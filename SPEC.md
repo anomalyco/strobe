@@ -1156,7 +1156,11 @@ What strobe reads from a native app (§13.7), per run:
     when the input's `until` waits on them (`{ pixels: { changed } }` or an image, §9.6 "Image anchors"):
     the pixel proof replaces the tree change, and the sample is the one present of the app that reached
     the screen between the last capture without the reaction and the first with it (two or more: busy,
-    no sample; none: unshown). Without one, an app with no accessibility tree has no `interaction.*`.
+    no sample; none: unshown). A capture of the compositor's frame (Windows) or of the window server's
+    copy of the window (macOS) holds a frame before the display shows it, so the first with the reaction
+    counts up to a refresh after it ends: on air a reaction was in a capture that ended 9.8 ms before
+    ScreenCaptureKit's displayed frame of it, which a bound at the capture's end left unshown. Without
+    one, an app with no accessibility tree has no `interaction.*`.
   - Its latency is from the post time (host clock) to the screen time of the first present of the
     app's processes that started after it, and no earlier than its first change can have happened,
     and reached the screen, within 1 s. A frame begun before the model changed cannot show the change:
@@ -2978,8 +2982,10 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   per device-independent pixel: an area-weighted box filter down, bilinear up, both over premultiplied
   alpha, so a non-integer step such as 2 → 1.5 weighs every source pixel by its coverage and a
   transparent edge does not darken). Text that a toolkit grid-fits to each size draws other glyph shapes
-  at another scale: an image exported at @2x scored 0.95 and 0.995 at 1x (GDI+ on adais, cairo on vps),
-  so for text across scales capture the image at the target's own scale or give `threshold: 0.9`.
+  at another scale, which no filter undoes: the dev fixture's button exported at @2x and @1.5x scored
+  0.950 and 0.955 at 1x through GDI+ (adais), 0.995 and 0.997 through cairo (vps, X11 and Wayland;
+  @1.5x was 0.979 with an integer box filter), so for text across scales capture the image at the
+  target's own scale or give `threshold: 0.9`.
   Zero-mean normalized cross-correlation of
   integer BT.601 luma (`(77 R + 150 G + 29 B) >> 8`) over its opaque pixels, first on a grid 4× coarser
   (2× or 1× for a small image; a coarse cell is opaque when most of its pixels are, its colour the mean of
@@ -3014,7 +3020,9 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   locked session, and Direct3D 12 and Vulkan flip-model windows), else `PrintWindow` cropped; macOS
   `CGWindowListCreateImage` of the region's screen rect, this window only (no Screen Recording, or a
   window the app keeps from capture: `NoPresentSource`); X11 `GetImage` of the region once the window is
-  viewable and on top at its centre (else `WindowHidden`: the server copies what covers it). Between
+  viewable and on top at its centre (else `WindowHidden`: the server copies what covers it); a window of
+  the headless Wayland compositor strobe runs (§13.7 "Wayland"): the compositor's copy of the region, routed by the
+  window's id, once it shows and no window above it overlaps the region (else `WindowHidden`). Between
   captures a wait sleeps on the capture's next frame (Windows), else on the app's next present or 30 ms
   (a toolkit that draws past the present path still shows within a poll). A page through its browser
   outside timed stretches (setup, reset, `ctx.untimed`, `--check`, `--pixels`, `look`, `expect`:

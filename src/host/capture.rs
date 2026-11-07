@@ -32,8 +32,8 @@ pub struct Shot {
     /// The source's frame count at the capture (Windows), for `Grabber::wait`.
     pub seq: u64,
     /// How long after `t_ns` what it holds may have reached the screen: a compositor's frame is captured
-    /// as it is composed and scanned out up to a refresh later (Windows: the window's display's refresh
-    /// period); a read of what is already on the screen, 0.
+    /// as it is composed and scanned out up to a refresh later (Windows, and macOS's copy of the window:
+    /// the window's display's refresh period); a read of what is already on the screen, 0.
     pub late_ns: u64,
 }
 
@@ -109,9 +109,11 @@ impl Grabber {
         };
         let scale = img.width as f64 / (x1 - x0);
         // A frame time is when it was composed: both ends are it, and it reaches the screen up to a
-        // refresh later.
+        // refresh later. macOS reads the window server's copy of the window, which holds a frame before
+        // the display shows it (on air a reaction was in a capture ending 9.8 ms before ScreenCaptureKit's
+        // frame of it): up to a refresh later too.
         let t0 = if seq > 0 { at } else { t0 };
-        let late_ns = if seq > 0 {
+        let late_ns = if seq > 0 || cfg!(target_os = "macos") {
             let at = super::window_state(self.win).map_or((0, 0), |w| (w.rect.0 + w.rect.2 / 2, w.rect.1 + w.rect.3 / 2));
             super::refresh_at(at.0, at.1).map_or(16_666_667, |hz| 1_000_000_000 / hz.max(1) as u64)
         } else {
