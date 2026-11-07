@@ -173,6 +173,7 @@ const APP: Shape = Keys(&[
     ("moved", Strings),
     ("gpuCache", Enum(&["warm", "cold"])),
     ("motion", MOTION),
+    ("display", Enum(&["wayland", "x11"])),
 ]);
 const TOP: Shape = Keys(&[
     ("$schema", Str),

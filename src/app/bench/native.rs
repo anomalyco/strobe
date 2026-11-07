@@ -36,7 +36,8 @@ pub(super) fn app(v: &Variant, target: &Value, config: &Value) -> Result<isolate
     let args: Vec<String> = target["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
     let env: Vec<(String, String)> = target["env"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect();
     let unset: Vec<String> = target["unset"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
-    let app = base.with_extra(&args, &env).with_unset(&unset).with_files(&target["files"].as_object().cloned().unwrap_or_default());
+    let display = target["display"].as_str().map(isolate::Display::parse).transpose()?;
+    let app = base.with_extra(&args, &env).with_unset(&unset).with_files(&target["files"].as_object().cloned().unwrap_or_default()).with_display(display);
     // Reduced motion in a native app is what its profile declares (`motion.reduce`), or refused.
     if Motion::of(target, "")?.reduced() { app.with_reduced_motion(false) } else { Ok(app) }
 }
@@ -163,7 +164,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     // own on the target's CPUs before the launch, once the last block's app has left them quiet.
     let ratio = validity::native_speed_checked(ctx.pin)?;
     let home = isolate::prepare_home(&app, seed_dir(ctx, s, &target).as_deref(), None)?;
-    crate::target::a11y::prepare();
+    crate::target::a11y::prepare(app.wayland());
     let launched = Instant::now();
     // Its output goes nowhere unless the target asks for it (`output: true`, for `ctx.waitForLine`):
     // a pipe changes how a C runtime buffers stdout (a pipe is block-buffered, the null device is not).
@@ -316,14 +317,14 @@ fn runs(
     // (`until: "frame"`, idle) read it live, and frame metrics read the measured runs. Native stacks
     // in attribution blocks, through the helper.
     let presents: RefCell<Option<PresentCapture>> = RefCell::new(None);
-    let mut presents_err: Option<String> = None;
+    let mut presents_err: Option<Refusal> = None;
     if !windowless && set != Set::Attribution && set != Set::Memory && !x.counters {
-        match PresentCapture::start() {
+        match home.presents() {
             Ok(mut c) => {
                 c.track(&n.pids());
                 *presents.borrow_mut() = Some(c);
             }
-            Err(e) => presents_err = Some(e.message),
+            Err(e) => presents_err = Some(present_refusal(e)),
         }
     }
     let stacks = (set == Set::Attribution && crate::probe::stacks::stacks_available())
@@ -896,6 +897,27 @@ fn runs(
             let counted: Vec<(String, &wakes::Counted)> = measured.iter().enumerate().map(|(j, r)| (key(j), &r.span.counted)).collect();
             let (counts, mut refused) = wakes::counter_metrics(&counted, declared_metrics(s));
             extra.extend(counts);
+            // On the headless Wayland compositor strobe runs (`target::wayland`): nothing reaches a display
+            // (frames are refused `Headless` with the present source), and without a GPU it all draws in software.
+            if let Some((what, software)) = &n.headless {
+                if !ctx.warnings.iter().any(|w| w.id == "Headless") {
+                    ctx.warnings.push(validity::info(
+                        "Headless",
+                        format!("the app ran on {what}, the Wayland compositor strobe started for each launch (on strobe's CPUs, outside cpu.work): what reaches a display (frames.*, interaction.*, scroll.latency.*, display.hz, launch.painted and launch.settled) is refused"),
+                    ));
+                }
+                if *software {
+                    if !ctx.warnings.iter().any(|w| w.id == "SoftwareGpu") {
+                        ctx.warnings.push(validity::warn(
+                            "SoftwareGpu",
+                            "this machine has no GPU render node: the compositor composites in software (pixman) and the app draws in software too, so gpu.* is refused and cpu.work holds the app's own rasterization; compare it only with runs on this setup",
+                        ));
+                    }
+                    for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| m.starts_with("gpu.")) {
+                        refused.insert(m.clone(), Refusal::new(ValidatorId::SoftwareGpu, format!("{m}: no GPU render node, so the app and the compositor draw in software")));
+                    }
+                }
+            }
             // Other work on the CPUs the target is pinned to (SPEC §10.2 Background), as for pages.
             let foreign: Vec<f64> = gpu_runs
                 .iter()
@@ -987,17 +1009,17 @@ fn runs(
                         ctx.warnings.push(validity::warn("PresentsLost", format!("{} block: the present session lost {} events; frame counts may be short", side_of(ctx, v), p.events_lost)));
                     }
                 }
-                Some(Err(e)) => presents_err = Some(e.message.clone()),
+                Some(Err(e)) => presents_err = Some(present_refusal(e.clone())),
                 None => {}
             }
-            if let Some(why) = &presents_err {
+            if let Some(r) = &presents_err {
                 // Said once for the bench, so frames that never show are not mistaken for none being drawn.
-                if !ctx.warnings.iter().any(|w| w.id == "NoPresentSource") {
-                    ctx.warnings
-                        .push(validity::info("NoPresentSource", format!("frames refused: the OS present events gave nothing ({why}); frames.* and interaction.* are missing from every block")));
+                let why = if r.validator == ValidatorId::NoPresentSource { format!("OS present events: {}", r.summary) } else { r.summary.clone() };
+                if !ctx.warnings.iter().any(|w| w.id == r.validator.name()) {
+                    ctx.warnings.push(validity::info(r.validator.name(), format!("frames refused ({why}); frames.* and interaction.* are missing from every block")));
                 }
                 for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| frame_metric(m)) {
-                    refused.entry(m.clone()).or_insert_with(|| Refusal::new(ValidatorId::NoPresentSource, format!("{m}: OS present events: {why}")));
+                    refused.entry(m.clone()).or_insert_with(|| Refusal::new(r.validator, format!("{m}: {why}")));
                 }
             }
             // Inputs given through accessibility actions skip hit testing and pointer handling: they are
@@ -1333,6 +1355,12 @@ pub(super) fn line(why: &str) -> Refusal {
     Refusal::from_line(why).unwrap_or_else(|| Refusal::new(ValidatorId::NoPresentSource, why))
 }
 
+/// Why the OS's present events gave nothing: the source's own refusal (`Headless` on the compositor
+/// strobe runs), else `NoPresentSource` with its error.
+fn present_refusal(e: Error) -> Refusal {
+    e.refusal.map(|r| *r).unwrap_or_else(|| Refusal::new(ValidatorId::NoPresentSource, e.message))
+}
+
 /// How a native launch ends (an app launch ends on the window conditions too).
 pub(super) enum Until {
     /// The main window is visible.
@@ -1510,6 +1538,10 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             .map_err(|e| crate::runner::incomplete(&format!("{} before", s.case), "before", e, "", "fix the launch's before hook"))?;
     }
     lap("before", &mut steps);
+    // On the headless compositor strobe runs nothing reaches a display: no frame or pixels to end on.
+    if app.wayland() && matches!(until, Until::Selector(_) | Until::Painted | Until::Settled) {
+        return Err(headless_launch(&s.case, until_text(&until)).into());
+    }
     // A launch timed to an element ends on the frame that showed it: OS present events say when.
     let mut presents = match &until {
         Until::Selector(_) => Some(PresentCapture::start().map_err(|e| {
@@ -1521,7 +1553,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         })?),
         _ => None,
     };
-    crate::target::a11y::prepare();
+    crate::target::a11y::prepare(app.wayland());
     let clock = (host::tsc(), Instant::now());
     let (mut n, guard) = match nt::launch(&app, &prepared, &[], true, ctx.pin) {
         Ok(x) => x,
@@ -1744,7 +1776,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 None => {}
             }
         }
-        if let Some((painted, settled)) = screen_times(&pixels) {
+        // On strobe's headless compositor the window's pixels reach no display: no paint times.
+        if let Some((painted, settled)) = screen_times(&pixels).filter(|_| n.headless.is_none()) {
             values.insert("launch.painted".into(), painted - n.epoch_ms);
             values.insert("launch.settled".into(), settled - n.epoch_ms);
         }
@@ -1752,7 +1785,13 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             super::launch::memory(&n.processes(), &mut values);
         }
         let why_no_pixels = if windowless { "the app shows no window (window: false)".to_string() } else { super::launch::no_pixels(capture) };
-        let refused = super::launch::refusals(s, &values, &why_no_pixels, false);
+        let mut refused = super::launch::refusals(s, &values, &why_no_pixels, false);
+        if n.headless.is_some() {
+            for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| *m == "launch.painted" || *m == "launch.settled") {
+                refused
+                    .insert(m.clone(), Refusal::new(ValidatorId::Headless, format!("{m}: the window's pixels come from the headless Wayland compositor strobe runs, which shows them on no display")));
+            }
+        }
         if let (false, Some(r)) = (profile, refused.get(&s.primary)) {
             return Err(r.clone().fix("pick a primary a launch case measures").into());
         }
@@ -1845,6 +1884,14 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         ctx.warnings.push(validity::warn("Teardown", format!("{} launch: {}", side_of(ctx, v), e.message)));
     }
     result
+}
+
+/// `Headless` for a launch on strobe's Wayland compositor that ends on what only a display shows: the
+/// frame that showed an element, or the window's pixels (`until`: a selector, `window: "painted"` or
+/// `"settled"`, as `until_text` says them).
+pub(super) fn headless_launch(case: &str, until: &str) -> Refusal {
+    Refusal::new(ValidatorId::Headless, format!("{case}: the launch ends when its window {until}, which needs a display, and the app runs on the headless Wayland compositor strobe starts"))
+        .fix("time the launch to { window: \"visible\" } or a milestone, or run it on X11 (display: \"x11\")")
 }
 
 fn until_text(u: &Until) -> &'static str {

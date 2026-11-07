@@ -834,10 +834,61 @@ pub fn refresh_at(x: i32, y: i32) -> Option<u32> {
     hit.or(if outs.len() == 1 { outs.first() } else { None }).map(|o| o.hz.round() as u32).filter(|&hz| hz > 1)
 }
 
-pub use super::x11::{main_window, place_window, raise_windows, window_pixels, window_state};
+// Top-level windows: a compositor strobe runs (`wayland`, its windows' ids say so) or the X server.
 
-/// The output a window shows on, with its refresh (DRM): the one containing the window's centre.
+pub fn main_window(pids: &[u32]) -> Option<super::TopWindow> {
+    super::wayland::main_window(pids).or_else(|| super::x11::main_window(pids))
+}
+
+pub fn window_state(hwnd: isize) -> Option<super::TopWindow> {
+    if super::wayland::owns(hwnd) { super::wayland::window_state(hwnd) } else { super::x11::window_state(hwnd) }
+}
+
+pub fn place_window(w: &super::TopWindow, x: i32, y: i32, client: Option<(u32, u32)>) {
+    if super::wayland::owns(w.hwnd) { super::wayland::place_window(w, x, y, client) } else { super::x11::place_window(w, x, y, client) }
+}
+
+pub fn raise_windows(pids: &[u32]) -> usize {
+    super::wayland::raise_windows(pids) + super::x11::raise_windows(pids)
+}
+
+pub fn window_pixels(pids: &[u32]) -> Option<Vec<u8>> {
+    super::wayland::window_pixels(pids).or_else(|| super::x11::window_pixels(pids))
+}
+
+pub fn top_windows(pids: &[u32]) -> Vec<(isize, String, bool)> {
+    let mut v = super::wayland::top_windows(pids);
+    v.extend(super::x11::top_windows(pids));
+    v
+}
+
+pub fn window_image(hwnd: isize) -> Option<crate::png::Image> {
+    if super::wayland::owns(hwnd) { super::wayland::window_image(hwnd) } else { super::x11::window_image(hwnd) }
+}
+
+pub fn window_placement(hwnd: isize) -> Option<super::Placement> {
+    if super::wayland::owns(hwnd) { super::wayland::window_placement(hwnd) } else { super::x11::window_placement(hwnd) }
+}
+
+pub fn set_window_frame(hwnd: isize, frame: [f64; 4]) -> crate::model::Result<()> {
+    if super::wayland::owns(hwnd) { super::wayland::set_window_frame(hwnd, frame) } else { super::x11::set_window_frame(hwnd, frame) }
+}
+
+pub fn maximize_window(hwnd: isize, work: [f64; 4]) -> crate::model::Result<()> {
+    if super::wayland::owns(hwnd) { super::wayland::maximize_window(hwnd, work) } else { super::x11::maximize_window(hwnd, work) }
+}
+
+/// Where a window's client area starts on the screen (the X11 root, or the compositor's layout).
+pub fn client_origin(hwnd: isize) -> Option<(i32, i32)> {
+    if super::wayland::owns(hwnd) { super::wayland::client_origin(hwnd) } else { super::x11::client_origin(hwnd) }
+}
+
+/// The output a window shows on, with its refresh (DRM): the one containing the window's centre. None
+/// for a window of a compositor strobe runs, which shows on no display.
 pub fn display_of(hwnd: isize) -> Option<super::DisplayPath> {
+    if super::wayland::owns(hwnd) {
+        return None;
+    }
     let w = window_state(hwnd)?;
     let (cx, cy) = (w.rect.0 + w.rect.2 / 2, w.rect.1 + w.rect.3 / 2);
     let outs = outputs();

@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// Bench flags a track passes on to every bench it runs (points, confirmations, bisects).
-const PASS: &[&str] = &["filter", "target", "params", "pin", "power", "reserve-cpus", "runs", "primary", "equivalence", "trace", "engine", "headless", "seed"];
+const PASS: &[&str] = &["filter", "target", "params", "pin", "power", "reserve-cpus", "runs", "primary", "equivalence", "trace", "engine", "headless", "wayland", "seed"];
 
 /// The seed a track's benches run with (`ctx.seed`, `ctx.random()`) unless `--seed`: one per repository
 /// and bench file (its path in the repository), so every point of a series, its confirmations and its
@@ -240,6 +240,10 @@ fn driver_versions() -> Vec<String> {
 fn run_key(args: &Args, file: &Path, commit: &str, statics: &Value) -> Value {
     let flags: Vec<Value> = ["filter", "target", "params", "primary", "blocks", "engine", "headless"].iter().map(|k| json!(args.get(k))).collect();
     let mut key = json!({ "file": file, "commit": commit, "flags": flags, "env": statics });
+    // `--wayland` only when given, so keys from before it stay the same.
+    if args.has("wayland") {
+        key["wayland"] = json!(true);
+    }
     // The derived seed is the same on every run: only one given is another run (keys from before stay).
     if let Some(s) = args.get("seed") {
         key["seed"] = json!(s);
@@ -344,6 +348,10 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
             if !s["emulate"].is_null() {
                 fingerprint["emulate"] = s["emulate"].clone();
             }
+        }
+        // A native series on the X server or on strobe's headless Wayland compositor: two histories.
+        if !s["display"].is_null() {
+            fingerprint["native_display"] = s["display"].clone();
         }
         motion_fingerprint(r, s, &mut fingerprint);
         seed_fingerprint(r, &mut fingerprint);
@@ -548,6 +556,10 @@ fn series_args(args: &Args, s: &history::Series, id: &str) -> Result<Args> {
     }
     if args.has("headless") || fp["headless"] == true {
         a.set("headless", "true");
+    }
+    // A native series on strobe's Wayland compositor stays there.
+    if args.has("wayland") || fp["native_display"] == "wayland" {
+        a.set("wayland", "true");
     }
     a.set("why", "never");
     a.set("id", id);

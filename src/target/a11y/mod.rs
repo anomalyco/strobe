@@ -26,8 +26,12 @@ pub mod input;
 #[cfg(target_os = "linux")]
 pub mod atspi;
 #[cfg(target_os = "linux")]
-#[path = "xtest.rs"]
+#[path = "linux_input.rs"]
 pub mod input;
+#[cfg(target_os = "linux")]
+mod wl_input;
+#[cfg(target_os = "linux")]
+mod xtest;
 
 use crate::model::{Error, Result};
 use serde_json::{Value, json};
@@ -565,23 +569,32 @@ pub trait Accessibility {
 /// Before a native app launches: makes sure the OS's accessibility service runs, so an app that
 /// looks for it once at start finds it (Linux: the session's accessibility bus, started on demand;
 /// an app started before it never registers). Nothing elsewhere.
-pub fn prepare() {
+/// A launch on the Wayland compositor strobe runs has a bus of its own (`own_session`): the user's is
+/// left alone.
+pub fn prepare(own_session: bool) {
     #[cfg(target_os = "linux")]
-    atspi::wake_bus();
+    if !own_session {
+        atspi::wake_bus();
+    }
+    let _ = own_session;
 }
 
-/// The OS's accessibility client for an app's processes.
-pub fn open(pids: &[u32]) -> Result<Box<dyn Accessibility>> {
+/// The OS's accessibility client for an app's processes, whose main window is `main`: on Linux, over
+/// the session bus of the launch when the window is on strobe's compositor, else the user's.
+pub fn open(pids: &[u32], main: isize) -> Result<Box<dyn Accessibility>> {
     #[cfg(windows)]
     {
+        let _ = main;
         Ok(Box::new(uia::Uia::start(pids)?))
     }
     #[cfg(target_os = "macos")]
     {
+        let _ = main;
         Ok(Box::new(ax::Ax::start(pids)?))
     }
     #[cfg(target_os = "linux")]
     {
-        Ok(Box::new(atspi::Atspi::start(pids)?))
+        let bus = crate::host::wayland::compositor_of(main).map(|c| c.bus.clone());
+        Ok(Box::new(atspi::Atspi::start(pids, bus.as_deref())?))
     }
 }

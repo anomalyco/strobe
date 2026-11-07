@@ -79,6 +79,12 @@ object = { version = "0.39", default-features = false, features = ["read_core", 
 x11rb = { version = "0.13", default-features = false, features = ["xtest", "present", "dri3", "randr"] }
 # Unwinding sampled user stacks with the modules' DWARF unwind tables (.eh_frame); pure Rust.
 framehop = { version = "0.16", default-features = false }
+# Native Wayland apps on a compositor strobe runs: its output's pixels (wlr screencopy) and input through
+# its seat (wlr virtual pointer, virtual keyboard), over wayland-client's pure-Rust backend (no libwayland,
+# no C compiler: its system backend is off).
+wayland-client = { version = "0.31", default-features = false }
+wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
+wayland-protocols-misc = { version = "0.3", default-features = false, features = ["client"] }
 
 [target.'cfg(windows)'.dependencies]
 # UI Automation (COM): finding a native app's elements, their bounds and states, and waiting on its

@@ -13,6 +13,8 @@ pub mod isolate;
 pub mod motion;
 pub mod native;
 pub mod tty;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 pub mod web;
 pub mod webdriver;
 pub mod webkit;

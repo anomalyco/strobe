@@ -1819,6 +1819,13 @@ pub fn run(args: &Args) -> Result<Output> {
             .map(|t| (t.clone(), json!("reduce")))
             .collect();
         ident["motion"] = json!(reduced);
+        // Linux native targets: the X server or strobe's headless Wayland compositor, another setup each.
+        let displays: BTreeMap<String, Value> = series
+            .iter()
+            .flat_map(|s| std::iter::once(&s.target).chain(s.sides.iter().flat_map(|(b, h)| [b, h])))
+            .filter_map(|t| Some((t.clone(), json!(display_of(&ctx.describe["targets"][t], ctx.projects.get(t).map_or(&ctx.config, |(_, c)| c))?.name()))))
+            .collect();
+        ident["displays"] = json!(displays);
         // And what the targets without it followed: the OS's own setting.
         ident["os_reduced_motion"] = json!(env.reduced_motion);
         ident["seed"] = json!(seed);
@@ -4321,13 +4328,14 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // A series that may run locked but met a hidden window on an unlocked screen (a `--check` or
     // `record --bench` of a windowed native case): it waits and retries as on-screen blocks do.
     let mut hidden_unlocked = false;
-    // A phone's page: this computer's lock and display are not its screen.
-    let phone = ctx.phone.is_some();
+    // A phone's page, or an app on the headless compositor strobe runs: this computer's lock and display
+    // are not its screen.
+    let own_screen = ctx.phone.is_some() || cases.iter().all(|s| on_headless_compositor(&ctx.describe["targets"][v.target_of(s)], &ctx.config));
     let mut hot = 0;
     if cases.iter().all(|s| runs_locked(ctx, s, x)) {
         loop {
-            let (start, locks, unlocks) = (host::session_locked() && !phone, ctx.awake.locks(), ctx.awake.unlocks());
-            let display = if phone { None } else { host::display_state() };
+            let (start, locks, unlocks) = (host::session_locked() && !own_screen, ctx.awake.locks(), ctx.awake.unlocks());
+            let display = if own_screen { None } else { host::display_state() };
             let r = slotted(ctx, cases, v, pair, x);
             if retry_launch(ctx, s, v, failure_of(&r), &mut retries)? {
                 discard(&r);
@@ -4356,8 +4364,8 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 discard(&r);
                 continue;
             }
-            let end = host::session_locked() && !phone;
-            let steady = phone || (start == end && if start { ctx.awake.unlocks() == unlocks } else { ctx.awake.locks() == locks });
+            let end = host::session_locked() && !own_screen;
+            let steady = own_screen || (start == end && if start { ctx.awake.unlocks() == unlocks } else { ctx.awake.locks() == locks });
             // The display turned off (or on) during the block: it ran in two machine states.
             let lit = display.is_none_or(|(_, n)| host::display_state().is_some_and(|(_, m)| m == n));
             if steady && lit && !start && refused_by(&r) == Some(ValidatorId::WindowHidden) {
@@ -4773,6 +4781,11 @@ fn runs_locked(ctx: &Ctx, s: &Series, x: &Exec) -> bool {
 /// windowless app) needs nothing: its block refuses it `NotForTarget`.
 fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
     let t = &ctx.describe["targets"][&s.target];
+    // On the headless compositor strobe runs, the session's lock screen covers nothing of the app: its
+    // pixels and input are the compositor's own.
+    if on_headless_compositor(t, &ctx.config) {
+        return None;
+    }
     let offscreen = |m: &str| {
         ["cpu.", "ui.", "memory.", "io.", "count.", "gpu.", "phase.", "energy."].iter().any(|p| m.starts_with(p))
             || m == "run.duration"
@@ -7511,6 +7524,9 @@ fn series_setup(ctx: &Ctx, s: &Series, window: Value, out: &mut Value) {
     // Both sides of an implementation comparison ask for the same (`implementation_preflight`).
     let side = s.sides.as_ref().map_or(&s.target, |(b, _)| b);
     out["motion"] = ctx.describe["targets"][side]["motion"].clone();
+    // Linux: the X server, or the headless Wayland compositor strobe runs (a native series): never one
+    // history across them.
+    out["display"] = json!(display_of(&ctx.describe["targets"][side], &ctx.config).map(isolate::Display::name));
     if target["kind"] == "url" && s.sides.is_none() {
         out["href"] = target["href"].clone();
     }
@@ -7584,6 +7600,21 @@ fn apply_engines(describe: &mut Value, args: &Args) -> Result<()> {
             }
             WebEngine::parse(e).map_err(|e| Error::usage(format!("target {name}: {}", e.message)))?;
         }
+        if !t["display"].is_null() {
+            if t["kind"] != "native" {
+                return Err(Error::usage(format!("target {name}: display is for native targets (native()); this is a {} target", t["kind"].as_str().unwrap_or("?"))));
+            }
+            isolate::Display::parse(t["display"].as_str().unwrap_or("?")).map_err(|e| Error::usage(format!("target {name}: {}", e.message)))?;
+        }
+    }
+    // `--wayland`: every native target on the headless Wayland compositor strobe starts (`target::wayland`).
+    if args.has("wayland") {
+        if !targets.values().any(|t| t["kind"] == "native") {
+            return Err(Error::usage("--wayland runs native targets on a Wayland compositor strobe starts; this bench file has none"));
+        }
+        for t in targets.values_mut().filter(|t| t["kind"] == "native") {
+            t["display"] = json!("wayland");
+        }
     }
     if let Some(e) = flag {
         if !targets.values().any(page) {
@@ -7624,7 +7655,7 @@ fn check_engines(series: &mut [Series], describe: &Value, args: &Args, variants:
         };
         for name in names {
             if s.refused.is_none() {
-                s.refused = target_refusal(s, &name, describe, args)?;
+                s.refused = target_refusal(s, &name, describe, args, projects.get(&name).map_or(config, |(_, c)| c))?;
             }
             if s.refused.is_none() {
                 s.refused = motion_contract(s, &name, describe, variants, projects.get(&name).map_or(config, |(_, c)| c));
@@ -7793,9 +7824,25 @@ fn same_target(target: &Value, variants: &[Variant]) -> Option<Refusal> {
     )
 }
 
+/// Where a native target shows its windows on Linux (`isolate::App::wayland`): its `display` (or
+/// `--wayland`), else its app profile's, else Wayland in a session with no X11 display. None for any
+/// other target, and off Linux.
+pub(crate) fn display_of(t: &Value, config: &Value) -> Option<isolate::Display> {
+    if !cfg!(target_os = "linux") || t["kind"] != "native" {
+        return None;
+    }
+    let declared = t["display"].as_str().and_then(|d| isolate::Display::parse(d).ok()).or_else(|| profile_of(t).and_then(|id| isolate::app(id, config).ok()).and_then(|a| a.display()));
+    Some(declared.unwrap_or(if std::env::var_os("DISPLAY").is_none_or(|v| v.is_empty()) { isolate::Display::Wayland } else { isolate::Display::X11 }))
+}
+
+/// A native target that runs on the headless Wayland compositor strobe starts (`target::wayland`).
+fn on_headless_compositor(t: &Value, config: &Value) -> bool {
+    display_of(t, config) == Some(isolate::Display::Wayland)
+}
+
 /// `check_engines` for one target of a series: a usage error or whole-run refusal, else the series' own
 /// refusal (its summary without the series' label, which every listing prints beside it).
-fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args) -> Result<Option<Refusal>> {
+fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config: &Value) -> Result<Option<Refusal>> {
     let t = &describe["targets"][name];
     let page = matches!(t["kind"].as_str(), Some("web" | "url"));
     if args.get("engine").is_some() && !page {
@@ -7815,6 +7862,39 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args) -> Resu
     }
     if args.has("mobile") {
         return Ok(phone_refusal(s, name, t));
+    }
+    if on_headless_compositor(t, config) {
+        let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
+        // A launch that ends on the frame that showed an element, or on the window's pixels.
+        let until = &s.launch["until"];
+        let ends_on = match until["window"].as_str() {
+            Some(w @ ("painted" | "settled")) => Some(w),
+            None if s.launch.is_object() && until["milestone"].is_null() => Some("showed its until selector"),
+            _ => None,
+        };
+        if let Some(w) = ends_on {
+            let r = native::headless_launch(&s.case, w);
+            return Ok(Some(Refusal { summary: format!("{on}{}", r.summary), ..r }));
+        }
+        if display_metric(&s.primary) {
+            return Ok(Some(
+                Refusal::new(
+                    ValidatorId::Headless,
+                    format!("{on}the primary {} needs a display, and the app runs on the headless Wayland compositor strobe starts: nothing it draws reaches one", s.primary),
+                )
+                .fix("run it on an X11 session (display: \"x11\") to measure it on screen, or choose a CPU primary: cpu.work, cpu.app.total, run.duration or phase.<name>"),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if gpu_use(&s.primary) && crate::target::wayland::software() {
+            return Ok(Some(
+                Refusal::new(
+                    ValidatorId::SoftwareGpu,
+                    format!("{on}the primary {} is GPU work, and this machine has no GPU render node: the app on strobe's Wayland compositor draws in software", s.primary),
+                )
+                .fix("run on a machine with a GPU, or choose a CPU primary: cpu.work, cpu.app.total, run.duration or phase.<name>"),
+            ));
+        }
     }
     if !page {
         return Ok(None);

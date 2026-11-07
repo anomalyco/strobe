@@ -10,8 +10,9 @@
 //! `IsEnabled`): strobe registers its events, and turns `IsEnabled` on while it drives an app when it
 //! was off, putting it back when done.
 //!
-//! Bounds are read relative to the element's window and placed on the screen from that window's X11
-//! client origin: toolkits that cannot know their window's position (GTK 4) still give it right.
+//! Bounds are read relative to the element's window and placed on the screen from that window's
+//! client origin (the X server's, or on Wayland the compositor's strobe runs): toolkits that cannot
+//! know their window's position (GTK 4, every Wayland client) still give it right.
 
 use super::{Accessibility, Action, Changes, Node, PATTERN_EXPAND, PATTERN_INVOKE, PATTERN_SCROLL, PATTERN_SCROLL_ITEM, PATTERN_SELECT, PATTERN_TOGGLE, PATTERN_VALUE, Tree};
 use crate::host::dbus::{Arg, Conn, Value};
@@ -118,9 +119,13 @@ pub fn wake_bus() {
 }
 
 impl Atspi {
-    pub fn start(pids: &[u32]) -> Result<Atspi> {
-        let mut session =
-            Conn::session().map_err(|e| Error::msg(format!("AT-SPI: no session D-Bus ({e}); the accessibility bus is found through it (DBUS_SESSION_BUS_ADDRESS or $XDG_RUNTIME_DIR/bus)")))?;
+    /// The client over session bus `bus` (a launch's own), else the user's.
+    pub fn start(pids: &[u32], bus: Option<&str>) -> Result<Atspi> {
+        let session = match bus {
+            Some(addr) => Conn::open(addr, false),
+            None => Conn::session(),
+        };
+        let mut session = session.map_err(|e| Error::msg(format!("AT-SPI: no session D-Bus ({e}); the accessibility bus is found through it (DBUS_SESSION_BUS_ADDRESS or $XDG_RUNTIME_DIR/bus)")))?;
         let addr =
             session.call("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", &[]).ok().and_then(|v| v.first().and_then(Value::as_str).map(str::to_string)).ok_or_else(|| {
                 Error::msg("AT-SPI: the session has no accessibility bus (at-spi2-core's at-spi-bus-launcher answers org.a11y.Bus): install at-spi2-core, or the app exposes no tree")
@@ -396,7 +401,7 @@ impl Worker {
             let r = roots[k];
             let w = tree.windows.len();
             tree.windows.push(placed[k].unwrap_or(0));
-            let origin = placed[k].and_then(crate::host::x11::client_origin);
+            let origin = placed[k].and_then(crate::host::linux::client_origin);
             self.windows.push((raws[r].at.clone(), origin));
             let mut stack = vec![(r, None)];
             while let Some((i, parent)) = stack.pop() {

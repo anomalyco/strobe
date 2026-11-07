@@ -341,6 +341,44 @@ pub fn us_key(c: char) -> Option<(char, bool)> {
     }
 }
 
+/// The X keysym a named key makes (X11's and XKB's, so Wayland's too).
+pub fn keysym(n: Named) -> u32 {
+    match n {
+        Named::Enter => 0xff0d,
+        Named::Tab => 0xff09,
+        Named::Escape => 0xff1b,
+        Named::Backspace => 0xff08,
+        Named::Delete => 0xffff,
+        Named::Insert => 0xff63,
+        Named::Home => 0xff50,
+        Named::End => 0xff57,
+        Named::PageUp => 0xff55,
+        Named::PageDown => 0xff56,
+        Named::ArrowUp => 0xff52,
+        Named::ArrowDown => 0xff54,
+        Named::ArrowLeft => 0xff51,
+        Named::ArrowRight => 0xff53,
+        Named::Space => 0x20,
+        Named::Shift => 0xffe1,
+        Named::Control => 0xffe3,
+        Named::Alt => 0xffe9,
+        Named::Meta => 0xffeb,
+        Named::ContextMenu => 0xff67,
+        Named::CapsLock => 0xffe5,
+        Named::F(n) => 0xffbe + n as u32 - 1,
+        Named::Letter(c) => c.to_ascii_lowercase() as u32,
+        Named::Digit(c) => c as u32,
+    }
+}
+
+/// The keysym a character is (Latin-1 directly, the rest as Unicode keysyms).
+pub fn char_keysym(c: char) -> u32 {
+    match c as u32 {
+        0x20..=0x7e | 0xa0..=0xff => c as u32,
+        u => 0x0100_0000 | u,
+    }
+}
+
 /// Wheel notches for a delta in pixels: one notch per 100 px, Chromium's scroll per notch. What a
 /// native app scrolls per notch is its own.
 pub fn notches(px: f64) -> f64 {

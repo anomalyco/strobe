@@ -33,6 +33,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("for", Value, "record"),
     ("probes", Value, "record bench plan"),
     ("headless", Switch, "record bench plan track"),
+    ("wayland", Switch, "record bench plan track look"),
     ("engine", Value, "record bench plan track"),
     ("served", Value, "record"),
     ("emulate", Value, "record"),

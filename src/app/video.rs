@@ -85,6 +85,11 @@ impl Recorder {
             (false, None, Some(p)) => (Capture::renderer(p, &base)?, Some("strobe found no window of the target to capture, so this is the renderer's own frames".into())),
             (false, None, None) => return Err(Error::refused("NotForTarget", "the target has no window strobe can film", "record a target that opens a window")),
         };
+        let note = note.or_else(|| {
+            window
+                .filter(|w| crate::host::headless_window(w.hwnd))
+                .map(|_| "headless compositor frames: the window as the Wayland compositor strobe runs composited it, on a timer and for no display".to_string())
+        });
         Ok(Recorder { capture, scratch, calls: RefCell::new(Vec::new()), note, locked: crate::host::session_locked() })
     }
 

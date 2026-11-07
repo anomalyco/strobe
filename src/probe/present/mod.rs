@@ -15,6 +15,8 @@
 pub mod frames;
 #[cfg(target_os = "macos")]
 pub mod sck;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(target_os = "linux")]
@@ -185,6 +187,18 @@ impl Live {
     }
 }
 
+/// `Headless` for frames of an app on the Wayland compositor strobe runs (`target::wayland`): it
+/// composites for no display, on a timer, so no frame of it reaches a screen.
+#[cfg(target_os = "linux")]
+pub fn headless_compositor() -> crate::model::Error {
+    crate::model::Refusal::new(
+        crate::model::ValidatorId::Headless,
+        "the app runs on the headless Wayland compositor strobe started for it: its frames reach no display (the compositor ticks on a timer), so frames, input latency and the display's rate describe nothing a person sees",
+    )
+    .fix("measure frames on an X11 session (display: \"x11\"), or compare CPU, memory and phases (cpu.work, run.duration, phase.<name>), which the headless compositor leaves as they are")
+    .into()
+}
+
 /// A present session: in this process when its token may, else in the helper (Windows); a window's
 /// frames through ScreenCaptureKit (macOS) or X Present (Linux X11).
 pub enum PresentCapture {
@@ -196,6 +210,9 @@ pub enum PresentCapture {
     Screen(sck::Capture),
     #[cfg(target_os = "linux")]
     X11(xpresent::Capture),
+    /// The headless compositor strobe runs: changes for waits, no frame metrics (`Headless`).
+    #[cfg(target_os = "linux")]
+    Wayland(wayland::Capture),
 }
 
 impl PresentCapture {
@@ -223,6 +240,12 @@ impl PresentCapture {
         return Ok(PresentCapture::Screen(sck::Capture::start()?));
     }
 
+    /// The changes of a launch's own Wayland compositor (`target::wayland`), for waits only.
+    #[cfg(target_os = "linux")]
+    pub fn wayland(c: &std::sync::Arc<crate::host::wayland::Compositor>) -> crate::model::Result<PresentCapture> {
+        Ok(PresentCapture::Wayland(wayland::Capture::start(c)?))
+    }
+
     /// `in-process`, `helper`, `screencapturekit` or `x11-present`.
     pub fn via(&self) -> &'static str {
         match self {
@@ -234,7 +257,18 @@ impl PresentCapture {
             PresentCapture::Screen(_) => "screencapturekit",
             #[cfg(target_os = "linux")]
             PresentCapture::X11(_) => "x11-present",
+            #[cfg(target_os = "linux")]
+            PresentCapture::Wayland(_) => "wayland-damage",
         }
+    }
+
+    /// The frames reach no display (strobe's headless compositor): waits only, never a metric.
+    pub fn headless(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let PresentCapture::Wayland(_) = self {
+            return true;
+        }
+        false
     }
 
     /// Follows the windows of `pids`: the OS session (Windows) sees every process already; a
@@ -249,6 +283,8 @@ impl PresentCapture {
             PresentCapture::Screen(c) => c.track(pids),
             #[cfg(target_os = "linux")]
             PresentCapture::X11(c) => c.track(pids),
+            #[cfg(target_os = "linux")]
+            PresentCapture::Wayland(c) => c.track(pids),
         }
     }
 
@@ -280,6 +316,11 @@ impl PresentCapture {
                 c.track(pids);
                 Ok(c.live.view(pids, after, wait))
             }
+            #[cfg(target_os = "linux")]
+            PresentCapture::Wayland(c) => {
+                c.track(pids);
+                Ok(c.live.view(pids, after, wait))
+            }
         }
     }
 
@@ -293,6 +334,8 @@ impl PresentCapture {
             PresentCapture::Screen(c) => Ok(c.live.view(pids, u64::MAX, std::time::Duration::ZERO).last_start_ns),
             #[cfg(target_os = "linux")]
             PresentCapture::X11(c) => Ok(c.live.view(pids, u64::MAX, std::time::Duration::ZERO).last_start_ns),
+            #[cfg(target_os = "linux")]
+            PresentCapture::Wayland(c) => Ok(c.live.view(pids, u64::MAX, std::time::Duration::ZERO).last_start_ns),
         }
     }
 
@@ -306,6 +349,8 @@ impl PresentCapture {
             PresentCapture::Screen(c) => c.stop(),
             #[cfg(target_os = "linux")]
             PresentCapture::X11(c) => c.stop(),
+            #[cfg(target_os = "linux")]
+            PresentCapture::Wayland(c) => c.stop(),
         }
     }
 }

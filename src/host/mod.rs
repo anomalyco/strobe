@@ -19,6 +19,8 @@ pub mod power;
 pub mod reserve;
 pub mod spawn;
 pub mod tcp;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 #[cfg(windows)]
 pub mod win;
 #[cfg(target_os = "linux")]
@@ -455,7 +457,7 @@ pub fn top_windows(pids: &[u32]) -> Vec<(isize, String, bool)> {
     }
     #[cfg(target_os = "linux")]
     {
-        x11::top_windows(pids)
+        linux::top_windows(pids)
     }
     #[cfg(target_os = "macos")]
     {
@@ -490,11 +492,24 @@ pub fn window_image(hwnd: isize) -> Option<crate::png::Image> {
     }
     #[cfg(target_os = "linux")]
     {
-        x11::window_image(hwnd)
+        linux::window_image(hwnd)
     }
     #[cfg(target_os = "macos")]
     {
         macos::window_image(hwnd)
+    }
+}
+
+/// Whether a window is one of a headless compositor strobe runs (`wayland`): it shows on no display.
+pub fn headless_window(hwnd: isize) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        wayland::owns(hwnd)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = hwnd;
+        false
     }
 }
 
@@ -559,7 +574,7 @@ pub fn window_placement(hwnd: isize) -> Option<Placement> {
     }
     #[cfg(target_os = "linux")]
     {
-        x11::window_placement(hwnd)
+        linux::window_placement(hwnd)
     }
 }
 
@@ -576,7 +591,7 @@ pub fn set_window_frame(hwnd: isize, frame: [f64; 4]) -> crate::model::Result<()
     }
     #[cfg(target_os = "linux")]
     {
-        x11::set_window_frame(hwnd, frame)
+        linux::set_window_frame(hwnd, frame)
     }
 }
 
@@ -594,7 +609,7 @@ pub fn maximize_window(hwnd: isize, work: [f64; 4]) -> crate::model::Result<()> 
     }
     #[cfg(target_os = "linux")]
     {
-        x11::maximize_window(hwnd, work)
+        linux::maximize_window(hwnd, work)
     }
 }
 

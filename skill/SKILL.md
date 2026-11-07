@@ -381,7 +381,12 @@ export default bench({
 - `page` drives any app with an accessibility tree: `page.click("nav-history", { until: "history-pane" })`.
   - Windows: UI Automation, posted window messages, never takes focus.
   - macOS: AX, Quartz events (keys to the app, which they bring to the front; clicks and wheel at the point, as a person's).
-  - Linux: AT-SPI, XTest, keys focus its window; X11 or XWayland only: a native Wayland window is invisible, so `unset: ["WAYLAND_DISPLAY"]` in the app profile.
+  - Linux X11: AT-SPI, XTest, keys focus its window.
+  - Linux Wayland: `native(…, { display: "wayland" })`, `--wayland`, or no `DISPLAY`: strobe starts a headless sway per launch (install sway).
+    - It drives the app through the compositor's seat and reads its tree over AT-SPI, on a session bus of the launch's own (never yours): install sway, dbus-daemon and at-spi2-core.
+    - Frames, `interaction.*`, `scroll.latency.*`, `display.hz`, `launch.painted/settled` and launches `until` a selector or painted/settled are refused `Headless`; without a GPU `gpu.*` is `SoftwareGpu`.
+    - It runs on a locked session; time launches `until: { window: "visible" }` or a milestone.
+    - Measure `cpu.work`, `run.duration`, phases, memory; `until: "frame"` and idle still work. Chromium needs `args: ["--ozone-platform=wayland"]`.
 - Selectors are accessibility ids or key paths (`"slider/knob"`) with the filters above (`role=button text="Save"`).
 - `page.query("role=button")` lists what matches with key, name, value, `checked`, `enabled` and `actionable`, rects in the window's client area (find the keys with it; assert a toggle's state with `checked`).
 - `page.act(sel, "invoke")` is an accessibility action (no input latency); `act(sel, "setValue", { value })` fails when the app does not take the value.
@@ -398,7 +403,7 @@ export default bench({
 - Where the UI thread's time goes: `--why always`, then `query <rec> hotspots --thread <name> --phase <name>`.
 - A debug build is refused for timing.
 - A tray app is `native("my-app", { window: false })` with launches `until: { milestone: "up" }`.
-- Where no driver reaches (no accessibility tree, a native Wayland window, a state only the app's CLI or files set), drive the copy through its own CLI or files:
+- Where no driver reaches (no accessibility tree, a state only the app's CLI or files set), drive the copy through its own CLI or files:
   - `ctx.home`, `ctx.env` and `ctx.exe` name its private home, environment and executable (`Bun.spawnSync([ctx.exe, "window", "show"], { env: ctx.env })`).
 
 ### Webview apps
@@ -505,7 +510,7 @@ export default bench({
 - To watch it: `--video` on `record`, `bench --check` or a comparison (one untimed filmed run per side after the timed pairs; never in them).
   - `strobe report experiment <exp> --open`: both sides' players on one clock, a strip of the runs and each input strobe sent; click one to seek there.
   - `screen` (the OS's copy of the window: headed apps and pages) or `renderer` (a Chromium page's own frames: headless, locked sessions). Two kinds never compare side by side.
-  - Needs ffmpeg for `renderer` and Linux X11 (strobe says how to install it); headless Firefox/WebKit, `window: false`, scripts and cli targets get none.
+  - Needs ffmpeg for `renderer` and Linux (X11, and strobe's Wayland compositor; strobe says how to install it); headless Firefox/WebKit, `window: false`, scripts and cli targets get none.
 
 ### Every run starts from the same state
 
@@ -756,7 +761,7 @@ Never put hand-measured timings, single recordings or `--check` smoke numbers in
 
 ### Linux and macOS frames
 
-- Frames on screen come from X Present (X11 on a real display, no compositing manager; Xvfb, compositors and Wayland are refused) and ScreenCaptureKit (needs Screen Recording).
+- Frames on screen come from X Present (X11 on a real display, no compositing manager; Xvfb, compositors and Wayland are refused: `Headless` on strobe's own compositor) and ScreenCaptureKit (needs Screen Recording).
 - Both give screen times only, so `frames.interval.*` and `frames.dropped*` are refused there while counts and `interaction.*` stand.
 - A macOS window the app excludes from screen capture (sharing type none: an overlay left out of recordings) gets no stream.
   - Frame metrics of a block that showed one are refused `NoPresentSource`, naming the window, not reported as 0.
@@ -764,7 +769,7 @@ Never put hand-measured timings, single recordings or `--check` smoke numbers in
 ### Linux and macOS permissions
 
 - Driving a native app needs, on macOS, the Accessibility permission for the app strobe runs under (`strobe status` names it: Terminal, the agent's app, or `~/.local/bin/mesh` remotely).
-- On Linux it needs the session's accessibility bus (at-spi2-core) and an X11 display.
+- On Linux it needs at-spi2-core, and an X11 display or sway (`strobe status` says which is ready).
 - macOS 27 names the Accessibility pane "Device Control and Data Access"; strobe's messages name the right pane with its URL.
 - Linux native stacks need `perf_event_paranoid` ≤ 2 or CAP_PERFMON; `status` says which.
 

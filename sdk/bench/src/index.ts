@@ -693,8 +693,19 @@ export interface NativeOptions {
   env?: Record<string, string>
   /** Files written into the home before the launch, over the profile's (JSON or text; placeholders as in `args`). */
   files?: Record<string, unknown>
-  /** Variables the launch removes, after the profile's (`PREFIX_*` for a family): `["WAYLAND_DISPLAY"]` for an X11 run. */
+  /** Variables the launch removes, after the profile's (`PREFIX_*` for a family). */
   unset?: string[]
+  /**
+   * Linux: where the app opens its windows. `"wayland"` (`--wayland` sets it for every native target; the default when
+   * the session has no X11 display): a headless Wayland compositor (sway) strobe starts for each launch, which only the
+   * app and strobe use, with a session bus and accessibility bus of the launch's own (never yours). strobe reads,
+   * drives and films the app through it, also on a locked session. Nothing it draws reaches a display: `frames.*`,
+   * `interaction.*`, `scroll.latency.*`, `display.hz`, `launch.painted` and `launch.settled` are refused (Headless),
+   * as is a launch `until` a selector or the window painted or settled; without a GPU `gpu.*` is refused
+   * (SoftwareGpu). The compositor runs on strobe's CPUs, outside `cpu.work`.
+   * `"x11"`: the session's X server.
+   */
+  display?: "wayland" | "x11"
   /**
    * `"warm"` (default): each variant keeps the GPU driver's compiled shaders across its own launches (a discarded first
    * block fills them), as a person's machine has them; never the other variant's or yours. `"cold"`: every launch

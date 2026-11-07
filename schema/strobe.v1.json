@@ -105,6 +105,7 @@
         "window": { "type": "boolean", "description": "false: the app opens no window (a tray app)." },
         "moved": { "type": "array", "items": { "type": "string" }, "description": "The user's folders the profile's env moves into the home (macOS)." },
         "gpuCache": { "enum": ["warm", "cold"] },
+        "display": { "enum": ["wayland", "x11"], "description": "Linux, kind native: \"wayland\" runs the app on a headless Wayland compositor strobe starts per launch (frames and input latency refused Headless); \"x11\" on the session's X server. Default: Wayland when DISPLAY is unset." },
         "motion": {
           "type": "object",
           "additionalProperties": false,

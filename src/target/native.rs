@@ -46,6 +46,9 @@ pub struct Native {
     pub output: Option<Receiver<crate::target::isolate::OutputLine>>,
     /// Its main window once found.
     pub window: Option<TopWindow>,
+    /// The Wayland compositor strobe runs it on (`Home::headless`): what it is, and whether it
+    /// composites in software. Nothing it shows reaches a display.
+    pub headless: Option<(String, bool)>,
 }
 
 /// Starts `app` in `home` with `env` added; `output` keeps its stdout
@@ -55,7 +58,18 @@ pub fn launch(app: &App, home: &Home, env: &[(String, String)], output: bool, cp
     guard.shared = home.shared.clone();
     isolate::live(app, &guard)?;
     let s = isolate::spawn(app, home, &[], env, output, cpus)?;
-    let n = Native { child: Some(s.child), pid: s.pid, home: home.dir.clone(), fresh: home.fresh, exe: app.exe.clone(), epoch_ms: s.epoch_ms, at_ns: s.at_ns, output: s.output, window: None };
+    let n = Native {
+        child: Some(s.child),
+        pid: s.pid,
+        home: home.dir.clone(),
+        fresh: home.fresh,
+        exe: app.exe.clone(),
+        epoch_ms: s.epoch_ms,
+        at_ns: s.at_ns,
+        output: s.output,
+        window: None,
+        headless: home.headless(),
+    };
     Ok((n, guard))
 }
 
@@ -82,16 +96,20 @@ impl Native {
         self.child.as_mut()?.exited()
     }
 
-    /// Why no window may show on Linux: the app was given a Wayland display, where toolkits open a
+    /// Why no window may show on Linux: on strobe's compositor, an app that opened none on it (one
+    /// without Wayland support); elsewhere a Wayland display of the user's, where toolkits open a
     /// native Wayland window, which no other client sees.
     fn wayland_note(&self) -> &'static str {
+        if self.headless.is_some() {
+            return " on the Wayland compositor strobe runs for it: does the app speak Wayland? (its toolkit's backend: GDK_BACKEND, QT_QPA_PLATFORM and SDL_VIDEODRIVER are set to wayland; a Chromium or Electron app needs --ozone-platform=wayland in its args); display: \"x11\" runs it on the session's X server";
+        }
         let wayland = cfg!(target_os = "linux")
             && self
                 .pids()
                 .iter()
                 .any(|p| std::fs::read(format!("/proc/{p}/environ")).is_ok_and(|e| e.split(|&b| b == 0).any(|kv| kv.strip_prefix(b"WAYLAND_DISPLAY=").is_some_and(|v| !v.is_empty()))));
         if wayland {
-            ": the app has WAYLAND_DISPLAY, and a native Wayland window is invisible to strobe (Wayland shows no client another's windows, and takes no XTest input); run it under X11 or XWayland: unset WAYLAND_DISPLAY in the app profile (`unset`), or use the app's own switch to X11"
+            ": the app has WAYLAND_DISPLAY, and a native Wayland window of the user's compositor is invisible to strobe (Wayland shows no client another's windows, and takes no XTest input); give the target display: \"wayland\" (or --wayland) to run it on a compositor strobe runs, or run it under X11 or XWayland: unset WAYLAND_DISPLAY in the app profile (`unset`)"
         } else {
             ""
         }
@@ -109,8 +127,9 @@ impl Native {
             // A launcher that started the app and exited leaves it stamped with the home.
             if let Some(code) = self.exited().filter(|_| self.processes().is_empty()) {
                 return Err(Error::msg(format!(
-                    "{} exited (code {code}) before it opened a window: an app that hands its window to another process (a launcher, a single-instance app already running) cannot be measured this way",
-                    self.exe.display()
+                    "{} exited (code {code}) before it opened a window{}: an app that hands its window to another process (a launcher, a single-instance app already running) cannot be measured this way",
+                    self.exe.display(),
+                    if self.headless.is_some() { self.wayland_note() } else { "" }
                 )));
             }
             guard.check("while the app started")?;

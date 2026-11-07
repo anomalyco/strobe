@@ -2,7 +2,8 @@
 //! window manager's EWMH properties: whose a window is (`_NET_WM_PID`), whether it is minimized
 //! (`_NET_WM_STATE_HIDDEN`), the stacking order for occlusion, and placement that keeps a window on top
 //! without focusing it (`_NET_WM_STATE_ABOVE`). Native Wayland windows are invisible here: Wayland
-//! gives no client a view of another's windows, so a Wayland-only app has no main window for strobe.
+//! gives no client a view of another's windows, so strobe sees them only in a compositor it runs
+//! itself (`wayland`).
 
 use super::TopWindow;
 use std::sync::Mutex;

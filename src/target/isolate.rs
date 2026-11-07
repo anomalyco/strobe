@@ -86,6 +86,34 @@ pub struct App {
     /// Files merged over what the home holds once its seed and the profile's files are in place (JSON
     /// objects key by key, deeply; anything else replaced): the motion contract's.
     merged_files: Vec<(String, Value)>,
+    /// The display a native app opens its windows on (Linux): the profile's or the target's `display`,
+    /// else Wayland when this session has no X11 display (`wayland`).
+    display: Option<Display>,
+}
+
+/// Where a native app shows its windows on Linux (SPEC §13.7): the X server of the session, or a
+/// Wayland compositor strobe runs for the launch (`target::wayland`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Display {
+    X11,
+    Wayland,
+}
+
+impl Display {
+    pub fn name(self) -> &'static str {
+        match self {
+            Display::X11 => "x11",
+            Display::Wayland => "wayland",
+        }
+    }
+
+    pub fn parse(name: &str) -> Result<Display> {
+        match name {
+            "x11" => Ok(Display::X11),
+            "wayland" => Ok(Display::Wayland),
+            other => Err(Error::usage(format!("display is \"wayland\" or \"x11\", not {other:?}"))),
+        }
+    }
 }
 
 /// An app profile's `motion.reduce` (strobe.json): the arguments, environment and files that make
@@ -169,6 +197,28 @@ impl App {
     /// The profile declares `motion.reduce`.
     pub fn declares_motion(&self) -> bool {
         self.motion_contract.is_some()
+    }
+
+    /// The display its profile (or a target over it) asks for, if any.
+    pub fn display(&self) -> Option<Display> {
+        self.display
+    }
+
+    /// The display a target (or `--wayland`) asks for, over the profile's.
+    pub fn with_display(mut self, display: Option<Display>) -> App {
+        self.display = display.or(self.display);
+        self
+    }
+
+    /// Whether a launch runs on a compositor strobe starts (`target::wayland`): a native app on Linux
+    /// that asks for Wayland, or asks for nothing in a session with no X11 display.
+    pub fn wayland(&self) -> bool {
+        cfg!(target_os = "linux")
+            && self.kind == AppKind::Native
+            && match self.display {
+                Some(d) => d == Display::Wayland,
+                None => std::env::var_os("DISPLAY").is_none_or(|v| v.is_empty()),
+            }
     }
 }
 
@@ -268,6 +318,10 @@ pub fn app(id: &str, config: &Value) -> Result<App> {
     let moved = moved.iter().map(|m| expand(m).map_err(|e| Error::usage(format!("app profile \"{id}\" moved: {}", e.message)))).collect::<Result<Vec<_>>>()?;
     let kind = p["kind"].as_str().unwrap_or("electron");
     let kind = AppKind::parse(kind).ok_or_else(|| Error::usage(format!("app profile \"{id}\": kind is {}, not {kind}", AppKind::NAMES.join(", "))))?;
+    let display = p["display"].as_str().map(Display::parse).transpose().map_err(|e| Error::usage(format!("app profile \"{id}\": {}", e.message)))?;
+    if display.is_some() && kind != AppKind::Native {
+        return Err(Error::usage(format!("app profile \"{id}\": display is for native apps (kind \"native\"); this one is {kind}")));
+    }
     // Every place the profile writes in a home stays inside it (SPEC rule 10), said by `strobe config` too.
     let keys = |v: &Value| v.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
     for (what, rels) in [("files", keys(&p["files"])), ("motion.reduce.files", keys(&p["motion"]["reduce"]["files"])), ("dirs", strings("dirs"))] {
@@ -300,6 +354,7 @@ pub fn app(id: &str, config: &Value) -> Result<App> {
         motion_contract,
         reduce_motion: false,
         merged_files: Vec::new(),
+        display,
     })
 }
 
@@ -759,7 +814,8 @@ pub fn reap_dead_owners() -> Vec<String> {
     let entries: Vec<std::fs::DirEntry> = [host::paths::run(), super::firefox::snap_profiles()].iter().filter_map(|d| std::fs::read_dir(d).ok()).flat_map(|r| r.flatten()).collect();
     for e in entries {
         let name = e.file_name().to_string_lossy().to_string();
-        let Some(named) = name.strip_prefix("profile-").or_else(|| name.strip_prefix("home-")).and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok()) else { continue };
+        // A launch's home or browser profile, or the folder of a Wayland compositor strobe ran (`wayland`).
+        let Some(named) = ["profile-", "home-", "wl-"].iter().find_map(|p| name.strip_prefix(p)).and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok()) else { continue };
         let gone = match std::fs::read_to_string(e.path().join(OWNER_FILE)).ok().as_deref().and_then(parse_owner) {
             Some((pid, start)) => pid != std::process::id() && !owner_alive(pid, start),
             // A folder from before owner files: its strobe by the pid in its name.
@@ -801,6 +857,8 @@ pub struct EndOnStop {
 pub fn end_on_stop(home: Option<&Home>) -> EndOnStop {
     use std::sync::atomic::Ordering;
     let done = std::sync::Arc::new(std::sync::Mutex::new(false));
+    // The folder of the launch's Wayland compositor, ended and removed with it.
+    let display = home.and_then(Home::display_dir);
     let (flag, state, home) = (host::ctrl_c(), done.clone(), home.map(|h| (h.dir.clone(), h.fresh)));
     let watcher = std::thread::spawn(move || {
         loop {
@@ -817,6 +875,10 @@ pub fn end_on_stop(home: Option<&Home>) -> EndOnStop {
                         if *fresh {
                             remove_home(dir);
                         }
+                    }
+                    if let Some(dir) = &display {
+                        release_home(dir);
+                        remove_home(dir);
                     }
                     std::process::exit(130);
                 }
@@ -1054,13 +1116,64 @@ pub struct Home {
     /// `prepare_home` made it now (not a warm home launched before): a launch that ends without
     /// being closed removes it, and keeps a warm one for the caller.
     pub fresh: bool,
+    /// The Wayland compositor the launch runs on (`App::wayland`), ended with the last clone of the home.
+    #[cfg(target_os = "linux")]
+    pub display: Option<std::sync::Arc<super::wayland::Session>>,
 }
 
 impl Home {
+    /// The Wayland compositor the launch runs on, when it runs on one strobe started: what it is
+    /// (`sway version 1.10.1, headless, pixman`) and whether it composites in software.
+    pub fn headless(&self) -> Option<(String, bool)> {
+        #[cfg(target_os = "linux")]
+        {
+            self.display.as_ref().map(|s| (s.describe(), s.software()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    /// The folder of the Wayland compositor strobe runs for the launch, if it runs on one.
+    pub fn display_dir(&self) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        {
+            self.display.as_ref().map(|d| d.dir.clone())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    /// What reached the screen of the launch's windows: on the Wayland compositor strobe runs for it,
+    /// that compositor's changes (for waits; its frames are refused `Headless`), else the OS's.
+    pub fn presents(&self) -> Result<crate::probe::present::PresentCapture> {
+        #[cfg(target_os = "linux")]
+        if let Some(c) = self.display.as_ref().and_then(|d| d.compositor()) {
+            return crate::probe::present::PresentCapture::wayland(c);
+        }
+        crate::probe::present::PresentCapture::start()
+    }
+
+    /// Variables the launch removes beyond the profile's: another display, on strobe's compositor.
+    fn unsets(&self, key: &str) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.display.is_some() && super::wayland::UNSET.contains(&key)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = key;
+            false
+        }
+    }
+
     /// The app's whole environment, for a hook that starts something the app would see as its own
     /// (a background service).
     pub fn environment(&self, app: &App) -> std::collections::BTreeMap<String, String> {
-        let mut out: std::collections::BTreeMap<String, String> = std::env::vars().filter(|(k, _)| !app.unsets(k)).collect();
+        let mut out: std::collections::BTreeMap<String, String> = std::env::vars().filter(|(k, _)| !app.unsets(k) && !self.unsets(k)).collect();
         // One entry per name: the home's `APPDATA` replaces strobe's `AppData` on Windows.
         out.retain(|k, _| !self.env.iter().any(|(e, _)| env_name_is(k, e)));
         out.extend(self.env.iter().cloned());
@@ -1191,11 +1304,40 @@ pub fn prepare_home(app: &App, seed: Option<&Path>, home: Option<PathBuf>) -> Re
     if cfg!(target_os = "macos") {
         env.push(("CFFIXED_USER_HOME".into(), text(&home)));
     }
+    // A native app on Wayland: its session (buses with this home as theirs, the compositor) starts now,
+    // before any timed span, on strobe's CPUs.
+    #[cfg(target_os = "linux")]
+    let display = if app.wayland() {
+        match super::wayland::Session::start(&env, app.display.is_none()) {
+            Ok(s) => Some(std::sync::Arc::new(s)),
+            Err(e) => {
+                if fresh {
+                    remove_home(&home);
+                }
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(d) = &display {
+        env.extend(d.env());
+    }
     env.extend(app.env.iter().map(|(k, v)| (k.clone(), fill(v))));
     // Last, so no profile replaces them: what tells strobe's launches (and what they start) apart.
     env.extend(launch_env(&home));
     let gpu_warm = app.gpu_cache.as_deref().map(|store| lend_gpu_caches(&home, store));
-    Ok(Home { dir: home, port, env, shared, gpu_warm, fresh })
+    Ok(Home {
+        dir: home,
+        port,
+        env,
+        shared,
+        gpu_warm,
+        fresh,
+        #[cfg(target_os = "linux")]
+        display,
+    })
 }
 
 /// A spawned app: the child with its group, when it was spawned (epoch ms and the host clock), and
@@ -1215,7 +1357,7 @@ pub fn spawn(app: &App, home: &Home, args: &[String], env: &[(String, String)], 
     installed(app)?;
     let mut cmd = Command::new(&app.exe);
     for (k, _) in std::env::vars() {
-        if app.unsets(&k) {
+        if app.unsets(&k) || home.unsets(&k) {
             cmd.env_remove(&k);
         }
     }

@@ -87,23 +87,38 @@ const ENCODERS: [Encoder; 3] = [
     Encoder { name: "libvpx", ext: "webm", args: &["-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "3M", "-pix_fmt", "yuv420p"] },
 ];
 
+/// What an ffmpeg build lists for `-encoders` or `-demuxers`, read once per executable.
+fn listed(exe: &Path, what: &str) -> String {
+    static SEEN: Mutex<Vec<(PathBuf, String, String)>> = Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, _, l)) = seen.iter().find(|(p, w, _)| p == exe && w == what) {
+        return l.clone();
+    }
+    let mut cmd = Command::new(exe);
+    cmd.args(["-hide_banner", what]).stdin(Stdio::null()).stderr(Stdio::null());
+    no_window(&mut cmd);
+    let l = crate::host::output(&mut cmd).unwrap_or_default();
+    seen.push((exe.to_path_buf(), what.to_string(), l.clone()));
+    l
+}
+
+/// An ffmpeg that reads raw frames (`-f rawvideo`: its `rawvideo` demuxer), for a window polled from
+/// the OS (Linux): Playwright's minimal build has none. Else `NoPresentSource` with how to install one.
+pub fn find_raw() -> Result<PathBuf> {
+    let found: Vec<PathBuf> = crate::host::find_exe("ffmpeg", &[]).into_iter().chain(candidates().into_iter().filter(|p| p.is_file())).collect();
+    if let Some(p) = found.iter().find(|p| listed(p, "-demuxers").lines().any(|l| l.split_whitespace().nth(1) == Some("rawvideo"))) {
+        return Ok(p.clone());
+    }
+    let what = match found.first() {
+        Some(p) => format!("this video is encoded from raw frames by the ffmpeg program, and the one found ({}) cannot read them (no rawvideo demuxer: a minimal build)", p.display()),
+        None => "this video is encoded by the ffmpeg program, and none was found (PATH, the usual package folders, Playwright's cache)".to_string(),
+    };
+    Err(super::refused(what, "install ffmpeg from the distribution (apt install ffmpeg, pacman -S ffmpeg) and run strobe again"))
+}
+
 /// The first of `ENCODERS` this ffmpeg build has (`ffmpeg -encoders`, read once per executable).
 pub fn encoder(exe: &Path) -> Result<Encoder> {
-    static SEEN: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
-    let listed = {
-        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-        match seen.iter().find(|(p, _)| p == exe) {
-            Some((_, l)) => l.clone(),
-            None => {
-                let mut cmd = Command::new(exe);
-                cmd.args(["-hide_banner", "-encoders"]).stdin(Stdio::null()).stderr(Stdio::null());
-                no_window(&mut cmd);
-                let l = crate::host::output(&mut cmd).unwrap_or_default();
-                seen.push((exe.to_path_buf(), l.clone()));
-                l
-            }
-        }
-    };
+    let listed = listed(exe, "-encoders");
     ENCODERS
         .into_iter()
         .find(|e| listed.lines().any(|l| l.split_whitespace().nth(1) == Some(e.name)))

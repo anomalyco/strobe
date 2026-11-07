@@ -59,6 +59,7 @@ const TOOLS: &[Tool] = &[
             ("native", "exe:<path> is a native app (no browser engine): recorded from outside: CPU, thread wakes, IO, GPU, memory, the UI thread's CPU and what reached the screen"),
             ("app", "exe:<path>: the strobe.json app profile it borrows"),
             ("headless", "draw off screen: attribution data stays meaningful, frame metrics do not"),
+            ("wayland", "Linux: a native app (or with bench, the file's native targets) on a headless Wayland compositor strobe starts (sway); frames and input latency refused (Headless)"),
             (
                 "emulate",
                 "a page strobe launches as mobile (a phone: 390x844, coarse pointer, no hover, touch, the browser's Android user agent; scale 3 headless) or touch (a desktop with a touch screen); a desktop without it; Chromium and Firefox",
@@ -110,6 +111,7 @@ const TOOLS: &[Tool] = &[
             ),
             ("headless", "page targets in a headless browser (check and timed blocks): no display needed, runs through a locked session; frame, input-latency and GPU-use metrics refused (Headless)"),
             ("engine", "page targets' browser engine: chromium or firefox; the file's targets of that engine, else every page target in it"),
+            ("wayland", "Linux: the file's native targets on a headless Wayland compositor strobe starts per launch (sway): no display needed; frame and input-latency metrics refused (Headless)"),
             (
                 "mobile",
                 "true, or an adb serial: the file's phone targets (emulate: \"mobile\") run in Chrome on an Android phone over adb instead of being emulated (every other target refused NotForTarget); timed blocks are refused on an emulator (Emulator; check runs there) or over Wi-Fi (WirelessTransport); on a phone (not an emulator) strobe drives only a Chrome channel given to it once (strobe up --mobile=<serial> --channel canary)",
@@ -522,6 +524,14 @@ pub fn daemon(_args: &Args) -> Result<()> {
     // Tracked branches (`strobe track --schedule`): checked once a minute.
     std::thread::spawn(super::track::daemon_loop);
     std::thread::spawn(follow_installed);
+    // What strobes that died left running and their folders (a killed launch, its compositor and
+    // buses): ended now and once a minute, so none outlives them for long.
+    std::thread::spawn(|| {
+        loop {
+            let _ = crate::target::isolate::reap_dead_owners();
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
     let handler: Arc<dyn Fn(http::Request) -> http::Response + Send + Sync> = Arc::new(move |req: http::Request| serve(req, port, &token));
     http::serve(listener, handler);
     Ok(())

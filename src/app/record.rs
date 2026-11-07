@@ -32,7 +32,7 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
     // Recordings of one executable share its GPU caches, as `record` does.
     b.set("gpu-store", "exe");
     // `--mobile` too, bare (`""`) or naming a serial: the case's phone target on the phone.
-    for k in ["target", "params", "id", "pin", "power", "runs", "style", "headless", "engine", "seed", "video", "mobile"] {
+    for k in ["target", "params", "id", "pin", "power", "runs", "style", "headless", "wayland", "engine", "seed", "video", "mobile"] {
         if let Some(v) = args.get(k) {
             b.set(k, v);
         }
@@ -191,6 +191,9 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     // A native app (a profile of kind native, or `exe:<path> --native`): measured from outside.
     if let Some(a) = app.clone().filter(|a| a.kind == isolate::AppKind::Native || args.has("native")) {
         return native(args, &a.as_kind(isolate::AppKind::Native), &target, set, for_ms);
+    }
+    if args.has("wayland") {
+        return Err(Error::usage(format!("--wayland runs a native app (app:<id> of kind native, exe:<path> --native) on a Wayland compositor strobe starts, not {target}")));
     }
     if args.get("probes") == Some("waits") {
         return Err(Error::usage(format!("--probes waits takes a native capture's off-CPU waits: a native app (app:<id> of kind native, exe:<path> --native) or pid:<n>, not {target}")));
@@ -762,8 +765,11 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
     // end at one (`--for` caps it then).
     let line = |k: &str| args.get(k).map(|r| regex_lite::Regex::new(r).map_err(|e| Error::usage(format!("--{k}: {e}")))).transpose();
     let (until, stop) = (line("until-line")?, line("stop-line")?);
-    let app = &with_gpu_store(args, app)?;
+    let app = &with_gpu_store(args, app)?.with_display(args.has("wayland").then_some(isolate::Display::Wayland));
     let home = isolate::prepare_home(app, args.get("home").map(std::path::Path::new), None)?;
+    if let Some((what, _)) = home.headless() {
+        progress(format!("display: {what} (strobe's own Wayland compositor: frames and input latency are refused Headless)"));
+    }
     match home.gpu_warm {
         Some(true) => progress("GPU shader caches: warm, from earlier recordings of this executable"),
         Some(false) => progress("GPU shader caches: cold, the first recording of this executable (the next one is warm; --gpu-cache cold keeps them cold)"),
@@ -806,10 +812,12 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         app_gone(&mut n, "before the recording", |n| last_output(n, &seen, 5))?;
         // Its process's CPU goes with it when it exits: one that ends inside the window refuses.
         let running = n.exited().is_none();
+        // On strobe's headless compositor the session's lock screen covers nothing of the app.
+        let headless = n.headless.is_some();
         if !windowless {
             n.raise();
             n.check_visible()?;
-            if host::session_locked() {
+            if host::session_locked() && !headless {
                 return Err(validity::locked());
             }
         }
@@ -819,7 +827,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let sampler = probe::os::Sampler::start(n.pid, Some(n.home.clone()));
         // What reached the screen (OS present events), or in attribution, native stacks (the helper).
         let presents = (set != Set::Attribution && !windowless).then(|| {
-            crate::probe::present::PresentCapture::start().map(|mut c| {
+            home.presents().map(|mut c| {
                 c.track(&n.pids());
                 c
             })
@@ -869,7 +877,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let presents = presents.map(|r| r.and_then(|c| c.stop()));
         let stacks = stacks.map(|r| r.and_then(|c| c.stop()));
         let session_locked = awake.locks() > 0 || host::session_locked();
-        if session_locked && !windowless {
+        if session_locked && !windowless && !headless {
             return Err(validity::locked());
         }
         if !windowless {

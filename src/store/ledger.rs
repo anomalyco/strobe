@@ -117,6 +117,17 @@ fn attempt(line: &Value, current: &Value, later: bool) -> Value {
             changed.push(format!("{t}: {} → {}", show(a.get(t)), show(b.get(t))));
         }
     }
+    // Where native targets showed their windows on Linux (`identity.displays`: x11 or wayland); one from
+    // before strobe recorded it says nothing about it.
+    if let (Some(a), Some(b)) = (then["displays"].as_object(), now["displays"].as_object()) {
+        let mut targets: Vec<&String> = a.keys().chain(b.keys()).collect();
+        targets.sort();
+        targets.dedup();
+        for t in targets.into_iter().filter(|t| a.get(*t) != b.get(*t)) {
+            let show = |d: Option<&Value>| d.and_then(Value::as_str).unwrap_or("none").to_string();
+            changed.push(format!("{t}: display {} → {}", show(a.get(t)), show(b.get(t))));
+        }
+    }
     // The OS's own reduce-motion setting, which targets without `motion` follow (known on both sides).
     if let (Some(a), Some(b)) = (then["os_reduced_motion"].as_bool(), now["os_reduced_motion"].as_bool())
         && a != b

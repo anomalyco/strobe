@@ -99,7 +99,7 @@ mod imp {
             let sizer = crate::driver::window::Sizer::default();
             sizer.reference(crate::driver::window::Start::of(main));
             Ok(Session {
-                a11y: a11y::open(pids)?,
+                a11y: a11y::open(pids, main)?,
                 poster: Poster::start()?,
                 pids: RefCell::new(pids.to_vec()),
                 main: Cell::new(main),
@@ -378,7 +378,8 @@ mod imp {
             let r = tree.visible_rect(i).ok_or_else(|| Error::msg("the element is not visible"))?;
             let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
             if let Err(what) = self.a11y.hit(i, x, y)? {
-                if host::session_locked() {
+                // strobe's headless compositor hit-tests its own windows, whatever the session shows.
+                if host::session_locked() && !host::headless_window(self.main.get()) {
                     return Err(Error::refused(
                         "SessionLocked",
                         format!("pointer input at {:?}: the session is locked, so the OS hit-tests every point to the lock screen ({what}) and a click cannot be aimed", tree.key_path(i)),

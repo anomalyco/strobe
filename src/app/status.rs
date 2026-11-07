@@ -269,12 +269,21 @@ fn native_drive() -> (bool, String) {
             Ok(_) => "X Present".to_string(),
             Err(e) => format!("none ({})", e.message),
         };
+        // Native apps on Wayland run on a headless compositor strobe starts (`target::wayland`).
+        let wayland = match crate::target::wayland::unavailable() {
+            None => format!(
+                "ready (sway, headless, {}; frames and input latency refused Headless{})",
+                if crate::target::wayland::software() { "pixman" } else { "gles2" },
+                if crate::target::wayland::software() { ", gpu.* SoftwareGpu" } else { "" }
+            ),
+            Some(why) => format!("missing ({why})"),
+        };
         let text = format!(
-            "AT-SPI {} · XTest {} · frames: {frames}",
-            if bus { "(accessibility bus found)" } else { "missing (no accessibility bus: at-spi2-core)" },
-            if x11 { "on the X11 display" } else { "missing (no X11 display; Wayland windows take none)" }
+            "AT-SPI {} · XTest {} · frames: {frames} · Wayland compositor {wayland}",
+            if bus { "(accessibility bus found)" } else { "missing (no accessibility bus: at-spi2-core; a Wayland launch starts its own)" },
+            if x11 { "on the X11 display" } else { "missing (no X11 display: native apps run on the Wayland compositor)" }
         );
-        (bus && x11, text)
+        (bus && x11 || crate::target::wayland::unavailable().is_none(), text)
     }
 }
 

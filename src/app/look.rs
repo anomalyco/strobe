@@ -72,7 +72,8 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         (_, Some(path), None) => isolate::App::bare(Path::new(path)),
         _ => return Err(Error::usage("look app:<id> or exe:<path>")),
     }
-    .as_kind(isolate::AppKind::Native);
+    .as_kind(isolate::AppKind::Native)
+    .with_display(args.has("wayland").then_some(isolate::Display::Wayland));
     for page_only in ["element", "full", "size", "scale", "chars", "headed", "out"] {
         if args.has(page_only) {
             return Err(Error::usage(format!("--{page_only} is for a page; a native app's look reads its accessibility tree and takes no screenshot")));
@@ -97,6 +98,9 @@ fn native(args: &Args, target: &str) -> Result<Output> {
     let home = isolate::prepare_home(&app, args.get("home").map(Path::new), None)?;
     // A look stopped midway (Ctrl-C, SIGTERM) closes the app instead of leaving it running.
     let stop = isolate::end_on_stop(Some(&home));
+    if let Some((what, _)) = home.headless() {
+        progress(format!("look: on {what}, a Wayland compositor strobe started for this launch"));
+    }
     progress(format!("look: launching {} in an isolated home", app.exe.display()));
     let (mut n, guard) = match nt::launch(&app, &home, &[], false, None) {
         Ok(x) => x,
@@ -197,7 +201,7 @@ fn native(args: &Args, target: &str) -> Result<Output> {
 fn terminal(args: &Args, line: &str) -> Result<Output> {
     use crate::driver::tty as drv;
     use crate::target::{isolate, tty};
-    for page_only in ["element", "full", "scale", "chars", "headed", "keys", "build", "app"] {
+    for page_only in ["element", "full", "scale", "chars", "headed", "keys", "build", "app", "wayland"] {
         if args.has(page_only) {
             return Err(Error::usage(format!("--{page_only} is not a terminal's: look tty:<command> takes --size COLSxROWS, --until, --press, --type, --wait, --timeout, --home, --out <png>")));
         }
@@ -341,7 +345,7 @@ pub fn run(args: &Args) -> Result<Output> {
     if args.has("full") && args.has("element") {
         return Err(Error::usage("--full shoots the whole page and --element one element of it: give one"));
     }
-    for app_only in ["keys", "build", "app", "home"] {
+    for app_only in ["keys", "build", "app", "home", "wayland"] {
         if args.has(app_only) {
             return Err(Error::usage(format!("--{app_only} is for a native app (look app:<id> or exe:<path>), not a page")));
         }
