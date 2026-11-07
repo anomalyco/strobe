@@ -382,7 +382,7 @@ Use
         [--bisect good..bad]           (the commit that moved the primary; one series)
         [--style]                      (attribution blocks also trace what invalidated style: query <rec> style)
         [--noworse 2% | metric=2%,…]   (non-inferiority: is head at most 2% worse? verdicts no worse, worse, unclear)
-        [--unlock-wait 2h]             (a series that needs a presenting window waits at most that long for an unlock)
+        [--unlock-wait 2h]             (a series that needs a presenting window waits at most that long for an unlock, or on macOS for nobody to use the Mac)
         [--seed <n>]                   (ctx.seed and ctx.random(): replay a seeded workload; without it strobe draws one
                                         and prints it)
         --filter: case names, comma-separated; exact unless a name holds * (a glob)

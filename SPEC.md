@@ -536,7 +536,9 @@ stop ends `track` and `bisect` (exit 130). Each invocation keeps its own progres
 (the daemon runs several at once); the daemon installs no signal handler, so SIGTERM ends it.
 `--unlock-wait <duration>` caps each wait for an unlock of a series that needs a presenting window:
 then the bench ends as a stop does, with exit 124 and a hint to resume once unlocked (checked on
-adais, locked: exit 124 after `--unlock-wait 10s`). Both keep the experiment's warm GPU cache
+adais, locked: exit 124 after `--unlock-wait 10s`). On macOS it caps each wait for nobody to use the
+Mac for a minute (a block whose app lost the front while a person used the Mac) the same way, and
+that wait prints a line a minute with the last input's age. Both keep the experiment's warm GPU cache
 stores for `--resume`, and `track` and `bisect` take a bench that ended either way as that error,
 never as a partial answer (a bisect step without its pairs would otherwise move `good`). `--stop`
 and `--resume` together are a usage error. On Windows and in a

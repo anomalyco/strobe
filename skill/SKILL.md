@@ -776,7 +776,7 @@ Never put hand-measured timings, single recordings or `--check` smoke numbers in
   - Ctrl-C, SIGTERM or `strobe bench --stop <exp>` (a unique prefix works; it says what the bench was doing) stops one after its block, or at once while it waits for an unlock or the slot.
   - It writes what finished (exit 130; the PR table says incomplete).
   - `strobe bench --resume <exp>` goes on from the last finished pair.
-  - `--unlock-wait 2h` caps how long a series that needs a presenting window waits for an unlock (then exit 124, resumable).
+  - `--unlock-wait 2h` caps how long a series that needs a presenting window waits for an unlock, or on macOS for nobody to use the Mac (then exit 124, resumable).
 - Launches that fail under load (no debugging port, no DevTools reply) run again up to 3 times.
 - A share primary stuck at its ceiling on both sides stops as `saturated`: choose another primary.
 - If `strobe` isn't on PATH, use the CLI path from the MCP instructions.

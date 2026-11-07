@@ -4539,7 +4539,22 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             release_machine(ctx);
             ctx.reg.set("waiting", format!("{} {} block: someone is using this Mac (the app must be the active one)", s.label(), v.role));
             let waiting = Instant::now();
-            while host::person_idle_s().is_some_and(|i| i < 60.0) {
+            // `--unlock-wait` caps this wait as it caps one for an unlock; without it, a line a minute.
+            let limit = ctx.args.get("unlock-wait").map(duration_ms).transpose()?.map(Duration::from_millis);
+            let mut said = Instant::now();
+            while let Some(idle) = host::person_idle_s().filter(|i| *i < 60.0) {
+                if let Some(l) = limit.filter(|l| waiting.elapsed() >= *l) {
+                    ctx.waited_ms += waiting.elapsed().as_secs_f64() * 1e3;
+                    return Err(Error::timeout(format!("someone kept using this Mac for {} (--unlock-wait), and the {} app must be the active one", fmt::ms_duration(l.as_millis() as u64), v.role))
+                        .hint(format!("strobe bench --resume {} once nobody uses the Mac", ctx.exp)));
+                }
+                if said.elapsed() >= Duration::from_secs(60) {
+                    said = Instant::now();
+                    progress(format!(
+                        "  still waiting {} for nobody to use this Mac for a minute (last input {idle:.0} s ago); --unlock-wait caps it, strobe bench --stop ends it",
+                        fmt::ms_duration(waiting.elapsed().as_millis() as u64)
+                    ));
+                }
                 nap(Duration::from_secs(5))?;
             }
             ctx.waited_ms += waiting.elapsed().as_secs_f64() * 1e3;

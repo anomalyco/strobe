@@ -146,7 +146,7 @@ const TOOLS: &[Tool] = &[
             ("video", "film untimed: with check the check run; on a comparison one warmed run per side after every timed pair (never in them); report experiment <exp> plays both side by side"),
             ("style", "attribution blocks also trace what invalidated style"),
             ("max-time", "stop starting pairs after this long, e.g. 30m"),
-            ("unlock-wait", "a series that needs a presenting window waits at most this long for an unlock (default: until unlocked), e.g. 2h"),
+            ("unlock-wait", "a series that needs a presenting window waits at most this long for an unlock, or on macOS for nobody to use the Mac (default: no limit), e.g. 2h"),
             ("require-verdict", "exit 5 when a series has no verdict"),
             ("require-parity", "implementation comparisons: exit 4 when a journey is a parity gap (one side cannot run it)"),
             ("stop", "exp_… (a unique prefix works): ask that running experiment to stop; it keeps what finished"),
