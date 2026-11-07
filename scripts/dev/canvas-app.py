@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# A custom-drawn GTK 3 window for strobe's image anchors and pixel waits (dev fixture, not shipped): one
-# DrawingArea painted with cairo, no accessible children, so only its pixels say what it shows. The same
-# tiles as canvas-app.cs: a click on PLAY or Space counts (one bar each), a click on STOP or R resets, X
-# shows or hides a square. `canvas-app.py --anchors <dir>` writes each tile as a PNG (PLAY at 1.5x and 2x
-# too) and exits.
+# A custom-drawn GTK 3 window for strobe's image anchors and pixel waits (dev fixture, not shipped): the
+# scene is painted with pycairo into an image and shown whole (no accessible children), so only its pixels
+# say what it shows; no gi-cairo bridge needed. The same tiles as canvas-app.cs: a click on PLAY or Space
+# counts (one bar each), a click on STOP or R resets, X shows or hides a square. `canvas-app.py --anchors
+# <dir>` writes each tile as a PNG (PLAY at 1.5x and 2x too) and exits.
+import io
 import math
 import os
 import sys
@@ -13,7 +14,8 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gtk
 
 PLAY, STOP, ITEM_A, ITEM_B, SQUARE = (40, 40, 160, 60), (240, 40, 160, 60), (40, 160, 120, 50), (240, 160, 120, 50), (440, 160, 100, 100)
 
@@ -109,10 +111,12 @@ state = {"count": 0, "square": False}
 win = Gtk.Window(title="Canvas fixture")
 win.set_default_size(600, 360)
 win.connect("destroy", Gtk.main_quit)
-area = Gtk.DrawingArea()
-area.set_can_focus(True)
-area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.KEY_PRESS_MASK)
-win.add(area)
+box = Gtk.EventBox()
+image = Gtk.Image()
+image.set_halign(Gtk.Align.START)
+image.set_valign(Gtk.Align.START)
+box.add(image)
+win.add(box)
 
 
 def at(c, r, draw):
@@ -122,7 +126,9 @@ def at(c, r, draw):
     c.restore()
 
 
-def on_draw(_, c):
+def scene():
+    s = cairo.ImageSurface(cairo.FORMAT_ARGB32, 600, 360)
+    c = cairo.Context(s)
     rgb(c, 32, 40, 48)
     c.paint()
     at(c, PLAY, play)
@@ -135,6 +141,12 @@ def on_draw(_, c):
     for i in range(min(state["count"], 40)):
         c.rectangle(40 + i * 12, 270, 8, 40)
     c.fill()
+    out = io.BytesIO()
+    s.write_to_png(out)
+    loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+    loader.write(out.getvalue())
+    loader.close()
+    image.set_from_pixbuf(loader.get_pixbuf())
 
 
 def inside(r, x, y):
@@ -148,7 +160,7 @@ def on_press(_, e):
         state["count"] = 0
     else:
         return
-    area.queue_draw()
+    scene()
 
 
 def on_key(_, e):
@@ -161,13 +173,12 @@ def on_key(_, e):
         state["square"] = not state["square"]
     else:
         return False
-    area.queue_draw()
+    scene()
     return True
 
 
-area.connect("draw", on_draw)
-area.connect("button-press-event", on_press)
+scene()
+box.connect("button-press-event", on_press)
 win.connect("key-press-event", on_key)
 win.show_all()
-area.grab_focus()
 Gtk.main()
