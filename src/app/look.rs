@@ -543,7 +543,7 @@ pub fn run(args: &Args) -> Result<Output> {
         if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&out, &bytes)?;
+        crate::host::paths::write_owner_only(&out, &bytes)?;
         let errors = console.iter().filter(|c| matches!(c["level"].as_str(), Some("error" | "exception"))).count();
         let mut text = format!("{} · {}\n", info["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(no title)"), info["url"].as_str().unwrap_or(&url));
         // A phone's page is its own screen, read from the page.
@@ -721,6 +721,11 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     if args.has("full") && args.has("element") {
         return Err(Error::usage("--full shoots the whole page and --element one element of it: give one"));
     }
+    if args.get("until").and_then(image_until).is_some() {
+        return Err(crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "--until image=: look wir: inspects an open Safari tab over USB without polling screenshots in a loop")
+            .fix("wait for a DOM or role selector (--until \"role=heading …\"), or take one screenshot with strobe look wir: --out shot.png")
+            .into());
+    }
 
     let wait_ms = args.get("wait").map(duration_ms).transpose()?.unwrap_or(200);
     let chars = args.num("chars")?.unwrap_or(4000.0).max(0.0) as usize;
@@ -730,7 +735,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
 
     let t0_ns = crate::host::now_ns();
     let started = Instant::now();
-    let mut session = wir::Session::attach(target, false, timeout)?;
+    let mut session = wir::Session::attach(target, false, timeout, super::stop_requested)?;
     let handle = session.page.handle.clone();
     progress(format!("look {handle}"));
 
@@ -819,7 +824,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     if let Some(dir) = out_path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    crate::store::write_atomic(&out_path, &png_bytes)?;
+    crate::host::paths::write_owner_only(&out_path, &png_bytes)?;
 
     let url = scrub_url(info["url"].as_str().unwrap_or(&session.page.url), false);
     let title = info["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(no title)");

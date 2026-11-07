@@ -372,8 +372,9 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
     }
-    // Work while idle: a recording with no input that still presents frames or keeps the main thread busy.
-    if meta["kind"] == "record" && v["interaction.n"].is_null() && v["scroll.n"].is_null() {
+    // Work while idle: a recording with no input that still presents frames or keeps the main thread busy
+    // (skipped on `wir:`, where a developer inspects their live Safari tab and may touch/scroll it).
+    if meta["kind"] == "record" && meta["wir"] != true && v["interaction.n"].is_null() && v["scroll.n"].is_null() {
         let seconds = meta["duration_ms"].as_f64().unwrap_or(0.0) / 1000.0;
         let fps = v["frames.n"].as_f64().unwrap_or(0.0) / seconds.max(1e-9);
         let busy = v["main.busy"].as_f64().unwrap_or(0.0);
@@ -597,15 +598,31 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
             }
             let mut rows: Vec<(String, f64)> = sums.into_iter().collect();
             rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let has_private = target_procs.iter().any(|p| p["private_bytes"].is_f64());
             let private: f64 = target_procs.iter().filter_map(|p| p["private_bytes"].as_f64()).sum();
-            let left_out = if c["engine"] == "firefox" { "" } else { " (strobe's tracing service left out)" };
-            text += &format!("  {:>10}  OS private, all {} target processes{left_out}\n", mb(private), target_procs.len());
-            let what = if c["engine"] == "firefox" { "JavaScript memory of the page (SpiderMonkey's reporters, after GC and CC)" } else { "JS heap of the page (used, after GC)" };
+            if has_private {
+                let left_out = if c["engine"] == "firefox" { "" } else { " (strobe's tracing service left out)" };
+                text += &format!("  {:>10}  OS private, all {} target processes{left_out}\n", mb(private), target_procs.len());
+            } else if c["engine"] == "webkit" {
+                text += "     refused  OS private memory (NotOnThisOs: WebKit's page categories follow below)\n";
+            }
+            let what = if c["engine"] == "firefox" {
+                "JavaScript memory of the page (SpiderMonkey's reporters, after GC and CC)"
+            } else if c["engine"] == "webkit" {
+                "JavaScript heap of the page (WebKit Heap)"
+            } else {
+                "JS heap of the page (used, after GC)"
+            };
             text += &format!("  {:>10}  {what}\n", mb(c["js_heap_bytes"].as_f64().unwrap_or(f64::NAN)));
             for (k, v) in rows.iter().take(top) {
                 text += &format!("  {:>10}  {k}\n", mb(*v));
             }
-            json!({ "census": label, "os_private_bytes": private, "js_heap_bytes": c["js_heap_bytes"], "layers": rows.iter().map(|(k, v)| json!({ "layer": k, "effective_bytes": v })).collect::<Vec<_>>() })
+            json!({
+                "census": label,
+                "os_private_bytes": if has_private { json!(private) } else { Value::Null },
+                "js_heap_bytes": c["js_heap_bytes"],
+                "layers": rows.iter().map(|(k, v)| json!({ "layer": k, "effective_bytes": v })).collect::<Vec<_>>(),
+            })
         }
         "allocator" => {
             let mut rows: Vec<(String, String, f64, f64)> = target_procs

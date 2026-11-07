@@ -87,6 +87,14 @@ fn run_with(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize, plan_runs: Op
             Ok(d.output(a, b, top))
         }
         "style" => style(a, b, top),
+        "threads" if a.meta["wir"] == true || b.meta["wir"] == true => {
+            Err(Refusal::new(ValidatorId::NotOnThisOs, "iOS gives an unprivileged USB client no per-thread CPU or wake counters").fix(format!("strobe query {}..{} hotspots", a.id, b.id)).into())
+        }
+        "frames" if a.meta["wir"] == true || b.meta["wir"] == true => {
+            Err(Refusal::new(ValidatorId::EngineUnsupported, "WebKit's Web Inspector reports main-thread RenderingFrame records, not screen presentation times or dropped refreshes")
+                .fix(format!("strobe query {}..{} layout · strobe query {}..{} hotspots", a.id, b.id, a.id, b.id))
+                .into())
+        }
         "threads" => threads(a, b, top),
         "frames" => frames(a, b),
         "summary" => summary(a, b),

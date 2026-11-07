@@ -384,7 +384,7 @@ engine, attachable targets (running apps and their bridge state, CDP endpoints f
 `--calibrate` runs the full calibration (§10.3).
 
 iOS devices (`ios` row, `ios.devices` and `ios.pages` in JSON): every phone the OS's usbmuxd sees,
-read beside the idle-load sample within 1.5 s for all of them (`--fast`: 250 ms, without the
+read beside the idle-load sample within 2.5 s for all of them (`--fast`: 250 ms, without the
 temperature or page listing): model (`ProductType`), iOS version, link (USB, Wi-Fi or both), battery
 level and charging (lockdownd's battery domain), battery temperature (diagnostics_relay's
 `AppleSmartBatteryPack` `BatteryData` on iOS 27+, falling back to `IOPMPowerSource` on earlier iOS,
@@ -4791,32 +4791,38 @@ target is resumed), never pairs or writes to the phone, and never prints the pho
   using native WebKit Inspector methods only, and detach always sends `_rpc_forwardDidClose:` (on
   `Drop` and Ctrl-C too).
 - `strobe look wir:[<selector>]`: side-effect-free read of title, scrubbed URL, headings, buffered and
-  live `Console` messages, `innerText`, and a PNG from `Page.snapshotRect` (`Viewport`, or `Page` for
-  `--full` and `--element` without scrolling the user's viewport); detaches immediately after the shot.
+  live `Console` messages, `innerText`, and a PNG (`0600` owner-only) from `Page.snapshotRect`
+  (`Viewport`, or `Page` for `--full` and `--element` without scrolling the user's viewport); detaches
+  immediately after the shot. `--until image=` refuses `NotForTarget`.
 - `strobe record wir:[<selector>] [--for 10s]`: attribution capture (`Timeline`, `ScriptProfiler`,
   `Memory`, `Heap`, `Network`, `Console`), always marked `timing: "perturbed"` and device-tagged (a
   diff against a desktop or another device model refuses `NotComparable`):
-  - `ScriptProfiler` stack traces and turns become `cpu-0.cpuprofile` with source maps fetched via
+  - `ScriptProfiler` leaf-first JSC `SamplingProfiler` stack traces are reversed into root-first V8
+    `.cpuprofile` trees (`0600` owner-only) with source maps fetched under a bounded 12 s deadline via
     `Page.getResourceTree` and `Network.loadResource` (`query hotspots`).
   - `Timeline` (`RecalculateStyles`, `Layout`, `Paint`, `Composite`, caller `stackTrace`s) and
-    `Heap.garbageCollected` populate `webkit.json` (`query layout`, `query gc`, `query summary`,
-    `query insights`, and Perfetto tracks in `strobe open`).
+    `Heap.garbageCollected` populate owner-only `webkit.json` (`query layout`, `query gc`,
+    `query summary`, `query insights`, and Perfetto tracks in `strobe open`).
   - `Heap.snapshot` converts WebKit's version-3 snapshot into V8's `.heapsnapshot.gz` (`0600`
-    owner-only) for `query heap` and (`--probes memory` S0/S1/S2) `query leaks`; `Memory.trackingUpdate`
-    categories feed `query memory`.
-  - `Network` events plus `Runtime` Navigation, Paint and `performance.measure` spans write owner-only
-    `network.json.gz` (`query <rec> network [--reveal]`), never re-fetching URLs and keeping no headers.
-  - Device logs (`com.apple.os_trace_relay` with `PidList` + `StartActivity`, fallback
-    `com.apple.syslog_relay`) and crash/jetsam `.ips` reports in `[t0 - 2s, t1 + 5s]`
+    owner-only, excluding `InjectedScript` / `CommandLineAPI` debugger scaffolding via two-BFS
+    dominator filtering) for `query heap` and (`--probes memory` S0/S1/S2) `query leaks`;
+    `Memory.trackingUpdate` categories feed `query memory` (with `private_bytes: null`, never
+    conflated with OS private memory).
+  - `Network` events plus `Runtime` Navigation, Paint, pre-attach `Resource Timing` and
+    `performance.measure` spans write owner-only `network.json.gz` (`query <rec> network [--reveal]`),
+    never re-fetching URLs and keeping no headers.
+  - Device logs (`com.apple.os_trace_relay` with `PidList` + `StartActivity` `StreamFlags = 0x34`,
+    fallback `com.apple.syslog_relay`) and crash/jetsam `.ips` reports in `[t0 - 2s, t1 + 5s]`
     (`com.apple.crashreportmover` + strictly read-only AFC `com.apple.crashreportcopymobile`, no remove
     or write opcode in the binary) filter in memory through an allowlist (`MobileSafari` +
-    `com.apple.WebKit.*` for Safari; the host app + `com.apple.WebKit.*` for a WKWebView) before
-    writing owner-only `device-log.json.gz` and `crashes.json.gz`. Apple's `<private>` stays as is;
-    `Cookie`, `Authorization`, `Bearer` tokens and secret query parameters are scrubbed unless
-    `--reveal` (`query <rec> log [--source console|device|crash] [--reveal]`). Crashes and WebContent
-    jetsams flag in `summary` and `insights`.
-  - Refused on `wir:`: `cpu.*`, `ui.*`, `gpu.*`, `memory.app.private` (`NotOnThisOs`) and `frames.*`
-    (`EngineUnsupported`).
+    `com.apple.WebKit.*` for Safari; the host app + `com.apple.WebKit.*` for a WKWebView) and drop
+    `webinspectord` / `message-trace` IPC noise before writing owner-only `device-log.json.gz` and
+    `crashes.json.gz`. Apple's `<private>` stays as is; `Cookie`, `Authorization`, `Bearer` tokens and
+    secret query/`#fragment` parameters are scrubbed unless `--reveal`
+    (`query <rec> log [--source console|device|crash] [--reveal]`). Crashes and WebContent jetsams flag
+    in `summary` and `insights`.
+  - Refused on `wir:`: `cpu.*`, `gpu.*`, `memory.app.private` (`NotOnThisOs`), `frames.*`
+    (`EngineUnsupported`), and `a..b` `threads`/`frames`.
 
 **Other engines.** A page target runs in one engine (`model::WebEngine`): Chromium over CDP (the
 default), Firefox over WebDriver BiDi, WebKit over WebDriver Classic (refused `EngineUnsupported` on
@@ -6321,7 +6327,7 @@ code is and where it chose differently, so nobody reads a promise as a feature.
 | anchors | image anchors and pixel waits (§9.6): image locators, `{ pixels }` waits, `page.query({ image })`, `expect.visible` and native launch `until` images, `resetPixels`, `look --until image=`, pixel proofs for `interaction.*` (§7.4), `driver.pixel_*`, `pixel_pct`, `AnchorNotFound`, `AnchorAmbiguous`, `SessionLocked` for points and images; `host::capture` on Windows.Graphics.Capture, macOS `CGWindowListCreateImage`, X11 `GetImage`, the headless Wayland compositor's copy; `--check` judging the pixel overhead. Checked with `scripts/dev/canvas.bench.ts` (`--check`): on adais locked with a GDI-drawn window: tiles found, @2x 0.950 and @1.5x 0.955, two ITEM tiles at 0.996 refused ambiguous (`look`), a lookalike refused by its colours, clicks at points and images refused `SessionLocked` before any read to aim, key reactions proved by `changed` in 2 reads and 4.6 ms a run at 0.56% of a core (a stable wait sleeping on frame events; 2.7% before), page queries 2.4% (40 to 65% before captures were closed between cases), a reset that left a bar refused by `resetPixels`; on vps with a GTK window painted from an image, on Xvfb and on the headless Wayland compositor, and headless Chromium on a canvas page: the same outcomes, XTest clicks counted, @2x 0.995 and @1.5x 0.997 on both displays, `changed` 2 reads and 6.5 ms a run on X11, 19 ms on Wayland, `interaction.*` refused `NoPresentSource` on Xvfb and `Headless` on Wayland and headless pages; on air (clippy natively, a Cocoa window built with swiftc): the same outcomes, and `interaction.p50` 67 ms from a pixel proof matched to ScreenCaptureKit's frame once a capture counts up to a refresh before the display (it was unshown before), refused `OverheadBudget` at 5.9% of a core (20 ms a read) | a page's launch timed to an image (refused `NotForTarget`); `interaction.*` from a pixel proof under the 2% budget on macOS; a headed page's window read inside timed runs (calibrated or checked viewport placement); X11 with a compositor (its copy of a window may precede the screen, as macOS's does); one `image` failure on air (two bars from no input of the case's, while another session's OS-input bench ran there) did not recur in 4 runs |
 | webview | apps on the OS's webview (§13.8): `kind: "webview"` profiles, `webview()` bench targets, `record app:<id>`; Windows WebView2 attached over CDP through its environment variables (checked on adais, locked, with a release Tauri v2 app: launch, the user's own WEBVIEW2_* removed, strobe's arguments beside the app's, browser pid in the process set, page eval, trace, CPU and memory over the app and its WebView2 processes, attribution and memory recordings, WebView2's GPU caches kept per executable, closing in 5 s instead of 11.5 s for a 1 s recording); Linux and macOS refused `EngineUnsupported` before anything launches (vps) | WebKit drivers (the WebKitGTK inspector route is checked, §13.8); on an unlocked Windows session: frames, input latency, window sizing to `viewport` and a `bench --check` of a `webview()` target; the override refusal against a real WebView2 policy; `look` of a webview profile reads its accessibility tree, not its page |
 | 6 | Windows: the deep helper (§13.4), OS present events (`record pid:|proc:`, `--os-frames`), native stacks and PDB symbols (`hotspots`, insights, reports) | context switches, core residency, symbols.electronjs.org; Linux perf stacks and macOS `sample` stacks with DWARF symbols are built (§13.4) |
-| ios | `host/ios.rs` (§5.4), `host/ios/logs.rs`, `target/wir.rs`, `probe/webkit_inspector.rs` (§13.1): usbmuxd (`/var/run/usbmuxd`, Windows 127.0.0.1:27015, `USBMUXD_SOCKET_ADDRESS`), `ListDevices`, `ReadPairRecord`, `Connect`; lockdownd `QueryType`, `GetValue`, `StartSession` with mutual TLS (`host/ios/tls.rs`: RustCrypto AES-GCM, X25519 and P-256, RSA; pinned to the pair record's DeviceCertificate SubjectPublicKeyInfo), `StartService` with `EnableServiceSSL`; diagnostics_relay `IORegistry` of `AppleSmartBatteryPack` (`BatteryData.Temperature` / `VirtualTemperature`, where OS 27 moved battery temperature) with fallback to `IOPMPowerSource`; Web Inspector (`com.apple.webinspector`) page listing in `status`, read-only attach (`WIRAutomaticallyPause = false`, `Target` mux with ≤8 in flight, `DebuggerAttached` refusal, `_rpc_forwardDidClose:` on detach and `Drop`), `look wir:` (`Runtime`, `Console`, `Page.snapshotRect`), and `record wir:` (`Timeline`, `ScriptProfiler` + `Network.loadResource` source maps → `hotspots`, `Heap.snapshot` v3 → V8 `.heapsnapshot.gz` → `heap`/`leaks`, `Memory` → `memory`, `Network` waterfall → `query network`, in-memory allowlisted `os_trace_relay`/`syslog_relay` logs and read-only AFC `crashreportcopymobile` crashes/jetsams → `query log`, Perfetto export). Checked on iPhone15,3 (iOS 27.0.1) in spike: lockdownd TLS, battery read and `com.apple.webinspector` application listing (`com.apple.mobilesafari`); builds, rustfmt and clippy `-D warnings` across Windows, macOS and Linux | live-phone end-to-end verification of `AppleSmartBatteryPack` temperature, `status` page listing, `look wir:` ×10 back-to-back detach, and `record wir:` (`hotspots`, `layout`, `heap`, `log`, `network`); driven Safari benches (`safaridriver`, M0.4) |
+| ios | `host/ios.rs` (§5.4), `host/ios/logs.rs`, `target/wir.rs`, `probe/webkit_inspector.rs` (§13.1): usbmuxd (`/var/run/usbmuxd`, Windows 127.0.0.1:27015, `USBMUXD_SOCKET_ADDRESS`), `ListDevices`, `ReadPairRecord`, `Connect`; lockdownd `QueryType`, `GetValue`, `StartSession` with mutual TLS (`host/ios/tls.rs`: RustCrypto AES-GCM, X25519 and P-256, RSA; pinned to the pair record's DeviceCertificate SubjectPublicKeyInfo, clean `close_notify` teardown), `StartService` with `EnableServiceSSL` and buffered 4-byte-BE plist framing (`Service::recv`); diagnostics_relay `IORegistry` of `AppleSmartBatteryPack` (`BatteryData.Temperature` / `VirtualTemperature`, where OS 27 moved battery temperature) with fallback to `IOPMPowerSource`; Web Inspector (`com.apple.webinspector`) page listing in `status`, read-only attach (`WIRAutomaticallyPause = false`, `Target` mux with ≤8 in flight, `DebuggerAttached` refusal, `_rpc_forwardDidClose:` + listing-ack drain on detach and `Drop`), `look wir:` (`Runtime`, `Console`, `Page.snapshotRect`), and `record wir:` (`Timeline`, `ScriptProfiler` leaf-first JSC stacks reversed + `Network.loadResource` source maps → `hotspots`, `Heap.snapshot` v3 → V8 `.heapsnapshot.gz` with two-BFS `InjectedScript` exclusion → `heap`/`leaks`, `Memory` → `memory`, `Network` + pre-attach `Resource Timing` → `query network`, in-memory allowlisted `os_trace_relay`/`syslog_relay` logs and read-only AFC `crashreportcopymobile` crashes/jetsams → `query log`, Perfetto export). Verified end-to-end on iPhone15,3 (iOS 27.0.1) cabled to air: `status` (`29.4 °C`, Safari + WKWebView page listing), `look wir:` ×10 back-to-back with zero sleep (10/10 exit 0), `record wir: --for 5s` (`hotspots` root-to-leaf stacks, `layout`, `heap` 70k objects / 7.5 MB, `memory --by layer`, `log` 143 allowlisted entries / 1017 inspector lines dropped, `network` 108 pre-attach resources, `insights`, HTML `report`), and `record wir: --probes memory` (`leaks`); rustfmt, `generic.ts` and `clippy --release --locked -- -D warnings` clean across Windows, macOS and Linux | driven Safari benches (`safaridriver`, M0.4); live WKWebView app attach and live crash/jetsam `.ips` fixture |
 | 7 | history: `strobe track` (points, E-divisive change points, paired confirmation, bisect to the culprit, alert hooks, daemon schedules), `history`, `query history` and `query changes`, `report history` (§25) | CI budgets, mesh; cheap paired points (each commit against the previous tracked one) |
 
 Query views built: `summary` (with per-run style, layout and paint), `frames`, `threads` (a native recording's: its threads' wakes and CPU;

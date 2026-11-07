@@ -15,17 +15,21 @@ pub fn run(args: &Args) -> Result<Output> {
         return Err(Error::usage(format!("status takes no target ({p}): it checks this device; strobe look {p} checks that a target loads")));
     }
     // Cabled iOS devices and their inspectable Web Inspector pages, read beside the idle-load sample,
-    // within its time (SPEC §19); `--fast` skips the battery temperature and page listing.
+    // under one shared ~2.5 s deadline across all phones (`--fast`: 250 ms, skipping diagnostics & pages).
     let fast = args.has("fast");
     let ios = std::thread::spawn(move || -> Result<(Vec<host::ios::Summary>, Vec<crate::target::wir::InspectablePage>)> {
-        let summaries = host::ios::summaries(std::time::Duration::from_millis(if fast { 250 } else { 1500 }), !fast)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(if fast { 250 } else { 2500 });
+        let summaries = host::ios::summaries_until(deadline, !fast)?;
         let mut pages = Vec::new();
         if !fast {
             for s in &summaries {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
                 if s.problem.is_none()
                     && s.locked == Some(false)
                     && s.connections.contains(&host::ios::Connection::Usb)
-                    && let Ok(p) = crate::target::wir::list_pages_for_udid(&s.udid, std::time::Duration::from_millis(1200))
+                    && let Ok(p) = crate::target::wir::list_pages_for_udid_until(&s.udid, deadline)
                 {
                     pages.extend(p);
                 }

@@ -141,11 +141,11 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
     let end_mark = format!("strobe:{token}:run:0:end");
     let t0 = crate::host::now_ns();
     collect_console_events(&pre_events, t0, &mut console);
-    let _ = session.eval(&format!("try {{ performance.mark({:?}) }} catch {{}}", start_mark), Duration::from_secs(3));
+    let _ = session.eval(&format!("try {{ performance.mark({start_mark:?}); performance.clearMarks({start_mark:?}) }} catch {{}}"), Duration::from_secs(3));
 
     session.pump_for(Duration::from_millis(for_ms))?;
 
-    let _ = session.eval(&format!("try {{ performance.mark({:?}) }} catch {{}}", end_mark), Duration::from_secs(3));
+    let _ = session.eval(&format!("try {{ performance.mark({end_mark:?}); performance.clearMarks({end_mark:?}) }} catch {{}}"), Duration::from_secs(3));
     let t1 = crate::host::now_ns();
 
     on_progress("stopping WebKit Timeline and ScriptProfiler");
@@ -391,7 +391,6 @@ fn walk_timeline(
     layout_rows: &mut Vec<Row>,
     phase_rows: &mut Vec<Row>,
     busy_spans: &mut Vec<(u64, u64)>,
-    long_tasks: &mut (u64, u64),
     slices: &mut Vec<TimelineSlice>,
     depth: usize,
 ) -> usize {
@@ -408,10 +407,6 @@ fn walk_timeline(
             let dur = cb.saturating_sub(ca);
             if depth == 0 && dur > 0 {
                 busy_spans.push((ca, cb));
-                if dur > 50_000_000 {
-                    long_tasks.0 += 1;
-                    long_tasks.1 = long_tasks.1.max(dur);
-                }
             }
             if dur > 0 || ty == "TimeStamp" {
                 let detail = rec["data"]["url"]
@@ -420,7 +415,7 @@ fn walk_timeline(
                     .or_else(|| rec["data"]["type"].as_str())
                     .or_else(|| rec["data"]["message"].as_str())
                     .filter(|m| !m.starts_with("strobe:"))
-                    .map(str::to_string);
+                    .map(|m| crate::host::ios::logs::redact_text(m, false));
                 if !ty.is_empty() && slices.len() < 20_000 {
                     slices.push(TimelineSlice { kind: ty.to_string(), t0_ns: ca, t1_ns: cb, detail });
                 }
@@ -446,7 +441,7 @@ fn walk_timeline(
     }
     for kid in rec["children"].as_array().into_iter().flatten() {
         let next_depth = if ty == "RenderingFrame" { depth } else { depth + 1 };
-        count += walk_timeline(kid, own_stack, to_host_ns, win_key, t0, t1, scripts, layout_rows, phase_rows, busy_spans, long_tasks, slices, next_depth);
+        count += walk_timeline(kid, own_stack, to_host_ns, win_key, t0, t1, scripts, layout_rows, phase_rows, busy_spans, slices, next_depth);
     }
     count
 }
@@ -501,7 +496,6 @@ fn convert_events(
     let mut gc_rows: Vec<Row> = vec![vec![cell(&win_key), None, None, None, None, None, None]];
     let mut phase_rows: Vec<Row> = vec![vec![cell(&win_key), None, None, None, None]];
     let mut busy_spans: Vec<(u64, u64)> = Vec::new();
-    let mut long_tasks = (0u64, 0u64);
     let mut slices: Vec<TimelineSlice> = Vec::new();
     let mut timeline_records = 0usize;
     let mut script_turns: Vec<(f64, f64)> = Vec::new();
@@ -517,7 +511,7 @@ fn convert_events(
         let p = &ev.params;
         match ev.method.as_str() {
             "Timeline.eventRecorded" => {
-                timeline_records += walk_timeline(&p["record"], None, &to_host_ns, &win_key, t0, t1, &mut scripts, &mut layout_rows, &mut phase_rows, &mut busy_spans, &mut long_tasks, &mut slices, 0);
+                timeline_records += walk_timeline(&p["record"], None, &to_host_ns, &win_key, t0, t1, &mut scripts, &mut layout_rows, &mut phase_rows, &mut busy_spans, &mut slices, 0);
             }
             "ScriptProfiler.trackingUpdate" => {
                 if let (Some(s), Some(e)) = (p["event"]["startTime"].as_f64(), p["event"]["endTime"].as_f64()) {
@@ -528,13 +522,8 @@ fn convert_events(
                     if b >= t0 && a <= t1 {
                         let ca = a.max(t0);
                         let cb = b.min(t1);
-                        let dur = cb.saturating_sub(ca);
-                        if dur > 0 {
+                        if cb > ca {
                             busy_spans.push((ca, cb));
-                            if dur > 50_000_000 {
-                                long_tasks.0 += 1;
-                                long_tasks.1 = long_tasks.1.max(dur);
-                            }
                         }
                     }
                 }
@@ -747,23 +736,38 @@ fn convert_events(
     // Build `cpu-0.cpuprofile` from `ScriptProfiler` samples inside `[sw0, sw_end]`.
     let (js_samples, sampling) = build_cpu_profile(&stack_traces, &script_turns, (sw0, sw_end), (t0, t1), &mut scripts, dir)?;
 
-    // Merge overlapping main-thread busy intervals so `main.work` never double-counts nested records.
+    // Merge overlapping main-thread busy intervals so neither `main.work` nor `main.tasks.long` double-counts.
     busy_spans.sort_by_key(|s| (s.0, s.1));
     let mut merged_busy_ns = 0u64;
+    let mut long_tasks = (0u64, 0u64);
     let mut cur: Option<(u64, u64)> = None;
     for (a, b) in busy_spans {
         match cur {
             Some((ca, cb)) if a <= cb => cur = Some((ca, cb.max(b))),
             Some((ca, cb)) => {
-                merged_busy_ns += cb - ca;
+                let dur = cb - ca;
+                merged_busy_ns += dur;
+                if dur > 50_000_000 {
+                    long_tasks.0 += 1;
+                    long_tasks.1 = long_tasks.1.max(dur);
+                }
                 cur = Some((a, b));
             }
             None => cur = Some((a, b)),
         }
     }
     if let Some((ca, cb)) = cur {
-        merged_busy_ns += cb - ca;
+        let dur = cb - ca;
+        merged_busy_ns += dur;
+        if dur > 50_000_000 {
+            long_tasks.0 += 1;
+            long_tasks.1 = long_tasks.1.max(dur);
+        }
     }
+
+    sort_part_rows(&mut layout_rows, 4, 2);
+    sort_part_rows(&mut gc_rows, 4, 2);
+    sort_part_rows(&mut phase_rows, 0, 2);
 
     let dur_ms = (t1.saturating_sub(t0) as f64 / 1e6).max(1e-3);
     let main_work_ms = merged_busy_ns as f64 / 1e6;
@@ -827,7 +831,6 @@ fn convert_events(
     let mut census = Vec::new();
     if js_used_bytes.is_some() || !layers_map.is_empty() {
         let alloc_list: Vec<Value> = layers_map.iter().map(|(k, v)| json!({ "path": format!("webkit/{k}"), "effective": v, "size": v })).collect();
-        let total_cat: f64 = layers_map.values().filter_map(Value::as_f64).sum();
         let mut allocators = Map::new();
         allocators.insert(pid_str.clone(), json!({ "layers": layers_map, "allocators": alloc_list }));
         census.push(json!({
@@ -841,7 +844,7 @@ fn convert_events(
                 "pid": app_pid.unwrap_or(1),
                 "type": "WebContent",
                 "name": "com.apple.WebKit.WebContent",
-                "private_bytes": if total_cat > 0.0 { json!(total_cat) } else { Value::Null },
+                "private_bytes": Value::Null,
                 "working_set_bytes": Value::Null,
             }],
             "allocators": allocators,
@@ -862,7 +865,7 @@ fn convert_events(
         "slices": slices,
         "memory": mem_samples,
     });
-    store::write_json(&dir.join(READ), &read_doc)?;
+    paths::write_owner_only(&dir.join(READ), &serde_json::to_vec(&read_doc)?)?;
 
     Ok(ConvertedEvents { values, sampling, census, scripts, source_map_hints, network_requests, network_bytes, pre_attach_resources: pre_attach_count, timeline_records, js_samples })
 }
@@ -931,9 +934,11 @@ fn build_cpu_profile(stack_traces: &[Value], turns: &[(f64, f64)], (sw0, sw_end)
         let w_s = (limit_s - s).max(0.0001);
         let w_us = (w_s * 1e6).round() as i64;
 
+        // JSC's SamplingProfiler walks from `m_callFrame` (leaf at index 0) up to the root (`last()`):
+        // reverse into root-first -> leaf-last order for V8 `.cpuprofile` trees.
         let frames = st["stackFrames"].as_array().or_else(|| st["frames"].as_array());
         let mut at = 0usize;
-        for f in frames.into_iter().flatten() {
+        for f in frames.into_iter().flatten().rev() {
             let raw_name = f["name"].as_str().unwrap_or("");
             let url = f["url"].as_str().unwrap_or("");
             let line = f["line"].as_i64().unwrap_or(-1);
@@ -981,8 +986,23 @@ fn build_cpu_profile(stack_traces: &[Value], turns: &[(f64, f64)], (sw0, sw_end)
         "samples": samples,
         "timeDeltas": time_deltas,
     });
-    store::write_json(&dir.join("cpu-0.cpuprofile"), &profile)?;
+    paths::write_owner_only(&dir.join("cpu-0.cpuprofile"), &serde_json::to_vec(&profile)?)?;
     Ok((js_count, sampling))
+}
+
+fn sort_part_rows(rows: &mut [Row], a: usize, b: usize) {
+    if rows.len() <= 2 {
+        return;
+    }
+    let cmp_cell = |x: &[Option<String>], y: &[Option<String>], col: usize| -> std::cmp::Ordering {
+        let xs = x.get(col).and_then(Option::as_deref);
+        let ys = y.get(col).and_then(Option::as_deref);
+        match (xs.and_then(|s| s.parse::<f64>().ok()), ys.and_then(|s| s.parse::<f64>().ok())) {
+            (Some(nx), Some(ny)) => nx.total_cmp(&ny),
+            _ => xs.cmp(&ys),
+        }
+    };
+    rows[1..].sort_by(|x, y| cmp_cell(x, y, a).then_with(|| cmp_cell(x, y, b)).then_with(|| cmp_cell(y, x, 3)));
 }
 
 fn is_inspector_class(cname: &str) -> bool {
@@ -1285,18 +1305,29 @@ fn decode_data_url(url: &str) -> Option<String> {
     }
 }
 
-fn load_webkit_text(session: &mut Session, frame_id: &str, url: &str) -> Option<String> {
+fn load_webkit_text(session: &mut Session, frame_id: &str, url: &str, deadline: std::time::Instant) -> Option<String> {
     if url.starts_with("data:") {
         return decode_data_url(url);
     }
-    if let Ok(r) = session.call("Network.loadResource", json!({ "frameId": frame_id, "url": url }), Duration::from_secs(8))
+    if session.stopped() {
+        return None;
+    }
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        return None;
+    }
+    if let Ok(r) = session.call("Network.loadResource", json!({ "frameId": frame_id, "url": url }), left.min(Duration::from_secs(5)))
         && r["status"].as_i64().unwrap_or(200) < 400
         && let Some(c) = r["content"].as_str()
         && !c.is_empty()
     {
         return Some(c.to_string());
     }
-    if let Ok(r) = session.call("Page.getResourceContent", json!({ "frameId": frame_id, "url": url }), Duration::from_secs(5))
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() || session.stopped() {
+        return None;
+    }
+    if let Ok(r) = session.call("Page.getResourceContent", json!({ "frameId": frame_id, "url": url }), left.min(Duration::from_secs(4)))
         && let Some(c) = r["content"].as_str()
         && !c.is_empty()
     {
@@ -1315,25 +1346,33 @@ fn find_sourcemap_comment(script: &str) -> Option<&str> {
 }
 
 fn store_webkit_maps(session: &mut Session, scripts: &BTreeSet<String>, hints: &HashMap<String, String>, dir: &Path, served: Option<&Path>) -> Result<usize> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
     let maps_dir = dir.join("maps");
     std::fs::create_dir_all(&maps_dir)?;
     let mut default_frame = None;
     let mut resources = HashMap::new();
-    if let Ok(tree) = session.call("Page.getResourceTree", Value::Null, Duration::from_secs(5)) {
+    let tree_wait = deadline.saturating_duration_since(std::time::Instant::now()).min(Duration::from_secs(4));
+    if !tree_wait.is_zero()
+        && !session.stopped()
+        && let Ok(tree) = session.call("Page.getResourceTree", Value::Null, tree_wait)
+    {
         collect_frame_resources(&tree["frameTree"], &mut default_frame, &mut resources);
     }
     let Some(fallback_frame) = default_frame else { return Ok(0) };
 
     let mut index = Map::new();
     for (i, url) in scripts.iter().take(48).enumerate() {
+        if session.stopped() || std::time::Instant::now() >= deadline {
+            break;
+        }
         let (frame_id, tree_sm) = resources.get(url).cloned().unwrap_or_else(|| (fallback_frame.clone(), None));
-        let Some(script_text) = load_webkit_text(session, &frame_id, url) else { continue };
+        let Some(script_text) = load_webkit_text(session, &frame_id, url, deadline) else { continue };
         let sm_ref = hints.get(url).map(String::as_str).or(tree_sm.as_deref()).or_else(|| find_sourcemap_comment(&script_text));
         let map_url = match sm_ref {
             Some(r) => resolve_relative_url(url, r),
             None => format!("{}.map", url.split(['?', '#']).next().unwrap_or(url)),
         };
-        let Some(map_text) = load_webkit_text(session, &frame_id, &map_url) else { continue };
+        let Some(map_text) = load_webkit_text(session, &frame_id, &map_url, deadline) else { continue };
         if !map_text.trim_start_matches('\u{feff}').trim_start().starts_with('{') {
             continue;
         }

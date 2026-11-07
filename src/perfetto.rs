@@ -782,7 +782,7 @@ impl Builder {
             let mut lanes: Vec<(u64, u64)> = Vec::new();
             for s in &raw_slices {
                 let (Some(kind), Some(a), Some(b)) = (s["kind"].as_str(), s["t0_ns"].as_u64(), s["t1_ns"].as_u64()) else { continue };
-                let args: Vec<(String, Value)> = s["detail"].as_str().map(|d| vec![("detail".to_string(), json!(d))]).unwrap_or_default();
+                let args: Vec<(String, Value)> = s["detail"].as_str().map(|d| vec![("detail".to_string(), json!(crate::host::ios::logs::redact_text(d, false)))]).unwrap_or_default();
                 if b <= a {
                     let tr = self.track_under(Some(group), "marks", 0, None);
                     self.instant(tr, MONOTONIC, a, kind, &args);

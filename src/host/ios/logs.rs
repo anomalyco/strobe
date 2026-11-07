@@ -120,13 +120,13 @@ pub struct LogStream {
 }
 
 impl LogStream {
-    /// Starts streaming allowlisted device logs on a background thread. If neither log relay is
-    /// available on this device, returns gracefully with an empty log capture when stopped.
-    pub fn start(device: &Device, allowlist: Allowlist, t0_ns: u64) -> Self {
+    /// Starts streaming allowlisted live device logs (`wall_s >= wall0_s - 1.0`, no historical buffer)
+    /// on a background thread. If neither log relay is available, returns an empty capture on stop.
+    pub fn start(device: &Device, allowlist: Allowlist, t0_ns: u64, wall0_s: f64) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let dev = device.clone();
-        let handle = std::thread::spawn(move || run_log_stream(&dev, allowlist, t0_ns, &stop2));
+        let handle = std::thread::spawn(move || run_log_stream(&dev, allowlist, t0_ns, wall0_s, &stop2));
         LogStream { stop, handle: Some(handle) }
     }
 
@@ -147,7 +147,7 @@ impl Drop for LogStream {
     }
 }
 
-fn run_log_stream(dev: &Device, mut allow: Allowlist, t0_ns: u64, stop: &AtomicBool) -> DeviceLogs {
+fn run_log_stream(dev: &Device, mut allow: Allowlist, t0_ns: u64, wall0_s: f64, stop: &AtomicBool) -> DeviceLogs {
     let setup_deadline = Some(Instant::now() + Duration::from_secs(3));
     let Ok(mut l) = session_for(dev, setup_deadline) else { return DeviceLogs::default() };
     // Enrich the allowlist with live PIDs from PidList when os_trace_relay supports it.
@@ -160,6 +160,7 @@ fn run_log_stream(dev: &Device, mut allow: Allowlist, t0_ns: u64, stop: &AtomicB
                 }
             }
         }
+        s.close();
     }
     if stop.load(Ordering::Relaxed) {
         return DeviceLogs::default();
@@ -167,10 +168,14 @@ fn run_log_stream(dev: &Device, mut allow: Allowlist, t0_ns: u64, stop: &AtomicB
     if let Ok(mut s) = l.start_service("com.apple.os_trace_relay")
         && ostrace_start(&mut s).is_ok()
     {
-        return read_ostrace(&mut s, &allow, t0_ns, stop);
+        let out = read_ostrace(&mut s, &allow, t0_ns, wall0_s, stop);
+        s.close();
+        return out;
     }
     if let Ok(mut s) = l.start_service("com.apple.syslog_relay") {
-        return read_syslog(&mut s, &allow, t0_ns, stop);
+        let out = read_syslog(&mut s, &allow, t0_ns, stop);
+        s.close();
+        return out;
     }
     DeviceLogs::default()
 }
@@ -218,7 +223,9 @@ fn ostrace_start(s: &mut Service) -> Result<()> {
     req.insert("Request".into(), "StartActivity".into());
     req.insert("Pid".into(), (-1i64).into());
     req.insert("MessageFilter".into(), 0xffffu64.into());
-    req.insert("StreamFlags".into(), 0x3cu64.into());
+    // PAYLOAD (0x04) | CALLSTACK (0x10) | DEBUG (0x20) = 0x34: deliberately omits HISTORICAL (0x08)
+    // so pre-recording personal logs from before strobe attached are never streamed.
+    req.insert("StreamFlags".into(), 0x34u64.into());
     s.send(&Value::Dictionary(req), true)?;
     let reply = ostrace_recv_plist(s)?;
     if reply.get("Status").and_then(Value::as_string) == Some("RequestSuccessful") { Ok(()) } else { Err(Error::msg("os_trace_relay StartActivity refused")) }
@@ -230,7 +237,7 @@ enum ParsedLog {
     Filtered,
 }
 
-fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool) -> DeviceLogs {
+fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, wall0_s: f64, stop: &AtomicBool) -> DeviceLogs {
     let mut logs = DeviceLogs { source: "os_trace_relay".into(), entries: Vec::new(), dropped: 0, observer_dropped: 0 };
     while !stop.load(Ordering::Relaxed) {
         s.set_deadline(Some(Instant::now() + Duration::from_millis(150)));
@@ -257,7 +264,7 @@ fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBoo
             break;
         }
         // Filter in memory BEFORE allocating or retaining non-target or observer-noise log messages.
-        match parse_ostrace_entry(&pkt, allow, t0_ns) {
+        match parse_ostrace_entry(&pkt, allow, t0_ns, wall0_s) {
             ParsedLog::Keep(entry) => {
                 if logs.entries.len() < MAX_LOG_ENTRIES {
                     logs.entries.push(entry);
@@ -272,16 +279,21 @@ fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBoo
     logs
 }
 
-fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> ParsedLog {
+fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64, wall0_s: f64) -> ParsedLog {
     if pkt.len() < TRACE_HEADER_LEN {
         return ParsedLog::Filtered;
     }
     let pid = u32::from_le_bytes([pkt[9], pkt[10], pkt[11], pkt[12]]);
-    let seconds = u32::from_le_bytes([pkt[55], pkt[56], pkt[57], pkt[58]]) as f64;
+    let seconds = i64::from_le_bytes([pkt[55], pkt[56], pkt[57], pkt[58], pkt[59], pkt[60], pkt[61], pkt[62]]) as f64;
     let micros = u32::from_le_bytes([pkt[63], pkt[64], pkt[65], pkt[66]]) as f64;
+    let wall_s = seconds + micros * 1e-6;
+    if wall0_s > 0.0 && wall_s > 0.0 && wall_s < wall0_s - 1.0 {
+        return ParsedLog::Filtered;
+    }
     let level_byte = pkt[68];
     let image_len = u16::from_le_bytes([pkt[107], pkt[108]]) as usize;
-    let msg_len = u16::from_le_bytes([pkt[109], pkt[110]]) as usize;
+    let msg_len_u32 = u32::from_le_bytes([pkt[109], pkt[110], pkt[111], pkt[112]]) as usize;
+    let msg_len_u16 = u16::from_le_bytes([pkt[109], pkt[110]]) as usize;
     let sub_len = u32::from_le_bytes([pkt[117], pkt[118], pkt[119], pkt[120]]) as usize;
     let cat_len = u32::from_le_bytes([pkt[121], pkt[122], pkt[123], pkt[124]]) as usize;
 
@@ -296,9 +308,16 @@ fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> ParsedLog {
         return ParsedLog::Filtered;
     }
     let after_fn = &rest[fn_end + 1..];
-    if after_fn.len() < image_len.saturating_add(msg_len) {
+    let label_len = if sub_len > 0 && cat_len > 0 { sub_len.saturating_add(cat_len) } else { 0 };
+    // `message_size` at +109 is u32 on 64-bit Darwin (matching `after_fn.len()` for >= 64 KiB messages);
+    // fall back to u16 only when +111..+113 holds non-zero flags on a shorter packet.
+    let msg_len = if image_len.checked_add(msg_len_u32).and_then(|n| n.checked_add(label_len)).is_some_and(|total| total <= after_fn.len()) {
+        msg_len_u32
+    } else if image_len.checked_add(msg_len_u16).and_then(|n| n.checked_add(label_len)).is_some_and(|total| total <= after_fn.len()) {
+        msg_len_u16
+    } else {
         return ParsedLog::Filtered;
-    }
+    };
     let msg_slice = &after_fn[image_len..image_len + msg_len];
     let msg_trimmed = msg_slice.strip_suffix(&[0]).unwrap_or(msg_slice);
     let message = String::from_utf8_lossy(msg_trimmed).trim().to_string();
@@ -306,7 +325,7 @@ fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> ParsedLog {
         return ParsedLog::Filtered;
     }
     let tail = &after_fn[image_len + msg_len..];
-    let (subsystem, category) = if sub_len > 0 && cat_len > 0 && tail.len() >= sub_len.saturating_add(cat_len) {
+    let (subsystem, category) = if sub_len > 0 && cat_len > 0 && tail.len() >= label_len {
         let sub = String::from_utf8_lossy(tail[..sub_len].strip_suffix(&[0]).unwrap_or(&tail[..sub_len])).into_owned();
         let cat = String::from_utf8_lossy(tail[sub_len..sub_len + cat_len].strip_suffix(&[0]).unwrap_or(&tail[sub_len..sub_len + cat_len])).into_owned();
         (Some(sub).filter(|s| !s.is_empty()), Some(cat).filter(|s| !s.is_empty()))
@@ -325,7 +344,7 @@ fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> ParsedLog {
     }
     .to_string();
     let at_ms = crate::host::now_ns().saturating_sub(t0_ns) as f64 / 1e6;
-    ParsedLog::Keep(DeviceLogEntry { at_ms, wall_s: Some(seconds + micros * 1e-6), pid: Some(pid), process: process.to_string(), level, subsystem, category, message })
+    ParsedLog::Keep(DeviceLogEntry { at_ms, wall_s: Some(wall_s), pid: Some(pid), process: process.to_string(), level, subsystem, category, message })
 }
 
 fn read_syslog(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool) -> DeviceLogs {
@@ -363,25 +382,24 @@ fn read_syslog(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool
     logs
 }
 
-/// Parses `Nov  8 06:15:02 Device ProcessName[512] <Notice>: message`, filtering in memory first.
+/// Parses `Nov  8 06:15:02 Device ProcessName[512] <Notice>: message`, parsing proc/level from the right
+/// of `: ` so device or process names containing spaces never shift columns.
 fn parse_syslog_line(line: &str, allow: &Allowlist, t0_ns: u64) -> ParsedLog {
     if line.len() < 16 {
         return ParsedLog::Filtered;
     }
-    // Skip `Mon DD HH:MM:SS <host> ` (4 space-separated tokens after the 15-char timestamp).
     let Some(rest) = line.get(16..).map(str::trim_start) else { return ParsedLog::Filtered };
-    let Some((_, after_host)) = rest.split_once(' ') else { return ParsedLog::Filtered };
-    let after_host = after_host.trim_start();
-    let Some(colon) = after_host.find(": ") else { return ParsedLog::Filtered };
-    let head = &after_host[..colon];
-    let message = after_host[colon + 2..].trim();
+    let Some(colon) = rest.find(": ") else { return ParsedLog::Filtered };
+    let head = rest[..colon].trim_end();
+    let message = rest[colon + 2..].trim();
     if message.is_empty() {
         return ParsedLog::Filtered;
     }
-    let (proc_part, level_part) = match head.split_once(' ') {
-        Some((p, l)) => (p, l.trim_matches(['<', '>'])),
+    let (before_level, level_part) = match head.strip_suffix('>').and_then(|h| h.rsplit_once(" <")) {
+        Some((b, l)) => (b.trim_end(), l),
         None => (head, "notice"),
     };
+    let proc_part = before_level.rsplit_once(' ').map_or(before_level, |(_, p)| p);
     let (process, pid) = match proc_part.strip_suffix(']').and_then(|p| p.rsplit_once('[')) {
         Some((name, id)) => (name, id.parse::<u32>().ok()),
         None => (proc_part, None),
@@ -681,7 +699,17 @@ const SECRET_PARAMS: &[&str] = &[
     "cookie",
 ];
 
-/// Scrubs credentials (`user:pass@`) and secret query parameters in a URL unless `reveal` is set.
+fn scrub_kv_pairs(s: &str) -> String {
+    s.split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((k, _)) if is_secret_key(k.trim_start_matches(['/', '?'])) => format!("{k}=<redacted>"),
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Scrubs credentials (`user:pass@`) and secret query or `#fragment` parameters in a URL unless `reveal` is set.
 pub fn scrub_url(url: &str, reveal: bool) -> String {
     if reveal {
         return url.to_string();
@@ -703,23 +731,16 @@ pub fn scrub_url(url: &str, reveal: bool) -> String {
     };
     let mut out = clean_base;
     if let Some(q) = query {
-        let parts: Vec<String> = q
-            .split('&')
-            .map(|pair| match pair.split_once('=') {
-                Some((k, _)) if is_secret_key(k) => format!("{k}=<redacted>"),
-                _ => pair.to_string(),
-            })
-            .collect();
         out.push('?');
-        out.push_str(&parts.join("&"));
+        out.push_str(&scrub_kv_pairs(q));
     }
     if let Some(f) = frag {
         out.push('#');
-        if f.contains("access_token=") || f.contains("id_token=") || f.contains("token=") {
-            out.push_str("<redacted>");
-        } else {
-            out.push_str(f);
-        }
+        let scrubbed = match f.split_once('?') {
+            Some((route, fq)) => format!("{}?{}", scrub_kv_pairs(route), scrub_kv_pairs(fq)),
+            None => scrub_kv_pairs(f),
+        };
+        out.push_str(&redact_bearer(&scrubbed));
     }
     out
 }

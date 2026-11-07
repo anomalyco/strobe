@@ -1634,7 +1634,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
         None => 10_000,
     };
 
-    let mut session = wir::Session::attach(target, true, Duration::from_secs(15))?;
+    let mut session = wir::Session::attach(target, true, Duration::from_secs(15), super::stop_requested)?;
     let handle = session.page.handle.clone();
     let usb_dev = session.usb_device().clone();
     let allowlist = Allowlist::new(&session.page.bundle_id, session.page.app_pid);
@@ -1652,7 +1652,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     let dir = draft.dir().to_path_buf();
     let token = id.trim_start_matches("rec_").to_string();
 
-    let log_stream = LogStream::start(&usb_dev, allowlist.clone(), t0_ns);
+    let log_stream = LogStream::start(&usb_dev, allowlist.clone(), t0_ns, wall0_s);
     progress(format!("recording {id} on {handle} ({}) for {}", session.phone.product_type.as_deref().unwrap_or("iPhone"), fmt::ms_duration(for_ms)));
 
     if set == Set::Memory {
@@ -1663,6 +1663,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
         session.close();
         let dev_logs = log_stream.stop();
         let crashes = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+        let redacted_crashes = redact_crashes(&crashes);
         let mem = mem_res.map_err(|e| attach_crash_detail(e, &crashes))?;
         let (values, census, leaks, console) = (mem.values, mem.census, mem.leaks, mem.console);
         wki::write_owner_gz(&dir.join(wki::DEVICE_LOG_FILE), &dev_logs)?;
@@ -1675,7 +1676,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "wir": true,
             "engine": "webkit",
             "target": handle,
-            "url": session.page.url,
+            "url": host::ios::logs::scrub_url(&session.page.url, false),
             "probes": "memory",
             "token": "",
             "duration_ms": for_ms,
@@ -1687,7 +1688,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "census": census,
             "leaks": { "count": leaks["count"], "self_size": leaks["self_size"], "retained_size": leaks["retained_size"], "classes_total": leaks["classes_total"] },
             "logs": { "console": console.len(), "device": dev_logs.entries.len(), "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len() },
-            "crashes": crashes,
+            "crashes": redacted_crashes,
             "timing": "perturbed",
             "created": now_iso(),
             "valid": true,
@@ -1706,6 +1707,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
 
     let dev_logs = log_stream.stop();
     let crashes = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+    let redacted_crashes = redact_crashes(&crashes);
     let cap = cap_res.map_err(|e| attach_crash_detail(e, &crashes))?;
 
     wki::write_owner_gz(&dir.join(wki::DEVICE_LOG_FILE), &dev_logs)?;
@@ -1718,7 +1720,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
         "wir": true,
         "engine": "webkit",
         "target": handle,
-        "url": session.page.url,
+        "url": host::ios::logs::scrub_url(&session.page.url, false),
         "probes": "attribution",
         "token": token,
         "runs": 1,
@@ -1745,7 +1747,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "bytes": cap.network_bytes,
             "pre_attach_resources": cap.pre_attach_resources,
         },
-        "crashes": crashes,
+        "crashes": redacted_crashes,
         "timing": "perturbed",
         "created": now_iso(),
         "valid": true,
@@ -1772,17 +1774,37 @@ fn wir_phone_meta(session: &crate::target::wir::Session, handle: &str, screen: &
     })
 }
 
+fn redact_crashes(crashes: &[crate::host::ios::logs::CrashReport]) -> Vec<Value> {
+    use crate::host::ios::logs::redact_text;
+    crashes
+        .iter()
+        .map(|c| {
+            json!({
+                "kind": c.kind,
+                "process": c.process,
+                "pid": c.pid,
+                "timestamp": c.timestamp,
+                "summary": redact_text(&c.summary, false),
+                "exception": c.exception.as_deref().map(|s| redact_text(s, false)),
+                "termination": c.termination.as_deref().map(|s| redact_text(s, false)),
+                "memory_pages": c.memory_pages,
+                "frames": c.frames.iter().map(|f| redact_text(f, false)).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
 fn attach_crash_detail(err: Error, crashes: &[crate::host::ios::logs::CrashReport]) -> Error {
     let Some(first) = crashes.first() else { return err };
     let prev = err.hint.clone().unwrap_or_else(|| "the tab disconnected".into());
-    err.hint(format!("{prev}; device crash report in window: {}", first.summary))
+    err.hint(format!("{prev}; device crash report in window: {}", host::ios::logs::redact_text(&first.summary, false)))
 }
 
 fn wir_refusals() -> serde_json::Map<String, Value> {
     use crate::model::{Refusal, ValidatorId};
     let mut r = serde_json::Map::new();
     let cpu_why = Refusal::new(ValidatorId::NotOnThisOs, "iOS gives an unprivileged USB client no per-process CPU or wake counters for Safari").message();
-    for m in ["cpu.app.total", "cpu.work", "cpu.wakes", "ui.cpu", "ui.wakes"] {
+    for m in ["cpu.app.total", "cpu.work", "cpu.wakes"] {
         r.insert(m.into(), json!(cpu_why));
     }
     let mem_why = Refusal::new(

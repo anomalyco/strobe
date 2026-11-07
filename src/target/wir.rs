@@ -12,7 +12,6 @@ use plist::{Dictionary, Value as Plist};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const WIR_SERVICE: &str = "com.apple.webinspector";
@@ -187,7 +186,7 @@ fn start_wir(l: &mut Lockdown) -> Result<Service> {
 }
 
 /// Discovers connected inspectable apps and their open web pages on an open `webinspector` service.
-fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration) -> Result<(Vec<AppEntry>, Vec<InspectablePage>)> {
+fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration, safari_fast: bool) -> Result<(Vec<AppEntry>, Vec<InspectablePage>)> {
     let overall = Instant::now() + budget;
     svc.set_deadline(Some(overall));
     let mut id_arg = Dictionary::new();
@@ -197,7 +196,7 @@ fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration
 
     let mut apps: HashMap<String, AppEntry> = HashMap::new();
     let mut got_app_list = false;
-    let app_wait = overall.min(Instant::now() + Duration::from_millis(1200));
+    let app_wait = overall.min(Instant::now() + Duration::from_millis(1500));
     while Instant::now() < app_wait {
         svc.set_deadline(Some(app_wait));
         let Ok(msg) = svc.recv() else { break };
@@ -229,7 +228,9 @@ fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration
         return Err(Error::msg("Web Inspector started on the phone, but sent no application list").hint("turn on Settings › Apps › Safari › Advanced › Web Inspector on the phone, then run again"));
     }
 
+    svc.set_deadline(Some(overall));
     let inspectable_apps: Vec<AppEntry> = apps.values().filter(|a| !a.proxy).cloned().collect();
+    let safari_app_id = inspectable_apps.iter().find(|a| a.bundle_id == SAFARI_BUNDLE).map(|a| a.app_id.clone());
     let mut pending: HashSet<String> = HashSet::new();
     for a in &inspectable_apps {
         let mut f = Dictionary::new();
@@ -256,12 +257,23 @@ fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration
                     by_app.insert(aid.to_string(), parse_listing(udid, conn_id, app, listing));
                 }
                 pending.remove(aid);
+                // Suspended background WKWebView apps never answer `_rpc_forwardGetListing:`: once
+                // MobileSafari has reported non-empty tabs and the caller asked for Safari (or default
+                // `wir:` when Safari has tabs), do not block 900 ms on background apps.
+                if safari_fast
+                    && let Some(sid) = &safari_app_id
+                    && !pending.contains(sid)
+                    && by_app.get(sid).is_some_and(|p| !p.is_empty())
+                {
+                    break;
+                }
             }
             "_rpc_applicationConnected:" | "_rpc_applicationUpdated:" => {
                 if let Some(a) = parse_app("", arg)
                     && !a.proxy
                     && !apps.contains_key(&a.app_id)
                 {
+                    svc.set_deadline(Some(overall));
                     let mut f = Dictionary::new();
                     f.insert("WIRConnectionIdentifierKey".into(), conn_id.into());
                     f.insert("WIRApplicationIdentifierKey".into(), a.app_id.as_str().into());
@@ -289,17 +301,21 @@ fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration
     Ok((app_list, pages))
 }
 
-/// Lists inspectable pages on a USB-connected, unlocked phone for `strobe status`.
-pub fn list_pages_for_udid(udid: &str, budget: Duration) -> Result<Vec<InspectablePage>> {
-    let deadline = Some(Instant::now() + budget);
-    let devices = ios::list(deadline)?;
+/// Lists inspectable pages on a USB-connected, unlocked phone for `strobe status` within a shared `deadline`.
+pub fn list_pages_for_udid_until(udid: &str, deadline: Instant) -> Result<Vec<InspectablePage>> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Ok(Vec::new());
+    }
+    let dl = Some(deadline);
+    let devices = ios::list(dl)?;
     let Some(dev) = devices.into_iter().find(|d| d.udid == udid && d.connection == ios::Connection::Usb) else {
         return Ok(Vec::new());
     };
-    let mut l = ios::session_for(&dev, deadline)?;
+    let mut l = ios::session_for(&dev, dl)?;
     let mut svc = start_wir(&mut l)?;
     let conn_id = uuid_v4();
-    let res = discover_pages(&mut svc, udid, &conn_id, budget).map(|(_, pages)| pages);
+    let res = discover_pages(&mut svc, udid, &conn_id, deadline.saturating_duration_since(Instant::now()), false).map(|(_, pages)| pages);
     svc.close();
     res
 }
@@ -436,28 +452,25 @@ pub struct Session {
     replies: HashMap<u64, std::result::Result<Value, Error>>,
     events: VecDeque<WirEvent>,
     disconnected: Option<String>,
+    stop: fn() -> bool,
     closed: bool,
 }
 
 impl Session {
     /// Attaches read-only (`WIRAutomaticallyPause = false`) to the page selected by `target` (`wir:[sel]`).
-    /// Refuses `DebuggerAttached` if Safari's own Develop inspector or another client holds the page.
-    /// Retries transient USB/webinspectord handoff timeouts across rapid back-to-back invocations.
-    pub fn attach(target: &str, diagnostics: bool, timeout: Duration) -> Result<Self> {
-        // Ensure Ctrl-C sets strobe's atomic flag so unwinding runs Drop and sends _rpc_forwardDidClose:.
-        let _ = host::ctrl_c();
+    /// `stop` comes from the caller (`app::stop_requested`) so `target` stays independent of `app`
+    /// (SPEC §4.3) and never installs a signal handler inside the daemon.
+    pub fn attach(target: &str, diagnostics: bool, timeout: Duration, stop: fn() -> bool) -> Result<Self> {
         let overall = Instant::now() + timeout;
         let mut last_err = None;
-        for attempt in 0..5 {
-            if crate::app::stop_requested() {
-                return Err(Error::new(130, "stopped (Ctrl-C or SIGTERM)"));
+        for _attempt in 0..8 {
+            if stop() {
+                return Err(Error::new(130, "stopped (Ctrl-C, SIGTERM or strobe bench --stop)"));
             }
-            let left = overall.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if Instant::now() >= overall {
                 break;
             }
-            let step_budget = left.min(Duration::from_millis(if attempt == 0 { 2500 } else { 3000 }));
-            match Self::attach_once(target, diagnostics, step_budget) {
+            match Self::attach_once(target, diagnostics, overall, stop) {
                 Ok(s) => return Ok(s),
                 Err(e) if e.refusal.is_some() || e.code == 2 || e.code == 130 => return Err(e),
                 Err(e) => {
@@ -465,22 +478,28 @@ impl Session {
                     if Instant::now() + Duration::from_millis(200) >= overall {
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(120));
+                    std::thread::sleep(Duration::from_millis(150));
                 }
             }
         }
         Err(last_err.unwrap_or_else(|| Error::timeout("timed out attaching to Web Inspector on the phone")))
     }
 
-    fn attach_once(target: &str, diagnostics: bool, step_budget: Duration) -> Result<Self> {
-        let deadline = Some(Instant::now() + step_budget);
-        let devices = ios::list(deadline)?;
+    fn attach_once(target: &str, diagnostics: bool, overall: Instant, stop: fn() -> bool) -> Result<Self> {
+        let usb_deadline = Some(overall.min(Instant::now() + Duration::from_millis(4500)));
+        let devices = ios::list(usb_deadline)?;
         let known_udids: Vec<String> = devices.iter().map(|d| d.udid.clone()).collect();
         let (udid_hint, page_sel) = split_selector(target, &known_udids);
-        let (mut lockdown, phone) = ios::open_usb(udid_hint, diagnostics, deadline)?;
+        let (mut lockdown, phone) = ios::open_usb(udid_hint, diagnostics, usb_deadline)?;
         let mut svc = start_wir(&mut lockdown)?;
         let conn_id = uuid_v4();
-        let (apps, pages) = discover_pages(&mut svc, &phone.udid, &conn_id, step_budget)?;
+        let disc_budget = overall.saturating_duration_since(Instant::now()).min(Duration::from_millis(3000));
+        if disc_budget.is_zero() {
+            svc.close();
+            return Err(Error::timeout("the device did not answer in time"));
+        }
+        let safari_fast = page_sel.is_empty() || page_sel == "safari" || page_sel.starts_with("safari/");
+        let (apps, pages) = discover_pages(&mut svc, &phone.udid, &conn_id, disc_budget, safari_fast)?;
         let mut page = choose_page(&pages, &apps, page_sel)?;
         // If a remote WIRConnectionIdentifierKey is still clearing over XPC from an immediately
         // preceding detach (within milliseconds), wait up to 600 ms for MobileSafari's updated listing.
@@ -538,14 +557,15 @@ impl Session {
             replies: HashMap::new(),
             events: VecDeque::new(),
             disconnected: None,
+            stop,
             closed: false,
         };
 
         if !session.direct_mode {
             let wait_until = Instant::now() + Duration::from_millis(2500);
             while session.target_id.is_none() {
-                if crate::app::stop_requested() {
-                    return Err(Error::new(130, "stopped (Ctrl-C or SIGTERM)"));
+                if (session.stop)() {
+                    return Err(Error::new(130, "stopped (Ctrl-C, SIGTERM or strobe bench --stop)"));
                 }
                 if Instant::now() >= wait_until {
                     return Err(Error::timeout(format!("{} accepted the socket setup, but sent no Target.targetCreated in 2.5 s", session.page.handle))
@@ -556,6 +576,10 @@ impl Session {
         }
         session.svc.set_deadline(None);
         Ok(session)
+    }
+
+    pub fn stopped(&self) -> bool {
+        (self.stop)()
     }
 
     pub fn usb_device(&self) -> &Device {
@@ -582,6 +606,9 @@ impl Session {
         let limit = Instant::now() + Duration::from_secs(10);
         while self.in_flight.len() >= MAX_IN_FLIGHT {
             self.check_alive()?;
+            if Instant::now() >= limit {
+                return Err(Error::timeout("Web Inspector target did not drain in-flight commands in time"));
+            }
             self.pump_once(limit)?;
         }
         self.check_alive()?;
@@ -627,7 +654,7 @@ impl Session {
         self.svc.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
         if let Err(e) = send_rpc(&mut self.svc, "_rpc_forwardSocketData:", arg) {
             self.disconnected = Some(e.message.clone());
-            return Err(disconnect_error(&self.page.short_udid, &e.message));
+            return Err(disconnect_error(&self.page.short_udid, &e.message, (self.stop)()));
         }
         self.in_flight.insert(id);
         Ok(id)
@@ -778,11 +805,11 @@ impl Session {
     }
 
     fn check_alive(&self) -> Result<()> {
-        if crate::app::stop_requested() {
-            return Err(Error::new(130, "stopped (Ctrl-C or SIGTERM)"));
+        if (self.stop)() {
+            return Err(Error::new(130, "stopped (Ctrl-C, SIGTERM or strobe bench --stop)"));
         }
         if let Some(why) = &self.disconnected {
-            return Err(disconnect_error(&self.page.short_udid, why));
+            return Err(disconnect_error(&self.page.short_udid, why, false));
         }
         Ok(())
     }
@@ -799,7 +826,7 @@ impl Session {
             Err(e) if e.code == 124 => return Ok(()),
             Err(e) => {
                 self.disconnected = Some(e.message.clone());
-                return Err(disconnect_error(&self.page.short_udid, &e.message));
+                return Err(disconnect_error(&self.page.short_udid, &e.message, (self.stop)()));
             }
         };
         self.handle_rpc(msg)
@@ -935,6 +962,7 @@ impl Session {
         arg.insert("WIRSessionIdentifierKey".into(), self.sender_id.as_str().into());
         arg.insert("WIRSenderKey".into(), self.sender_id.as_str().into());
         arg.insert("WIRSocketDataKey".into(), Plist::Data(serde_json::to_vec(outer)?));
+        self.svc.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
         send_rpc(&mut self.svc, "_rpc_forwardSocketData:", arg)
     }
 }
@@ -945,9 +973,9 @@ impl Drop for Session {
     }
 }
 
-fn disconnect_error(short_udid: &str, why: &str) -> Error {
-    if host::ctrl_c().load(Ordering::SeqCst) {
-        return Error::new(130, "stopped (Ctrl-C or SIGTERM)");
+fn disconnect_error(short_udid: &str, why: &str, stopped: bool) -> Error {
+    if stopped {
+        return Error::new(130, "stopped (Ctrl-C, SIGTERM or strobe bench --stop)");
     }
     Error::refused("RunIncomplete", format!("lost connection to the phone ({short_udid}): {why}"), "keep the phone unlocked on the USB cable with the tab open in Safari, then run again")
 }

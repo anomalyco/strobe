@@ -645,7 +645,7 @@ impl Lockdown {
         } else {
             (stream, None)
         };
-        Ok(Service { name: name.to_string(), port, tls, stream, ctl })
+        Ok(Service { name: name.to_string(), port, tls, stream, ctl, rx_buf: Vec::new() })
     }
 }
 
@@ -661,9 +661,9 @@ impl Drop for Lockdown {
     }
 }
 
-/// A started lockdownd service: a byte stream to it (TLS when the service asked), with the
-/// lockdownd-style plist framing most services use. Protocols with their own framing (AFC,
-/// os_trace_relay's binary entries) read and write it directly.
+/// A started lockdownd service: a byte stream to it (TLS when the service asked), with buffered
+/// 4-byte-BE plist framing so a short polling deadline can never misalign a partially read frame.
+/// Protocols with their own framing (AFC, os_trace_relay's binary entries) read and write it directly.
 pub struct Service {
     pub name: String,
     pub port: u16,
@@ -671,6 +671,7 @@ pub struct Service {
     pub tls: Option<String>,
     stream: Box<dyn Io>,
     ctl: Ctl,
+    rx_buf: Vec<u8>,
 }
 
 impl Service {
@@ -682,7 +683,29 @@ impl Service {
         send_plist(&mut *self.stream, value, binary)
     }
     pub fn recv(&mut self) -> Result<Dictionary> {
-        recv_plist(&mut *self.stream)
+        let mut chunk = [0u8; 8192];
+        loop {
+            if self.rx_buf.len() >= 4 {
+                let len = u32::from_be_bytes([self.rx_buf[0], self.rx_buf[1], self.rx_buf[2], self.rx_buf[3]]) as usize;
+                if len > MAX_MESSAGE {
+                    self.rx_buf.clear();
+                    return Err(Error::msg(format!("the device sent a {len}-byte message")));
+                }
+                if self.rx_buf.len() >= 4 + len {
+                    let body: Vec<u8> = self.rx_buf.drain(..4 + len).skip(4).collect();
+                    return parse(&body);
+                }
+                // Once a frame header has arrived, extend the read deadline so the frame completes whole.
+                self.ctl.set(Some(Instant::now() + IO_TIMEOUT));
+            } else if !self.rx_buf.is_empty() {
+                self.ctl.set(Some(Instant::now() + IO_TIMEOUT));
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(Error::msg("the device closed the service stream")),
+                Ok(n) => self.rx_buf.extend_from_slice(&chunk[..n]),
+                Err(e) => return Err(io(e)),
+            }
+        }
     }
     pub fn close(&mut self) {
         self.stream.close();
@@ -691,6 +714,12 @@ impl Service {
 
 impl Read for Service {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.rx_buf.is_empty() {
+            let n = buf.len().min(self.rx_buf.len());
+            buf[..n].copy_from_slice(&self.rx_buf[..n]);
+            self.rx_buf.drain(..n);
+            return Ok(n);
+        }
         self.stream.read(buf)
     }
 }
@@ -916,7 +945,11 @@ pub struct Summary {
 /// Wi-Fi is listed, not read); `diagnostics` adds the battery temperature (one more service and
 /// handshake). Err only when usbmuxd is unreachable.
 pub fn summaries(budget: Duration, diagnostics: bool) -> Result<Vec<Summary>> {
-    let deadline = Some(Instant::now() + budget);
+    summaries_until(Instant::now() + budget, diagnostics)
+}
+
+pub fn summaries_until(deadline: Instant, diagnostics: bool) -> Result<Vec<Summary>> {
+    let deadline = Some(deadline);
     let devices = list(deadline)?;
     let mut out: Vec<Summary> = Vec::new();
     for d in &devices {
