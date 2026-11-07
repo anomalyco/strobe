@@ -6,7 +6,7 @@
   "os": ["darwin"],
   "cpu": ["arm64"],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/Hona/strobe.git" },
+  "repository": { "type": "git", "url": "git+https://github.com/anomalyco/strobe.git" },
   "publishConfig": {
     "access": "public"
   }

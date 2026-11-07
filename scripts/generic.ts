@@ -14,6 +14,9 @@ const products: RegExp[] = [/\brune\b/i, /\bopencode\b/i, /\barcade\b/i, /\banom
 // strobe may name, and only in that role: its CLI, its config and skill folders, its MCP locations.
 const harness = /`opencode`|opencode( mcp| api|'s (global )?config| registration| MCP| locations)|opencode\/skills/gi
 
+// strobe's own repository address names the organisation that hosts it, and only in that form.
+const home = /anomalyco\/strobe\b/g
+
 // Whole files allowed to name products, and why.
 const allowed: Record<string, string> = {
   "AGENTS.md": "dev-environment notes: where consumer repos live on the dev machine",
@@ -27,7 +30,7 @@ for (const file of files) {
   const bytes = new Uint8Array(await Bun.file(join(root, file)).arrayBuffer())
   if (bytes.includes(0)) continue
   new TextDecoder().decode(bytes).split("\n").forEach((line, i) => {
-    const rest = line.replace(harness, "")
+    const rest = line.replace(harness, "").replace(home, "")
     for (const re of products) {
       const m = rest.match(re)
       if (m) found.push(`${file}:${i + 1}: "${m[0]}": ${line.trim().slice(0, 160)}`)

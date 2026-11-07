@@ -16,7 +16,7 @@
     "@hona/strobe": "0.19.0"
   },
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/Hona/strobe.git" },
+  "repository": { "type": "git", "url": "git+https://github.com/anomalyco/strobe.git" },
   "publishConfig": {
     "access": "public"
   }

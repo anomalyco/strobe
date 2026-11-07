@@ -1,6 +1,6 @@
 # @hona/strobe
 
-[strobe](https://github.com/Hona/strobe): measure and explain performance. This package is the `strobe` command
+[strobe](https://github.com/anomalyco/strobe): measure and explain performance. This package is the `strobe` command
 and the types and helpers for its bench files, so a project pins one strobe version for everyone who runs its
 benches, people, agents and CI alike.
 

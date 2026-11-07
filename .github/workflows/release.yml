@@ -7,7 +7,7 @@ name: Release
 # no npm token and every version gets provenance.
 # npm trusts a workflow only for a package that exists. For a new package, first stage a throwaway version
 # (`npm stage publish --tag init` at 0.0.0-init), then `npm trust github <name> --file release.yml
-# --repo Hona/strobe --env npm --allow-publish`, and `npm access set mfa=publish <name>`.
+# --repo anomalyco/strobe --env npm --allow-publish`, and `npm access set mfa=publish <name>`.
 on:
   push:
     tags: ["v*"]

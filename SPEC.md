@@ -112,7 +112,7 @@ locations, not only PATH.
 
 ## 4. Repo and files
 
-### 4.1 Tool repo — `Hona/strobe` (private for now)
+### 4.1 Tool repo — `anomalyco/strobe`
 
 ```
 Cargo.toml  build.rs
