@@ -278,7 +278,10 @@ Every flag strobe reads is in one table (`cli::FLAGS`, with whether it takes a v
 commands read it); any other
 flag is a usage error (exit 2) that names the closest one, never a setting silently ignored, and
 so is an unknown short flag (`-x`; a negative number stays an argument). A switch takes
-`--name`, `--name=true` or `--name=false` (off), nothing else. MCP tool schemas take their types
+`--name`, `--name=true` or `--name=false` (off), nothing else. No flag repeats: one given again with
+another value is a usage error naming both (`--filter a --filter b` once kept only `b`); a list flag
+(`--filter`, `--target`, `--params`, `--metrics`, `--noworse`, `--skip`) takes its items comma-separated,
+and the error says so (`--filter a,b`). MCP tool schemas take their types
 from the same table (§17). Durations take `500ms`, `10s`, `2m`, `2h`, `1d` (and a bare `0`); a
 negative or non-finite one is refused, and so is a number without its unit (exit 2, `not a
 duration: 2000; give a unit: 2000ms or 2000s`): `--for 2000` meant as milliseconds once recorded

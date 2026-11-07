@@ -1239,6 +1239,15 @@ pub fn window_state(id: isize) -> Option<super::TopWindow> {
     windows(LIST_INCLUDING, id as u32).into_iter().find(|w| w.id == id as u32).map(|w| top_window(&w))
 }
 
+/// A window's frame (global points) and whether it is on screen, from one read of that window alone:
+/// what a pixel read checks each time, without `window_state`'s reads of every window (occlusion) and
+/// of the displays.
+pub fn window_frame(id: isize) -> Option<([f64; 4], bool)> {
+    let w = windows(LIST_INCLUDING, id as u32).into_iter().find(|w| w.id == id as u32)?;
+    let b = w.bounds;
+    Some(([b.origin.x.trunc(), b.origin.y.trunc(), b.size.width.trunc(), b.size.height.trunc()], w.onscreen && w.alpha > 0.0))
+}
+
 /// Accessibility permission: needed to move another app's window or read its elements.
 pub fn accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }

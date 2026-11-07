@@ -64,7 +64,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub(crate) static SCStreamFrameInfoStatus: CFTypeRef;
     pub(crate) static SCStreamFrameInfoDisplayTime: CFTypeRef;
-    static SCStreamFrameInfoDirtyRects: CFTypeRef;
+    pub(crate) static SCStreamFrameInfoDirtyRects: CFTypeRef;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -104,24 +104,24 @@ unsafe extern "C" {
 
 #[link(name = "CoreVideo", kind = "framework")]
 unsafe extern "C" {
-    fn CVPixelBufferLockBaseAddress(buf: *mut c_void, flags: u64) -> i32;
-    fn CVPixelBufferUnlockBaseAddress(buf: *mut c_void, flags: u64) -> i32;
-    fn CVPixelBufferGetBaseAddress(buf: *mut c_void) -> *const u8;
-    fn CVPixelBufferGetBytesPerRow(buf: *mut c_void) -> usize;
-    fn CVPixelBufferGetWidth(buf: *mut c_void) -> usize;
-    fn CVPixelBufferGetHeight(buf: *mut c_void) -> usize;
+    pub(crate) fn CVPixelBufferLockBaseAddress(buf: *mut c_void, flags: u64) -> i32;
+    pub(crate) fn CVPixelBufferUnlockBaseAddress(buf: *mut c_void, flags: u64) -> i32;
+    pub(crate) fn CVPixelBufferGetBaseAddress(buf: *mut c_void) -> *const u8;
+    pub(crate) fn CVPixelBufferGetBytesPerRow(buf: *mut c_void) -> usize;
+    pub(crate) fn CVPixelBufferGetWidth(buf: *mut c_void) -> usize;
+    pub(crate) fn CVPixelBufferGetHeight(buf: *mut c_void) -> usize;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
-    fn CFRelease(cf: CFTypeRef);
+    pub(crate) fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+    pub(crate) fn CFRelease(cf: CFTypeRef);
 }
 
 /// 32-bit BGRA, the frames strobe asks for. A 4:2:0 YCbCr format or a quarter-size frame read
 /// fewer bytes, but on air (macOS 27) both missed 8 to 15% of the frames of a small overlay that
 /// animates faint level changes: they rounded away.
-const BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+pub(crate) const BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 
 /// Rows compared in a first pass over a frame's rectangles: every 16th, then the rows between. A
 /// frame that changed is usually told after a few rows of each rectangle rather than a whole

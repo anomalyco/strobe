@@ -8,7 +8,13 @@
 //!   and its event wakes waiters. The compositor still draws a window while the session is locked, and
 //!   it captures Direct3D 12 and Vulkan flip-model windows a `PrintWindow` misses (black).
 //!   Without Windows.Graphics.Capture: `PrintWindow`, cropped.
-//! - macOS: `CGWindowListCreateImage` of the region's screen rect, this window only (Screen Recording).
+//! - macOS: a ScreenCaptureKit stream of the window alone on its display, its source rectangle the
+//!   window's frame at the display's pixels, BGRA, a frame only when something in the frame changed. Each
+//!   frame replaces the one strobe keeps (retained, never copied); a read copies only the region out of
+//!   it. Each frame carries the time it was displayed (the host clock), and its arrival wakes waiters.
+//!   A read checks the window's frame first (one window-list read of that window) and points the stream
+//!   at a frame that moved. Without the stream (it did not start or failed): `CGWindowListCreateImage`
+//!   of the region's screen rect, this window only. Both need Screen Recording.
 //! - Linux X11: `GetImage` of the region of the window, once it is viewable and on top there. A window
 //!   of the headless Wayland compositor strobe runs: the compositor's copy of the region, once it shows
 //!   and no window covers it there.
@@ -25,15 +31,16 @@ pub struct Shot {
     pub img: Image,
     /// Capture pixels per device-independent pixel.
     pub scale: f64,
-    /// When what it holds was on the screen (host clock): the compositor's frame time (Windows), else
-    /// the read's start (`t0_ns`) and end (`t_ns`).
+    /// When what it holds was on the screen (host clock): the compositor's frame time (Windows), the
+    /// frame's display time (macOS's stream), else the read's start (`t0_ns`) and end (`t_ns`).
     pub t0_ns: u64,
     pub t_ns: u64,
-    /// The source's frame count at the capture (Windows), for `Grabber::wait`.
+    /// The source's frame count at the capture (Windows, macOS's stream), for `Grabber::wait`.
     pub seq: u64,
     /// How long after `t_ns` what it holds may have reached the screen: a compositor's frame is captured
-    /// as it is composed and scanned out up to a refresh later (Windows, and macOS's copy of the window:
-    /// the window's display's refresh period); a read of what is already on the screen, 0.
+    /// as it is composed and scanned out up to a refresh later (Windows, and macOS's copy of the window
+    /// without the stream: the window's display's refresh period); a frame stamped with its display
+    /// time, or a read of what is already on the screen, 0.
     pub late_ns: u64,
 }
 
@@ -41,11 +48,13 @@ pub struct Grabber {
     win: isize,
     #[cfg(windows)]
     os: Option<wgc::Wgc>,
+    #[cfg(target_os = "macos")]
+    os: Option<sck::Stream>,
 }
 
 impl Grabber {
-    /// Pixels of `win` from now on: on Windows its capture starts here and waits up to a second for the
-    /// window's first frame.
+    /// Pixels of `win` from now on: on Windows and macOS its capture starts here and waits up to a second
+    /// for the window's first frame.
     pub fn open(win: isize) -> Result<Grabber> {
         #[cfg(windows)]
         {
@@ -55,7 +64,11 @@ impl Grabber {
             // Without Windows.Graphics.Capture (or a frame of the window from it): PrintWindow.
             Ok(Grabber { win, os: wgc::Wgc::open(win).ok() })
         }
-        #[cfg(not(windows))]
+        // Without the stream (no Screen Recording, a window kept out of capture, no frame of it in a
+        // second): CGWindowListCreateImage, which says why when it cannot read the window either.
+        #[cfg(target_os = "macos")]
+        return Ok(Grabber { win, os: sck::Stream::open(win).ok() });
+        #[cfg(target_os = "linux")]
         Ok(Grabber { win })
     }
 
@@ -63,19 +76,35 @@ impl Grabber {
         self.win
     }
 
+    /// The client area's size in device-independent pixels, its screen units per one, whether the window
+    /// shows, and its frame in screen units (macOS: its frame in points, from one read of that window).
+    fn client(&self) -> Result<(f64, f64, f64, bool, [f64; 4])> {
+        let closed = || Error::msg("the app's window closed");
+        #[cfg(target_os = "macos")]
+        {
+            let (f, shown) = super::macos::window_frame(self.win).ok_or_else(closed)?;
+            Ok((f[2], f[3], 1.0, shown, f))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let p = super::window_placement(self.win).ok_or_else(closed)?;
+            let shown = !super::window_state(self.win).is_some_and(|w| w.iconic || !w.visible);
+            Ok((p.client.0 / p.per_dip, p.client.1 / p.per_dip, p.per_dip, shown, p.frame))
+        }
+    }
+
     /// The client area's size in device-independent pixels.
     pub fn size(&self) -> Result<(f64, f64)> {
-        let p = super::window_placement(self.win).ok_or_else(|| Error::msg("the app's window closed"))?;
-        Ok((p.client.0 / p.per_dip, p.client.1 / p.per_dip))
+        let (w, h, ..) = self.client()?;
+        Ok((w, h))
     }
 
     /// The pixels of `r` (device-independent pixels in the client area, clipped to it) as they show now.
     pub fn grab(&mut self, r: [f64; 4]) -> Result<Shot> {
-        let p = super::window_placement(self.win).ok_or_else(|| Error::msg("the app's window closed"))?;
-        if super::window_state(self.win).is_some_and(|w| w.iconic || !w.visible) {
+        let (cw, ch, u, shown, frame) = self.client()?;
+        if !shown {
             return Err(hidden("the window is minimized or hidden, so nothing of it is on the screen"));
         }
-        let (cw, ch) = (p.client.0 / p.per_dip, p.client.1 / p.per_dip);
         let (x0, y0) = (r[0].clamp(0.0, cw), r[1].clamp(0.0, ch));
         let (x1, y1) = ((r[0] + r[2]).clamp(0.0, cw), (r[1] + r[3]).clamp(0.0, ch));
         if x1 - x0 < 1.0 || y1 - y0 < 1.0 {
@@ -84,57 +113,70 @@ impl Grabber {
                 .into());
         }
         // Screen units (physical pixels; points on macOS), outward to whole ones.
-        let u = p.per_dip;
         let px = [(x0 * u).floor(), (y0 * u).floor(), (x1 * u).ceil() - (x0 * u).floor(), (y1 * u).ceil() - (y0 * u).floor()];
         let t0 = super::now_ns();
+        // `composed`: what it holds reaches the screen up to a refresh after its time.
         #[cfg(windows)]
-        let (img, at, seq) = {
+        let (img, at, seq, composed) = {
             let px = px.map(|v| v as i32);
             match self.os.as_mut() {
-                Some(w) => w.grab(self.win, px)?,
+                Some(w) => {
+                    let (img, at, seq) = w.grab(self.win, px)?;
+                    (img, at, seq, true)
+                }
                 None => {
                     let full = super::win::window_image(self.win).ok_or_else(|| Error::msg("the window did not draw itself (PrintWindow), and Windows.Graphics.Capture is not available"))?;
-                    (crate::image::crop(&full, px.map(|v| v.max(0) as usize)), super::now_ns(), 0)
+                    (crate::image::crop(&full, px.map(|v| v.max(0) as usize)), super::now_ns(), 0, false)
                 }
             }
         };
+        // The stream's frame is stamped with when it was displayed. Without it, macOS reads the window
+        // server's copy of the window, which holds a frame before the display shows it (on air a reaction
+        // was in a capture ending 9.8 ms before ScreenCaptureKit's frame of it): up to a refresh later.
         #[cfg(target_os = "macos")]
-        let (img, at, seq) = (super::macos::window_region(self.win, px).map_err(no_source)?, super::now_ns(), 0);
+        let (img, at, seq, composed) = match self.os.as_mut().map(|s| s.grab(frame, px)) {
+            Some(Ok((img, at, seq))) => (img, at, seq, false),
+            other => {
+                // A stream that cannot follow the window (another display, no frame after a move) is done.
+                if other.is_some() {
+                    self.os = None;
+                }
+                (super::macos::window_region(self.win, px).map_err(no_source)?, super::now_ns(), 0, true)
+            }
+        };
         #[cfg(target_os = "linux")]
-        let (img, at, seq) = {
+        let (img, at, seq, composed) = {
             let px = px.map(|v| v as i32);
             // A window of the headless compositor strobe runs, else the X server's.
             let img = if super::wayland::owns(self.win) { super::wayland::shown_region(self.win, px) } else { super::x11::window_region(self.win, px) };
-            (img.map_err(hidden)?, super::now_ns(), 0)
+            (img.map_err(hidden)?, super::now_ns(), 0, false)
         };
         let scale = img.width as f64 / (x1 - x0);
         // A frame time is when it was composed: both ends are it, and it reaches the screen up to a
-        // refresh later. macOS reads the window server's copy of the window, which holds a frame before
-        // the display shows it (on air a reaction was in a capture ending 9.8 ms before ScreenCaptureKit's
-        // frame of it): up to a refresh later too.
+        // refresh later.
         let t0 = if seq > 0 { at } else { t0 };
-        let late_ns = if seq > 0 || cfg!(target_os = "macos") {
-            let at = super::window_state(self.win).map_or((0, 0), |w| (w.rect.0 + w.rect.2 / 2, w.rect.1 + w.rect.3 / 2));
-            super::refresh_at(at.0, at.1).map_or(16_666_667, |hz| 1_000_000_000 / hz.max(1) as u64)
+        let late_ns = if composed {
+            let (cx, cy) = ((frame[0] + frame[2] / 2.0) as i32, (frame[1] + frame[3] / 2.0) as i32);
+            super::refresh_at(cx, cy).map_or(16_666_667, |hz| 1_000_000_000 / hz.max(1) as u64)
         } else {
             0
         };
         Ok(Shot { img, scale, t0_ns: t0, t_ns: at, seq, late_ns })
     }
 
-    /// Whether its frames come as events (Windows.Graphics.Capture): `wait` follows them.
+    /// Whether its frames come as events (Windows.Graphics.Capture, macOS's stream): `wait` follows them.
     pub fn evented(&self) -> bool {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         return self.os.is_some();
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         false
     }
 
     /// Waits until the window's capture has a frame after the one numbered `seq`, at most until `until`:
-    /// true when one came. Only Windows' capture numbers its frames; elsewhere false at once, and the
-    /// caller waits on the target's presents or a short poll.
+    /// true when one came. Only Windows' and macOS's captures number their frames; elsewhere false at
+    /// once, and the caller waits on the target's presents or a short poll.
     pub fn wait(&self, seq: u64, until: Instant) -> bool {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some(w) = &self.os {
             return w.wait(seq, until);
         }
@@ -142,20 +184,22 @@ impl Grabber {
         false
     }
 
-    /// The capture's frame count now (Windows.Graphics.Capture); None where frames are not events.
+    /// The capture's frame count now (Windows.Graphics.Capture, macOS's stream); None where frames are
+    /// not events.
     pub fn seq(&self) -> Option<u64> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         return self.os.as_ref().map(|w| w.seq());
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         None
     }
 
     /// strobe's CPU (ms) on the capture's own threads since the last call: its frame events copying each
-    /// frame out of the pool (Windows), part of what its reads cost (`overhead.pixel_pct`).
+    /// frame out of the pool (Windows) or keeping each frame (macOS), part of what its reads cost
+    /// (`overhead.pixel_pct`).
     pub fn take_cpu_ms(&self) -> f64 {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         return self.os.as_ref().map_or(0.0, |w| w.take_cpu_ms());
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         0.0
     }
 }
@@ -170,6 +214,349 @@ fn no_source(why: String) -> Error {
     Refusal::new(ValidatorId::NoPresentSource, format!("the target's pixels cannot be read: {why}"))
         .fix("grant Screen Recording (strobe status says to which app), and measure a window the app lets be captured")
         .into()
+}
+
+#[cfg(target_os = "macos")]
+mod sck {
+    use crate::host::macos::{CFTypeRef, CGPoint, CGRect, CGSize, cf_array, cf_i64, cf_rect};
+    use crate::model::{Error, Result};
+    use crate::probe::present::sck::{
+        BGRA, Block, CFRelease, CFRetain, CMSampleBufferGetImageBuffer, CMSampleBufferGetSampleAttachmentsArray, CMTime, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+        CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress, Id, SCStreamFrameInfoDirtyRects, SCStreamFrameInfoDisplayTime,
+        SCStreamFrameInfoStatus, Sel, cf_dict_value, class, class_addIvar, class_addMethod, class_addProtocol, class_getInstanceVariable, description, dispatch_queue_create, dispatch_release,
+        dispatch_sync_f, objc_allocateClassPair, objc_autoreleasePoolPop, objc_autoreleasePoolPush, objc_getProtocol, objc_registerClassPair, objc_release, object_getIvar, object_setIvar, rect_of,
+        sel, send, with_completion,
+    };
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// The newest frame that drew something: the frame itself (retained), when it was displayed, its size
+    /// in pixels, and the count so far.
+    #[derive(Default)]
+    struct Latest {
+        image: usize,
+        t_ns: u64,
+        size: (usize, usize),
+        count: u64,
+    }
+
+    #[derive(Default)]
+    struct Shared {
+        latest: Mutex<Latest>,
+        cv: Condvar,
+        /// The frame callbacks' CPU so far (ns).
+        cpu_ns: AtomicU64,
+    }
+
+    pub struct Stream {
+        stream: Id,
+        output: Id,
+        queue: *mut c_void,
+        shared: Arc<Shared>,
+        /// The window's frame (global points) the stream's source rectangle is, and the frame of the
+        /// display it streams from.
+        frame: [f64; 4],
+        display: CGRect,
+        /// That display's pixels per point.
+        scale: f64,
+    }
+
+    // SAFETY: the stream and its output are used from the thread that owns the grabber; the frame
+    // callback reaches only `Shared`, through its own reference.
+    unsafe impl Send for Stream {}
+
+    /// `stream:didOutputSampleBuffer:ofType:` of strobe's region output class: keeps the frame (no copy)
+    /// when it drew something, and wakes waiters.
+    extern "C" fn on_frame(this: Id, _cmd: Sel, _stream: Id, sbuf: *mut c_void, kind: isize) {
+        let cpu0 = crate::host::thread_cycles();
+        let shared = unsafe { object_getIvar(this, class_getInstanceVariable(output_class(), c"sink".as_ptr())) } as *const Shared;
+        if kind != 0 || sbuf.is_null() || shared.is_null() {
+            return;
+        }
+        let shared = unsafe { &*shared };
+        if let Some(&info) = cf_array(unsafe { CMSampleBufferGetSampleAttachmentsArray(sbuf, 0) }).first() {
+            let status = cf_i64(unsafe { cf_dict_value(info, SCStreamFrameInfoStatus) });
+            let shown = cf_i64(unsafe { cf_dict_value(info, SCStreamFrameInfoDisplayTime) });
+            let rects = unsafe { cf_dict_value(info, SCStreamFrameInfoDirtyRects) };
+            // A stream's first frame may be empty, its changed rectangles too: the window comes next.
+            let drew = rects.is_null() || cf_array(rects).into_iter().filter_map(cf_rect).any(|r| r.size.width * r.size.height > 0.0);
+            let image = unsafe { CMSampleBufferGetImageBuffer(sbuf) };
+            // SCFrameStatusComplete: new content (an idle window sends none).
+            if let (Some(0), Some(t), true, false) = (status, shown, drew, image.is_null()) {
+                unsafe { CFRetain(image as CFTypeRef) };
+                let size = unsafe { (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image)) };
+                let old = {
+                    let mut l = shared.latest.lock().unwrap_or_else(|e| e.into_inner());
+                    l.count += 1;
+                    l.t_ns = crate::host::macos::mach_ns(t as u64);
+                    l.size = size;
+                    std::mem::replace(&mut l.image, image as usize)
+                };
+                if old != 0 {
+                    unsafe { CFRelease(old as CFTypeRef) };
+                }
+                shared.cv.notify_all();
+            }
+        }
+        shared.cpu_ns.fetch_add(crate::host::thread_cycles().saturating_sub(cpu0), Ordering::Relaxed);
+    }
+
+    /// strobe's region SCStreamOutput class, made once.
+    fn output_class() -> Id {
+        static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *CLASS.get_or_init(|| unsafe {
+            let existing = class("StrobeRegionOutput");
+            if !existing.is_null() {
+                return existing as usize;
+            }
+            let cls = objc_allocateClassPair(class("NSObject"), c"StrobeRegionOutput".as_ptr(), 0);
+            class_addIvar(cls, c"sink".as_ptr(), std::mem::size_of::<usize>(), 3, c"^v".as_ptr());
+            class_addMethod(cls, sel("stream:didOutputSampleBuffer:ofType:"), on_frame as *const c_void, c"v@:@^vq".as_ptr());
+            let proto = objc_getProtocol(c"SCStreamOutput".as_ptr());
+            if !proto.is_null() {
+                class_addProtocol(cls, proto);
+            }
+            objc_registerClassPair(cls);
+            cls as usize
+        }) as Id
+    }
+
+    /// The error a completion handler handed back, released.
+    fn taken(e: Id) -> String {
+        let why = description(e);
+        if !e.is_null() {
+            unsafe { objc_release(e) };
+        }
+        why
+    }
+
+    impl Stream {
+        /// A stream of window `win` alone on its display, started, once its first frame came (at most a
+        /// second).
+        pub fn open(win: isize) -> Result<Stream> {
+            if !crate::host::macos::screen_capture_allowed() {
+                return Err(Error::msg("no Screen Recording"));
+            }
+            let w = crate::host::window_state(win).ok_or_else(|| Error::msg("the window is gone"))?;
+            if crate::host::macos::unshared_windows(&[w.pid]).iter().any(|u| u.0 as isize == win) {
+                return Err(Error::msg("the app keeps the window out of screen capture"));
+            }
+            let (frame, _) = crate::host::macos::window_frame(win).ok_or_else(|| Error::msg("the window is gone"))?;
+            let pool = unsafe { objc_autoreleasePoolPush() };
+            let r = Stream::start(win, frame, w.scale().max(1.0));
+            unsafe { objc_autoreleasePoolPop(pool) };
+            r
+        }
+
+        fn start(win: isize, frame: [f64; 4], scale: f64) -> Result<Stream> {
+            let content = with_completion(
+                Duration::from_secs(5),
+                false,
+                |b| send!((); class("SCShareableContent"), "getShareableContentExcludingDesktopWindows:onScreenWindowsOnly:completionHandler:", i8 = 1, i8 = 1, *mut Block = b),
+            );
+            let Some((content, err)) = content else { return Err(Error::msg("ScreenCaptureKit did not list the windows in 5 s")) };
+            if content.is_null() {
+                return Err(Error::msg(format!("ScreenCaptureKit: {}", taken(err))));
+            }
+            let windows: Id = send!(Id; content, "windows");
+            let found = (0..send!(usize; windows, "count")).map(|k| send!(Id; windows, "objectAtIndex:", usize = k)).find(|w| send!(u32; *w, "windowID") == win as u32);
+            let displays: Id = send!(Id; content, "displays");
+            let (cx, cy) = (frame[0] + frame[2] / 2.0, frame[1] + frame[3] / 2.0);
+            let display = (0..send!(usize; displays, "count")).map(|k| send!(Id; displays, "objectAtIndex:", usize = k)).find(|d| inside(rect_of(*d, "frame"), cx, cy));
+            let (Some(window), Some(display)) = (found, display) else {
+                unsafe { objc_release(content) };
+                return Err(Error::msg("ScreenCaptureKit does not list the window on a display"));
+            };
+            let only: Id = send!(Id; class("NSArray"), "arrayWithObject:", Id = window);
+            let filter: Id = send!(Id; class("SCContentFilter"), "alloc");
+            let filter: Id = send!(Id; filter, "initWithDisplay:includingWindows:", Id = display, Id = only);
+            let dframe = rect_of(display, "frame");
+            unsafe { objc_release(content) };
+            let queue = unsafe { dispatch_queue_create(c"strobe.pixels".as_ptr(), std::ptr::null()) };
+            let mut s = Stream { stream: std::ptr::null_mut(), output: std::ptr::null_mut(), queue, shared: Arc::default(), frame, display: dframe, scale };
+            let config = s.config();
+            let stream: Id = send!(Id; class("SCStream"), "alloc");
+            let stream: Id = send!(Id; stream, "initWithFilter:configuration:delegate:", Id = filter, Id = config, Id = std::ptr::null_mut());
+            unsafe {
+                objc_release(filter);
+                objc_release(config);
+            }
+            if stream.is_null() {
+                return Err(Error::msg("ScreenCaptureKit made no stream for the window"));
+            }
+            s.stream = stream;
+            s.output = send!(Id; output_class(), "new");
+            unsafe { object_setIvar(s.output, class_getInstanceVariable(output_class(), c"sink".as_ptr()), Arc::into_raw(s.shared.clone()) as Id) };
+            let mut err: Id = std::ptr::null_mut();
+            if send!(i8; stream, "addStreamOutput:type:sampleHandlerQueue:error:", Id = s.output, isize = 0, *mut c_void = queue, *mut Id = &mut err) == 0 {
+                return Err(Error::msg(format!("ScreenCaptureKit would not take strobe's output: {}", taken(err))));
+            }
+            match with_completion(Duration::from_secs(5), true, |b| send!((); stream, "startCaptureWithCompletionHandler:", *mut Block = b)) {
+                Some((_, e)) if e.is_null() => {}
+                Some((_, e)) => return Err(Error::msg(format!("ScreenCaptureKit did not start: {}", taken(e)))),
+                None => return Err(Error::msg("ScreenCaptureKit did not start in 5 s")),
+            }
+            if !s.wait(0, Instant::now() + Duration::from_secs(1)) {
+                return Err(Error::msg("ScreenCaptureKit delivered no frame of the window in a second"));
+            }
+            Ok(s)
+        }
+
+        /// The frame's size in pixels at the display's scale.
+        fn pixels(&self) -> (usize, usize) {
+            ((self.frame[2] * self.scale).round().max(1.0) as usize, (self.frame[3] * self.scale).round().max(1.0) as usize)
+        }
+
+        /// A configuration for the window's frame: its rectangle on the display at the display's pixels,
+        /// BGRA, no cursor, a frame as often as it changes, and few frames queued (strobe keeps one).
+        fn config(&self) -> Id {
+            let (f, d) = (self.frame, self.display);
+            let source = CGRect { origin: CGPoint { x: f[0] - d.origin.x, y: f[1] - d.origin.y }, size: CGSize { width: f[2], height: f[3] } };
+            let (w, h) = self.pixels();
+            let config: Id = send!(Id; class("SCStreamConfiguration"), "alloc");
+            let config: Id = send!(Id; config, "init");
+            send!((); config, "setSourceRect:", CGRect = source);
+            send!((); config, "setWidth:", usize = w);
+            send!((); config, "setHeight:", usize = h);
+            send!((); config, "setPixelFormat:", u32 = BGRA);
+            send!((); config, "setShowsCursor:", i8 = 0);
+            send!((); config, "setQueueDepth:", isize = 3);
+            send!((); config, "setMinimumFrameInterval:", CMTime = CMTime { value: 1, timescale: 1000, flags: 1, epoch: 0 });
+            config
+        }
+
+        /// Points the stream at the window's frame now when it moved or resized on its display, and waits
+        /// for a frame of it there.
+        fn follow(&mut self, frame: [f64; 4]) -> Result<()> {
+            if frame == self.frame {
+                return Ok(());
+            }
+            if !inside(self.display, frame[0] + frame[2] / 2.0, frame[1] + frame[3] / 2.0) {
+                return Err(Error::msg("the window went to another display"));
+            }
+            let seq = self.seq();
+            self.frame = frame;
+            let config = self.config();
+            let stream = self.stream;
+            let done = with_completion(Duration::from_secs(2), true, |b| send!((); stream, "updateConfiguration:completionHandler:", Id = config, *mut Block = b));
+            unsafe { objc_release(config) };
+            match done {
+                Some((_, e)) if e.is_null() => {}
+                Some((_, e)) => return Err(Error::msg(format!("ScreenCaptureKit did not follow the window: {}", taken(e)))),
+                None => return Err(Error::msg("ScreenCaptureKit did not follow the window in 2 s")),
+            }
+            if !self.wait(seq, Instant::now() + Duration::from_millis(500)) {
+                return Err(Error::msg("ScreenCaptureKit sent no frame of the window where it moved"));
+            }
+            Ok(())
+        }
+
+        /// `[x, y, w, h]` (points in the window's frame `frame`, global points now) of the newest frame:
+        /// its pixels, display time and number.
+        pub fn grab(&mut self, frame: [f64; 4], [x, y, w, h]: [f64; 4]) -> Result<(crate::png::Image, u64, u64)> {
+            self.follow(frame)?;
+            let want = self.pixels();
+            let until = Instant::now() + Duration::from_millis(500);
+            let (image, t_ns, count) = loop {
+                let l = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner());
+                if l.image != 0 && l.size == want {
+                    unsafe { CFRetain(l.image as CFTypeRef) };
+                    break (l.image as *mut c_void, l.t_ns, l.count);
+                }
+                // A frame of the window's size before it resized: the next one.
+                let seq = l.count;
+                drop(l);
+                if !self.wait(seq, until) {
+                    return Err(Error::msg("ScreenCaptureKit sent no frame of the window's size"));
+                }
+            };
+            let k = want.0 as f64 / frame[2].max(1.0);
+            let (x0, y0) = (((x * k).round().max(0.0) as usize).min(want.0), ((y * k).round().max(0.0) as usize).min(want.1));
+            let (x1, y1) = ((((x + w) * k).round().max(0.0) as usize).min(want.0), (((y + h) * k).round().max(0.0) as usize).min(want.1));
+            let mut rgba = Vec::with_capacity((x1 - x0) * (y1 - y0) * 4);
+            let read = unsafe { CVPixelBufferLockBaseAddress(image, 1) } == 0;
+            if read {
+                let (base, stride) = unsafe { (CVPixelBufferGetBaseAddress(image), CVPixelBufferGetBytesPerRow(image)) };
+                if !base.is_null() && stride >= want.0 * 4 {
+                    for row in y0..y1 {
+                        let line = unsafe { std::slice::from_raw_parts(base.add(row * stride + x0 * 4), (x1 - x0) * 4) };
+                        for p in line.as_chunks::<4>().0 {
+                            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+                        }
+                    }
+                }
+                unsafe { CVPixelBufferUnlockBaseAddress(image, 1) };
+            }
+            unsafe { CFRelease(image as CFTypeRef) };
+            if rgba.len() != (x1 - x0) * (y1 - y0) * 4 || rgba.is_empty() {
+                return Err(Error::msg("ScreenCaptureKit's frame of the window could not be read"));
+            }
+            Ok((crate::png::Image { width: x1 - x0, height: y1 - y0, rgba }, t_ns, count))
+        }
+
+        /// The frames kept so far.
+        pub fn seq(&self) -> u64 {
+            self.shared.latest.lock().unwrap_or_else(|e| e.into_inner()).count
+        }
+
+        /// The frame callbacks' CPU (ms) since the last call.
+        pub fn take_cpu_ms(&self) -> f64 {
+            self.shared.cpu_ns.swap(0, Ordering::Relaxed) as f64 / 1e6
+        }
+
+        /// Waits for a frame after the `seq`th, at most until `until`.
+        pub fn wait(&self, seq: u64, until: Instant) -> bool {
+            let mut l = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner());
+            while l.count <= seq {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return false;
+                }
+                l = self.shared.cv.wait_timeout(l, left).unwrap_or_else(|e| e.into_inner()).0;
+            }
+            true
+        }
+    }
+
+    fn inside(r: CGRect, x: f64, y: f64) -> bool {
+        x >= r.origin.x && x < r.origin.x + r.size.width && y >= r.origin.y && y < r.origin.y + r.size.height
+    }
+
+    /// Stops the stream and drains its queue (no callback runs after), then lets the kept frame go.
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            let pool = unsafe { objc_autoreleasePoolPush() };
+            let stream = self.stream;
+            if !stream.is_null() {
+                let _ = with_completion(Duration::from_secs(2), true, |b| send!((); stream, "stopCaptureWithCompletionHandler:", *mut Block = b));
+            }
+            unsafe {
+                if !self.output.is_null() {
+                    let ivar = class_getInstanceVariable(output_class(), c"sink".as_ptr());
+                    let sink = object_getIvar(self.output, ivar) as *const Shared;
+                    object_setIvar(self.output, ivar, std::ptr::null_mut());
+                    // The queue is serial: once an empty call queued now has run, every frame before it has.
+                    extern "C" fn nothing(_: *mut c_void) {}
+                    dispatch_sync_f(self.queue, std::ptr::null_mut(), nothing);
+                    if !sink.is_null() {
+                        drop(Arc::from_raw(sink));
+                    }
+                    objc_release(self.output);
+                }
+                if !stream.is_null() {
+                    objc_release(stream);
+                }
+                dispatch_release(self.queue);
+                let image = std::mem::take(&mut self.shared.latest.lock().unwrap_or_else(|e| e.into_inner()).image);
+                if image != 0 {
+                    CFRelease(image as CFTypeRef);
+                }
+                objc_autoreleasePoolPop(pool);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]

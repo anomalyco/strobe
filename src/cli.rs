@@ -217,6 +217,25 @@ pub fn unknown_flag(name: &str) -> Error {
     }
 }
 
+/// Flags whose value is a comma-separated list.
+const LISTS: &[&str] = &["filter", "target", "params", "metrics", "noworse", "skip"];
+
+/// Sets a flag, refusing it given again with another value: no flag repeats (`--filter a --filter b`
+/// kept only b), and a list flag takes its items comma-separated.
+fn put(flags: &mut HashMap<String, String>, name: &str, value: &str) -> Result<()> {
+    match flags.get(name) {
+        Some(was) if was != value => {
+            let shown = |v: &str| if v.is_empty() || v == "true" { format!("--{name}") } else { format!("--{name} {v}") };
+            let e = Error::usage(format!("--{name} given twice ({} and {}): strobe takes each flag once", shown(was), shown(value)));
+            Err(if LISTS.contains(&name) { e.hint(format!("give every item in one, comma-separated: --{name} {was},{value}")) } else { e.hint(format!("keep the one you mean: {}", shown(value))) })
+        }
+        _ => {
+            flags.insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Args {
     pub command: String,
@@ -257,27 +276,29 @@ impl Args {
             if let Some((key, value)) = name.split_once('=') {
                 match (kind(key).ok_or_else(|| unknown_flag(key))?, value) {
                     // `--check=false` is the switch off, not on.
-                    (Switch, "true") => flags.insert(key.to_string(), "true".to_string()),
-                    (Switch | Optional, "false") => flags.remove(key),
+                    (Switch, "true") => put(&mut flags, key, "true")?,
+                    (Switch | Optional, "false") => {
+                        flags.remove(key);
+                    }
                     (Switch, _) => return Err(Error::usage(format!("--{key} is a switch: --{key}, --{key}=true or --{key}=false, not --{key}={value}"))),
-                    (Optional, "true") => flags.insert(key.to_string(), String::new()),
-                    _ => flags.insert(key.to_string(), value.to_string()),
+                    (Optional, "true") => put(&mut flags, key, "")?,
+                    _ => put(&mut flags, key, value)?,
                 };
                 continue;
             }
             match kind(&name).ok_or_else(|| unknown_flag(&name))? {
                 Switch => {
-                    flags.insert(name, "true".to_string());
+                    put(&mut flags, &name, "true")?;
                     continue;
                 }
                 Optional => {
-                    flags.insert(name, String::new());
+                    put(&mut flags, &name, "")?;
                     continue;
                 }
                 Value | Number => {}
             }
             let value = iter.next().ok_or_else(|| Error::usage(format!("--{name} needs a value")))?;
-            flags.insert(name, value);
+            put(&mut flags, &name, &value)?;
         }
         let command = if pos.is_empty() { String::new() } else { pos.remove(0) };
         Ok(Args { command, pos, flags })
