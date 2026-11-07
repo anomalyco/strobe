@@ -3054,7 +3054,8 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns). Past 2% the block's times and rates over
   the runs' wall time (`run.duration`, `frames.*`, `interaction.*`, `scroll.*`, `phase.*`,
   `cpu.app.total`, wakes per second, `input.*`) leave its values, and the series' declared ones are
-  refused `OverheadBudget`; totals of the app's own work (`cpu.work`, memory, IO) stay. A native
+  refused `OverheadBudget` (a `--check` too, so it says before a bench runs what the bench would
+  refuse); totals of the app's own work (`cpu.work`, memory, IO) stay. A native
   launch timed to pixels counts its captures over the launch the same way. A window's capture is closed
   before each case's runs (a capture setup opened would copy every frame through them) and opened again
   by the first read a run makes.

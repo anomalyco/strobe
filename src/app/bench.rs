@@ -921,6 +921,12 @@ impl Exec {
     fn measures_time(&self) -> bool {
         !self.untimed && !self.video && matches!(self.set, Set::Lean | Set::Timing)
     }
+
+    /// Whether what strobe's own reads did to the block's times is judged (`pixel_overhead`): a timed
+    /// block's, and a `--check`'s, which says what the bench would refuse (not a `--pixels` block's).
+    fn judges_time(&self) -> bool {
+        self.measures_time() || (self.untimed && self.pixels.is_none())
+    }
 }
 
 /// Whether a recording kept a video (`video.json`).
@@ -6752,8 +6758,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 // timing they shared the runs with is refused.
                 let run_ms_sum: f64 = measured.iter().map(|r| r.ms).sum();
                 let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms_sum.max(1.0));
-                let disturbed = x.measures_time() && pixel_pct.is_some_and(|p| p > 2.0);
-                if x.measures_time() {
+                let disturbed = x.judges_time() && pixel_pct.is_some_and(|p| p > 2.0);
+                if x.judges_time() {
                     pixel_overhead(s, pixel_pct, &mut values, &mut refused);
                 }
                 // The launch's steps before the runs, the case's warmup and runs, then the launch's after them.

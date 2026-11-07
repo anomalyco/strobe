@@ -1130,7 +1130,7 @@ fn runs(
                 refused.insert(m.clone(), missing(m, &have));
             }
             super::block::untimed_state(s, &measured.iter().map(|r| &r.timed).collect::<Vec<_>>(), &mut values, &mut refused);
-            if x.measures_time() {
+            if x.judges_time() {
                 super::pixel_overhead(s, pixel_pct, &mut values, &mut refused);
             }
             for m in refused.keys() {
