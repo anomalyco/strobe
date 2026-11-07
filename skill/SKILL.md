@@ -450,9 +450,10 @@ export default bench({
     the last capture without it and the first with it.
   - Each capture in a run counts (`driver.pixel_reads`, `ObserverCost` past 8); strobe's CPU in them over 2%
     of a core refuses timing metrics (`--check` says so too). A read took 2 to 3 ms on Windows and X11,
-    10 ms on the headless Wayland compositor and 20 ms on macOS: a `changed` wait per run stayed under
-    the bar on Windows (frames come as events) and went over it on macOS. Headless pages refuse pixel
-    reads inside timed runs (`Headless`).
+    10 ms on the headless Wayland compositor, and 0.5 to 0.8 ms on macOS (its ScreenCaptureKit stream;
+    20 ms without it): a `changed` wait per run stayed under the bar on Windows and in a macOS `--check`
+    (frames come as events); a short warmed run (24 ms) still went over it on a loaded Mac. Headless pages
+    refuse pixel reads inside timed runs (`Headless`).
   - `resetPixels: { region, ignore, tolerance }` on the target or case: runs that start from other pixels
     are `ResetIncomplete`. Try one with `strobe look exe:<path> --until image=play.png`.
 
