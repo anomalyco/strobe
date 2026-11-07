@@ -3013,20 +3013,28 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   moved by more than `delta` (default 8) in a channel; `stable` (`true` is 300, or ms): no channel moved
   by more than 8 between captures for that long, counted from the later of the last change's frame and
   the wait's start (a still window's last frame may be long before; the input's frame may still be on
-  its way); where frames come as events (Windows) the wait sleeps until the next one or until it has
+  its way); where frames come as events (Windows, macOS) the wait sleeps until the next one or until it has
   held long enough, reading nothing while nothing changes; `matches`: an image shows in the region. An image
   `until` resolves once it shows anywhere (`matches` over the whole area).
 - **Where pixels come from**: a native app's window from outside (`host::capture::Grabber`, opened on a
   call's first need and kept for the block): Windows.Graphics.Capture (a free-threaded pool of one buffer;
   its frame event copies each frame into a texture strobe keeps, a read copies only the region out of it
   and maps that; frames carry the compositor's time on the QPC clock and wake waiters; it captures on a
-  locked session, and Direct3D 12 and Vulkan flip-model windows), else `PrintWindow` cropped; macOS
-  `CGWindowListCreateImage` of the region's screen rect, this window only (no Screen Recording, or a
-  window the app keeps from capture: `NoPresentSource`); X11 `GetImage` of the region once the window is
+  locked session, and Direct3D 12 and Vulkan flip-model windows), else `PrintWindow` cropped; macOS a
+  ScreenCaptureKit stream of the window alone on its display (`initWithDisplay:includingWindows:`, its
+  source rectangle the window's frame at the display's pixels, BGRA, three frames queued, no cursor): a
+  frame comes only when something in it changed, replaces the one strobe keeps (retained, never
+  copied) and wakes waiters, and carries the time it was displayed (`SCStreamFrameInfoDisplayTime`, the
+  host clock); a read checks the window's frame (one window-list read of that window), points the
+  stream at a frame that moved or resized (`updateConfiguration`, then its next frame), and copies only
+  the region; without the stream (no Screen Recording, a window the app keeps from capture, no frame in
+  a second, a window gone to another display) `CGWindowListCreateImage` of the region's screen rect,
+  this window only (no Screen Recording, or a window the app keeps from capture: `NoPresentSource`);
+  X11 `GetImage` of the region once the window is
   viewable and on top at its centre (else `WindowHidden`: the server copies what covers it); a window of
   the headless Wayland compositor strobe runs (§13.7 "Wayland"): the compositor's copy of the region, routed by the
   window's id, once it shows and no window above it overlaps the region (else `WindowHidden`). Between
-  captures a wait sleeps on the capture's next frame (Windows), else on the app's next present or 30 ms
+  captures a wait sleeps on the capture's next frame (Windows, macOS's stream), else on the app's next present or 30 ms
   (a toolkit that draws past the present path still shows within a poll). A page through its browser
   outside timed stretches (setup, reset, `ctx.untimed`, `--check`, `--pixels`, `look`, `expect`:
   Chromium's `Page.captureScreenshot` with a clip at scale 1, BiDi's `browsingContext.captureScreenshot`
@@ -3042,7 +3050,8 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   or gives black.
 - **Pixel proof** (latency, §7.4): an input whose `until` is `changed` or an image (`matches`) that the
   capture before it lacked keeps the last capture without it (its start) and the first with it (its end;
-  Windows: plus a refresh, a composed frame reaching the screen after it was captured) as
+  Windows, and macOS without its stream: plus a refresh, a composed frame or the window server's copy
+  reaching the screen after it was captured; a macOS stream frame is its display time) as
   `frames::Sent::pixel`. Its `interaction.*` sample is the one present of the target that reached the
   screen between the two (from the press, when it came before the release), in place of the
   accessibility or DOM change that gates other inputs: what an app with no tree shows of a reaction.
@@ -3053,7 +3062,8 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   `driver.pixel_ms` per run (inside the runs' timed stretches only; 0 for runs that read none) and
   `ObserverCost` past 2% of a run's wall time or 8 reads a run, or (two implementations) one side read
   at least 4 more times a run and over 4 times as often as the other; strobe's CPU in them over the
-  runs' wall time (its thread's, and Windows.Graphics.Capture's frame events copying each frame) is
+  runs' wall time (its thread's, Windows.Graphics.Capture's frame events copying each frame, and the
+  macOS stream's frame callbacks keeping each frame) is
   `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns). Past 2% the block's times and rates over
   the runs' wall time (`run.duration`, `frames.*`, `interaction.*`, `scroll.*`, `phase.*`,
   `cpu.app.total`, wakes per second, `input.*`) leave its values, and the series' declared ones are

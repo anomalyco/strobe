@@ -54,6 +54,7 @@ strobe bench <file.bench.ts> --head <variant>
 - variant: a directory, a git ref, `app:<id>`, `exe:<path>`; or a target of the file, `<target>[=<variant>]`, on both sides: an implementation comparison.
   - Every variant builds and serves with head's harness (the bench file's folder, strobe.json and its `harness` paths), so a base from before the bench works.
 - `--filter`: case names, comma-separated, exact unless they hold `*` (`"window-closed*"` also runs `window-closed-memory`).
+  No flag repeats: `--filter a --filter b` is a usage error (give `--filter a,b`).
   - strobe prints what runs and what it skips before building.
 - `--engine firefox`: page targets in Firefox (only the file's Firefox targets, when it has some).
   - No trace there: `main.*`, `layout.*`, `js.heap.*`, `span.*`, `frames.presented.p*` refuse.

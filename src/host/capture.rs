@@ -8,13 +8,14 @@
 //!   and its event wakes waiters. The compositor still draws a window while the session is locked, and
 //!   it captures Direct3D 12 and Vulkan flip-model windows a `PrintWindow` misses (black).
 //!   Without Windows.Graphics.Capture: `PrintWindow`, cropped.
-//! - macOS: a ScreenCaptureKit stream of the window alone on its display, its source rectangle the
-//!   window's frame at the display's pixels, BGRA, a frame only when something in the frame changed. Each
-//!   frame replaces the one strobe keeps (retained, never copied); a read copies only the region out of
-//!   it. Each frame carries the time it was displayed (the host clock), and its arrival wakes waiters.
-//!   A read checks the window's frame first (one window-list read of that window) and points the stream
-//!   at a frame that moved. Without the stream (it did not start or failed): `CGWindowListCreateImage`
-//!   of the region's screen rect, this window only. Both need Screen Recording.
+//! - macOS: a ScreenCaptureKit stream of the window alone on its display, started by the first read, its
+//!   source rectangle the part of the window's frame read so far (it grows to hold a region outside it)
+//!   at the display's pixels, BGRA, a frame only when something there changed. Each frame replaces the
+//!   one strobe keeps (retained, never copied); a read copies only the region out of it. Each frame
+//!   carries the time it was displayed (the host clock), and its arrival wakes waiters. A read checks
+//!   the window's frame first (one window-list read of that window) and points the stream at a frame
+//!   that moved. Without the stream (it did not start or cannot follow the window):
+//!   `CGWindowListCreateImage` of the region's screen rect, this window only. Both need Screen Recording.
 //! - Linux X11: `GetImage` of the region of the window, once it is viewable and on top there. A window
 //!   of the headless Wayland compositor strobe runs: the compositor's copy of the region, once it shows
 //!   and no window covers it there.
@@ -48,13 +49,16 @@ pub struct Grabber {
     win: isize,
     #[cfg(windows)]
     os: Option<wgc::Wgc>,
+    /// The stream, once a read started it; `tried` once one did not start (it is not tried again).
     #[cfg(target_os = "macos")]
     os: Option<sck::Stream>,
+    #[cfg(target_os = "macos")]
+    tried: bool,
 }
 
 impl Grabber {
-    /// Pixels of `win` from now on: on Windows and macOS its capture starts here and waits up to a second
-    /// for the window's first frame.
+    /// Pixels of `win` from now on: on Windows its capture starts here and waits up to a second for the
+    /// window's first frame (macOS: at the first read, which knows the region).
     pub fn open(win: isize) -> Result<Grabber> {
         #[cfg(windows)]
         {
@@ -64,10 +68,8 @@ impl Grabber {
             // Without Windows.Graphics.Capture (or a frame of the window from it): PrintWindow.
             Ok(Grabber { win, os: wgc::Wgc::open(win).ok() })
         }
-        // Without the stream (no Screen Recording, a window kept out of capture, no frame of it in a
-        // second): CGWindowListCreateImage, which says why when it cannot read the window either.
         #[cfg(target_os = "macos")]
-        return Ok(Grabber { win, os: sck::Stream::open(win).ok() });
+        return Ok(Grabber { win, os: None, tried: false });
         #[cfg(target_os = "linux")]
         Ok(Grabber { win })
     }
@@ -133,15 +135,23 @@ impl Grabber {
         // The stream's frame is stamped with when it was displayed. Without it, macOS reads the window
         // server's copy of the window, which holds a frame before the display shows it (on air a reaction
         // was in a capture ending 9.8 ms before ScreenCaptureKit's frame of it): up to a refresh later.
+        // Without the stream (no Screen Recording, a window kept out of capture, no frame of it in a
+        // second, a window it cannot follow): CGWindowListCreateImage, which says why when it cannot
+        // read the window either.
         #[cfg(target_os = "macos")]
-        let (img, at, seq, composed) = match self.os.as_mut().map(|s| s.grab(frame, px)) {
-            Some(Ok((img, at, seq))) => (img, at, seq, false),
-            other => {
-                // A stream that cannot follow the window (another display, no frame after a move) is done.
-                if other.is_some() {
-                    self.os = None;
+        let (img, at, seq, composed) = {
+            if self.os.is_none() && !self.tried {
+                self.tried = true;
+                self.os = sck::Stream::open(self.win, frame, px).ok();
+            }
+            match self.os.as_mut().map(|s| s.grab(frame, px)) {
+                Some(Ok((img, at, seq))) => (img, at, seq, false),
+                other => {
+                    if other.is_some() {
+                        self.os = None;
+                    }
+                    (super::macos::window_region(self.win, px).map_err(no_source)?, super::now_ns(), 0, true)
                 }
-                (super::macos::window_region(self.win, px).map_err(no_source)?, super::now_ns(), 0, true)
             }
         };
         #[cfg(target_os = "linux")]
@@ -255,9 +265,11 @@ mod sck {
         output: Id,
         queue: *mut c_void,
         shared: Arc<Shared>,
-        /// The window's frame (global points) the stream's source rectangle is, and the frame of the
-        /// display it streams from.
+        /// The window's frame (global points), the part of it the stream's source rectangle is (points
+        /// from the frame's top left: every region read so far), and the frame of the display it
+        /// streams from.
         frame: [f64; 4],
+        area: [f64; 4],
         display: CGRect,
         /// That display's pixels per point.
         scale: f64,
@@ -333,9 +345,9 @@ mod sck {
     }
 
     impl Stream {
-        /// A stream of window `win` alone on its display, started, once its first frame came (at most a
-        /// second).
-        pub fn open(win: isize) -> Result<Stream> {
+        /// A stream of `area` (points from the top left of the window's frame `frame`, global points) of
+        /// window `win` alone on its display, started, once its first frame came (at most a second).
+        pub fn open(win: isize, frame: [f64; 4], area: [f64; 4]) -> Result<Stream> {
             if !crate::host::macos::screen_capture_allowed() {
                 return Err(Error::msg("no Screen Recording"));
             }
@@ -343,14 +355,13 @@ mod sck {
             if crate::host::macos::unshared_windows(&[w.pid]).iter().any(|u| u.0 as isize == win) {
                 return Err(Error::msg("the app keeps the window out of screen capture"));
             }
-            let (frame, _) = crate::host::macos::window_frame(win).ok_or_else(|| Error::msg("the window is gone"))?;
             let pool = unsafe { objc_autoreleasePoolPush() };
-            let r = Stream::start(win, frame, w.scale().max(1.0));
+            let r = Stream::start(win, frame, area, w.scale().max(1.0));
             unsafe { objc_autoreleasePoolPop(pool) };
             r
         }
 
-        fn start(win: isize, frame: [f64; 4], scale: f64) -> Result<Stream> {
+        fn start(win: isize, frame: [f64; 4], area: [f64; 4], scale: f64) -> Result<Stream> {
             let content = with_completion(
                 Duration::from_secs(5),
                 false,
@@ -375,7 +386,7 @@ mod sck {
             let dframe = rect_of(display, "frame");
             unsafe { objc_release(content) };
             let queue = unsafe { dispatch_queue_create(c"strobe.pixels".as_ptr(), std::ptr::null()) };
-            let mut s = Stream { stream: std::ptr::null_mut(), output: std::ptr::null_mut(), queue, shared: Arc::default(), frame, display: dframe, scale };
+            let mut s = Stream { stream: std::ptr::null_mut(), output: std::ptr::null_mut(), queue, shared: Arc::default(), frame, area, display: dframe, scale };
             let config = s.config();
             let stream: Id = send!(Id; class("SCStream"), "alloc");
             let stream: Id = send!(Id; stream, "initWithFilter:configuration:delegate:", Id = filter, Id = config, Id = std::ptr::null_mut());
@@ -404,16 +415,17 @@ mod sck {
             Ok(s)
         }
 
-        /// The frame's size in pixels at the display's scale.
+        /// The frames' size in pixels: the area at the display's scale.
         fn pixels(&self) -> (usize, usize) {
-            ((self.frame[2] * self.scale).round().max(1.0) as usize, (self.frame[3] * self.scale).round().max(1.0) as usize)
+            ((self.area[2] * self.scale).round().max(1.0) as usize, (self.area[3] * self.scale).round().max(1.0) as usize)
         }
 
-        /// A configuration for the window's frame: its rectangle on the display at the display's pixels,
-        /// BGRA, no cursor, a frame as often as it changes, and few frames queued (strobe keeps one).
+        /// A configuration for the area: its rectangle on the display at the display's pixels, BGRA, no
+        /// cursor, a frame as often as it changes, and few frames queued (strobe keeps one). The window
+        /// server composes and sends only that much, and only when it changed.
         fn config(&self) -> Id {
-            let (f, d) = (self.frame, self.display);
-            let source = CGRect { origin: CGPoint { x: f[0] - d.origin.x, y: f[1] - d.origin.y }, size: CGSize { width: f[2], height: f[3] } };
+            let (f, a, d) = (self.frame, self.area, self.display);
+            let source = CGRect { origin: CGPoint { x: f[0] + a[0] - d.origin.x, y: f[1] + a[1] - d.origin.y }, size: CGSize { width: a[2], height: a[3] } };
             let (w, h) = self.pixels();
             let config: Id = send!(Id; class("SCStreamConfiguration"), "alloc");
             let config: Id = send!(Id; config, "init");
@@ -427,17 +439,25 @@ mod sck {
             config
         }
 
-        /// Points the stream at the window's frame now when it moved or resized on its display, and waits
-        /// for a frame of it there.
-        fn follow(&mut self, frame: [f64; 4]) -> Result<()> {
-            if frame == self.frame {
+        /// Points the stream at `region` (points in the frame) of the window's frame now: the area grows
+        /// to hold a region outside it, and follows a frame that moved or resized on its display. Waits
+        /// for a frame of the new source.
+        fn follow(&mut self, frame: [f64; 4], region: [f64; 4]) -> Result<()> {
+            let a = self.area;
+            let held = region[0] >= a[0] && region[1] >= a[1] && region[0] + region[2] <= a[0] + a[2] && region[1] + region[3] <= a[1] + a[3];
+            if frame == self.frame && held {
                 return Ok(());
             }
             if !inside(self.display, frame[0] + frame[2] / 2.0, frame[1] + frame[3] / 2.0) {
                 return Err(Error::msg("the window went to another display"));
             }
+            let (x0, y0) = (a[0].min(region[0]).max(0.0), a[1].min(region[1]).max(0.0));
+            let (x1, y1) = ((a[0] + a[2]).max(region[0] + region[2]).min(frame[2]), (a[1] + a[3]).max(region[1] + region[3]).min(frame[3]));
+            if x1 - x0 < 1.0 || y1 - y0 < 1.0 {
+                return Err(Error::msg("the region is outside the window's frame"));
+            }
             let seq = self.seq();
-            self.frame = frame;
+            (self.frame, self.area) = (frame, [x0, y0, x1 - x0, y1 - y0]);
             let config = self.config();
             let stream = self.stream;
             let done = with_completion(Duration::from_secs(2), true, |b| send!((); stream, "updateConfiguration:completionHandler:", Id = config, *mut Block = b));
@@ -453,10 +473,10 @@ mod sck {
             Ok(())
         }
 
-        /// `[x, y, w, h]` (points in the window's frame `frame`, global points now) of the newest frame:
-        /// its pixels, display time and number.
-        pub fn grab(&mut self, frame: [f64; 4], [x, y, w, h]: [f64; 4]) -> Result<(crate::png::Image, u64, u64)> {
-            self.follow(frame)?;
+        /// `[x, y, w, h]` (whole points in the window's frame `frame`, global points now) of the newest
+        /// frame: its pixels, display time and number.
+        pub fn grab(&mut self, frame: [f64; 4], region: [f64; 4]) -> Result<(crate::png::Image, u64, u64)> {
+            self.follow(frame, region)?;
             let want = self.pixels();
             let until = Instant::now() + Duration::from_millis(500);
             let (image, t_ns, count) = loop {
@@ -465,14 +485,16 @@ mod sck {
                     unsafe { CFRetain(l.image as CFTypeRef) };
                     break (l.image as *mut c_void, l.t_ns, l.count);
                 }
-                // A frame of the window's size before it resized: the next one.
+                // A frame of the area's size before it changed: the next one.
                 let seq = l.count;
                 drop(l);
                 if !self.wait(seq, until) {
-                    return Err(Error::msg("ScreenCaptureKit sent no frame of the window's size"));
+                    return Err(Error::msg("ScreenCaptureKit sent no frame of the area's size"));
                 }
             };
-            let k = want.0 as f64 / frame[2].max(1.0);
+            // The region from the area's top left, in the frame's pixels.
+            let k = want.0 as f64 / self.area[2].max(1.0);
+            let [x, y, w, h] = [region[0] - self.area[0], region[1] - self.area[1], region[2], region[3]];
             let (x0, y0) = (((x * k).round().max(0.0) as usize).min(want.0), ((y * k).round().max(0.0) as usize).min(want.1));
             let (x1, y1) = ((((x + w) * k).round().max(0.0) as usize).min(want.0), (((y + h) * k).round().max(0.0) as usize).min(want.1));
             let mut rgba = Vec::with_capacity((x1 - x0) * (y1 - y0) * 4);
