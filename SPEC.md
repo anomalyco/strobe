@@ -2975,9 +2975,15 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   image needs 16 opaque pixels (alpha 128 or more) whose luma is not one flat shade, else a usage error:
   it would match anywhere.
 - **Matching** (`image::Template::find`): the image is resampled once per capture scale (capture pixels
-  per device-independent pixel: a box filter down, bilinear up). Zero-mean normalized cross-correlation of
+  per device-independent pixel: an area-weighted box filter down, bilinear up, both over premultiplied
+  alpha, so a non-integer step such as 2 → 1.5 weighs every source pixel by its coverage and a
+  transparent edge does not darken). Text that a toolkit grid-fits to each size draws other glyph shapes
+  at another scale: an image exported at @2x scored 0.95 and 0.995 at 1x (GDI+ on adais, cairo on vps),
+  so for text across scales capture the image at the target's own scale or give `threshold: 0.9`.
+  Zero-mean normalized cross-correlation of
   integer BT.601 luma (`(77 R + 150 G + 29 B) >> 8`) over its opaque pixels, first on a grid 4× coarser
-  (2× or 1× for a small image; a fully opaque image's window sums from summed-area tables), whose best
+  (2× or 1× for a small image; a coarse cell is opaque when most of its pixels are, its colour the mean of
+  those, so a masked image's thin strokes stay; a fully opaque image's window sums from summed-area tables), whose best
   local peaks (at most 32, each at least the threshold less 0.12; the best always) are searched at full
   resolution 4 pixels each way. A peak at or over the threshold matches when its colours agree too
   (correlation ignores gain and offset, so a dimmed or recoloured lookalike would pass): the mean absolute
@@ -2996,7 +3002,10 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   or `{ delta?, pct? }`): the region against what it showed just before the call's input (the capture
   `before`, taken after the input's rest), at least `pct`% (default 0.5) of its pixels and at least 16
   moved by more than `delta` (default 8) in a channel; `stable` (`true` is 300, or ms): no channel moved
-  by more than 8 between captures for that long; `matches`: an image shows in the region. An image
+  by more than 8 between captures for that long, counted from the later of the last change's frame and
+  the wait's start (a still window's last frame may be long before; the input's frame may still be on
+  its way); where frames come as events (Windows) the wait sleeps until the next one or until it has
+  held long enough, reading nothing while nothing changes; `matches`: an image shows in the region. An image
   `until` resolves once it shows anywhere (`matches` over the whole area).
 - **Where pixels come from**: a native app's window from outside (`host::capture::Grabber`, opened on a
   call's first need and kept for the block): Windows.Graphics.Capture (a free-threaded pool of one buffer;
@@ -3011,8 +3020,12 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   outside timed stretches (setup, reset, `ctx.untimed`, `--check`, `--pixels`, `look`, `expect`:
   Chromium's `Page.captureScreenshot` with a clip at scale 1, BiDi's `browsingContext.captureScreenshot`
   with a box, WebDriver Classic's viewport screenshot cut to it), and inside a run's timed stretches from
-  outside: a headed page's browser window, the viewport the bottom of its client area at the window's
-  device-independent pixels per CSS pixel. A headless page there refuses `Headless` (a screenshot is the
+  outside: a headed page's browser window. Where strobe gives the page the OS's input (§9.10), the
+  viewport is where that input's calibration placed it on the screen; else it is the bottom of the
+  window's client area at the window's device-independent pixels per CSS pixel, read before the runs
+  (`innerWidth`, `innerHeight`, `devicePixelRatio`, `outerHeight`; again after a `page.window`) and
+  checked: the client area within 2 pixels as wide as the viewport, and the bars above it within what
+  the window adds to its height; otherwise `NoPresentSource`, never a guess. A headless page there refuses `Headless` (a screenshot is the
   renderer's own work, inside the run it times), a phone's `NotForTarget`. `host::window_image`
   (`--pixels` snapshots, `expect`'s screens) falls back to the compositor's copy when `PrintWindow` fails
   or gives black.
@@ -3026,10 +3039,17 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   none is unshown (`PresentsUnmatched`, `NoPresentSource`). A `stable` wait proves nothing of when.
   Chromium times its inputs from its own trace and never needs it.
 - **Cost** (rule 2): every capture (with its match) is a read: `driver.pixel_reads` and
-  `driver.pixel_ms` per run (inside the runs' timed stretches only) and `ObserverCost` past 2% of a
-  run's wall time or 8 reads a run; strobe's thread CPU in them over the runs' wall time is
-  `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns), and past 2% the series' timing and latency
-  metrics are refused `OverheadBudget`.
+  `driver.pixel_ms` per run (inside the runs' timed stretches only; 0 for runs that read none) and
+  `ObserverCost` past 2% of a run's wall time or 8 reads a run, or (two implementations) one side read
+  at least 4 more times a run and over 4 times as often as the other; strobe's CPU in them over the
+  runs' wall time (its thread's, and Windows.Graphics.Capture's frame events copying each frame) is
+  `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns). Past 2% the block's times and rates over
+  the runs' wall time (`run.duration`, `frames.*`, `interaction.*`, `scroll.*`, `phase.*`,
+  `cpu.app.total`, wakes per second, `input.*`) leave its values, and the series' declared ones are
+  refused `OverheadBudget`; totals of the app's own work (`cpu.work`, memory, IO) stay. A native
+  launch timed to pixels counts its captures over the launch the same way. A window's capture is closed
+  before each case's runs (a capture setup opened would copy every frame through them) and opened again
+  by the first read a run makes.
 - **`resetPixels`** (`true` or `{ region?, ignore?, tolerance? }`, on a target or a case, the case's
   winning): every run must start from the pixels the first run (a batch's: the launch's first) started
   from, read where `resetCheck` reads (outside the runs; a native app's window from outside with no
@@ -3037,8 +3057,11 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   `tolerance` (default 8): else `ResetIncomplete` after a second of reads every 100 ms, with how many
   pixels moved and by how much. Off with `resetCheck: false`.
 - **Pointer input on a locked session** (Windows): a point or an image aims nowhere the OS would deliver
-  it (every point hit-tests to the lock screen): refused `SessionLocked`, as a selector's is; keys still
-  reach the window, and its pixels still read.
+  it (every point hit-tests to the lock screen): refused `SessionLocked` before any pixel is read to aim
+  it, as a selector's is (and `move`, and `wheel` at the window's centre); keys still reach the window,
+  and its pixels still read (§10.5).
+- **A page launch** timed to an image or pixels is refused `NotForTarget` before anything builds: a
+  page's launch is timed in its own document, where nothing reads its pixels.
 
 **Terminal targets** (`tty()`, §13.9): `page` sends what a terminal sends; `until: { state }` waits for
 the program's own state on its event stream (`STROBE_EVENTS`, §13.9 "App events"), and
@@ -3820,7 +3843,8 @@ lock when nothing it measures reaches a screen:
   display, and what would need one is refused `Headless`;
 - a native target with `window: false` (a tray app), or any native target under `--check` (it
   validates a bench file and gives no verdict), whose declared metrics are all `cpu.*`, `ui.*`,
-  `memory.*`, `io.*`, `count.*`, `phase.*`, `energy.*`, GPU memory (`gpu.vram`, `gpu.shared`), `run.duration` and launch
+  `memory.*`, `io.*`, `count.*`, `phase.*`, `energy.*`, strobe's own reads (`driver.*`), GPU memory
+  (`gpu.vram`, `gpu.shared`), `run.duration` and launch
   milestones (a launch ends on `until: { milestone }`). GPU use (`gpu.process.3d`, `gpu.compile`)
   may be a secondary: on a locked screen the compositor draws nothing and the app's presents reach
   no screen, so the GPU work in a locked block describes no person's screen; it is refused in locked
@@ -3835,7 +3859,13 @@ window outside `--check`.
 What drives a native app on a locked session (checked on adais, locked): its accessibility tree reads
 and waits on its events, accessibility actions (`page.act`), and posted keys to its focused element.
 Pointer input does not: the OS hit-tests every point to the lock screen, so strobe cannot aim a click
-and refuses it (`SessionLocked`), and it cannot park the cursor. Nothing presents.
+(at an element, a point or an image, refused before any pixel is read to aim it), a move or a wheel
+at the window's centre, and refuses it (`SessionLocked`), and it cannot park the cursor. Nothing
+presents, but on Windows the compositor still draws the window for capture: image anchors and pixel
+waits read it (§9.6 "Image anchors"), and a `--pixels` block of a native app runs locked (its
+snapshots are the window's own rendering or the compositor's copy). Such a block whose pointer input
+meets the lock is discarded and waits for an unlock, as on-screen blocks do (`--unlock-wait`); a
+`--check` keeps the refusal, which says what to fix at once.
 
 Every block records its lock state (`locked`), checked at its start and end and by the 500 ms poll
 in between; a block whose state changed runs again. Base and head of a pair share one state, or the

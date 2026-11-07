@@ -930,7 +930,7 @@ pub struct Driver {
     grabber: RefCell<Option<crate::host::capture::Grabber>>,
     before: RefCell<Option<pixels::Before>>,
     call_at: Cell<u64>,
-    viewport: Cell<Option<(f64, f64, f64)>>,
+    viewport: Cell<Option<[f64; 4]>>,
 }
 
 impl Driver {
@@ -990,9 +990,32 @@ impl Driver {
         Ok(Box::new(WindowShots { d: self }))
     }
 
-    /// strobe's captures of the page's pixels since the last call: count, wall ms, CPU ms.
+    /// strobe's captures of the page's pixels since the last call: count, wall ms, CPU ms (with the
+    /// window capture's own frame events).
     pub fn take_pixel_reads(&self) -> (u64, f64, f64) {
-        self.images.take_reads()
+        let (n, ms, cpu) = self.images.take_reads();
+        (n, ms, cpu + self.grabber.borrow().as_ref().map_or(0.0, crate::host::capture::Grabber::take_cpu_ms))
+    }
+
+    /// Closes the browser window's capture (after setup, between a batch's cases), so none copies frames
+    /// through runs that read no pixels.
+    pub fn close_pixels(&self) {
+        self.grabber.borrow_mut().take();
+    }
+
+    /// The viewport's metrics a timed pixel read maps onto the window (`WindowShots`): its CSS width and
+    /// height, device-independent pixels per CSS pixel, and what the window adds to its height (CSS
+    /// pixels). Read once before the runs (the block calls it outside them) and again after a `window`.
+    pub fn prime_viewport(&self) -> Result<[f64; 4]> {
+        if let Some(v) = self.viewport.get() {
+            return Ok(v);
+        }
+        let v = self.page.eval("[innerWidth, innerHeight, devicePixelRatio, outerHeight]")?;
+        let scale = self.browser_window().map_or(1.0, |w| w.scale()).max(0.01);
+        let n = |i: usize| v[i].as_f64().unwrap_or(0.0);
+        let out = [n(0), n(1), if n(2) > 0.0 { n(2) / scale } else { 1.0 }, (n(3) - n(1)).max(0.0)];
+        self.viewport.set(Some(out));
+        Ok(out)
     }
 
     /// Before a measured input whose `until` waits on pixels: what the region shows now.
@@ -1449,7 +1472,7 @@ impl Driver {
         let sel = |i: usize| args.get(i).cloned().unwrap_or(Value::String(String::new()));
         self.call_at.set(crate::host::now_ns());
         self.before.borrow_mut().take();
-        if matches!(call, "goto" | "window") {
+        if call == "window" {
             self.viewport.set(None);
         }
         if let Some(os) = self.os.get().filter(|_| os::INPUT.contains(&call)) {
@@ -1952,9 +1975,13 @@ impl pixels::Source for PageShots<'_> {
 }
 
 /// A headed page's viewport from outside, inside a run's timed stretch: the browser's window through
-/// `host::capture` (the renderer does nothing for it). The viewport is the bottom of the window's client
-/// area, full width (the browser's own bars are above it), at the window's device-independent pixels
-/// per CSS pixel (`devicePixelRatio` over the window's scale), read once until a `goto` or `window`.
+/// `host::capture` (the renderer does nothing for it). Where strobe gives the page the OS's input, the
+/// viewport is where that input's calibration put it (`OsInput::page_in_client`). Else it is the bottom
+/// of the window's client area, full width (the browser's own bars are above it), at the window's
+/// device-independent pixels per CSS pixel (`devicePixelRatio` over the window's scale), checked against
+/// the window: its width within 2 pixels of the viewport's, and the bars above it inside what the window
+/// adds to the viewport (`outerHeight − innerHeight`); otherwise refused, never guessed. The metrics are
+/// read before the runs (`Driver::prime_viewport`), again after a `window` call.
 struct WindowShots<'a> {
     d: &'a Driver,
 }
@@ -1969,33 +1996,45 @@ impl WindowShots<'_> {
         f(g.as_mut().ok_or_else(|| Error::msg("internal: the window's capture"))?)
     }
 
-    /// The viewport's CSS size and device-independent pixels per CSS pixel.
-    fn viewport(&self) -> Result<(f64, f64, f64)> {
-        if let Some(v) = self.d.viewport.get() {
-            return Ok(v);
+    /// Where the viewport is in the window's client area: its origin and device-independent pixels per
+    /// CSS pixel.
+    fn place(&self, g: &crate::host::capture::Grabber) -> Result<(f64, f64, f64)> {
+        if let Some(os) = self.d.os.get() {
+            return os.page_in_client(g.window());
         }
-        let v = self.d.page.eval("[innerWidth, innerHeight, devicePixelRatio]")?;
-        let scale = self.d.browser_window().map_or(1.0, |w| w.scale()).max(0.01);
-        let n = |i: usize| v[i].as_f64().unwrap_or(0.0);
-        let out = (n(0), n(1), if n(2) > 0.0 { n(2) / scale } else { 1.0 });
-        self.d.viewport.set(Some(out));
-        Ok(out)
+        let [vw, vh, k, chrome] = self.d.prime_viewport()?;
+        let (cw, ch) = g.size()?;
+        let top = ch - vh * k;
+        if (cw - vw * k).abs() > 2.0 || top < -2.0 || top > chrome * k + 2.0 {
+            return Err(Refusal::new(
+                ValidatorId::NoPresentSource,
+                format!(
+                    "the page's {vw:.0}×{vh:.0} viewport does not sit at the bottom of its browser window's {cw:.0}×{ch:.0} client area, full width ({:.1} device-independent pixels a CSS pixel, the window adding {chrome:.0} CSS pixels): where its pixels are on the screen is unknown",
+                    k
+                ),
+            )
+            .fix("read the page's pixels outside the runs (setup, ctx.untimed), or measure it from outside against another implementation, where strobe calibrates the page on the screen")
+            .into());
+        }
+        Ok((0.0, top.max(0.0), k))
     }
 }
 
 impl pixels::Source for WindowShots<'_> {
     fn size(&self) -> Result<(f64, f64)> {
-        self.viewport().map(|v| (v.0, v.1))
+        self.d.prime_viewport().map(|v| (v[0], v[1]))
     }
 
     fn grab(&self, r: [f64; 4]) -> Result<crate::host::capture::Shot> {
-        let (_, vh, k) = self.viewport()?;
         self.with(|g| {
-            let (_, ch) = g.size()?;
-            let top = ch - vh * k;
-            let s = g.grab([r[0] * k, top + r[1] * k, r[2] * k, r[3] * k])?;
+            let (x0, y0, k) = self.place(g)?;
+            let s = g.grab([x0 + r[0] * k, y0 + r[1] * k, r[2] * k, r[3] * k])?;
             Ok(crate::host::capture::Shot { scale: s.scale * k, ..s })
         })
+    }
+
+    fn seq(&self) -> Option<u64> {
+        self.d.grabber.borrow().as_ref().and_then(|g| g.seq())
     }
 
     fn wake(&self, after: &crate::host::capture::Shot, until: Instant) {

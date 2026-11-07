@@ -480,6 +480,16 @@ impl OsInput {
         std::mem::take(&mut self.log.borrow_mut())
     }
 
+    /// The page's viewport in `win`'s client area by the map strobe calibrated (where its posted moves
+    /// landed): its origin there and device-independent pixels per CSS pixel.
+    pub(super) fn page_in_client(&self, win: isize) -> Result<(f64, f64, f64)> {
+        let c0 = self.poster.client_point(win, 0.0, 0.0)?;
+        let c1 = self.poster.client_point(win, 100.0, 0.0)?;
+        let u = ((c1.0 - c0.0) / 100.0).abs().max(0.01);
+        let (o, k) = (self.origin.get(), self.scale.get());
+        Ok(((o.0 - c0.0) / u, (o.1 - c0.1) / u, k.0 / u))
+    }
+
     /// A pixel proof (`Input::pixel`) for the last measured input sent since `since`.
     pub(super) fn prove(&self, since: u64, proof: (u64, u64)) {
         if let Some(i) = self.log.borrow_mut().inputs.iter_mut().rev().take_while(|i| i.t_ns >= since).find(|i| i.kind == "discrete" || (i.kind == "scroll" && i.first)) {
@@ -677,6 +687,7 @@ impl Driver {
             "click" => (opts(1), self.os_click(os, &sel(0), &opts(1), "discrete")?),
             "hover" => {
                 let (x, y, t) = self.os_aim(os, &sel(0), &opts(1))?;
+                self.before_input(&opts(1))?;
                 (opts(1), os.pointer_to(x, y, t)?)
             }
             "move" => {
@@ -686,6 +697,7 @@ impl Driver {
                     Some((_, _, t)) => t.moved(x, y),
                     None => os.target(x, y)?,
                 };
+                self.before_input(&opts(2))?;
                 (opts(2), os.pointer_to(x, y, t)?)
             }
             "type" => {
@@ -693,6 +705,7 @@ impl Driver {
                 self.os_focus(os, &sel(0), &o)?;
                 let delay = Duration::from_millis(o["delay"].as_f64().unwrap_or(0.0).max(0.0) as u64);
                 os.rest(Duration::ZERO, os.frame())?;
+                self.before_input(&o)?;
                 let mut last = host::now_ns();
                 let typing = super::Typing::of(&o);
                 let mut paced = typing == super::Typing::Paced;
@@ -730,6 +743,7 @@ impl Driver {
                 menu_chord(os, &s(0), mods, key)?;
                 // After the click into the field, if there was one: its frames settle first.
                 os.rest(Duration::ZERO, os.frame())?;
+                self.before_input(&o)?;
                 let at = os.poster.press(os.top.get(), None, mods, key)?;
                 os.count(KEY_DOWN);
                 // macOS sends no key up while Command is down: the page never sees one.
@@ -757,6 +771,7 @@ impl Driver {
                 if call == "up" {
                     os.rest(Duration::ZERO, os.frame())?;
                 }
+                self.before_input(&o)?;
                 (o.clone(), os.button(b, call == "down", true)?)
             }
             "down" | "up" => {
@@ -768,6 +783,7 @@ impl Driver {
                 if call == "down" {
                     os.rest(Duration::ZERO, os.frame())?;
                 }
+                self.before_input(&opts(1))?;
                 let at = if call == "down" { os.poster.hold(os.top.get(), key)? } else { os.poster.release(os.top.get(), key)? };
                 // An `up` posts a key up only for a key strobe holds.
                 let mut held = os.held.borrow_mut();
@@ -792,6 +808,7 @@ impl Driver {
                 os.input(os.move_to(t, 0)?, "pointer", false);
                 let frame = os.frame();
                 os.rest(Duration::ZERO, frame)?;
+                self.before_input(&o)?;
                 let (by_y, by_x) = (d["by"].as_f64().unwrap_or(0.0), d["byX"].as_f64().unwrap_or(0.0));
                 // The native driver's pace: one wheel step per refresh at `speed` (default 3000 px/s).
                 let speed = d["speed"].as_f64().unwrap_or(3000.0).max(1.0);
@@ -829,6 +846,7 @@ impl Driver {
                 os.park(x, y)?;
                 os.input(os.move_to(t, 0)?, "pointer", false);
                 os.rest(Duration::ZERO, os.frame())?;
+                self.before_input(&o)?;
                 let (dx, dy) = (d["dx"].as_f64().unwrap_or(0.0), d["dy"].as_f64().unwrap_or(0.0));
                 let at = os.poster.wheel(t, dx, dy)?;
                 if at == 0 {
@@ -883,6 +901,7 @@ impl Driver {
         let gap = os.frame();
         // A frame of what came before (a hover, an earlier step) settles before the press.
         let quiet = os.rest(Duration::ZERO, gap)?;
+        self.before_input(o)?;
         let mut last = 0;
         for k in 0..count {
             // The press shows a pressed look, or does the click (a `mousedown` handler); the release

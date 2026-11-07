@@ -149,6 +149,23 @@ mod imp {
                 None => std::thread::sleep(step),
             }
         }
+
+        fn seq(&self) -> Option<u64> {
+            self.s.grabber.borrow().as_ref().and_then(|g| g.seq())
+        }
+    }
+
+    /// `SessionLocked` for pointer input on a locked Windows session: every point hit-tests to the lock
+    /// screen, so no click, move or wheel can be aimed (checked before any pixel is read to aim it).
+    fn locked_pointer(what: &str) -> Result<()> {
+        if cfg!(windows) && host::session_locked() {
+            return Err(Error::refused(
+                "SessionLocked",
+                format!("{what}: the session is locked, so the OS hit-tests every point to the lock screen and pointer input cannot be aimed"),
+                "run pointer cases on an unlocked session; keys reach the window while locked (type or press without a locator)",
+            ));
+        }
+        Ok(())
     }
 
     impl Session {
@@ -183,7 +200,14 @@ mod imp {
         /// strobe's captures of the app's pixels since the last call: count, wall ms, CPU ms
         /// (`driver.pixel_reads`, `driver.pixel_ms`, `overhead.pixel_pct`).
         pub fn take_pixel_reads(&self) -> (u64, f64, f64) {
-            self.pixels.take_reads()
+            let (n, ms, cpu) = self.pixels.take_reads();
+            (n, ms, cpu + self.grabber.borrow().as_ref().map_or(0.0, Grabber::take_cpu_ms))
+        }
+
+        /// Closes the window's capture (after setup, between a batch's cases): a capture setup opened
+        /// would otherwise copy every frame through the runs. A run that reads pixels opens it again.
+        pub fn close_pixels(&self) {
+            self.grabber.borrow_mut().take();
         }
 
         /// Before a measured input whose `until` waits on pixels: what the region shows now.
@@ -906,6 +930,8 @@ mod imp {
                 return None;
             }
             Some((|| {
+                // Before any pixel is read to aim: on a locked session no point can be aimed at.
+                locked_pointer(&format!("pointer input at {}", if anchor.is_some() { "an image" } else { "a point" }))?;
                 let win = self.windows(o["window"].as_str())?[0];
                 let (px, py) = match (point, anchor) {
                     (Some(p), _) => {
@@ -920,16 +946,6 @@ mod imp {
                     }
                     (None, None) => return Err(Error::msg("internal: a locator")),
                 };
-                // The OS hit-tests every point to the lock screen while the session is locked (Windows).
-                if cfg!(windows) && host::session_locked() {
-                    return Err(Error::refused(
-                        "SessionLocked",
-                        format!(
-                            "pointer input at ({px:.0}, {py:.0}) in the window's client area: the session is locked, so the OS hit-tests every point to the lock screen and a click cannot be aimed"
-                        ),
-                        "run pointer cases on an unlocked session; keys reach the window while locked (type or press without a locator)",
-                    ));
-                }
                 let (x, y) = self.poster.client_point(win, px, py)?;
                 let t = self.poster.target(&self.pids.borrow(), x, y)?;
                 Ok((x, y, t))
@@ -1173,6 +1189,7 @@ mod imp {
                 "move" => {
                     let at = |i: usize| args.get(i).and_then(Value::as_f64).unwrap_or(0.0);
                     let o = opts(2);
+                    locked_pointer("page.move()")?;
                     let (x, y) = self.poster.client_point(main, at(0), at(1))?;
                     // While a button is held the move goes to the window it pressed in, as capture does.
                     let t = match self.pointer.get().filter(|_| self.pressed.get().is_some()) {
@@ -1296,6 +1313,7 @@ mod imp {
                     let d = opts(1);
                     let o = opts(2);
                     let (x, y, t) = if s(0).is_empty() {
+                        locked_pointer("page.wheel() at the window's centre")?;
                         let w = host::window_state(main).ok_or_else(|| Error::msg("the app's window closed"))?;
                         let (x, y) = self.poster.client_point(main, w.client.0 as f64 / w.scale() / 2.0, w.client.1 as f64 / w.scale() / 2.0)?;
                         (x, y, self.poster.target(&self.pids.borrow(), x, y)?)

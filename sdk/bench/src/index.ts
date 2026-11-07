@@ -43,7 +43,11 @@ export interface ImageLocator {
   region?: Region
   /** How alike, over 0 and at most 1. Default 0.95. */
   threshold?: number
-  /** The image's pixels per device-independent pixel: 1 (default), or 2 for an image exported at @2x. */
+  /**
+   * The image's pixels per device-independent pixel: 1 (default), or 2 for an image exported at @2x. Text a toolkit
+   * grid-fits to each size draws other glyphs at another scale (an @2x export scored 0.95 at 1x): capture the image at
+   * the target's own scale, or give `threshold: 0.9`.
+   */
   scale?: number
 }
 

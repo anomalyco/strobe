@@ -559,6 +559,10 @@ fn runs(
             let start = start_screen.clone();
             starts.case(s, x, batch.then_some(base));
             pixel_starts.case(s, x, batch.then_some(base))?;
+            // A capture setup (or the case before) opened would copy every frame through these runs.
+            if let Some(se) = drive.session.get() {
+                se.close_pixels();
+            }
             if batch {
                 case_marks.push((format!("{mark}:start"), host::now_ns()));
             }
@@ -583,7 +587,10 @@ fn runs(
                     starts.check(g + 1, false, &read_start, &wait_start)?;
                 }
                 if !windowless {
-                    pixel_starts.check(g + 1, false, &read_pixels, &wait_pixels)?;
+                    let checked = pixel_starts.check(g + 1, false, &read_pixels, &wait_pixels);
+                    // Closed before the run: it would copy every frame through it.
+                    start_window.borrow_mut().take();
+                    checked?;
                 }
                 if let Some(se) = drive.session.get() {
                     se.window_start(g + 1, false, starts.on())?;
@@ -720,7 +727,9 @@ fn runs(
             }
             starts.check(base + runs.len() + 1, true, &read_start, &wait_start)?;
             if !windowless {
-                pixel_starts.check(base + runs.len() + 1, true, &read_pixels, &wait_pixels)?;
+                let checked = pixel_starts.check(base + runs.len() + 1, true, &read_pixels, &wait_pixels);
+                start_window.borrow_mut().take();
+                checked?;
             }
             if let Some(se) = drive.session.get() {
                 se.window_start(base + runs.len() + 1, true, starts.on())?;
@@ -920,11 +929,9 @@ fn runs(
             // strobe's own reads of the app's tree inside the runs (`ObserverCost`).
             extra.insert("driver.reads".into(), per_run(&|r| r.reads.0 as f64));
             extra.insert("driver.read_ms".into(), per_run(&|r| r.reads.1));
-            // And of its pixels (image locators, pixel waits).
-            if measured.iter().any(|r| r.pixels.0 > 0) {
-                extra.insert("driver.pixel_reads".into(), per_run(&|r| r.pixels.0 as f64));
-                extra.insert("driver.pixel_ms".into(), per_run(&|r| r.pixels.1));
-            }
+            // And of its pixels (image locators, pixel waits; 0 for runs that read none).
+            extra.insert("driver.pixel_reads".into(), per_run(&|r| r.pixels.0 as f64));
+            extra.insert("driver.pixel_ms".into(), per_run(&|r| r.pixels.1));
             let run_ms: f64 = measured.iter().map(|r| r.ms).sum();
             let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms.max(1.0));
             // Drags: the moves strobe posted, beside the frames the app drew.
@@ -1124,7 +1131,7 @@ fn runs(
             }
             super::block::untimed_state(s, &measured.iter().map(|r| &r.timed).collect::<Vec<_>>(), &mut values, &mut refused);
             if x.measures_time() {
-                super::pixel_overhead(s, pixel_pct, &mut refused);
+                super::pixel_overhead(s, pixel_pct, &mut values, &mut refused);
             }
             for m in refused.keys() {
                 values.remove(m);
@@ -1629,6 +1636,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         let deadline = Instant::now() + timeout;
         // (epoch ms, cycles of the tree) when the launch was ready.
+        // A launch timed to pixels: its captures (count, wall ms, strobe's CPU ms).
+        let pixel_reads: Cell<Option<(u64, f64, f64)>> = Cell::new(None);
         let ready: (f64, u64) = if let Until::Milestone(name) = &until {
             // The first line matching it, from the output as it arrives or the log files under the
             // home (read every 20 ms); its time is when strobe read it, or the line's own `at`.
@@ -1688,6 +1697,12 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             let cell = RefCell::new(presents.take());
             let pixel = session.pixel_until(sel, deadline.saturating_duration_since(Instant::now()), &cell);
             presents = cell.into_inner();
+            // What reading the window cost during the launch it times.
+            let read = session.take_pixel_reads();
+            session.close_pixels();
+            if read.0 > 0 {
+                pixel_reads.set(Some(read));
+            }
             if let Some((lacked, had)) = pixel.map_err(|e| Error { message: format!("{} launch: {}", s.case, e.message), ..e })? {
                 let cycles = n.processes().iter().map(|p| p.cycles).sum();
                 let Some(lacked) = lacked else {
@@ -1879,6 +1894,16 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                     .insert(m.clone(), Refusal::new(ValidatorId::Headless, format!("{m}: the window's pixels come from the headless Wayland compositor strobe runs, which shows them on no display")));
             }
         }
+        // A launch timed to pixels: strobe's reads of the window while it launched, over 2% of a core
+        // refusing its times (`pixel_overhead`).
+        let pixel_pct = pixel_reads.get().map(|(_, _, cpu)| 100.0 * cpu / ready_ms.max(1.0));
+        if let Some((k, ms, _)) = pixel_reads.get() {
+            values.insert("driver.pixel_reads".into(), k as f64);
+            values.insert("driver.pixel_ms".into(), ms);
+            if !profile {
+                super::pixel_overhead(s, pixel_pct, &mut values, &mut refused);
+            }
+        }
         if let (false, Some(r)) = (profile, refused.get(&s.primary)) {
             return Err(r.clone().fix("pick a primary a launch case measures").into());
         }
@@ -1948,6 +1973,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             steps: steps.clone(),
             shown,
             refused,
+            overhead: pixel_pct.map(|p| Overhead { pixel_pct: Some(p), ..Overhead::default() }),
             process_set: Some(programs(&procs)),
             same: same.take(0..1),
             client: opened.as_ref().map(client_of),

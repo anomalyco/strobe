@@ -3226,6 +3226,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         for (role, who) in ["base", "head"].into_iter().zip([names.0, names.1]) {
             warnings.extend(observer_pixels(&blocks, role, who));
         }
+        warnings.extend(observer_pixel_sides(&blocks, names));
     } else {
         for (role, who) in ["base", "head"].into_iter().zip(names) {
             warnings.extend(observer_reads(&blocks, role, who, is_native(&target)));
@@ -3687,11 +3688,37 @@ fn observer_pixels(blocks: &[Block], role: &str, who: &str) -> Option<Warning> {
     ))
 }
 
+/// `ObserverCost` between the two sides of an implementation comparison: one side's runs read its pixels at
+/// least 4 more times a run than the other's and over 4 times as often (an image found in every run on one
+/// side, a point on the other), so strobe's own work in the runs differs by side.
+fn observer_pixel_sides(blocks: &[Block], names: (&str, &str)) -> Option<Warning> {
+    let reads = |role: &str| {
+        let v: Vec<f64> = blocks.iter().filter(|b| b.variant == role).filter_map(|b| b.values.get("driver.pixel_reads").copied()).collect();
+        (!v.is_empty()).then(|| metrics::median(&v))
+    };
+    let (b, h) = (reads("base")?, reads("head")?);
+    ((b - h).abs() >= 4.0 && b.max(h) > 4.0 * b.min(h)).then(|| {
+        validity::warn(
+            "ObserverCost",
+            format!(
+                "strobe read {}'s pixels {b:.1} times a run and {}'s {h:.1}: one side is read over 4 times as often, and each capture is work the other side's runs do not pay; find images in setup on both sides and aim at points",
+                names.0, names.1
+            ),
+        )
+    })
+}
+
 /// `OverheadBudget` (SPEC §19): strobe's pixel reads in the runs used over 2% of a core, so the runs they
 /// timed are disturbed: the series' timing and latency metrics are refused.
-fn pixel_overhead(s: &Series, pct: Option<f64>, refused: &mut BTreeMap<String, Refusal>) {
+fn pixel_overhead(s: &Series, pct: Option<f64>, values: &mut BTreeMap<String, f64>, refused: &mut BTreeMap<String, Refusal>) {
     let Some(p) = pct.filter(|p| *p > 2.0) else { return };
-    let timing = |m: &str| ["frames.", "interaction.", "scroll.", "display.", "phase.", "span.", "launch.", "tty."].iter().any(|x| m.starts_with(x)) || m == "run.duration";
+    // Times and rates over the runs' wall time: what strobe's reads stretched or competed with. A total
+    // of the app's own work (`cpu.work`, memory, IO) stays.
+    let timing = |m: &str| {
+        ["frames.", "interaction.", "scroll.", "display.", "phase.", "span.", "launch.", "tty.", "input."].iter().any(|x| m.starts_with(x))
+            || matches!(m, "run.duration" | "cpu.app.total" | "cpu.wakes" | "ui.wakes" | "main.busy")
+    };
+    values.retain(|k, _| !timing(k));
     for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| timing(m)) {
         refused.entry(m.clone()).or_insert_with(|| {
             Refusal::new(ValidatorId::OverheadBudget, format!("{m}: strobe's pixel reads in the runs used {} of a core (budget 0.5%), so the runs it timed are disturbed", pct_of_core(p)))
@@ -4387,6 +4414,8 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // A series that may run locked but met a hidden window on an unlocked screen (a `--check` or
     // `record --bench` of a windowed native case): it waits and retries as on-screen blocks do.
     let mut hidden_unlocked = false;
+    // What such a series met, said while it waits for an unlock.
+    let mut met = "it met a hidden window";
     // A phone's page, or an app on the headless compositor strobe runs: this computer's lock and display
     // are not its screen.
     let own_screen = ctx.phone.is_some() || cases.iter().all(|s| on_headless_compositor(&ctx.describe["targets"][v.target_of(s)], &ctx.config));
@@ -4431,6 +4460,16 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 hidden_unlocked = true;
                 break;
             }
+            // Pointer input a locked session cannot aim (a click in a `--pixels` block, which runs locked to
+            // read a native app's window): discarded, and the block waits for an unlock as on-screen
+            // blocks do. Elsewhere (`--check`) the refusal stands: it says what to fix at once.
+            if start && x.pixels.is_some() && refused_by(&r) == Some(ValidatorId::SessionLocked) {
+                discard(&r);
+                hidden_unlocked = true;
+                met = "its pointer input cannot be aimed on a locked session";
+                progress(format!("  a {} block's pointer input met the locked session: discarded, it runs again once unlocked", v.role));
+                break;
+            }
             if steady && lit {
                 return stamped(r, cases, |s, mut b| {
                     b.display = display.map(|d| d.0);
@@ -4451,7 +4490,7 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             std::thread::sleep(Duration::from_secs(3));
         }
         if host::session_locked() {
-            let why = needs_screen(ctx, s, x).unwrap_or_else(|| "it met a hidden window".into());
+            let why = needs_screen(ctx, s, x).unwrap_or_else(|| met.into());
             progress(format!("  waiting: the session is locked and {} needs a presenting window: {why}; strobe resumes when it is unlocked", s.label()));
             // Nothing held while waiting: the user's power plan, sleep as they set it, and the slot, so
             // other benches run what needs no presenting window meanwhile.
@@ -5844,6 +5883,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             }
             let docs = page.documents();
             driver.take_reads();
+            // A `page.window` since the last run: the viewport is read again here, outside the run.
+            if !headless && on_phone.is_none() {
+                let _ = driver.prime_viewport();
+            }
             driver.take_pixel_reads();
             edges.borrow_mut().clear();
             reads_before.set((0, 0.0));
@@ -6098,6 +6141,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let start = start_screen.clone();
                 starts.case(s, x, batch.then_some(base));
                 pixel_starts.case(s, x, batch.then_some(base))?;
+                // A window capture setup (or the case before) opened would copy frames through these runs;
+                // the viewport a timed pixel read maps is read now, outside them.
+                driver.close_pixels();
+                if !headless && on_phone.is_none() {
+                    let _ = driver.prime_viewport();
+                }
                 loaded_document.set(false);
                 let burst0 = burst_keys.get();
                 let mark = format!("case:{k}:{}", batch::mark_name(&s.case));
@@ -6536,10 +6585,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 extra.insert("cpu.work".to_string(), measured.iter().enumerate().filter(|(_, r)| r.cpu.is_finite()).map(|(j, r)| (key(j), r.cpu * r.ms / 100.0)).collect());
                 extra.insert("driver.reads".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.reads.0 as f64)).collect());
                 extra.insert("driver.read_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.reads.1)).collect());
-                if measured.iter().any(|r| r.pixels.0 > 0) {
-                    extra.insert("driver.pixel_reads".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.0 as f64)).collect());
-                    extra.insert("driver.pixel_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.1)).collect());
-                }
+                extra.insert("driver.pixel_reads".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.0 as f64)).collect());
+                extra.insert("driver.pixel_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.1)).collect());
                 // The page as each measured run left it (`RunEnd`), the median over the runs.
                 let heap: BTreeMap<String, f64> = measured.iter().enumerate().filter_map(|(j, r)| Some((key(j), r.end.heap_mb?))).collect();
                 let dom: BTreeMap<String, f64> = measured.iter().enumerate().filter_map(|(j, r)| Some((key(j), r.end.nodes? as f64))).collect();
@@ -6705,9 +6752,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 // timing they shared the runs with is refused.
                 let run_ms_sum: f64 = measured.iter().map(|r| r.ms).sum();
                 let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms_sum.max(1.0));
+                let disturbed = x.measures_time() && pixel_pct.is_some_and(|p| p > 2.0);
                 if x.measures_time() {
-                    pixel_overhead(s, pixel_pct, &mut refused);
-                    values.retain(|k, _| !refused.contains_key(k));
+                    pixel_overhead(s, pixel_pct, &mut values, &mut refused);
                 }
                 // The launch's steps before the runs, the case's warmup and runs, then the launch's after them.
                 let launch_steps = steps.borrow();
@@ -6722,9 +6769,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     speed_ratio: ratio,
                     nodes,
                     recording: None,
-                    phases,
-                    frames,
-                    intervals,
+                    // Timing disturbed by strobe's pixel reads (`pixel_overhead`) feeds no later analysis.
+                    phases: if disturbed { Default::default() } else { phases },
+                    frames: if disturbed { Default::default() } else { frames },
+                    intervals: if disturbed { Default::default() } else { intervals },
                     steps,
                     background: background.clone(),
                     leak: leak.clone(),
@@ -7999,6 +8047,17 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
                 .fix("run on a machine with a GPU, or choose a CPU primary: cpu.work, cpu.app.total, run.duration or phase.<name>"),
             ));
         }
+    }
+    // A launch timed to an image or pixels: only a native app's window is read from outside while it
+    // launches (a page's launch is timed in its own document, a terminal's on its grid).
+    if s.launch.is_object() && crate::driver::pixels::is_pixels(&s.launch["until"]) && !is_native(t) {
+        return Ok(Some(
+            Refusal::new(
+                ValidatorId::NotForTarget,
+                format!("launch.until: an image or pixels on a {} target's launch; only a native app's window is read from outside while it launches", t["kind"].as_str().unwrap_or("?")),
+            )
+            .fix("time the launch to a selector (a page's canvas element, a heading) or text, or launch the app as a native target"),
+        ));
     }
     if !page {
         return Ok(None);

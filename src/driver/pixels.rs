@@ -204,6 +204,11 @@ pub(crate) trait Source {
     fn grab(&self, r: [f64; 4]) -> Result<Shot>;
     /// Until the target may show something other than `after` (a frame after it), at most `until`.
     fn wake(&self, after: &Shot, until: Instant);
+    /// The source's frame count now, where frames come as events (Windows.Graphics.Capture): a still
+    /// window sends none, so an unchanged count says the pixels held without reading them. None elsewhere.
+    fn seq(&self) -> Option<u64> {
+        None
+    }
     /// What the area is called in messages.
     fn what(&self) -> &'static str {
         "window's client area"
@@ -242,6 +247,10 @@ impl Source for Window<'_> {
             return;
         }
         std::thread::sleep(until.min(Instant::now() + Duration::from_millis(30)).saturating_duration_since(Instant::now()));
+    }
+
+    fn seq(&self) -> Option<u64> {
+        self.cell.borrow().as_ref().and_then(|g| g.seq())
     }
 }
 
@@ -474,27 +483,50 @@ impl Pixels {
                     Some(b) => b.shot,
                     None => self.shoot(src, rect)?,
                 };
-                let mut since = last.t_ns;
+                // Held since the frame that last changed it, and never since before the wait began (a
+                // compositor's frame of a window that held still for a while is old, and the input's own
+                // frame may still be on its way).
+                let hold = ms * 1_000_000;
+                let mut since = last.t_ns.max(crate::host::now_ns());
                 loop {
-                    src.wake(&last, deadline.min(Instant::now() + Duration::from_millis(50)));
+                    let left = Duration::from_nanos((since + hold).saturating_sub(crate::host::now_ns()));
+                    match src.seq() {
+                        // Frames as events: sleep until the next one, or until it held long enough; no frame
+                        // means the pixels held, with nothing read.
+                        Some(_) => {
+                            src.wake(&last, deadline.min(Instant::now() + left));
+                            if src.seq() == Some(last.seq) {
+                                if crate::host::now_ns() >= since + hold {
+                                    return Ok(Proof { lacked: None, had: since, timing: false });
+                                }
+                                if Instant::now() >= deadline {
+                                    return Err(unstable(*ms, t));
+                                }
+                                continue;
+                            }
+                        }
+                        None => src.wake(&last, deadline.min(Instant::now() + left.min(Duration::from_millis(50)))),
+                    }
                     let shot = self.shoot(src, rect)?;
                     let (_, max) = crate::image::moved(&last.img, &shot.img, 8);
-                    // Held since the frame that last changed it, until now: a compositor sends no frame of
-                    // a window that holds still, so the time a still capture shows does not move on.
                     if max > 8 {
-                        since = shot.t_ns;
-                    } else if crate::host::now_ns().saturating_sub(since) >= ms * 1_000_000 {
+                        since = shot.t_ns.max(since);
+                    } else if crate::host::now_ns() >= since + hold {
                         return Ok(Proof { lacked: None, had: since, timing: false });
                     }
                     if Instant::now() >= deadline {
-                        return Err(Error::timeout(format!("pixels stable: the region never held still for {ms} ms in {:.1} s", t.as_secs_f64()))
-                            .hint("an animation, a caret or a spinner in the region keeps it moving: narrow the region, or wait for an image"));
+                        return Err(unstable(*ms, t));
                     }
                     last = shot;
                 }
             }
         }
     }
+}
+
+fn unstable(ms: u64, t: Duration) -> Error {
+    Error::timeout(format!("pixels stable: the region never held still for {ms} ms in {:.1} s", t.as_secs_f64()))
+        .hint("an animation, a caret or a spinner in the region keeps it moving: narrow the region, or wait for an image")
 }
 
 /// A capture before an input, and whether it already had what the wait after it wants.

@@ -9,7 +9,9 @@
 //!   it captures Direct3D 12 and Vulkan flip-model windows a `PrintWindow` misses (black).
 //!   Without Windows.Graphics.Capture: `PrintWindow`, cropped.
 //! - macOS: `CGWindowListCreateImage` of the region's screen rect, this window only (Screen Recording).
-//! - Linux X11: `GetImage` of the region of the window, once it is viewable and on top there.
+//! - Linux X11: `GetImage` of the region of the window, once it is viewable and on top there. A window
+//!   of the headless Wayland compositor strobe runs: the compositor's copy of the region, once it shows
+//!   and no window covers it there.
 //!
 //! Regions are in the window's client area, device-independent pixels (macOS: points of the whole
 //! frame, as `host::window_placement` has it); a capture says how many of its pixels make one.
@@ -99,7 +101,12 @@ impl Grabber {
         #[cfg(target_os = "macos")]
         let (img, at, seq) = (super::macos::window_region(self.win, px).map_err(no_source)?, super::now_ns(), 0);
         #[cfg(target_os = "linux")]
-        let (img, at, seq) = (super::x11::window_region(self.win, px.map(|v| v as i32)).map_err(hidden)?, super::now_ns(), 0);
+        let (img, at, seq) = {
+            let px = px.map(|v| v as i32);
+            // A window of the headless compositor strobe runs, else the X server's.
+            let img = if super::wayland::owns(self.win) { super::wayland::shown_region(self.win, px) } else { super::x11::window_region(self.win, px) };
+            (img.map_err(hidden)?, super::now_ns(), 0)
+        };
         let scale = img.width as f64 / (x1 - x0);
         // A frame time is when it was composed: both ends are it, and it reaches the screen up to a
         // refresh later.
@@ -131,6 +138,23 @@ impl Grabber {
         }
         let _ = (seq, until);
         false
+    }
+
+    /// The capture's frame count now (Windows.Graphics.Capture); None where frames are not events.
+    pub fn seq(&self) -> Option<u64> {
+        #[cfg(windows)]
+        return self.os.as_ref().map(|w| w.seq());
+        #[cfg(not(windows))]
+        None
+    }
+
+    /// strobe's CPU (ms) on the capture's own threads since the last call: its frame events copying each
+    /// frame out of the pool (Windows), part of what its reads cost (`overhead.pixel_pct`).
+    pub fn take_cpu_ms(&self) -> f64 {
+        #[cfg(windows)]
+        return self.os.as_ref().map_or(0.0, |w| w.take_cpu_ms());
+        #[cfg(not(windows))]
+        0.0
     }
 }
 
@@ -177,6 +201,8 @@ mod wgc {
         d3d: IDirect3DDevice,
         latest: Mutex<Latest>,
         cv: Condvar,
+        /// The frame events' CPU so far (ns), from each event thread's own cycles.
+        cpu_ns: std::sync::atomic::AtomicU64,
     }
 
     // SAFETY: the device is free-threaded and its immediate context multithread-protected
@@ -205,11 +231,14 @@ mod wgc {
             let item = item(hwnd)?;
             let size = item.Size().map_err(|e| win(e, "the window's size"))?;
             let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).map_err(|e| win(e, "the capture's frame pool"))?;
-            let shared = Arc::new(Shared { device, ctx, d3d, latest: Mutex::new(Latest::default()), cv: Condvar::new() });
+            let shared = Arc::new(Shared { device, ctx, d3d, latest: Mutex::new(Latest::default()), cv: Condvar::new(), cpu_ns: Default::default() });
             let s = shared.clone();
             pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(move |pool, _| {
                 if let Some(pool) = pool.as_ref() {
+                    let cpu = crate::probe::video::ThreadCpu::start();
                     s.take(pool);
+                    let ns = (cpu.ms().unwrap_or(0.0) * 1e6) as u64;
+                    s.cpu_ns.fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(())
             }))
@@ -223,6 +252,16 @@ mod wgc {
                 return Err(Error::msg("Windows.Graphics.Capture delivered no frame of the window in a second"));
             }
             Ok(w)
+        }
+
+        /// The frames copied so far.
+        pub fn seq(&self) -> u64 {
+            self.shared.latest.lock().unwrap_or_else(|e| e.into_inner()).count
+        }
+
+        /// The frame events' CPU (ms) since the last call.
+        pub fn take_cpu_ms(&self) -> f64 {
+            self.shared.cpu_ns.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6
         }
 
         /// Waits for a frame after the `seq`th, at most until `until`.

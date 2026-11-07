@@ -245,23 +245,27 @@ impl Scaled {
         }
         let factor = [4usize, 2].into_iter().find(|f| w / f >= 4 && h / f >= 4).filter(|_| coarse).unwrap_or(1);
         let coarse = (factor > 1).then(|| {
-            // A coarse cell is opaque when every pixel of it is.
+            // A coarse cell is opaque when most of its pixels are (a thin stroke of a masked template
+            // stays), its colour the mean of its opaque pixels only.
             let (cw, ch) = (w / factor, h / factor);
             let mut rgba = Vec::with_capacity(cw * ch * 4);
             for cy in 0..ch {
                 for cx in 0..cw {
-                    let (mut sum, mut all) = ([0u32; 3], true);
+                    let (mut sum, mut opaque) = ([0u32; 3], 0u32);
                     for y in cy * factor..(cy + 1) * factor {
                         for x in cx * factor..(cx + 1) * factor {
                             let p = &px[y * w + x];
-                            all &= p[3] >= 128;
-                            for c in 0..3 {
-                                sum[c] += p[c] as u32;
+                            if p[3] >= 128 {
+                                opaque += 1;
+                                for c in 0..3 {
+                                    sum[c] += p[c] as u32;
+                                }
                             }
                         }
                     }
-                    let k = (factor * factor) as u32;
-                    rgba.extend_from_slice(&[(sum[0] / k) as u8, (sum[1] / k) as u8, (sum[2] / k) as u8, if all { 255 } else { 0 }]);
+                    let k = opaque.max(1);
+                    let most = 2 * opaque > (factor * factor) as u32;
+                    rgba.extend_from_slice(&[(sum[0] / k) as u8, (sum[1] / k) as u8, (sum[2] / k) as u8, if most { 255 } else { 0 }]);
                 }
             }
             Scaled::of(&Image { width: cw, height: ch, rgba }, false).map(Box::new)
@@ -386,26 +390,49 @@ fn colour_delta(frame: &Image, t: &Scaled, x: usize, y: usize) -> f64 {
     d as f64 / (3 * t.n) as f64
 }
 
-/// `img` at `w` × `h`: a box filter when it shrinks, bilinear when it grows; alpha with it.
+/// The source pixels each of `dst` output pixels covers when `src` shrinks to `dst`, with how much of
+/// each it covers (a fractional box: 2 → 1.5 gives every output 1.33 source pixels, never 1, 1, 2).
+fn spans(src: usize, dst: usize) -> Vec<Vec<(usize, f64)>> {
+    let k = src as f64 / dst as f64;
+    (0..dst)
+        .map(|i| {
+            let (a, b) = (i as f64 * k, (i + 1) as f64 * k);
+            (a.floor() as usize..(b.ceil() as usize).min(src)).map(|j| (j, b.min(j as f64 + 1.0) - a.max(j as f64))).filter(|(_, w)| *w > 1e-9).collect()
+        })
+        .collect()
+}
+
+/// `img` at `w` × `h`: an area-weighted box filter when it shrinks, bilinear when it grows, both over
+/// premultiplied alpha (a transparent pixel's colour never darkens an opaque edge).
 fn resample(img: &Image, w: usize, h: usize) -> Image {
     let (sw, sh) = (img.width, img.height);
     let mut rgba = Vec::with_capacity(w * h * 4);
     let px = |x: usize, y: usize| &img.rgba[(y * sw + x) * 4..(y * sw + x) * 4 + 4];
+    // Sums of premultiplied colour, alpha and weight, out as straight RGBA.
+    let mut put = |c: [f64; 3], a: f64, n: f64| {
+        let alpha = if n > 0.0 { a / n } else { 0.0 };
+        for v in c {
+            rgba.push(if a > 0.0 { (v / a).round().clamp(0.0, 255.0) as u8 } else { 0 });
+        }
+        rgba.push((alpha * 255.0).round().clamp(0.0, 255.0) as u8);
+    };
     if w <= sw && h <= sh {
-        for y in 0..h {
-            let (y0, y1) = (y * sh / h, ((y + 1) * sh / h).max(y * sh / h + 1));
-            for x in 0..w {
-                let (x0, x1) = (x * sw / w, ((x + 1) * sw / w).max(x * sw / w + 1));
-                let mut s = [0u32; 4];
-                for yy in y0..y1 {
-                    for xx in x0..x1 {
-                        for (c, v) in px(xx, yy).iter().enumerate() {
-                            s[c] += *v as u32;
+        let (cols, rows) = (spans(sw, w), spans(sh, h));
+        for row in &rows {
+            for col in &cols {
+                let (mut c, mut a, mut n) = ([0f64; 3], 0f64, 0f64);
+                for &(yy, wy) in row {
+                    for &(xx, wx) in col {
+                        let p = px(xx, yy);
+                        let (wt, al) = (wx * wy, p[3] as f64 / 255.0);
+                        for i in 0..3 {
+                            c[i] += p[i] as f64 * al * wt;
                         }
+                        a += al * wt;
+                        n += wt;
                     }
                 }
-                let n = ((y1 - y0) * (x1 - x0)) as u32;
-                rgba.extend(s.iter().map(|v| ((v + n / 2) / n) as u8));
+                put(c, a, n);
             }
         }
     } else {
@@ -417,12 +444,16 @@ fn resample(img: &Image, w: usize, h: usize) -> Image {
                 let fx = ((x as f64 + 0.5) * sw as f64 / w as f64 - 0.5).clamp(0.0, (sw - 1) as f64);
                 let (x0, tx) = (fx.floor() as usize, fx - fx.floor());
                 let x1 = (x0 + 1).min(sw - 1);
-                for c in 0..4 {
-                    let v = |xx: usize, yy: usize| px(xx, yy)[c] as f64;
-                    let top = v(x0, y0) * (1.0 - tx) + v(x1, y0) * tx;
-                    let bottom = v(x0, y1) * (1.0 - tx) + v(x1, y1) * tx;
-                    rgba.push((top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8);
+                let (mut c, mut a) = ([0f64; 3], 0f64);
+                for (xx, yy, wt) in [(x0, y0, (1.0 - tx) * (1.0 - ty)), (x1, y0, tx * (1.0 - ty)), (x0, y1, (1.0 - tx) * ty), (x1, y1, tx * ty)] {
+                    let p = px(xx, yy);
+                    let al = p[3] as f64 / 255.0;
+                    for i in 0..3 {
+                        c[i] += p[i] as f64 * al * wt;
+                    }
+                    a += al * wt;
                 }
+                put(c, a, 1.0);
             }
         }
     }
