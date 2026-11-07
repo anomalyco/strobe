@@ -16,6 +16,10 @@ const NEAR_DIP: f64 = 2.0;
 /// that lie outside it, even maximized.
 const SLACK_DIP: f64 = if cfg!(windows) { 8.0 } else { 1.0 };
 
+/// The part of a frame that lies past the work area unseen (DIP): Windows' invisible resize borders on
+/// the left, right and bottom. Elsewhere `SLACK_DIP` is only a rounding tolerance, never room to offer.
+const OVERHANG_DIP: f64 = if cfg!(windows) { 8.0 } else { 0.0 };
+
 /// The longest strobe waits for the window to take a size and its content to hold still.
 const SETTLE: Duration = Duration::from_secs(1);
 
@@ -282,7 +286,9 @@ fn inside(p: &Placement, size: (f64, f64)) -> [f64; 4] {
 
 /// `DisplayTooSmall` for a window of `size` (screen units) whose own part is `chrome`.
 fn too_small(s: Sizing, size: (f64, f64), chrome: (f64, f64), work: [f64; 4], k: f64) -> Error {
-    let most = ((work[2] - chrome.0) / k + 2.0 * SLACK_DIP, (work[3] - chrome.1) / k + SLACK_DIP);
+    // The largest content whose window fits the work area (only its unseen borders past it); a value a
+    // rounding error short of a whole point at a fractional scale floors to that point.
+    let most = ((work[2] - chrome.0) / k + 2.0 * OVERHANG_DIP + 1e-6, (work[3] - chrome.1) / k + OVERHANG_DIP + 1e-6);
     Refusal::new(
         ValidatorId::DisplayTooSmall,
         format!(

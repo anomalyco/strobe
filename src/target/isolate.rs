@@ -1588,10 +1588,10 @@ pub fn restore_protocols(home: &Path) {
 /// account (`NSHomeDirectory`, Application Support, caches, saved window state), which only
 /// `CFFIXED_USER_HOME` (set by `prepare_home`) moves, and `cfprefsd` writes its preferences for the
 /// user whatever the process's home. A launched copy may still write into the user's own `~/Library`
-/// folders for its bundle id. So strobe launches such an app only while none of those
-/// folders exist (a build with its own bundle id, or an app this user never ran), records which it
-/// may create, and removes them (and the preferences domain) when the launch is released. A sandboxed
-/// app's container is in the user's Library too: refused.
+/// folders for its bundle id (a bare executable: for its name, through a daemon). So strobe launches
+/// such an app only while none of those folders exist (a build with its own bundle id, or an app this
+/// user never ran), records which it may create, and removes them (and the preferences domain) when
+/// the launch is released. A sandboxed app's container is in the user's Library too: refused.
 #[cfg(target_os = "macos")]
 mod macos_library {
     use super::*;
@@ -1605,19 +1605,29 @@ mod macos_library {
         (id.clone().unwrap_or_else(|| name.clone()), id.is_some().then_some(name))
     }
 
+    /// An executable outside any app bundle (a command-line program, a bare build).
+    fn bare(app: &App) -> bool {
+        !app.exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app"))
+    }
+
     fn places(app: &App) -> (String, Vec<PathBuf>) {
         let (id, name) = ids(app);
         let lib = host::home().join("Library");
         let mut p = vec![
             lib.join(format!("Preferences/{id}.plist")),
-            lib.join(format!("Application Support/{id}")),
-            lib.join(format!("Caches/{id}")),
-            lib.join(format!("Saved Application State/{id}.savedState")),
             lib.join(format!("HTTPStorages/{id}")),
             lib.join(format!("WebKit/{id}")),
             lib.join(format!("Cookies/{id}.binarycookies")),
             lib.join(format!("Containers/{id}")),
         ];
+        // The folders a process looks up itself (its caches, data and saved state) follow `HOME` and
+        // `CFFIXED_USER_HOME` into the home. A bundle's helpers and services that launchd starts under
+        // its id never get that environment, so a bundle's are counted; a bare executable has no
+        // bundle id to key them by: what is left in the user's Library for it is what a daemon
+        // writes under its name (cfprefsd's preferences, network and web storage).
+        if !bare(app) {
+            p.extend([lib.join(format!("Application Support/{id}")), lib.join(format!("Caches/{id}")), lib.join(format!("Saved Application State/{id}.savedState"))]);
+        }
         if let Some(n) = name {
             p.push(lib.join(format!("Application Support/{n}")));
         }
@@ -1651,7 +1661,11 @@ mod macos_library {
                     p.display(),
                     if p.try_exists().is_err() { "may exist (macOS would not let strobe look)" } else { "exists" }
                 ),
-                "measure a build with its own bundle id (or one this account never ran)",
+                if bare(app) {
+                    "measure a copy of the program under another file name (macOS keys a bare executable's data by its name)"
+                } else {
+                    "measure a build with its own bundle id (or one this account never ran)"
+                },
             ));
         }
         Ok(())
