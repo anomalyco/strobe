@@ -1,6 +1,6 @@
 // Dev bench for image anchors and pixel waits (SPEC 9.6; not shipped): a window drawn with no accessibility tree
-// (canvas-app.cs on Windows, built here with the .NET Framework's compiler; canvas-app.py, GTK, on Linux) and a page
-// drawn on one canvas. The anchors are the fixtures' own tiles, written to a temporary folder. Run from the repo root:
+// (canvas-app.cs on Windows, built here with the .NET Framework's compiler; canvas-app.swift on macOS, built with
+// swiftc; canvas-app.py, GTK, on Linux) and a page drawn on one canvas. The anchors are the fixtures' own tiles, written to a temporary folder. Run from the repo root:
 //   strobe bench scripts/dev/canvas.bench.ts --head . --check
 // Expected refusals: `ambiguous` AnchorAmbiguous (two ITEM tiles), `missing` AnchorNotFound, `dirty` ResetIncomplete
 // (resetPixels), and on a locked session `click` SessionLocked (keys still reach the window there).
@@ -13,11 +13,14 @@ import path from "node:path"
 const dir = path.join(tmpdir(), "strobe-canvas")
 mkdirSync(dir, { recursive: true })
 const windows = process.platform === "win32"
-const exe = windows ? path.join(dir, "canvas-app.exe") : path.join(import.meta.dir, "canvas-app.py")
-const source = path.join(import.meta.dir, "canvas-app.cs")
-if (windows && (!existsSync(exe) || statSync(exe).mtimeMs < statSync(source).mtimeMs))
-  execFileSync("C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe", ["/nologo", "/target:winexe", `/out:${exe}`, source])
-if (!existsSync(path.join(dir, "play.png"))) execFileSync(windows ? exe : "python3", windows ? ["--anchors", dir] : [exe, "--anchors", dir])
+const mac = process.platform === "darwin"
+const exe = windows ? path.join(dir, "canvas-app.exe") : mac ? path.join(dir, "canvas-app") : path.join(import.meta.dir, "canvas-app.py")
+const source = path.join(import.meta.dir, windows ? "canvas-app.cs" : "canvas-app.swift")
+if ((windows || mac) && (!existsSync(exe) || statSync(exe).mtimeMs < statSync(source).mtimeMs)) {
+  if (windows) execFileSync("C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe", ["/nologo", "/target:winexe", `/out:${exe}`, source])
+  else execFileSync("swiftc", ["-O", source, "-o", exe])
+}
+if (!existsSync(path.join(dir, "play.png"))) execFileSync(windows || mac ? exe : "python3", windows || mac ? ["--anchors", dir] : [exe, "--anchors", dir])
 
 // A tile of the window's, and one of the page's (written by its setup).
 const tile = (name: string) => path.join(dir, `${name}.png`)

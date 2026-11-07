@@ -1481,15 +1481,17 @@ impl Driver {
                 let count = o["count"].as_u64().unwrap_or(1).clamp(1, 3);
                 let (held, bit) = (self.buttons.get().0, cdp_button(b).1);
                 self.pointer.set((x, y));
-                self.before_input(&o)?;
                 match &self.page {
                     Page::Firefox(_) | Page::Webkit(_) => {
+                        self.before_input(&o)?;
                         self.webdriver_click((x, y), b, mods & !self.mods.get(), count)?;
                         return self.until(&o);
                     }
                     Page::Chromium(_) => {}
                 }
                 self.mouse("mouseMoved", (x, y), None, held, 0, mods)?;
+                // After the move: what a hover drew is not the click's reaction.
+                self.before_input(&o)?;
                 // Each press of a double or triple click carries its count, as a mouse's do. Chromium's
                 // trace times a single click's events (`sent`: the action log's edges only).
                 for k in 1..=count {
