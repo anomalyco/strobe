@@ -439,7 +439,8 @@ export default bench({
   `{ x, y, space: "norm" }`; off the viewport is `OutOfView`.
 - No accessibility tree or DOM (a canvas, a game, a GPU toolkit's widgets): image anchors (native and pages).
   - `page.click({ image: "play.png" })` (path relative to the bench file; `region`, `threshold` 0.95,
-    `scale: 2` for an @2x export). None shows: `AnchorNotFound` (best score and where;
+    `scale: 2` for an @2x export; text drawn at another scale may score 0.95: capture at the target's
+    scale or give `threshold: 0.9`). None shows: `AnchorNotFound` (best score and where;
     `failed-<step>-anchor.png`). Two or more: `AnchorAmbiguous`.
   - `page.query({ image })` lists every match (`point`, `rect`, `score`): query in setup, click points in the run.
   - Waits: `until: { image }`, `until: { pixels: { region, changed: true } }` (vs before the input),
@@ -447,7 +448,10 @@ export default bench({
   - After an input, `changed` or an image is its pixel proof: `interaction.*` from the one OS frame between
     the last capture without it and the first with it.
   - Each capture in a run counts (`driver.pixel_reads`, `ObserverCost` past 8); strobe's CPU in them over 2%
-    refuses timing metrics. Headless pages refuse pixel reads inside timed runs (`Headless`).
+    of a core refuses timing metrics (`--check` says so too). A read took 2 to 3 ms on Windows and X11,
+    10 ms on the headless Wayland compositor and 20 ms on macOS: a `changed` wait per run stayed under
+    the bar on Windows (frames come as events) and went over it on macOS. Headless pages refuse pixel
+    reads inside timed runs (`Headless`).
   - `resetPixels: { region, ignore, tolerance }` on the target or case: runs that start from other pixels
     are `ResetIncomplete`. Try one with `strobe look exe:<path> --until image=play.png`.
 
@@ -459,8 +463,9 @@ export default bench({
   - any native case with those under `--check`
 - Both blocks of a pair also share the display state (a locked display sleeps; `DisplayOff` says so).
 - Everything with frames, pixels or a window waits for an unlock.
-- Locked, a native app's accessibility tree, `page.act` and keys work; clicks are refused.
-  On Windows its pixels read too (image anchors, pixel waits, `--pixels`).
+- Locked, a native app's accessibility tree, `page.act` and keys work; clicks, moves and wheels are refused.
+  On Windows its pixels read too (image anchors, pixel waits, `--pixels`); a `--pixels` block whose
+  clicks meet the lock waits for an unlock.
 - GPU use (`gpu.process.3d`) is refused in locked blocks; GPU memory is kept.
 - `record pid:…` on a locked session keeps CPU, threads, IO, GPU, memory and `--probes deep` stacks and refuses only frames.
 - A profile with `"window": false` records without a window.

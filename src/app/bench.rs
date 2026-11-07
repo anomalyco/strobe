@@ -3727,8 +3727,11 @@ fn pixel_overhead(s: &Series, pct: Option<f64>, values: &mut BTreeMap<String, f6
     values.retain(|k, _| !timing(k));
     for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| timing(m)) {
         refused.entry(m.clone()).or_insert_with(|| {
-            Refusal::new(ValidatorId::OverheadBudget, format!("{m}: strobe's pixel reads in the runs used {} of a core (budget 0.5%), so the runs it timed are disturbed", pct_of_core(p)))
-                .fix("find images in setup (page.query({ image })) and aim at the points, or wait on until: \"frame\" or \"idle\" in the runs")
+            Refusal::new(
+                ValidatorId::OverheadBudget,
+                format!("{m}: strobe's pixel reads in the runs used {} of a core (over 2%; the budget is 0.5%), so the runs it timed are disturbed", pct_of_core(p)),
+            )
+            .fix("find images in setup (page.query({ image })) and aim at the points, or wait on until: \"frame\" or \"idle\" in the runs")
         });
     }
 }
