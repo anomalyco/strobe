@@ -408,6 +408,31 @@ export default bench({
   - `page` and every page metric work as on `app()` targets; CPU and memory cover the app and its webview processes.
   - Linux (WebKitGTK) and macOS (WKWebView): refused `EngineUnsupported` before anything launches; measure the app with `native("my-app")` through its accessibility tree.
 
+### Terminal programs (TUIs)
+
+- `tty(["my-tui", "--flag"], { cols: 120, rows: 40 })` (or a command line): the program on strobe's own terminal
+  (ConPTY on Windows, a pseudo-terminal elsewhere) in a fresh isolated home; no display needed (locked, headless).
+  - Look first: `strobe look tty:"my-tui" --until text=Ready --press Control+p --out grid.png` prints the grid.
+  - Selectors are text on the grid: `"text=Ready"`, `'text="two words"'`, `text==` a whole row; points are cells,
+    `[col, row]` from 0.
+  - Keys go as the terminal would send them (the progressive keyboard protocol once the program pushes it).
+  - Mouse calls need the program's mouse reporting, else `MouseNotEnabled`; `wheel`/`scroll` take notches.
+  - `page.window({ resize: { width: cols, height: rows } })` resizes; `"restore"` goes back.
+  - Metrics: `tty.latency.p50/p95` (input to the first grid change), `tty.settle.p50` (to the last change),
+    `tty.updates`, `tty.frames` (synchronized output), `tty.bytes`, `tty.cells`, `cpu.work`, `memory.app.private`;
+    Windows' console host is `cpu.pty_host`, never in `cpu.work`.
+  - Windows: ConPTY redraws first at a resize, so its `tty.latency` and `until: "frame"` are refused (`NotOnThisOs`), and
+    `tty.settle` only counts when the program redrew after the host. Time a resize there with a phase whose `until`
+    is text only the program's redraw shows, or its `{ state }` on STROBE_EVENTS; Linux and macOS give `tty.latency`.
+  - Launch cases: `launch: { until: 'text="ready text"', milestones: { x: { match: "…", in: "screen" } } }`.
+  - Wait in `setup` for everything that arrives late (a model line, an update notice), or runs refuse
+    `ResetIncomplete` naming the rows that moved; `ignore: [[col, row, cols, rows]]` leaves a clock out.
+  - App events: the program gets `STROBE_EVENTS`; one appended JSON line per event:
+    `{"strobe":"state","name":"done"}` (`until: { state: "done" }`), `{"strobe":"count","name":"ops","n":3}`
+    (`count.ops`), `{"strobe":"metric","name":"parse_ms","value":2.1}` (`app.parse_ms`).
+- Points work on every driver: `page.click([x, y])` (a page's CSS pixels, a native window's DIPs) or
+  `{ x, y, space: "norm" }`; off the viewport is `OutOfView`.
+
 ### Locked sessions
 
 - A locked session: series that need no presenting window run anyway and say `session locked`; compare those only with locked runs. They are:

@@ -850,7 +850,10 @@ impl Driver {
 
     /// `os_aim`, and whether focus is in the element: one look at the page.
     fn os_aim_focus(&self, os: &OsInput, sel: &Value, o: &Value) -> Result<(f64, f64, Target, bool)> {
-        let (cx, cy, focused) = self.aim(&Self::sel(sel)?, o)?;
+        let (cx, cy, focused) = match crate::driver::point(sel) {
+            Some(_) => self.spot(sel, o).map(|(x, y)| (x, y, false))?,
+            None => self.aim(&Self::sel(sel)?, o)?,
+        };
         let (x, y) = os.screen(cx, cy);
         Ok((x, y, os.target(x, y)?, focused))
     }
@@ -915,6 +918,10 @@ impl Driver {
             // Its frames (a focus ring, a caret) settle before the first key, which is measured: at least
             // 2 refreshes, since the click's first frame may not have begun yet.
             os.rest(os.frame() * 2, os.frame())?;
+            // A point names no element to hold focus: the click there is all.
+            if crate::driver::point(sel).is_some() {
+                return Ok(());
+            }
             let s = Self::sel(sel)?;
             if self.read(&format!("document.hasFocus() && __strobe.focused({})", s.page_spec()), self.timeout(o))? != Value::Bool(true) {
                 return Err(refused(format!("the click into {} put no focus in it, so the keys strobe would send through the OS would go elsewhere", s.source)));

@@ -1,0 +1,750 @@
+//! The `page` driver of terminal targets (SPEC §13.9): input as the bytes a terminal sends for keys,
+//! the mouse and its window's size, written to the program's pseudo-terminal, and waits on the cell
+//! grid strobe's terminal keeps (`target::tty`). Selectors find text on the grid (`text=`), and a
+//! point is a cell, `[col, row]` from 0. Every input is stamped on the host clock when it is written,
+//! and its latency is the first grid change the program drew after it (`latencies`).
+
+use crate::host;
+use crate::model::{Error, Refusal, Result, ValidatorId};
+use crate::target::a11y::keys::{self, Button, Key, Mods, Named};
+use crate::target::a11y::{Dialect, Selector};
+use crate::target::tty::{Grid, Modes, Mouse, Tty};
+use serde_json::{Value, json};
+use std::cell::{Cell, RefCell};
+use std::time::{Duration, Instant};
+
+/// How long the grid must hold still before a measured input: a program still drawing then (a
+/// spinner, a redraw of the last step) is not at rest, and the input is no latency sample.
+pub const QUIET: Duration = Duration::from_millis(50);
+/// The longest strobe waits for the grid to hold still before an input, and for a key's change.
+const SETTLE_MAX: Duration = Duration::from_millis(300);
+/// How to time a resize on Windows, where ConPTY's host redraws before the program does.
+pub const RESIZE_FIX: &str = "on Windows time a resize with a phase whose until is what only the program's redraw shows (text its new layout puts somewhere new) or its state on STROBE_EVENTS (until: { state }); tty.settle times it when the program redrew after the host; tty.latency measures resizes on Linux and macOS";
+
+/// `idle`: no grid change for this long.
+pub const IDLE: Duration = Duration::from_millis(300);
+/// A click's press is held this long at most: a program that acts on the press changes the grid by
+/// then, and its latency is from the press.
+const PRESS_HOLD: Duration = Duration::from_millis(50);
+
+/// One input written to the terminal.
+#[derive(Clone, Copy, Debug)]
+pub struct Input {
+    /// When it was written (host clock).
+    pub sent_ns: u64,
+    pub what: &'static str,
+    /// It may be a latency sample: one key of paced typing, a press, a click, a wheel's first
+    /// notch, a resize (not a burst's key, a drag's move, a modifier going down).
+    pub sample: bool,
+    /// The grid held still before it (`QUIET`): without that its first change may be the program's
+    /// earlier drawing.
+    pub rested: bool,
+}
+
+/// What became of the inputs of a stretch (`latencies`): each sample's latency, and how many were
+/// not samples because the program was still drawing before them, or drew nothing after them.
+#[derive(Clone, Debug, Default)]
+pub struct Latencies {
+    pub ms: Vec<f64>,
+    /// Each input's time to the grid's last change before it held still (`QUIET`) or the next input:
+    /// what it set off, done drawing (a resize on Windows too, after its host's redraw).
+    pub settle_ms: Vec<f64>,
+    pub busy: usize,
+    pub silent: usize,
+    /// Resizes that were no sample: ConPTY's host redraws first (Windows).
+    pub host_resizes: usize,
+    /// Of those, the ones after which only the host drew (one change): no settle sample either.
+    pub host_only: usize,
+}
+
+/// A point on the grid: a cell, `[col, row]` from the top left (0, 0), or
+/// `{ x, y, space: "cell" | "norm" }` (`norm`: 0 to 1 of the grid's width and height).
+pub fn point(v: &Value, size: (u16, u16)) -> Option<Result<(u16, u16)>> {
+    let p = crate::driver::point(v)?;
+    let (cols, rows) = (size.0.max(1) as f64, size.1.max(1) as f64);
+    Some(p.and_then(|(x, y, space)| {
+        let (c, r) = match space.as_deref() {
+            None | Some("cell") => (x.floor(), y.floor()),
+            Some("norm") => ((x * cols).floor(), (y * rows).floor()),
+            Some(other) => return Err(Error::usage(format!("a terminal's point is in cells ([col, row], space \"cell\") or \"norm\" (0 to 1 of the grid), not space {other:?}"))),
+        };
+        if !(0.0..cols).contains(&c) || !(0.0..rows).contains(&r) {
+            return Err(Refusal::new(ValidatorId::OutOfView, format!("cell [{x}, {y}] is off the {}×{} grid", size.0, size.1)).fix("give a cell inside the grid: [col, row] from 0, or { x, y, space: \"norm\" }").into());
+        }
+        Ok((c as u16, r as u16))
+    }))
+}
+
+/// Where a selector's text shows on the grid, in reading order: (row, first column, columns). `text=`
+/// is each run of the text on one row; `text==` a row whose text is all of it, trimmed.
+pub fn find(g: &Grid, sel: &Selector) -> Vec<(u16, u16, u16)> {
+    let mut out = Vec::new();
+    for r in 0..g.rows {
+        let (text, at) = g.row(r);
+        let chars: Vec<char> = text.chars().collect();
+        let end_col = |i: usize| at.get(i).copied().unwrap_or(g.cols);
+        match sel.text_filter() {
+            None => {
+                let first = chars.iter().position(|c| !c.is_whitespace());
+                let last = chars.iter().rposition(|c| !c.is_whitespace());
+                if let (Some(a), Some(b)) = (first, last) {
+                    out.push((r, at[a], end_col(b + 1) - at[a]));
+                }
+            }
+            Some((want, true)) => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() && trimmed == want.trim() {
+                    let a = chars.iter().position(|c| !c.is_whitespace()).unwrap_or(0);
+                    let n = trimmed.chars().count();
+                    out.push((r, at[a], end_col(a + n) - at[a]));
+                }
+            }
+            Some((want, false)) => {
+                let w: Vec<char> = want.chars().collect();
+                if w.is_empty() {
+                    continue;
+                }
+                let mut i = 0;
+                while i + w.len() <= chars.len() {
+                    if chars[i..i + w.len()] == w[..] {
+                        out.push((r, at[i], end_col(i + w.len()) - at[i]));
+                        i += w.len();
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The match `sel`'s index names, among `found`.
+fn pick(found: &[(u16, u16, u16)], sel: &Selector) -> Option<(u16, u16, u16)> {
+    let i = sel.index();
+    let at = if i < 0 { found.len().checked_sub(i.unsigned_abs() as usize)? } else { i as usize };
+    found.get(at).copied()
+}
+
+pub fn parse_sel(v: &Value) -> Result<Selector> {
+    Selector::parse(v, Dialect::Terminal)
+}
+
+fn timeout(opts: &Value) -> Duration {
+    opts.get("timeout").and_then(Value::as_u64).map(Duration::from_millis).unwrap_or(Duration::from_secs(30))
+}
+
+/// The modifier parameter of xterm's and the progressive keyboard protocol's sequences.
+fn mod_param(m: Mods) -> u8 {
+    1 + u8::from(m.shift) + 2 * u8::from(m.alt) + 4 * u8::from(m.ctrl) + 8 * u8::from(m.meta)
+}
+
+/// Progressive keyboard enhancement flags (`CSI > flags u`).
+const DISAMBIGUATE: u16 = 1;
+const EVENTS: u16 = 2;
+const ALL_KEYS: u16 = 8;
+
+/// The bytes a terminal sends for a key with `m` held (`release`: its release, which only a program
+/// that asked for key events gets; empty otherwise), in the encoding the program asked for: xterm's
+/// (application cursor keys when set), or the progressive keyboard protocol's (`CSI … u`) once it
+/// pushed flags.
+pub fn key_bytes(m: Mods, k: Key, modes: &Modes, release: bool) -> Result<Vec<u8>> {
+    let kitty = modes.kitty;
+    let event = if release { ":3" } else { "" };
+    let ev_mods = |m: Mods| if release || m.any() { format!(";{}{event}", mod_param(m)) } else { String::new() };
+    let csi_u = |code: u32, m: Mods| format!("\x1b[{code}{}u", ev_mods(m)).into_bytes();
+    // Functional keys: a final letter (`CSI 1;m X`, SS3 without modifiers where xterm sends it) or
+    // a number with a tilde (`CSI n;m ~`).
+    let letter = |fin: char, ss3: bool, m: Mods| {
+        if release || m.any() { format!("\x1b[1;{}{event}{fin}", mod_param(m)) } else if ss3 { format!("\x1bO{fin}") } else { format!("\x1b[{fin}") }.into_bytes()
+    };
+    let tilde = |n: u8, m: Mods| format!("\x1b[{n}{}~", ev_mods(m)).into_bytes();
+    if release && kitty & EVENTS == 0 {
+        return Ok(Vec::new());
+    }
+    let named = match k {
+        Key::Named(n) => n,
+        Key::Char(c) => {
+            let (base, shifted) = keys::us_key(c).unwrap_or((c, false));
+            let m = Mods { shift: m.shift || shifted, ..m };
+            if kitty & ALL_KEYS != 0 || (kitty & DISAMBIGUATE != 0 && (m.ctrl || m.alt || m.meta)) {
+                return Ok(csi_u(base.to_ascii_lowercase() as u32, m));
+            }
+            if release {
+                return Ok(Vec::new());
+            }
+            let text = if m.shift { keys::us_shifted(base) } else { c };
+            if m.meta {
+                return Err(Error::usage(format!("Meta+{c}: a terminal sends no Meta key unless the program asks for every key (the progressive keyboard protocol); Alt is ESC before the key")));
+            }
+            let mut out = Vec::new();
+            if m.alt {
+                out.push(0x1b);
+            }
+            if m.ctrl {
+                let b = match base.to_ascii_lowercase() {
+                    l @ 'a'..='z' => l as u8 & 0x1f,
+                    ' ' | '@' | '2' => 0,
+                    '[' | '3' => 0x1b,
+                    '\\' | '4' => 0x1c,
+                    ']' | '5' => 0x1d,
+                    '^' | '6' => 0x1e,
+                    '_' | '-' | '7' => 0x1f,
+                    '/' => 0x1f,
+                    '8' | '?' => 0x7f,
+                    _ => return Err(Error::usage(format!("Control+{c}: no control code a terminal sends for it"))),
+                };
+                out.push(b);
+            } else {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(text.encode_utf8(&mut buf).as_bytes());
+            }
+            return Ok(out);
+        }
+    };
+    let all = kitty & ALL_KEYS != 0;
+    let dis = kitty & DISAMBIGUATE != 0;
+    let app = modes.app_cursor;
+    Ok(match named {
+        Named::Letter(c) | Named::Digit(c) => return key_bytes(m, Key::Char(c.to_ascii_lowercase() as char), modes, release),
+        Named::Space => return key_bytes(m, Key::Char(' '), modes, release),
+        Named::Enter if all || (dis && m.any()) || release => csi_u(13, m),
+        Named::Enter => [if m.alt { &b"\x1b"[..] } else { b"" }, b"\r"].concat(),
+        Named::Tab if all || (dis && m.any() && m != Mods { shift: true, ..Mods::default() }) || release => csi_u(9, m),
+        Named::Tab if m.shift => b"\x1b[Z".to_vec(),
+        Named::Tab => [if m.alt { &b"\x1b"[..] } else { b"" }, b"\t"].concat(),
+        Named::Backspace if all || (dis && m.any()) || release => csi_u(127, m),
+        Named::Backspace => [if m.alt { &b"\x1b"[..] } else { b"" }, if m.ctrl { b"\x08" } else { b"\x7f" }].concat(),
+        Named::Escape if all || dis || release => csi_u(27, m),
+        Named::Escape => [if m.alt { &b"\x1b"[..] } else { b"" }, b"\x1b"].concat(),
+        Named::ArrowUp => letter('A', app, m),
+        Named::ArrowDown => letter('B', app, m),
+        Named::ArrowRight => letter('C', app, m),
+        Named::ArrowLeft => letter('D', app, m),
+        Named::Home => letter('H', app, m),
+        Named::End => letter('F', app, m),
+        Named::Insert => tilde(2, m),
+        Named::Delete => tilde(3, m),
+        Named::PageUp => tilde(5, m),
+        Named::PageDown => tilde(6, m),
+        Named::F(n @ 1..=4) => letter(['P', 'Q', 'R', 'S'][n as usize - 1], true, m),
+        Named::F(n @ 5..=12) => tilde([15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5], m),
+        Named::F(n) if all => csi_u(57376 + n as u32 - 13, m),
+        Named::F(n) => return Err(Error::usage(format!("F{n}: xterm's keys end at F12; a terminal sends F13 to F24 only to a program that asks for every key"))),
+        Named::Shift | Named::Control | Named::Alt | Named::Meta if all => {
+            let code = match named {
+                Named::Shift => 57441,
+                Named::Control => 57442,
+                Named::Alt => 57443,
+                _ => 57444,
+            };
+            csi_u(code, m)
+        }
+        Named::Shift | Named::Control | Named::Alt | Named::Meta => Vec::new(),
+        Named::ContextMenu | Named::CapsLock if all => csi_u(if named == Named::CapsLock { 57358 } else { 57363 }, m),
+        Named::ContextMenu | Named::CapsLock => return Err(Error::usage(format!("{named:?}: a terminal sends no bytes for it unless the program asks for every key"))),
+    })
+}
+
+/// The mouse report a terminal sends for button code `b` at a cell (`release`: a button's release),
+/// in the encoding the program asked for: SGR (`?1006`), else xterm's X10 bytes (cells up to 223).
+fn mouse_bytes(modes: &Modes, b: u8, cell: (u16, u16), release: bool, m: Mods) -> Result<Vec<u8>> {
+    let b = b + if m.shift { 4 } else { 0 } + if m.alt || m.meta { 8 } else { 0 } + if m.ctrl { 16 } else { 0 };
+    let (x, y) = (cell.0 as u32 + 1, cell.1 as u32 + 1);
+    if modes.sgr {
+        return Ok(format!("\x1b[<{b};{x};{y}{}", if release { 'm' } else { 'M' }).into_bytes());
+    }
+    if x > 223 || y > 223 {
+        return Err(Error::usage(format!("cell {}, {}: xterm's X10 mouse bytes reach column and row 223; the program did not ask for SGR reports (?1006)", cell.0, cell.1)));
+    }
+    // X10 says a release as button 3, whichever button it was; the wheel and moves keep theirs.
+    let b = if release && b & 64 == 0 { (b & !3) | 3 } else { b };
+    Ok(vec![0x1b, b'[', b'M', 32 + b, 32 + x as u8, 32 + y as u8])
+}
+
+fn button_code(b: Button) -> u8 {
+    match b {
+        Button::Left => 0,
+        Button::Middle => 1,
+        Button::Right => 2,
+    }
+}
+
+/// `MouseNotEnabled`: the program did not turn on the mouse reporting `what` needs.
+fn no_mouse(call: &str, what: &str, have: Mouse) -> Error {
+    let has = match have {
+        Mouse::Off => "no mouse reporting".to_string(),
+        m => format!("mouse reporting of {}", serde_json::to_value(m).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()),
+    };
+    Refusal::new(ValidatorId::MouseNotEnabled, format!("page.{call}(): {what}, and the program turned on {has}, so a terminal would send nothing"))
+        .fix("drive it with keys (press, type), or wait until the program turns the mouse on (a terminal reports clicks after ?1000, drags after ?1002, every move after ?1003)")
+        .into()
+}
+
+pub struct Driver<'a> {
+    tty: &'a Tty,
+    /// The program's event stream (`STROBE_EVENTS`), for `until: { state }`.
+    events: Option<&'a crate::target::events::Events>,
+    inputs: RefCell<Vec<Input>>,
+    /// Modifier keys `down` holds, which mark later keys and mouse reports.
+    held: Cell<Mods>,
+    /// The mouse button `down` holds.
+    pressed: Cell<Option<Button>>,
+    /// The cell the mouse is over, once an input put it somewhere.
+    pointer: Cell<Option<(u16, u16)>>,
+    /// The size the block started at: `window("restore")`.
+    start_size: (u16, u16),
+    /// A click that focuses an element before keys (`type(sel)`, `press({ selector })`): no sample.
+    focusing: Cell<bool>,
+}
+
+impl<'a> Driver<'a> {
+    pub fn new(tty: &'a Tty, events: Option<&'a crate::target::events::Events>) -> Driver<'a> {
+        Driver { tty, events, inputs: RefCell::new(Vec::new()), held: Cell::new(Mods::default()), pressed: Cell::new(None), pointer: Cell::new(None), start_size: tty.size(), focusing: Cell::new(false) }
+    }
+
+    /// Every input so far.
+    pub fn inputs(&self) -> Vec<Input> {
+        self.inputs.borrow().clone()
+    }
+
+    /// Lets go of what `down` holds (between runs): modifier keys and a mouse button.
+    pub fn release_all(&self) -> Result<()> {
+        if let Some(b) = self.pressed.take() {
+            let at = self.pointer.get().unwrap_or((0, 0));
+            if self.tty.modes().mouse != Mouse::Off {
+                self.write(&mouse_bytes(&self.tty.modes(), button_code(b), at, true, self.held.get())?, "mouse", false, false)?;
+            }
+        }
+        self.held.set(Mods::default());
+        Ok(())
+    }
+
+    /// Writes `bytes` and records the input (`sample`: one a latency may come from; `rested`: the grid
+    /// held still before it). The action log gets it as `driver::sent`.
+    fn write(&self, bytes: &[u8], what: &'static str, sample: bool, rested: bool) -> Result<u64> {
+        let at = self.tty.write(bytes)?;
+        self.inputs.borrow_mut().push(Input { sent_ns: at, what, sample, rested });
+        crate::driver::sent(at, sample, None);
+        Ok(at)
+    }
+
+    /// Waits for the grid to hold still before a measured input (at most `SETTLE_MAX`).
+    /// Still since the last change and since the last input: what an input just before caused
+    /// arrives before the next one goes out.
+    fn settle(&self) -> bool {
+        let last = self.inputs.borrow().last().map_or(0, |i| i.sent_ns);
+        self.tty.quiet(QUIET, last, Instant::now() + SETTLE_MAX)
+    }
+
+    /// The cell a locator names: a point, or the middle of the text a selector finds (waiting for it
+    /// up to `t`).
+    fn locate(&self, v: &Value, t: Duration) -> Result<(u16, u16)> {
+        if let Some(p) = point(v, self.tty.size()) {
+            return p;
+        }
+        if v.as_str() == Some("") || v.is_null() {
+            return Ok(self.pointer.get().unwrap_or_else(|| {
+                let (c, r) = self.tty.size();
+                (c / 2, r / 2)
+            }));
+        }
+        let sel = parse_sel(v)?;
+        let mut hit = None;
+        let shown = self.tty.wait(Instant::now() + t, |g, _, _| {
+            hit = pick(&find(g, &sel), &sel);
+            hit.is_some()
+        });
+        match hit.filter(|_| shown) {
+            Some((r, c, w)) => Ok((c + w.saturating_sub(1) / 2, r)),
+            None => Err(self.missed(&sel, t)),
+        }
+    }
+
+    fn missed(&self, sel: &Selector, t: Duration) -> Error {
+        let n = self.tty.grid(|g| find(g, sel).len());
+        let why = if n > 0 && sel.index() != 0 { format!("it shows {n} times, too few for index={}", sel.index()) } else { "the grid never showed it".into() };
+        let rows: Vec<String> = self.tty.grid(|g| g.text()).into_iter().filter(|l| !l.trim().is_empty()).take(6).collect();
+        Error::timeout(format!("{:?}: {why} in {} s", sel.source, t.as_secs())).hint(format!("the grid's first rows: {}", rows.iter().map(|r| format!("{:?}", r.trim())).collect::<Vec<_>>().join(", ")))
+    }
+
+    /// After an input: `until` a selector shows, the next grid change, or the grid at rest.
+    fn until(&self, opts: &Value, after: u64) -> Result<()> {
+        let Some(u) = opts.get("until").filter(|u| !u.is_null()) else { return Ok(()) };
+        let t = timeout(opts);
+        // A state the program announces on its event stream after the input.
+        if let Some(name) = u.get("state").and_then(Value::as_str) {
+            let events = self.events.ok_or_else(|| Error::usage("until: { state }: this launch has no event stream"))?;
+            return events
+                .wait_state(name, after, Instant::now() + t)
+                .map(|_| ())
+                .ok_or_else(|| Error::timeout(format!("until: {{ state: {name:?} }}: the program wrote no such state to $STROBE_EVENTS in {} s", t.as_secs())).hint("the program appends {\"strobe\":\"state\",\"name\":\"…\"} lines to the path in STROBE_EVENTS"));
+        }
+        match u.as_str() {
+            Some("idle") => self.idle(after, t),
+            Some("frame") => self.tty.first_change(after, Instant::now() + t).map(|_| ()).ok_or_else(|| Error::timeout(format!("until: \"frame\": the grid did not change in {} s", t.as_secs()))),
+            _ => self.locate(u, t).map(|_| ()),
+        }
+    }
+
+    /// No grid change for `IDLE` since the last change and since `since_ns`.
+    fn idle(&self, since_ns: u64, t: Duration) -> Result<()> {
+        if self.tty.quiet(IDLE, since_ns, Instant::now() + t) {
+            Ok(())
+        } else {
+            Err(Error::timeout(format!("idle: the grid kept changing for {} s (never {} ms still)", t.as_secs(), IDLE.as_millis())).hint("a program that animates never rests: wait for text (waitFor) instead"))
+        }
+    }
+
+    /// One key with `extra` held over what `down` holds: settles first (a sample only at rest), then
+    /// with `wait` up to `SETTLE_MAX` for its change (typing: the next key's input must not come
+    /// before this one's output). False when the grid never held still, so the caller stops waiting
+    /// for rest.
+    fn key(&self, extra: Mods, k: Key, paced: bool, wait: bool) -> Result<(u64, bool)> {
+        let bytes = key_bytes(self.held.get().or(extra), k, &self.tty.modes(), false)?;
+        if bytes.is_empty() {
+            return Err(Error::usage(format!("{k:?}: a terminal sends no bytes for a modifier alone (unless the program asks for every key); hold it with page.down and press the key")));
+        }
+        let rested = paced && self.settle();
+        let at = self.write(&bytes, "key", paced, rested)?;
+        if paced && wait {
+            let _ = self.tty.first_change(at, Instant::now() + SETTLE_MAX);
+        }
+        Ok((at, rested || !paced))
+    }
+
+    fn mouse_mode(&self, call: &str, motion: bool) -> Result<Modes> {
+        let m = self.tty.modes();
+        let ok = match (m.mouse, motion, self.pressed.get().is_some()) {
+            (Mouse::Off, _, _) => false,
+            (_, false, _) => true,
+            (Mouse::Motion, true, _) => true,
+            (Mouse::Drags, true, true) => true,
+            _ => false,
+        };
+        if ok {
+            return Ok(m);
+        }
+        let what = if motion { if self.pressed.get().is_some() { "it moves the mouse with a button held" } else { "it moves the mouse with no button held" } } else { "it sends a mouse button or the wheel" };
+        Err(no_mouse(call, what, m.mouse))
+    }
+
+    /// The click into an element before keys: an input, never a sample.
+    fn focus_click(&self, sel: &Value, o: &Value, pixels: Option<&std::path::Path>) -> Result<()> {
+        self.focusing.set(true);
+        let r = self.dispatch("click", &[sel.clone(), json!({ "timeout": o["timeout"] })], pixels);
+        self.focusing.set(false);
+        r.map(drop)
+    }
+
+    /// One page call from the runner. `pixels`: a pixels block's folder for `snapshot`.
+    pub fn dispatch(&self, call: &str, args: &[Value], pixels: Option<&std::path::Path>) -> Result<Value> {
+        let opts = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
+        let sel = |i: usize| args.get(i).cloned().unwrap_or(Value::String(String::new()));
+        match call {
+            "type" => {
+                let o = opts(2);
+                if !matches!(sel(0).as_str(), Some("")) {
+                    self.focus_click(&sel(0), &o, pixels)?;
+                }
+                let text = args.get(1).and_then(Value::as_str).unwrap_or("");
+                let delay = Duration::from_millis(o["delay"].as_u64().unwrap_or(0));
+                let mut paced = crate::driver::Typing::of(&o) == crate::driver::Typing::Paced;
+                if !paced {
+                    crate::driver::unmeasured();
+                }
+                // `until` counts from the call when it typed nothing.
+                let mut last = host::now_ns();
+                for c in text.chars() {
+                    let k = if c == '\n' { Key::Named(Named::Enter) } else { Key::Char(c) };
+                    let started = Instant::now();
+                    let (at, rested) = self.key(Mods::default(), k, paced, true)?;
+                    last = at;
+                    // A program that never rests holds every key the whole wait: pacing stops.
+                    paced &= rested;
+                    std::thread::sleep(delay.saturating_sub(started.elapsed()));
+                }
+                self.until(&o, last)?;
+            }
+            "press" => {
+                let o = opts(1);
+                if let Some(s) = o.get("selector").filter(|s| s.as_str() != Some("") && !s.is_null()) {
+                    self.focus_click(s, &o, pixels)?;
+                }
+                let (m, k) = keys::parse_chord(args.first().and_then(Value::as_str).unwrap_or(""))?;
+                let (at, _) = self.key(m, k, true, false)?;
+                self.until(&o, at)?;
+            }
+            "down" | "up" => {
+                let o = opts(1);
+                let name = args.first().and_then(Value::as_str).unwrap_or("");
+                let down = call == "down";
+                if let Some(b) = keys::mouse_button(name) {
+                    let modes = self.mouse_mode(call, false)?;
+                    let at = match o.get("at").filter(|v| !v.is_null()) {
+                        Some(v) => self.locate(v, timeout(&o))?,
+                        None => self.pointer.get().ok_or_else(|| Error::usage(format!("page.{call}(\"{name}\"): the mouse is nowhere yet; give opts.at (text, or [col, row])")))?,
+                    };
+                    self.pointer.set(Some(at));
+                    let rested = down && self.settle();
+                    let t = self.write(&mouse_bytes(&modes, button_code(b), at, !down, self.held.get())?, "mouse", down, rested)?;
+                    self.pressed.set(down.then_some(b));
+                    self.until(&o, t)?;
+                } else {
+                    let (m, k) = keys::parse_chord(name)?;
+                    let modifier = matches!(k, Key::Named(n) if n.modifier());
+                    if modifier && m == Mods::default() {
+                        let mut held = self.held.get();
+                        let on = |b: &mut bool| *b = down;
+                        match k {
+                            Key::Named(Named::Shift) => on(&mut held.shift),
+                            Key::Named(Named::Control) => on(&mut held.ctrl),
+                            Key::Named(Named::Alt) => on(&mut held.alt),
+                            _ => on(&mut held.meta),
+                        }
+                        // The keys it marks carry it; only a program that asked for every key sees it alone.
+                        let bytes = key_bytes(if down { held } else { self.held.get() }, k, &self.tty.modes(), !down)?;
+                        self.held.set(held);
+                        if !bytes.is_empty() {
+                            self.write(&bytes, "key", false, false)?;
+                        }
+                    } else {
+                        let bytes = key_bytes(self.held.get().or(m), k, &self.tty.modes(), !down)?;
+                        if !bytes.is_empty() {
+                            let rested = down && self.settle();
+                            let t = self.write(&bytes, "key", down, rested)?;
+                            self.until(&o, t)?;
+                        }
+                    }
+                }
+            }
+            "click" => {
+                let o = opts(1);
+                let at = self.locate(&sel(0), timeout(&o))?;
+                let modes = self.mouse_mode("click", false)?;
+                let b = button_code(Button::parse(o["button"].as_str())?);
+                let m = self.held.get().or(keys::Mods::parse_list(&o["modifiers"])?);
+                let count = o["count"].as_u64().unwrap_or(1).clamp(1, 3);
+                self.pointer.set(Some(at));
+                let mut last = 0;
+                // A click into a field before typing is no sample (as native's pointer clicks).
+                let measured = count == 1 && !self.focusing.get();
+                for i in 0..count {
+                    let rested = measured && self.settle();
+                    let press = self.tty.write(&mouse_bytes(&modes, b, at, false, m)?)?;
+                    // A program that acts on the press has changed the grid by the release: the
+                    // click's latency is from the press then (`driver::sent`'s press).
+                    let on_press = measured && self.tty.first_change(press, Instant::now() + PRESS_HOLD).is_some();
+                    let release = self.tty.write(&mouse_bytes(&modes, b, at, true, m)?)?;
+                    // Both edges are inputs: what the release drew bounds the press's sample, and the
+                    // release is the sample when the press drew nothing.
+                    let mut ins = self.inputs.borrow_mut();
+                    ins.push(Input { sent_ns: press, what: "click", sample: on_press, rested });
+                    ins.push(Input { sent_ns: release, what: "release", sample: measured && !on_press, rested });
+                    drop(ins);
+                    crate::driver::sent(release, measured, on_press.then_some(press));
+                    last = release;
+                    if i + 1 < count {
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                }
+                self.until(&o, last)?;
+            }
+            "hover" | "move" => {
+                let (at, o) = if call == "move" {
+                    let n = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
+                    let p = point(&json!([n(0), n(1)]), self.tty.size()).ok_or_else(|| Error::usage("page.move(col, row): two numbers, a cell from 0"))??;
+                    (p, opts(2))
+                } else {
+                    let o = opts(1);
+                    (self.locate(&sel(0), timeout(&o))?, o)
+                };
+                let modes = self.mouse_mode(call, true)?;
+                let b = self.pressed.get().map_or(3, button_code) + 32;
+                self.pointer.set(Some(at));
+                let t = self.write(&mouse_bytes(&modes, b, at, false, self.held.get())?, "pointer", false, false)?;
+                self.until(&o, t)?;
+            }
+            "wheel" | "scroll" => {
+                let o = opts(2);
+                let at = self.locate(&sel(0), timeout(&o))?;
+                let modes = self.mouse_mode(call, false)?;
+                let d = args.get(1).cloned().unwrap_or(Value::Null);
+                // A terminal's wheel moves in notches, no pixels: `dy`/`by` notches down (negative up),
+                // `dx`/`byX` right.
+                let (dx, dy) = if call == "wheel" { (d["dx"].as_f64().unwrap_or(0.0), d["dy"].as_f64().unwrap_or(0.0)) } else { (d["byX"].as_f64().unwrap_or(0.0), d["by"].as_f64().unwrap_or(0.0)) };
+                let steps: Vec<u8> = std::iter::repeat_n(if dy < 0.0 { 64 } else { 65 }, dy.abs().round() as usize).chain(std::iter::repeat_n(if dx < 0.0 { 66 } else { 67 }, dx.abs().round() as usize)).collect();
+                if steps.is_empty() {
+                    return Err(Error::usage(format!("page.{call}(): a terminal's wheel moves in notches; give at least one ({} in notches)", if call == "wheel" { "dy, dx" } else { "by, byX" })));
+                }
+                // `scroll` paces its notches at `speed` notches a second (default 20); `wheel` sends them at once.
+                let gap = if call == "scroll" { Duration::from_secs_f64(1.0 / d["speed"].as_f64().filter(|s| *s > 0.0).unwrap_or(20.0)) } else { Duration::ZERO };
+                self.pointer.set(Some(at));
+                let rested = self.settle();
+                let mut last = 0;
+                for (i, b) in steps.iter().enumerate() {
+                    if i > 0 {
+                        std::thread::sleep(gap);
+                    }
+                    last = self.write(&mouse_bytes(&modes, *b, at, false, self.held.get())?, "wheel", i == 0, rested && i == 0)?;
+                }
+                self.until(&o, last)?;
+            }
+            "drag" => {
+                let o = opts(2);
+                let from = self.locate(&sel(0), timeout(&o))?;
+                let modes = self.mouse_mode("drag", false)?;
+                let path = keys::parse_path(&args.get(1).cloned().unwrap_or(Value::Null))?;
+                let b = button_code(Button::parse(o["button"].as_str())?);
+                let duration = Duration::from_millis(o["duration"].as_u64().unwrap_or(1000));
+                let held = self.pressed.get().is_some();
+                if !held {
+                    self.write(&mouse_bytes(&modes, b, from, false, self.held.get())?, "mouse", false, false)?;
+                    self.pressed.set(Some(Button::parse(o["button"].as_str())?));
+                }
+                self.mouse_mode("drag", true)?;
+                let (cols, rows) = self.tty.size();
+                let started = Instant::now();
+                let mut at = from;
+                // One move per cell the path enters, paced along its duration.
+                let n = (duration.as_millis() / 16).max(1) as usize;
+                for i in 1..=n {
+                    let (dx, dy) = keys::path_at(&path, i as f64 / n as f64);
+                    let cell = ((from.0 as f64 + dx).round().clamp(0.0, cols as f64 - 1.0) as u16, (from.1 as f64 + dy).round().clamp(0.0, rows as f64 - 1.0) as u16);
+                    let due = duration.mul_f64(i as f64 / n as f64);
+                    std::thread::sleep(due.saturating_sub(started.elapsed()));
+                    if cell != at {
+                        at = cell;
+                        self.write(&mouse_bytes(&modes, b + 32, at, false, self.held.get())?, "drag", false, false)?;
+                    }
+                }
+                self.pointer.set(Some(at));
+                let mut last = self.inputs.borrow().last().map_or(0, |i| i.sent_ns);
+                if !held {
+                    last = self.write(&mouse_bytes(&modes, b, at, true, self.held.get())?, "mouse", false, false)?;
+                    self.pressed.set(None);
+                }
+                self.until(&o, last)?;
+            }
+            "window" => {
+                let o = opts(1);
+                let action = args.first().cloned().unwrap_or(Value::Null);
+                let (cols, rows) = match (&action, action.as_str()) {
+                    (_, Some("restore")) => self.start_size,
+                    (Value::Object(m), _) if m.contains_key("resize") => {
+                        let r = &m["resize"];
+                        let n = |k: &str| r[k].as_u64().filter(|n| (1..=u16::MAX as u64).contains(n)).map(|n| n as u16);
+                        n("width").zip(n("height")).ok_or_else(|| Error::usage("page.window({ resize: { width, height } }): a terminal's size is in cells, columns and rows from 1"))?
+                    }
+                    _ => {
+                        return Err(Refusal::new(ValidatorId::NotForTarget, format!("page.window({action}): a terminal's window only takes a size ({{ resize: {{ width: cols, height: rows }} }}) or \"restore\"")).into());
+                    }
+                };
+                if cfg!(windows) && o["until"] == "frame" {
+                    return Err(Refusal::new(ValidatorId::NotOnThisOs, "page.window(resize, { until: \"frame\" }): ConPTY's console host redraws its own buffer at a resize before the program hears of it, so the next change is the host's")
+                        .fix(RESIZE_FIX)
+                        .into());
+                }
+                let rested = self.settle();
+                let at = host::now_ns();
+                self.tty.resize(cols, rows)?;
+                // ConPTY's console host redraws its own buffer at a resize before the program hears of
+                // it: the first change is the host's, so a resize is no latency sample there.
+                let sample = !cfg!(windows);
+                self.inputs.borrow_mut().push(Input { sent_ns: at, what: "resize", sample, rested });
+                crate::driver::sent(at, sample, None);
+                self.until(&o, at)?;
+            }
+            "waitFor" => {
+                let o = opts(1);
+                if crate::driver::point(&sel(0)).is_some() {
+                    return Err(Error::usage("page.waitFor(point): a cell is always there; wait for text on the grid (\"text=…\")"));
+                }
+                self.locate(&crate::driver::with_text(&sel(0), &o), timeout(&o))?;
+            }
+            "idle" => self.idle(host::now_ns(), timeout(&opts(0)))?,
+            "frame" => {
+                let t = timeout(&opts(0));
+                self.tty.first_change(host::now_ns(), Instant::now() + t).ok_or_else(|| Error::timeout(format!("frame: the grid did not change in {} s", t.as_secs())))?;
+            }
+            "wait" => std::thread::sleep(Duration::from_millis(args.first().and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64)),
+            "query" => return self.query(&sel(0)),
+            "snapshot" => {
+                let Some(dir) = pixels else { return Ok(Value::Bool(false)) };
+                let name: String = args.first().and_then(Value::as_str).unwrap_or("").chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect();
+                std::fs::create_dir_all(dir)?;
+                let (img, text) = self.tty.grid(|g| (crate::target::tty::image::image(g), g.text().join("\n")));
+                crate::store::write_atomic(&dir.join(format!("{name}.png")), &crate::png::write(&img?)?)?;
+                crate::store::write_atomic(&dir.join(format!("{name}.txt")), text.as_bytes())?;
+            }
+            "goto" | "eval" | "act" => {
+                return Err(Refusal::new(
+                    ValidatorId::NotForTarget,
+                    format!("page.{call}() is not a terminal's: a terminal target takes keys, the mouse (once the program turns it on) and its size (type, press, down, up, click, hover, move, wheel, scroll, drag, window, waitFor, query, idle, frame, wait, snapshot)"),
+                )
+                .into());
+            }
+            other => return Err(Error::msg(format!("unknown page call {other}"))),
+        }
+        Ok(Value::Bool(true))
+    }
+
+    /// `page.query(selector?)`: where the selector's text shows now (every non-empty row without
+    /// one), each with its cells as `rect` ([col, row, columns, 1]).
+    fn query(&self, sel: &Value) -> Result<Value> {
+        let sel = if sel.is_null() || sel.as_str() == Some("") || sel.as_str() == Some("*") { Selector::every(Dialect::Terminal) } else { parse_sel(sel)? };
+        let mouse = self.tty.modes().mouse != Mouse::Off;
+        Ok(self.tty.grid(|g| {
+            let found = find(g, &sel);
+            Value::Array(
+                found
+                    .iter()
+                    .map(|&(r, c, w)| {
+                        let name: String = (c..c + w).filter_map(|x| g.cell(r, x)).filter(|cell| !cell.is_wide_continuation()).map(|cell| if cell.has_contents() { cell.contents().to_string() } else { " ".into() }).collect();
+                        let focused = g.cursor.0 == r && (c..c + w.max(1)).contains(&g.cursor.1);
+                        json!({ "key": "", "path": format!("text={:?}", name.trim()), "role": "text", "name": name, "rect": [c, r, w, 1], "actionable": mouse, "focused": focused, "enabled": true, "checked": null, "expanded": null, "selected": null })
+                    })
+                    .collect(),
+            )
+        }))
+    }
+}
+
+/// Each sample's latency among `inputs` (those in `stretches`, host clock, without `gaps`): from
+/// the input to the first update after it that changed cells and began before the next input was
+/// written (its output, not the next one's). An input written while the program still drew is
+/// `busy`; one after which nothing changed before the next input (or the stretch's end) is `silent`.
+pub fn latencies(tty: &Tty, inputs: &[Input], stretches: &[&crate::metrics::Timed]) -> Latencies {
+    let mut out = Latencies::default();
+    for crate::metrics::Timed { t0, t1, untimed: gaps } in stretches.iter().copied() {
+        let updates = tty.updates(*t0, u64::MAX);
+        let ins: Vec<&Input> = inputs.iter().filter(|i| i.sent_ns >= *t0 && i.sent_ns <= *t1 && !gaps.iter().any(|g| i.sent_ns >= g.0 && i.sent_ns < g.1)).collect();
+        out.host_resizes += ins.iter().filter(|i| i.what == "resize" && !i.sample).count();
+        for i in ins.iter().filter(|i| i.sample || i.what == "resize") {
+            if !i.rested {
+                out.busy += i.sample as usize;
+                continue;
+            }
+            let next = inputs.iter().map(|j| j.sent_ns).filter(|&s| s > i.sent_ns).min().unwrap_or(u64::MAX);
+            let caused: Vec<&crate::target::tty::Update> = updates.iter().filter(|u| u.cells > 0 && u.start_ns >= i.sent_ns && u.start_ns < next).collect();
+            match caused.first() {
+                Some(u) if i.sample => out.ms.push((u.commit_ns - i.sent_ns) as f64 / 1e6),
+                None if i.sample => out.silent += 1,
+                _ => {}
+            }
+            // A resize ConPTY's host redraws first settles only on a change after the host's: the
+            // program's own redraw.
+            if !i.sample && caused.len() < 2 {
+                out.host_only += 1;
+                continue;
+            }
+            // Settled: the grid held still after its last change, before the next input or the end.
+            if let Some(last) = caused.last()
+                && next.min(*t1).saturating_sub(last.commit_ns) >= QUIET.as_nanos() as u64
+            {
+                out.settle_ms.push((last.commit_ns - i.sent_ns) as f64 / 1e6);
+            }
+        }
+    }
+    out
+}

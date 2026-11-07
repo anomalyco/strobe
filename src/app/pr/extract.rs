@@ -834,7 +834,7 @@ pub(super) fn variants(r: &Value) -> (Value, Value) {
 /// else its blocks' client area, else the experiment's; nothing for a target without a window or a
 /// series that never ran.
 pub(super) fn window_of(s: &Value, r: &Value) -> String {
-    if s["windowless"] == true || matches!(s["target_kind"].as_str(), Some("script" | "cli")) || !measured(s) {
+    if s["windowless"] == true || matches!(s["target_kind"].as_str(), Some("script" | "cli" | "tty")) || !measured(s) {
         return String::new();
     }
     let shape = |w: &Value| {

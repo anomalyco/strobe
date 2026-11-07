@@ -24,8 +24,8 @@ pub(super) struct Milestone {
 pub(super) type Line = (f64, String, String);
 
 /// What a launch series is timed until, as result.json records it (the series' `until`): `{ end:
-/// "visible" | "painted" | "settled" }` for the window, `{ end: "milestone", milestone }`, or `{ end:
-/// "selector", selector }`. Null for a series that is no launch.
+/// "visible" | "painted" | "settled" }` for the window, `{ end: "milestone", milestone }`, `{ end:
+/// "state", state }`, or `{ end: "selector", selector }`. Null for a series that is no launch.
 pub(super) fn until_of(launch: &Value) -> Value {
     let u = &launch["until"];
     if !launch.is_object() || u.is_null() {
@@ -34,6 +34,10 @@ pub(super) fn until_of(launch: &Value) -> Value {
     // A milestone ends the launch before any window condition does (`native::launch_once`).
     if let Some(m) = u["milestone"].as_str() {
         return json!({ "end": "milestone", "milestone": m });
+    }
+    // A terminal program's own state on its event stream (`tty()`, §13.9).
+    if let Some(st) = u["state"].as_str() {
+        return json!({ "end": "state", "state": st });
     }
     match u["window"].as_str() {
         Some(w) => json!({ "end": w }),

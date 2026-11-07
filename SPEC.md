@@ -206,9 +206,12 @@ target/         finding and driving targets → chromium.rs (CDP), firefox.rs an
                 process.rs, isolate.rs (isolated launches), electron.rs, android_chrome.rs (Chrome on a
                 phone over adb, 13.1), webview.rs (apps on the OS's
                 webview, §13.8), native.rs (native apps, §13.7), a11y/ (the OS accessibility client: uia.rs, ax.rs, atspi.rs; input:
-                input.rs (posted messages), cg_input.rs (Quartz), xtest.rs; keys.rs shared)
+                input.rs (posted messages), cg_input.rs (Quartz), xtest.rs; keys.rs shared), tty.rs
+                (terminal programs on strobe's own pseudo-terminal and grid, §13.9; tty/image.rs draws
+                the grid), events.rs (an app's STROBE_EVENTS stream)
 driver/         the bench file's `page`: over CDP, or a native app's accessibility tree and
-                message loop (native.rs)
+                message loop (native.rs), or a terminal's bytes (tty.rs)
+font.rs         the embedded font every drawn image uses (cards, badges, terminal snapshots)
 probe/          collecting → trace.rs, cpu.rs, alloc.rs, heap.rs, symbols.rs (source maps),
                 census.rs, gecko.rs (Firefox's profiler and about:memory), coverage.rs, os/{windows,linux,macos}.rs, gpu/{pdh,nvml,d3dkmt,drm,ioreport}.rs,
                 stacks.rs (native stacks: `Deep`, one sampler per OS: kernel_profile.rs in the helper,
@@ -841,6 +844,16 @@ SIGTERM), of a page or an app, ends every launch it owns (each one's tree, then 
 never race), what still runs stamped with the app's home, and removes a home strobe made, before it
 exits 130 (`isolate::end_on_stop`; the watcher ends before the look closes what it launched). A
 browser profile left by a stop goes with the next strobe's `reap_dead_owners`.
+
+`look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s]
+[--timeout 30s] [--home <seed>]`: the command on strobe's own terminal (§13.9) in an isolated home, as
+a `tty()` block starts it, in the folder strobe runs in, nothing measured. Once `--until`'s text shows
+it sends `--press` (one key or chord) and `--type`, waits until the grid holds still for `--wait`, and
+prints the terminal's title, when the program first drew and when `--until` showed, its updates and
+synchronized frames, the bytes it sent, the modes it set (mouse reporting and SGR, the progressive
+keyboard flags it pushed, cursor keys) and the grid's rows. Exit 124 when `--until` never showed, the
+grid never held still or the program exited. Runs on a locked session and on a server without a
+display.
 
 ## 6. Clock
 
@@ -2341,7 +2354,11 @@ export default bench({
   where the app allows; `window: false` is an app with no window (a tray app).
   `webview(appIdOrPath, { home?, viewport?, gpuCache?, expect? })` is an app on the OS's webview
   (§13.8): launched as an app target, its page driven and measured over the webview's own
-  debugging port, whatever `kind` its profile names. `app()`, `exe()` and `native()` take `args`,
+  debugging port, whatever `kind` its profile names. `tty(run, { cwd?, cols?, rows?, home?, files?,
+  env?, unset?, build?, ignore? })` is a program in a terminal (a TUI, an editor), on a terminal strobe
+  owns with no display (§13.9): `run` a command line or `[program, ...args]`, the terminal 120×40 cells
+  by default, `ignore` grid regions left out of the reset check; it runs in the variant's folder like
+  `command()` and `script()`. `app()`, `exe()` and `native()` take `args`,
   `env` and `files` (written into the home over the profile's), and every target `name` (what
   reports call it as a side) and `cwd` (another project's strobe.json for it), §9.10.
   `fixture(command, opts)` at the top level starts a process per block that both sides talk to
@@ -2900,6 +2917,19 @@ experiment's `script.log`.
 - **Attribution:** the process starts with `--cpu-prof` (200 µs, 400 µs on Windows: §8.3) and `--heap-prof`; the profiles
   cover the whole process and name the harness's and the variant's own source files, so nothing
   needs a source map.
+
+**Point locators.** Wherever a call takes an element (`click`, `hover`, `wheel`, `scroll`, `drag`, the
+element `type` clicks into, `down`/`up`'s `at`) it also takes a point: `[x, y]` in the target's own
+units (a page's CSS pixels in its viewport, a native app's device-independent pixels in its main
+window's client area, a terminal's cells from 0) or `{ x, y, space }` (`"dip"`, `"cell"`, or `"norm"`:
+0 to 1 of the viewport, client area or grid; `driver::point`). A point off it is refused `OutOfView`;
+the action log records the point as the aim. `type("", text)` types where focus is, on every driver.
+A touch `scroll` keeps a selector (its swipes stay inside the element).
+
+**Terminal targets** (`tty()`, §13.9): `page` sends what a terminal sends; `until: { state }` waits for
+the program's own state on its event stream (`STROBE_EVENTS`, §13.9 "App events"), and
+`ctx.waitForLine(match, { in: "events" })` for a line of it; `in: "output"` is refused (a terminal
+program's output is its screen: `page.waitFor("text=…")`).
 
 **CLI targets** (`cli(run?, { env?, build?, side? })`): a command run to its exit, once per
 `ctx.exec(line?)` in a case's run (`run: (ctx) => ctx.exec()`), in the variant's folder, pinned like
@@ -3502,6 +3532,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `Emulator` | a timed bench, track or record on an Android emulator (`ro.boot.qemu`, `ro.kernel.qemu`, the emulator's boards, `ro.build.characteristics=emulator`, an `emulator-` serial; `adb::Facts::emulator`): it runs on this computer's CPU, usually with a software GPU, so its timing describes no phone. Refused before anything builds; `--check`, `look`, pixel comparisons and attribution recordings run there |
 | `WirelessTransport` | a timed run on a phone reached by adb over the network (`adb connect`, wireless debugging): the radio's work and the link's latency are in the numbers. Untimed runs take it |
 | `NotProfileable` | attribution that needs the phone's own profilers (native stacks with simpleperf or Perfetto's `traced_perf`) on an app without `<profileable android:shell="true"/>` (iOS: without `get-task-allow`). Reserved: no target strobe drives on a phone takes on-device native stacks yet, so nothing refuses it now (a phone's Chrome is attributed through DevTools, which needs none) |
+| `MouseNotEnabled` | a `tty()` target's mouse call (`click`, `hover`, `move`, `drag`, `wheel`, `scroll`, a mouse button's `down`/`up`) needs mouse reporting the program has not turned on (clicks and the wheel after `?1000`, moves with a button held after `?1002`, any move after `?1003`; 13.9): a terminal would send nothing, so strobe sends nothing rather than bytes the program would read as keys. Refused before anything is sent |
 
 Validators are one type in the code (`model::ValidatorId`, these ids), and a refusal is data:
 `Refusal { validator, summary, detail, fix, hidden }`. A refused run's error carries it (exit 4;
@@ -5576,6 +5607,100 @@ everything stamped with the home ended and the home deleted. What differs is how
   ref) needs strobe.json's `build` for this OS: without one each variant would launch the profile's
   same executable, which is a usage error before any block.
 
+### 13.9 Terminal programs (`tty()`)
+
+A program that draws in a terminal (a TUI, an editor, a shell) is measured on a terminal strobe owns,
+so nothing needs a display: it runs on a locked session and on a server alike (`target::tty`).
+
+- **The terminal.** A pseudo-terminal per block: ConPTY on Windows (`CreatePseudoConsole`, the program
+  in a job of its own, both listed with strobe's launches so a stop ends it before its home goes),
+  `openpty` on Unix (the program a session leader with the terminal as its controlling terminal, in
+  the process group `Owned` ends). `TERM=xterm-256color`. The program starts in a fresh isolated home
+  (§13.2's: `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `XDG_*`, the launch stamps; on
+  Unix also `TMPDIR`, a 0700 folder inside it), seeded from the target's `home` and `files`, in the
+  variant's folder (`cwd` under it), with `run` as a command line (`sh -c 'exec …'` on Unix, as
+  `CreateProcess` reads it on Windows) or as a program and its arguments. Rule 10 holds as for apps:
+  the user's Documents, Desktop and shared seed files are guarded around each case and the launch
+  (`isolate::Guard`), and on macOS a program whose data Cocoa keeps in the user's Library is refused
+  (`isolate::library_check`); the running-copy check of apps is skipped (a terminal program the user
+  runs elsewhere never shares the home). Its process set is its tree plus what carries its home's
+  stamp (`host::process_set`). When the command names an executable strobe finds (a path, or a name
+  on PATH), a timed block of a debug build refuses `DevBuild`; every block runs the native speed check
+  first (`Throttled`), and a program at background priority keeps no latency values
+  (`BackgroundPriority`).
+- **The grid.** One reader thread per terminal reads the program's output as it comes and feeds a
+  terminal emulator inside strobe (the `vt100` crate) that keeps the cell grid a terminal shows. It
+  answers the program's queries at once, before anything else (DA1, DA2, DSR and CPR, DECRQM for the
+  modes it tracks, `?2026` included, the progressive keyboard protocol's query, push, pop and set,
+  `CSI 14/16/18 t` with an 8×16 cell, XTVERSION, OSC 10/11/12 and 4 colours of a dark xterm), so a
+  program that asks what the terminal is never stalls. The grid as committed is what a terminal shows:
+  at the end of each read outside a frame (bytes after a frame's end in the same read too), or at the
+  end of a synchronized frame (`CSI ? 2026 h` … `l`; one left open a second ends at the next read as a
+  plain update, counted, never a frame). Each commit that changed cells, and each synchronized
+  frame, is an update: when its first read returned (start), when the grid held it (commit), the
+  cells it changed, synchronized or not. A resize is the terminal's own change, never an update.
+- **Input** is the bytes a terminal sends, stamped on the host clock when written. Keys use xterm's
+  encoding (application cursor keys once `?1` is set), or the progressive keyboard protocol's
+  `CSI … u` once the program pushed flags (disambiguate, event types with releases, every key); a key
+  with no bytes (a modifier alone, F13 and up without "every key") is a usage error. The mouse goes as
+  SGR reports (`?1006`) or X10 bytes, only once the program turned reporting on: clicks after `?1000`,
+  drags after `?1002`, moves after `?1003`; else `MouseNotEnabled` (§10.1), never bytes the program
+  would read as keys. `wheel` and `scroll` send notches (a terminal has no pixels; `scroll` paces them
+  at `speed` a second). `window({ resize: { width, height } })` sizes the terminal in cells
+  (`SIGWINCH`, `ResizePseudoConsole`); `"restore"` the block's start size. Selectors are text on the
+  grid (`text=`, `text==` a whole row, `index=`), points cells (`[col, row]` from 0, or `norm`).
+- **Latency.** Before a measured input the grid must hold still 50 ms after its last change and the
+  last input (at most 300 ms, else the input is `busy`, no sample). `tty.latency` is from the input to
+  the first update that began after it, changed cells and began before the next input (else
+  `silent`); a click's from its press when the press changed the grid within 50 ms, else from its
+  release (both edges are inputs, so a release's redraw never counts as the press's). The click into
+  an element before keys (`type(sel)`, `press({ selector })`) is never a sample. `tty.settle` is to
+  the last such update, once the grid then held still 50 ms. Typing paces each key on its change, as
+  §7.4 does on frames. On Windows ConPTY's console host redraws its buffer at a resize before the
+  program hears of it, so a resize is no latency sample there (`NotOnThisOs` when a
+  case's only inputs were resizes), `until: "frame"` on a resize is refused, and `tty.settle` counts a
+  resize only when a change followed the host's: one after which only the host drew refuses
+  `tty.settle` (`NotOnThisOs`). There, time a resize with a phase whose `until` is text only the
+  program's redraw shows, or its state on the event stream (`until: { state }`).
+- **Metrics** per run: `tty.updates`, `tty.frames` (synchronized), `tty.bytes` (what the terminal
+  received: on Windows the console host's re-render, not the program's bytes), `tty.cells`; pooled:
+  `tty.latency.p50/p95`, `tty.settle.p50/p95`, `tty.frame.p50/p95` (a synchronized frame's begin to end);
+  from outside the program's process tree `cpu.work`, `cpu.app.total`, `cpu.wakes`, `memory.app.private`,
+  `io.*`; Windows' console host apart as `cpu.pty_host`, never in `cpu.work`. The reader thread's whole
+  CPU over the measured runs (its reads' system calls too) is the block's `terminal` overhead (§19:
+  0.5%); over 2% what it stamped (`tty.latency.*`, `tty.settle.*`, `tty.frame.*`) is refused
+  `OverheadBudget`. In the daemon the reader and the event stream's threads take the bench thread's
+  CPUs (a new thread on Windows takes the process's).
+- **Every run starts where run 0 did** (a batch's later cases too: the launch's first run): the grid
+  cell by cell (a cell in the target's `ignore` regions, a clock or a spinner, is a placeholder
+  whatever it holds, so a wide character there shifts nothing), the cells shown inverse (a
+  selection, a highlighted row) and the cursor are compared before each run, and a reset that left
+  them otherwise refuses `ResetIncomplete` with the rows that differ (`resetCheck: false` for runs
+  that build on each other).
+- **Launch cases** end on text: `until: "text=…"`, the update that first showed it (`launch.ready`), its
+  `milestones` showing text (`in: "screen"`, the default) or writing a log line under the home, or the
+  program's own `until: { state }` (below); `cpu.work`, `tty.updates`, `tty.frames`, `tty.bytes` to
+  ready, `memory.app.*` once ready.
+- **App events** (`target::events`): the program gets `STROBE_EVENTS`, a path it appends one JSON line
+  per event to: `{"strobe":"state","name":…}` (ends `until: { state }` on an input, or a launch),
+  `{"strobe":"count","name":…,"n":…}` (adds to the run's `count.<name>`), `{"strobe":"metric","name":…,
+  "value":…}` (adds to the run's `app.<name>`; a declared one every measured run lacks is refused
+  `NoMetric`), `{"strobe":"mark","name":…}`. Each line must reach the path whole and flushed (one
+  append). Each is stamped as it arrives: on Unix the path is a FIFO strobe holds open and a thread
+  blocks on, on Windows a file alone in its folder, read through one handle shared every way when
+  the folder's change notification wakes the reader (no polling either way). A line may carry `t_ns`
+  (the host's monotonic clock in ns: Linux `CLOCK_MONOTONIC`, macOS `mach_absolute_time`, Windows
+  QPC): within the transport's delivery of its arrival (1 ms for the FIFO; 10 ms for Windows' file,
+  whose measured round trip was 6.3 ms) it is the event's time, beyond it the run (or the launch,
+  from its spawn to ready) refuses `ClockUnsynced`. A stream keeps at most a million events: past
+  that the block refuses `RunIncomplete`. `ctx.waitForLine(match, { in: "events" })` waits for a line
+  of it; `look tty:` lists what came. (Windows named pipes were rejected: an append-mode open, which
+  most runtimes use for `appendFile`, cannot write to one.)
+- No attribution block (`--why` says so) and no memory block yet. `page.snapshot` (`--pixels`) draws the
+  grid (`target::tty::image`): 16×32-pixel cells in their colours, each character in the embedded font
+  centred in its cell, box drawing and block elements as shapes, a shown cursor as a hollow box: the
+  same grid gives the same pixels on every machine. Its text goes beside it (`<name>.txt`).
+
 ## 14. Storage
 
 ### 14.1 Recordings
@@ -5798,6 +5923,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | off-CPU waits (`--probes waits`, attribution only, §11.1) | none in timing blocks: per context switch in the target (Linux about 7 µs on top of `deep` in a VM), so only a capture that asks takes them |
 | Firefox's profiler (attribution only, §8.3) | the browser's own samplers, in the target's processes: on Windows 1 ms through Firefox 160, where any shorter interval makes every process's sampler busy-wait a core (bug 1349801; 10.2 cores for a page's Firefox 159 on adais at 200 µs or 500 µs, 0.3-0.4 cores at 1 ms, 0.25 with no profiler), and 500 µs from Firefox 161, whose sampler waits on a high-resolution timer (bug 2082760; Nightly 162: 0.65 cores at 500 µs, 0.3 with no profiler); 200 µs on macOS and Linux (air 0.3-0.6 cores and vps 0.1-0.5 at any interval, no profiler alike) |
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
+| `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output); over it warns `OverheadBudget`, over 2% refuses `tty.latency.*`. Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
 
@@ -6811,6 +6937,24 @@ launch attach prepare load checks setup warmup runs trace analyse close`; attrib
 the same value keys (but one `warmup.unsteady`), no verdict in either, and block medians within run
 to run noise (`cpu.work` +1.3%, `main.work` −0.3%, `run.duration` −0.5% on the page; the script's
 `cpu.work` −0.5%).
+
+Terminal targets (2026-11-08, §13.9; `--check` smoke runs, one noisy run each, adais locked). A
+synthetic TUI (it asks the terminal for DA1 at startup and draws 10 synchronized frames of exactly 64
+bytes per key) on vps: its query answered in 2.5 ms, `tty.frames` 10 and `tty.bytes` 640, a click
+refused `MouseNotEnabled` before anything was sent, a reset that left a stray word refused
+`ResetIncomplete` naming the row, `count.ops` 42 from its event line and a key-to-`until: { state }`
+round trip of 0.72 ms (its own work included). On adais under ConPTY the query took 4.5 ms,
+`tty.frames` 10, `tty.bytes` 263 (the console host draws the program's console again: the bytes are
+its, not the program's), the round trip 6.3 ms (a file and its folder's change notification), and
+`--pixels-only` compared the drawn grids. A production TUI (an agent CLI, run with its private server
+in an isolated home, the user's own service and data untouched before and after): launch to its full
+first frame 1.4 s on vps, 1.7 s on adais; typing 12 keys `tty.latency.p50` 9.9 ms (vps) and 2.4 ms
+(adais); opening and closing its command palette p50 65 ms and 20 ms (`phase.open` 111 and 37 ms);
+list scrolling by keys and wheel 3.2 and 1.6 ms; a resize redrew in `tty.latency.p50` 104 ms on vps,
+and on adais was refused `NotOnThisOs` for latency (ConPTY redraws first) and timed by `tty.settle`
+(124 ms). Its update notice and model line arriving after the first frame were caught as
+`ResetIncomplete` until setup waited for them. Clippy `-D warnings` clean on Windows and Linux (vps);
+macOS checked from Windows only (`--target aarch64-apple-darwin`): air was offline.
 
 Not built: times on macOS samples, per-thread wakes on macOS (root only). Not checked on hardware: Linux DRM client statistics (the VM's virtio GPU prints
 none, so it reads unreadable), Linux display refresh, macOS GPU time against a GPU-bound app,

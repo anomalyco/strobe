@@ -37,6 +37,7 @@ pub mod plan;
 mod script;
 mod shown;
 pub mod slot;
+mod tty;
 
 pub use shown::shown_line;
 
@@ -111,6 +112,12 @@ const DESCRIPTIVE: &[&str] = &[
     "ui.wakes",
     "js.heap.used",
     "dom.nodes",
+    "tty.updates",
+    "tty.cells",
+    "tty.bytes",
+    "tty.frame.p50",
+    "tty.frame.p95",
+    "cpu.pty_host",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -260,6 +267,7 @@ fn engine(target: &Value) -> &'static str {
         "native" => "native",
         "script" => "script",
         "cli" => "cli",
+        "tty" => "tty",
         _ => engine_of(target).name(),
     }
 }
@@ -658,7 +666,7 @@ fn series_windowless(ctx: &Ctx, s: &Series) -> bool {
     };
     names.iter().all(|n| {
         let t = &ctx.describe["targets"][*n];
-        matches!(t["kind"].as_str(), Some("script" | "cli")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless)
+        matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless)
     })
 }
 
@@ -680,7 +688,7 @@ const TITLE_BAR_PT: f64 = 32.0;
 /// difference there is not the implementation. Each refusal names the side.
 fn admit_window(ctx: &mut Ctx, s: &Series, v: &Variant, b: &Block) -> Result<()> {
     let target = &ctx.describe["targets"][v.target_of(s)];
-    let windowed = !matches!(target["kind"].as_str(), Some("script" | "cli")) && target["window"] != false;
+    let windowed = !matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) && target["window"] != false;
     // A phone's page is its own screen: a target's viewport sizes only an emulated one.
     let asked =
         target["viewport"].as_object().filter(|_| ctx.phone.is_none()).map(|vp| (vp.get("width").and_then(Value::as_f64).unwrap_or(0.0), vp.get("height").and_then(Value::as_f64).unwrap_or(0.0)));
@@ -917,9 +925,9 @@ fn has_video(rec: &str) -> bool {
 /// a screencast.
 fn no_video(ctx: &Ctx, name: &str) -> Option<String> {
     let t = &ctx.describe["targets"][name];
-    let windowless = matches!(t["kind"].as_str(), Some("script" | "cli")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
+    let windowless = matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
     if windowless {
-        return Some(format!("{name} opens no window (a script, a command, or window: false)"));
+        return Some(format!("{name} opens no window (a script, a command, a terminal program, or window: false)"));
     }
     let engine = engine_of(t);
     if (ctx.headless || t["headless"] == true) && engine != WebEngine::Chromium && !is_native(t) {
@@ -1198,12 +1206,15 @@ struct Overhead {
     /// The reserved-CPU sweep (§19: 5%, on strobe's own CPUs).
     #[serde(skip_serializing_if = "Option::is_none")]
     reserve_pct: Option<f64>,
+    /// A terminal target's reader: reading, parsing and answering the program's output (§19: 0.5%).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_pct: Option<f64>,
 }
 
 impl Overhead {
     /// `strobe 1.2% · runner 0.3% · sampler 0.08% of a core`.
     fn text(&self) -> String {
-        let parts: Vec<String> = [("strobe", self.strobe_pct), ("runner", self.runner_pct), ("sampler", self.sampler_pct), ("presents", self.present_pct), ("reserve", self.reserve_pct)]
+        let parts: Vec<String> = [("strobe", self.strobe_pct), ("runner", self.runner_pct), ("sampler", self.sampler_pct), ("presents", self.present_pct), ("reserve", self.reserve_pct), ("terminal", self.terminal_pct)]
             .into_iter()
             .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
             .collect();
@@ -1212,7 +1223,7 @@ impl Overhead {
 
     /// Where a part went over its §19 budget: (part, its share, the budget).
     fn over(&self) -> Vec<(&'static str, f64, f64)> {
-        [("the sampler", self.sampler_pct, 0.5), ("the present session's consumer", self.present_pct, 0.5), ("the reserved-CPU sweep", self.reserve_pct, 5.0)]
+        [("the sampler", self.sampler_pct, 0.5), ("the present session's consumer", self.present_pct, 0.5), ("the reserved-CPU sweep", self.reserve_pct, 5.0), ("the terminal's reader", self.terminal_pct, 0.5)]
             .into_iter()
             .filter_map(|(n, p, b)| p.filter(|p| *p > b).map(|p| (n, p, b)))
             .collect()
@@ -1260,6 +1271,7 @@ fn mean_overhead(blocks: &[Block]) -> Option<Overhead> {
         sampler_pct: mean(|o| o.sampler_pct),
         present_pct: mean(|o| o.present_pct),
         reserve_pct: mean(|o| o.reserve_pct),
+        terminal_pct: mean(|o| o.terminal_pct),
     })
 }
 
@@ -2764,7 +2776,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // Outside-in CPU (`cpu.work`) is a tested secondary where the target is measured from outside: a
     // script, a command, a native app, both sides of an implementation comparison, and a page in an
     // engine without the renderer's task time.
-    let script = target["kind"] == "script" || target["kind"] == "cli" || is_native(&target) || s.sides.is_some() || engine_of(&target) != WebEngine::Chromium;
+    let script = matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) || is_native(&target) || s.sides.is_some() || engine_of(&target) != WebEngine::Chromium;
     let mut stopped = String::from("max pairs");
     let mut last: Option<Comparison> = None;
     // Why the series ended early (a stop, or an error after some pairs), as the error to report.
@@ -3468,6 +3480,9 @@ fn tail_of(name: &str) -> (&'static str, &'static str) {
         Some("interaction") => ("interaction.n", "inputs"),
         Some("scroll") => ("scroll.n", "scroll updates"),
         Some("canvas") => ("canvas.n", "canvas frame gaps"),
+        Some("tty") if name.starts_with("tty.latency.") => ("tty.latency.n", "inputs"),
+        Some("tty") if name.starts_with("tty.settle.") => ("tty.settle.n", "inputs"),
+        Some("tty") => ("tty.frame.n", "synchronized frames"),
         _ if metrics::split_metric(name) => ("frames.split.n", "frames with their stages"),
         _ => ("frames.n", "frames"),
     }
@@ -3509,6 +3524,7 @@ fn tail_state(x: &Exec, mut b: Block) -> Block {
 fn no_profiler(target: &Value, launch: bool) -> Option<String> {
     match (target["kind"].as_str(), engine_of(target)) {
         (Some("cli"), _) => Some("a command ends inside each run: there is nothing to profile it with".into()),
+        (Some("tty"), _) => Some("a terminal program has no profiler in strobe yet (profile it with strobe record pid:<n> --probes deep)".into()),
         (Some("web" | "url"), WebEngine::Webkit) => Some(format!("{} pages have no profilers in strobe yet", engine_of(target))),
         (Some("web" | "url"), WebEngine::Firefox) if launch => Some("a Firefox page's launch has no profile in strobe yet".into()),
         _ => None,
@@ -4642,6 +4658,8 @@ fn kind_launch(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Ex
     let native = is_native(&ctx.describe["targets"][&s.target]);
     if ctx.describe["targets"][&s.target]["kind"] == "cli" {
         Ok(Launch::of(cli::block(ctx, s, v, pair, x)))
+    } else if ctx.describe["targets"][&s.target]["kind"] == "tty" {
+        if s.launch.is_object() { Ok(Launch::of(tty::launch(ctx, s, v, pair, x))) } else { tty::chunk(ctx, cases, v, pair, x) }
     } else if s.launch.is_object() && native {
         Ok(Launch::of(native::launch(ctx, s, v, pair, x)))
     } else if s.launch.is_object() {
@@ -4694,12 +4712,14 @@ fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
             || (m.starts_with("launch.") && m != "launch.painted" && m != "launch.settled")
     };
     let windowless = t["window"] == false || t["app"].as_str().and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
-    // A pixels block compares what the window shows; only a headless page draws it without a screen.
-    if x.pixels.is_some() && !(matches!(t["kind"].as_str(), Some("web" | "url")) && (headless_of(ctx, s) || ctx.phone.is_some())) {
+    // A pixels block compares what the window shows; only a headless page (or a phone's) draws it
+    // without a screen, and a terminal's grid is drawn by strobe itself.
+    if x.pixels.is_some() && t["kind"] != "tty" && !(matches!(t["kind"].as_str(), Some("web" | "url")) && (headless_of(ctx, s) || ctx.phone.is_some())) {
         return Some("it compares the case's snapshots (--pixels), which are pixels on screen".into());
     }
     match t["kind"].as_str().unwrap_or("") {
-        "script" | "cli" => None,
+        // A terminal's grid is strobe's own: nothing it measures reaches a display.
+        "script" | "cli" | "tty" => None,
         // A headless page draws to no display: the lock screen covers nothing of it. A phone's page draws
         // on the phone's.
         "web" | "url" if headless_of(ctx, s) || ctx.phone.is_some() => None,
@@ -4738,7 +4758,7 @@ fn session_state(s: &Series, mut b: Block, locked: bool) -> Block {
 /// `BackgroundPriority`). At background QoS a drag read 83-91% dropped frames that dropped 0.4% at
 /// normal priority.
 pub(crate) fn foreground_metric(m: &str) -> bool {
-    ["frames.", "interaction.", "scroll.", "canvas.", "input.", "display."].iter().any(|p| m.starts_with(p)) || m == "launch.painted" || m == "launch.settled"
+    ["frames.", "interaction.", "scroll.", "canvas.", "input.", "display.", "tty.latency.", "tty.settle.", "tty.frame."].iter().any(|p| m.starts_with(p)) || m == "launch.painted" || m == "launch.settled"
 }
 
 /// A kept recording's values and refusals as the block ended with them: the block wrote its
@@ -4806,7 +4826,7 @@ fn phase_state(ctx: &Ctx, s: &Series, mut b: Block) -> Block {
     if b.values.is_empty() {
         return b;
     }
-    let page = !is_native(&ctx.describe["targets"][&s.target]) && !matches!(ctx.describe["targets"][&s.target]["kind"].as_str(), Some("script" | "cli"));
+    let page = !is_native(&ctx.describe["targets"][&s.target]) && !matches!(ctx.describe["targets"][&s.target]["kind"].as_str(), Some("script" | "cli" | "tty"));
     for m in declared_metrics(s) {
         if b.values.get(m).is_some_and(|v| v.is_finite()) || b.refused.contains_key(m) {
             continue;
@@ -6683,6 +6703,12 @@ thread_local! {
     static THREAD_PIN: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
+/// The CPUs this bench's thread is kept on inside the daemon, for the threads it starts that read the
+/// target (a terminal's reader): on Windows a new thread takes the process's CPUs, not its creator's.
+fn thread_pin() -> Option<u64> {
+    THREAD_PIN.with(|p| p.get())
+}
+
 impl OwnAffinity {
     fn start(mask: Option<u64>) -> OwnAffinity {
         let Some(m) = mask else { return OwnAffinity(None) };
@@ -7444,7 +7470,7 @@ fn apply_engines(describe: &mut Value, args: &Args) -> Result<()> {
             isolate::check_home_rel(rel, &format!("target {name}: files"))?;
         }
         if !t["motion"].is_null() {
-            if let Some(kind @ ("script" | "cli")) = t["kind"].as_str() {
+            if let Some(kind @ ("script" | "cli" | "tty")) = t["kind"].as_str() {
                 return Err(Error::usage(format!("target {name}: motion is for targets that show something (web, url, app, exe, command, native, webview); this is a {kind} target")));
             }
             Motion::of(t, name)?;
@@ -8398,7 +8424,7 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
     if matches!(v.kind, Kind::Cmd(_)) && target["kind"] != "cli" {
         return Err(Error::usage(format!("{}: a cmd:<line> variant is a command line, for a cli() target; this target is a {}", v.role, target["kind"].as_str().unwrap_or("?"))));
     }
-    if matches!(target["kind"].as_str(), Some("command") | Some("script") | Some("cli")) {
+    if matches!(target["kind"].as_str(), Some("command" | "script" | "cli" | "tty")) {
         // A command line runs as given, in the folder strobe started in: nothing to place or build.
         if let Kind::Cmd(_) = &v.kind {
             return Ok(());
@@ -8877,7 +8903,7 @@ fn render(r: &Value) -> String {
         // A script, a command line or a `window: false` app (every side's) has no window and draws to no
         // display (`windowless` in the series; older results by the target kinds).
         let kinds = if sides { vec![&s["target_kinds"]["base"], &s["target_kinds"]["head"]] } else { vec![&s["target_kind"]] };
-        let windowless = s["windowless"].as_bool().unwrap_or_else(|| kinds.iter().all(|k| matches!(k.as_str(), Some("script" | "cli"))));
+        let windowless = s["windowless"].as_bool().unwrap_or_else(|| kinds.iter().all(|k| matches!(k.as_str(), Some("script" | "cli" | "tty"))));
         // Two implementations: the window both were measured in, or none (one side's alone says nothing).
         let size = if sides {
             let c = &r["fairness"]["window"]["client_dip"];

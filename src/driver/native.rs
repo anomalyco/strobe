@@ -660,6 +660,23 @@ mod imp {
             if no_selector(sel) {
                 return Ok((self.main.get(), None));
             }
+            // A point: a click there, and the keys go where it lands: the main window, and on Windows the
+            // child window under the point (a classic control takes its keys there).
+            if let Some(p) = self.at_point(sel) {
+                let (_, _, t) = p?;
+                self.click(sel, &json!({}), presents, "pointer")?;
+                let frame = Duration::from_millis(self.frame_ms(0.0, 0.0));
+                self.rest(frame * 2, frame, presents)?;
+                let main = self.main.get();
+                #[cfg(windows)]
+                let to = Some(t.hwnd).filter(|h| *h != 0 && *h != main);
+                #[cfg(not(windows))]
+                let to = {
+                    let _ = t;
+                    None
+                };
+                return Ok((main, to));
+            }
             let (tree, i) = self.find_in(&parse_sel(sel)?, o["window"].as_str(), timeout(o), true)?;
             let top = tree.windows[tree.nodes[i].window];
             let own = tree.nodes[i].hwnd;
@@ -684,8 +701,7 @@ mod imp {
             let (x0, y0, t0) = if no_selector(sel) {
                 self.pointer.get().ok_or_else(|| Error::usage("page.drag(\"\", …) starts where the pointer is: move it first, or name an element"))?
             } else {
-                let (tree, i) = self.find(&parse_sel(sel)?, o["window"].as_str(), timeout(o))?;
-                self.aim(&tree, i)?
+                self.spot(sel, o)?
             };
             let b = Button::parse(o["button"].as_str())?;
             let main = self.main.get();
@@ -762,16 +778,51 @@ mod imp {
             }
         }
 
+        /// A coordinate locator (`driver::point`) in the main window's client area: device-independent
+        /// pixels from its top left, or `norm`; the screen point and the window it posts to.
+        fn at_point(&self, v: &Value) -> Option<Result<(f64, f64, Target)>> {
+            let p = crate::driver::point(v)?;
+            Some((|| {
+                let main = self.main.get();
+                let size = host::window_placement(main).map(|p| (p.client.0 / p.per_dip, p.client.1 / p.per_dip)).ok_or_else(|| Error::msg("the app's main window closed"))?;
+                let (px, py) = crate::driver::pixel_point(p?, size, "window's client area")?;
+                let (x, y) = self.poster.client_point(main, px, py)?;
+                let t = self.poster.target(&self.pids.borrow(), x, y)?;
+                crate::driver::aimed(crate::store::actions::Hit { role: String::new(), key: None, name: String::new(), point: Some([px, py]), rect: None, scrolled: false });
+                Ok((x, y, t))
+            })())
+        }
+
+        /// Where a locator puts the pointer: a point (`at_point`), or the element a selector finds.
+        fn spot(&self, sel: &Value, o: &Value) -> Result<(f64, f64, Target)> {
+            match self.at_point(sel) {
+                Some(p) => p,
+                None => {
+                    let (tree, i) = self.find(&parse_sel(sel)?, o["window"].as_str(), timeout(o))?;
+                    self.aim(&tree, i)
+                }
+            }
+        }
+
         fn click(&self, sel: &Value, opts: &Value, presents: &RefCell<Option<PresentCapture>>, kind: &'static str) -> Result<()> {
-            let selector = parse_sel(sel)?;
-            let (tree, i) = self.find_enabled(&selector, opts["window"].as_str(), timeout(opts))?;
-            let aimed = tree.visible_rect(i).unwrap_or(tree.nodes[i].rect);
-            let (x, y, t) = self.aim(&tree, i)?;
+            // The element aimed at and its visible part, for `moved`; a point has none.
+            let (x, y, t, top, aimed) = match self.at_point(sel) {
+                Some(p) => {
+                    let (x, y, t) = p?;
+                    (x, y, t, self.main.get(), None)
+                }
+                None => {
+                    let selector = parse_sel(sel)?;
+                    let (tree, i) = self.find_enabled(&selector, opts["window"].as_str(), timeout(opts))?;
+                    let rect = tree.visible_rect(i).unwrap_or(tree.nodes[i].rect);
+                    let (x, y, t) = self.aim(&tree, i)?;
+                    (x, y, t, tree.windows[tree.nodes[i].window], Some((selector, rect)))
+                }
+            };
             let b = Button::parse(opts["button"].as_str())?;
             let mods = Mods::parse_list(&opts["modifiers"])?;
             let count = opts["count"].as_u64().unwrap_or(1).clamp(1, 3);
             self.park(x, y)?;
-            let top = tree.windows[tree.nodes[i].window];
             let gap = Duration::from_millis(self.frame_ms(x, y));
             self.input(self.poster.move_to(t, 0)?, "pointer", false);
             self.pointer.set(Some((x, y, t)));
@@ -803,7 +854,10 @@ mod imp {
                     crate::driver::sent(last, true, Some(pressed));
                 }
             }
-            self.until(opts, last, presents).map_err(|e| self.moved(e, &selector, opts, aimed))
+            self.until(opts, last, presents).map_err(|e| match &aimed {
+                Some((selector, rect)) => self.moved(e, selector, opts, *rect),
+                None => e,
+            })
         }
 
         /// A click's `until` selector that never showed: when the clicked element is still visible but
@@ -959,8 +1013,7 @@ mod imp {
                 "click" => self.click(&sel(0), &opts(1), presents, "discrete")?,
                 "hover" => {
                     let o = opts(1);
-                    let (tree, i) = self.find(&parse_sel(&sel(0))?, o["window"].as_str(), timeout(&o))?;
-                    let (x, y, t) = self.aim(&tree, i)?;
+                    let (x, y, t) = self.spot(&sel(0), &o)?;
                     let at = self.pointer_to(x, y, t)?;
                     self.until(&o, at, presents)?;
                 }
@@ -1025,18 +1078,9 @@ mod imp {
                     let o = opts(1);
                     let b = a11y::keys::mouse_button(&s(0)).unwrap_or(Button::Left);
                     // `at`: an element to move onto first, or a point in the main window's client area.
-                    match o.get("at") {
-                        Some(at @ (Value::String(_) | Value::Object(_))) => {
-                            let (tree, i) = self.find(&parse_sel(at)?, o["window"].as_str(), timeout(&o))?;
-                            let (x, y, t) = self.aim(&tree, i)?;
-                            self.pointer_to(x, y, t)?;
-                        }
-                        Some(Value::Array(p)) => {
-                            let (x, y) = self.poster.client_point(main, p.first().and_then(Value::as_f64).unwrap_or(0.0), p.get(1).and_then(Value::as_f64).unwrap_or(0.0))?;
-                            let t = self.poster.target(&self.pids.borrow(), x, y)?;
-                            self.pointer_to(x, y, t)?;
-                        }
-                        _ => {}
+                    if let Some(at) = o.get("at").filter(|a| matches!(a, Value::String(_) | Value::Object(_) | Value::Array(_))) {
+                        let (x, y, t) = self.spot(at, &o)?;
+                        self.pointer_to(x, y, t)?;
                     }
                     // A release is measured as a click's is: what the press drew settles first.
                     if call == "up" {
@@ -1061,8 +1105,7 @@ mod imp {
                 "scroll" => {
                     let d = opts(1);
                     let o = opts(2);
-                    let (tree, i) = self.find(&parse_sel(&sel(0))?, o["window"].as_str(), timeout(&o))?;
-                    let (x, y, t) = self.aim(&tree, i)?;
+                    let (x, y, t) = self.spot(&sel(0), &o)?;
                     self.park(x, y)?;
                     self.input(self.poster.move_to(t, 0)?, "pointer", false);
                     self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(x, y)), presents)?;
@@ -1098,8 +1141,7 @@ mod imp {
                         let (x, y) = self.poster.client_point(main, w.client.0 as f64 / w.scale() / 2.0, w.client.1 as f64 / w.scale() / 2.0)?;
                         (x, y, self.poster.target(&self.pids.borrow(), x, y)?)
                     } else {
-                        let (tree, i) = self.find(&parse_sel(&sel(0))?, o["window"].as_str(), timeout(&o))?;
-                        self.aim(&tree, i)?
+                        self.spot(&sel(0), &o)?
                     };
                     self.park(x, y)?;
                     self.input(self.poster.move_to(t, 0)?, "pointer", false);

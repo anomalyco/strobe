@@ -12,8 +12,16 @@
  */
 export type Selector = string | { selector?: string; role?: string; text?: string; exact?: boolean; index?: number; focus?: boolean }
 
-/** An element a call acts on: a {@link Selector}. */
-export type Element = Selector
+/**
+ * A point instead of an element: `[x, y]` in the target's own units (a page's CSS pixels in its viewport, a native
+ * app's device-independent pixels in its main window's client area, a terminal's cells from 0), or `{ x, y, space }`:
+ * `"dip"` (pages and native apps), `"cell"` (terminals) or `"norm"` (0 to 1 of the viewport, client area or grid).
+ * A point off it is refused `OutOfView`. Where an element would be clicked into focus (`type`), a point is clicked.
+ */
+export type Point = [number, number] | { x: number; y: number; space?: "dip" | "cell" | "norm" }
+
+/** What a call acts on: an element by its {@link Selector}, or a {@link Point}. */
+export type Element = Selector | Point
 
 /** How a click presses: the button, the modifiers held around it (`"Shift"`, `"ControlOrMeta"`), and 2 for a double click, 3 for a triple. */
 export interface ClickOptions extends Options {
@@ -22,8 +30,28 @@ export interface ClickOptions extends Options {
   count?: 1 | 2 | 3
 }
 
-/** When an input call resolves: `"idle"` (no DOM change or long frame for 300 ms), `"frame"` (after next paint), or a visible element. */
-export type Until = "idle" | "frame" | Selector
+/**
+ * When an input call resolves: `"idle"` (no DOM change or long frame for 300 ms; a terminal's grid still for 300 ms),
+ * `"frame"` (after next paint), a visible element, or `{ state }`: the app wrote that state to its event stream
+ * after the input (`tty()` targets, see {@link AppEvent}).
+ */
+export type Until = "idle" | "frame" | Selector | { state: string }
+
+/**
+ * A line an app appends to the path in its `STROBE_EVENTS` (tty targets get it): strobe stamps each on its host clock
+ * as it arrives (Unix: a FIFO strobe reads; Windows: a file whose changes wake strobe). `state` ends an
+ * `until: { state }` wait or a launch's `until: { state }`; `count` adds `n` (default 1) to the run's `count.<name>`;
+ * `metric` adds `value` to the run's `app.<name>` (every measured run must write it); `mark` is kept with the run.
+ * `t_ns`, the app's own reading of the host's monotonic clock in ns, makes strobe refuse the run (`ClockUnsynced`) when
+ * the line arrived more than 1 ms from it. One line per append: `{"strobe":"count","name":"ops","n":42}`.
+ */
+export interface AppEvent {
+  strobe: "state" | "count" | "metric" | "mark"
+  name: string
+  n?: number
+  value?: number
+  t_ns?: number
+}
 
 export interface Options {
   until?: Until
@@ -354,8 +382,8 @@ export interface LaunchContext<P> extends Seeded {
 export interface Milestone {
   /** Text the line contains, or a regular expression it matches. A group named `at` holding epoch ms (`/entry: (?<at>\d{13})/`) is the time, for marks an app writes into its log; otherwise the time strobe read the line. */
   match: string | RegExp
-  /** `"output"` (stdout and stderr, the default), `"page"` (the page's `performance.mark` names), or a glob of files under the launch's home. */
-  in?: "output" | "page" | (string & {})
+  /** `"output"` (stdout and stderr, the default), `"page"` (the page's `performance.mark` names), `"screen"` (a `tty()` target's grid: the update that first showed it), or a glob of files under the launch's home. */
+  in?: "output" | "page" | "screen" | (string & {})
 }
 
 /** A native, app, exe or command launch ends on its main window: `visible`, its pixels first `painted` (changed from its first frame), or `settled` (their last change, once they hold for a second). Not a web target's (a page has no window of its own). */
@@ -489,6 +517,7 @@ export type Target<P> = Side &
     | ({ kind: "cli" } & CliOptions)
     | ({ kind: "native"; app?: string; path?: string } & NativeOptions)
     | ({ kind: "webview"; app?: string; path?: string } & WebviewOptions)
+    | ({ kind: "tty"; run: string | string[] } & TtyOptions)
   )
 
 /**
@@ -689,6 +718,26 @@ export interface WebviewOptions {
   motion?: Motion
 }
 
+export interface TtyOptions {
+  /** Where the program runs, relative to the variant's folder. Default: the folder itself. */
+  cwd?: string
+  /** The terminal's size in cells. Default 120 × 40. */
+  cols?: number
+  rows?: number
+  /** A seed folder copied into each launch's fresh private home (`{param}` placeholders allowed), relative to the bench file. */
+  home?: string
+  /** Files written into the home before the launch (JSON or text; `{home}`, `{port}` filled in). */
+  files?: Record<string, unknown>
+  /** Extra environment after the home's (`HOME`, `USERPROFILE`, `APPDATA`, `XDG_*`); `{home}`, `{port}` and `{fixture.*}` filled in. */
+  env?: Record<string, string>
+  /** Variables to remove (`PREFIX_*` for a family). */
+  unset?: string[]
+  /** Run once per variant before its first block, in its folder. */
+  build?: string
+  /** Regions of the grid every run's start may differ in (a clock, a spinner), `[col, row, cols, rows]` each: left out of the `ResetIncomplete` check. */
+  ignore?: [number, number, number, number][]
+}
+
 /** A parameter's values: all run, or `run` by default and `more` with `--params all`. */
 export type ParamValues = readonly unknown[] | { readonly run: readonly unknown[]; readonly more?: readonly unknown[] }
 
@@ -791,6 +840,23 @@ export function native<P = any>(appOrPath: string, opts: NativeOptions & Side = 
 export function webview<P = any>(appOrPath: string, opts: WebviewOptions & Side = {}): Target<P> {
   const path = /[\\/]|\.exe$/i.test(appOrPath)
   return { kind: "webview", ...(path ? { path: appOrPath } : { app: appOrPath }), ...opts }
+}
+
+/**
+ * A program in a terminal (a TUI, an editor, a shell): strobe starts it on a pseudo-terminal of its own (ConPTY on
+ * Windows), in a fresh isolated home per block, and keeps the cell grid a terminal would show for its output; no
+ * display is needed (locked sessions and headless servers run it). `page` drives it with the bytes a terminal
+ * sends: `type` and `press` keys (xterm's encoding, or the progressive keyboard protocol once the program pushes
+ * it), `click`, `hover`, `move`, `drag`, `wheel` and `scroll` (wheel notches) as mouse reports only once the
+ * program turned the mouse on (else refused `MouseNotEnabled`), `window({ resize: { width: cols, height: rows } })`.
+ * Selectors find text on the grid (`"text=Ask anything"`, `text==` a whole row) and points are cells (`[col, row]`
+ * from 0). Measures `tty.latency.p50`/`p95` (an input to the first grid change it caused), `tty.updates`,
+ * `tty.frames` (synchronized output, `?2026`), `tty.frame.p50`/`p95`, `tty.bytes`, `tty.cells`, and from outside
+ * its processes `cpu.work`, `cpu.app.total`, `cpu.wakes`, `memory.app.private`, `io.*`; Windows' console host
+ * `cpu.pty_host` apart, never the program's. Launch cases end on text: `launch: { until: "text=…" }`.
+ */
+export function tty<P = any>(run: string | string[], opts: TtyOptions & Side = {}): Target<P> {
+  return { kind: "tty", run, ...opts }
 }
 
 /** A fixture: the command and how strobe starts it. */

@@ -311,7 +311,7 @@ const context = (): any => seeded({
     const pattern = match instanceof RegExp ? plain(match) : { match }
     const id = await request("line", { step: "watch", ...pattern, in: opts.in ?? "output", timeout: opts.timeout ?? 30_000 })
     for (;;) {
-      const got: any = await request("line", { step: "poll", id })
+      const got: any = await request("line", { step: "poll", id, in: opts.in ?? "output" })
       if (!got?.pending) return got
       await Bun.sleep(10)
     }

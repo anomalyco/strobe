@@ -152,6 +152,7 @@ pub fn ready_noun(s: &Value) -> Option<String> {
             "painted" => Some("time until the window first paints".into()),
             "visible" => Some("time until the window shows".into()),
             "milestone" => s["until"]["milestone"].as_str().map(|m| format!("time until {m}")),
+            "state" => s["until"]["state"].as_str().map(|m| format!("time until the app says {m}")),
             _ => None,
         };
     }

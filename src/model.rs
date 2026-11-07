@@ -129,6 +129,7 @@ validators!(
     Emulator,
     WirelessTransport,
     NotProfileable,
+    MouseNotEnabled,
 );
 
 impl ValidatorId {
@@ -146,7 +147,7 @@ impl ValidatorId {
             SoftwareGpu | DevBuild | DebuggerAttached | WrongScreen | UnpacedSpin | NoPresentSource | AmbiguousInteraction | PatternInput | ConcurrentBench | VariantMismatch | RunIncomplete
             | Throttled | BackgroundPriority | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter
             | NotOnThisOs | NotForTarget | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent
-            | Untimed | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | PowerSave | LowBattery | Emulator | WirelessTransport | NotProfileable => false,
+            | Untimed | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | PowerSave | LowBattery | Emulator | WirelessTransport | NotProfileable | MouseNotEnabled => false,
         }
     }
 }
@@ -715,6 +716,116 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::Compared,
         about: "scroll update input to presentation, 95th percentile",
     },
+    MetricDef {
+        name: "tty.latency.p50",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 1,
+        across: Across::Compared,
+        about: "terminal targets: an input written to the terminal (a key, a click, a wheel notch, a resize) to the first change of the grid the program drew after it, median",
+    },
+    MetricDef {
+        name: "tty.latency.p95",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 20,
+        across: Across::Compared,
+        about: "terminal targets: input to the first grid change it caused, 95th percentile",
+    },
+    MetricDef {
+        name: "tty.settle.p50",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 1,
+        across: Across::Compared,
+        about: "terminal targets: an input to the last grid change it set off, once the grid then held still (50 ms) before the next input, median",
+    },
+    MetricDef {
+        name: "tty.settle.p95",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 20,
+        across: Across::Compared,
+        about: "terminal targets: input to the last grid change it set off, 95th percentile",
+    },
+    MetricDef {
+        name: "tty.updates",
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::Compared,
+        about: "terminal targets: changes of the grid per run (each read of the program's output that changed cells, and each synchronized frame)",
+    },
+    MetricDef {
+        name: "tty.frames",
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Exact,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "terminal targets: synchronized frames per run (the program's `?2026` begin and end around a redraw)",
+    },
+    MetricDef {
+        name: "tty.frame.p50",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 1,
+        across: Across::PerSide,
+        about: "terminal targets: a synchronized frame from the read holding its begin to the read holding its end, median",
+    },
+    MetricDef {
+        name: "tty.frame.p95",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 20,
+        across: Across::PerSide,
+        about: "terminal targets: a synchronized frame's begin to its end, 95th percentile",
+    },
+    MetricDef {
+        name: "tty.bytes",
+        unit: "bytes",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::Compared,
+        about: "terminal targets: bytes the terminal received per run: what the program wrote (Unix), what ConPTY's console host sent for it after drawing its console again (Windows)",
+    },
+    MetricDef {
+        name: "tty.cells",
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::Compared,
+        about: "terminal targets: cells (character or attributes) the grid's changes changed per run",
+    },
+    MetricDef {
+        name: "cpu.pty_host",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::Compared,
+        about: "terminal targets on Windows: CPU of the console host ConPTY starts for the terminal, per run: the terminal's work, never in cpu.work",
+    },
     MetricDef { name: "run.duration", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 0, across: Across::Compared, about: "wall time of one run" },
     MetricDef {
         name: "cpu.app.total",
@@ -1059,6 +1170,16 @@ pub const METRICS: &[MetricDef] = &[
         about: "`count.<name>`: what the bench file (`ctx.count`) or the page (`strobe.count`) counted per run",
     },
     MetricDef {
+        name: "app",
+        unit: "value",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: ("less", "more"),
+        min_n: 0,
+        across: Across::Compared,
+        about: "`app.<name>`: what the app's `{\"strobe\":\"metric\"}` lines on $STROBE_EVENTS added up to per run (lower is better)",
+    },
+    MetricDef {
         name: "phase",
         unit: "ms",
         better: Better::Lower,
@@ -1135,7 +1256,7 @@ pub const METRIC_HIGHER: MetricDef = MetricDef {
 
 /// A metric's definition. Families resolve by their base: `net.requests{<glob>}` → `net.requests`,
 /// `count.<name>` → `count`, `phase.<name>` → `phase`, `span.<name>` → `span`, `metric.<name>` →
-/// `metric`, `launch.<milestone>` → `launch.milestone`.
+/// `metric`, `app.<name>` → `app`, `launch.<milestone>` → `launch.milestone`.
 pub fn metric(name: &str) -> Option<&'static MetricDef> {
     let base = name.split_once('{').map_or(name, |(b, _)| b);
     let find = |n: &str| METRICS.iter().find(|m| m.name == n);
@@ -1144,6 +1265,7 @@ pub fn metric(name: &str) -> Option<&'static MetricDef> {
         Some(("phase", rest)) if !rest.is_empty() => find("phase"),
         Some(("span", rest)) if !rest.is_empty() => find("span"),
         Some(("metric", rest)) if !rest.is_empty() => find("metric"),
+        Some(("app", rest)) if !rest.is_empty() => find("app"),
         Some(("launch", rest)) if !rest.is_empty() => find("launch.milestone"),
         _ => None,
     })

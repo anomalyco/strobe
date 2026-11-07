@@ -188,6 +188,26 @@ pub fn end_launches() {
 #[cfg(windows)]
 static JOBS: std::sync::Mutex<Vec<(String, isize)>> = std::sync::Mutex::new(Vec::new());
 
+/// A launch made outside `spawn_owned` (Windows: a pseudo console's program, started with
+/// `CreateProcessW`): listed so a stop's `end_launches` ends it too, and its job, when it has one,
+/// found by `group_pids` for `home`. Taken back by `unlist_launch` before it is ended.
+#[cfg(windows)]
+pub fn list_launch(pid: u32, job: Option<isize>, home: Option<&Path>) {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push((pid, None));
+    if let (Some(j), Some(h)) = (job, home) {
+        JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((home_key(h), j));
+    }
+}
+
+/// Takes a `list_launch` back off the lists (before its owner ends it and closes its job).
+#[cfg(windows)]
+pub fn unlist_launch(pid: u32, job: Option<isize>) {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != pid);
+    if let Some(j) = job {
+        JOBS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, x)| *x != j);
+    }
+}
+
 impl Owned {
     pub fn pid(&self) -> u32 {
         self.child.id()
@@ -640,6 +660,31 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         let unattributed = None;
         Ok(Owned { child, group: Some(Group { pgid }), unattributed, start: super::start_time(pgid) })
     }
+}
+
+/// `spawn_owned` for a program on a pseudo-terminal (Unix): the child starts a session of its own
+/// (`setsid`, which also makes it its process group, the group `Owned` ends) whose controlling
+/// terminal is its stdin, as a terminal emulator starts a shell. `cmd`'s stdin must be the terminal.
+#[cfg(unix)]
+pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>) -> std::io::Result<Owned> {
+    use std::os::unix::process::CommandExt;
+    // Held from before the spawn until the launch is listed: a stop in between ends it too.
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    pin(cmd, cpus);
+    // Between fork and exec only async-signal-safe calls.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    let pgid = child.id();
+    let start = super::start_time(pgid);
+    live.push((pgid, start));
+    Ok(Owned { child, group: Some(Group { pgid }), unattributed: None, start })
 }
 
 /// Linux: the CPU mask set between fork and exec. macOS has no CPU affinity.

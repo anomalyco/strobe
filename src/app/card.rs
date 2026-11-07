@@ -14,7 +14,7 @@ use resvg::{tiny_skia, usvg};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 mod forest;
 mod history;
@@ -26,8 +26,6 @@ const H: f32 = 630.0;
 const HEAD: f32 = 72.0;
 const FOOT: f32 = 64.0;
 const PAD: f32 = 48.0;
-const REGULAR: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
-const SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
 
 // ---------- colours ----------
 
@@ -633,22 +631,8 @@ fn short_os(os: &str) -> String {
 
 // ---------- drawing ----------
 
-fn fonts() -> Arc<usvg::fontdb::Database> {
-    static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    DB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_font_data(REGULAR.to_vec());
-        db.load_font_data(SEMIBOLD.to_vec());
-        db.set_sans_serif_family("Inter");
-        Arc::new(db)
-    })
-    .clone()
-}
-
 fn options() -> usvg::Options<'static> {
-    let mut o = usvg::Options { font_family: "Inter".into(), ..Default::default() };
-    o.fontdb = fonts();
-    o
+    crate::font::options()
 }
 
 fn esc(s: &str) -> String {

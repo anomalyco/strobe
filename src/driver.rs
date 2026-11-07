@@ -4,6 +4,7 @@
 pub mod native;
 pub mod os;
 pub mod touch;
+pub mod tty;
 pub mod window;
 
 use crate::model::{Error, Refusal, Result, ValidatorId};
@@ -302,6 +303,18 @@ pub(crate) const HELPER: &str = r#"window.__strobe ??= (() => {
       const on = () => { if (focusedIn(el)) done(true) }
       addEventListener("focusin", on, true)
       const t = setTimeout(() => done(focusedIn(el)), timeout)
+    })
+    return true
+  }
+  // `armFocus` for a tap at a point, which names no element: whether focus left the body (a focusin
+  // elsewhere) within `timeout` ms.
+  s.armFocusAny = (timeout) => {
+    const away = () => !!document.activeElement && document.activeElement !== document.body
+    s.focusWait = new Promise((res) => {
+      const done = (v) => { removeEventListener("focusin", on, true); clearTimeout(t); res(v) }
+      const on = () => { if (away()) done(true) }
+      addEventListener("focusin", on, true)
+      const t = setTimeout(() => done(away()), timeout)
     })
     return true
   }
@@ -747,6 +760,41 @@ pub fn text(page: &Page, sel: &Value, timeout: Duration) -> Result<Option<String
     let sel = Selector::parse(sel, Dialect::Page)?;
     let v = helped(page, &format!("__strobe.text({}, {})", sel.page_spec(), timeout.as_millis()), timeout + Duration::from_secs(5))?;
     Ok(v.as_str().map(str::to_string))
+}
+
+/// A coordinate locator in a selector's place (SPEC 9.6): `[x, y]` in the target's own units (a page's
+/// CSS pixels in its viewport, a native window's device-independent pixels in its client area, a
+/// terminal's cells), or `{ x, y, space }` naming them (`"dip"`, `"cell"`, or `"norm"`: 0 to 1 of the
+/// viewport, client area or grid). None for a selector. Each driver takes the spaces it has.
+pub(crate) fn point(v: &Value) -> Option<Result<(f64, f64, Option<String>)>> {
+    let num = |x: &Value| x.as_f64().filter(|f| f.is_finite());
+    match v {
+        Value::Array(a) if a.len() == 2 => Some(match (num(&a[0]), num(&a[1])) {
+            (Some(x), Some(y)) => Ok((x, y, None)),
+            _ => Err(Error::usage(format!("a point is [x, y], two numbers, not {v}"))),
+        }),
+        Value::Object(o) if o.contains_key("x") || o.contains_key("y") => Some(match (o.get("x").and_then(num), o.get("y").and_then(num)) {
+            (Some(x), Some(y)) if o.keys().all(|k| matches!(k.as_str(), "x" | "y" | "space")) => Ok((x, y, o.get("space").and_then(Value::as_str).map(str::to_string))),
+            _ => Err(Error::usage(format!("a point is {{ x, y, space? }} (numbers; space \"dip\", \"cell\" or \"norm\"), not {v}"))),
+        }),
+        _ => None,
+    }
+}
+
+/// A point in a page's or a window's own pixels from `point`: its units (`dip`, a page's CSS pixels
+/// too) or `norm` of `size`, refused off it (input there lands on nothing of the target's).
+pub(crate) fn pixel_point((x, y, space): (f64, f64, Option<String>), size: (f64, f64), what: &str) -> Result<(f64, f64)> {
+    let (px, py) = match space.as_deref() {
+        None | Some("dip" | "css") => (x, y),
+        Some("norm") => (x * size.0, y * size.1),
+        Some(s) => return Err(Error::usage(format!("a point's space here is \"dip\" ({what}'s own pixels) or \"norm\" (0 to 1 of it), not {s:?}"))),
+    };
+    if !(0.0..size.0).contains(&px) || !(0.0..size.1).contains(&py) {
+        return Err(Refusal::new(ValidatorId::OutOfView, format!("point ({x}, {y}){} is off the {:.0}×{:.0} {what}, so input there would land on nothing of the target's", space.map(|s| format!(" in {s}")).unwrap_or_default(), size.0, size.1))
+            .fix(format!("give a point inside the {what}: [x, y] from its top left, or {{ x, y, space: \"norm\" }} from 0 to 1"))
+            .into());
+    }
+    Ok((px, py))
 }
 
 /// A selector argument with a call's `{ text, exact }` options added (`waitFor(sel, { text })`).
@@ -1215,7 +1263,7 @@ impl Driver {
     /// already held by `down` stays held.
     fn drag(&self, sel: &Value, path: &Value, o: &Value) -> Result<Value> {
         let path = keys::parse_path(path)?;
-        let (x0, y0) = if no_selector(sel) { self.pointer.get() } else { self.locate(&Self::sel(sel)?, o)? };
+        let (x0, y0) = if no_selector(sel) { self.pointer.get() } else { self.spot(sel, o)? };
         let b = Button::parse(o["button"].as_str())?;
         let duration = o.get("duration").and_then(Value::as_f64).unwrap_or(1000.0).max(1.0);
         let frame = self.frame_period()?;
@@ -1304,8 +1352,10 @@ impl Driver {
         if no_selector(sel) {
             return self.settle(Duration::ZERO).map(drop);
         }
-        let sel = Self::sel(sel)?;
-        let (x, y, focused) = self.aim_for(&sel, o, true)?;
+        let (x, y, focused) = match point(sel) {
+            Some(_) => self.spot(sel, o).map(|(x, y)| (x, y, false))?,
+            None => self.aim_for(&Self::sel(sel)?, o, true)?,
+        };
         if focused {
             return self.settle(Duration::ZERO).map(drop);
         }
@@ -1348,7 +1398,7 @@ impl Driver {
             }
             "click" => {
                 let o = opts(1);
-                let (x, y) = self.locate(&Self::sel(&sel(0))?, &o)?;
+                let (x, y) = self.spot(&sel(0), &o)?;
                 let b = Button::parse(o["button"].as_str())?;
                 let mods = cdp_mods(Mods::parse_list(&o["modifiers"])?);
                 let count = o["count"].as_u64().unwrap_or(1).clamp(1, 3);
@@ -1413,7 +1463,7 @@ impl Driver {
             }
             // The pointer over an element, without a click: reveals hover-only controls, or parks the pointer.
             "hover" => {
-                let (x, y) = self.locate(&Self::sel(&sel(0))?, &opts(1))?;
+                let (x, y) = self.spot(&sel(0), &opts(1))?;
                 self.pointer_move(x, y, false)?;
                 self.until(&opts(1))
             }
@@ -1425,7 +1475,7 @@ impl Driver {
             "drag" => self.drag(&sel(0), &opts(1), &opts(2)),
             "scroll" => {
                 let o = opts(1);
-                let (x, y) = self.locate(&Self::sel(&sel(0))?, &opts(2))?;
+                let (x, y) = self.spot(&sel(0), &opts(2))?;
                 let by = o.get("by").and_then(Value::as_f64).unwrap_or(0.0);
                 let by_x = o.get("byX").and_then(Value::as_f64).unwrap_or(0.0);
                 let speed = o.get("speed").and_then(Value::as_f64).unwrap_or(2000.0);
@@ -1446,7 +1496,7 @@ impl Driver {
                     let c = self.page.eval("[innerWidth / 2, innerHeight / 2]")?;
                     (c[0].as_f64().unwrap_or(0.0), c[1].as_f64().unwrap_or(0.0))
                 } else {
-                    self.locate(&Self::sel(&sel(0))?, &opts(2))?
+                    self.spot(&sel(0), &opts(2))?
                 };
                 let delta = |k: &str| d.get(k).and_then(Value::as_f64).unwrap_or(0.0);
                 let (mask, last) = self.buttons.get();
@@ -1490,13 +1540,9 @@ impl Driver {
                 let o = opts(1);
                 if let Some(b) = keys::mouse_button(&s(0)) {
                     // `at`: a selector or [x, y] to move to first, as a person moves before pressing.
-                    match o.get("at") {
-                        Some(at @ (Value::String(_) | Value::Object(_))) => {
-                            let (x, y) = self.locate(&Self::sel(at)?, &o)?;
-                            self.pointer_move(x, y, false)?;
-                        }
-                        Some(Value::Array(p)) => self.pointer_move(p.first().and_then(Value::as_f64).unwrap_or(0.0), p.get(1).and_then(Value::as_f64).unwrap_or(0.0), false)?,
-                        _ => {}
+                    if let Some(at) = o.get("at").filter(|a| matches!(a, Value::String(_) | Value::Object(_) | Value::Array(_))) {
+                        let (x, y) = self.spot(at, &o)?;
+                        self.pointer_move(x, y, false)?;
                     }
                     // A release is measured as a click's is: what the press drew settles first.
                     if call == "up" {
@@ -1553,6 +1599,17 @@ impl Driver {
     /// Waits for the element, then returns the point to send input at.
     fn locate(&self, sel: &Selector, opts: &Value) -> Result<(f64, f64)> {
         self.aim(sel, opts).map(|(x, y, _)| (x, y))
+    }
+
+    /// Where input goes for a locator: a point in the viewport (`point`: CSS pixels, or `norm`), or the
+    /// element a selector finds (`locate`).
+    pub(crate) fn spot(&self, v: &Value, opts: &Value) -> Result<(f64, f64)> {
+        let Some(p) = point(v) else { return self.locate(&Self::sel(v)?, opts) };
+        let p = p?;
+        let c = self.page.eval("[innerWidth, innerHeight]")?;
+        let (x, y) = pixel_point(p, (c[0].as_f64().unwrap_or(0.0), c[1].as_f64().unwrap_or(0.0)), "viewport")?;
+        aimed(Hit { role: String::new(), key: None, name: String::new(), point: Some([x, y]), rect: None, scrolled: false });
+        Ok((x, y))
     }
 
     /// `locate`, and whether focus is in the element: one look at the page (`__strobe.aim`).

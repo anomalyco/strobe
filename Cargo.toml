@@ -61,6 +61,8 @@ x25519-dalek = { version = "2", default-features = false, features = ["zeroize"]
 p256 = { version = "0.13", default-features = false, features = ["ecdh", "std"] }
 # iOS TLS: the OS random source for the RustCrypto keys (getrandom 0.2, already in the tree).
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Terminal targets: the cell grid a terminal would show for a program's output (on vte); pure Rust, ~4k lines.
+vt100 = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 # Linux and macOS system calls (affinity, CPU clocks, sysctl, proc_pidinfo, perf_event_open, dlopen); bindings only, no C build.

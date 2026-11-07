@@ -129,6 +129,8 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("headed", Switch, "look"),
     ("build", Switch, "look"),
     ("timeout", Value, "look"),
+    ("type", Value, "look"),
+    ("press", Value, "look"),
     // status, top.
     ("calibrate", Switch, "status"),
     ("fast", Switch, "status"),
@@ -431,8 +433,10 @@ Use
   look <url|file> [--until <css>] [--wait 1s] [--size 1280x800] [--out <png>] [--chars 4000] [--full | --element <css>] [--headed]
        [--mobile[=<serial>]]       (the page in Chrome on an Android phone or emulator, at the phone's own screen)
   look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40]
+  look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s] [--home <seed>]
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
-                                  console messages and uncaught errors, and a screenshot (exit 124 when it never loads)
+                                  console messages and uncaught errors, and a screenshot (exit 124 when it never loads);
+                                  tty: the program on strobe's own terminal in an isolated home: its grid, the modes it set
   top [--target <pid>] [--once]   live per-core load by CCD, processes with CPU, GPU, VRAM
   run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] -- <command> [args…]
                                   run your own harness as a bench block runs: the bench slot, the fastest power plan,
@@ -457,7 +461,7 @@ Setup
   leave [--yes]                   undo up (--yes also deletes recordings and experiments)
 
 Targets   https://… · a local page.html (or file:page.html) · app:<id> (a strobe.json profile, Electron or native) · exe:<path> [--app <id> | --native]
-          · cdp:<port> · cdp:ws://… · file:<trace> (import) · pid:<n> · proc:<name>
+          · cdp:<port> · cdp:ws://… · file:<trace> (import) · pid:<n> · proc:<name> · tty:<command> (look)
 Variants  a directory · a git ref (git:<ref>) · app:<id> · exe:<path> · url:<href> · cmd:<line> (a cli() target's command)
 Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells that count stderr lines as a failure)
 Exit codes: 0 ok · 1 error · 2 usage · 3 needs a human · 4 refused (invalid) · 5 inconclusive · 124 timeout · 255 unreachable

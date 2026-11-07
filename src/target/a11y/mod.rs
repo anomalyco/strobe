@@ -85,6 +85,8 @@ pub enum Dialect {
     Native,
     /// A page: the base is a CSS selector (`>>>` crosses shadow roots).
     Page,
+    /// A terminal's cell grid: no base and no role, only text (a run of it on one row) and index.
+    Terminal,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -239,6 +241,9 @@ impl Selector {
         {
             return Err(bad(format!("unknown role {r:?} (roles: {})", ROLES.iter().map(|r| r.0).collect::<Vec<_>>().join(", "))));
         }
+        if dialect == Dialect::Terminal && (role.is_some() || focus) {
+            return Err(bad(format!("a terminal's grid has text, not elements: no {}; select text with text=<text>, or a cell with [col, row]", if focus { ":focus" } else { "role=" })));
+        }
         // `*` alone: every element (a native app's tree has no CSS, so there it is no base).
         let star = base.len() == 1 && base[0] == "*";
         let base = match (dialect, base.len()) {
@@ -248,6 +253,10 @@ impl Selector {
             (Dialect::Native, 1) if !base[0].starts_with(['[', '.', '#']) && !base[0].contains(">>>") => Base::Key(base[0].split('/').map(str::to_string).collect()),
             (Dialect::Native, _) => {
                 return Err(bad("a native app's elements are found through its accessibility tree, not CSS: the base is one element key or key path".into()));
+            }
+            (Dialect::Terminal, 1) if star => Base::Any,
+            (Dialect::Terminal, _) => {
+                return Err(bad("a terminal's grid has text, not elements: select text with text=<text> (text==<text> a whole row, trimmed), or a cell with [col, row]".into()));
             }
         };
         if base == Base::Any && !star && role.is_none() && text.is_none() && !focus {
@@ -259,10 +268,15 @@ impl Selector {
     /// `*`: every visible element (`page.query` without a selector).
     pub fn every(dialect: Dialect) -> Selector {
         let base = match dialect {
-            Dialect::Native => Base::Any,
+            Dialect::Native | Dialect::Terminal => Base::Any,
             Dialect::Page => Base::Css("*".into()),
         };
         Selector { base, role: None, exact: false, focus: false, text: None, index: 0, source: "*".into() }
+    }
+
+    /// Its text filter and whether it is the whole text (`text==`): all a terminal's selector holds.
+    pub fn text_filter(&self) -> Option<(&str, bool)> {
+        self.text.as_deref().map(|t| (t, self.exact))
     }
 
     /// What a page's helper (`__strobe.find`) takes.

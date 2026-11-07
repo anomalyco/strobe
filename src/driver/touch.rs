@@ -444,14 +444,19 @@ impl Driver {
                         "drop the modifiers and let go of held ones (page.up), or measure the modified click on a desktop target",
                     ));
                 }
-                let at = self.locate(&Self::sel(&sel(0))?, &o)?;
+                let at = self.spot(&sel(0), &o)?;
                 self.tap(t, at, o["count"].as_u64().unwrap_or(1).clamp(1, 3))?;
                 self.until(&o)
             }
             "type" | "press" => {
                 let (target, o) = if call == "type" { (sel(0), opts(2)) } else { (opts(1)["selector"].clone(), opts(1)) };
-                let sel = Self::sel(&target)?;
-                let (x, y, focused) = self.aim_for(&sel, &o, true)?;
+                // A point names no element: its tap waits for focus to leave the body instead.
+                let sel = if crate::driver::point(&target).is_some() { None } else { Some(Self::sel(&target)?) };
+                let (x, y, focused) = match &sel {
+                    None => self.spot(&target, &o).map(|(x, y)| (x, y, false))?,
+                    Some(sel) => self.aim_for(sel, &o, true)?,
+                };
+                let named = sel.as_ref().map_or_else(|| target.to_string(), |s| s.source.clone());
                 if !focused {
                     // A tap into the field, never a sample; its frames (a caret, a focus ring) settle
                     // before the first key, which is measured. On a page a person can zoom, a phone's
@@ -459,7 +464,11 @@ impl Driver {
                     // the keys wait for the page's focusin (armed before the tap, `FOCUS_WAIT`), and a
                     // tap that moved no focus there refuses the run rather than type into the body.
                     self.settle(Duration::ZERO)?;
-                    self.read(&format!("__strobe.armFocus({}, {})", sel.page_spec(), FOCUS_WAIT.as_millis()), Duration::from_secs(10))?;
+                    let arm = match &sel {
+                        Some(sel) => format!("__strobe.armFocus({}, {})", sel.page_spec(), FOCUS_WAIT.as_millis()),
+                        None => format!("__strobe.armFocusAny({})", FOCUS_WAIT.as_millis()),
+                    };
+                    self.read(&arm, Duration::from_secs(10))?;
                     sent(crate::host::now_ns(), false, None);
                     self.finger(t, Phase::Start, (x, y), true)?;
                     std::thread::sleep(TAP_HOLD);
@@ -467,7 +476,7 @@ impl Driver {
                     if self.read("__strobe.focusWait", FOCUS_WAIT + Duration::from_secs(2))? != Value::Bool(true) {
                         return Err(Refusal::new(
                             ValidatorId::RunIncomplete,
-                            format!("page.{call}({}): the tap into it moved no focus there within {} ms, so its keys would reach whatever has focus", sel.source, FOCUS_WAIT.as_millis()),
+                            format!("page.{call}({named}): the tap into it moved no focus there within {} ms, so its keys would reach whatever has focus", FOCUS_WAIT.as_millis()),
                         )
                         .fix("tap an element that takes focus (a field, an editable element), or let the page settle before typing (an `until` on the call before)")
                         .into());
@@ -498,7 +507,7 @@ impl Driver {
                 if no_selector(&sel(0)) {
                     return Err(Error::usage("page.drag(\"\", …) on a phone: a finger is down only inside a call, so a drag starts on an element: give its selector"));
                 }
-                let from = self.locate(&Self::sel(&sel(0))?, &o)?;
+                let from = self.spot(&sel(0), &o)?;
                 // Headless Firefox would scroll by its own rule where a browser pans: the drag must be one
                 // the page keeps for itself (touch-action, nothing to scroll, or its touch's default
                 // prevented, read after it).
@@ -521,6 +530,9 @@ impl Driver {
             "scroll" if self.page.firefox().is_some() => Err(firefox_pans("page.scroll", "a swipe")),
             "scroll" => {
                 let o = opts(1);
+                if crate::driver::point(&sel(0)).is_some() {
+                    return Err(Error::usage("page.scroll(point) on a phone: a swipe stays inside the element it scrolls, so it takes a selector; a point suits click and drag"));
+                }
                 let sel = Self::sel(&sel(0))?;
                 let at = self.locate(&sel, &opts(2))?;
                 let by = o.get("by").and_then(Value::as_f64).unwrap_or(0.0);

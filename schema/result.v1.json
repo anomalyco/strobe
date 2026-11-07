@@ -56,7 +56,7 @@
           "name": { "type": "string", "description": "What reports call this side: the target's name (implementations), else the variant's label." },
           "target": { "type": ["string", "null"], "description": "implementations: the bench file's target this side runs." },
           "target_kind": { "type": ["string", "null"], "description": "web, url, app, exe, command, script or native." },
-          "engine": { "enum": ["chromium", "native", "script", null], "description": "What the target runs on: metrics of class per_side compare only between sides of one engine." },
+          "engine": { "enum": ["chromium", "firefox", "webkit", "native", "script", "cli", "tty", null], "description": "What the target runs on: metrics of class per_side compare only between sides of one engine." },
           "repo": { "type": ["string", "null"], "description": "The target's own project (its cwd's strobe.json root), when it is not the bench file's." },
           "spec": { "type": "string" },
           "label": { "type": "string" },
@@ -194,7 +194,8 @@
         "DeviceAsleep",
         "Emulator",
         "WirelessTransport",
-        "NotProfileable"
+        "NotProfileable",
+        "MouseNotEnabled"
       ]
     },
     "verdictKind": {
@@ -299,7 +300,8 @@
         "runner_pct": { "type": "number", "description": "The bench runner." },
         "sampler_pct": { "type": "number", "description": "The OS and GPU sampler's thread (budget 0.5%)." },
         "present_pct": { "type": "number", "description": "The OS present session's consumer (budget 0.5%)." },
-        "reserve_pct": { "type": "number", "description": "The reserved-CPU sweep (budget 5%, on strobe's own CPUs)." }
+        "reserve_pct": { "type": "number", "description": "The reserved-CPU sweep (budget 5%, on strobe's own CPUs)." },
+        "terminal_pct": { "type": "number", "description": "A tty() target's terminal reader: reading, parsing and answering the program's output (budget 0.5%)." }
       }
     },
     "step": {
@@ -359,8 +361,8 @@
         "launches": { "type": "integer" },
         "until": {
           "type": ["object", "null"],
-          "description": "A launch series: what each launch was timed until. end is visible, painted or settled (the window), milestone (with milestone, its name) or selector (with selector, the case's until). Null for other series; absent in older results (readers then infer it from the launches' values).",
-          "properties": { "end": { "enum": ["visible", "painted", "settled", "milestone", "selector"] }, "milestone": { "type": "string" }, "selector": {} }
+          "description": "A launch series: what each launch was timed until. end is visible, painted or settled (the window), milestone (with milestone, its name), state (with state: a tty() program's own state on its STROBE_EVENTS stream) or selector (with selector, the case's until). Null for other series; absent in older results (readers then infer it from the launches' values).",
+          "properties": { "end": { "enum": ["visible", "painted", "settled", "milestone", "state", "selector"] }, "milestone": { "type": "string" }, "state": { "type": "string" }, "selector": {} }
         },
         "stopped": { "type": "string", "description": "Why the series ended: primary decided, max pairs, max time, …" },
         "bound": { "type": "number" },

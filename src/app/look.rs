@@ -185,10 +185,147 @@ fn native(args: &Args, target: &str) -> Result<Output> {
     result
 }
 
+/// `strobe look tty:<command>`: the program on strobe's own terminal (`target::tty`) in an isolated
+/// home, as a tty() target's block starts it, nothing measured: its grid once it showed `--until` and
+/// held still, the modes it set (mouse, keyboard protocol), and when it first drew. `--press` and
+/// `--type` send input first, to see what a case's steps would show.
+fn terminal(args: &Args, line: &str) -> Result<Output> {
+    use crate::driver::tty as drv;
+    use crate::target::{isolate, tty};
+    for page_only in ["element", "full", "scale", "chars", "headed", "keys", "build", "app"] {
+        if args.has(page_only) {
+            return Err(Error::usage(format!("--{page_only} is not a terminal's: look tty:<command> takes --size COLSxROWS, --until, --press, --type, --wait, --timeout, --home, --out <png>")));
+        }
+    }
+    let (cols, rows) = match args.get("size") {
+        Some(s) => {
+            let (c, r) = s.split_once(['x', 'X', '×']).ok_or_else(|| Error::usage(format!("--size COLSxROWS (cells), not {s}")))?;
+            (c.trim().parse().map_err(|_| Error::usage(format!("--size: {c}")))?, r.trim().parse().map_err(|_| Error::usage(format!("--size: {r}")))?)
+        }
+        None => (120u16, 40u16),
+    };
+    let wait = Duration::from_millis(args.get("wait").map(duration_ms).transpose()?.unwrap_or(1000));
+    let timeout = Duration::from_millis(args.get("timeout").map(duration_ms).transpose()?.unwrap_or(30_000));
+    let until = args.get("until").map(|u| drv::parse_sel(&Value::String(u.to_string()))).transpose()?;
+    for l in isolate::reap_dead_owners() {
+        progress(l);
+    }
+    let home = isolate::prepare_home(&isolate::App::bare(Path::new("tty")), args.get("home").map(Path::new), None)?;
+    let stop = isolate::end_on_stop(Some(&home));
+    // As a block's: the program gets its event stream, and look says what came on it.
+    let events = crate::target::events::Events::open(&home.dir, None)?;
+    let mut env = home.env.clone();
+    env.extend(tty::private_tmp(&home.dir)?);
+    env.push(events.env());
+    // The user's own Documents, Desktop and shared seeds, held to what they were (rule 10).
+    let mut guard = isolate::Guard::take(&isolate::App::bare(Path::new("tty")));
+    guard.shared = home.shared.clone();
+    let spec = tty::Spec { run: tty::Run::Line(home.fill(line)), cwd: std::env::current_dir()?, env, unset: Vec::new(), cols, rows, home: Some(home.dir.clone()) };
+    progress(format!("look: {line} on a {cols}×{rows} terminal in an isolated home"));
+    let result = (|| -> Result<Output> {
+        let t = tty::Tty::spawn(&spec, None, None)?;
+        let started = t.started_ns;
+        let mut problems: Vec<String> = Vec::new();
+        let mut shown_at = None;
+        if let Some(sel) = &until {
+            let ok = t.wait(Instant::now() + timeout, |g, last, _| {
+                let hit = !drv::find(g, sel).is_empty();
+                if hit {
+                    shown_at = Some(last);
+                }
+                hit
+            });
+            if !ok {
+                problems.push(format!("{:?} never showed in {} s{}", sel.source, timeout.as_secs(), if t.ended() { " (the program exited)" } else { "" }));
+            }
+        }
+        let d = drv::Driver::new(&t, None);
+        if let Some(k) = args.get("press") {
+            d.dispatch("press", &[json!(k), json!({ "timeout": timeout.as_millis() as u64 })], None)?;
+        }
+        if let Some(text) = args.get("type") {
+            d.dispatch("type", &[json!(""), json!(text), json!({ "timeout": timeout.as_millis() as u64 })], None)?;
+        }
+        // Then until it holds still for `--wait` (at most the timeout).
+        if !t.quiet(wait, crate::host::now_ns(), Instant::now() + timeout) {
+            problems.push(format!("the grid never held still for {} ms in {} s", wait.as_millis(), timeout.as_secs()));
+        }
+        let first = t.updates(started, u64::MAX).first().map(|u| (u.commit_ns - started) as f64 / 1e6);
+        let ups = t.updates(started, u64::MAX);
+        let modes = t.modes();
+        let (title, text) = t.grid(|g| (g.title.to_string(), g.text()));
+        // `--out`: the grid drawn as `--pixels` snapshots draw it.
+        if let Some(out) = args.get("out") {
+            let img = t.grid(tty::image::image)?;
+            std::fs::write(out, crate::png::write(&img)?)?;
+            progress(format!("look: the grid drawn to {out}"));
+        }
+        let ended = t.ended().then(|| t.exited()).flatten();
+        let shown_ms = shown_at.map(|a| (a - started) as f64 / 1e6);
+        let mut out = format!("{} · {line}\n", if title.is_empty() { "(no title)" } else { &title });
+        out += &format!(
+            "drew     first after {} · {} updates ({} synchronized frames) · {} bytes{}\n",
+            first.map_or("never".into(), |ms| fmt::value(ms, "ms")),
+            ups.len(),
+            ups.iter().filter(|u| u.synced).count(),
+            t.bytes(started, u64::MAX),
+            shown_ms.map_or(String::new(), |ms| format!(" · --until showed after {}", fmt::value(ms, "ms")))
+        );
+        out += &format!(
+            "modes    mouse {} · keyboard {} · cursor keys {}\n",
+            serde_json::to_value(modes.mouse).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default() + if modes.sgr { " (SGR)" } else { "" },
+            if modes.kitty == 0 { "xterm".to_string() } else { format!("progressive flags {}", modes.kitty) },
+            if modes.app_cursor { "application" } else { "normal" }
+        );
+        if let Some(code) = ended {
+            problems.push(format!("the program exited with {code}"));
+        }
+        let got = events.between(0, u64::MAX);
+        if !got.is_empty() || !events.bad().is_empty() {
+            out += &format!("events   {} on $STROBE_EVENTS ({}){}\n", got.len(), got.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "), if events.bad().is_empty() { String::new() } else { format!(" · {} lines that are no event", events.bad().len()) });
+        }
+        for p in &problems {
+            out += &format!("!        {p}\n");
+        }
+        let last = text.iter().rposition(|r| !r.trim().is_empty()).map_or(0, |i| i + 1);
+        out += &format!("screen   {cols}×{rows}\n");
+        for r in &text[..last] {
+            out += &format!("  │{r}\n");
+        }
+        let json = json!({
+            "target": format!("tty:{line}"), "title": title, "cols": cols, "rows": rows, "first_ms": first, "until_ms": shown_ms, "updates": ups.len(),
+            "frames": ups.iter().filter(|u| u.synced).count(), "bytes": t.bytes(started, u64::MAX), "mouse": modes.mouse, "sgr": modes.sgr, "kitty": modes.kitty,
+            "screen": text, "exited": ended, "problems": problems,
+        });
+        drop(d);
+        t.close();
+        let mut o = Output::new(out, json);
+        if !problems.is_empty() {
+            o.code = 124;
+        }
+        Ok(o)
+    })();
+    drop(stop);
+    drop(events);
+    isolate::end_launch(None, Some(&home.dir), true);
+    result.and_then(|o| guard.check("after the look").map(|_| o))
+}
+
 pub fn run(args: &Args) -> Result<Output> {
-    let target = args.pos.first().ok_or_else(|| Error::usage("look needs a page or an app: strobe look <url | file | app:<id> | exe:<path>> [--until <css>] [--wait 2s] [--out shot.png]"))?;
+    let target = args.pos.first().ok_or_else(|| Error::usage("look needs a page or an app: strobe look <url | file | app:<id> | exe:<path> | tty:<command>> [--until <css>] [--wait 2s] [--out shot.png]"))?;
     if target.starts_with("app:") || target.starts_with("exe:") {
         return native(args, target);
+    }
+    if let Some(line) = target.strip_prefix("tty:") {
+        if args.has("mobile") {
+            return Err(Error::usage("--mobile opens a page in Chrome on a phone; a terminal program (tty:) runs on strobe's own terminal, on this machine"));
+        }
+        return terminal(args, line);
+    }
+    for tty_only in ["type", "press"] {
+        if args.has(tty_only) {
+            return Err(Error::usage(format!("--{tty_only} is for a terminal program (look tty:<command>)")));
+        }
     }
     if args.has("full") && args.has("element") {
         return Err(Error::usage("--full shoots the whole page and --element one element of it: give one"));

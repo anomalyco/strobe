@@ -1353,6 +1353,21 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
     Ok(())
 }
 
+/// `live`'s Library rule alone (macOS: an app whose data Cocoa keeps in the user's ~/Library whatever
+/// HOME says is refused), for a launch that skips the running-copy check: a terminal program the user
+/// may also run elsewhere (its own copy never shares the isolated home).
+pub fn library_check(app: &App) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_library::check(app)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
 /// A launch until its target takes it (`done`): dropped before (a failed start, an early return), it
 /// ends what the launch started (`end_launch`) and releases its folder, removing it when `fresh`.
 pub struct Launching {
