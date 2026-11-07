@@ -10,6 +10,7 @@ pub mod font;
 pub mod heapsnap;
 pub mod history;
 pub mod host;
+pub mod image;
 pub mod jsonc;
 pub mod metrics;
 pub mod model;

@@ -632,6 +632,31 @@ impl WebPage {
         }
     }
 
+    /// A rect of the viewport (`[x, y, width, height]`, CSS pixels) as the browser draws it, at its own
+    /// device pixels: Chromium's `Page.captureScreenshot` with a clip, BiDi's `browsingContext.captureScreenshot`
+    /// with a box, WebDriver Classic's viewport screenshot cut to it.
+    pub fn capture(&self, [x, y, w, h]: [f64; 4], timeout: Duration) -> Result<crate::png::Image> {
+        let decode = |b64: &str| -> Result<crate::png::Image> {
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(|e| Error::msg(format!("screenshot: {e}")))?;
+            crate::png::read(&bytes)
+        };
+        match self {
+            WebPage::Chromium(p) => {
+                let shot = p.send_timeout("Page.captureScreenshot", json!({ "format": "png", "clip": { "x": x, "y": y, "width": w, "height": h, "scale": 1 } }), timeout)?;
+                decode(shot["data"].as_str().unwrap_or(""))
+            }
+            WebPage::Firefox(p) => {
+                let shot = p.bidi.send_timeout("browsingContext.captureScreenshot", json!({ "context": p.context, "clip": { "type": "box", "x": x, "y": y, "width": w, "height": h } }), timeout)?;
+                decode(shot["data"].as_str().unwrap_or(""))
+            }
+            WebPage::Webkit(p) => {
+                let img = crate::png::read(&p.screenshot(timeout)?)?;
+                let k = img.width as f64 / self.eval("innerWidth")?.as_f64().unwrap_or(img.width as f64).max(1.0);
+                Ok(crate::image::crop(&img, [(x * k).floor() as usize, (y * k).floor() as usize, (w * k).ceil() as usize, (h * k).ceil() as usize]))
+            }
+        }
+    }
+
     /// WebDriver input actions (BiDi's `input.performActions`, Classic's `POST /actions`), back once the
     /// page handled them. Chromium's input goes over CDP instead.
     pub fn actions(&self, actions: Value) -> Result<()> {

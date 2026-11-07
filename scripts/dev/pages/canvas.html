@@ -1,0 +1,77 @@
+<!doctype html>
+<!-- A page drawn on one canvas, for strobe's image anchors and pixel waits (dev fixture): the same tiles as
+     canvas-app.cs. A click on PLAY or Space counts (one bar each), a click on STOP or R resets, X shows or hides
+     a square. `anchor(name, scale)` returns a tile as a PNG data URL, for the bench's setup to write. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Canvas fixture</title>
+    <style>
+      html, body { margin: 0; background: #202830; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c" width="600" height="360"></canvas>
+    <script>
+      const tiles = {
+        play: [160, 60, (g) => {
+          g.fillStyle = "rgb(40,160,80)"; g.fillRect(0, 0, 160, 60)
+          g.strokeStyle = "#fff"; g.lineWidth = 3; g.strokeRect(6, 6, 148, 48)
+          g.fillStyle = "rgb(16,48,16)"; g.beginPath(); g.moveTo(24, 16); g.lineTo(24, 44); g.lineTo(48, 30); g.fill()
+          g.fillStyle = "#fff"; g.font = "bold 14px sans-serif"; g.textBaseline = "top"; g.fillText("PLAY", 70, 20)
+        }],
+        stop: [160, 60, (g) => {
+          g.fillStyle = "rgb(190,50,50)"; g.fillRect(0, 0, 160, 60)
+          g.fillStyle = "rgb(48,16,16)"; g.fillRect(22, 16, 28, 28)
+          g.fillStyle = "#fff"; g.font = "bold 14px sans-serif"; g.textBaseline = "top"; g.fillText("STOP", 70, 20)
+        }],
+        item: [120, 50, (g) => {
+          g.fillStyle = "rgb(40,80,190)"; g.fillRect(0, 0, 120, 50)
+          g.fillStyle = "rgb(240,210,40)"; g.beginPath(); g.arc(60, 25, 15, 0, 2 * Math.PI); g.fill()
+        }],
+        square: [100, 100, (g) => {
+          g.fillStyle = "rgb(240,140,30)"; g.fillRect(0, 0, 100, 100)
+          g.fillStyle = "#000"; g.beginPath(); g.moveTo(50, 15); g.lineTo(85, 50); g.lineTo(50, 85); g.lineTo(15, 50); g.fill()
+        }],
+        missing: [80, 40, (g) => {
+          g.fillStyle = "rgb(150,40,170)"; g.fillRect(0, 0, 80, 40)
+          g.fillStyle = "#fff"; g.beginPath(); g.arc(40, 20, 15, 0, 2 * Math.PI); g.fill()
+        }],
+      }
+      const at = { play: [40, 40], stop: [240, 40], itemA: [40, 160], itemB: [240, 160], square: [440, 160] }
+      const state = { count: 0, square: false }
+      const g = document.getElementById("c").getContext("2d")
+      function draw() {
+        g.fillStyle = "#202830"; g.fillRect(0, 0, 600, 360)
+        for (const [k, name] of [["play", "play"], ["stop", "stop"], ["itemA", "item"], ["itemB", "item"]].concat(state.square ? [["square", "square"]] : [])) {
+          g.save(); g.translate(...at[k]); tiles[name][2](g); g.restore()
+        }
+        g.fillStyle = "#fff"
+        for (let i = 0; i < Math.min(state.count, 40); i++) g.fillRect(40 + i * 12, 270, 8, 40)
+      }
+      window.anchor = (name, scale = 1) => {
+        const [w, h, paint] = tiles[name]
+        const c = document.createElement("canvas")
+        c.width = Math.round(w * scale); c.height = Math.round(h * scale)
+        const x = c.getContext("2d"); x.scale(scale, scale); paint(x)
+        return c.toDataURL("image/png")
+      }
+      const inside = (r, w, h, x, y) => x >= r[0] && y >= r[1] && x < r[0] + w && y < r[1] + h
+      document.getElementById("c").addEventListener("mousedown", (e) => {
+        if (inside(at.play, 160, 60, e.offsetX, e.offsetY)) state.count++
+        else if (inside(at.stop, 160, 60, e.offsetX, e.offsetY)) state.count = 0
+        else return
+        draw()
+      })
+      addEventListener("keydown", (e) => {
+        if (e.key === " ") state.count++
+        else if (e.key === "r") state.count = 0
+        else if (e.key === "x") state.square = !state.square
+        else return
+        draw()
+      })
+      draw()
+    </script>
+  </body>
+</html>

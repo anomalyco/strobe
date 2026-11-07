@@ -1194,6 +1194,7 @@ fn native_frames(dir: &Path, top: usize) -> Result<Output> {
                 press: i["press_ns"].as_u64(),
                 acted: i["acted"].as_bool(),
                 burst: i["burst"] == true,
+                pixel: i["pixel"][0].as_u64().zip(i["pixel"][1].as_u64()),
             })
             .filter(|s| !timed.untimed_at(s.t_ns) && !s.press.is_some_and(|p| timed.untimed_at(p)))
             .collect();

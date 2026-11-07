@@ -1,5 +1,6 @@
-//! The PNGs Chromium's screenshots are (8-bit RGB or RGBA, not interlaced): read for `--pixels`, and a diff image
-//! written back. Inflate and deflate are flate2's.
+//! 8-bit PNGs, not interlaced (Chromium's screenshots, and the images a bench file's image locators name: RGB,
+//! RGBA, grey, grey with alpha, or a palette with its transparency): read for `--pixels` and image anchors, and
+//! a diff image written back. Inflate and deflate are flate2's.
 
 use crate::model::{Error, Result};
 use std::io::{Read, Write};
@@ -15,7 +16,8 @@ pub fn read(bytes: &[u8]) -> Result<Image> {
     if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
         return Err(Error::msg("not a PNG"));
     }
-    let (mut width, mut height, mut channels) = (0usize, 0usize, 0usize);
+    let (mut width, mut height, mut channels, mut colour) = (0usize, 0usize, 0usize, 0u8);
+    let (mut palette, mut alpha): (Vec<[u8; 3]>, Vec<u8>) = (Vec::new(), Vec::new());
     let mut idat = Vec::new();
     let mut at = 8;
     while at + 8 <= bytes.len() {
@@ -29,12 +31,17 @@ pub fn read(bytes: &[u8]) -> Result<Image> {
                 if data[8] != 8 || data[12] != 0 {
                     return Err(Error::msg("PNG: only 8-bit, non-interlaced images"));
                 }
-                channels = match data[9] {
+                colour = data[9];
+                channels = match colour {
+                    0 | 3 => 1,
+                    4 => 2,
                     2 => 3,
                     6 => 4,
-                    t => return Err(Error::msg(format!("PNG: colour type {t} (only RGB and RGBA)"))),
+                    t => return Err(Error::msg(format!("PNG: colour type {t}"))),
                 };
             }
+            b"PLTE" => palette = data.as_chunks::<3>().0.to_vec(),
+            b"tRNS" => alpha = data.to_vec(),
             b"IDAT" => idat.extend_from_slice(data),
             b"IEND" => break,
             _ => {}
@@ -79,8 +86,18 @@ pub fn read(bytes: &[u8]) -> Result<Image> {
         }
         for x in 0..width {
             let (s, d) = (x * channels, (y * width + x) * 4);
-            out[d..d + 3].copy_from_slice(&row[s..s + 3]);
-            out[d + 3] = if channels == 4 { row[s + 3] } else { 255 };
+            let px = match colour {
+                0 => [row[s], row[s], row[s], 255],
+                4 => [row[s], row[s], row[s], row[s + 1]],
+                3 => {
+                    let i = row[s] as usize;
+                    let [r, g, b] = palette.get(i).copied().ok_or_else(|| Error::msg("PNG: a palette index past its palette"))?;
+                    [r, g, b, alpha.get(i).copied().unwrap_or(255)]
+                }
+                2 => [row[s], row[s + 1], row[s + 2], 255],
+                _ => [row[s], row[s + 1], row[s + 2], row[s + 3]],
+            };
+            out[d..d + 4].copy_from_slice(&px);
         }
         std::mem::swap(&mut prev, &mut row);
     }

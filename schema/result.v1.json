@@ -196,7 +196,9 @@
         "Emulator",
         "WirelessTransport",
         "NotProfileable",
-        "MouseNotEnabled"
+        "MouseNotEnabled",
+        "AnchorNotFound",
+        "AnchorAmbiguous"
       ]
     },
     "verdictKind": {
@@ -302,7 +304,8 @@
         "sampler_pct": { "type": "number", "description": "The OS and GPU sampler's thread (budget 0.5%)." },
         "present_pct": { "type": "number", "description": "The OS present session's consumer (budget 0.5%)." },
         "reserve_pct": { "type": "number", "description": "The reserved-CPU sweep (budget 5%, on strobe's own CPUs)." },
-        "terminal_pct": { "type": "number", "description": "A tty() target's terminal reader: reading, parsing and answering the program's output (budget 0.5%)." }
+        "terminal_pct": { "type": "number", "description": "A tty() target's terminal reader: reading, parsing and answering the program's output (budget 0.5%)." },
+        "pixel_pct": { "type": "number", "description": "strobe's pixel reads inside the runs (captures and image matching for image locators and pixel waits), CPU as % of the runs' wall time (budget 0.5%; over 2% refuses timing and latency metrics)." }
       }
     },
     "step": {

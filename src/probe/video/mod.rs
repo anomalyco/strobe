@@ -19,7 +19,7 @@ mod avf;
 pub mod ffmpeg;
 pub mod screencast;
 #[cfg(windows)]
-mod wgc;
+pub(crate) mod wgc;
 #[cfg(target_os = "linux")]
 mod x11;
 

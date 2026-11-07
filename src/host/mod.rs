@@ -2,6 +2,7 @@
 
 pub(crate) mod adb;
 pub mod build;
+pub mod capture;
 #[cfg(windows)]
 pub mod cycle_clock;
 #[cfg(target_os = "linux")]
@@ -484,11 +485,20 @@ pub fn window_thread(hwnd: isize) -> Option<u32> {
     }
 }
 
-/// A window's client area as it draws it now.
+/// A window's client area as it draws it now. Windows: the window's own rendering (`PrintWindow`), else
+/// (it failed, or gave black: a Direct3D 12 or Vulkan flip-model window) the compositor's copy of it
+/// (`capture::Grabber`).
 pub fn window_image(hwnd: isize) -> Option<crate::png::Image> {
     #[cfg(windows)]
     {
-        win::window_image(hwnd)
+        match win::window_image(hwnd) {
+            Some(img) if img.rgba.as_chunks::<4>().0.iter().any(|p| p[..3].iter().any(|c| *c > 1)) => Some(img),
+            _ => {
+                let mut g = capture::Grabber::open(hwnd).ok()?;
+                let (w, h) = g.size().ok()?;
+                g.grab([0.0, 0.0, w, h]).ok().map(|s| s.img)
+            }
+        }
     }
     #[cfg(target_os = "linux")]
     {

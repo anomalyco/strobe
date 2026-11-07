@@ -26,6 +26,35 @@ pub(super) fn address(target: &str) -> String {
     target.to_string()
 }
 
+/// `--until image=<png>[,threshold=<t>][,scale=<s>]`: an image locator, its path relative to where strobe
+/// runs; anything else is a selector.
+fn image_until(u: &str) -> Option<Value> {
+    let rest = u.strip_prefix("image=")?;
+    let mut parts = rest.split(',');
+    let file = parts.next().unwrap_or("");
+    let abs = std::fs::canonicalize(file).map(|p| p.display().to_string().trim_start_matches(r"\\?\").to_string()).unwrap_or_else(|_| file.to_string());
+    let mut v = json!({ "image": abs, "as": file });
+    for p in parts {
+        if let Some((k, x)) = p.split_once('=')
+            && let Ok(n) = x.trim().parse::<f64>()
+        {
+            v[k.trim()] = json!(n);
+        }
+    }
+    Some(v)
+}
+
+/// The matches of an image locator, as look lists them: `3 matches · best 0.982 at [x, y, w, h]`.
+fn image_lines(found: &Value) -> (String, Vec<Value>) {
+    let all: Vec<Value> = found.as_array().cloned().unwrap_or_default();
+    let mut text = format!("image    {} match{}\n", all.len(), if all.len() == 1 { "" } else { "es" });
+    for m in all.iter().take(10) {
+        let r: Vec<String> = m["rect"].as_array().into_iter().flatten().map(|x| format!("{:.0}", x.as_f64().unwrap_or(0.0))).collect();
+        text += &format!("  score {:.3} at [{}]\n", m["score"].as_f64().unwrap_or(0.0), r.join(", "));
+    }
+    (text, all)
+}
+
 fn console_text(args: &Value) -> String {
     args.as_array()
         .into_iter()
@@ -124,12 +153,23 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         };
         let window_ms = started.elapsed().as_secs_f64() * 1e3;
         let session = main.map(|m| crate::driver::native::Session::open(&n.pids(), m));
-        if let (Some(Ok(se)), Some(sel)) = (&session, args.get("until"))
-            && !se.shows(&Value::String(sel.to_string()), timeout)?
-        {
-            problems.push(format!("{sel:?} never showed in {} s", timeout.as_secs()));
+        let until = args.get("until").map(|u| image_until(u).unwrap_or_else(|| Value::String(u.to_string())));
+        match (&session, &until) {
+            // An image that never showed says where the nearest thing to it was (`AnchorNotFound`).
+            (Some(Ok(se)), Some(u)) if u.get("image").is_some() => {
+                if let Err(e) = se.dispatch("waitFor", &[u.clone(), json!({ "timeout": timeout.as_millis() as u64 })], &std::cell::RefCell::new(None), None) {
+                    problems.push(e.message);
+                }
+            }
+            (Some(Ok(se)), Some(sel)) if !se.shows(sel, timeout)? => problems.push(format!("{:?} never showed in {} s", args.get("until").unwrap_or(""), timeout.as_secs())),
+            _ => {}
         }
         std::thread::sleep(wait);
+        // An image: every place it shows now, read from outside.
+        let images = match (&session, &until) {
+            (Some(Ok(se)), Some(u)) if u.get("image").is_some() => Some(image_lines(&se.dispatch("query", std::slice::from_ref(u), &std::cell::RefCell::new(None), None)?)),
+            _ => None,
+        };
         let windows = crate::host::top_windows(&n.pids());
         let mut titles: Vec<String> =
             windows.iter().filter(|w| Some(w.0) == main).chain(windows.iter().filter(|w| Some(w.0) != main)).map(|w| w.1.trim().to_string()).filter(|t| !t.is_empty()).collect();
@@ -157,7 +197,11 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         text += &format!(
             "window   {}{}\n",
             if main.is_some() { format!("after {}", fmt::value(window_ms, "ms")) } else { "none".into() },
-            if locked { " · session locked (the tree still reads; pixels and input do not)" } else { "" }
+            match (locked, cfg!(windows)) {
+                (true, true) => " · session locked (the tree and the window's pixels still read; pointer input does not)",
+                (true, false) => " · session locked (the tree still reads; pixels and input do not)",
+                _ => "",
+            }
         );
         for p in &problems {
             text += &format!("!        {p}\n");
@@ -177,10 +221,14 @@ fn native(args: &Args, target: &str) -> Result<Output> {
                 text += &format!("  {path:<32} {role:<12} {name}\n");
             }
         }
+        if let Some((t, _)) = &images {
+            text += t;
+        }
         text += "expect   a case's `expect: { title, heading }` matches one of the titles, and one of the headings\n";
         let json = json!({
             "target": target, "exe": app.exe, "window_ms": main.map(|_| window_ms), "session_locked": locked, "titles": titles, "headings": headings,
             "keys": keyed.iter().map(|(p, r, n)| json!({ "path": p, "role": r, "name": n })).collect::<Vec<_>>(), "problems": problems,
+            "image": images.map(|(_, all)| all),
         });
         let mut o = Output::new(text, json);
         if !problems.is_empty() {
@@ -215,6 +263,11 @@ fn terminal(args: &Args, line: &str) -> Result<Output> {
     };
     let wait = Duration::from_millis(args.get("wait").map(duration_ms).transpose()?.unwrap_or(1000));
     let timeout = Duration::from_millis(args.get("timeout").map(duration_ms).transpose()?.unwrap_or(30_000));
+    if args.get("until").and_then(image_until).is_some() {
+        return Err(crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "--until image=: a terminal program draws a grid of cells, not pixels")
+            .fix("wait for its text: --until \"text=…\"")
+            .into());
+    }
     let until = args.get("until").map(|u| drv::parse_sel(&Value::String(u.to_string()))).transpose()?;
     for l in isolate::reap_dead_owners() {
         progress(l);
@@ -405,13 +458,27 @@ pub fn run(args: &Args) -> Result<Output> {
             Ok(()) => {}
         }
         // The same selectors and probe as a bench's page calls and `expect`, so what look says is what they see.
+        let image = args.get("until").and_then(image_until);
         if let Some(sel) = args.get("until") {
-            let sel = Selector::parse(&Value::String(sel.to_string()), Dialect::Page)?;
-            if !crate::driver::shows(&page.clone().into(), &sel, timeout)? {
-                problems.push(format!("{:?} never showed in {} s", sel.source, timeout.as_secs()));
+            match &image {
+                // An image that never showed says where the nearest thing to it was (`AnchorNotFound`).
+                Some(v) => {
+                    if let Some(Err(e)) = crate::driver::page_image_wait(&page.clone().into(), v, timeout) {
+                        problems.push(e.message);
+                    }
+                }
+                None if !crate::driver::shows(&page.clone().into(), &Selector::parse(&Value::String(sel.to_string()), Dialect::Page)?, timeout)? => {
+                    problems.push(format!("{sel:?} never showed in {} s", timeout.as_secs()));
+                }
+                None => {}
             }
         }
         std::thread::sleep(Duration::from_millis(wait));
+        // An image: every place it shows now, through the browser's screenshot.
+        let images = match &image {
+            Some(v) => crate::driver::page_image_query(&page.clone().into(), v).map(|r| r.map(|f| image_lines(&f))).transpose()?,
+            None => None,
+        };
         let info = crate::driver::screen(&page.clone().into(), 6, chars, Duration::from_secs(10))?;
         // Everything the page said while it loaded and settled.
         let mut console: Vec<Value> = Vec::new();
@@ -505,8 +572,11 @@ pub fn run(args: &Args) -> Result<Output> {
             out.display(),
             clip.as_ref().map(|c| format!(" ({} only, {:.0}×{:.0})", args.get("element").unwrap_or(""), c["width"].as_f64().unwrap_or(0.0), c["height"].as_f64().unwrap_or(0.0))).unwrap_or_default()
         );
+        if let Some((t, _)) = &images {
+            text += t;
+        }
         text += "expect   a case's `expect: { title, heading }` matches the title, and one of the headings\n";
-        let json = json!({ "url": info["url"], "title": info["title"], "load_ms": load_ms, "ready": info["ready"], "problems": problems, "headings": info["headings"], "console": console, "errors": errors, "text": body, "chars": total, "screenshot": out, "clip": clip, "phone": phone });
+        let json = json!({ "url": info["url"], "title": info["title"], "load_ms": load_ms, "ready": info["ready"], "problems": problems, "headings": info["headings"], "console": console, "errors": errors, "text": body, "chars": total, "screenshot": out, "clip": clip, "phone": phone, "image": images.map(|(_, all)| all) });
         let mut o = Output::new(text, json);
         // The page never loaded, or never showed `--until`: a timeout. Its own console errors are the
         // page's, and listed.

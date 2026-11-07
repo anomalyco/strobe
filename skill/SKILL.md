@@ -437,6 +437,19 @@ export default bench({
     (`count.ops`), `{"strobe":"metric","name":"parse_ms","value":2.1}` (`app.parse_ms`).
 - Points work on every driver: `page.click([x, y])` (a page's CSS pixels, a native window's DIPs) or
   `{ x, y, space: "norm" }`; off the viewport is `OutOfView`.
+- No accessibility tree or DOM (a canvas, a game, a GPU toolkit's widgets): image anchors (native and pages).
+  - `page.click({ image: "play.png" })` (path relative to the bench file; `region`, `threshold` 0.95,
+    `scale: 2` for an @2x export). None shows: `AnchorNotFound` (best score and where;
+    `failed-<step>-anchor.png`). Two or more: `AnchorAmbiguous`.
+  - `page.query({ image })` lists every match (`point`, `rect`, `score`): query in setup, click points in the run.
+  - Waits: `until: { image }`, `until: { pixels: { region, changed: true } }` (vs before the input),
+    `{ pixels: { stable: 300 } }`, `{ pixels: { matches: "x.png" } }`; `waitFor` and `expect.visible` too.
+  - After an input, `changed` or an image is its pixel proof: `interaction.*` from the one OS frame between
+    the last capture without it and the first with it.
+  - Each capture in a run counts (`driver.pixel_reads`, `ObserverCost` past 8); strobe's CPU in them over 2%
+    refuses timing metrics. Headless pages refuse pixel reads inside timed runs (`Headless`).
+  - `resetPixels: { region, ignore, tolerance }` on the target or case: runs that start from other pixels
+    are `ResetIncomplete`. Try one with `strobe look exe:<path> --until image=play.png`.
 
 ### Locked sessions
 
@@ -447,6 +460,7 @@ export default bench({
 - Both blocks of a pair also share the display state (a locked display sleeps; `DisplayOff` says so).
 - Everything with frames, pixels or a window waits for an unlock.
 - Locked, a native app's accessibility tree, `page.act` and keys work; clicks are refused.
+  On Windows its pixels read too (image anchors, pixel waits, `--pixels`).
 - GPU use (`gpu.process.3d`) is refused in locked blocks; GPU memory is kept.
 - `record pid:…` on a locked session keeps CPU, threads, IO, GPU, memory and `--probes deep` stacks and refuses only frames.
 - A profile with `"window": false` records without a window.

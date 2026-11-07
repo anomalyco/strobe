@@ -3,6 +3,7 @@
 
 pub mod native;
 pub mod os;
+pub mod pixels;
 pub mod touch;
 pub mod tty;
 pub mod window;
@@ -919,6 +920,17 @@ pub struct Driver {
     sizer: window::Sizer,
     /// An emulated phone's page: its pointer input is touch (`touch_input`).
     touch: std::cell::OnceCell<touch::Touch>,
+    /// The call runs inside a run's timed stretch (not setup, reset, `ctx.untimed`, an untimed block or a
+    /// pixels block): pixels are then read from outside, never through the browser (`pixels`).
+    pub timed: Cell<bool>,
+    /// Image anchors and pixel waits (`driver::pixels`): the block's templates and reads, the browser
+    /// window's capture for timed reads, what an input's pixel `until` captured before it, when the
+    /// call began, and the viewport a timed read maps (CSS width, height, device pixels per CSS pixel).
+    images: pixels::Pixels,
+    grabber: RefCell<Option<crate::host::capture::Grabber>>,
+    before: RefCell<Option<pixels::Before>>,
+    call_at: Cell<u64>,
+    viewport: Cell<Option<(f64, f64, f64)>>,
 }
 
 impl Driver {
@@ -946,6 +958,61 @@ impl Driver {
             phone: false,
             sizer: window::Sizer::default(),
             touch: std::cell::OnceCell::new(),
+            timed: Cell::new(false),
+            images: pixels::Pixels::default(),
+            grabber: RefCell::new(None),
+            before: RefCell::new(None),
+            call_at: Cell::new(0),
+            viewport: Cell::new(None),
+        }
+    }
+
+    /// The page's pixels as `driver::pixels` reads them: through the browser outside timed stretches
+    /// (`PageShots`), from outside inside them (`WindowShots`, a headed page's window); a headless page
+    /// or a phone's has none to read from outside there.
+    fn shots(&self) -> Result<Box<dyn pixels::Source + '_>> {
+        if !self.timed.get() {
+            return Ok(Box::new(PageShots { page: &self.page }));
+        }
+        if self.headless {
+            return Err(Refusal::new(
+                ValidatorId::Headless,
+                "an image or pixel wait inside a timed run of a headless page: its pixels can only be read through the browser's own renderer, which would add work to the run it times",
+            )
+            .fix("find images in setup or ctx.untimed (page.query({ image })) and aim at the points it found, or run the page headed (its window is read from outside)")
+            .into());
+        }
+        if self.phone {
+            return Err(Refusal::new(ValidatorId::NotForTarget, "an image or pixel wait inside a timed run of a phone's page: its screen is the phone's, which strobe cannot read from outside")
+                .fix("find images in setup or ctx.untimed and aim at the points it found")
+                .into());
+        }
+        Ok(Box::new(WindowShots { d: self }))
+    }
+
+    /// strobe's captures of the page's pixels since the last call: count, wall ms, CPU ms.
+    pub fn take_pixel_reads(&self) -> (u64, f64, f64) {
+        self.images.take_reads()
+    }
+
+    /// Before a measured input whose `until` waits on pixels: what the region shows now.
+    fn before_input(&self, o: &Value) -> Result<()> {
+        let Some(l) = o.get("until").and_then(pixels::look) else { return Ok(()) };
+        let b = self.images.before(&*self.shots()?, &l?)?;
+        *self.before.borrow_mut() = Some(b);
+        Ok(())
+    }
+
+    /// A pixel proof for the call's last measured input (`Sent::pixel`), the driver's or the OS input's.
+    fn prove(&self, p: pixels::Proof) {
+        let (Some(lacked), true) = (p.lacked, p.timing) else { return };
+        let since = self.call_at.get();
+        if let Some(os) = self.os.get() {
+            os.prove(since, (lacked, p.had));
+            return;
+        }
+        if let Some(s) = self.inputs.borrow_mut().iter_mut().rev().take_while(|s| s.t_ns >= since).next() {
+            s.pixel = Some((lacked, p.had));
         }
     }
 
@@ -1159,7 +1226,7 @@ impl Driver {
     fn input_at(&self, scroll: bool, press: Option<u64>) {
         let t_ns = crate::host::now_ns();
         sent(t_ns, true, press);
-        self.inputs.borrow_mut().push(Sent { t_ns, scroll, press, acted: None, burst: false });
+        self.inputs.borrow_mut().push(Sent { t_ns, scroll, press, acted: None, burst: false, pixel: None });
     }
 
     /// Follows the page's OS presents (a headed page whose engine reports no frames of its own): a
@@ -1357,9 +1424,9 @@ impl Driver {
         if no_selector(sel) {
             return self.settle(Duration::ZERO).map(drop);
         }
-        let (x, y, focused) = match point(sel) {
-            Some(_) => self.spot(sel, o).map(|(x, y)| (x, y, false))?,
-            None => self.aim_for(&Self::sel(sel)?, o, true)?,
+        let (x, y, focused) = match point(sel).is_some() || pixels::anchor(sel).is_some() {
+            true => self.spot(sel, o).map(|(x, y)| (x, y, false))?,
+            false => self.aim_for(&Self::sel(sel)?, o, true)?,
         };
         if focused {
             return self.settle(Duration::ZERO).map(drop);
@@ -1380,6 +1447,11 @@ impl Driver {
         let opts = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
         // A selector as the bench gave it: a string, or `{ selector, role, text, exact, index, focus }`.
         let sel = |i: usize| args.get(i).cloned().unwrap_or(Value::String(String::new()));
+        self.call_at.set(crate::host::now_ns());
+        self.before.borrow_mut().take();
+        if matches!(call, "goto" | "window") {
+            self.viewport.set(None);
+        }
         if let Some(os) = self.os.get().filter(|_| os::INPUT.contains(&call)) {
             return self.os_dispatch(os, call, args);
         }
@@ -1409,6 +1481,7 @@ impl Driver {
                 let count = o["count"].as_u64().unwrap_or(1).clamp(1, 3);
                 let (held, bit) = (self.buttons.get().0, cdp_button(b).1);
                 self.pointer.set((x, y));
+                self.before_input(&o)?;
                 match &self.page {
                     Page::Firefox(_) | Page::Webkit(_) => {
                         self.webdriver_click((x, y), b, mods & !self.mods.get(), count)?;
@@ -1430,6 +1503,7 @@ impl Driver {
             "type" => {
                 let o = opts(2);
                 self.focus(&sel(0), &o)?;
+                self.before_input(&o)?;
                 // One key event per character, like a person typing, so each keystroke is an interaction,
                 // sent once what the last one drew has settled (SPEC 7.4), unless typed in a burst.
                 let delay = Duration::from_millis(o.get("delay").and_then(Value::as_u64).unwrap_or(0));
@@ -1463,12 +1537,14 @@ impl Driver {
                 let o = opts(1);
                 self.focus(&o["selector"], &o)?;
                 let (mods, key) = keys::parse_chord(&s(0))?;
+                self.before_input(&o)?;
                 self.stroke(key, cdp_mods(mods))?;
                 self.until(&o)
             }
             // The pointer over an element, without a click: reveals hover-only controls, or parks the pointer.
             "hover" => {
                 let (x, y) = self.spot(&sel(0), &opts(1))?;
+                self.before_input(&opts(1))?;
                 self.pointer_move(x, y, false)?;
                 self.until(&opts(1))
             }
@@ -1484,6 +1560,7 @@ impl Driver {
                 let by = o.get("by").and_then(Value::as_f64).unwrap_or(0.0);
                 let by_x = o.get("byX").and_then(Value::as_f64).unwrap_or(0.0);
                 let speed = o.get("speed").and_then(Value::as_f64).unwrap_or(2000.0);
+                self.before_input(&opts(2))?;
                 match &self.page {
                     Page::Chromium(p) => {
                         sent(crate::host::now_ns(), true, None);
@@ -1509,6 +1586,7 @@ impl Driver {
                 let delta = |k: &str| d.get(k).and_then(Value::as_f64).unwrap_or(0.0);
                 let (mask, last) = self.buttons.get();
                 self.settle(Duration::ZERO)?;
+                self.before_input(&opts(2))?;
                 self.input_at(true, None);
                 match &self.page {
                     Page::Chromium(p) => {
@@ -1523,10 +1601,20 @@ impl Driver {
             }
             "window" => self.window(args.first().unwrap_or(&Value::Null), &opts(1)),
             "act" => Err(Error::usage("page.act() is a native app's accessibility action; on a page click, type or press")),
-            "query" => self.query(&sel(0), &opts(1)),
+            "query" => match pixels::anchor(&sel(0)) {
+                Some(a) => self.images.query(&*self.shots()?, &a?),
+                None => self.query(&sel(0), &opts(1)),
+            },
             "waitFor" => {
                 let o = opts(1);
-                self.wait_for(&Self::sel(&with_text(&sel(0), &o))?, self.timeout(&o))?;
+                match pixels::look(&sel(0)) {
+                    Some(l) => {
+                        self.images.wait(&*self.shots()?, &l?, None, self.timeout(&o))?;
+                    }
+                    None => {
+                        self.wait_for(&Self::sel(&with_text(&sel(0), &o))?, self.timeout(&o))?;
+                    }
+                }
                 Ok(Value::Bool(true))
             }
             "idle" => {
@@ -1556,6 +1644,7 @@ impl Driver {
                     if call == "up" {
                         self.settle(Duration::ZERO)?;
                     }
+                    self.before_input(&o)?;
                     self.pointer_button(b, call == "down", true)?;
                 } else {
                     let (mods, key) = keys::parse_chord(&s(0))?;
@@ -1566,6 +1655,7 @@ impl Driver {
                     if call == "down" {
                         self.settle(Duration::ZERO)?;
                     }
+                    self.before_input(&o)?;
                     self.key(key, call == "down")?;
                 }
                 self.until(&o)
@@ -1612,6 +1702,10 @@ impl Driver {
     /// Where input goes for a locator: a point in the viewport (`point`: CSS pixels, or `norm`), or the
     /// element a selector finds (`locate`).
     pub(crate) fn spot(&self, v: &Value, opts: &Value) -> Result<(f64, f64)> {
+        if let Some(a) = pixels::anchor(v) {
+            let m = self.images.aim(&*self.shots()?, &a?, self.timeout(opts))?;
+            return Ok((m.x, m.y));
+        }
         let Some(p) = point(v) else { return self.locate(&Self::sel(v)?, opts) };
         let p = p?;
         let c = self.page.eval("[innerWidth, innerHeight]")?;
@@ -1681,6 +1775,13 @@ impl Driver {
 
     fn until(&self, opts: &Value) -> Result<Value> {
         let t = self.timeout(opts);
+        // An image or pixels: from what the region showed before the input (`before_input`).
+        if let Some(l) = opts.get("until").and_then(pixels::look) {
+            let before = self.before.borrow_mut().take();
+            let p = self.images.wait(&*self.shots()?, &l?, before, t)?;
+            self.prove(p);
+            return Ok(Value::Bool(true));
+        }
         match opts.get("until") {
             None | Some(Value::Null) => Ok(Value::Bool(true)),
             Some(Value::String(u)) if u == "idle" => self.wait(&format!("__strobe.idle(300, {})", t.as_millis()), t),
@@ -1818,6 +1919,123 @@ impl Driver {
         }
         self.key_event(key, down, self.mods.get())
     }
+}
+
+/// A page's viewport through its browser's own screenshots (`WebPage::capture`): outside timed stretches
+/// only, as the renderer draws them for strobe (`Driver::shots`), and for `expect` and `look`.
+pub(crate) struct PageShots<'a> {
+    pub page: &'a Page,
+}
+
+impl pixels::Source for PageShots<'_> {
+    fn size(&self) -> Result<(f64, f64)> {
+        let v = self.page.eval("[innerWidth, innerHeight]")?;
+        Ok((v[0].as_f64().unwrap_or(0.0), v[1].as_f64().unwrap_or(0.0)))
+    }
+
+    fn grab(&self, r: [f64; 4]) -> Result<crate::host::capture::Shot> {
+        let t0 = crate::host::now_ns();
+        let img = self.page.capture(r, Duration::from_secs(15))?;
+        let t = crate::host::now_ns();
+        Ok(crate::host::capture::Shot { scale: img.width as f64 / r[2].max(1.0), img, t0_ns: t0, t_ns: t, seq: 0, late_ns: 0 })
+    }
+
+    fn wake(&self, _: &crate::host::capture::Shot, until: Instant) {
+        std::thread::sleep(until.min(Instant::now() + Duration::from_millis(30)).saturating_duration_since(Instant::now()));
+    }
+
+    fn what(&self) -> &'static str {
+        "viewport"
+    }
+}
+
+/// A headed page's viewport from outside, inside a run's timed stretch: the browser's window through
+/// `host::capture` (the renderer does nothing for it). The viewport is the bottom of the window's client
+/// area, full width (the browser's own bars are above it), at the window's device-independent pixels
+/// per CSS pixel (`devicePixelRatio` over the window's scale), read once until a `goto` or `window`.
+struct WindowShots<'a> {
+    d: &'a Driver,
+}
+
+impl WindowShots<'_> {
+    fn with<T>(&self, f: impl FnOnce(&mut crate::host::capture::Grabber) -> Result<T>) -> Result<T> {
+        let w = self.d.browser_window()?.hwnd;
+        let mut g = self.d.grabber.borrow_mut();
+        if g.as_ref().is_none_or(|g| g.window() != w) {
+            *g = Some(crate::host::capture::Grabber::open(w)?);
+        }
+        f(g.as_mut().ok_or_else(|| Error::msg("internal: the window's capture"))?)
+    }
+
+    /// The viewport's CSS size and device-independent pixels per CSS pixel.
+    fn viewport(&self) -> Result<(f64, f64, f64)> {
+        if let Some(v) = self.d.viewport.get() {
+            return Ok(v);
+        }
+        let v = self.d.page.eval("[innerWidth, innerHeight, devicePixelRatio]")?;
+        let scale = self.d.browser_window().map_or(1.0, |w| w.scale()).max(0.01);
+        let n = |i: usize| v[i].as_f64().unwrap_or(0.0);
+        let out = (n(0), n(1), if n(2) > 0.0 { n(2) / scale } else { 1.0 });
+        self.d.viewport.set(Some(out));
+        Ok(out)
+    }
+}
+
+impl pixels::Source for WindowShots<'_> {
+    fn size(&self) -> Result<(f64, f64)> {
+        self.viewport().map(|v| (v.0, v.1))
+    }
+
+    fn grab(&self, r: [f64; 4]) -> Result<crate::host::capture::Shot> {
+        let (_, vh, k) = self.viewport()?;
+        self.with(|g| {
+            let (_, ch) = g.size()?;
+            let top = ch - vh * k;
+            let s = g.grab([r[0] * k, top + r[1] * k, r[2] * k, r[3] * k])?;
+            Ok(crate::host::capture::Shot { scale: s.scale * k, ..s })
+        })
+    }
+
+    fn wake(&self, after: &crate::host::capture::Shot, until: Instant) {
+        if let Some(g) = self.d.grabber.borrow().as_ref().filter(|g| g.evented()) {
+            g.wait(after.seq, until);
+            return;
+        }
+        let step = until.min(Instant::now() + Duration::from_millis(30)).saturating_duration_since(Instant::now());
+        match self.d.live.get() {
+            Some(p) => {
+                if let Some(c) = p.borrow_mut().as_mut() {
+                    let _ = c.live(&self.d.live_pids.borrow(), after.t_ns, step);
+                } else {
+                    std::thread::sleep(step);
+                }
+            }
+            None => std::thread::sleep(step),
+        }
+    }
+
+    fn what(&self) -> &'static str {
+        "viewport"
+    }
+}
+
+/// Whether an image shows on a page within `t`, through the browser's screenshots (`expect.visible`).
+pub fn page_image_shows(page: &Page, v: &Value, t: Duration) -> Option<Result<bool>> {
+    let a = pixels::anchor(v)?;
+    Some(a.and_then(|a| pixels::Pixels::default().shows(&PageShots { page }, &a, t)))
+}
+
+/// Waits up to `t` for an image (or pixels) on a page, through the browser's screenshots (`look`):
+/// `AnchorNotFound` says where the nearest thing to it was.
+pub fn page_image_wait(page: &Page, v: &Value, t: Duration) -> Option<Result<()>> {
+    let l = pixels::look(v)?;
+    Some(l.and_then(|l| pixels::Pixels::default().wait(&PageShots { page }, &l, None, t).map(drop)))
+}
+
+/// Every place an image shows on a page now, through the browser's screenshot (`look`).
+pub fn page_image_query(page: &Page, v: &Value) -> Option<Result<Value>> {
+    let a = pixels::anchor(v)?;
+    Some(a.and_then(|a| pixels::Pixels::default().query(&PageShots { page }, &a)))
 }
 
 /// One wheel step at a viewport point, for WebDriver input (whole pixels).

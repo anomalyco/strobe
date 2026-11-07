@@ -462,6 +462,16 @@ impl<'a> Driver<'a> {
     pub fn dispatch(&self, call: &str, args: &[Value], pixels: Option<&std::path::Path>) -> Result<Value> {
         let opts = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
         let sel = |i: usize| args.get(i).cloned().unwrap_or(Value::String(String::new()));
+        // A terminal has a grid of cells, not pixels: an image locator or a pixel wait has nothing to read.
+        let pixel = |v: &Value| crate::driver::pixels::is_pixels(v) || ["until", "selector", "at"].iter().any(|k| v.get(k).is_some_and(crate::driver::pixels::is_pixels));
+        if args.iter().any(pixel) {
+            return Err(crate::model::Refusal::new(
+                crate::model::ValidatorId::NotForTarget,
+                format!("page.{call}(): an image locator or a pixel wait on a terminal target, which draws a grid of cells, not pixels"),
+            )
+            .fix("find the grid's text with a selector (\"text=…\"), name a cell ([col, row]), or wait until: \"idle\" or { state }")
+            .into());
+        }
         match call {
             "type" => {
                 let o = opts(2);

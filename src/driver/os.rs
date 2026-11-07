@@ -480,6 +480,13 @@ impl OsInput {
         std::mem::take(&mut self.log.borrow_mut())
     }
 
+    /// A pixel proof (`Input::pixel`) for the last measured input sent since `since`.
+    pub(super) fn prove(&self, since: u64, proof: (u64, u64)) {
+        if let Some(i) = self.log.borrow_mut().inputs.iter_mut().rev().take_while(|i| i.t_ns >= since).find(|i| i.kind == "discrete" || (i.kind == "scroll" && i.first)) {
+            i.pixel = Some(proof);
+        }
+    }
+
     /// Whether the OS cursor could be parked on the pointer's points.
     pub fn parked(&self) -> Option<bool> {
         self.parked.get()
@@ -493,7 +500,7 @@ impl OsInput {
     fn input(&self, t_ns: u64, kind: &'static str, first: bool) {
         super::sent(t_ns, kind == "discrete" || (kind == "scroll" && first), None);
         self.last_input.set(t_ns);
-        self.log.borrow_mut().inputs.push(Input { t_ns, kind, first, press_ns: None, burst: false });
+        self.log.borrow_mut().inputs.push(Input { t_ns, kind, first, press_ns: None, burst: false, pixel: None });
     }
 
     fn count(&self, i: usize) {
@@ -852,9 +859,9 @@ impl Driver {
 
     /// `os_aim`, and whether focus is in the element: one look at the page.
     fn os_aim_focus(&self, os: &OsInput, sel: &Value, o: &Value) -> Result<(f64, f64, Target, bool)> {
-        let (cx, cy, focused) = match crate::driver::point(sel) {
-            Some(_) => self.spot(sel, o).map(|(x, y)| (x, y, false))?,
-            None => self.aim(&Self::sel(sel)?, o)?,
+        let (cx, cy, focused) = match crate::driver::point(sel).is_some() || super::pixels::anchor(sel).is_some() {
+            true => self.spot(sel, o).map(|(x, y)| (x, y, false))?,
+            false => self.aim(&Self::sel(sel)?, o)?,
         };
         let (x, y) = os.screen(cx, cy);
         Ok((x, y, os.target(x, y)?, focused))
@@ -920,8 +927,8 @@ impl Driver {
             // Its frames (a focus ring, a caret) settle before the first key, which is measured: at least
             // 2 refreshes, since the click's first frame may not have begun yet.
             os.rest(os.frame() * 2, os.frame())?;
-            // A point names no element to hold focus: the click there is all.
-            if crate::driver::point(sel).is_some() {
+            // A point or an image names no element to hold focus: the click there is all.
+            if crate::driver::point(sel).is_some() || super::pixels::anchor(sel).is_some() {
                 return Ok(());
             }
             let s = Self::sel(sel)?;

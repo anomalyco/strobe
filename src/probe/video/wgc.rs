@@ -47,10 +47,8 @@ type SizedOut = unsafe extern "system" fn(u32, *mut *mut c_void) -> HRESULT;
 type Manager = unsafe extern "system" fn(*mut u32, *mut *mut c_void) -> HRESULT;
 type SinkWriter = unsafe extern "system" fn(PCWSTR, *mut c_void, *mut c_void, *mut *mut c_void) -> HRESULT;
 
-/// The functions strobe calls in d3d11.dll, mfplat.dll and mfreadwrite.dll.
+/// The functions strobe calls in mfplat.dll and mfreadwrite.dll.
 struct Lib {
-    create_device: CreateDevice,
-    wrap_device: WrapDevice,
     startup: Startup,
     shutdown: Shutdown,
     attributes: OutSized,
@@ -77,8 +75,6 @@ impl Lib {
         // SAFETY: each pointer is the named export, whose signature the type spells out.
         unsafe {
             Ok(Lib {
-                create_device: std::mem::transmute::<Raw, CreateDevice>(proc("d3d11.dll", "D3D11CreateDevice")?),
-                wrap_device: std::mem::transmute::<Raw, WrapDevice>(proc("d3d11.dll", "CreateDirect3D11DeviceFromDXGIDevice")?),
                 startup: std::mem::transmute::<Raw, Startup>(proc("mfplat.dll", "MFStartup")?),
                 shutdown: std::mem::transmute::<Raw, Shutdown>(proc("mfplat.dll", "MFShutdown")?),
                 attributes: std::mem::transmute::<Raw, OutSized>(proc("mfplat.dll", "MFCreateAttributes")?),
@@ -174,7 +170,8 @@ struct Processor {
     size: (u32, u32),
 }
 
-fn texture(device: &ID3D11Device, w: u32, h: u32, format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT, bind: u32, staging: bool) -> windows_core::Result<ID3D11Texture2D> {
+/// A staging texture strobe maps to read (`staging`), or a default one the GPU copies into.
+pub(crate) fn texture(device: &ID3D11Device, w: u32, h: u32, format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT, bind: u32, staging: bool) -> windows_core::Result<ID3D11Texture2D> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
         Height: h,
@@ -328,12 +325,18 @@ fn run(hwnd: isize, shared: &Shared, base: &Path, started: &std::sync::mpsc::Sen
     r
 }
 
-fn capture(lib: &Lib, hwnd: isize, shared: &Shared, base: &Path, started: &std::sync::mpsc::Sender<Result<()>>, cpu0: super::ThreadCpu) -> Result<Video> {
-    // The GPU: a hardware device with BGRA and video support, guarded for Media Foundation's threads.
+/// A hardware Direct3D 11 device with BGRA (with `video`, video too) support, guarded for other threads
+/// (Media Foundation's, a capture's frame events), and its WinRT wrapper, which a Windows.Graphics.Capture
+/// frame pool takes. d3d11.dll loads on first use. Shared with `host::capture`.
+pub(crate) fn device(video: bool) -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice)> {
+    // SAFETY: each pointer is the named export, whose signature the type spells out.
+    let (create, wrap) = unsafe {
+        (std::mem::transmute::<Raw, CreateDevice>(proc("d3d11.dll", "D3D11CreateDevice")?), std::mem::transmute::<Raw, WrapDevice>(proc("d3d11.dll", "CreateDirect3D11DeviceFromDXGIDevice")?))
+    };
     let (device, ctx) = unsafe {
         let (mut d, mut c) = (std::ptr::null_mut(), std::ptr::null_mut());
-        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0;
-        (lib.create_device)(
+        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | if video { D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0 } else { 0 };
+        create(
             std::ptr::null_mut(),
             windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE.0,
             std::ptr::null_mut(),
@@ -346,7 +349,7 @@ fn capture(lib: &Lib, hwnd: isize, shared: &Shared, base: &Path, started: &std::
             &mut c,
         )
         .ok()
-        .map_err(|e| super::refused(format!("no Direct3D 11 device with video support: {}", e.message()), "record on a machine with a GPU driver"))?;
+        .map_err(|e| super::refused(format!("no Direct3D 11 device{}: {}", if video { " with video support" } else { "" }, e.message()), "run on a machine with a GPU driver"))?;
         (ID3D11Device::from_raw(d), ID3D11DeviceContext::from_raw(c))
     };
     let e = |what: &'static str| move |x: windows_core::Error| win(x, what);
@@ -355,17 +358,32 @@ fn capture(lib: &Lib, hwnd: isize, shared: &Shared, base: &Path, started: &std::
             let _ = m.SetMultithreadProtected(true);
         }
     }
-    let vdev: ID3D11VideoDevice = device.cast().map_err(e("the GPU's video processor"))?;
-    let vctx: ID3D11VideoContext = ctx.cast().map_err(e("the GPU's video processor"))?;
     let dxgi: IDXGIDevice = device.cast().map_err(e("DXGI"))?;
     let d3d: IDirect3DDevice = unsafe {
         let mut p = std::ptr::null_mut();
-        (lib.wrap_device)(dxgi.as_raw(), &mut p).ok().map_err(e("the WinRT Direct3D device"))?;
+        wrap(dxgi.as_raw(), &mut p).ok().map_err(e("the WinRT Direct3D device"))?;
         IInspectable::from_raw(p).cast().map_err(e("the WinRT Direct3D device"))?
     };
-    let interop = windows_core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(e("Windows.Graphics.Capture"))?;
-    let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(HWND(hwnd as *mut c_void)) }
-        .map_err(|x| super::refused(format!("Windows.Graphics.Capture cannot capture the window: {}", x.message()), "a window that is shown (not minimized), of a process in this session"))?;
+    Ok((device, ctx, d3d))
+}
+
+/// The capture item of a window: what Windows.Graphics.Capture records of it.
+pub(crate) fn item(hwnd: isize) -> Result<GraphicsCaptureItem> {
+    if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
+        return Err(super::refused("Windows.Graphics.Capture is not available here", "run on Windows 10 1903 or later"));
+    }
+    let interop = windows_core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|x| win(x, "Windows.Graphics.Capture"))?;
+    unsafe { interop.CreateForWindow(HWND(hwnd as *mut c_void)) }
+        .map_err(|x| super::refused(format!("Windows.Graphics.Capture cannot capture the window: {}", x.message()), "a window that is shown (not minimized), of a process in this session"))
+}
+
+fn capture(lib: &Lib, hwnd: isize, shared: &Shared, base: &Path, started: &std::sync::mpsc::Sender<Result<()>>, cpu0: super::ThreadCpu) -> Result<Video> {
+    // The GPU: a hardware device with BGRA and video support, guarded for Media Foundation's threads.
+    let (device, ctx, d3d) = device(true)?;
+    let e = |what: &'static str| move |x: windows_core::Error| win(x, what);
+    let vdev: ID3D11VideoDevice = device.cast().map_err(e("the GPU's video processor"))?;
+    let vctx: ID3D11VideoContext = ctx.cast().map_err(e("the GPU's video processor"))?;
+    let item = item(hwnd)?;
     let first = item.Size().map_err(e("the window's size"))?;
     let mut size = (first.Width.max(2) as u32, first.Height.max(2) as u32);
     let out = super::fit(size.0, size.1);

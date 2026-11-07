@@ -1043,6 +1043,23 @@ unsafe fn invisible_borders(h: windows_sys::Win32::Foundation::HWND, r: &windows
     [(e.left - r.left).max(0) as f64, (e.top - r.top).max(0) as f64, (r.right - e.right).max(0) as f64, (r.bottom - e.bottom).max(0) as f64]
 }
 
+/// Where a window's client area starts inside what the compositor draws of it (its frame less the
+/// invisible resize borders, which Windows.Graphics.Capture captures), in physical pixels.
+pub fn client_in_visual(hwnd: isize) -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
+    let h = hwnd as windows_sys::Win32::Foundation::HWND;
+    per_monitor(|| unsafe {
+        let mut e: RECT = zeroed();
+        if DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS as u32, &mut e as *mut RECT as *mut _, size_of::<RECT>() as u32) < 0 {
+            return None;
+        }
+        let mut p = POINT { x: 0, y: 0 };
+        (ClientToScreen(h, &mut p) != 0).then_some((p.x - e.left, p.y - e.top))
+    })
+}
+
 /// Read per-monitor DPI aware, so every rectangle is physical pixels on any display (`window_state`
 /// runs in strobe's own unaware context). Maximized: Windows' own state, or a frame whose visible part
 /// fills the work area (what `maximize_window` makes).

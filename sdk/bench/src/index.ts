@@ -20,8 +20,52 @@ export type Selector = string | { selector?: string; role?: string; text?: strin
  */
 export type Point = [number, number] | { x: number; y: number; space?: "dip" | "cell" | "norm" }
 
-/** What a call acts on: an element by its {@link Selector}, or a {@link Point}. */
-export type Element = Selector | Point
+/**
+ * A part of the target's own area, as a {@link Point} is in it: `[x, y, width, height]` (a page's CSS pixels, a native
+ * app's device-independent pixels in its main window's client area), or `{ x, y, width, height, space: "norm" }` (0 to
+ * 1 of it). A region off it is refused `OutOfView`.
+ */
+export type Region = [number, number, number, number] | { x: number; y: number; width: number; height: number; space?: "dip" | "norm" }
+
+/**
+ * An image instead of an element, for what draws without an accessibility tree (a canvas, a game, a GPU toolkit's own
+ * widgets): a PNG (path relative to the bench file) found in the target's pixels by normalized cross-correlation of
+ * its opaque pixels (alpha 128 or more; at least 16, not one flat shade), its colours checked too. Input aims at the
+ * centre of its one match: none in the call's timeout refuses `AnchorNotFound` (the capture is kept as
+ * `failed-<step>-anchor.png`), two or more still there 50 ms later `AnchorAmbiguous`. A native app's window is read
+ * from outside (every OS; Windows reads it on a locked session too); a page through its browser outside timed
+ * stretches, and inside them from its window (headed only: a headless page refuses `Headless`). Each capture counts in
+ * `driver.pixel_reads`: find images in setup with `page.query({ image })` and click the points it found in the run.
+ */
+export interface ImageLocator {
+  image: string
+  /** Where to look (default: everywhere). */
+  region?: Region
+  /** How alike, over 0 and at most 1. Default 0.95. */
+  threshold?: number
+  /** The image's pixels per device-independent pixel: 1 (default), or 2 for an image exported at @2x. */
+  scale?: number
+}
+
+/**
+ * A wait on the target's pixels (`until: { pixels }`, `waitFor({ pixels })`), exactly one of: `changed` (the region
+ * changed from what it showed before the input: more than `pct`% of its pixels, default 0.5 and at least 16, moved by
+ * more than `delta` in a channel, default 8), `stable` (no channel moved by more than 8 for that many ms; `true` is
+ * 300) or `matches` (an image shows there, as {@link ImageLocator}). After an input, `changed` and `matches` prove
+ * its reaction: `interaction.*` is the one OS frame that reached the screen between the last capture without it and
+ * the first with it (two or more there: no sample), for apps with no accessibility tree to tell a reaction by.
+ */
+export interface PixelWait {
+  region?: Region
+  changed?: boolean | { delta?: number; pct?: number }
+  stable?: boolean | number
+  matches?: string
+  threshold?: number
+  scale?: number
+}
+
+/** What a call acts on: an element by its {@link Selector}, a {@link Point}, or an {@link ImageLocator}. */
+export type Element = Selector | Point | ImageLocator
 
 /** How a click presses: the button, the modifiers held around it (`"Shift"`, `"ControlOrMeta"`), and 2 for a double click, 3 for a triple. */
 export interface ClickOptions extends Options {
@@ -32,10 +76,11 @@ export interface ClickOptions extends Options {
 
 /**
  * When an input call resolves: `"idle"` (no DOM change or long frame for 300 ms; a terminal's grid still for 300 ms),
- * `"frame"` (after next paint), a visible element, or `{ state }`: the app wrote that state to its event stream
- * after the input (`tty()` targets, see {@link AppEvent}).
+ * `"frame"` (after next paint), a visible element, an image showing ({@link ImageLocator}), `{ pixels }`
+ * ({@link PixelWait}), or `{ state }`: the app wrote that state to its event stream after the input (`tty()`
+ * targets, see {@link AppEvent}).
  */
-export type Until = "idle" | "frame" | Selector | { state: string }
+export type Until = "idle" | "frame" | Selector | ImageLocator | { pixels: PixelWait } | { state: string }
 
 /**
  * A line an app appends to the path in its `STROBE_EVENTS` (tty targets get it): strobe stamps each on its host clock
@@ -99,6 +144,9 @@ export interface QueriedElement {
   selected: boolean | null
   /** Native apps: the window it is in. */
   window?: number
+  /** An image's match (`role: "image"`): its centre, the point input aims at, and how alike it is (0 to 1). */
+  point?: [number, number]
+  score?: number
 }
 
 /**
@@ -193,11 +241,17 @@ export interface Page {
    * The visible elements `selector` matches now, in tree order ({@link QueriedElement}); without one (or `"*"`) every
    * visible element (on a page: those with a role, an id or a way to take input). On pages through strobe's own page
    * probe (shadow roots included), on native apps through the accessibility tree. One read, counted in
-   * `driver.reads`: discover in setup, `--check` or `ctx.untimed`, not in a timed step.
+   * `driver.reads`: discover in setup, `--check` or `ctx.untimed`, not in a timed step. An {@link ImageLocator} lists
+   * every distinct match (`role: "image"`, its `rect`, `point` and `score`; several are no refusal), one capture
+   * counted in `driver.pixel_reads`: query in setup, click the points in the run.
    */
   query(selector?: Element, opts?: QueryOptions): Promise<QueriedElement[]>
-  /** Resolves when a visible element matches `selector` (holding `text`, if given). Re-checked on every DOM, tree and focus change, so `:focus` works. */
-  waitFor(selector: Element, opts?: { text?: string; exact?: boolean; timeout?: number }): Promise<void>
+  /**
+   * Resolves when a visible element matches `selector` (holding `text`, if given). Re-checked on every DOM, tree and focus
+   * change, so `:focus` works. An image resolves once it shows; `{ pixels }` once the region changed from the call's first
+   * capture, held still or shows an image ({@link PixelWait}).
+   */
+  waitFor(selector: Element | { pixels: PixelWait }, opts?: { text?: string; exact?: boolean; timeout?: number }): Promise<void>
   /** Resolves when nothing in the DOM changed and no frame ran long for 300 ms. */
   idle(opts?: { timeout?: number }): Promise<void>
   wait(ms: number): Promise<void>
@@ -409,7 +463,7 @@ export interface MilestoneUntil {
 
 export interface Launch<P, K = any> {
   /** The launch is ready when this is visible in any of its windows. The primary is `launch.ready`. A page (Chromium or Firefox; WebKit refuses launch cases): from strobe's navigation, in a fresh profile, until its top document shows it. A native target: the screen time of the frame that first showed the element in its accessibility tree (OS present events). Any target with a window of its own may end on a window condition instead, read from its pixels the same way on every kind (two implementations timed alike). */
-  until: Selector | WindowUntil | MilestoneUntil
+  until: Selector | WindowUntil | MilestoneUntil | ImageLocator | { pixels: PixelWait }
   /** Named points on the way, each a metric `launch.<name>`. One a case declares must appear in every launch. */
   milestones?: Record<string, Milestone>
   /** `fresh` (default): a new home every launch. `warm`: one home per series and variant, kept across its launches, so caches and state from earlier launches are there. */
@@ -448,7 +502,17 @@ interface CaseBase {
    * runs are meant to build on each other (say why in a comment).
    */
   resetCheck?: boolean
+  /** {@link ResetPixels} for this case, over its target's. */
+  resetPixels?: ResetPixels
 }
+
+/**
+ * For a target whose state shows only in pixels (a canvas, a GPU toolkit's own widgets): every run must start from
+ * the pixels the first run started from, read outside the runs (a native app's window from outside, a page through its
+ * browser), else `ResetIncomplete`. `true` is the whole area; `region` limits it, `ignore` leaves parts out (a clock, a
+ * spinner: regions), and `tolerance` is how far a channel may move (default 8). Off with `resetCheck: false`.
+ */
+export type ResetPixels = boolean | { region?: Region; ignore?: Region[]; tolerance?: number }
 
 /**
  * The screen a block must show, read before its runs and after them (never inside one). Strings match
@@ -604,6 +668,8 @@ export interface PageOptions {
   emulate?: Emulate
   /** {@link Motion}: Chromium's `--force-prefers-reduced-motion`, Firefox's `ui.prefersReducedMotion` or WebKitGTK's GTK setting, in this launch only. Safari and WPE refuse it (EngineUnsupported). */
   motion?: Motion
+  /** {@link ResetPixels} for every case of this target (a case's own wins). */
+  resetPixels?: ResetPixels
 }
 
 /** What a page target emulates (`PageOptions.emulate`). */
@@ -721,6 +787,8 @@ export interface NativeOptions {
   window?: false
   /** What every block of this target must show (a case's `expect` adds to it). */
   expect?: Expect
+  /** {@link ResetPixels} for every case of this target (a case's own wins). */
+  resetPixels?: ResetPixels
   /**
    * `true`: strobe reads the app's stdout and stderr through a pipe, for `ctx.waitForLine` on its output. Off by
    * default, as a pipe changes how a C runtime buffers stdout: an app whose output a case waits on must flush each line.
@@ -819,7 +887,7 @@ export interface Bench<Params extends Record<string, ParamValues>, K = undefined
  * driver's own caches are the user's, as for any browser on the machine (SPEC §13.2).
  */
 export function web<P = any, K = any>(opts: { url?: FirstPage<P, K> } & PageOptions & Hooks<P, K> & Side = {}): Target<P, K> {
-  return { kind: "web", url: opts.url ?? "/", prepare: opts.prepare, teardown: opts.teardown, viewport: opts.viewport, scale: opts.scale, expect: opts.expect, name: opts.name, cwd: opts.cwd, engine: opts.engine, headless: opts.headless, emulate: opts.emulate, motion: opts.motion, ui: opts.ui }
+  return { kind: "web", url: opts.url ?? "/", prepare: opts.prepare, teardown: opts.teardown, viewport: opts.viewport, scale: opts.scale, expect: opts.expect, name: opts.name, cwd: opts.cwd, engine: opts.engine, headless: opts.headless, emulate: opts.emulate, motion: opts.motion, ui: opts.ui, resetPixels: opts.resetPixels }
 }
 
 /** A fixed page; the same for both variants unless a variant is `url:<href>`. */

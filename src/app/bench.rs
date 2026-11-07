@@ -130,6 +130,8 @@ struct Series {
     reset: bool,
     /// Whether every run must start from the same state (`ResetIncomplete`); the case's `resetCheck`.
     reset_check: bool,
+    /// The case's `resetPixels` (over its target's): what every run starts from in pixels.
+    reset_pixels: Value,
     /// A launch case's `launch` spec (`until`, `milestones`, `before`, …); null for a run case.
     launch: Value,
     /// The case's `timeout` (ms) for a run or reset, when it sets one.
@@ -461,6 +463,9 @@ struct Run {
     counted: probe::wakes::Counted,
     /// strobe's reads of the page inside the run and their time (ms): `driver.reads`, `driver.read_ms`.
     reads: (u64, f64),
+    /// strobe's captures of the page's pixels inside the run, their time and its CPU in them (ms):
+    /// `driver.pixel_reads`, `driver.pixel_ms`, `overhead.pixel_pct`.
+    pixels: (u64, f64, f64),
     /// What the run left, read after its span and before its reset (`RunEnd`).
     end: RunEnd,
 }
@@ -1216,16 +1221,27 @@ struct Overhead {
     /// A terminal target's reader: reading, parsing and answering the program's output (§19: 0.5%).
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_pct: Option<f64>,
+    /// strobe's pixel reads inside the runs (image locators and pixel waits: captures and matching), its
+    /// CPU over the runs' wall time (§19: 0.5%; over 2% refuses timing and latency metrics).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pixel_pct: Option<f64>,
 }
 
 impl Overhead {
     /// `strobe 1.2% · runner 0.3% · sampler 0.08% of a core`.
     fn text(&self) -> String {
-        let parts: Vec<String> =
-            [("strobe", self.strobe_pct), ("runner", self.runner_pct), ("sampler", self.sampler_pct), ("presents", self.present_pct), ("reserve", self.reserve_pct), ("terminal", self.terminal_pct)]
-                .into_iter()
-                .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
-                .collect();
+        let parts: Vec<String> = [
+            ("strobe", self.strobe_pct),
+            ("runner", self.runner_pct),
+            ("sampler", self.sampler_pct),
+            ("presents", self.present_pct),
+            ("reserve", self.reserve_pct),
+            ("terminal", self.terminal_pct),
+            ("pixels", self.pixel_pct),
+        ]
+        .into_iter()
+        .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
+        .collect();
         if parts.is_empty() { String::new() } else { format!("{} of a core", parts.join(" · ")) }
     }
 
@@ -1236,6 +1252,7 @@ impl Overhead {
             ("the present session's consumer", self.present_pct, 0.5),
             ("the reserved-CPU sweep", self.reserve_pct, 5.0),
             ("the terminal's reader", self.terminal_pct, 0.5),
+            ("strobe's pixel reads", self.pixel_pct, 0.5),
         ]
         .into_iter()
         .filter_map(|(n, p, b)| p.filter(|p| *p > b).map(|p| (n, p, b)))
@@ -1285,6 +1302,7 @@ fn mean_overhead(blocks: &[Block]) -> Option<Overhead> {
         present_pct: mean(|o| o.present_pct),
         reserve_pct: mean(|o| o.reserve_pct),
         terminal_pct: mean(|o| o.terminal_pct),
+        pixel_pct: mean(|o| o.pixel_pct),
     })
 }
 
@@ -2749,6 +2767,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     // Background, StateDrift (Drift is a trend of pair differences: none here).
     analyse(s, def, &blocks, &[], false, ["base", "head"], &mut warnings);
     warnings.extend(observer_reads(&blocks, "head", "head", is_native(&target)));
+    warnings.extend(observer_pixels(&blocks, "head", "head"));
     let (session, locked, _) = session_of(blocks.iter());
     if session == "mixed" {
         warnings.push(validity::warn("SessionLocked", format!("{locked} of {} blocks ran on a locked screen and the rest unlocked: their values do not compare", blocks.len())));
@@ -3204,9 +3223,13 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             }
         }
         warnings.extend(journey::observer_cost(&blocks, names));
+        for (role, who) in ["base", "head"].into_iter().zip([names.0, names.1]) {
+            warnings.extend(observer_pixels(&blocks, role, who));
+        }
     } else {
         for (role, who) in ["base", "head"].into_iter().zip(names) {
             warnings.extend(observer_reads(&blocks, role, who, is_native(&target)));
+            warnings.extend(observer_pixels(&blocks, role, who));
         }
     }
     if session == "mixed" {
@@ -3639,6 +3662,42 @@ fn observer_reads(blocks: &[Block], role: &str, who: &str, a11y: bool) -> Option
         return None;
     };
     Some(validity::warn("ObserverCost", format!("strobe read {who} {reads:.1} times a run ({:.1}% of its wall time) inside the measured runs: {why}", 100.0 * share)))
+}
+
+/// `ObserverCost` for strobe's pixel reads (image locators and pixel waits) inside one side's measured
+/// runs: over 2% of a run's wall time, or over 8 a run (each a capture of the window and a search).
+fn observer_pixels(blocks: &[Block], role: &str, who: &str) -> Option<Warning> {
+    let mine: Vec<&Block> = blocks.iter().filter(|b| b.variant == role).collect();
+    let reads: Vec<f64> = mine.iter().filter_map(|b| b.values.get("driver.pixel_reads").copied()).collect();
+    let share: Vec<f64> = mine.iter().filter_map(|b| Some(b.values.get("driver.pixel_ms")? / metrics::median(&b.run_ms).max(1e-3))).collect();
+    let (reads, share) = (metrics::median(&reads), if share.is_empty() { 0.0 } else { metrics::median(&share) });
+    let why = if share > 0.02 {
+        "reading pixels took over 2% of a run"
+    } else if reads > 8.0 {
+        "over 8 captures a run (an image waited for frame after frame)"
+    } else {
+        return None;
+    };
+    Some(validity::warn(
+        "ObserverCost",
+        format!(
+            "strobe read {who}'s pixels {reads:.1} times a run ({:.1}% of its wall time) inside the measured runs: {why}; find images in setup (page.query({{ image }})) and aim at the points, or wait on until: \"frame\" or \"idle\"",
+            100.0 * share
+        ),
+    ))
+}
+
+/// `OverheadBudget` (SPEC §19): strobe's pixel reads in the runs used over 2% of a core, so the runs they
+/// timed are disturbed: the series' timing and latency metrics are refused.
+fn pixel_overhead(s: &Series, pct: Option<f64>, refused: &mut BTreeMap<String, Refusal>) {
+    let Some(p) = pct.filter(|p| *p > 2.0) else { return };
+    let timing = |m: &str| ["frames.", "interaction.", "scroll.", "display.", "phase.", "span.", "launch.", "tty."].iter().any(|x| m.starts_with(x)) || m == "run.duration";
+    for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| timing(m)) {
+        refused.entry(m.clone()).or_insert_with(|| {
+            Refusal::new(ValidatorId::OverheadBudget, format!("{m}: strobe's pixel reads in the runs used {} of a core (budget 0.5%), so the runs it timed are disturbed", pct_of_core(p)))
+                .fix("find images in setup (page.query({ image })) and aim at the points, or wait on until: \"frame\" or \"idle\" in the runs")
+        });
+    }
 }
 
 /// `ObserverCost` from a page's attribution recording: its profile's samples in strobe's page driver,
@@ -4787,14 +4846,16 @@ fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
         return None;
     }
     let offscreen = |m: &str| {
-        ["cpu.", "ui.", "memory.", "io.", "count.", "gpu.", "phase.", "energy."].iter().any(|p| m.starts_with(p))
+        ["cpu.", "ui.", "memory.", "io.", "count.", "gpu.", "phase.", "energy.", "driver."].iter().any(|p| m.starts_with(p))
             || m == "run.duration"
             || (m.starts_with("launch.") && m != "launch.painted" && m != "launch.settled")
     };
     let windowless = t["window"] == false || t["app"].as_str().and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
     // A pixels block compares what the window shows; only a headless page (or a phone's) draws it
-    // without a screen, and a terminal's grid is drawn by strobe itself.
-    if x.pixels.is_some() && t["kind"] != "tty" && !(matches!(t["kind"].as_str(), Some("web" | "url")) && (headless_of(ctx, s) || ctx.phone.is_some())) {
+    // without a screen, a terminal's grid is drawn by strobe itself, and Windows draws a native app's
+    // window for its own rendering and its compositor's copy while locked (`host::window_image`).
+    let native_locked_pixels = cfg!(windows) && t["kind"] == "native";
+    if x.pixels.is_some() && t["kind"] != "tty" && !native_locked_pixels && !(matches!(t["kind"].as_str(), Some("web" | "url")) && (headless_of(ctx, s) || ctx.phone.is_some())) {
         return Some("it compares the case's snapshots (--pixels), which are pixels on screen".into());
     }
     match t["kind"].as_str().unwrap_or("") {
@@ -5276,6 +5337,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // (`metrics::read`).
         let edges: RefCell<Vec<WebEdge>> = RefCell::new(Vec::new());
         let reads_before = Cell::new((0u64, 0.0f64));
+        let pixels_before = Cell::new((0u64, 0.0f64, 0.0f64));
         let counted_before: RefCell<BTreeMap<String, f64>> = RefCell::new(BTreeMap::new());
         // strobe's own calls into the page at an edge (its reads, marks, counts and the OS input's
         // checks) stay inside the stretch: after the processes' readings at its start, before them at
@@ -5319,8 +5381,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 reading();
             }
             let (k, ms) = driver.take_reads();
+            let (pk, pms, pcpu) = driver.take_pixel_reads();
             if start {
                 reads_before.set((reads_before.get().0 + k, reads_before.get().1 + ms));
+                let b = pixels_before.get();
+                pixels_before.set((b.0 + pk, b.1 + pms, b.2 + pcpu));
             }
             if counting {
                 let now = page_counts();
@@ -5385,6 +5450,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         ranges.borrow_mut().merge(probe::symbols::Ranges::take(&page)?);
                     }
                     let (started, sent0) = (host::now_ns(), driver.inputs.borrow().len());
+                    // Pixels inside a timed stretch are read from outside the browser (`Driver::shots`).
+                    driver.timed.set(hooks.in_run() && !hooks.untimed_now() && !x.untimed && x.pixels.is_none());
                     let r = driver.dispatch(call, &args);
                     if profiled_goto && r.is_ok() {
                         same_renderer()?;
@@ -5777,8 +5844,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             }
             let docs = page.documents();
             driver.take_reads();
+            driver.take_pixel_reads();
             edges.borrow_mut().clear();
             reads_before.set((0, 0.0));
+            pixels_before.set((0, 0.0, 0.0));
             if let Some(os) = driver.os.get() {
                 os.set_pids(browser.pids());
                 os.take_log();
@@ -5836,6 +5905,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // Read once the run's span and CPU window closed: the page's own count of its time.
             let reads = driver.take_reads();
             let reads = (reads.0 + reads_before.get().0, reads.1 + reads_before.get().1);
+            let shots = driver.take_pixel_reads();
+            let pb = pixels_before.get();
+            let shots = (shots.0 + pb.0, shots.1 + pb.1, shots.2 + pb.2);
             roles.extend(process_roles(&browser));
             // The readings at the run's start, each untimed stretch's edges and the run's end: each pair
             // a timed part (a stretch the run never ended ends with it). The cycle clock's and the page
@@ -5952,7 +6024,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let counted = probe::wakes::counted(&k0, &k1);
             let work = cpu * wall / 1e6 / 100.0;
             let task = c1[0] + carry[0] - c0[0] - gap.1[0];
-            Ok(Run { ms: wall / 1e6, cpu, cpu_whole, task, work, parts, roles, t0, t1, timed, total: began.elapsed().as_secs_f64() * 1e3, input, counted, reads, end })
+            Ok(Run { ms: wall / 1e6, cpu, cpu_whole, task, work, parts, roles, t0, t1, timed, total: began.elapsed().as_secs_f64() * 1e3, input, counted, reads, pixels: shots, end })
         };
         // Warm until two consecutive runs do the same main-thread work (within 5%); both of them count
         // as measured (SPEC §9.2). Wall time says nothing here: a fixed-speed scroll or paced typing
@@ -5963,6 +6035,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // the case that left it (`ResetIncomplete`) before the next one runs.
         let mut starts = shown::Starts::new(s, x);
         let read_start = || shown::page_start(&page);
+        // `resetPixels`: the viewport's pixels each run starts from, through the browser (outside the runs).
+        let mut pixel_starts = shown::PixelStarts::new(s, x)?;
+        let read_pixels = |spec: &crate::driver::pixels::StartPixels| spec.read(&crate::driver::PageShots { page: &page }).ok();
+        let wait_pixels = |t: Duration| std::thread::sleep(t);
         let profiled = set == Set::Attribution && !gecko_on;
         let wait_start = |t: Duration| {
             let _ = crate::driver::wait_change(&page, t);
@@ -6021,6 +6097,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 };
                 let start = start_screen.clone();
                 starts.case(s, x, batch.then_some(base));
+                pixel_starts.case(s, x, batch.then_some(base))?;
                 loaded_document.set(false);
                 let burst0 = burst_keys.get();
                 let mark = format!("case:{k}:{}", batch::mark_name(&s.case));
@@ -6039,6 +6116,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     let g = base + i;
                     nodes.push(driver.nodes().unwrap_or(0));
                     starts.check(g + 1, false, &read_start, &wait_start)?;
+                    pixel_starts.check(g + 1, false, &read_pixels, &wait_pixels)?;
                     driver.window_start(g + 1, false, starts.on())?;
                     let profile = profiled && warmup.measures(i);
                     // A check's run after its reset is never measured: the trace names it a warmup run, so no
@@ -6114,6 +6192,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     batch::answers(&s.case, page.eval("1"))?;
                 }
                 starts.check(base + runs.len() + 1, true, &read_start, &wait_start)?;
+                pixel_starts.check(base + runs.len() + 1, true, &read_pixels, &wait_pixels)?;
                 driver.window_start(base + runs.len() + 1, true, starts.on())?;
                 // In a batch, what one block checks after its runs is checked after each case: a later case
                 // may take the page down with it, and the cases before it keep what they measured.
@@ -6457,6 +6536,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 extra.insert("cpu.work".to_string(), measured.iter().enumerate().filter(|(_, r)| r.cpu.is_finite()).map(|(j, r)| (key(j), r.cpu * r.ms / 100.0)).collect());
                 extra.insert("driver.reads".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.reads.0 as f64)).collect());
                 extra.insert("driver.read_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.reads.1)).collect());
+                if measured.iter().any(|r| r.pixels.0 > 0) {
+                    extra.insert("driver.pixel_reads".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.0 as f64)).collect());
+                    extra.insert("driver.pixel_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.1)).collect());
+                }
                 // The page as each measured run left it (`RunEnd`), the median over the runs.
                 let heap: BTreeMap<String, f64> = measured.iter().enumerate().filter_map(|(j, r)| Some((key(j), r.end.heap_mb?))).collect();
                 let dom: BTreeMap<String, f64> = measured.iter().enumerate().filter_map(|(j, r)| Some((key(j), r.end.nodes? as f64))).collect();
@@ -6612,11 +6695,19 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         let (sent, changes, _) = run_inputs_kept.get(first + j).cloned().unwrap_or_default();
                         let sent: Vec<Value> = sent
                             .iter()
-                            .map(|s| json!({ "t_ns": s.t_ns, "kind": if s.scroll { "scroll" } else { "discrete" }, "first": true, "press_ns": s.press, "acted": s.acted, "burst": s.burst }))
+                            .map(|s| json!({ "t_ns": s.t_ns, "kind": if s.scroll { "scroll" } else { "discrete" }, "first": true, "press_ns": s.press, "acted": s.acted, "burst": s.burst, "pixel": s.pixel }))
                             .collect();
                         frames_runs.insert(key(j), json!({ "t0_ns": r.t0, "t1_ns": r.t1, "untimed": r.timed.untimed, "inputs": sent, "marks": run_marks.get(first + j), "changes": changes }));
                     }
                     os_presents = case_presents;
+                }
+                // strobe's pixel reads in the runs (image locators, pixel waits) over 2% of a core: the
+                // timing they shared the runs with is refused.
+                let run_ms_sum: f64 = measured.iter().map(|r| r.ms).sum();
+                let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms_sum.max(1.0));
+                if x.measures_time() {
+                    pixel_overhead(s, pixel_pct, &mut refused);
+                    values.retain(|k, _| !refused.contains_key(k));
                 }
                 // The launch's steps before the runs, the case's warmup and runs, then the launch's after them.
                 let launch_steps = steps.borrow();
@@ -6643,7 +6734,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     screen: Some(screen.clone()),
                     reserve: None,
                     shown: Some(shown::Shown { start: c.start.clone(), end }),
-                    overhead: Some(Overhead { strobe_pct, runner_pct, sampler_pct, ..Overhead::default() }),
+                    overhead: Some(Overhead { strobe_pct, runner_pct, sampler_pct, pixel_pct, ..Overhead::default() }),
                     process_set: Some(programs(&browser.processes())),
                     fixture_connected: None,
                     client: content,
@@ -6867,9 +6958,21 @@ fn snapshot(page: &Page, exp: &str, step: &str) -> String {
     let url = page.eval_timeout("location.href", quick).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "unresponsive".into());
     let shot = page.screenshot(quick).ok();
     let path = store::experiment_dir(exp).ok().map(|d| d.join(format!("failed-{step}-{}.png", store::new_id("shot").trim_start_matches("shot_"))));
+    let anchor = anchor_shot(exp, step);
     match (shot, path) {
-        (Some(png), Some(path)) if std::fs::write(&path, &png).is_ok() => format!("\n  page: {url}\n  screenshot: {}", path.display()),
-        _ => format!("\n  page: {url}"),
+        (Some(png), Some(path)) if std::fs::write(&path, &png).is_ok() => format!("\n  page: {url}\n  screenshot: {}{anchor}", path.display()),
+        _ => format!("\n  page: {url}{anchor}"),
+    }
+}
+
+/// The capture an image locator was last not found in (`AnchorNotFound`), kept with the experiment as
+/// `failed-<step>-anchor.png` beside the failed step: what strobe searched, to hold the image against.
+fn anchor_shot(exp: &str, step: &str) -> String {
+    let Some(img) = crate::driver::pixels::take_failed() else { return String::new() };
+    let path = store::experiment_dir(exp).ok().map(|d| d.join(format!("failed-{step}-anchor.png")));
+    match (path, crate::png::write(&img)) {
+        (Some(p), Ok(bytes)) if std::fs::write(&p, &bytes).is_ok() => format!("\n  anchor capture: {}", p.display()),
+        _ => String::new(),
     }
 }
 
@@ -7377,6 +7480,7 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
                     metrics: c["metrics"].as_array().map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect()).unwrap_or_default(),
                     reset: c["reset"].as_bool().unwrap_or(false),
                     reset_check: c["resetCheck"] != false,
+                    reset_pixels: if c["resetPixels"].is_null() { targets[target.as_str()]["resetPixels"].clone() } else { c["resetPixels"].clone() },
                     launch: launch.clone(),
                     timeout: c["timeout"].as_u64(),
                     gpu_cache: c["gpuCache"].as_str().map(str::to_string),

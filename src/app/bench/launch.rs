@@ -39,6 +39,10 @@ pub(super) fn until_of(launch: &Value) -> Value {
     if let Some(st) = u["state"].as_str() {
         return json!({ "end": "state", "state": st });
     }
+    // An image or pixels the window shows (`driver::pixels`), by the name the bench file gave the image.
+    if u.get("image").is_some() || u.get("pixels").is_some() {
+        return json!({ "end": "pixels", "image": u.get("as").or_else(|| u["pixels"].get("as")) });
+    }
     match u["window"].as_str() {
         Some(w) => json!({ "end": w }),
         None => json!({ "end": "selector", "selector": u }),
@@ -783,6 +787,14 @@ const NO_OBSERVER: &str = "window.__strobeLaunch = window.__strobeLaunch || new 
 /// `waitFor` and `look` use, which goes in first. Only a page's top document: a frame inside it runs
 /// nothing of strobe's.
 fn observer(until: &Value) -> Result<String> {
+    if crate::driver::pixels::is_pixels(until) {
+        return Err(crate::model::Refusal::new(
+            crate::model::ValidatorId::NotForTarget,
+            "launch.until: an image or pixels on a page's launch, which is timed in its own document, where no pixels are read",
+        )
+        .fix("time the page's launch to a selector (its canvas element, a heading), or launch the app as a native target, whose window strobe reads from outside")
+        .into());
+    }
     let q = crate::target::a11y::Selector::parse(until, crate::target::a11y::Dialect::Page).map_err(|e| Error::usage(format!("launch.until: {}", e.message)))?.page_spec();
     Ok(format!(
         r#"if (window === window.top) {{

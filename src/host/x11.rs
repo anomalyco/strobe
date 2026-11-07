@@ -368,6 +368,35 @@ pub fn window_image(win: isize) -> Option<crate::png::Image> {
     })
 }
 
+/// A part of a window's client area as it is drawn now (`GetImage` of `[x, y, w, h]`, pixels), once the
+/// window is viewable and on top at the part's centre: the X server copies whatever covers a window's
+/// area, so a covered part would be another window's pixels. Err says why there are none.
+pub fn window_region(win: isize, [x, y, w, h]: [i32; 4]) -> Result<crate::png::Image, String> {
+    let at = client_origin(win).ok_or("the window is gone or there is no display")?;
+    let (cx, cy) = (at.0 + x + w / 2, at.1 + y + h / 2);
+    if window_at(cx, cy).is_none_or(|t| t.0 != win) {
+        let over = window_at(cx, cy).map(|t| format!("{:?} (pid {})", t.2, t.1)).unwrap_or_else(|| "nothing of the app's".into());
+        return Err(format!("the window is not on top at ({cx}, {cy}): {over} is, and the X server copies what covers a window"));
+    }
+    with(|xc| {
+        let attrs = xc.conn.get_window_attributes(win as Window).ok()?.reply().ok()?;
+        if attrs.map_state != MapState::VIEWABLE {
+            return None;
+        }
+        let r = xc.conn.get_image(ImageFormat::Z_PIXMAP, win as Window, x as i16, y as i16, w as u16, h as u16, !0).ok()?.reply().ok()?;
+        let (w, h) = (w as usize, h as usize);
+        if r.data.len() < w * h * 4 {
+            return None;
+        }
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for px in r.data[..w * h * 4].chunks(4) {
+            rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+        }
+        Some(crate::png::Image { width: w, height: h, rgba })
+    })
+    .ok_or_else(|| "the window is not viewable (unmapped or minimized), or the X server gave no image of it".to_string())
+}
+
 /// The largest window of `pids` as 16×16 averaged BGRA cells, from its own pixels (`GetImage` of the
 /// one-pixel row through each cell row's middle, so a sample moves a few kilobytes, not the window).
 pub fn window_pixels(pids: &[u32]) -> Option<Vec<u8>> {

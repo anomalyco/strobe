@@ -130,6 +130,8 @@ validators!(
     WirelessTransport,
     NotProfileable,
     MouseNotEnabled,
+    AnchorNotFound,
+    AnchorAmbiguous,
 );
 
 impl ValidatorId {
@@ -147,7 +149,8 @@ impl ValidatorId {
             SoftwareGpu | DevBuild | DebuggerAttached | WrongScreen | UnpacedSpin | NoPresentSource | AmbiguousInteraction | PatternInput | ConcurrentBench | VariantMismatch | RunIncomplete
             | Throttled | BackgroundPriority | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter
             | NotOnThisOs | NotForTarget | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent
-            | Untimed | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | PowerSave | LowBattery | Emulator | WirelessTransport | NotProfileable | MouseNotEnabled => false,
+            | Untimed | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | PowerSave | LowBattery | Emulator | WirelessTransport | NotProfileable | MouseNotEnabled | AnchorNotFound
+            | AnchorAmbiguous => false,
         }
     }
 }
@@ -695,6 +698,26 @@ pub const METRICS: &[MetricDef] = &[
         min_n: 0,
         across: Across::Compared,
         about: "what strobe's driver.reads inside a run cost: a page's main-thread time in its element lookups, a native app's tree reads (ObserverCost)",
+    },
+    MetricDef {
+        name: "driver.pixel_reads",
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::Compared,
+        about: "strobe's captures of the target's pixels inside a run (an image locator's aim, an until or waitFor of an image or of pixels): each a read of the window from outside (ObserverCost)",
+    },
+    MetricDef {
+        name: "driver.pixel_ms",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 0,
+        across: Across::Compared,
+        about: "the wall time of strobe's driver.pixel_reads inside a run: capture, copy and matching (ObserverCost)",
     },
     MetricDef {
         name: "scroll.latency.p50",

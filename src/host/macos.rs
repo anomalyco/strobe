@@ -1561,6 +1561,47 @@ pub fn window_image(id: isize) -> Option<crate::png::Image> {
     Some(crate::png::Image { width, height, rgba })
 }
 
+/// A part of a window (`[x, y, w, h]` in points from its frame's top left) at the display's resolution, as
+/// RGBA: `CGWindowListCreateImage` of that rect, this window only. Err says why there are none (Screen
+/// Recording, a window the app keeps out of capture, a window that is gone).
+pub fn window_region(id: isize, [x, y, w, h]: [f64; 4]) -> Result<crate::png::Image, String> {
+    type CreateImage = unsafe extern "C" fn(CGRect, u32, u32, u32) -> CFTypeRef;
+    if !screen_capture_allowed() {
+        return Err(format!("Screen Recording is not granted to {}", screen_recording_grantee()));
+    }
+    let win = window_state(id).ok_or("the window is gone")?;
+    if unshared_windows(&[win.pid]).iter().any(|u| u.0 as isize == id) {
+        return Err("the app keeps this window out of screen capture (NSWindowSharingNone), so nothing it draws can be read".into());
+    }
+    let sym = CString::new("CGWindowListCreateImage").map_err(|e| e.to_string())?;
+    let f = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym.as_ptr()) };
+    if f.is_null() {
+        return Err("this macOS has no CGWindowListCreateImage".into());
+    }
+    let create: CreateImage = unsafe { std::mem::transmute(f) };
+    let rect = CGRect { origin: CGPoint { x: win.rect.0 as f64 + x, y: win.rect.1 as f64 + y }, size: CGSize { width: w, height: h } };
+    // This window only, its own pixels without the shadow, at the best resolution.
+    let img = unsafe { create(rect, LIST_INCLUDING, id as u32, 1 | 8) };
+    if img.is_null() {
+        return Err("macOS gave no image of the window".into());
+    }
+    let (width, height, stride, bpp) = unsafe { (CGImageGetWidth(img), CGImageGetHeight(img), CGImageGetBytesPerRow(img), CGImageGetBitsPerPixel(img)) };
+    let data = Cf::new(unsafe { CGDataProviderCopyData(CGImageGetDataProvider(img)) });
+    unsafe { CGImageRelease(img) };
+    let data = data.ok_or("macOS gave no pixels of the window")?;
+    if bpp != 32 {
+        return Err(format!("macOS gave {bpp}-bit pixels"));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(CFDataGetBytePtr(data.0), CFDataGetLength(data.0) as usize) };
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        for px in bytes.get(row * stride..row * stride + width * 4).ok_or("macOS gave a short image")?.chunks(4) {
+            rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+        }
+    }
+    Ok(crate::png::Image { width, height, rgba })
+}
+
 /// macOS lets no app put another app's window on top without activating it, which takes the keyboard
 /// focus. So strobe makes the app the active one in every block (`check_visible` requires it), and
 /// only once nobody has used this Mac for a minute: a person at the keyboard keeps their focus, and

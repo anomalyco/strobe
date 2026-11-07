@@ -324,7 +324,7 @@ impl Starts {
         Starts { first: None, live: Default::default(), on: Starts::wanted(s, x), case: None }
     }
 
-    fn wanted(s: &Series, x: &Exec) -> bool {
+    pub(super) fn wanted(s: &Series, x: &Exec) -> bool {
         s.reset_check && !matches!(x.set, Set::Attribution | Set::Memory) && x.pixels.is_none()
     }
 
@@ -469,9 +469,94 @@ impl Starts {
     }
 }
 
+/// `resetPixels` (SPEC §9.6, `ResetIncomplete`): every run starts from the pixels the launch's first run
+/// started from, for an app whose state shows in no accessibility tree (a canvas, a GPU toolkit's own
+/// widgets). Read outside every timed span, where `Starts` reads; off where it is off.
+pub(super) struct PixelStarts {
+    spec: Option<crate::driver::pixels::StartPixels>,
+    first: Option<(String, png::Image)>,
+    case: Option<(String, usize)>,
+}
+
+impl PixelStarts {
+    /// The case's `resetPixels` (over its target's).
+    pub(super) fn new(s: &Series, x: &Exec) -> Result<PixelStarts> {
+        Ok(PixelStarts { spec: Self::spec(s, x)?, first: None, case: None })
+    }
+
+    fn spec(s: &Series, x: &Exec) -> Result<Option<crate::driver::pixels::StartPixels>> {
+        if !Starts::wanted(s, x) {
+            return Ok(None);
+        }
+        crate::driver::pixels::StartPixels::parse(&s.reset_pixels).map_err(|e| Error::usage(format!("{}: {}", s.case, e.message)))
+    }
+
+    /// The case whose runs come next in the launch (its first run's index among the launch's runs in a
+    /// batch); its starts are held to the launch's first one.
+    pub(super) fn case(&mut self, s: &Series, x: &Exec, base: Option<usize>) -> Result<()> {
+        self.spec = Self::spec(s, x)?;
+        self.case = base.map(|b| (s.case.clone(), b));
+        Ok(())
+    }
+
+    fn name(&self, run: usize) -> String {
+        match &self.case {
+            Some((case, base)) => format!("{case}'s run {}", run - base),
+            None => format!("run {run}"),
+        }
+    }
+
+    /// Before run `run` (1-based; `after`: after the last run and its reset). `read` captures the start
+    /// (None: it could not be read); `wait(t)` waits about `t`. Other pixels are read again every 100 ms
+    /// for up to a second (a reset's last frame on its way), then refuse the block.
+    pub(super) fn check(&mut self, run: usize, after: bool, read: &dyn Fn(&crate::driver::pixels::StartPixels) -> Option<png::Image>, wait: &dyn Fn(Duration)) -> Result<()> {
+        let Some(spec) = self.spec.clone() else { return Ok(()) };
+        let Some((first_when, first)) = &self.first else {
+            if let Some(img) = read(&spec) {
+                self.first = Some((self.name(run), img));
+            }
+            return Ok(());
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut moved = (first.width * first.height, 255u8);
+        loop {
+            if let Some(now) = read(&spec) {
+                moved = crate::image::moved(first, &now, spec.tolerance);
+                if moved.0 == 0 {
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            wait(Duration::from_millis(100));
+        }
+        let when = match (&self.case, after) {
+            (Some(_), true) => format!("the next case of the launch would start, after {} and its reset,", self.name(run.saturating_sub(1))),
+            (None, true) => format!("a run after the last (run {}) would start", run.saturating_sub(1)),
+            (_, false) => format!("{} started", self.name(run)),
+        };
+        Err(Error::refused(
+            "ResetIncomplete",
+            format!(
+                "{when} from other pixels than {first_when} did: {} of the region's {} pixels moved by more than {} in a channel (by up to {})",
+                moved.0,
+                first.width * first.height,
+                spec.tolerance,
+                moved.1
+            ),
+            "every run must start from the same screen: the case's reset has to take back what its run drew; leave changing parts out with resetPixels: { ignore: [[x, y, width, height]] }, or set resetCheck: false for runs that build on each other",
+        ))
+    }
+}
+
 /// Whether a selector matches a visible element of the page within 5 s, by the driver's own probe
 /// (what a `page.waitFor` would see).
 pub(super) fn page_shows(page: &Page, sel: &Value) -> Result<bool> {
+    // An image: through the browser's screenshots (outside the runs).
+    if let Some(r) = crate::driver::page_image_shows(page, sel, Duration::from_secs(5)) {
+        return r;
+    }
     let sel = crate::target::a11y::Selector::parse(sel, crate::target::a11y::Dialect::Page)?;
     crate::driver::shows(page, &sel, Duration::from_secs(5)).map_err(|e| Error::usage(format!("expect.visible {:?}: {}", sel.source, e.message)))
 }
@@ -544,7 +629,7 @@ pub(super) fn expect(e: &Value, screen: &Screen, at: &str, full: bool, visible: 
     };
     for sel in &sels {
         if !visible(sel)? {
-            return refuse(format!("{} visible", shown_text(sel.get("selector").unwrap_or(sel))));
+            return refuse(format!("{} visible", shown_text(sel.get("selector").or_else(|| sel.get("as")).unwrap_or(sel))));
         }
     }
     Ok(())

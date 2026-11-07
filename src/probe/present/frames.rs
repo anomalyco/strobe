@@ -255,6 +255,12 @@ pub struct Sent {
     /// frame is its reaction alone (`Reactions::burst`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub burst: bool,
+    /// The input's `until` waited on pixels and proved its reaction: the last capture that lacked it (its
+    /// start) and the first that had it (its end), host clock. Its frame is the one present of the target
+    /// that reached the screen between them, in place of a model change (`reactions`): what an app with
+    /// no accessibility tree (a canvas, a GPU toolkit's own widgets) shows of a reaction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel: Option<(u64, u64)>,
 }
 
 /// Why `interaction.*` is refused for a block whose runs typed in a burst (every engine and app).
@@ -412,6 +418,40 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
     for (k, s) in sent.iter().enumerate() {
         // A key typed in a burst is no one's sample (`interaction.*` refuses the block) and claims nothing.
         if s.burst {
+            continue;
+        }
+        // A pixel proof: the target's one frame that reached the screen between the last capture that
+        // lacked the reaction (or the input, when later) and the first that had it. Two or more there:
+        // which one showed it is unknown; none: the capture saw what no present of the target says.
+        if let Some((lacked, had)) = s.pixel {
+            let from = s.press.unwrap_or(s.t_ns);
+            let kind = usize::from(s.scroll);
+            let bump = |x: &mut (usize, usize)| if kind == 1 { x.1 += 1 } else { x.0 += 1 };
+            bump(&mut out.tried);
+            let shown: Vec<&&Present> = mine.iter().filter(|p| p.state == "displayed" && p.screen_ns > lacked.max(from) && p.screen_ns <= had).collect();
+            let o = match shown.as_slice() {
+                [p] => {
+                    let (t, edge) = if s.press.is_some() && p.screen_ns <= s.t_ns { (from, Edge::Press) } else { (s.t_ns, Edge::Sent) };
+                    let ms = (p.screen_ns - t) as f64 / 1e6;
+                    if s.scroll {
+                        out.scroll.push(ms);
+                        Outcome::Scroll(ms)
+                    } else {
+                        out.interaction.push((ms, edge));
+                        Outcome::Timed(edge, ms)
+                    }
+                }
+                [] => {
+                    bump(&mut out.unshown);
+                    Outcome::Unshown
+                }
+                _ => {
+                    bump(&mut out.busy);
+                    Outcome::Busy
+                }
+            };
+            out.each.push((s.t_ns, o));
+            seen.push((s.t_ns, None));
             continue;
         }
         let next = sent.get(k + 1).map_or(u64::MAX, |n| n.press.unwrap_or(n.t_ns));

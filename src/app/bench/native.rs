@@ -122,6 +122,9 @@ struct Run {
     elements: Option<usize>,
     /// Reads of the app's tree inside the run and their time (ms): `driver.reads` (none without a session).
     reads: (u64, f64),
+    /// Captures of the app's pixels inside the run, their time and strobe's CPU in them (ms):
+    /// `driver.pixel_reads`, `driver.pixel_ms`, `overhead.pixel_pct`.
+    pixels: (u64, f64, f64),
     t0: u64,
     t1: u64,
     total: f64,
@@ -339,12 +342,16 @@ fn runs(
     // (`Hooks::untimed`), and strobe's reads of its tree before the first (those inside one are not the run's).
     let edges: RefCell<Vec<Edge>> = RefCell::new(Vec::new());
     let reads_before = Cell::new((0u64, 0.0f64));
+    let pixels_before = Cell::new((0u64, 0.0f64, 0.0f64));
     let edge = |start: bool| {
         if start {
             cost.pause();
             if let Some(se) = drive.session.get() {
                 let (n, ms) = se.take_reads();
                 reads_before.set((reads_before.get().0 + n, reads_before.get().1 + ms));
+                let (n, ms, cpu) = se.take_pixel_reads();
+                let b = pixels_before.get();
+                pixels_before.set((b.0 + n, b.1 + ms, b.2 + cpu));
             }
         }
         let listed = wakes::wall_us();
@@ -354,6 +361,7 @@ fn runs(
         if !start {
             if let Some(se) = drive.session.get() {
                 se.take_reads();
+                se.take_pixel_reads();
             }
             cost.resume();
         }
@@ -416,7 +424,7 @@ fn runs(
     let setup = ctx.runner.call("setup", json!({}), t, &serve);
     super::batch::launch_hook_case(ctx)?;
     super::super::record::app_gone(n, "before the runs", |_| last())?;
-    setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup"))?;
+    setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, &super::anchor_shot(&ctx.exp, "setup"), "fix the bench file's setup"))?;
     hooks.check_fixture();
     // `expect.same` (SPEC §9.10): read through the session after setup (a later case of a batch: before
     // its runs), each run and each reset. A windowless app shows nothing to read.
@@ -487,6 +495,15 @@ fn runs(
         Some(se) => se.wait_change(changes_seen.get(), t),
         None => std::thread::sleep(t),
     };
+    // `resetPixels`: what each run starts from in the main window's pixels, read from outside (no
+    // driving session needed).
+    let mut pixel_starts = shown::PixelStarts::new(s, x)?;
+    let start_window = RefCell::new(None);
+    let read_pixels = |spec: &crate::driver::pixels::StartPixels| {
+        let win = drive.main.get();
+        (win != 0).then(|| spec.read(&crate::driver::pixels::Window { cell: &start_window, win }).ok()).flatten()
+    };
+    let wait_pixels = |t: Duration| std::thread::sleep(t);
     let mut ran: Vec<Result<NativeCase>> = Vec::new();
     let mut notes: Vec<(usize, String)> = Vec::new();
     let mut abort: Option<Error> = None;
@@ -541,6 +558,7 @@ fn runs(
             let read_same = |when| same.read(when, &|sel| drive.get()?.text(sel, Duration::from_secs(2)));
             let start = start_screen.clone();
             starts.case(s, x, batch.then_some(base));
+            pixel_starts.case(s, x, batch.then_some(base))?;
             if batch {
                 case_marks.push((format!("{mark}:start"), host::now_ns()));
             }
@@ -564,6 +582,9 @@ fn runs(
                     se.set_pids(&n.pids());
                     starts.check(g + 1, false, &read_start, &wait_start)?;
                 }
+                if !windowless {
+                    pixel_starts.check(g + 1, false, &read_pixels, &wait_pixels)?;
+                }
                 if let Some(se) = drive.session.get() {
                     se.window_start(g + 1, false, starts.on())?;
                 }
@@ -580,9 +601,11 @@ fn runs(
                     se.set_pids(&pids);
                     se.take_log();
                     se.take_reads();
+                    se.take_pixel_reads();
                 }
                 edges.borrow_mut().clear();
                 reads_before.set((0, 0.0));
+                pixels_before.set((0, 0.0, 0.0));
                 hooks.begin(&format!("run:{g}"));
                 // The process's CPU goes with it when it exits, so a run it exits in is no run of the app.
                 let running = n.exited().is_none();
@@ -602,7 +625,7 @@ fn runs(
                     Some(code) if running && (code != 0 || procs1.is_empty()) => return Err(super::super::record::exited(code, &format!("during {}'s run {}", s.case, i + 1), last().as_deref())),
                     _ => super::super::record::app_gone(n, &format!("before {}'s run {}", s.case, i + 1), |_| last())?,
                 }
-                ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw or timed out; fix the bench file or the app"))?;
+                ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &super::anchor_shot(&ctx.exp, "run"), "the run threw or timed out; fix the bench file or the app"))?;
                 hooks.end();
                 let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
                 let mut log = drive.session.get().map(Session::take_log).unwrap_or_default();
@@ -610,6 +633,9 @@ fn runs(
                 log.drags = log.timed_drags(&timed);
                 let reads = drive.session.get().map(Session::take_reads).unwrap_or_default();
                 let reads = (reads.0 + reads_before.get().0, reads.1 + reads_before.get().1);
+                let shots = drive.session.get().map(Session::take_pixel_reads).unwrap_or_default();
+                let b = pixels_before.get();
+                let shots = (shots.0 + b.0, shots.1 + b.1, shots.2 + b.2);
                 let elements = drive.session.get().and_then(|se| se.count_elements().ok());
                 // The readings at the run's start, each untimed stretch's edges and the run's end: each pair a
                 // timed part. A stretch the run never ended (it threw) ends with the run.
@@ -637,6 +663,7 @@ fn runs(
                     window_end: t1,
                     elements,
                     reads,
+                    pixels: shots,
                     t0,
                     t1,
                     total: 0.0,
@@ -644,7 +671,8 @@ fn runs(
                 });
                 // The last measured input's change: an app may announce it after the run's `until` (a read).
                 if let Some(se) = drive.session.get() {
-                    if let Some(last) = runs[i].log.sent(&runs[i].timed).iter().map(|s| s.t_ns).max() {
+                    // An input whose pixels proved its reaction needs no change of the tree.
+                    if let Some(last) = runs[i].log.sent(&runs[i].timed).iter().filter(|s| s.pixel.is_none()).map(|s| s.t_ns).max() {
                         let left = (last + 1_000_000_000).saturating_sub(host::now_ns());
                         se.wait_change_after(last, Instant::now() + Duration::from_nanos(left));
                     }
@@ -666,7 +694,7 @@ fn runs(
                 if s.reset {
                     ctx.runner
                         .call("reset", json!({ "case": s.case }), run_timeout, &serve)
-                        .map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset"))?;
+                        .map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, &super::anchor_shot(&ctx.exp, "reset"), "fix the case's reset"))?;
                     if let Some(se) = drive.session.get() {
                         se.release_all();
                     }
@@ -691,6 +719,9 @@ fn runs(
                 super::super::record::app_gone(n, &format!("after {}'s runs", s.case), |_| last())?;
             }
             starts.check(base + runs.len() + 1, true, &read_start, &wait_start)?;
+            if !windowless {
+                pixel_starts.check(base + runs.len() + 1, true, &read_pixels, &wait_pixels)?;
+            }
             if let Some(se) = drive.session.get() {
                 se.window_start(base + runs.len() + 1, true, starts.on())?;
             }
@@ -889,6 +920,13 @@ fn runs(
             // strobe's own reads of the app's tree inside the runs (`ObserverCost`).
             extra.insert("driver.reads".into(), per_run(&|r| r.reads.0 as f64));
             extra.insert("driver.read_ms".into(), per_run(&|r| r.reads.1));
+            // And of its pixels (image locators, pixel waits).
+            if measured.iter().any(|r| r.pixels.0 > 0) {
+                extra.insert("driver.pixel_reads".into(), per_run(&|r| r.pixels.0 as f64));
+                extra.insert("driver.pixel_ms".into(), per_run(&|r| r.pixels.1));
+            }
+            let run_ms: f64 = measured.iter().map(|r| r.ms).sum();
+            let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms.max(1.0));
             // Drags: the moves strobe posted, beside the frames the app drew.
             if measured.iter().any(|r| crate::driver::input_pacing(&r.log.drags).is_some()) {
                 extra.insert("input.rate".into(), per_run(&|r: &Run| crate::driver::input_pacing(&r.log.drags).map_or(f64::NAN, |p| p.0)));
@@ -1085,6 +1123,9 @@ fn runs(
                 refused.insert(m.clone(), missing(m, &have));
             }
             super::block::untimed_state(s, &measured.iter().map(|r| &r.timed).collect::<Vec<_>>(), &mut values, &mut refused);
+            if x.measures_time() {
+                super::pixel_overhead(s, pixel_pct, &mut refused);
+            }
             for m in refused.keys() {
                 values.remove(m);
             }
@@ -1113,7 +1154,7 @@ fn runs(
                 leak: leak_result,
                 screen: Some(screen.clone()),
                 shown,
-                overhead: Some(Overhead { strobe_pct, runner_pct, sampler_pct, present_pct, ..Overhead::default() }),
+                overhead: Some(Overhead { strobe_pct, runner_pct, sampler_pct, present_pct, pixel_pct, ..Overhead::default() }),
                 process_set: Some(programs(&n.processes())),
                 // macOS's window list gives a window's frame, title bar included, not its content area: kept
                 // as the frame (`admit_window` allows a page's side the title bar). As setup began when a
@@ -1642,48 +1683,94 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 p.track(&n.pids());
             }
             let session = Session::open(&n.pids(), main.hwnd)?;
-            let (lo, hi) = session
-                .appeared(sel, deadline.saturating_duration_since(Instant::now()))
-                .map_err(|e| Error::refused("RunIncomplete", format!("{} launch: {}", s.case, e.message), "the until selector never showed"))?;
-            let cycles = n.processes().iter().map(|p| p.cycles).sum();
-            let Some(lo) = lo else {
-                return Err(Error::refused(
-                    "RunIncomplete",
-                    format!("{} launch: the until selector already showed when strobe first read the app's accessibility tree, so the frame that showed it is unknown", s.case),
-                    "time the launch to an element that appears later, or to { window: \"settled\" }",
-                ));
-            };
-            let p = presents.as_mut().ok_or_else(|| Error::msg("internal: the launch's present session"))?;
-            let pids = n.pids();
-            let early = p.live(&pids, lo, Duration::from_secs(2))?;
-            let late = p.live(&pids, hi, Duration::from_secs(2))?;
-            let refresh_ns = host::refresh_at(main.rect.0, main.rect.1).map_or(16_666_667, |hz| 1_000_000_000 / hz.max(1) as u64);
-            // Nothing presented after the read that had it: a tree that announces a change just after
-            // the frame that drew it (then the app went idle). The frame is the present that started in
-            // the span, when every present since the span began is within a refresh of it.
-            let drawn_in_span = late.next_screen_ns == 0 && early.next_screen_ns != 0 && early.next_start_ns <= hi && late.last_start_ns.saturating_sub(early.next_start_ns) <= refresh_ns;
-            if drawn_in_span {
-                (n.epoch_ms + (early.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles)
-            } else if late.next_screen_ns == 0 {
+            // An image or pixels: the capture that first had it shows the frame that brought it, which
+            // reached the screen after the last capture that lacked it.
+            let cell = RefCell::new(presents.take());
+            let pixel = session.pixel_until(sel, deadline.saturating_duration_since(Instant::now()), &cell);
+            presents = cell.into_inner();
+            if let Some((lacked, had)) = pixel.map_err(|e| Error { message: format!("{} launch: {}", s.case, e.message), ..e })? {
+                let cycles = n.processes().iter().map(|p| p.cycles).sum();
+                let Some(lacked) = lacked else {
+                    return Err(Error::refused(
+                        "RunIncomplete",
+                        format!("{} launch: the until image or pixels already showed in strobe's first capture of the window, so the frame that showed them is unknown", s.case),
+                        "time the launch to an image that appears later, or to { window: \"settled\" }",
+                    ));
+                };
+                let p = presents.as_mut().ok_or_else(|| Error::msg("internal: the launch's present session"))?;
+                let pids = n.pids();
+                let first = p.live(&pids, lacked, Duration::ZERO)?;
+                let second = (first.next_start_ns != 0).then(|| p.live(&pids, first.next_start_ns, Duration::ZERO)).transpose()?;
                 let at = |ns: u64| (ns as f64 - n.at_ns as f64) / 1e6;
-                let last = if late.last_start_ns == 0 { "it never presented".to_string() } else { format!("its last present started at {:.0} ms", at(late.last_start_ns)) };
-                return Err(Error::refused(
-                    "RunIncomplete",
-                    format!("{} launch: no frame reached the screen after the element showed (between {:.0} and {:.0} ms after the spawn; {last})", s.case, at(lo), at(hi)),
-                    "a window that never presents cannot be timed to an element; use a milestone",
-                ));
-            } else if early.next_start_ns != late.next_start_ns && late.next_screen_ns.saturating_sub(early.next_screen_ns) > refresh_ns {
-                return Err(Error::refused(
-                    "RunIncomplete",
-                    format!(
-                        "{} launch: the app showed {:.1} ms of frames while strobe read its tree, so which frame showed the element is unknown",
-                        s.case,
-                        (late.next_screen_ns - early.next_screen_ns) as f64 / 1e6
-                    ),
-                    "time the launch to an element that appears after the app stops animating, or to { window: \"settled\" }",
-                ));
+                if first.next_screen_ns == 0 || first.next_screen_ns > had {
+                    return Err(Error::refused(
+                        "NoPresentSource",
+                        format!(
+                            "{} launch: no frame of the app reached the screen between strobe's last capture without it ({:.0} ms after the spawn) and its first with it ({:.0} ms)",
+                            s.case,
+                            at(lacked),
+                            at(had)
+                        ),
+                        "a window that draws without the OS's present path cannot be timed to its pixels; time it to { window: \"settled\" } or a milestone",
+                    ));
+                }
+                if second.is_some_and(|x| x.next_screen_ns != 0 && x.next_screen_ns <= had) {
+                    return Err(Error::refused(
+                        "AmbiguousInteraction",
+                        format!(
+                            "{} launch: two or more frames reached the screen between strobe's last capture without the until image or pixels and its first with them ({:.0} to {:.0} ms after the spawn), so which one showed them is unknown",
+                            s.case,
+                            at(lacked),
+                            at(had)
+                        ),
+                        "time the launch to an image that appears once the app stops animating, or to { window: \"settled\" }",
+                    ));
+                }
+                (n.epoch_ms + at(first.next_screen_ns), cycles)
             } else {
-                (n.epoch_ms + (late.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles)
+                let (lo, hi) = session
+                    .appeared(sel, deadline.saturating_duration_since(Instant::now()))
+                    .map_err(|e| Error::refused("RunIncomplete", format!("{} launch: {}", s.case, e.message), "the until selector never showed"))?;
+                let cycles = n.processes().iter().map(|p| p.cycles).sum();
+                let Some(lo) = lo else {
+                    return Err(Error::refused(
+                        "RunIncomplete",
+                        format!("{} launch: the until selector already showed when strobe first read the app's accessibility tree, so the frame that showed it is unknown", s.case),
+                        "time the launch to an element that appears later, or to { window: \"settled\" }",
+                    ));
+                };
+                let p = presents.as_mut().ok_or_else(|| Error::msg("internal: the launch's present session"))?;
+                let pids = n.pids();
+                let early = p.live(&pids, lo, Duration::from_secs(2))?;
+                let late = p.live(&pids, hi, Duration::from_secs(2))?;
+                let refresh_ns = host::refresh_at(main.rect.0, main.rect.1).map_or(16_666_667, |hz| 1_000_000_000 / hz.max(1) as u64);
+                // Nothing presented after the read that had it: a tree that announces a change just after
+                // the frame that drew it (then the app went idle). The frame is the present that started in
+                // the span, when every present since the span began is within a refresh of it.
+                let drawn_in_span = late.next_screen_ns == 0 && early.next_screen_ns != 0 && early.next_start_ns <= hi && late.last_start_ns.saturating_sub(early.next_start_ns) <= refresh_ns;
+                if drawn_in_span {
+                    (n.epoch_ms + (early.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles)
+                } else if late.next_screen_ns == 0 {
+                    let at = |ns: u64| (ns as f64 - n.at_ns as f64) / 1e6;
+                    let last = if late.last_start_ns == 0 { "it never presented".to_string() } else { format!("its last present started at {:.0} ms", at(late.last_start_ns)) };
+                    return Err(Error::refused(
+                        "RunIncomplete",
+                        format!("{} launch: no frame reached the screen after the element showed (between {:.0} and {:.0} ms after the spawn; {last})", s.case, at(lo), at(hi)),
+                        "a window that never presents cannot be timed to an element; use a milestone",
+                    ));
+                } else if early.next_start_ns != late.next_start_ns && late.next_screen_ns.saturating_sub(early.next_screen_ns) > refresh_ns {
+                    return Err(Error::refused(
+                        "RunIncomplete",
+                        format!(
+                            "{} launch: the app showed {:.1} ms of frames while strobe read its tree, so which frame showed the element is unknown",
+                            s.case,
+                            (late.next_screen_ns - early.next_screen_ns) as f64 / 1e6
+                        ),
+                        "time the launch to an element that appears after the app stops animating, or to { window: \"settled\" }",
+                    ));
+                } else {
+                    (n.epoch_ms + (late.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles)
+                }
             }
         } else {
             let mut wait = WindowWait::default();

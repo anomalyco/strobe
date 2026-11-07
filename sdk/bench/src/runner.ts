@@ -36,8 +36,22 @@ class ParityGap extends Error {
   }
 }
 
+// An image locator's file (and a pixel wait's `matches`) relative to the bench file's folder; `as` keeps
+// the name the file gave it, for messages and the action log.
+function located(v: any): any {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return v
+  if (typeof v.image === "string") return { ...v, image: path.resolve(path.dirname(file), v.image), as: v.as ?? v.image }
+  if (v.pixels && typeof v.pixels === "object" && typeof v.pixels.matches === "string")
+    return { ...v, pixels: { ...v.pixels, matches: path.resolve(path.dirname(file), v.pixels.matches), as: v.pixels.as ?? v.pixels.matches } }
+  return v
+}
+
+// An `expect` with its `visible` images located.
+const expectOf = (e: any) => e && { ...e, ...(e.visible !== undefined ? { visible: Array.isArray(e.visible) ? e.visible.map(located) : located(e.visible) } : {}) }
+
 // `@name` (optionally followed by filters, `@row index=-1`) as the running side's selector.
 function alias(sel: unknown): unknown {
+  if (sel && typeof sel === "object" && !Array.isArray(sel) && ("image" in sel || "pixels" in sel)) return located(sel)
   if (sel && typeof sel === "object" && !Array.isArray(sel) && typeof (sel as any).selector === "string")
     return { ...(sel as object), selector: alias((sel as any).selector) }
   if (typeof sel !== "string" || !sel.startsWith("@")) return sel
@@ -407,6 +421,7 @@ function describe() {
       // `ui`: selectors as strings, steps as `{ step: true }` (strobe resolves `@name` in `expect` and `until`).
       {
         ...plain(t),
+        expect: expectOf(plain(t.expect)),
         url: typeof t.url === "function" ? "/" : t.url,
         prepare: !!t.prepare || typeof t.url === "function",
         teardown: !!t.teardown,
@@ -426,15 +441,17 @@ function describe() {
         gaps: Object.fromEntries(Object.keys(spec.targets ?? {}).flatMap((t) => { const g = gapOf(c, t); return g ? [[t, g]] : [] })),
         typos: [...new Set([spec.setup, c.launch?.before, c.run, c.reset ?? (c.launch ? undefined : spec.reset)].flatMap((h) => (typeof h === "function" ? [h] : h && typeof h === "object" ? Object.values(h) : [])).flatMap((f: any) => typos(String(f))))],
         resetCheck: c.resetCheck !== false,
+        resetPixels: c.resetPixels,
         targets: c.targets,
         timeout: c.timeout,
         noworse: c.noworse,
         gpuCache: c.gpuCache,
         hero: c.hero === true,
         unsupported: c.unsupported,
-        expect: c.expect && plain(c.expect),
+        expect: c.expect && expectOf(plain(c.expect)),
         launch: c.launch && {
           ...plain(c.launch),
+          until: located(plain(c.launch.until)),
           milestones: Object.fromEntries(
             Object.entries(c.launch.milestones ?? {}).map(([m, d]: [string, any]) => [
               m,

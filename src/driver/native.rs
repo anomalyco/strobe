@@ -26,6 +26,10 @@ pub struct Input {
     /// A key of `type(…, { burst: true })` (`frames::Sent::burst`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub burst: bool,
+    /// Its `until` on pixels proved its reaction (`frames::Sent::pixel`): the last capture that lacked it
+    /// and the first that had it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel: Option<(u64, u64)>,
 }
 
 /// What a run's page calls did: inputs and phase marks, both on the host clock.
@@ -44,7 +48,7 @@ impl Log {
         self.inputs
             .iter()
             .filter(|i| (i.kind == "discrete" || (i.kind == "scroll" && i.first)) && !run.untimed_at(i.t_ns) && !i.press_ns.is_some_and(|p| run.untimed_at(p)))
-            .map(|i| crate::probe::present::frames::Sent { t_ns: i.t_ns, scroll: i.kind == "scroll", press: i.press_ns, acted: None, burst: i.burst })
+            .map(|i| crate::probe::present::frames::Sent { t_ns: i.t_ns, scroll: i.kind == "scroll", press: i.press_ns, acted: None, burst: i.burst, pixel: i.pixel })
             .collect()
     }
 
@@ -58,7 +62,9 @@ pub use imp::Session;
 
 mod imp {
     use super::*;
+    use crate::driver::pixels::{self, Pixels};
     use crate::host;
+    use crate::host::capture::Grabber;
     use crate::probe::present::PresentCapture;
     use crate::target::a11y::input::{self, Button, Key, Mods, Named, Poster, Target};
     use crate::target::a11y::{self, Accessibility, Action, Selector, Tree};
@@ -92,6 +98,57 @@ mod imp {
         reads: Cell<(u64, f64)>,
         /// `page.window` sizing over the block.
         sizer: crate::driver::window::Sizer,
+        /// Image anchors and pixel waits (`driver::pixels`): the block's templates and reads, the window's
+        /// capture once a call needed pixels, and what an input's pixel `until` captured before it.
+        pixels: Pixels,
+        grabber: RefCell<Option<Grabber>>,
+        before: RefCell<Option<pixels::Before>>,
+        /// When the page call now running began (host clock).
+        call_at: Cell<u64>,
+    }
+
+    /// The app's window as `driver::pixels` reads it: its client area, from outside.
+    struct Screen<'a> {
+        s: &'a Session,
+        win: isize,
+        presents: &'a RefCell<Option<PresentCapture>>,
+    }
+
+    impl Screen<'_> {
+        /// Runs `f` on the window's capture, opened on first use (and again for another window).
+        fn with<T>(&self, f: impl FnOnce(&mut Grabber) -> Result<T>) -> Result<T> {
+            let mut g = self.s.grabber.borrow_mut();
+            if g.as_ref().is_none_or(|g| g.window() != self.win) {
+                *g = Some(Grabber::open(self.win)?);
+            }
+            f(g.as_mut().ok_or_else(|| Error::msg("internal: the window's capture"))?)
+        }
+    }
+
+    impl pixels::Source for Screen<'_> {
+        fn size(&self) -> Result<(f64, f64)> {
+            self.with(|g| g.size())
+        }
+
+        fn grab(&self, r: [f64; 4]) -> Result<crate::host::capture::Shot> {
+            self.with(|g| g.grab(r))
+        }
+
+        /// The capture's next frame (Windows), else the app's next present or 30 ms, whichever comes
+        /// first: a toolkit that draws past the present path still shows within a poll.
+        fn wake(&self, after: &crate::host::capture::Shot, until: Instant) {
+            if let Some(g) = self.s.grabber.borrow().as_ref().filter(|g| g.evented()) {
+                g.wait(after.seq, until);
+                return;
+            }
+            let step = until.min(Instant::now() + Duration::from_millis(30)).saturating_duration_since(Instant::now());
+            match self.presents.borrow_mut().as_mut() {
+                Some(p) => {
+                    let _ = p.live(&self.s.pids.borrow(), after.t_ns, step);
+                }
+                None => std::thread::sleep(step),
+            }
+        }
     }
 
     impl Session {
@@ -111,7 +168,43 @@ mod imp {
                 pacer: crate::driver::Pacer::default(),
                 reads: Cell::new((0, 0.0)),
                 sizer,
+                pixels: Pixels::default(),
+                grabber: RefCell::new(None),
+                before: RefCell::new(None),
+                call_at: Cell::new(0),
             })
+        }
+
+        /// The app's main window (or `window`'s) as `driver::pixels` reads it.
+        fn source<'a>(&'a self, window: Option<&str>, presents: &'a RefCell<Option<PresentCapture>>) -> Result<Screen<'a>> {
+            Ok(Screen { s: self, win: self.windows(window)?[0], presents })
+        }
+
+        /// strobe's captures of the app's pixels since the last call: count, wall ms, CPU ms
+        /// (`driver.pixel_reads`, `driver.pixel_ms`, `overhead.pixel_pct`).
+        pub fn take_pixel_reads(&self) -> (u64, f64, f64) {
+            self.pixels.take_reads()
+        }
+
+        /// Before a measured input whose `until` waits on pixels: what the region shows now.
+        fn before_input(&self, opts: &Value, presents: &RefCell<Option<PresentCapture>>) -> Result<()> {
+            let Some(l) = opts.get("until").and_then(pixels::look) else { return Ok(()) };
+            let l = l?;
+            let b = self.pixels.before(&self.source(opts["window"].as_str(), presents)?, &l)?;
+            *self.before.borrow_mut() = Some(b);
+            Ok(())
+        }
+
+        /// A pixel proof for the call's last measured input (`Input::pixel`); none when the call sent none.
+        fn prove(&self, p: pixels::Proof) {
+            if !p.timing {
+                return;
+            }
+            let Some(lacked) = p.lacked else { return };
+            let since = self.call_at.get();
+            if let Some(i) = self.log.borrow_mut().inputs.iter_mut().rev().take_while(|i| i.t_ns >= since).find(|i| i.kind == "discrete" || (i.kind == "scroll" && i.first)) {
+                i.pixel = Some((lacked, p.had));
+            }
         }
 
         /// Before run `run` (1-based; `after`: after the last): the window's size as each run starts,
@@ -177,6 +270,9 @@ mod imp {
         /// label), else its name, else (a container) its visible descendants' names and values in tree
         /// order, as a page's `innerText` joins its text. None when it never showed.
         pub fn text(&self, sel: &Value, t: Duration) -> Result<Option<String>> {
+            if pixels::anchor(sel).is_some() {
+                return Err(Error::usage("expect.same reads an element's text or value, and an image has none: name an element of the accessibility tree"));
+            }
             match self.find_in(&parse_sel(sel)?, None, t, true) {
                 Ok((tree, i)) => {
                     let n = &tree.nodes[i];
@@ -270,7 +366,7 @@ mod imp {
         fn input(&self, t_ns: u64, kind: &'static str, first: bool) {
             crate::driver::sent(t_ns, kind == "discrete" || (kind == "scroll" && first), None);
             self.last_input.set(t_ns);
-            self.log.borrow_mut().inputs.push(Input { t_ns, kind, first, press_ns: None, burst: false });
+            self.log.borrow_mut().inputs.push(Input { t_ns, kind, first, press_ns: None, burst: false, pixel: None });
         }
 
         /// The app's windows to search, main first: `window` (a title, or part of one) picks one.
@@ -412,6 +508,14 @@ mod imp {
         fn until(&self, opts: &Value, after: u64, presents: &RefCell<Option<PresentCapture>>) -> Result<()> {
             let Some(u) = opts.get("until").filter(|u| !u.is_null()) else { return Ok(()) };
             let t = timeout(opts);
+            // An image or pixels: from what the region showed before the input (`before_input`).
+            if let Some(l) = pixels::look(u) {
+                let l = l?;
+                let before = self.before.borrow_mut().take();
+                let p = self.pixels.wait(&self.source(opts["window"].as_str(), presents)?, &l, before, t)?;
+                self.prove(p);
+                return Ok(());
+            }
             match u.as_str() {
                 Some("idle") => self.idle(after, t, presents).map(|_| ()),
                 Some("frame") => self.frame(after, t, presents).map(|_| ()),
@@ -528,6 +632,15 @@ mod imp {
             .hint("wait for what the step brings instead (until: a selector), or stop what keeps the app busy in setup")
         }
 
+        /// A launch's `until` on pixels (an image, or `{ pixels }`): when the last capture of the main window
+        /// that lacked it began (None when the first had it) and when what the first that had it shows was
+        /// on the screen by.
+        pub fn pixel_until(&self, until: &Value, t: Duration, presents: &RefCell<Option<PresentCapture>>) -> Result<Option<(Option<u64>, u64)>> {
+            let Some(l) = pixels::look(until) else { return Ok(None) };
+            let p = self.pixels.wait(&self.source(None, presents)?, &l?, None, t)?;
+            Ok(Some((p.lacked, p.had)))
+        }
+
         /// A launch's `until` selector: when strobe began the last read of the app's tree that lacked
         /// it (None when the first read had it) and when it finished the first that had it.
         pub fn appeared(&self, sel: &Value, t: Duration) -> Result<(Option<u64>, u64)> {
@@ -607,8 +720,12 @@ mod imp {
                 .collect())
         }
 
-        /// Whether a selector matches a visible element within `t`.
+        /// Whether a selector matches a visible element within `t`, or an image shows in the main window.
         pub fn shows(&self, sel: &Value, t: Duration) -> Result<bool> {
+            if let Some(a) = pixels::anchor(sel) {
+                let none = RefCell::new(None);
+                return self.pixels.shows(&self.source(None, &none)?, &a?, t);
+            }
             match self.find(&parse_sel(sel)?, None, t) {
                 Ok(_) => Ok(true),
                 Err(e) if e.code == 124 => Ok(false),
@@ -661,11 +778,11 @@ mod imp {
             if no_selector(sel) {
                 return Ok((self.main.get(), None));
             }
-            // A point: a click there, and the keys go where it lands: the main window, and on Windows the
-            // child window under the point (a classic control takes its keys there).
-            if let Some(p) = self.at_point(sel) {
-                let (_, _, t) = p?;
-                self.click(sel, &json!({}), presents, "pointer")?;
+            // A point or an image: a click there, and the keys go where it lands: the main window, and on
+            // Windows the child window under the point (a classic control takes its keys there).
+            if crate::driver::point(sel).is_some() || pixels::anchor(sel).is_some() {
+                self.click(sel, &json!({ "window": o["window"], "timeout": o["timeout"] }), presents, "pointer")?;
+                let t = self.pointer.get().map(|p| p.2).ok_or_else(|| Error::msg("internal: the click's target"))?;
                 let frame = Duration::from_millis(self.frame_ms(0.0, 0.0));
                 self.rest(frame * 2, frame, presents)?;
                 let main = self.main.get();
@@ -697,12 +814,12 @@ mod imp {
         /// over `duration`) one move per display refresh on strobe's clock, each posted to the window it
         /// pressed in without waiting for the app, and releases. A button `down` holds stays held.
         /// Returns when the last input was posted.
-        fn drag(&self, sel: &Value, path: &Value, o: &Value) -> Result<u64> {
+        fn drag(&self, sel: &Value, path: &Value, o: &Value, presents: &RefCell<Option<PresentCapture>>) -> Result<u64> {
             let path = a11y::keys::parse_path(path)?;
             let (x0, y0, t0) = if no_selector(sel) {
                 self.pointer.get().ok_or_else(|| Error::usage("page.drag(\"\", …) starts where the pointer is: move it first, or name an element"))?
             } else {
-                self.spot(sel, o)?
+                self.spot(sel, o, presents)?
             };
             let b = Button::parse(o["button"].as_str())?;
             let main = self.main.get();
@@ -779,24 +896,49 @@ mod imp {
             }
         }
 
-        /// A coordinate locator (`driver::point`) in the main window's client area: device-independent
-        /// pixels from its top left, or `norm`; the screen point and the window it posts to.
-        fn at_point(&self, v: &Value) -> Option<Result<(f64, f64, Target)>> {
-            let p = crate::driver::point(v)?;
+        /// A coordinate locator (`driver::point`: device-independent pixels from the client area's top
+        /// left, or `norm`) or an image locator (`driver::pixels`: its one match's centre) in the main
+        /// window's client area (or `o.window`'s); the screen point and the window it posts to.
+        fn at_point(&self, v: &Value, o: &Value, presents: &RefCell<Option<PresentCapture>>) -> Option<Result<(f64, f64, Target)>> {
+            let point = crate::driver::point(v);
+            let anchor = pixels::anchor(v);
+            if point.is_none() && anchor.is_none() {
+                return None;
+            }
             Some((|| {
-                let main = self.main.get();
-                let size = host::window_placement(main).map(|p| (p.client.0 / p.per_dip, p.client.1 / p.per_dip)).ok_or_else(|| Error::msg("the app's main window closed"))?;
-                let (px, py) = crate::driver::pixel_point(p?, size, "window's client area")?;
-                let (x, y) = self.poster.client_point(main, px, py)?;
+                let win = self.windows(o["window"].as_str())?[0];
+                let (px, py) = match (point, anchor) {
+                    (Some(p), _) => {
+                        let size = host::window_placement(win).map(|p| (p.client.0 / p.per_dip, p.client.1 / p.per_dip)).ok_or_else(|| Error::msg("the app's window closed"))?;
+                        let (px, py) = crate::driver::pixel_point(p?, size, "window's client area")?;
+                        crate::driver::aimed(crate::store::actions::Hit { role: String::new(), key: None, name: String::new(), point: Some([px, py]), rect: None, scrolled: false });
+                        (px, py)
+                    }
+                    (None, Some(a)) => {
+                        let m = self.pixels.aim(&self.source(o["window"].as_str(), presents)?, &a?, timeout(o))?;
+                        (m.x, m.y)
+                    }
+                    (None, None) => return Err(Error::msg("internal: a locator")),
+                };
+                // The OS hit-tests every point to the lock screen while the session is locked (Windows).
+                if cfg!(windows) && host::session_locked() {
+                    return Err(Error::refused(
+                        "SessionLocked",
+                        format!(
+                            "pointer input at ({px:.0}, {py:.0}) in the window's client area: the session is locked, so the OS hit-tests every point to the lock screen and a click cannot be aimed"
+                        ),
+                        "run pointer cases on an unlocked session; keys reach the window while locked (type or press without a locator)",
+                    ));
+                }
+                let (x, y) = self.poster.client_point(win, px, py)?;
                 let t = self.poster.target(&self.pids.borrow(), x, y)?;
-                crate::driver::aimed(crate::store::actions::Hit { role: String::new(), key: None, name: String::new(), point: Some([px, py]), rect: None, scrolled: false });
                 Ok((x, y, t))
             })())
         }
 
-        /// Where a locator puts the pointer: a point (`at_point`), or the element a selector finds.
-        fn spot(&self, sel: &Value, o: &Value) -> Result<(f64, f64, Target)> {
-            match self.at_point(sel) {
+        /// Where a locator puts the pointer: a point or an image (`at_point`), or the element a selector finds.
+        fn spot(&self, sel: &Value, o: &Value, presents: &RefCell<Option<PresentCapture>>) -> Result<(f64, f64, Target)> {
+            match self.at_point(sel, o, presents) {
                 Some(p) => p,
                 None => {
                     let (tree, i) = self.find(&parse_sel(sel)?, o["window"].as_str(), timeout(o))?;
@@ -806,11 +948,11 @@ mod imp {
         }
 
         fn click(&self, sel: &Value, opts: &Value, presents: &RefCell<Option<PresentCapture>>, kind: &'static str) -> Result<()> {
-            // The element aimed at and its visible part, for `moved`; a point has none.
-            let (x, y, t, top, aimed) = match self.at_point(sel) {
+            // The element aimed at and its visible part, for `moved`; a point or an image has none.
+            let (x, y, t, top, aimed) = match self.at_point(sel, opts, presents) {
                 Some(p) => {
                     let (x, y, t) = p?;
-                    (x, y, t, self.main.get(), None)
+                    (x, y, t, self.windows(opts["window"].as_str())?[0], None)
                 }
                 None => {
                     let selector = parse_sel(sel)?;
@@ -829,6 +971,7 @@ mod imp {
             self.pointer.set(Some((x, y, t)));
             // A frame of what came before (a hover, an earlier step) settles before the press.
             let quiet = self.rest(Duration::ZERO, gap, presents)?;
+            self.before_input(opts, presents)?;
             let mut last = 0;
             for k in 0..count {
                 // The press shows a pressed look, or does the click (many native controls act on the
@@ -1016,11 +1159,14 @@ mod imp {
             // A selector as the bench gave it: a string, or `{ selector, text, exact, index }`.
             let sel = |i: usize| args.get(i).cloned().unwrap_or(Value::String(String::new()));
             let main = self.main.get();
+            self.call_at.set(host::now_ns());
+            self.before.borrow_mut().take();
             match call {
                 "click" => self.click(&sel(0), &opts(1), presents, "discrete")?,
                 "hover" => {
                     let o = opts(1);
-                    let (x, y, t) = self.spot(&sel(0), &o)?;
+                    let (x, y, t) = self.spot(&sel(0), &o, presents)?;
+                    self.before_input(&o, presents)?;
                     let at = self.pointer_to(x, y, t)?;
                     self.until(&o, at, presents)?;
                 }
@@ -1033,12 +1179,13 @@ mod imp {
                         Some((_, _, t)) => t.moved(x, y),
                         None => self.poster.target(&self.pids.borrow(), x, y)?,
                     };
+                    self.before_input(&o, presents)?;
                     let at = self.pointer_to(x, y, t)?;
                     self.until(&o, at, presents)?;
                 }
                 "drag" => {
                     let o = opts(2);
-                    let at = self.drag(&sel(0), &opts(1), &o)?;
+                    let at = self.drag(&sel(0), &opts(1), &o, presents)?;
                     self.until(&o, at, presents)?;
                 }
                 "type" => {
@@ -1047,6 +1194,7 @@ mod imp {
                     let (top, to) = self.key_target(&sel(0), &o, presents)?;
                     let refresh = Duration::from_millis(self.frame_ms(0.0, 0.0));
                     self.rest(Duration::ZERO, refresh, presents)?;
+                    self.before_input(&o, presents)?;
                     let mut last = 0;
                     let typing = crate::driver::Typing::of(&o);
                     let mut paced = typing == crate::driver::Typing::Paced;
@@ -1077,6 +1225,7 @@ mod imp {
                     let (top, to) = self.key_target(&o["selector"], &o, presents)?;
                     // After the click into the field, if there was one: its frames settle first.
                     self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(0.0, 0.0)), presents)?;
+                    self.before_input(&o, presents)?;
                     let at = self.poster.press(top, to, mods, key)?;
                     self.input(at, "discrete", false);
                     self.until(&opts(1), at, presents)?;
@@ -1086,13 +1235,14 @@ mod imp {
                     let b = a11y::keys::mouse_button(&s(0)).unwrap_or(Button::Left);
                     // `at`: an element to move onto first, or a point in the main window's client area.
                     if let Some(at) = o.get("at").filter(|a| matches!(a, Value::String(_) | Value::Object(_) | Value::Array(_))) {
-                        let (x, y, t) = self.spot(at, &o)?;
+                        let (x, y, t) = self.spot(at, &o, presents)?;
                         self.pointer_to(x, y, t)?;
                     }
                     // A release is measured as a click's is: what the press drew settles first.
                     if call == "up" {
                         self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(0.0, 0.0)), presents)?;
                     }
+                    self.before_input(&o, presents)?;
                     let at = self.pointer_button(b, call == "down", true)?;
                     self.until(&o, at, presents)?;
                 }
@@ -1105,6 +1255,7 @@ mod imp {
                     if call == "down" {
                         self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(0.0, 0.0)), presents)?;
                     }
+                    self.before_input(&opts(1), presents)?;
                     let at = if call == "down" { self.poster.hold(main, key)? } else { self.poster.release(main, key)? };
                     self.input(at, if call == "down" { "discrete" } else { "pointer" }, false);
                     self.until(&opts(1), at, presents)?;
@@ -1112,10 +1263,11 @@ mod imp {
                 "scroll" => {
                     let d = opts(1);
                     let o = opts(2);
-                    let (x, y, t) = self.spot(&sel(0), &o)?;
+                    let (x, y, t) = self.spot(&sel(0), &o, presents)?;
                     self.park(x, y)?;
                     self.input(self.poster.move_to(t, 0)?, "pointer", false);
                     self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(x, y)), presents)?;
+                    self.before_input(&o, presents)?;
                     let (by_y, by_x) = (d["by"].as_f64().unwrap_or(0.0), d["byX"].as_f64().unwrap_or(0.0));
                     let speed = d["speed"].as_f64().unwrap_or(3000.0).max(1.0);
                     // One wheel step per refresh at that speed, as a trackpad sends them.
@@ -1148,11 +1300,12 @@ mod imp {
                         let (x, y) = self.poster.client_point(main, w.client.0 as f64 / w.scale() / 2.0, w.client.1 as f64 / w.scale() / 2.0)?;
                         (x, y, self.poster.target(&self.pids.borrow(), x, y)?)
                     } else {
-                        self.spot(&sel(0), &o)?
+                        self.spot(&sel(0), &o, presents)?
                     };
                     self.park(x, y)?;
                     self.input(self.poster.move_to(t, 0)?, "pointer", false);
                     self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(x, y)), presents)?;
+                    self.before_input(&o, presents)?;
                     let (dx, dy) = (d["dx"].as_f64().unwrap_or(0.0), d["dy"].as_f64().unwrap_or(0.0));
                     let at = self.poster.wheel(t, dx, dy)?;
                     if at == 0 {
@@ -1163,6 +1316,9 @@ mod imp {
                 }
                 "act" => {
                     let o = opts(2);
+                    if pixels::anchor(&sel(0)).is_some() || crate::driver::point(&sel(0)).is_some() {
+                        return Err(Error::usage("page.act() runs an accessibility action on an element, and a point or an image is none: click it, or type or press there"));
+                    }
                     let (tree, i) = self.find(&parse_sel(&sel(0))?, o["window"].as_str(), timeout(&o))?;
                     crate::driver::aimed(self.hit_of(&tree, i, None));
                     // `{ value: 0.2 }` is as good as `{ value: "0.2" }` (a number was dropped as "").
@@ -1178,10 +1334,23 @@ mod imp {
                     }
                     self.until(&o, at, presents)?;
                 }
-                "query" => return self.query(&sel(0), &opts(1)),
+                "query" => {
+                    let o = opts(1);
+                    if let Some(a) = pixels::anchor(&sel(0)) {
+                        return self.pixels.query(&self.source(o["window"].as_str(), presents)?, &a?);
+                    }
+                    return self.query(&sel(0), &o);
+                }
                 "waitFor" => {
                     let o = opts(1);
-                    self.find(&parse_sel(&crate::driver::with_text(&sel(0), &o))?, o["window"].as_str(), timeout(&o))?;
+                    match pixels::look(&sel(0)) {
+                        Some(l) => {
+                            self.pixels.wait(&self.source(o["window"].as_str(), presents)?, &l?, None, timeout(&o))?;
+                        }
+                        None => {
+                            self.find(&parse_sel(&crate::driver::with_text(&sel(0), &o))?, o["window"].as_str(), timeout(&o))?;
+                        }
+                    }
                 }
                 "idle" => {
                     self.idle(host::now_ns(), timeout(&opts(0)), presents)?;

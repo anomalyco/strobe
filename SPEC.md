@@ -845,7 +845,11 @@ phone, its viewport and device pixel ratio, and the JSON keeps `phone`.
 `--until`'s element shows, then `--wait`) it prints the windows' titles, the accessibility tree's
 window names, open dialogs and headings (what a case's `expect: { title, heading }` matches, read the
 same way, §9.6), and the visible elements that carry a key, with role and name. The tree reads on a
-locked session too (pixels and input do not), so an `expect` can be checked before an unlock. Exit
+locked session too (input does not; Windows reads the window's pixels there too), so an `expect` can be
+checked before an unlock. `--until image=<png>[,threshold=<t>][,scale=<s>]` (on a page too; the path
+relative to where strobe runs) waits for an image anchor (§9.6 "Image anchors") instead and lists every
+place it shows (`image`: score and rect in the client area or viewport); one that never shows says where
+the best place was (`AnchorNotFound`). A `tty:` look refuses it `NotForTarget`. Exit
 124 when the tree or `--until` could not be read. When the executable is missing it says so and
 names the newest build of it a bench made (a directory or git-ref variant's output in strobe's
 `builds/out`), with the `look exe:<path> --app <id>` that opens it. `--build` (with `app:<id>`) first
@@ -1148,8 +1152,11 @@ What strobe reads from a native app (§13.7), per run:
   - An input reacts when the app changed its accessibility tree (a structure, property or focus event
     from its windows) within 1 s after strobe posted it. An input that changes no tree (a press
     highlight, a hover, a key the app ignores) is not a sample, so no later frame of something else
-    (a caret blink, a timer) is ever attributed to it. Reactions that change only pixels are not
-    measured; an app with no accessibility tree has no `interaction.*`.
+    (a caret blink, a timer) is ever attributed to it. A reaction that changes only pixels is measured
+    when the input's `until` waits on them (`{ pixels: { changed } }` or an image, §9.6 "Image anchors"):
+    the pixel proof replaces the tree change, and the sample is the one present of the app that reached
+    the screen between the last capture without the reaction and the first with it (two or more: busy,
+    no sample; none: unshown). Without one, an app with no accessibility tree has no `interaction.*`.
   - Its latency is from the post time (host clock) to the screen time of the first present of the
     app's processes that started after it, and no earlier than its first change can have happened,
     and reached the screen, within 1 s. A frame begun before the model changed cannot show the change:
@@ -2774,7 +2781,7 @@ handed to the page's helper or matched against the accessibility tree: a base, t
 a filter given twice, an unknown `x=` or an unclosed quote is a usage error that quotes the grammar. Every
 call takes the object form too, `{ selector, role, text, exact, index, focus }`, its `selector` in the
 string grammar. `until`, `waitFor`, `expect.visible`, `look --until` and a native launch's `until` take
-the same selectors. Only visible elements match (a page: a box, and not hidden by `visibility`,
+the same selectors, and an image locator or a pixel wait in their place ("Image anchors" below). Only visible elements match (a page: a box, and not hidden by `visibility`,
 `opacity: 0` or `content-visibility`; a native app: bounds inside their clipping ancestors, not
 offscreen); the first in tree order wins, a native app's searching the main window, then its other
 windows.
@@ -2954,6 +2961,84 @@ window's client area, a terminal's cells from 0) or `{ x, y, space }` (`"dip"`, 
 0 to 1 of the viewport, client area or grid; `driver::point`). A point off it is refused `OutOfView`;
 the action log records the point as the aim. `type("", text)` types where focus is, on every driver.
 A touch `scroll` keeps a selector (its swipes stay inside the element).
+
+**Image anchors and pixel waits** (`driver::pixels`, `image`, `host::capture`): for what draws with no
+accessibility tree or DOM to find (a canvas, a game, a GPU toolkit's own widgets), on native and page
+targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pixels).
+
+- **Image locator** `{ image, region?, threshold?, scale? }` wherever an element goes (the calls above,
+  `page.query`, `waitFor`, `until`, `expect.visible`, a native launch's `until`). `image` is a PNG, relative
+  to the bench file's folder (the runner resolves it; `as` keeps the name the file gave, for messages and
+  the action log). `region` is where to look, a `Region` as points are (`[x, y, width, height]`, or `{ x,
+  y, width, height, space: "norm" }`); `threshold` how alike, over 0 and at most 1 (default 0.95);
+  `scale` the image's pixels per device-independent pixel (1, or 2 for an image exported at @2x). An
+  image needs 16 opaque pixels (alpha 128 or more) whose luma is not one flat shade, else a usage error:
+  it would match anywhere.
+- **Matching** (`image::Template::find`): the image is resampled once per capture scale (capture pixels
+  per device-independent pixel: a box filter down, bilinear up). Zero-mean normalized cross-correlation of
+  integer BT.601 luma (`(77 R + 150 G + 29 B) >> 8`) over its opaque pixels, first on a grid 4× coarser
+  (2× or 1× for a small image; a fully opaque image's window sums from summed-area tables), whose best
+  local peaks (at most 32, each at least the threshold less 0.12; the best always) are searched at full
+  resolution 4 pixels each way. A peak at or over the threshold matches when its colours agree too
+  (correlation ignores gain and offset, so a dimmed or recoloured lookalike would pass): the mean absolute
+  difference per RGB channel at most (1 − threshold) · 510 + 8. Matches overlapping by more than 0.3
+  (intersection over union) keep the best; they are ordered by score, then top to bottom, left to right.
+- **Aim**: input goes to the centre of the image's one match, waited for up to the call's timeout.
+  None refuses `AnchorNotFound`, with the best place's score and where (and its colour difference when
+  that is what failed); the capture searched is kept as the failed step's `failed-<step>-anchor.png`.
+  Two or more are read again 50 ms later (something passing over a lookalike), and two or more still
+  refuse `AnchorAmbiguous` at once rather than guess. The action log's hit is `{ role: "image", key:
+  <name>, point, rect }`. `page.query({ image })` lists every match (`role: "image"`, `rect`, `point`,
+  `score`) without refusing several: find them in setup and click the points in the run, with no pixel
+  read in the run at all.
+- **Pixel waits** `{ pixels: { region?, changed | stable | matches, threshold?, scale? } }`, exactly one
+  of the three (else a usage error), in `until`, `waitFor` and a native launch's `until`: `changed` (`true`
+  or `{ delta?, pct? }`): the region against what it showed just before the call's input (the capture
+  `before`, taken after the input's rest), at least `pct`% (default 0.5) of its pixels and at least 16
+  moved by more than `delta` (default 8) in a channel; `stable` (`true` is 300, or ms): no channel moved
+  by more than 8 between captures for that long; `matches`: an image shows in the region. An image
+  `until` resolves once it shows anywhere (`matches` over the whole area).
+- **Where pixels come from**: a native app's window from outside (`host::capture::Grabber`, opened on a
+  call's first need and kept for the block): Windows.Graphics.Capture (a free-threaded pool of one buffer;
+  its frame event copies each frame into a texture strobe keeps, a read copies only the region out of it
+  and maps that; frames carry the compositor's time on the QPC clock and wake waiters; it captures on a
+  locked session, and Direct3D 12 and Vulkan flip-model windows), else `PrintWindow` cropped; macOS
+  `CGWindowListCreateImage` of the region's screen rect, this window only (no Screen Recording, or a
+  window the app keeps from capture: `NoPresentSource`); X11 `GetImage` of the region once the window is
+  viewable and on top at its centre (else `WindowHidden`: the server copies what covers it). Between
+  captures a wait sleeps on the capture's next frame (Windows), else on the app's next present or 30 ms
+  (a toolkit that draws past the present path still shows within a poll). A page through its browser
+  outside timed stretches (setup, reset, `ctx.untimed`, `--check`, `--pixels`, `look`, `expect`:
+  Chromium's `Page.captureScreenshot` with a clip at scale 1, BiDi's `browsingContext.captureScreenshot`
+  with a box, WebDriver Classic's viewport screenshot cut to it), and inside a run's timed stretches from
+  outside: a headed page's browser window, the viewport the bottom of its client area at the window's
+  device-independent pixels per CSS pixel. A headless page there refuses `Headless` (a screenshot is the
+  renderer's own work, inside the run it times), a phone's `NotForTarget`. `host::window_image`
+  (`--pixels` snapshots, `expect`'s screens) falls back to the compositor's copy when `PrintWindow` fails
+  or gives black.
+- **Pixel proof** (latency, §7.4): an input whose `until` is `changed` or an image (`matches`) that the
+  capture before it lacked keeps the last capture without it (its start) and the first with it (its end;
+  Windows: plus a refresh, a composed frame reaching the screen after it was captured) as
+  `frames::Sent::pixel`. Its `interaction.*` sample is the one present of the target that reached the
+  screen between the two (from the press, when it came before the release), in place of the
+  accessibility or DOM change that gates other inputs: what an app with no tree shows of a reaction.
+  Two or more such presents are no sample (busy: `AmbiguousInteraction` past half of a block's inputs),
+  none is unshown (`PresentsUnmatched`, `NoPresentSource`). A `stable` wait proves nothing of when.
+  Chromium times its inputs from its own trace and never needs it.
+- **Cost** (rule 2): every capture (with its match) is a read: `driver.pixel_reads` and
+  `driver.pixel_ms` per run (inside the runs' timed stretches only) and `ObserverCost` past 2% of a
+  run's wall time or 8 reads a run; strobe's thread CPU in them over the runs' wall time is
+  `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns), and past 2% the series' timing and latency
+  metrics are refused `OverheadBudget`.
+- **`resetPixels`** (`true` or `{ region?, ignore?, tolerance? }`, on a target or a case, the case's
+  winning): every run must start from the pixels the first run (a batch's: the launch's first) started
+  from, read where `resetCheck` reads (outside the runs; a native app's window from outside with no
+  driving session, a page through its browser), `ignore` regions blanked, a channel moving at most
+  `tolerance` (default 8): else `ResetIncomplete` after a second of reads every 100 ms, with how many
+  pixels moved and by how much. Off with `resetCheck: false`.
+- **Pointer input on a locked session** (Windows): a point or an image aims nowhere the OS would deliver
+  it (every point hit-tests to the lock screen): refused `SessionLocked`, as a selector's is; keys still
+  reach the window, and its pixels still read.
 
 **Terminal targets** (`tty()`, §13.9): `page` sends what a terminal sends; `until: { state }` waits for
 the program's own state on its event stream (`STROBE_EVENTS`, §13.9 "App events"), and
@@ -3562,6 +3647,8 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `WirelessTransport` | a timed run on a phone reached by adb over the network (`adb connect`, wireless debugging): the radio's work and the link's latency are in the numbers. Untimed runs take it |
 | `NotProfileable` | attribution that needs the phone's own profilers (native stacks with simpleperf or Perfetto's `traced_perf`) on an app without `<profileable android:shell="true"/>` (iOS: without `get-task-allow`). Reserved: no target strobe drives on a phone takes on-device native stacks yet, so nothing refuses it now (a phone's Chrome is attributed through DevTools, which needs none) |
 | `MouseNotEnabled` | a `tty()` target's mouse call (`click`, `hover`, `move`, `drag`, `wheel`, `scroll`, a mouse button's `down`/`up`) needs mouse reporting the program has not turned on (clicks and the wheel after `?1000`, moves with a button held after `?1002`, any move after `?1003`; 13.9): a terminal would send nothing, so strobe sends nothing rather than bytes the program would read as keys. Refused before anything is sent |
+| `AnchorNotFound` | an image locator (or an image `until`, `waitFor`) showed nowhere in the call's timeout at its threshold (9.6 "Image anchors"): the message gives the best place's score, where it was and, when that failed, how far its colours were; the capture searched is kept as `failed-<step>-anchor.png` |
+| `AnchorAmbiguous` | an image locator for input matched two or more places, and still did 50 ms later: input aimed at it would be a guess. `page.query({ image })` lists them; a region, a tighter crop or a higher threshold makes it one |
 
 Validators are one type in the code (`model::ValidatorId`, these ids), and a refusal is data:
 `Refusal { validator, summary, detail, fix, hidden }`. A refused run's error carries it (exit 4;
@@ -5616,7 +5703,10 @@ toolkit (rule 15).
   `hide` `ShowWindowAsync(SW_HIDE)`, `focus` `SetForegroundWindow` (refused when Windows keeps
   another window in front).
 - **Pixels**: `snapshot` is the window's own rendering of its client area (`PrintWindow` with full
-  content, which composition and flip-model windows answer), as a PNG.
+  content, which composition and flip-model windows answer), as a PNG; where it fails or gives black
+  (a Direct3D 12 or Vulkan flip-model window), the compositor's copy (Windows.Graphics.Capture). Image
+  locators and pixel waits read the window from outside the same way (§9.6 "Image anchors"), on a
+  locked session too, so a `--pixels` block of a native app runs locked.
 - **Marks and runs**: strobe stamps runs, phases and inputs itself on the host clock; `frames.json`
   keeps per measured run its inputs, marks and the accessibility change times, beside the OS presents.
 - **What it costs the app**: once a client is connected, an app keeps its accessibility tree current
@@ -6029,6 +6119,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | Firefox's profiler (attribution only, §8.3) | the browser's own samplers, in the target's processes: on Windows 1 ms through Firefox 160, where any shorter interval makes every process's sampler busy-wait a core (bug 1349801; 10.2 cores for a page's Firefox 159 on adais at 200 µs or 500 µs, 0.3-0.4 cores at 1 ms, 0.25 with no profiler), and 500 µs from Firefox 161, whose sampler waits on a high-resolution timer (bug 2082760; Nightly 162: 0.65 cores at 500 µs, 0.3 with no profiler); 200 µs on macOS and Linux (air 0.3-0.6 cores and vps 0.1-0.5 at any interval, no profiler alike) |
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
 | `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output); over it warns `OverheadBudget`, over 2% refuses `tty.latency.*`. Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
+| Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
 
@@ -6140,6 +6231,7 @@ code is and where it chose differently, so nobody reads a promise as a feature.
 | 4 | Windows OS and GPU samplers; the viewer (`experiment`, `recording` incl. memory); JS symbols through stored source maps; imports of a trace, `.cpuprofile` or `.heapsnapshot` | report views `bench-summary`, `memory-timeline`, `frames`, `hotspots`, `flame`, `compare`, `leak`; folder imports by `manifest.json` |
 | 5 | `top`, insights, `--bisect` | core migration (needs deep), the flight recorder (`--ring`) |
 | native | native targets (§13.7): `native()` bench targets, `record` of a native app, outside-in `cpu.wakes`, `io.*`, per-thread wakes and names, `ui.cpu` and `ui.wakes` (the main window's thread), window placement and checks, window-condition launches; driving through the OS accessibility tree (Windows UI Automation: selectors by key path, role, text, focus; event-driven waits; `page.act`, `page.query`) with posted window messages (pointer at hit-tested points with the cursor parked, keys with modifiers in the shared key state), selector launches timed to the frame that showed the element, `interaction.*` and `scroll.latency.*` from strobe's inputs to OS presents (§7.4), phase marks and `hotspots --phase`; `{cache}` builds with copied outputs; windowless (`window: false`) targets and milestone launches; benches on a locked session (§10.5); validators `VariantMismatch` (adapter, scale), `UnpacedSpin` (from presents), `NoPresentSource`, `AmbiguousInteraction`, `PatternInput`, native `DevBuild` (debug C runtime), `SoftwareGpu`, `Throttled`; native stacks in attribution blocks (phase 6 row) | `frames.presented.*` from outside; macOS driving and ScreenCaptureKit frames not yet run with the permissions granted (§24.1) |
+| anchors | image anchors and pixel waits (§9.6): image locators, `{ pixels }` waits, `page.query({ image })`, `expect.visible` and native launch `until` images, `resetPixels`, `look --until image=`, pixel proofs for `interaction.*` (§7.4), `driver.pixel_*`, `pixel_pct`, `AnchorNotFound`, `AnchorAmbiguous`, `SessionLocked` for points and images; `host::capture` on Windows.Graphics.Capture, macOS `CGWindowListCreateImage`, X11 `GetImage`; checked on adais locked with a GDI-drawn window (`scripts/dev/canvas.bench.ts`: tiles found, @2x and @1.5x exports at 0.9, two ITEM tiles refused ambiguous, a lookalike refused by its colours, clicks refused `SessionLocked`, key reactions proved by `changed` in 2 reads and 4.8 ms a run, a reset that left a bar refused by `resetPixels`, a `--pixels-only` A/A same) | a page's launch timed to an image (refused `NotForTarget`); `interaction.*` from a pixel proof on an unlocked display with present events; macOS not run |
 | webview | apps on the OS's webview (§13.8): `kind: "webview"` profiles, `webview()` bench targets, `record app:<id>`; Windows WebView2 attached over CDP through its environment variables (checked on adais, locked, with a release Tauri v2 app: launch, the user's own WEBVIEW2_* removed, strobe's arguments beside the app's, browser pid in the process set, page eval, trace, CPU and memory over the app and its WebView2 processes, attribution and memory recordings, WebView2's GPU caches kept per executable, closing in 5 s instead of 11.5 s for a 1 s recording); Linux and macOS refused `EngineUnsupported` before anything launches (vps) | WebKit drivers (the WebKitGTK inspector route is checked, §13.8); on an unlocked Windows session: frames, input latency, window sizing to `viewport` and a `bench --check` of a `webview()` target; the override refusal against a real WebView2 policy; `look` of a webview profile reads its accessibility tree, not its page |
 | 6 | Windows: the deep helper (§13.4), OS present events (`record pid:|proc:`, `--os-frames`), native stacks and PDB symbols (`hotspots`, insights, reports) | context switches, core residency, symbols.electronjs.org; Linux perf stacks and macOS `sample` stacks with DWARF symbols are built (§13.4) |
 | ios | `host/ios.rs` (§5.4): usbmuxd (`/var/run/usbmuxd`, Windows 127.0.0.1:27015, `USBMUXD_SOCKET_ADDRESS`), `ListDevices`, `ReadPairRecord`, `Connect`; lockdownd `QueryType`, `GetValue`, `StartSession` with mutual TLS (rustls over a minimal in-tree crypto provider on the RustCrypto crates, `host/ios/tls.rs`: AES-GCM, X25519 and P-256, RSA; the device pinned by the pair record's DeviceCertificate SubjectPublicKeyInfo), `StartService` with `EnableServiceSSL`; diagnostics_relay `IORegistry` of `IOPMPowerSource`; one deadline over every read and write; the `status` row. Checked: builds and clippy on Windows, macOS and Linux; `ListDevices` on air with no phone returns an empty list; adais without Apple Mobile Device Service reports no usbmuxd; vps without usbmuxd says so; against a stand-in usbmuxd, lockdownd and diagnostics_relay on Node's TLS (OpenSSL) on adais: TLS 1.3 and 1.2, AES-128 and AES-256, X25519 and P-256 with the client certificate, a wrong device certificate refused, no pair record named, a silent device cut at the deadline (status 3.5 s in all, 0.65 s with `--fast`) | a real phone: the session handshake against iOS's TLS, the battery read and whether lockdownd still starts `com.apple.webinspector` on iOS 18/26 or it needs RemoteXPC; Web Inspector, device logs, crash reports, driven Safari benches |
