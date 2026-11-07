@@ -44,6 +44,19 @@ fn image_until(u: &str) -> Option<Value> {
     Some(v)
 }
 
+/// An image that never showed (`AnchorNotFound`): its message, and where the capture it was searched in
+/// is kept (strobe's run folder), to hold the image against.
+fn anchor_problem(e: Error) -> String {
+    let kept = crate::driver::pixels::take_failed().and_then(|img| {
+        let path = crate::host::paths::run().join(format!("look-anchor-{}.png", crate::host::now_ns()));
+        std::fs::write(&path, crate::png::write(&img).ok()?).ok().map(|_| path)
+    });
+    match kept {
+        Some(p) => format!("{} (capture searched: {})", e.message, p.display()),
+        None => e.message,
+    }
+}
+
 /// The matches of an image locator, as look lists them: `3 matches · best 0.982 at [x, y, w, h]`.
 fn image_lines(found: &Value) -> (String, Vec<Value>) {
     let all: Vec<Value> = found.as_array().cloned().unwrap_or_default();
@@ -158,7 +171,7 @@ fn native(args: &Args, target: &str) -> Result<Output> {
             // An image that never showed says where the nearest thing to it was (`AnchorNotFound`).
             (Some(Ok(se)), Some(u)) if u.get("image").is_some() => {
                 if let Err(e) = se.dispatch("waitFor", &[u.clone(), json!({ "timeout": timeout.as_millis() as u64 })], &std::cell::RefCell::new(None), None) {
-                    problems.push(e.message);
+                    problems.push(anchor_problem(e));
                 }
             }
             (Some(Ok(se)), Some(sel)) if !se.shows(sel, timeout)? => problems.push(format!("{:?} never showed in {} s", args.get("until").unwrap_or(""), timeout.as_secs())),
@@ -464,7 +477,7 @@ pub fn run(args: &Args) -> Result<Output> {
                 // An image that never showed says where the nearest thing to it was (`AnchorNotFound`).
                 Some(v) => {
                     if let Some(Err(e)) = crate::driver::page_image_wait(&page.clone().into(), v, timeout) {
-                        problems.push(e.message);
+                        problems.push(anchor_problem(e));
                     }
                 }
                 None if !crate::driver::shows(&page.clone().into(), &Selector::parse(&Value::String(sel.to_string()), Dialect::Page)?, timeout)? => {
