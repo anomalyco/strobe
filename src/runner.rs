@@ -96,8 +96,9 @@ pub struct Runner {
     phases: Vec<String>,
     /// A batch (`--check --batch`): each run's and reset's actions name their case (`ActionRecord::case`).
     batch: bool,
-    /// A launch hook (prepare, a `url` function, setup) read `ctx.case` since the last `took_case`.
-    read_case: bool,
+    /// A launch hook (prepare, a `url` function, setup) read what differs per case (`ctx.case`,
+    /// `ctx.seed`, `ctx.random()`) since the last `took_case`: the first hook and field.
+    read_case: Option<(String, String)>,
 }
 
 /// What the runner reports about a bench file.
@@ -170,7 +171,7 @@ impl Runner {
             untimed: false,
             phases: Vec::new(),
             batch: false,
-            read_case: false,
+            read_case: None,
         };
         runner.wait_ready()?;
         Ok(runner)
@@ -206,7 +207,7 @@ impl Runner {
         if op == "block" {
             self.actions.borrow_mut().clear(self.seed);
             self.runs = 0;
-            self.read_case = false;
+            self.read_case = None;
         }
         let hook = Hook::of_op(op);
         if hook == Some(Hook::Run) {
@@ -235,7 +236,11 @@ impl Runner {
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
             if msg.get("id").and_then(Value::as_u64) == Some(id) {
                 self.used_random |= msg["used_random"] == true;
-                self.read_case |= msg["read_case"] == true;
+                if self.read_case.is_none()
+                    && let (Some(hook), Some(field)) = (msg["read_case"]["hook"].as_str(), msg["read_case"]["field"].as_str())
+                {
+                    self.read_case = Some((hook.to_string(), field.to_string()));
+                }
                 if let Some(err) = msg.get("error").and_then(Value::as_str) {
                     let stack = msg.get("stack").and_then(Value::as_str).unwrap_or("");
                     let first = stack.lines().find(|l| l.contains(".bench.")).unwrap_or("").trim();
@@ -331,10 +336,27 @@ impl Runner {
         self.batch = on;
     }
 
-    /// Whether a hook read `ctx.case` since the last call (a batch's prepare, `url` function or setup
-    /// runs once for several cases); cleared.
-    pub fn took_case(&mut self) -> bool {
-        std::mem::take(&mut self.read_case)
+    /// The launch hook and the per-case field (`ctx.case`, `ctx.seed`, `ctx.random()`) it read since the
+    /// last call, if one did (a batch's prepare, `url` function or setup runs once for several cases);
+    /// cleared.
+    pub fn took_case(&mut self) -> Option<(String, String)> {
+        self.read_case.take()
+    }
+
+    /// Each series' `setupKey` (`{ case, target, params }` each) as canonical text, in order: cases share
+    /// a batch's launch only when theirs are the same. A key that is not plain JSON, or a `setupKey` that
+    /// throws, is the bench file's error (usage, exit 2).
+    pub fn setup_keys(&mut self, series: Vec<Value>) -> Result<Vec<String>> {
+        let n = series.len();
+        let out = self.call("setup_keys", json!({ "series": series }), Duration::from_secs(60), |_, _| Err(Error::msg("no driver while keying setups"))).map_err(|e| {
+            let why = e.message.strip_prefix("setup_keys: ").unwrap_or(&e.message).to_string();
+            Error::usage(why).hint("return plain JSON from setupKey (strings, finite numbers, booleans, null, arrays and plain objects) built from ctx.case, ctx.target and ctx.params")
+        })?;
+        let keys: Vec<String> = out.as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect();
+        if keys.len() != n {
+            return Err(Error::msg(format!("the bench runner gave {} setup keys for {n} series", keys.len())));
+        }
+        Ok(keys)
     }
 
     /// runner.log's length now: what the hooks printed from here on is the next case's.

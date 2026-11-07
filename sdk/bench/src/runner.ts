@@ -20,6 +20,7 @@ const spec = (await import(pathToFileURL(file).href)).default
 if (!spec || typeof spec !== "object" || !spec.cases) throw new Error(`${file} must default-export bench({ targets, cases })`)
 for (const [name, c] of Object.entries(spec.cases) as [string, any][])
   if (typeof c.run !== "function" && !(c.run && typeof c.run === "object") && !c.launch) throw new Error(`case ${name} needs run(ctx), run: { <target>: (ctx) => … }, or launch: { until }`)
+if (spec.setupKey !== undefined && typeof spec.setupKey !== "function") throw new Error(`setupKey must be a function of { case, target, params }, not ${typeof spec.setupKey}`)
 
 // A target's adapter (`ui`): `@name` in a selector is its entry there, and `ctx.ui.<name>` its
 // selector or its step bound to the hook's context (SPEC §9.10).
@@ -181,7 +182,9 @@ const state: {
   stream: () => number
   /** A hook read `ctx.seed` or called `ctx.random()`: the workload depends on the seed (the ledger's rule). */
   usedRandom: boolean
-} = { case: "", params: {}, target: "", variant: "base", url: "", root: "", home: null, env: null, exe: null, playwright: null, prepared: undefined, mocks: [], session: null, fixture: null, engine: "chromium", relay: null, devtools: null, seed: 0, caseSeed: 0, stream: () => 0, usedRandom: false }
+  /** What the file's `setupKey` gave for the block's case (`ctx.setupKey`); undefined without one. */
+  setupKey: unknown
+} = { case: "", params: {}, target: "", variant: "base", url: "", root: "", home: null, env: null, exe: null, playwright: null, prepared: undefined, mocks: [], session: null, fixture: null, engine: "chromium", relay: null, devtools: null, seed: 0, caseSeed: 0, stream: () => 0, usedRandom: false, setupKey: undefined }
 
 // Seeds (SPEC §9.6): a case's seed is mix(experiment seed, case + "\n" + its params as canonical JSON), so
 // base and head, and every target of a journey, get the same one. Each hook call starts its own stream
@@ -215,23 +218,51 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? "null"
 }
 
+// A `setupKey` value as text two cases share exactly when their setups are the same: `canonical`, but
+// strict. Only plain JSON (strings, finite numbers, booleans, null, arrays, plain objects) and
+// `undefined` (its own text, not null's; an object's undefined property is left out, as JSON does);
+// anything else would compare equal to a value that sets up otherwise, so it throws, naming where.
+function setupKeyText(value: unknown, at = "the key", seen = new Set<object>()): string {
+  if (value === undefined) return "undefined"
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value)
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${at} is ${value}, which JSON has not`)
+    return JSON.stringify(value)
+  }
+  if (typeof value !== "object") throw new Error(`${at} is a ${typeof value}, not JSON`)
+  if (seen.has(value)) throw new Error(`${at} refers back to itself`)
+  const proto = Object.getPrototypeOf(value)
+  if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) throw new Error(`${at} is a ${proto?.constructor?.name ?? "class instance"}, not a plain object`)
+  seen.add(value)
+  const out = Array.isArray(value)
+    ? `[${value.map((v, i) => setupKeyText(v, `${at}[${i}]`, seen)).join(",")}]`
+    : `{${Object.keys(value).sort().filter((k) => (value as any)[k] !== undefined).map((k) => `${JSON.stringify(k)}:${setupKeyText((value as any)[k], `${at}.${k}`, seen)}`).join(",")}}`
+  seen.delete(value)
+  return out
+}
+
 // The hook about to run starts its stream (`ctx.random()`) over.
 const stream = (hook: string) => void (state.stream = mulberry32(mix(state.caseSeed, hook)))
 
 // A batch (`--check --batch`) runs several cases in one launch: a run or reset of another case than the
-// last one's switches the hooks' case and seed to it.
+// last one's switches the hooks' case, seed and setup key to it (a key equal to the launch's: `batch::key`).
 function forCase(name: string) {
   if (!name || name === state.case) return
   state.case = name
   state.caseSeed = mix(state.seed, `${name}\n${canonical(state.params)}`)
+  state.setupKey = spec.setupKey?.({ case: state.case, target: state.target, params: state.params })
 }
 
-// A launch hook (prepare, a `url` function, setup) runs once for every case of a batch's launch: reading
-// `ctx.case` there is said (`read_case`), and strobe refuses the batch.
-let launchHook = false
-let readCase = false
+// A launch hook (prepare, a `url` function, setup) runs once for every case of a batch's launch: the
+// first read there of what differs per case (`ctx.case`, and `ctx.seed` and `ctx.random()`, which come
+// from the case's seed) is said with the hook (`read_case`), and strobe batches the cases accordingly.
+let launchHook: string | null = null
+let readCase: { hook: string; field: string } | null = null
+const perCase = (field: string) => {
+  if (launchHook && !readCase) readCase = { hook: launchHook, field }
+}
 const caseOf = () => {
-  if (launchHook) readCase = true
+  perCase("ctx.case")
   return state.case
 }
 
@@ -243,6 +274,7 @@ const seeded = <T extends object>(ctx: T): T =>
       enumerable: true,
       get() {
         state.usedRandom = true
+        perCase("ctx.seed")
         return state.caseSeed
       },
     },
@@ -250,6 +282,7 @@ const seeded = <T extends object>(ctx: T): T =>
       enumerable: true,
       value() {
         state.usedRandom = true
+        perCase("ctx.random()")
         return state.stream()
       },
     },
@@ -273,6 +306,7 @@ const context = (): any => seeded({
   get case() {
     return caseOf()
   },
+  setupKey: state.setupKey,
   params: state.params,
   target: state.target,
   variant: state.variant,
@@ -335,6 +369,7 @@ const prepareContext = () => seeded({
   get case() {
     return caseOf()
   },
+  setupKey: state.setupKey,
   params: state.params,
   target: state.target,
   variant: state.variant,
@@ -410,7 +445,7 @@ function describe() {
       },
     ]),
   )
-  return { file, targets, params: spec.params ?? {}, cases, setup: !!spec.setup, teardown: !!spec.teardown, fixture: spec.fixture && plain(spec.fixture) }
+  return { file, targets, params: spec.params ?? {}, cases, setup: !!spec.setup, setupKey: typeof spec.setupKey === "function", teardown: !!spec.teardown, fixture: spec.fixture && plain(spec.fixture) }
 }
 
 // Playwright, when it is installed next to the bench file: a prepare that uses only ctx.addInitScript and
@@ -579,6 +614,17 @@ async function handle(op: string, args: any) {
     case "seed":
       state.seed = args.seed >>> 0
       return true
+    // `--check --batch`, before anything builds: each series' `setupKey` as text, so cases share a launch
+    // only when their setups are the same. A key that is not JSON, or a `setupKey` that throws, fails it.
+    case "setup_keys":
+      return (args.series as { case: string; target: string; params: Record<string, unknown> }[]).map((s) => {
+        const label = [s.case, s.target, ...Object.entries(s.params ?? {}).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)].join(" · ")
+        try {
+          return setupKeyText(spec.setupKey({ case: s.case, target: s.target, params: s.params ?? {} }))
+        } catch (error) {
+          throw new Error(`setupKey for ${label}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      })
     case "block":
       Object.assign(state, {
         caseSeed: mix(state.seed, `${args.case ?? ""}\n${canonical(args.params ?? {})}`),
@@ -598,12 +644,14 @@ async function handle(op: string, args: any) {
         relay: null,
         devtools: null,
       })
+      state.setupKey = spec.setupKey?.({ case: state.case, target: state.target, params: state.params })
       return true
     case "before":
       stream("before")
       await spec.cases[args.case].launch.before?.(
         seeded({
           case: state.case,
+          setupKey: state.setupKey,
           params: state.params,
           target: state.target,
           variant: state.variant,
@@ -617,33 +665,34 @@ async function handle(op: string, args: any) {
       return true
     case "prepare": {
       const target = spec.targets[state.target]
-      launchHook = true
       try {
         if (target?.prepare) {
           state.devtools = args.endpoint ? { endpoint: args.endpoint, target: args.target } : null
           if (args.endpoint) state.playwright = await playwright(args.endpoint, args.target)
           stream("prepare")
+          launchHook = "the target's prepare"
           state.prepared = await target.prepare(prepareContext())
         }
         // A `url` function names the first page from what `prepare` returned, so the block loads one page.
         if (typeof target?.url === "function") stream("url")
+        launchHook = "the target's url function"
         const url =
           typeof target?.url === "function"
-            ? await target.url(seeded({ get case() { return caseOf() }, prepared: state.prepared, params: state.params }))
+            ? await target.url(seeded({ get case() { return caseOf() }, setupKey: state.setupKey, prepared: state.prepared, params: state.params }))
             : undefined
         return { url }
       } finally {
-        launchHook = false
+        launchHook = null
       }
     }
     case "setup":
       stream("setup")
-      launchHook = true
+      launchHook = "the bench file's setup"
       try {
         // Not spread: that would read `ctx.seed`.
         await spec.setup?.(Object.assign(context(), { addInitScript }))
       } finally {
-        launchHook = false
+        launchHook = null
       }
       return true
     case "run": {
@@ -701,10 +750,10 @@ createInterface({ input: socket }).on("line", (line) => {
     return
   }
   // `used_random`: some hook so far read `ctx.seed` or called `ctx.random()` (the ledger's rule, SPEC §14.2).
-  // `read_case`: a launch hook read `ctx.case` in this call (said once).
+  // `read_case`: the hook and field a launch hook first read of what differs per case in this call (said once).
   const used = () => {
-    const out = { ...(state.usedRandom ? { used_random: true } : {}), ...(readCase ? { read_case: true } : {}) }
-    readCase = false
+    const out = { ...(state.usedRandom ? { used_random: true } : {}), ...(readCase ? { read_case: readCase } : {}) }
+    readCase = null
     return out
   }
   handle(message.op, message.args ?? {}).then(

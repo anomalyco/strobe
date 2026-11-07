@@ -205,7 +205,7 @@ export interface Page {
   eval<A extends unknown[], T>(fn: (...args: A) => T, ...args: A): Promise<Awaited<T>>
 }
 
-export interface Context<P> extends Seeded {
+export interface Context<P, K = any> extends Seeded {
   page: Page
   /**
    * The running target's adapter ({@link Side.ui}): a selector string, or a step called with this context
@@ -214,9 +214,12 @@ export interface Context<P> extends Seeded {
   ui: Record<string, any>
   /**
    * The case this hook runs for. A block belongs to one case; with `--check --batch` one launch runs several, and
-   * `run` and `reset` get each its own (`setup` runs once for them all: reading this there refuses the batch).
+   * `run` and `reset` get each its own. `setup` runs once for them all: there read {@link setupKey} instead (reading
+   * this, `seed` or `random()` there runs each case in a launch of its own, or refuses a file with `setupKey`).
    */
   case: string
+  /** What the file's {@link Bench.setupKey} gave for this block's case; undefined without one. */
+  setupKey: K
   /** Marks a named span inside a run; every metric can be sliced by it, and `phase.<name>` is its wall time. */
   phase<T>(name: string, fn: () => T | Promise<T>): Promise<T>
   /**
@@ -318,12 +321,18 @@ export interface MockResponse {
 /** Answers a request, or returns `undefined` to let it through to the network. */
 export type MockHandler = (request: MockRequest) => MockResponse | undefined | Promise<MockResponse | undefined>
 
-export interface PrepareContext<P> extends Seeded {
+export interface PrepareContext<P, K = any> extends Seeded {
   /**
    * The case this block runs, so one file can give each case its own fixture. `--check --batch` runs `prepare` once
-   * for several cases: reading this then refuses the batch (usage error).
+   * for several cases: read {@link setupKey} instead (reading this, `seed` or `random()` runs each case in a launch
+   * of its own, or refuses a file with `setupKey`).
    */
   case: string
+  /**
+   * What the file's {@link Bench.setupKey} gave for this block's case; undefined without one. A target is made
+   * before the bench, so its hooks see `any` unless typed: `web<Params, Key>({ prepare(ctx) { … } })`.
+   */
+  setupKey: K
   params: P
   target: string
   variant: "base" | "head"
@@ -356,13 +365,15 @@ export interface PrepareContext<P> extends Seeded {
 export type AddInitScript = <A = undefined>(script: string | ((arg: A) => unknown), arg?: A) => Promise<void>
 
 /** `setup`'s context: a run's, plus {@link AddInitScript} for the documents the block loads next. */
-export interface SetupContext<P> extends Context<P> {
+export interface SetupContext<P, K = any> extends Context<P, K> {
   addInitScript: AddInitScript
 }
 
 /** What a launch's `before` hook gets: the launch has not started yet. */
-export interface LaunchContext<P> extends Seeded {
+export interface LaunchContext<P, K = any> extends Seeded {
   case: string
+  /** What the file's {@link Bench.setupKey} gave for this case; undefined without one. */
+  setupKey: K
   params: P
   target: string
   variant: "base" | "head"
@@ -396,7 +407,7 @@ export interface MilestoneUntil {
   milestone: string
 }
 
-export interface Launch<P> {
+export interface Launch<P, K = any> {
   /** The launch is ready when this is visible in any of its windows. The primary is `launch.ready`. A page (Chromium or Firefox; WebKit refuses launch cases): from strobe's navigation, in a fresh profile, until its top document shows it. A native target: the screen time of the frame that first showed the element in its accessibility tree (OS present events). Any target with a window of its own may end on a window condition instead, read from its pixels the same way on every kind (two implementations timed alike). */
   until: Selector | WindowUntil | MilestoneUntil
   /** Named points on the way, each a metric `launch.<name>`. One a case declares must appear in every launch. */
@@ -404,7 +415,7 @@ export interface Launch<P> {
   /** `fresh` (default): a new home every launch. `warm`: one home per series and variant, kept across its launches, so caches and state from earlier launches are there. */
   profile?: "fresh" | "warm"
   /** Before every launch, never timed: delete caches for a cold start, start or stop a service, seed the home. */
-  before?(ctx: LaunchContext<P>): unknown
+  before?(ctx: LaunchContext<P, K>): unknown
   /** Starts the main process with `--inspect` and reads Node's own bootstrap timing after the launch (`launch.node.*`). App and exe targets. */
   inspect?: boolean
   /** Times `launch.painted` and `launch.settled` from the window's pixels (default on for apps; macOS needs Screen Recording). */
@@ -462,54 +473,57 @@ export interface Expect {
 }
 
 /** A hook per target of an implementation comparison, by target name: for journeys whose steps differ entirely. */
-export type PerTarget<P> = Record<string, (ctx: Context<P>) => unknown>
+export type PerTarget<P, K = any> = Record<string, (ctx: Context<P, K>) => unknown>
 
 /** A case of runs inside an open target: measured `run`, unmeasured `reset`. */
-export interface RunCase<P> extends CaseBase {
+export interface RunCase<P, K = any> extends CaseBase {
   /**
    * Measured. In an implementation comparison, `{ <target>: (ctx) => … }` gives each target its own steps
    * (`adapted: "steps"`); the case then needs `expect.same`, which shows the two step lists reach the same place.
    * A target with no entry is a parity gap.
    */
-  run: ((ctx: Context<P>) => unknown) | PerTarget<P>
+  run: ((ctx: Context<P, K>) => unknown) | PerTarget<P, K>
   /** Puts the app back between runs. Never measured. Per target like `run`. */
-  reset?: ((ctx: Context<P>) => unknown) | PerTarget<P>
+  reset?: ((ctx: Context<P, K>) => unknown) | PerTarget<P, K>
   /** Milliseconds a run or reset may take before it fails the block (setup gets at least this too). Default 60000. */
   timeout?: number
   launch?: never
 }
 
 /** A case that measures the launch itself: one cold launch per block. */
-export interface LaunchCase<P> extends CaseBase {
-  launch: Launch<P>
+export interface LaunchCase<P, K = any> extends CaseBase {
+  launch: Launch<P, K>
   run?: never
   reset?: never
 }
 
-export type Case<P> = RunCase<P> | LaunchCase<P>
+export type Case<P, K = any> = RunCase<P, K> | LaunchCase<P, K>
 
 /** What a `url` function gets: the case, its params and what `prepare` returned; `random()` draws from its own stream. */
-export interface FirstPageContext<P> extends Seeded {
+export interface FirstPageContext<P, K = any> extends Seeded {
   case: string
+  /** What the file's {@link Bench.setupKey} gave for this block's case; undefined without one. */
+  setupKey: K
   prepared: any
   params: P
 }
 
 /** The first page a block opens: a path, or a function of what `prepare` returned. */
-export type FirstPage<P> = string | ((ctx: FirstPageContext<P>) => string | Promise<string>)
+export type FirstPage<P, K = any> = string | ((ctx: FirstPageContext<P, K>) => string | Promise<string>)
 
-interface Hooks<P> {
-  prepare?: (ctx: PrepareContext<P>) => unknown
+/** A page target's hooks. `K` types their `ctx.setupKey`: `web<Params, Key>({ … })` (a target is made before the bench). */
+interface Hooks<P, K = any> {
+  prepare?: (ctx: PrepareContext<P, K>) => unknown
   /** When the block closes, for what `prepare` started (a server, a temporary folder). */
-  teardown?: (ctx: PrepareContext<P>) => unknown
+  teardown?: (ctx: PrepareContext<P, K>) => unknown
   /** What every block of this target must show (a case's `expect` adds to it). */
   expect?: Expect
 }
 
-export type Target<P> = Side &
+export type Target<P, K = any> = Side &
   (
-    | ({ kind: "web"; url: FirstPage<P> } & PageOptions & Hooks<P>)
-    | ({ kind: "url"; href: string } & PageOptions & Hooks<P>)
+    | ({ kind: "web"; url: FirstPage<P, K> } & PageOptions & Hooks<P, K>)
+    | ({ kind: "url"; href: string } & PageOptions & Hooks<P, K>)
     | ({ kind: "app"; id: string } & AppOptions)
     | ({ kind: "exe"; path: string; app?: string } & AppOptions)
     | ({ kind: "command" } & CommandOptions)
@@ -751,25 +765,40 @@ type Values<T> = {
         : never
 }
 
-export interface Bench<Params extends Record<string, ParamValues>> {
+/** What {@link Bench.setupKey} gets: the series a block runs. */
+export interface SetupKeyContext<P> {
+  case: string
+  target: string
+  params: P
+}
+
+export interface Bench<Params extends Record<string, ParamValues>, K = undefined> {
   targets: Record<string, Target<Values<Params>>>
   /** Every combination is its own series. */
   params?: Params
   /** A process every block talks to (a server with seeded data): see {@link fixture}. */
   fixture?: Fixture
   /**
-   * Once per block, after load. Never measured. With `strobe bench --check --batch N` one launch runs it once for
-   * up to N cases: reading `ctx.case` here refuses the batch (usage error).
+   * What the launch hooks (`setup`, a target's `prepare` and `url` function) set up differently per case, as plain
+   * JSON (`(ctx) => (ctx.case === "review" ? "review" : "session")`); they read it as `ctx.setupKey` in every mode.
+   * With `strobe bench --check --batch N`, cases share a launch only when their keys are equal, so a file whose
+   * setup depends on the case still batches. Declare it before `setup` and `cases` so they get its type.
    */
-  setup?(ctx: SetupContext<Values<Params>>): unknown
+  setupKey?(ctx: SetupKeyContext<Values<Params>>): K
+  /**
+   * Once per block, after load. Never measured. With `strobe bench --check --batch N` one launch runs it once for
+   * up to N cases: read `ctx.setupKey`, not `ctx.case`, `ctx.seed` or `ctx.random()` (those run each case in a
+   * launch of its own, or refuse a file with `setupKey`).
+   */
+  setup?(ctx: SetupContext<Values<Params>, K>): unknown
   /**
    * The reset of every run case that has none of its own (`reset` on a case wins): puts the app back between runs,
    * never measured. With `--check --batch` it is also what brings the page back for the next case of the launch.
    */
-  reset?: ((ctx: Context<Values<Params>>) => unknown) | PerTarget<Values<Params>>
+  reset?: ((ctx: Context<Values<Params>, K>) => unknown) | PerTarget<Values<Params>, K>
   /** Once per block, when it closes. Never measured. */
-  teardown?(ctx: Context<Values<Params>>): unknown
-  cases: Record<string, Case<Values<Params>>>
+  teardown?(ctx: Context<Values<Params>, K>): unknown
+  cases: Record<string, Case<Values<Params>, K>>
 }
 
 /**
@@ -778,12 +807,12 @@ export interface Bench<Params extends Record<string, ParamValues>> {
  * page's own caches) whose warmup runs fill Chromium's GPU caches before the measured runs, and the GPU
  * driver's own caches are the user's, as for any browser on the machine (SPEC §13.2).
  */
-export function web<P = any>(opts: { url?: FirstPage<P> } & PageOptions & Hooks<P> & Side = {}): Target<P> {
+export function web<P = any, K = any>(opts: { url?: FirstPage<P, K> } & PageOptions & Hooks<P, K> & Side = {}): Target<P, K> {
   return { kind: "web", url: opts.url ?? "/", prepare: opts.prepare, teardown: opts.teardown, viewport: opts.viewport, scale: opts.scale, expect: opts.expect, name: opts.name, cwd: opts.cwd, engine: opts.engine, headless: opts.headless, emulate: opts.emulate, motion: opts.motion, ui: opts.ui }
 }
 
 /** A fixed page; the same for both variants unless a variant is `url:<href>`. */
-export function url<P = any>(href: string, opts: PageOptions & Hooks<P> & Side = {}): Target<P> {
+export function url<P = any, K = any>(href: string, opts: PageOptions & Hooks<P, K> & Side = {}): Target<P, K> {
   return { kind: "url", href, ...opts }
 }
 
@@ -884,6 +913,6 @@ export function fixture(command: string, opts: Omit<Fixture, "command"> = {}): F
   return { command, ...opts }
 }
 
-export function bench<const Params extends Record<string, ParamValues> = {}>(spec: Bench<Params>): Bench<Params> {
+export function bench<const Params extends Record<string, ParamValues> = {}, K = undefined>(spec: Bench<Params, K>): Bench<Params, K> {
   return spec
 }

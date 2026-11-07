@@ -230,7 +230,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         ctx.runner.call("block", json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": root_text }), t, &serve)?;
         let lapped = Instant::now();
         let setup = ctx.runner.call("setup", json!({}), t, &serve);
-        super::batch::launch_hook_case(ctx, "the bench file's setup")?;
+        super::batch::launch_hook_case(ctx)?;
         setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup"))?;
         hooks.check_fixture();
         steps.push(("setup".into(), lapped.elapsed().as_secs_f64() * 1e3));
@@ -239,7 +239,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         // The launch's runs so far: a case's runs are numbered after the ones before it.
         let mut base = 0usize;
         for (k, s) in cases.iter().enumerate() {
-            if k > 0 && stop_requested() {
+            // A launch hook that read what differs per case set up the first case alone (`unbatched`).
+            if k > 0 && (stop_requested() || ctx.unbatched.is_some()) {
                 break;
             }
             launch.log_at.push(ctx.runner.log_len());

@@ -160,6 +160,9 @@ struct Series {
     /// The sides run on different engines: metrics of one engine (`Across::PerSide`) are kept per side
     /// and never compared.
     cross_engine: bool,
+    /// A file with `setupKey`: the series' key as canonical text (with `--batch`, cases share a launch
+    /// only with the same one, `batch::key`).
+    setup_key: Option<String>,
 }
 
 impl Series {
@@ -1107,6 +1110,9 @@ struct Ctx<'a> {
     runner_pin: Option<u64>,
     /// `--check --batch N`: up to N run cases per launch (`batch`).
     batch: Option<usize>,
+    /// The launch hook and per-case field a batch's launch hook read, in a file without `setupKey`
+    /// (`batch::launch_hook_case`): the launch runs its first case alone.
+    unbatched: Option<(String, String)>,
     /// `--mobile`: the phone whose Chrome runs the file's phone targets (SPEC 13.1 "Chrome on a phone").
     phone: Option<crate::target::android_chrome::Phone>,
 }
@@ -1618,6 +1624,7 @@ pub fn run(args: &Args) -> Result<Output> {
         folder_notes: Default::default(),
         runner_pin,
         batch,
+        unbatched: None,
         phone: None,
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
@@ -1670,6 +1677,16 @@ pub fn run(args: &Args) -> Result<Output> {
         implementation_preflight(&ctx.describe, &series, &sides, &config, &ctx.projects)?;
     }
     ctx.journeys = series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()).count();
+    // A file with `setupKey`: each series' key, before anything builds, so a key that is not plain JSON
+    // is the file's error in every mode, and with `--batch` cases share a launch only when their setups
+    // are the same (`batch::key`).
+    if ctx.describe["setupKey"] == true {
+        let active: Vec<usize> = (0..series.len()).filter(|i| series[*i].gap.is_none() && series[*i].refused.is_none()).collect();
+        let keys = ctx.runner.setup_keys(active.iter().map(|i| json!({ "case": series[*i].case, "target": series[*i].target, "params": series[*i].params })).collect())?;
+        for (i, k) in active.into_iter().zip(keys) {
+            series[i].setup_key = Some(k);
+        }
+    }
     if ctx.implementations {
         for v in &variants {
             let t = v.target.as_deref().unwrap_or("");
@@ -1990,6 +2007,21 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     if check {
         let mut series_out = series_out;
+        // Cases run with the display asleep (a locked session's): a page's frames and timers slow down then,
+        // so their values are not a lit display's, as in a timed run.
+        let ran = series_out.iter().filter(|s| s["screen"].is_object()).count();
+        let dark = series_out.iter().filter(|s| s["screen"]["display"] == "off").count();
+        if dark > 0 {
+            let text = if dark == ran {
+                "every case ran with the display off (a locked session's display sleeps, and a page's frames and timers slow down): compare their values only with runs whose display was off too"
+                    .to_string()
+            } else {
+                format!(
+                    "{dark} of {ran} cases ran with the display off and the rest with it on (a locked session's display sleeps, and a page's frames and timers slow down): their values do not compare with each other"
+                )
+            };
+            ctx.warnings.push(validity::info("DisplayOff", text));
+        }
         let matrix = journey::matrix(&mut series_out);
         let batched = batching.as_ref().map_or(Value::Null, batch::Batching::summary);
         let mut out = check_output(&exp, &dir, &file, series_out, ctx.warnings, matrix, args.has("require-parity"), (seed, used_random), batched, halted.is_some())?;
@@ -4633,6 +4665,8 @@ fn reserve_for(ctx: &mut Ctx, x: &Exec) -> Option<host::reserve::Reserve> {
 /// never held a connection to it or ran its executable.
 fn any_launch(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) -> Result<Launch> {
     let s = &cases[0];
+    // What a launch hook read is this launch's: a launch run again reads it again.
+    ctx.unbatched = None;
     let b = fixture_launch(ctx, cases, v, pair, x);
     // What appeared in the user's Documents or Desktop during a later launch: a caution, once each.
     let noted: Vec<String> = std::mem::take(&mut *ctx.folder_notes.lock().unwrap_or_else(|e| e.into_inner()));
@@ -5409,8 +5443,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 _ => (Value::Null, Value::Null),
             };
             let r = ctx.runner.call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &serve);
-            // A batch's prepare that read `ctx.case` is refused whether or not it went on to fail.
-            batch::launch_hook_case(ctx, "the target's prepare")?;
+            // A batch's prepare that read what differs per case is said whether or not it went on to fail.
+            batch::launch_hook_case(ctx)?;
             let r = r.map_err(|e| crate::runner::incomplete("prepare", "prepare", e, "", "fix the target's prepare in the bench file"))?;
             if let Some(u) = r.get("url").and_then(Value::as_str) {
                 first = join_url(origin(&url), u);
@@ -5549,7 +5583,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         };
         let content_before = read_content();
         let setup = ctx.runner.call("setup", json!({}), t, &serve);
-        batch::launch_hook_case(ctx, "the bench file's setup")?;
+        batch::launch_hook_case(ctx)?;
         setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, &snapshot(&page, &ctx.exp, "setup"), "fix the bench file's setup"))?;
         if late_init.get() && !ctx.warnings.iter().any(|w| w.id == "InitScript") {
             ctx.warnings.push(validity::info(
@@ -5936,7 +5970,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let mut log_at: Vec<u64> = Vec::new();
         let mut case_ms: Vec<f64> = Vec::new();
         for (k, s) in cases.iter().enumerate() {
-            if k > 0 && stop_requested() {
+            // A launch hook that read what differs per case set up the first case alone (`unbatched`).
+            if k > 0 && (stop_requested() || ctx.unbatched.is_some()) {
                 break;
             }
             let case_began = Instant::now();
@@ -7332,6 +7367,7 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
                     launch: launch.clone(),
                     timeout: c["timeout"].as_u64(),
                     gpu_cache: c["gpuCache"].as_str().map(str::to_string),
+                    setup_key: None,
                 });
             }
         }

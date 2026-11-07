@@ -4,9 +4,12 @@
 //! run started (`ResetIncomplete`), still answer, show what the case expects (`WrongScreen`) and have
 //! taken the OS's input where strobe put it, before the next case runs. A case that fails, crashes or
 //! leaves dirty state fails alone and ends its launch: the next case gets a fresh one. One recording per
-//! launch marks each case (`case:<i>:<name>:start|end`), and each case's actions name it.
+//! launch marks each case (`case:<i>:<name>:start|end`), and each case's actions name it. Cases share
+//! a launch only with the same `setupKey`; a file without one whose launch hook reads what differs per
+//! case runs those cases a launch each (`unbatch`).
 
 use super::*;
+use std::collections::BTreeSet;
 
 /// Launches in a row that failed before any case ran stop the bench.
 const LAUNCH_FAILURES: u32 = 3;
@@ -21,6 +24,11 @@ pub(super) struct Batching {
     failures: u32,
     /// Why the bench stops: the user's state disturbed, or launches that kept failing.
     pub(super) halt: Option<Error>,
+    /// The keys (`key`) whose launch hook read what differs per case, in a file without `setupKey`:
+    /// their cases run a launch each.
+    unbatched: BTreeSet<String>,
+    /// The cases that ran a launch each for that.
+    unbatched_cases: usize,
 }
 
 /// One launch of the batch: how many cases it ran and its own time (ms), before its first case's runs
@@ -33,7 +41,7 @@ struct Seen {
 
 impl Batching {
     pub(super) fn new(size: usize) -> Batching {
-        Batching { size, done: BTreeMap::new(), launches: Vec::new(), failures: 0, halt: None }
+        Batching { size, done: BTreeMap::new(), launches: Vec::new(), failures: 0, halt: None, unbatched: BTreeSet::new(), unbatched_cases: 0 }
     }
 
     /// Series `i`'s result when a launch already ran it.
@@ -50,7 +58,7 @@ impl Batching {
         let own = if ok.is_empty() { Value::Null } else { json!(ok.iter().map(|l| l.own_ms).sum::<f64>() / ok.len() as f64) };
         json!({
             "size": self.size, "launches": self.launches.len(), "cases": cases, "failed_launches": self.launches.iter().filter(|l| l.failed).count(),
-            "launch_ms_mean": own, "saved_ms": saved,
+            "launch_ms_mean": own, "saved_ms": saved, "unbatched_cases": self.unbatched_cases,
         })
     }
 }
@@ -69,30 +77,39 @@ pub(super) fn line(b: &Value) -> Option<String> {
     if let Some(n) = b["failed_launches"].as_u64().filter(|n| *n > 0) {
         t += &format!("; {n} launch{} failed before a case ran", if n == 1 { "" } else { "es" });
     }
+    if let Some(n) = b["unbatched_cases"].as_u64().filter(|n| *n > 0) {
+        t += &format!("; {n} case{} ran a launch each: a launch hook reads what differs per case (the Batch note says which; setupKey batches them)", if n == 1 { "" } else { "s" });
+    }
     Some(t + "\n")
 }
 
 /// What a run case may share a launch by: its target (and with it the engine, headless mode, emulated
-/// device and motion), its params (a fixture's, a seed folder's and the hooks' own), its GPU cache and
-/// whether it is measured from outside. None for a case that needs a launch of its own: a launch case,
-/// a command line's (`cli()`), a series that counts instructions in a block of their own (Linux).
+/// device and motion), its params (a fixture's, a seed folder's and the hooks' own), its GPU cache,
+/// whether it is measured from outside and its `setupKey`. None for a case that needs a launch of its
+/// own: a launch case, a command line's (`cli()`), a series that counts instructions in a block of
+/// their own (Linux).
 pub(super) fn key(ctx: &Ctx, s: &Series) -> Option<String> {
     let kind = ctx.describe["targets"][&s.target]["kind"].as_str().unwrap_or("");
     if s.gap.is_some() || s.refused.is_some() || s.launch.is_object() || kind == "cli" || counting(s) != Counting::InTiming {
         return None;
     }
-    Some(format!("{}\n{}\n{:?}\n{}", s.target, serde_json::to_string(&s.params).unwrap_or_default(), s.gpu_cache, s.cross_engine))
+    Some(format!("{}\n{}\n{:?}\n{}\n{:?}", s.target, serde_json::to_string(&s.params).unwrap_or_default(), s.gpu_cache, s.cross_engine, s.setup_key))
 }
 
-/// Refuses a batch whose launch hook (`what`: the target's prepare and `url` function, the file's setup)
-/// read `ctx.case`: a launch runs it once for every case of its chunk, so it would set every case up as
-/// the first. Without `--batch` it says nothing.
-pub(super) fn launch_hook_case(ctx: &mut Ctx, what: &str) -> Result<()> {
-    if ctx.runner.took_case() && ctx.batch.is_some() {
+/// After a launch hook (the target's prepare and `url` function, the file's setup): one that read what
+/// differs per case (`ctx.case`, `ctx.seed`, `ctx.random()`) ran once for every case of the launch, so
+/// it would set every case up as the first. A file with `setupKey` says what its setup depends on, and
+/// reading the case past it is refused (usage error); a file without one runs this launch's first case
+/// alone (`Ctx::unbatched`), and its other cases a launch each (`series`). Without `--batch` it says
+/// nothing.
+pub(super) fn launch_hook_case(ctx: &mut Ctx) -> Result<()> {
+    let Some((hook, field)) = ctx.runner.took_case().filter(|_| ctx.batch.is_some()) else { return Ok(()) };
+    if ctx.describe["setupKey"] == true {
         return Err(Error::usage(format!(
-            "--batch: {what} reads ctx.case, and a batch's launch runs it once for all its cases: drop --batch, or set up per case in the case's own run (or a target of its own)"
+            "--batch: {hook} reads {field}, and a batch's launch runs it once for all the cases whose setupKey is the same: move the per-case choice into setupKey and read ctx.setupKey"
         )));
     }
+    ctx.unbatched.get_or_insert((hook, field));
     Ok(())
 }
 
@@ -135,10 +152,13 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
     }
     let Some(k) = key(ctx, &all[i]) else { return check_series(ctx, &all[i], variants, config) };
     // A case whose runs build on each other (`resetCheck: false`) ends its launch: the chunk ends with it.
+    // A key whose launch hook reads what differs per case runs its cases a launch each.
+    let alone = b.unbatched.contains(&k);
+    let size = if alone { 1 } else { b.size };
     let mut chunk: Vec<usize> = Vec::new();
     for j in (i..all.len()).filter(|j| !b.done.contains_key(j) && !ctx.saved["series"][all[*j].label()]["done"].is_object() && key(ctx, &all[*j]).as_deref() == Some(k.as_str())) {
         chunk.push(j);
-        if chunk.len() == b.size || !all[j].reset_check {
+        if chunk.len() == size || !all[j].reset_check {
             break;
         }
     }
@@ -162,10 +182,18 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
     let log_from = ctx.runner.log_len();
     let r = launch_on_screen(ctx, &cases, &variants[0], 0, &Exec { video: film, ..Exec::untimed(true, None) });
     let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+    // A stop, an unlock wait that ran out, or a question the batch cannot answer ends the bench.
+    if let Err(e) = &r
+        && (matches!(e.code, 2 | 124 | 130) || stop_requested())
+    {
+        return Err(if e.code == 124 || e.code == 2 { e.clone() } else { stop_error() });
+    }
+    // The case ran a launch of its own because its key's launch hook read what differs per case.
+    if alone {
+        b.unbatched_cases += 1;
+    }
     let launch = match r {
         Ok(l) => l,
-        // A stop, an unlock wait that ran out, or a question the batch cannot answer ends the bench.
-        Err(e) if matches!(e.code, 2 | 124 | 130) || stop_requested() => return Err(if e.code == 124 || e.code == 2 { e } else { stop_error() }),
         Err(e) => {
             // The launch, its prepare or its setup failed: its first case fails with it, the rest wait.
             b.failures += 1;
@@ -174,6 +202,9 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
             let sent = ctx.runner.take_actions();
             let mut out = check_case(ctx, s, variants, Err(e), wall_ms, log, sent, film)?;
             stamp(&mut out, b.launches.len(), 0);
+            if let Some(note) = unbatch(ctx, b, &k, &cases) {
+                out["batch_note"] = json!(note);
+            }
             if b.failures >= LAUNCH_FAILURES {
                 b.halt = Some(Error::msg(format!("{LAUNCH_FAILURES} launches in a row failed before any case ran (the last: {})", out["error"].as_str().unwrap_or(""))));
             }
@@ -191,6 +222,7 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
     b.launches.push(Seen { cases: launch.cases.len(), own_ms, failed: false });
     let id = b.launches.len();
     let n = launch.cases.len();
+    let alone = unbatch(ctx, b, &k, &cases);
     for (seq, r) in launch.cases.into_iter().enumerate() {
         let s = &cases[seq];
         let elapsed = launch.case_ms.get(seq).copied().unwrap_or(0.0) + if seq == 0 { own_ms } else { 0.0 };
@@ -202,12 +234,38 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
             out["batch_note"] = json!(note);
             ctx.warnings.push(validity::warn("Batch", format!("{}: {note}", s.label())));
         }
+        if let Some(note) = alone.as_ref().filter(|_| seq == 0) {
+            out["batch_note"] = json!(note);
+        }
         b.done.insert(chunk[seq], out);
     }
     if let Some(e) = launch.abort {
         b.halt = Some(e);
     }
     b.done.remove(&i).ok_or_else(stop_error)
+}
+
+/// A launch whose hook read what differs per case (`launch_hook_case`) ran its first case alone: the
+/// other cases of its key run a launch each from now on, and the first case's note says why (one
+/// `Batch` line per hook and field).
+fn unbatch(ctx: &mut Ctx, b: &mut Batching, k: &str, cases: &[Series]) -> Option<String> {
+    let (hook, field) = ctx.unbatched.take()?;
+    if cases.len() < 2 || !b.unbatched.insert(k.to_string()) {
+        return None;
+    }
+    b.unbatched_cases += 1;
+    let why = format!("{hook} reads {field}, which differs per case, and a launch runs it once for all its cases");
+    progress(format!("  {why}: {} and the cases that would share its launch run a launch each", cases[0].label()));
+    if !ctx.warnings.iter().any(|w| w.id == "Batch" && w.text.contains(&why)) {
+        ctx.warnings.push(validity::info(
+            "Batch",
+            format!(
+                "{}: {why}, so its cases ran a launch each; give the file setupKey (what setup depends on, from the case and its params) and read ctx.setupKey there to batch them",
+                cases[0].label()
+            ),
+        ));
+    }
+    Some(format!("{why}: this case ran alone, and the cases that would have shared its launch ran a launch each"))
 }
 
 /// A case's place in the batch: its launch (from 1) and its place there (from 1).

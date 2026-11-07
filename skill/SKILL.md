@@ -564,10 +564,13 @@ export default bench({
 Fewer than 6 pairs never gets a verdict.
 
 - Validate a new file with `--check` first: each case once, pass or fail with a screenshot. A case with a reset runs once more after it (unmeasured), so a run that cannot start from what the reset leaves fails the check.
-- Many small cases (a fuzzer's)? `--check --batch 10` runs up to 10 run cases per launch (same target and params), one prepare and setup.
+- Many small cases (a fuzzer's)? `--check --batch 10` runs up to 10 run cases per launch (same target, params and setupKey), one prepare and setup.
   - After each case its page or app must be back at the launch's start (`ResetIncomplete`), answer, and show its `expect`; a case that fails, crashes or leaves dirty state fails alone, and the next case gets a fresh launch.
   - `bench({ reset })` is the reset of every case without its own: put the page back there.
-  - A `prepare`, `url` or `setup` that reads `ctx.case` refuses the batch: set up per case in its `run`.
+  - Setup differs per case? Give the file `setupKey: (ctx) => …` (plain JSON from case, target, params)
+    and read `ctx.setupKey` in `prepare`, `url` and `setup`: cases with equal keys share a launch.
+  - A launch hook that reads `ctx.case`, `ctx.seed` or `ctx.random()`: without `setupKey` its cases run
+    a launch each (a `Batch` note names the hook); with `setupKey` it is refused (exit 2).
   - Later cases run warm (`· launch 3.2`); the summary says the time saved. `--check` only: a verdict needs a fresh launch per block.
   - Cases run in case-name order, not the file's. Not checked between cases: other DOM, JS globals, listeners, timers,
     storage (local, session, IndexedDB, Cache API, cookies, service workers) and HTTP caches. Cases that share those: no `--batch`.

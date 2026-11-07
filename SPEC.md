@@ -580,7 +580,7 @@ on a check of one case answers from that recording (with several, it lists them)
 `prepare` and its `setup`, up to N at a time, so a file of many small cases (a fuzzer's) checks in a
 fraction of the time. Cases share a launch when they run on one target (so one engine, headless
 mode, emulated device and motion) with the same params (a fixture's, a seed folder's and the hooks'
-own), GPU cache and way of measuring (from outside or not), in the series' order (case names sorted,
+own), GPU cache, way of measuring (from outside or not) and `setupKey` (below), in the series' order (case names sorted,
 then target and params; not the order the file lists them), up to and including the first with
 `resetCheck: false`; a launch case, a
 `cli()` case and a Linux series that counts instructions in a block of its own each keep a launch of
@@ -606,16 +606,28 @@ cookies and service workers; the HTTP and GPU caches; a native app's state beyon
 controls and toggles. A file whose cases share such state checks each case alone (no `--batch`).
 A launch that fails before any case ran (its launch, prepare or setup) fails its first case, as
 without `--batch`; three such launches in a row stop the bench (exit 1), as does a disturbed
-guard. `prepare`, a `url` function and `setup` run once for a launch's cases, so a file whose
-`prepare`, `url` function or `setup` reads `ctx.case` is refused (usage error, exit 2, at its first
-launch); `run` and `reset` get each case's own `ctx.case`, `ctx.seed` and `ctx.random()`. A launch
+guard. `prepare`, a `url` function and `setup` run once for a launch's cases. A file whose cases
+need different setups says what its setup depends on with `setupKey` (§9.6): before anything builds
+(in every mode, with or without `--batch`) strobe asks the runner for each series' key as canonical
+text (`setup_keys`), and a key that is not
+plain JSON (a function, symbol, BigInt, non-finite number, class instance or a value that refers
+back to itself) or a `setupKey` that throws is a usage error (exit 2) naming the series and where in
+the key; `undefined` is a key of its own, not `null`'s. A launch hook that reads what differs per
+case (`ctx.case`, and `ctx.seed` and `ctx.random()`, which come from the case's seed) would set every
+case of its launch up as the first: in a file with `setupKey` that is refused (usage error, exit 2,
+at its first launch, naming the hook and the field: move the choice into `setupKey` and read
+`ctx.setupKey`); in a file without one the launch runs only its first case, the cases that would
+have shared it run a launch each, the first case gets the note `batch  the bench file's setup reads
+ctx.case …`, the experiment one `Batch` info line per hook and field, and `result.json`'s
+`batch.unbatched_cases` counts the cases that ran so. `run` and `reset` get each case's own
+`ctx.case`, `ctx.seed` and `ctx.random()`. A launch
 keeps one recording, its trace marked `case:<i>:<name>:start|end` around each case, its runs
 numbered across its cases (`run:<i>`), its `meta.json` `batch` listing each case's label, measured
 runs and values (`query <rec> summary` lists them, and `query <exp> actions` shows each case only
 its own actions), its action log naming each run's and reset's case (§9.6), and with `--video` one
 film of the launch with each case's span. `result.json` has `batch` (`size`, `launches`, `cases`,
-`failed_launches`, `launch_ms_mean`: a launch's own time besides its cases, and `saved_ms`: that
-time for each case after a launch's first) and each series `batch_id` (its launch, from 1) and
+`failed_launches`, `launch_ms_mean`: a launch's own time besides its cases, `saved_ms`: that
+time for each case after a launch's first, and `unbatched_cases`) and each series `batch_id` (its launch, from 1) and
 `batch_seq` (its place there); the text marks each case `· launch 3.2` and ends with `batch  40
 cases in 10 launches (--batch 10): about 3.1 min saved against a launch per case (…)`. A later
 case runs in a page or app the cases before it warmed: its values are a check's, not a cold
@@ -2403,6 +2415,15 @@ export default bench({
   `{ run: [...], more: [...] }`: `run` values make series by default, `more` values only with
   `--params all` or when `--params k=v` names one, so a scaling sweep keeps a short default run.
 - `setup(ctx)`: once per block, after load, never measured.
+- `setupKey(ctx)`: what the launch hooks (`setup`, a target's `prepare` and `url` function) set up
+  differently per case, as plain JSON from `{ case, target, params }`
+  (`(ctx) => (ctx.case === "review" ? "review" : "session")`). The runner calls it at each block's
+  `block` op and the hooks read it as `ctx.setupKey`, in every mode (`bench`, `--check`, `--batch`,
+  `record --bench`); in a launch of several cases `run` and `reset` get their own case's, equal to
+  the launch's. With `--check --batch` cases share a launch only when their keys are equal
+  (§5.6), so a file whose setup depends on the case still batches. In TypeScript, declare it before
+  `setup` and `cases` so their `ctx.setupKey` gets its type; a target is made before the bench, so
+  its hooks get it from `web<Params, Key>(…)` (or `url<Params, Key>`), and `any` without.
 - `cases.<name>`: `primary` (metric name, required; `launch.ready` for a launch case), `run(ctx)`
   (measured) or `launch` (a launch case, below), `reset(ctx)` (optional, between runs, never
   measured), `metrics` (optional extra secondaries), `targets` (optional: the targets this case
@@ -2432,8 +2453,11 @@ answered at once, so strobe serves the hook's other calls meanwhile and `const s
 ctx.waitForLine(/saved/); await page.click(…); await saved` misses nothing and never deadlocks;
 output lines no watch waits for are dropped), `fixture` (the block's fixture: `{ url, port, pid }`, or null, §9.10), `case` (the case the block runs, also in `prepare`, `setup` and a `url` function, so one
 file can give each case its own fixture; with `--check --batch` a launch runs several cases, `run`
-and `reset` get each its own, and reading it in `prepare`, a `url` function or `setup`, which run
-once for them all, refuses the batch, §5.6), `params`, `target` (its name), `variant` (`base` or
+and `reset` get each its own, and reading it (or `seed`, or `random()`) in `prepare`, a `url`
+function or `setup`, which run once for them all, runs each case in a launch of its own, or refuses a
+file with `setupKey`, §5.6), `setupKey` (what the file's `setupKey` gave for the block's case;
+undefined without one; also in `prepare`, a `url` function and a launch's `before`), `params`,
+`target` (its name), `variant` (`base` or
 `head`, for logging only), `url`, `root` (the variant's folder), `prepared`, `seed` and `random()`
 (below; also in `prepare` and a launch's `before`), in `prepare` and `setup`
 `addInitScript(script, arg?)`, and in `prepare` only `playwright` and `mock(pattern, handler)`.
@@ -2454,7 +2478,11 @@ measured); a bench that wants the app seeded passes `ctx.seed` in itself (`ctx.a
 …, ctx.seed)`). Not seeded either: the app's own nondeterminism, scheduling, IPC order, GC and
 timers. Reading `ctx.seed` or calling `ctx.random()` marks the experiment `used_random` (the runner
 says so on its replies); only then is `--seed` part of the workload (the rerun ledger, §14.2), so a
-context is never copied with spread syntax inside the runner (that would read the getter).
+context is never copied with spread syntax inside the runner (that would read the getter). The first
+read of `ctx.case`, `ctx.seed` or `ctx.random()` inside a launch hook (`prepare`, a `url` function,
+`setup`) is said on that reply too, as `read_case: { hook, field }` (`runner::Runner::took_case`),
+which a batch acts on (§5.6); `setupKey`, `params`, `target`, `url`, `root`, `home`, `env`, `exe`,
+`fixture` and `prepared` are the same for every case of a launch and are not tracked.
 
 **Actions.** Every input, page load, window or accessibility action (`page.goto`, `click`, `hover`,
 `move`, `type`, `press`, `down`, `up`, `drag`, `scroll`, `wheel`, `window`, `act`), `ctx.call` and
@@ -3736,7 +3764,9 @@ the machine awake only while blocks run (never while a bench waits, §9.4), and 
 (`ES_DISPLAY_REQUIRED`) only while the session is also unlocked: a locked machine's display
 sleeps as Windows decides, which is how locked machines run for their users, and keeping a display lit
 through days of locked benches would be strobe changing the machine. Pairs in different display states
-still compare within themselves; `DisplayOff` notes it (every pair, or how many).
+still compare within themselves; `DisplayOff` notes it (every pair, or how many). A `--check` notes
+it too (every case, or how many): a sleeping display slows a page's frames and timers, so a check's
+values from then are not a lit display's.
 
 `record pid:|proc:` on a locked session records what `record exe:` gives (CPU, threads' wakes and CPU,
 IO, the UI thread, GPU, memory by what holds it) and stacks (`--probes deep`), and refuses only its
@@ -6937,6 +6967,26 @@ launch attach prepare load checks setup warmup runs trace analyse close`; attrib
 the same value keys (but one `warmup.unsteady`), no verdict in either, and block medians within run
 to run noise (`cpu.work` +1.3%, `main.work` −0.3%, `run.duration` −0.5% on the page; the script's
 `cpu.work` −0.5%).
+
+Batches whose setup differs per case (`setupKey`, §5.6, §9.6; 2026-11-08, `--check` runs, adais
+locked and headless, and vps). The runner tracks `ctx.seed` and `ctx.random()` in launch hooks as it
+tracked `ctx.case`, and reports the hook and field (`read_case`); `setup_keys` keys each series
+before builds; `batch::key` adds the key; a launch whose hook read a per-case field in a file without
+`setupKey` sets `Ctx::unbatched`, the case loops of pages, native apps, scripts and terminals stop
+after its first case, and `batch::unbatch` runs the key's other cases a launch each. `setup_keys`
+runs in every mode, so a bad key fails a plain `--check` too, and a `--check` notes `DisplayOff`:
+values of a case alone in a batch launch that differed from the same case without `--batch` came
+from a display asleep then (a page's frames slowed about sevenfold) and agree once both ran lit.
+`scripts/dev/batch-setup.bench.ts` (six cases on one page, setup opens each case's heading and every
+case expects its own) behaved the same on adais and vps: without `setupKey` and setup reading
+`ctx.case` (or `ctx.random()`), 6 passes in 6 launches with the note and `unbatched_cases: 6`; with
+`setupKey`, 6 passes in 2 launches, as without `--batch`; `setupKey` and setup still reading
+`ctx.case`, exit 2 at the first launch; a BigInt key, exit 2 before anything built. On an app's ten
+page bench files (49 series, two refused headless): unchanged, `--check --batch 10` exited 2 on none
+of them and ran 45 launches (41 cases a launch each); with `setupKey` added to seven of them, 33
+launches; both, and the same files without `--batch`, passed 46 cases, failed the same one (its
+setup timed out) and refused the same two. Clippy `-D warnings` clean on Windows, Linux (vps) and
+for `aarch64-apple-darwin` from Windows (no Mac was reachable).
 
 Terminal targets (2026-11-08, §13.9; `--check` smoke runs, one noisy run each, adais locked). A
 synthetic TUI (it asks the terminal for DA1 at startup and draws 10 synchronized frames of exactly 64

@@ -413,7 +413,7 @@ fn runs(
     // The window's client area before any `page.window` (`admit_window`).
     let client_before = n.window.as_ref().map(client_of);
     let setup = ctx.runner.call("setup", json!({}), t, &serve);
-    super::batch::launch_hook_case(ctx, "the bench file's setup")?;
+    super::batch::launch_hook_case(ctx)?;
     super::super::record::app_gone(n, "before the runs", |_| last())?;
     setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup"))?;
     hooks.check_fixture();
@@ -496,7 +496,8 @@ fn runs(
     let mut log_at: Vec<u64> = Vec::new();
     let mut case_ms: Vec<f64> = Vec::new();
     for (k, s) in cases.iter().enumerate() {
-        if k > 0 && stop_requested() {
+        // A launch hook that read what differs per case set up the first case alone (`unbatched`).
+        if k > 0 && (stop_requested() || ctx.unbatched.is_some()) {
             break;
         }
         let case_began = Instant::now();
