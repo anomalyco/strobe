@@ -43,6 +43,7 @@ pub struct CaptureResult {
     pub console_errors: usize,
     pub network_requests: usize,
     pub network_bytes: u64,
+    pub pre_attach_resources: usize,
     pub timeline_records: usize,
     pub js_samples: u64,
     pub mapped_scripts: usize,
@@ -94,6 +95,9 @@ pub struct NetworkWaterfall {
     pub paint: Vec<Value>,
     pub spans: Vec<Value>,
     pub requests: Vec<NetworkEntry>,
+    /// Resources already loaded by the tab before Web Inspector attached (`performance.getEntriesByType("resource")`).
+    #[serde(default)]
+    pub pre_attach_resources: Vec<Value>,
 }
 
 pub fn write_owner_gz<T: Serialize>(path: &Path, val: &T) -> Result<()> {
@@ -114,7 +118,6 @@ pub fn read_gz_json(path: &Path) -> Result<Value> {
 /// Runs WebKit Inspector attribution over `for_ms` on `session`, then takes a Heap v3 snapshot and
 /// source maps before returning. Leaves no globals or performance marks on the user's page.
 pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms: u64, served: Option<&Path>, on_progress: impl Fn(&str)) -> Result<CaptureResult> {
-    let _ = session.call("Runtime.enable", Value::Null, Duration::from_secs(5));
     let _ = session.call("Page.enable", Value::Null, Duration::from_secs(5));
     let _ = session.call("Console.enable", Value::Null, Duration::from_secs(5));
     let _ = session.call("Network.enable", Value::Null, Duration::from_secs(5));
@@ -171,6 +174,19 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
     .filter((m) => !String(m.name).startsWith("strobe:"))
     .slice(-200)
     .map((m) => ({{ name: m.name, start_ms: m.startTime, duration_ms: m.duration }}))
+  const resources = (performance.getEntriesByType?.("resource") ?? [])
+    .slice(0, 300)
+    .map((r) => ({{
+      url: r.name,
+      type: r.initiatorType || "other",
+      protocol: r.nextHopProtocol || null,
+      start_ms: r.startTime,
+      duration_ms: r.duration,
+      ttfb_ms: r.responseStart > 0 && r.requestStart > 0 ? Math.max(0, r.responseStart - r.requestStart) : null,
+      transfer_bytes: r.transferSize ?? 0,
+      encoded_bytes: r.encodedBodySize ?? 0,
+      decoded_bytes: r.decodedBodySize ?? 0,
+    }}))
   const dom = document.getElementsByTagName("*").length
   try {{ performance.clearMarks({start:?}); performance.clearMarks({end:?}) }} catch {{}}
   return JSON.stringify({{
@@ -186,6 +202,7 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
     }} : null,
     paints,
     measures,
+    resources,
   }})
 }})()"#,
         start = start_mark,
@@ -194,6 +211,7 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
     let page_perf: Value = session.eval(&perf_js, Duration::from_secs(5)).ok().and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok())).unwrap_or(Value::Null);
 
     on_progress("taking a WebKit heap snapshot");
+    let _ = session.call("Runtime.releaseObjectGroup", json!({ "objectGroup": "console" }), Duration::from_secs(2));
     let mut heap_self_bytes = None;
     if let Ok(snap_res) = session.call("Heap.snapshot", Value::Null, Duration::from_secs(30))
         && let Some(snap_str) = snap_res["snapshotData"].as_str()
@@ -223,6 +241,7 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
         console_errors,
         network_requests: converted.network_requests,
         network_bytes: converted.network_bytes,
+        pre_attach_resources: converted.pre_attach_resources,
         timeline_records: converted.timeline_records,
         js_samples: converted.js_samples,
         mapped_scripts,
@@ -241,7 +260,6 @@ pub struct MemoryCapture {
 /// `.heapsnapshot.gz` so `heapsnap::leaks` finds objects allocated in the first half and alive in S2.
 pub fn record_memory(session: &mut Session, dir: &Path, for_ms: u64, on_progress: impl Fn(&str)) -> Result<MemoryCapture> {
     let t0 = crate::host::now_ns();
-    let _ = session.call("Runtime.enable", Value::Null, Duration::from_secs(5));
     let _ = session.call("Console.enable", Value::Null, Duration::from_secs(5));
     let _ = session.call("Heap.enable", Value::Null, Duration::from_secs(5));
     let started = std::time::Instant::now();
@@ -301,6 +319,7 @@ struct ConvertedEvents {
     source_map_hints: HashMap<String, String>,
     network_requests: usize,
     network_bytes: u64,
+    pre_attach_resources: usize,
     timeline_records: usize,
     js_samples: u64,
 }
@@ -799,7 +818,9 @@ fn convert_events(
     values.insert("net.requests".into(), network_requests as f64);
     values.insert("net.bytes".into(), network_bytes as f64);
 
-    let waterfall = NetworkWaterfall { navigation: page_perf["nav"].clone(), paint: page_perf["paints"].as_array().cloned().unwrap_or_default(), spans, requests };
+    let pre_attach_resources = page_perf["resources"].as_array().cloned().unwrap_or_default();
+    let pre_attach_count = pre_attach_resources.len();
+    let waterfall = NetworkWaterfall { navigation: page_perf["nav"].clone(), paint: page_perf["paints"].as_array().cloned().unwrap_or_default(), spans, requests, pre_attach_resources };
     write_owner_gz(&dir.join(NETWORK_FILE), &waterfall)?;
 
     let pid_str = app_pid.unwrap_or(1).to_string();
@@ -843,7 +864,7 @@ fn convert_events(
     });
     store::write_json(&dir.join(READ), &read_doc)?;
 
-    Ok(ConvertedEvents { values, sampling, census, scripts, source_map_hints, network_requests, network_bytes, timeline_records, js_samples })
+    Ok(ConvertedEvents { values, sampling, census, scripts, source_map_hints, network_requests, network_bytes, pre_attach_resources: pre_attach_count, timeline_records, js_samples })
 }
 
 fn build_cpu_profile(stack_traces: &[Value], turns: &[(f64, f64)], (sw0, sw_end): (f64, f64), (t0, t1): (u64, u64), scripts: &mut BTreeSet<String>, dir: &Path) -> Result<(u64, Option<Sampling>)> {
@@ -964,9 +985,30 @@ fn build_cpu_profile(stack_traces: &[Value], turns: &[(f64, f64)], (sw0, sw_end)
     Ok((js_count, sampling))
 }
 
+fn is_inspector_class(cname: &str) -> bool {
+    matches!(cname, "InjectedScriptHost" | "CommandLineAPIHost" | "InjectedScript" | "CommandLineAPI") || cname.contains("InjectedScript") || cname.contains("CommandLineAPI")
+}
+
+fn is_inspector_edge(ename: &str) -> bool {
+    matches!(
+        ename,
+        "injectedScript"
+            | "InjectedScript"
+            | "InjectedScriptHost"
+            | "CommandLineAPI"
+            | "commandLineAPI"
+            | "_commandLineAPIImpl"
+            | "CommandLineAPIHost"
+            | "_idToWrappedObject"
+            | "_wrappedObjectToId"
+            | "_objectGroups"
+            | "_lastBoundObjectId"
+    )
+}
+
 /// Converts a WebKit Heap Snapshot v3 JSON string into V8's `.heapsnapshot` schema, gzipped and
-/// owner-only (`0600`), so `heapsnap::read` and `heapsnap::leaks` compute dominators, retained sizes,
-/// classes and retainer paths natively. Returns total `self_size` in bytes.
+/// owner-only (`0600`), excluding Web Inspector's own `InjectedScript` / `CommandLineAPI` scaffolding
+/// (rule 2: measure the app, not strobe). Returns total app/engine `self_size` in bytes.
 pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
     let mut de = serde_json::Deserializer::from_str(raw_json);
     de.disable_recursion_limit();
@@ -979,6 +1021,94 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
     let edge_names: Vec<&str> = wk["edgeNames"].as_array().map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect()).unwrap_or_default();
     let raw_nodes = wk["nodes"].as_array().ok_or_else(|| Error::msg("WebKit heap snapshot lacks nodes"))?;
     let raw_edges = wk["edges"].as_array().ok_or_else(|| Error::msg("WebKit heap snapshot lacks edges"))?;
+
+    // Step 1: Parse raw WebKit nodes `(nid, sz, cname, flags)` with `<root>` at raw index 0.
+    let mut wk_nodes: Vec<(u64, u32, &str, u64)> = Vec::with_capacity(raw_nodes.len() / stride + 1);
+    let mut raw_id_map: HashMap<u64, usize> = HashMap::with_capacity(raw_nodes.len() / stride + 1);
+    for (k, chunk) in raw_nodes.chunks_exact(stride).enumerate() {
+        let nid = chunk[0].as_u64().unwrap_or(0);
+        let sz = chunk[1].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
+        let cidx = chunk[2].as_u64().unwrap_or(0) as usize;
+        let flags = chunk[3].as_u64().unwrap_or(0);
+        let cname = class_names.get(cidx).copied().unwrap_or("Object");
+        if k == 0 && nid != 0 {
+            wk_nodes.push((0, 0, "<root>", 0));
+            raw_id_map.insert(0, 0);
+        }
+        if raw_id_map.contains_key(&nid) {
+            continue;
+        }
+        let idx = wk_nodes.len();
+        raw_id_map.insert(nid, idx);
+        wk_nodes.push((nid, sz, cname, flags));
+    }
+    if wk_nodes.is_empty() {
+        wk_nodes.push((0, 0, "<root>", 0));
+        raw_id_map.insert(0, 0);
+    }
+
+    // Step 2: Identify Web Inspector scaffolding (`InjectedScript` / `CommandLineAPI`) and exclude
+    // objects reachable from `<root>` exclusively through those inspector roots/edges.
+    let n_raw = wk_nodes.len();
+    let mut insp_seed = vec![false; n_raw];
+    for (i, &(_, _, cname, _)) in wk_nodes.iter().enumerate().skip(1) {
+        if is_inspector_class(cname) {
+            insp_seed[i] = true;
+        }
+    }
+    // Raw adjacency: (to_raw_idx, wk_kind, extra, is_insp_edge)
+    let mut raw_adj: Vec<Vec<(usize, &str, u32, bool)>> = vec![Vec::new(); n_raw];
+    for e in raw_edges.as_chunks::<4>().0 {
+        let (Some(&u), Some(&v)) = (raw_id_map.get(&e[0].as_u64().unwrap_or(u64::MAX)), raw_id_map.get(&e[1].as_u64().unwrap_or(u64::MAX))) else { continue };
+        if u == v {
+            continue;
+        }
+        let wk_kind = edge_types.get(e[2].as_u64().unwrap_or(0) as usize).copied().unwrap_or("Internal");
+        let extra = e[3].as_u64().unwrap_or(0) as u32;
+        let ename = if matches!(wk_kind, "Property" | "Variable") { edge_names.get(extra as usize).copied().unwrap_or("") } else { "" };
+        let insp_edge = is_inspector_edge(ename);
+        if insp_edge && v != 0 {
+            insp_seed[v] = true;
+        }
+        raw_adj[u].push((v, wk_kind, extra, insp_edge));
+    }
+
+    // Also treat a root-held scope/object whose direct properties include InjectedScriptHost or
+    // CommandLineAPIHost as an inspector root (the InjectedScript closure environment in JSC).
+    for &(v, _, _, _) in &raw_adj[0] {
+        if v != 0 && wk_nodes[v].2 != "Window" && wk_nodes[v].2 != "JSWindowProxy" && raw_adj[v].iter().any(|&(w, _, _, ie)| ie || (w != 0 && is_inspector_class(wk_nodes[w].2))) {
+            insp_seed[v] = true;
+        }
+    }
+
+    let mut user_reach = vec![false; n_raw];
+    let mut queue = std::collections::VecDeque::new();
+    user_reach[0] = true;
+    queue.push_back(0usize);
+    while let Some(u) = queue.pop_front() {
+        for &(v, _, _, insp_edge) in &raw_adj[u] {
+            if !insp_edge && !insp_seed[v] && !user_reach[v] {
+                user_reach[v] = true;
+                queue.push_back(v);
+            }
+        }
+    }
+
+    let mut excluded = vec![false; n_raw];
+    for (i, &seed) in insp_seed.iter().enumerate().skip(1) {
+        if seed && !user_reach[i] {
+            excluded[i] = true;
+            queue.push_back(i);
+        }
+    }
+    while let Some(u) = queue.pop_front() {
+        for &(v, _, _, _) in &raw_adj[u] {
+            if v != 0 && !user_reach[v] && !excluded[v] {
+                excluded[v] = true;
+                queue.push_back(v);
+            }
+        }
+    }
 
     // V8 node_types: 0 hidden, 1 array, 2 string, 3 object, 4 code, 5 closure, 6 regexp, 7 number, 8 native, 9 synthetic, 10 object shape
     let mut strings: Vec<String> = vec![String::new()];
@@ -993,32 +1123,23 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
         idx
     };
 
-    // Parse nodes: (v8_ntype, name_str_idx, node_id, self_size, is_window_like)
-    let mut nodes: Vec<(u8, u32, u32, u32, bool)> = Vec::with_capacity(raw_nodes.len() / stride + 1);
-    let mut id_to_ord: HashMap<u64, u32> = HashMap::with_capacity(raw_nodes.len() / stride + 1);
+    // Parse kept nodes: (v8_ntype, name_str_idx, node_id, self_size, is_window_like)
+    let mut nodes: Vec<(u8, u32, u32, u32, bool)> = Vec::with_capacity(n_raw);
+    let mut raw_to_ord: Vec<u32> = vec![u32::MAX; n_raw];
     let mut total_self: u64 = 0;
 
-    for (k, chunk) in raw_nodes.chunks_exact(stride).enumerate() {
-        let nid = chunk[0].as_u64().unwrap_or(0);
-        let sz = chunk[1].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
-        let cidx = chunk[2].as_u64().unwrap_or(0) as usize;
-        let flags = chunk[3].as_u64().unwrap_or(0);
-        let cname = class_names.get(cidx).copied().unwrap_or("Object");
-
-        if k == 0 && nid != 0 {
-            nodes.push((9, 0, 0, 0, false));
-            id_to_ord.insert(0, 0);
-        }
-        if id_to_ord.contains_key(&nid) {
+    for (raw_idx, &(nid, sz, cname, flags)) in wk_nodes.iter().enumerate() {
+        if excluded[raw_idx] {
             continue;
         }
         let ord = nodes.len() as u32;
-        id_to_ord.insert(nid, ord);
+        raw_to_ord[raw_idx] = ord;
 
-        let (v8_type, display_name) = if nid == 0 || cname == "<root>" {
+        let (v8_type, display_name) = if raw_idx == 0 || nid == 0 || cname == "<root>" {
             (9u8, "")
+        } else if insp_seed[raw_idx] {
+            (0, "(Web Inspector)")
         } else if flags & 4 != 0 {
-            // ElementSubtype: DOM node wrapper.
             (8, cname)
         } else if cname == "string" {
             (2, "")
@@ -1039,34 +1160,34 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
         };
         let is_win = matches!(cname, "Window" | "DOMWindow" | "JSWindowProxy" | "GlobalObject");
         let name_idx = intern_str(display_name);
-        total_self += u64::from(sz);
+        if !insp_seed[raw_idx] {
+            total_self += u64::from(sz);
+        }
         nodes.push((v8_type, name_idx, nid.min(u32::MAX as u64) as u32, sz, is_win));
-    }
-    if nodes.is_empty() {
-        nodes.push((9, 0, 0, 0, false));
-        id_to_ord.insert(0, 0);
     }
 
     let window_name_idx = intern_str("window");
     // V8 edge_types: 0 context, 1 element, 2 property, 3 internal, 4 hidden, 5 shortcut, 6 weak
     let mut adj: Vec<Vec<(u8, u32, u32)>> = vec![Vec::new(); nodes.len()];
-    for e in raw_edges.as_chunks::<4>().0 {
-        let from_id = e[0].as_u64().unwrap_or(u64::MAX);
-        let to_id = e[1].as_u64().unwrap_or(u64::MAX);
-        let (Some(&from_ord), Some(&to_ord)) = (id_to_ord.get(&from_id), id_to_ord.get(&to_id)) else { continue };
-        if from_ord == to_ord {
+    for (u_raw, list) in raw_adj.iter().enumerate() {
+        let from_ord = raw_to_ord[u_raw];
+        if from_ord == u32::MAX {
             continue;
         }
-        let wk_kind = edge_types.get(e[2].as_u64().unwrap_or(0) as usize).copied().unwrap_or("Internal");
-        let extra = e[3].as_u64().unwrap_or(0) as u32;
-        let (etype, name_or_idx) = match wk_kind {
-            "Property" => (2u8, intern_str(edge_names.get(extra as usize).copied().unwrap_or(""))),
-            "Index" => (1u8, extra),
-            "Variable" => (0u8, intern_str(edge_names.get(extra as usize).copied().unwrap_or(""))),
-            _ if from_ord == 0 && nodes[to_ord as usize].4 => (5u8, window_name_idx),
-            _ => (3u8, 0u32),
-        };
-        adj[from_ord as usize].push((etype, name_or_idx, to_ord));
+        for &(v_raw, wk_kind, extra, insp_edge) in list {
+            let to_ord = raw_to_ord[v_raw];
+            if to_ord == u32::MAX || from_ord == to_ord || insp_edge {
+                continue;
+            }
+            let (etype, name_or_idx) = match wk_kind {
+                "Property" => (2u8, intern_str(edge_names.get(extra as usize).copied().unwrap_or(""))),
+                "Index" => (1u8, extra),
+                "Variable" => (0u8, intern_str(edge_names.get(extra as usize).copied().unwrap_or(""))),
+                _ if from_ord == 0 && nodes[to_ord as usize].4 => (5u8, window_name_idx),
+                _ => (3u8, 0u32),
+            };
+            adj[from_ord as usize].push((etype, name_or_idx, to_ord));
+        }
     }
 
     let node_count = nodes.len();

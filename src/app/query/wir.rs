@@ -122,9 +122,10 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         }
     }
 
-    if want_device && (!dev_entries.is_empty() || source == Some("device")) {
+    if want_device && (!dev_entries.is_empty() || raw_device.observer_dropped > 0 || source == Some("device")) {
         let via = if raw_device.source.is_empty() { "device" } else { raw_device.source.as_str() };
-        text += &format!("device ({} entries via {via}, Safari + WebKit allowlist only)\n", dev_entries.len());
+        let obs = if raw_device.observer_dropped > 0 { format!("; {} webinspectord/message-trace lines dropped", raw_device.observer_dropped) } else { String::new() };
+        text += &format!("device ({} entries via {via}, Safari + WebKit allowlist only{obs})\n", dev_entries.len());
         for e in dev_entries.iter().take(top) {
             let pid = e["pid"].as_u64().map(|p| format!("[{p}]")).unwrap_or_default();
             let label = match (e["subsystem"].as_str(), e["category"].as_str()) {
@@ -150,6 +151,7 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
             json!({
                 "relay": raw_device.source,
                 "dropped": raw_device.dropped,
+                "observer_dropped": raw_device.observer_dropped,
                 "entries": dev_entries,
             })
         } else {
@@ -224,6 +226,18 @@ pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Outp
         }
     }
 
+    let pre_resources: Vec<Value> = wf
+        .pre_attach_resources
+        .iter()
+        .map(|r| {
+            let mut v = r.clone();
+            if let Some(u) = r["url"].as_str() {
+                v["url"] = json!(scrub_url(u, reveal));
+            }
+            v
+        })
+        .collect();
+
     if !rows.is_empty() {
         text += "      start        dur       ttfb  status  proto     type         wire  url\n";
         for r in rows.iter().take(top) {
@@ -245,6 +259,25 @@ pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Outp
         if rows.len() > top {
             text += &format!("  … {} more requests (--top N)\n", rows.len() - top);
         }
+    } else if !pre_resources.is_empty() {
+        let pre_wire: f64 = pre_resources.iter().filter_map(|r| r["transfer_bytes"].as_f64()).sum();
+        let pre_dec: f64 = pre_resources.iter().filter_map(|r| r["decoded_bytes"].as_f64()).sum();
+        text += &format!("loaded before attach · {} Resource Timing entries · {} transfer ({} decoded)\n", pre_resources.len(), fmt::bytes(pre_wire), fmt::bytes(pre_dec));
+        text += "      start        dur       ttfb  proto     type         wire  url\n";
+        for r in pre_resources.iter().take(top) {
+            let start = r["start_ms"].as_f64().unwrap_or(0.0);
+            let dur = r["duration_ms"].as_f64().map_or_else(|| "—".into(), |d| format!("{d:>6.1} ms"));
+            let ttfb = r["ttfb_ms"].as_f64().map_or_else(|| "—".into(), |d| format!("{d:>6.1} ms"));
+            let proto = r["protocol"].as_str().filter(|p| !p.is_empty()).unwrap_or("—");
+            let rtype = r["type"].as_str().unwrap_or("other");
+            let wire = fmt::bytes(r["transfer_bytes"].as_f64().unwrap_or(0.0));
+            let url = r["url"].as_str().unwrap_or("");
+            let short_url: String = if url.chars().count() > 80 { format!("{}…", url.chars().take(79).collect::<String>()) } else { url.to_string() };
+            text += &format!("  {start:>6.1} ms  {dur:>9}  {ttfb:>9}  {proto:<8}  {rtype:<10}  {wire:>7}  {short_url}\n");
+        }
+        if pre_resources.len() > top {
+            text += &format!("  … {} more pre-attach resources (--top N)\n", pre_resources.len() - top);
+        }
     }
 
     let out_json = json!({
@@ -257,11 +290,13 @@ pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Outp
             "cached": cached,
             "failed": failed,
             "protocols": by_proto,
+            "pre_attach_resources": pre_resources.len(),
         },
         "navigation": wf.navigation,
         "paint": wf.paint,
         "spans": wf.spans,
         "requests": rows,
+        "pre_attach_resources": pre_resources,
     });
     Ok(Output::new(text, out_json))
 }

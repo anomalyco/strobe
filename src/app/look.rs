@@ -730,15 +730,14 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
 
     let t0_ns = crate::host::now_ns();
     let started = Instant::now();
-    let mut session = wir::Session::attach(target, true, timeout)?;
+    let mut session = wir::Session::attach(target, false, timeout)?;
     let handle = session.page.handle.clone();
     progress(format!("look {handle}"));
 
     let mut problems: Vec<String> = Vec::new();
     let mut raw_console: Vec<wir::ConsoleEntry> = Vec::new();
 
-    // Runtime + Console: Console.enable flushes buffered messages first, then streams live ones.
-    let _ = session.call("Runtime.enable", Value::Null, Duration::from_secs(5));
+    // Console.enable flushes buffered messages first, then streams live ones (Runtime.evaluate needs no Runtime.enable).
     let _ = session.call("Console.enable", Value::Null, Duration::from_secs(5));
     let _ = session.call("Page.enable", Value::Null, Duration::from_secs(5));
 

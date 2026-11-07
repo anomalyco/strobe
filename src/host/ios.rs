@@ -28,8 +28,12 @@ use std::time::{Duration, Instant};
 
 /// A byte stream to the device: a usbmuxd tunnel, or TLS over one. Every service layer (lockdownd,
 /// diagnostics_relay, Web Inspector, os_trace_relay, AFC) reads and writes through it.
-pub trait Io: Read + Write + Send {}
-impl<T: Read + Write + Send> Io for T {}
+pub trait Io: Read + Write + Send {
+    fn shutdown_write(&mut self) {}
+    fn close(&mut self) {}
+}
+
+impl Io for std::io::Empty {}
 
 /// The longest one read or write may block: the device answers in milliseconds, and a phone that
 /// stopped answering must not hang strobe.
@@ -131,6 +135,31 @@ impl Write for Sock {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+impl Io for Sock {
+    fn shutdown_write(&mut self) {
+        match &mut self.stream {
+            Stream::Tcp(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+            #[cfg(unix)]
+            Stream::Unix(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+        }
+    }
+    fn close(&mut self) {
+        match &mut self.stream {
+            Stream::Tcp(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+            #[cfg(unix)]
+            Stream::Unix(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        }
     }
 }
 
@@ -454,9 +483,68 @@ fn tls_config(pair: &PairRecord) -> Result<Arc<ClientConfig>> {
     Ok(Arc::new(cfg))
 }
 
+struct TlsIo {
+    inner: StreamOwned<ClientConnection, Box<dyn Io>>,
+    ctl: Ctl,
+    closed: bool,
+}
+
+impl TlsIo {
+    fn close_clean(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        self.ctl.set(Some(Instant::now() + Duration::from_millis(200)));
+        self.inner.conn.send_close_notify();
+        while self.inner.conn.wants_write() {
+            if self.inner.conn.write_tls(&mut self.inner.sock).is_err() {
+                break;
+            }
+        }
+        let _ = self.inner.sock.flush();
+        self.inner.sock.shutdown_write();
+        // Drain peer close_notify / trailing frame bytes briefly so closing the fd sends FIN, never RST.
+        self.ctl.set(Some(Instant::now() + Duration::from_millis(60)));
+        let mut drain = [0u8; 512];
+        let _ = self.inner.sock.read(&mut drain);
+        self.inner.sock.close();
+    }
+}
+
+impl Read for TlsIo {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Write for TlsIo {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Io for TlsIo {
+    fn shutdown_write(&mut self) {
+        self.inner.sock.shutdown_write();
+    }
+    fn close(&mut self) {
+        self.close_clean();
+    }
+}
+
+impl Drop for TlsIo {
+    fn drop(&mut self) {
+        self.close_clean();
+    }
+}
+
 /// TLS over `stream` with this computer's pairing identity, handshake done. Returns the stream and
 /// the negotiated version and suite.
-fn tls_wrap(stream: Box<dyn Io>, cfg: &Arc<ClientConfig>) -> Result<(Box<dyn Io>, String)> {
+fn tls_wrap(stream: Box<dyn Io>, ctl: Ctl, cfg: &Arc<ClientConfig>) -> Result<(Box<dyn Io>, String)> {
     let name = ServerName::try_from("device").expect("static name");
     let conn = ClientConnection::new(cfg.clone(), name).map_err(|e| Error::msg(format!("TLS: {e}")))?;
     let mut s = StreamOwned::new(conn, stream);
@@ -468,7 +556,7 @@ fn tls_wrap(stream: Box<dyn Io>, cfg: &Arc<ClientConfig>) -> Result<(Box<dyn Io>
     }
     let version = s.conn.protocol_version().map(|v| format!("{v:?}")).unwrap_or_default();
     let suite = s.conn.negotiated_cipher_suite().map(|c| format!("{:?}", c.suite())).unwrap_or_default();
-    Ok((Box::new(s), format!("{version} {suite}")))
+    Ok((Box::new(TlsIo { inner: s, ctl, closed: false }), format!("{version} {suite}")))
 }
 
 // lockdownd
@@ -533,7 +621,7 @@ impl Lockdown {
         self.session = Some((id, cfg.clone()));
         if r.get("EnableSessionSSL").and_then(Value::as_boolean).unwrap_or(false) {
             let plain = std::mem::replace(&mut self.stream, Box::new(std::io::empty()));
-            let (stream, what) = tls_wrap(plain, &cfg).inspect_err(|_| self.session = None)?;
+            let (stream, what) = tls_wrap(plain, self.ctl.clone(), &cfg).inspect_err(|_| self.session = None)?;
             self.stream = stream;
             self.tls = Some(what);
         }
@@ -552,7 +640,7 @@ impl Lockdown {
         let port = r.get("Port").and_then(Value::as_unsigned_integer).and_then(|p| u16::try_from(p).ok()).ok_or_else(|| Error::msg(format!("lockdownd started {name} without a port")))?;
         let (stream, ctl) = mux_connect(&self.device, port, self.deadline)?;
         let (stream, tls) = if r.get("EnableServiceSSL").and_then(Value::as_boolean).unwrap_or(false) {
-            let (stream, what) = tls_wrap(stream, &cfg)?;
+            let (stream, what) = tls_wrap(stream, ctl.clone(), &cfg)?;
             (stream, Some(what))
         } else {
             (stream, None)
@@ -564,11 +652,12 @@ impl Lockdown {
 impl Drop for Lockdown {
     fn drop(&mut self) {
         if let Some((id, _)) = self.session.take() {
-            self.ctl.set(Some(Instant::now() + Duration::from_millis(200)));
+            self.ctl.set(Some(Instant::now() + Duration::from_millis(250)));
             let mut f = Dictionary::new();
             f.insert("SessionID".into(), id.into());
             let _ = self.request("StopSession", f);
         }
+        self.stream.close();
     }
 }
 
@@ -594,6 +683,9 @@ impl Service {
     }
     pub fn recv(&mut self) -> Result<Dictionary> {
         recv_plist(&mut *self.stream)
+    }
+    pub fn close(&mut self) {
+        self.stream.close();
     }
 }
 

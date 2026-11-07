@@ -1686,7 +1686,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "refused": refused,
             "census": census,
             "leaks": { "count": leaks["count"], "self_size": leaks["self_size"], "retained_size": leaks["retained_size"], "classes_total": leaks["classes_total"] },
-            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "device_source": dev_logs.source, "crashes": crashes.len() },
+            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len() },
             "crashes": crashes,
             "timing": "perturbed",
             "created": now_iso(),
@@ -1736,12 +1736,14 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "console": cap.console_count,
             "console_errors": cap.console_errors,
             "device": dev_logs.entries.len(),
+            "observer_dropped": dev_logs.observer_dropped,
             "device_source": dev_logs.source,
             "crashes": crashes.len(),
         },
         "network": {
             "requests": cap.network_requests,
             "bytes": cap.network_bytes,
+            "pre_attach_resources": cap.pre_attach_resources,
         },
         "crashes": crashes,
         "timing": "perturbed",
@@ -1826,12 +1828,16 @@ fn wir_summary(meta: &Value) -> String {
     s += &format!("heap     {} JS heap · {} DOM nodes\n", fmt::value(get("js.heap.used"), "MB"), fmt::value(get("dom.nodes"), "count"));
     let net_reqs = meta["network"]["requests"].as_u64().unwrap_or(0);
     let net_bytes = meta["network"]["bytes"].as_f64().unwrap_or(0.0);
-    s += &format!("network  {net_reqs} requests · {}\n", fmt::bytes(net_bytes));
+    let pre_res = meta["network"]["pre_attach_resources"].as_u64().unwrap_or(0);
+    let pre_note = if net_reqs == 0 && pre_res > 0 { format!(" ({pre_res} resources loaded before attach · query {id} network)") } else { String::new() };
+    s += &format!("network  {net_reqs} requests · {}{pre_note}\n", fmt::bytes(net_bytes));
     let con = meta["logs"]["console"].as_u64().unwrap_or(0);
     let con_err = meta["logs"]["console_errors"].as_u64().unwrap_or(0);
     let dev = meta["logs"]["device"].as_u64().unwrap_or(0);
+    let obs = meta["logs"]["observer_dropped"].as_u64().unwrap_or(0);
+    let obs_note = if obs > 0 { format!(" ({obs} inspector IPC lines dropped)") } else { String::new() };
     let crashes = meta["crashes"].as_array().map_or(0, Vec::len);
-    s += &format!("logs     {con} console ({con_err} errors) · {dev} Safari/WebKit device logs · {crashes} crashes/jetsams\n");
+    s += &format!("logs     {con} console ({con_err} errors) · {dev} Safari/WebKit device logs{obs_note} · {crashes} crashes/jetsams\n");
     for c in meta["crashes"].as_array().into_iter().flatten() {
         s += &format!("! Crash  {}\n", c["summary"].as_str().unwrap_or("crash or jetsam"));
     }

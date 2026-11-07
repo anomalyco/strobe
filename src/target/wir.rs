@@ -39,6 +39,8 @@ pub struct InspectablePage {
     pub title: String,
     pub url: String,
     pub debugger_attached: bool,
+    #[serde(skip)]
+    local_debugger: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +168,7 @@ fn parse_listing(udid: &str, conn_id: &str, app: &AppEntry, listing: &Dictionary
             title,
             url,
             debugger_attached: local_dbg || other_conn,
+            local_debugger: local_dbg,
         });
     }
     out.sort_by_key(|p| p.page_id);
@@ -296,8 +299,9 @@ pub fn list_pages_for_udid(udid: &str, budget: Duration) -> Result<Vec<Inspectab
     let mut l = ios::session_for(&dev, deadline)?;
     let mut svc = start_wir(&mut l)?;
     let conn_id = uuid_v4();
-    let (_, pages) = discover_pages(&mut svc, udid, &conn_id, budget)?;
-    Ok(pages)
+    let res = discover_pages(&mut svc, udid, &conn_id, budget).map(|(_, pages)| pages);
+    svc.close();
+    res
 }
 
 fn format_choices(pages: &[InspectablePage]) -> String {
@@ -438,19 +442,67 @@ pub struct Session {
 impl Session {
     /// Attaches read-only (`WIRAutomaticallyPause = false`) to the page selected by `target` (`wir:[sel]`).
     /// Refuses `DebuggerAttached` if Safari's own Develop inspector or another client holds the page.
+    /// Retries transient USB/webinspectord handoff timeouts across rapid back-to-back invocations.
     pub fn attach(target: &str, diagnostics: bool, timeout: Duration) -> Result<Self> {
         // Ensure Ctrl-C sets strobe's atomic flag so unwinding runs Drop and sends _rpc_forwardDidClose:.
         let _ = host::ctrl_c();
-        let deadline = Some(Instant::now() + timeout);
+        let overall = Instant::now() + timeout;
+        let mut last_err = None;
+        for attempt in 0..5 {
+            if crate::app::stop_requested() {
+                return Err(Error::new(130, "stopped (Ctrl-C or SIGTERM)"));
+            }
+            let left = overall.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let step_budget = left.min(Duration::from_millis(if attempt == 0 { 2500 } else { 3000 }));
+            match Self::attach_once(target, diagnostics, step_budget) {
+                Ok(s) => return Ok(s),
+                Err(e) if e.refusal.is_some() || e.code == 2 || e.code == 130 => return Err(e),
+                Err(e) => {
+                    last_err = Some(e);
+                    if Instant::now() + Duration::from_millis(200) >= overall {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(120));
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::timeout("timed out attaching to Web Inspector on the phone")))
+    }
+
+    fn attach_once(target: &str, diagnostics: bool, step_budget: Duration) -> Result<Self> {
+        let deadline = Some(Instant::now() + step_budget);
         let devices = ios::list(deadline)?;
         let known_udids: Vec<String> = devices.iter().map(|d| d.udid.clone()).collect();
         let (udid_hint, page_sel) = split_selector(target, &known_udids);
         let (mut lockdown, phone) = ios::open_usb(udid_hint, diagnostics, deadline)?;
         let mut svc = start_wir(&mut lockdown)?;
         let conn_id = uuid_v4();
-        let (apps, pages) = discover_pages(&mut svc, &phone.udid, &conn_id, timeout.min(Duration::from_secs(5)))?;
-        let page = choose_page(&pages, &apps, page_sel)?;
+        let (apps, pages) = discover_pages(&mut svc, &phone.udid, &conn_id, step_budget)?;
+        let mut page = choose_page(&pages, &apps, page_sel)?;
+        // If a remote WIRConnectionIdentifierKey is still clearing over XPC from an immediately
+        // preceding detach (within milliseconds), wait up to 600 ms for MobileSafari's updated listing.
+        if page.debugger_attached && !page.local_debugger {
+            let settle_until = Instant::now() + Duration::from_millis(600);
+            while page.debugger_attached && Instant::now() < settle_until {
+                svc.set_deadline(Some(settle_until));
+                let Ok(msg) = svc.recv() else { break };
+                if msg.get("__selector").and_then(Plist::as_string) == Some("_rpc_applicationSentListing:")
+                    && let Some(arg) = msg.get("__argument").and_then(Plist::as_dictionary)
+                    && arg.get("WIRApplicationIdentifierKey").and_then(Plist::as_string) == Some(page.app_id.as_str())
+                    && let Some(listing) = arg.get("WIRListingKey").and_then(Plist::as_dictionary)
+                {
+                    let app = AppEntry { app_id: page.app_id.clone(), bundle_id: page.bundle_id.clone(), name: page.app_name.clone(), pid: page.app_pid, active: page.app_active, proxy: false };
+                    if let Some(updated) = parse_listing(&phone.udid, &conn_id, &app, listing).into_iter().find(|p| p.page_id == page.page_id) {
+                        page = updated;
+                    }
+                }
+            }
+        }
         if page.debugger_attached {
+            svc.close();
             return Err(Error::refused(
                 "DebuggerAttached",
                 format!("{} already has a debugger attached", page.handle),
@@ -466,7 +518,7 @@ impl Session {
         setup.insert("WIRSenderKey".into(), sender_id.as_str().into());
         setup.insert("WIRAutomaticallyPause".into(), false.into());
         setup.insert("WIRMessageDataTypeChunkSupportedKey".into(), 0u64.into());
-        svc.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
+        svc.set_deadline(Some(Instant::now() + Duration::from_secs(3)));
         send_rpc(&mut svc, "_rpc_forwardSocketSetup:", setup)?;
 
         let direct_mode = page.page_type == "WIRTypeWeb";
@@ -490,13 +542,13 @@ impl Session {
         };
 
         if !session.direct_mode {
-            let wait_until = Instant::now() + Duration::from_secs(5);
+            let wait_until = Instant::now() + Duration::from_millis(2500);
             while session.target_id.is_none() {
                 if crate::app::stop_requested() {
                     return Err(Error::new(130, "stopped (Ctrl-C or SIGTERM)"));
                 }
                 if Instant::now() >= wait_until {
-                    return Err(Error::timeout(format!("{} accepted the socket setup, but sent no Target.targetCreated in 5 s", session.page.handle))
+                    return Err(Error::timeout(format!("{} accepted the socket setup, but sent no Target.targetCreated in 2.5 s", session.page.handle))
                         .hint("keep Safari open and unlocked on the phone, and close any other Web Inspector window"));
                 }
                 session.pump_once(wait_until)?;
@@ -692,16 +744,37 @@ impl Session {
             return;
         }
         self.closed = true;
-        if self.disconnected.is_some() {
-            return;
+        if self.disconnected.is_none() {
+            self.svc.set_deadline(Some(Instant::now() + Duration::from_millis(300)));
+            let mut arg = Dictionary::new();
+            arg.insert("WIRConnectionIdentifierKey".into(), self.conn_id.as_str().into());
+            arg.insert("WIRApplicationIdentifierKey".into(), self.page.app_id.as_str().into());
+            arg.insert("WIRPageIdentifierKey".into(), self.page.page_id.into());
+            arg.insert("WIRSenderKey".into(), self.sender_id.as_str().into());
+            if send_rpc(&mut self.svc, "_rpc_forwardDidClose:", arg).is_ok() {
+                // Wait briefly for MobileSafari's updated listing confirming detach before closing TLS.
+                let ack_until = Instant::now() + Duration::from_millis(120);
+                while Instant::now() < ack_until {
+                    self.svc.set_deadline(Some(ack_until));
+                    let Ok(msg) = self.svc.recv() else { break };
+                    if msg.get("__selector").and_then(Plist::as_string) == Some("_rpc_applicationSentListing:")
+                        && let Some(a) = msg.get("__argument").and_then(Plist::as_dictionary)
+                        && a.get("WIRApplicationIdentifierKey").and_then(Plist::as_string) == Some(self.page.app_id.as_str())
+                        && let Some(listing) = a.get("WIRListingKey").and_then(Plist::as_dictionary)
+                    {
+                        let still_ours = listing.iter().any(|(k, v)| {
+                            let Some(d) = v.as_dictionary() else { return false };
+                            let pid = d.get("WIRPageIdentifierKey").and_then(plist_u64).or_else(|| k.parse::<u64>().ok());
+                            pid == Some(self.page.page_id) && d.get("WIRConnectionIdentifierKey").and_then(Plist::as_string) == Some(self.conn_id.as_str())
+                        });
+                        if !still_ours {
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        self.svc.set_deadline(Some(Instant::now() + Duration::from_millis(500)));
-        let mut arg = Dictionary::new();
-        arg.insert("WIRConnectionIdentifierKey".into(), self.conn_id.as_str().into());
-        arg.insert("WIRApplicationIdentifierKey".into(), self.page.app_id.as_str().into());
-        arg.insert("WIRPageIdentifierKey".into(), self.page.page_id.into());
-        arg.insert("WIRSenderKey".into(), self.sender_id.as_str().into());
-        let _ = send_rpc(&mut self.svc, "_rpc_forwardDidClose:", arg);
+        self.svc.close();
     }
 
     fn check_alive(&self) -> Result<()> {

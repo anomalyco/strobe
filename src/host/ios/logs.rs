@@ -50,12 +50,13 @@ impl Allowlist {
     }
 
     /// Whether a process name or bundle identifier belongs to the inspected browser/WebView or WebKit.
+    /// `webinspectord` is excluded here and counted separately as observer noise (`is_observer_noise`).
     pub fn allows_name(&self, raw: &str) -> bool {
         let base = raw.rsplit('/').next().unwrap_or(raw).trim();
         if base.is_empty() {
             return false;
         }
-        if base.starts_with("com.apple.WebKit") || matches!(base, "WebContent" | "WebKit" | "webinspectord") {
+        if base.starts_with("com.apple.WebKit") || matches!(base, "WebContent" | "WebKit") {
             return true;
         }
         if self.safari {
@@ -90,6 +91,27 @@ pub struct DeviceLogs {
     pub source: String,
     pub entries: Vec<DeviceLogEntry>,
     pub dropped: u64,
+    /// Web Inspector relay / message-trace lines dropped in memory so strobe does not log its own IPC.
+    #[serde(default)]
+    pub observer_dropped: u64,
+}
+
+/// Whether a device log line is Web Inspector's own IPC / message-trace observer traffic.
+fn is_observer_noise(process: &str, subsystem: Option<&str>, category: Option<&str>, message: &str) -> bool {
+    if process == "webinspectord" {
+        return true;
+    }
+    if subsystem.is_some_and(|s| s.starts_with("com.apple.WebInspector") || s.starts_with("com.apple.webinspectord")) {
+        return true;
+    }
+    if category == Some("message-trace") {
+        return true;
+    }
+    message.contains("message-trace")
+        || message.contains("_rpc_forwardSocketData:")
+        || message.contains("_rpc_applicationSentData:")
+        || message.contains("WIRSocketDataKey")
+        || message.contains("WIRMessageDataKey")
 }
 
 pub struct LogStream {
@@ -202,8 +224,14 @@ fn ostrace_start(s: &mut Service) -> Result<()> {
     if reply.get("Status").and_then(Value::as_string) == Some("RequestSuccessful") { Ok(()) } else { Err(Error::msg("os_trace_relay StartActivity refused")) }
 }
 
+enum ParsedLog {
+    Keep(DeviceLogEntry),
+    ObserverNoise,
+    Filtered,
+}
+
 fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool) -> DeviceLogs {
-    let mut logs = DeviceLogs { source: "os_trace_relay".into(), entries: Vec::new(), dropped: 0 };
+    let mut logs = DeviceLogs { source: "os_trace_relay".into(), entries: Vec::new(), dropped: 0, observer_dropped: 0 };
     while !stop.load(Ordering::Relaxed) {
         s.set_deadline(Some(Instant::now() + Duration::from_millis(150)));
         let mut tag = [0u8; 1];
@@ -228,21 +256,25 @@ fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBoo
         if s.read_exact(&mut pkt).is_err() {
             break;
         }
-        // Filter in memory BEFORE allocating or retaining non-target log messages.
-        if let Some(entry) = parse_ostrace_entry(&pkt, allow, t0_ns) {
-            if logs.entries.len() < MAX_LOG_ENTRIES {
-                logs.entries.push(entry);
-            } else {
-                logs.dropped += 1;
+        // Filter in memory BEFORE allocating or retaining non-target or observer-noise log messages.
+        match parse_ostrace_entry(&pkt, allow, t0_ns) {
+            ParsedLog::Keep(entry) => {
+                if logs.entries.len() < MAX_LOG_ENTRIES {
+                    logs.entries.push(entry);
+                } else {
+                    logs.dropped += 1;
+                }
             }
+            ParsedLog::ObserverNoise => logs.observer_dropped += 1,
+            ParsedLog::Filtered => {}
         }
     }
     logs
 }
 
-fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> Option<DeviceLogEntry> {
+fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> ParsedLog {
     if pkt.len() < TRACE_HEADER_LEN {
-        return None;
+        return ParsedLog::Filtered;
     }
     let pid = u32::from_le_bytes([pkt[9], pkt[10], pkt[11], pkt[12]]);
     let seconds = u32::from_le_bytes([pkt[55], pkt[56], pkt[57], pkt[58]]) as f64;
@@ -254,21 +286,24 @@ fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> Option<Devi
     let cat_len = u32::from_le_bytes([pkt[121], pkt[122], pkt[123], pkt[124]]) as usize;
 
     let rest = &pkt[TRACE_HEADER_LEN..];
-    let fn_end = rest.iter().position(|&b| b == 0)?;
-    let filename = std::str::from_utf8(&rest[..fn_end]).ok()?;
+    let Some(fn_end) = rest.iter().position(|&b| b == 0) else { return ParsedLog::Filtered };
+    let Ok(filename) = std::str::from_utf8(&rest[..fn_end]) else { return ParsedLog::Filtered };
     let process = filename.rsplit('/').next().unwrap_or(filename);
+    if process == "webinspectord" {
+        return ParsedLog::ObserverNoise;
+    }
     if !allow.allows(Some(pid), process) {
-        return None;
+        return ParsedLog::Filtered;
     }
     let after_fn = &rest[fn_end + 1..];
     if after_fn.len() < image_len.saturating_add(msg_len) {
-        return None;
+        return ParsedLog::Filtered;
     }
     let msg_slice = &after_fn[image_len..image_len + msg_len];
     let msg_trimmed = msg_slice.strip_suffix(&[0]).unwrap_or(msg_slice);
     let message = String::from_utf8_lossy(msg_trimmed).trim().to_string();
     if message.is_empty() {
-        return None;
+        return ParsedLog::Filtered;
     }
     let tail = &after_fn[image_len + msg_len..];
     let (subsystem, category) = if sub_len > 0 && cat_len > 0 && tail.len() >= sub_len.saturating_add(cat_len) {
@@ -278,6 +313,9 @@ fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> Option<Devi
     } else {
         (None, None)
     };
+    if is_observer_noise(process, subsystem.as_deref(), category.as_deref(), &message) {
+        return ParsedLog::ObserverNoise;
+    }
     let level = match level_byte {
         0x11 => "fault",
         0x10 => "error",
@@ -287,11 +325,11 @@ fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64) -> Option<Devi
     }
     .to_string();
     let at_ms = crate::host::now_ns().saturating_sub(t0_ns) as f64 / 1e6;
-    Some(DeviceLogEntry { at_ms, wall_s: Some(seconds + micros * 1e-6), pid: Some(pid), process: process.to_string(), level, subsystem, category, message })
+    ParsedLog::Keep(DeviceLogEntry { at_ms, wall_s: Some(seconds + micros * 1e-6), pid: Some(pid), process: process.to_string(), level, subsystem, category, message })
 }
 
 fn read_syslog(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool) -> DeviceLogs {
-    let mut logs = DeviceLogs { source: "syslog_relay".into(), entries: Vec::new(), dropped: 0 };
+    let mut logs = DeviceLogs { source: "syslog_relay".into(), entries: Vec::new(), dropped: 0, observer_dropped: 0 };
     let mut pending = Vec::new();
     let mut buf = [0u8; 4096];
     while !stop.load(Ordering::Relaxed) {
@@ -306,12 +344,16 @@ fn read_syslog(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool
         while let Some(pos) = pending.iter().position(|&b| b == b'\n' || b == 0) {
             let line_bytes: Vec<u8> = pending.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line_bytes);
-            if let Some(entry) = parse_syslog_line(line.trim_matches(['\0', '\r', '\n', ' ']), allow, t0_ns) {
-                if logs.entries.len() < MAX_LOG_ENTRIES {
-                    logs.entries.push(entry);
-                } else {
-                    logs.dropped += 1;
+            match parse_syslog_line(line.trim_matches(['\0', '\r', '\n', ' ']), allow, t0_ns) {
+                ParsedLog::Keep(entry) => {
+                    if logs.entries.len() < MAX_LOG_ENTRIES {
+                        logs.entries.push(entry);
+                    } else {
+                        logs.dropped += 1;
+                    }
                 }
+                ParsedLog::ObserverNoise => logs.observer_dropped += 1,
+                ParsedLog::Filtered => {}
             }
         }
         if pending.len() > 64 * 1024 {
@@ -322,19 +364,19 @@ fn read_syslog(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool
 }
 
 /// Parses `Nov  8 06:15:02 Device ProcessName[512] <Notice>: message`, filtering in memory first.
-fn parse_syslog_line(line: &str, allow: &Allowlist, t0_ns: u64) -> Option<DeviceLogEntry> {
+fn parse_syslog_line(line: &str, allow: &Allowlist, t0_ns: u64) -> ParsedLog {
     if line.len() < 16 {
-        return None;
+        return ParsedLog::Filtered;
     }
     // Skip `Mon DD HH:MM:SS <host> ` (4 space-separated tokens after the 15-char timestamp).
-    let rest = line.get(16..)?.trim_start();
-    let (_, after_host) = rest.split_once(' ')?;
+    let Some(rest) = line.get(16..).map(str::trim_start) else { return ParsedLog::Filtered };
+    let Some((_, after_host)) = rest.split_once(' ') else { return ParsedLog::Filtered };
     let after_host = after_host.trim_start();
-    let colon = after_host.find(": ")?;
+    let Some(colon) = after_host.find(": ") else { return ParsedLog::Filtered };
     let head = &after_host[..colon];
     let message = after_host[colon + 2..].trim();
     if message.is_empty() {
-        return None;
+        return ParsedLog::Filtered;
     }
     let (proc_part, level_part) = match head.split_once(' ') {
         Some((p, l)) => (p, l.trim_matches(['<', '>'])),
@@ -346,8 +388,14 @@ fn parse_syslog_line(line: &str, allow: &Allowlist, t0_ns: u64) -> Option<Device
     };
     // Often `MobileSafari(WebKit)[512]`: strip library suffix in parens for the process check.
     let base_proc = process.split('(').next().unwrap_or(process);
+    if base_proc == "webinspectord" {
+        return ParsedLog::ObserverNoise;
+    }
     if !allow.allows(pid, base_proc) {
-        return None;
+        return ParsedLog::Filtered;
+    }
+    if is_observer_noise(base_proc, None, None, message) {
+        return ParsedLog::ObserverNoise;
     }
     let level = match level_part.to_ascii_lowercase().as_str() {
         "fault" | "emergency" | "alert" | "critical" => "fault",
@@ -359,7 +407,7 @@ fn parse_syslog_line(line: &str, allow: &Allowlist, t0_ns: u64) -> Option<Device
     }
     .to_string();
     let at_ms = crate::host::now_ns().saturating_sub(t0_ns) as f64 / 1e6;
-    Some(DeviceLogEntry { at_ms, wall_s: None, pid, process: base_proc.to_string(), level, subsystem: None, category: None, message: message.to_string() })
+    ParsedLog::Keep(DeviceLogEntry { at_ms, wall_s: None, pid, process: base_proc.to_string(), level, subsystem: None, category: None, message: message.to_string() })
 }
 
 // Strictly read-only AFC client for com.apple.crashreportcopymobile.
