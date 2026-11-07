@@ -19,6 +19,14 @@ pub const VIEWS: [&str; 9] = ["hotspots", "alloc", "layout", "style", "threads",
 pub const ATTRIBUTION_PARTS: [Part; 3] = [Part::Layout, Part::Gc, Part::LongTasks];
 
 pub fn run(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize) -> Result<Output> {
+    let wir_dev = |r: &Rec| (r.meta["wir"] == true).then(|| r.meta["phone"]["model"].as_str().unwrap_or("ios").to_string());
+    if wir_dev(a) != wir_dev(b) {
+        let desc = |r: &Rec| match wir_dev(r) {
+            Some(m) => format!("{} on iOS Web Inspector ({m})", r.id),
+            None => format!("{} on {}", r.id, r.meta["engine"].as_str().unwrap_or("desktop")),
+        };
+        return Err(not_comparable(&format!("{} and {}", desc(a), desc(b)), view, &[&a.id, &b.id]));
+    }
     if let (Some(x), Some(y)) = (implementation(a), implementation(b))
         && x.0 != y.0
     {

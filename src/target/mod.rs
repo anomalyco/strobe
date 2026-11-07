@@ -19,3 +19,4 @@ pub mod web;
 pub mod webdriver;
 pub mod webkit;
 pub mod webview;
+pub mod wir;

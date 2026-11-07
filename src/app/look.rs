@@ -392,8 +392,13 @@ fn terminal(args: &Args, line: &str) -> Result<Output> {
 }
 
 pub fn run(args: &Args) -> Result<Output> {
-    let target =
-        args.pos.first().ok_or_else(|| Error::usage("look needs a page or an app: strobe look <url | file | app:<id> | exe:<path> | tty:<command>> [--until <css>] [--wait 2s] [--out shot.png]"))?;
+    let target = args
+        .pos
+        .first()
+        .ok_or_else(|| Error::usage("look needs a page or an app: strobe look <url | file | wir:[sel] | app:<id> | exe:<path> | tty:<command>> [--until <css>] [--wait 2s] [--out shot.png]"))?;
+    if target == "wir" || target.starts_with("wir:") {
+        return ios_wir(args, target);
+    }
     if target.starts_with("app:") || target.starts_with("exe:") {
         return native(args, target);
     }
@@ -601,4 +606,297 @@ pub fn run(args: &Args) -> Result<Output> {
     drop(stop);
     browser.close();
     result
+}
+
+/// Pure, side-effect-free selector matcher and screen reader evaluated in an attached iOS Safari tab:
+/// leaves no globals on `window`, patches no DOM methods, and never scrolls the user's viewport.
+const WIR_READ_SCRIPT: &str = r#"((max, chars, elSpec) => {
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (el.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ?? true) }
+  const implicit = (el) => {
+    const type = (el.getAttribute("type") ?? "").toLowerCase()
+    switch (el.localName) {
+      case "a": case "area": return el.hasAttribute("href") ? "link" : ""
+      case "button": case "summary": return "button"
+      case "input": return { button: "button", submit: "button", reset: "button", image: "button", checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox" }[type]
+        ?? (["hidden", "file", "color", "date", "datetime-local", "month", "time", "week"].includes(type) ? "" : "textbox")
+      case "textarea": return "textbox"
+      case "select": return el.multiple || el.size > 1 ? "listbox" : "combobox"
+      case "option": return "option"
+      case "h1": case "h2": case "h3": case "h4": case "h5": case "h6": return "heading"
+      case "img": return el.getAttribute("alt") === "" ? "presentation" : "img"
+      case "ul": case "ol": case "menu": return "list"
+      case "li": return "listitem"
+      case "nav": return "navigation"
+      case "main": return "main"
+      case "aside": return "complementary"
+      case "header": return "banner"
+      case "footer": return "contentinfo"
+      case "dialog": return "dialog"
+      case "table": return "table"
+      case "tr": return "row"
+      case "td": return "cell"
+      case "th": return "columnheader"
+      case "progress": return "progressbar"
+      case "hr": return "separator"
+      case "form": return "form"
+      case "article": return "article"
+      case "output": return "status"
+    }
+    return ""
+  }
+  const alias = { image: "img", edit: "textbox" }
+  const roleOf = (el) => (el.getAttribute("role") ?? "").trim().split(/\s+/)[0].toLowerCase() || implicit(el)
+  const isRole = (el, want) => { const r = roleOf(el), w = alias[want] ?? want; return r === w || (w === "textbox" && r === "searchbox") }
+  const has = (el, t, exact) => t == null || [el.textContent ?? "", el.getAttribute("aria-label") ?? "", typeof el.value === "string" ? el.value : ""].some((x) => (exact ? x.trim() === t.trim() : x.includes(t)))
+  const up = (el) => el.parentElement ?? el.getRootNode().host ?? null
+  const query = (root, [first, ...rest]) => {
+    const found = [...root.querySelectorAll(first)]
+    return rest.length ? found.flatMap((h) => (h.shadowRoot ? query(h.shadowRoot, rest) : [])) : found
+  }
+  const deepAll = (root, out) => { for (const el of root.querySelectorAll("*")) { out.push(el); if (el.shadowRoot) deepAll(el.shadowRoot, out) } return out }
+  const find = (q) => {
+    const all = q.css == null || q.css === "*" ? deepAll(document, []) : query(document, q.css.split(">>>").map((p) => p.trim()))
+    const found = all.filter((el) => (q.role == null || isRole(el, q.role)) && (!q.focus || el.matches(":focus")) && has(el, q.text, q.exact) && visible(el))
+    if (!found.length) return null
+    if (q.text != null) {
+      const outer = new Set()
+      for (const el of found) for (let p = up(el); p && !outer.has(p); p = up(p)) outer.add(p)
+      const inner = found.filter((el) => !outer.has(el))
+      return inner.at(q.index ?? 0) ?? null
+    }
+    return found.at(q.index ?? 0) ?? null
+  }
+  const text = (e) => (e.getAttribute("aria-label") || e.innerText || e.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80)
+  const out = []
+  for (const d of document.querySelectorAll("dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true]"))
+    if (visible(d)) out.push(text(d.querySelector("h1, h2, h3, [role=heading]") ?? d))
+  for (const h of document.querySelectorAll("h1, h2, [role=heading]"))
+    if (Number(h.getAttribute("aria-level") ?? (h.localName === "h1" ? 1 : 2)) <= 2 && visible(h)) out.push(text(h))
+  const body = chars > 0 ? (document.body?.innerText ?? "").replace(/\n{3,}/g, "\n\n").trim() : ""
+  let box = null
+  if (elSpec) {
+    const el = find(elSpec)
+    if (el) { const r = el.getBoundingClientRect(); box = [r.left + scrollX, r.top + scrollY, r.width, r.height] }
+  }
+  const de = document.documentElement
+  return JSON.stringify({
+    title: document.title,
+    url: location.href,
+    ready: document.readyState,
+    viewport: [Math.round(innerWidth), Math.round(innerHeight)],
+    dpr: devicePixelRatio || 1,
+    doc: [Math.round(Math.max(de?.scrollWidth ?? 0, innerWidth)), Math.round(Math.max(de?.scrollHeight ?? 0, innerHeight))],
+    headings: [...new Set(out.filter(Boolean))].slice(0, max),
+    text: body.slice(0, chars),
+    chars: body.length,
+    box,
+  })
+})"#;
+
+/// `strobe look wir:[selector]`: strictly read-only snapshot of an open iOS Safari tab or WKWebView over
+/// USB. Reads title, URL, headings, buffered and live console messages, visible text, and a PNG via
+/// `Page.snapshotRect`; never navigates, reloads, scrolls or mutates the page, and always detaches cleanly.
+fn ios_wir(args: &Args, target: &str) -> Result<Output> {
+    use crate::host::ios::logs::{redact_text, scrub_url};
+    use crate::target::wir;
+
+    for bad in ["size", "scale", "headed"] {
+        if args.has(bad) {
+            return Err(Error::usage(format!("--{bad} sizes a desktop browser's window; look wir: reads the phone's own Safari tab")));
+        }
+    }
+    if args.has("mobile") {
+        return Err(Error::usage("--mobile opens a page in Chrome on an Android phone; wir: reads an open Safari tab on an iPhone"));
+    }
+    for bad in ["type", "press"] {
+        if args.has(bad) {
+            return Err(Error::usage(format!("--{bad} sends input; look wir: is strictly read-only")));
+        }
+    }
+    for bad in ["keys", "build", "app", "home", "wayland"] {
+        if args.has(bad) {
+            return Err(Error::usage(format!("--{bad} is for a native app (look app:<id> or exe:<path>), not wir:")));
+        }
+    }
+    if args.has("full") && args.has("element") {
+        return Err(Error::usage("--full shoots the whole page and --element one element of it: give one"));
+    }
+
+    let wait_ms = args.get("wait").map(duration_ms).transpose()?.unwrap_or(200);
+    let chars = args.num("chars")?.unwrap_or(4000.0).max(0.0) as usize;
+    let timeout = Duration::from_millis(args.get("timeout").map(duration_ms).transpose()?.unwrap_or(15_000));
+    let until_sel = args.get("until").map(|s| Selector::parse(&Value::String(s.to_string()), Dialect::Page)).transpose()?;
+    let elem_sel = args.get("element").map(|s| Selector::parse(&Value::String(s.to_string()), Dialect::Page)).transpose()?;
+
+    let t0_ns = crate::host::now_ns();
+    let started = Instant::now();
+    let mut session = wir::Session::attach(target, true, timeout)?;
+    let handle = session.page.handle.clone();
+    progress(format!("look {handle}"));
+
+    let mut problems: Vec<String> = Vec::new();
+    let mut raw_console: Vec<wir::ConsoleEntry> = Vec::new();
+
+    // Runtime + Console: Console.enable flushes buffered messages first, then streams live ones.
+    let _ = session.call("Runtime.enable", Value::Null, Duration::from_secs(5));
+    let _ = session.call("Console.enable", Value::Null, Duration::from_secs(5));
+    let _ = session.call("Page.enable", Value::Null, Duration::from_secs(5));
+
+    if let Some(sel) = &until_sel {
+        let deadline = Instant::now() + timeout;
+        let check_expr = format!("JSON.parse({WIR_READ_SCRIPT}(0, 0, {})).box !== null", sel.page_spec());
+        let mut matched = false;
+        while Instant::now() < deadline {
+            if session.eval(&check_expr, Duration::from_secs(5))? == Value::Bool(true) {
+                matched = true;
+                break;
+            }
+            session.pump_for(Duration::from_millis(100))?;
+        }
+        if !matched {
+            problems.push(format!("{:?} never showed in {} s", sel.source, timeout.as_secs()));
+        }
+    }
+
+    if wait_ms > 0 {
+        session.pump_for(Duration::from_millis(wait_ms))?;
+    }
+
+    let read_expr = format!("{WIR_READ_SCRIPT}(6, {chars}, {})", elem_sel.as_ref().map_or_else(|| "null".to_string(), |s| s.page_spec().to_string()));
+    let info_raw = session.eval(&read_expr, Duration::from_secs(10))?;
+    let info: Value = info_raw.as_str().and_then(|s| serde_json::from_str(s).ok()).ok_or_else(|| Error::msg("the Safari tab's screen did not read"))?;
+    let attach_ms = started.elapsed().as_secs_f64() * 1e3;
+
+    let vp_w = info["viewport"][0].as_i64().unwrap_or(390).max(1);
+    let vp_h = info["viewport"][1].as_i64().unwrap_or(844).max(1);
+    let dpr = info["dpr"].as_f64().unwrap_or(1.0);
+    let doc_w = info["doc"][0].as_i64().unwrap_or(vp_w).max(1);
+    let doc_h = info["doc"][1].as_i64().unwrap_or(vp_h).clamp(1, 16_384);
+
+    let (sx, sy, sw, sh, coord, clip) = if let Some(sel) = &elem_sel {
+        match info["box"].as_array() {
+            Some(b) if b.len() == 4 => {
+                let (x, y, w, h) = (b[0].as_f64().unwrap_or(0.0), b[1].as_f64().unwrap_or(0.0), b[2].as_f64().unwrap_or(0.0), b[3].as_f64().unwrap_or(0.0));
+                if w < 1.0 || h < 1.0 {
+                    return Err(Error::usage(format!("--element {:?}: the element has no size to show (0×0)", sel.source)));
+                }
+                (x.floor() as i64, y.floor() as i64, w.ceil() as i64, h.ceil() as i64, "Page", Some(json!({ "x": x, "y": y, "width": w, "height": h })))
+            }
+            _ => {
+                return Err(Error::usage(format!("--element {:?}: no visible element matches it", sel.source))
+                    .hint(format!("strobe look {handle} lists the headings and text; a selector is CSS, then role=, text=, index=")));
+            }
+        }
+    } else if args.has("full") {
+        (0, 0, doc_w, doc_h, "Page", None)
+    } else {
+        (0, 0, vp_w, vp_h, "Viewport", None)
+    };
+
+    let png_bytes = session.snapshot_rect(sx, sy, sw, sh, coord, Duration::from_secs(15))?;
+    let events = session.drain_events();
+    wir::collect_console_events(&events, t0_ns, &mut raw_console);
+    let phone_meta = json!({
+        "platform": "ios",
+        "udid": session.phone.udid,
+        "short_udid": crate::host::ios::short_udid(&session.phone.udid),
+        "model": session.phone.product_type,
+        "ios": session.phone.ios,
+        "app": session.page.app_name,
+        "bundle_id": session.page.bundle_id,
+        "page_id": session.page.page_id,
+        "handle": handle,
+        "transport": "usb",
+        "battery": session.phone.battery,
+        "screen": { "viewport": [vp_w, vp_h], "dpr": dpr },
+    });
+    // Detach immediately so attached time on the developer's phone stays minimal.
+    session.close();
+
+    let out_path: PathBuf = match args.get("out") {
+        Some(p) => PathBuf::from(p),
+        None => crate::host::paths::run().join(format!("look-{}.png", crate::host::now_ns())),
+    };
+    if let Some(dir) = out_path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::store::write_atomic(&out_path, &png_bytes)?;
+
+    let url = scrub_url(info["url"].as_str().unwrap_or(&session.page.url), false);
+    let title = info["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(no title)");
+    let console: Vec<Value> = raw_console
+        .iter()
+        .map(|c| {
+            let loc = match (&c.url, c.line) {
+                (Some(u), Some(l)) => format!("{}:{l}", scrub_url(u, false)),
+                (Some(u), None) => scrub_url(u, false),
+                _ => String::new(),
+            };
+            json!({
+                "level": c.level,
+                "source": c.source,
+                "text": redact_text(&c.text, false),
+                "where": loc,
+                "repeat": c.repeat_count,
+            })
+        })
+        .collect();
+    let errors = console.iter().filter(|c| matches!(c["level"].as_str(), Some("error" | "exception"))).count();
+
+    let model_label = phone_meta["model"].as_str().unwrap_or("iPhone");
+    let ios_label = phone_meta["ios"].as_str().map(|v| format!("iOS {v}")).unwrap_or_else(|| "iOS".into());
+    let mut text = format!("{title} · {url}\n");
+    text += &format!("page     {handle} · {} · {vp_w}×{vp_h} @{dpr}x · {model_label} · {ios_label} · read in {}\n", info["ready"].as_str().unwrap_or("?"), fmt::value(attach_ms, "ms"));
+    for p in &problems {
+        text += &format!("!        {p}\n");
+    }
+    let headings: Vec<&str> = info["headings"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    for (i, h) in headings.iter().enumerate() {
+        text += &format!("{}{h}\n", if i == 0 { "headings " } else { "         " });
+    }
+    if headings.is_empty() {
+        text += "headings none: the page shows no open dialog, h1, h2 or level 1-2 role=heading\n";
+    }
+    text += &format!("console  {} messages, {errors} errors\n", console.len());
+    for c in console.iter().take(20) {
+        let at = c["where"].as_str().filter(|w| !w.is_empty()).map(|w| format!("  ({w})")).unwrap_or_default();
+        let rep = c["repeat"].as_u64().filter(|&r| r > 1).map(|r| format!(" ×{r}")).unwrap_or_default();
+        text += &format!("  {:<10}{}{rep}{at}\n", c["level"].as_str().unwrap_or(""), c["text"].as_str().unwrap_or("").lines().next().unwrap_or(""));
+    }
+    if console.len() > 20 {
+        text += &format!("  … {} more (--json lists them all)\n", console.len() - 20);
+    }
+    let body = redact_text(info["text"].as_str().unwrap_or(""), false);
+    let total = info["chars"].as_u64().unwrap_or(0);
+    text += &format!("text     {total} characters{}\n", if (total as usize) > body.len() { format!(", the first {} (--chars N for more)", body.chars().count()) } else { String::new() });
+    for l in body.lines() {
+        text += &format!("  {l}\n");
+    }
+    text += &format!(
+        "shot     {}{}\n",
+        out_path.display(),
+        clip.as_ref().map(|c| format!(" ({} only, {:.0}×{:.0})", args.get("element").unwrap_or(""), c["width"].as_f64().unwrap_or(0.0), c["height"].as_f64().unwrap_or(0.0))).unwrap_or_default()
+    );
+
+    let json = json!({
+        "target": handle,
+        "url": url,
+        "title": info["title"],
+        "attach_ms": attach_ms,
+        "ready": info["ready"],
+        "problems": problems,
+        "headings": info["headings"],
+        "console": console,
+        "errors": errors,
+        "text": body,
+        "chars": total,
+        "screenshot": out_path,
+        "clip": clip,
+        "phone": phone_meta,
+    });
+    let mut o = Output::new(text, json);
+    if !problems.is_empty() {
+        o.code = 124;
+    }
+    Ok(o)
 }

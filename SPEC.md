@@ -202,7 +202,8 @@ app/            commands (up, status, record, bench, query, report, top, update,
 model/          plain data: Target, Probe, Recording, Run, Metric, Verdict, Env, Validity
 target/         finding and driving targets → chromium.rs (CDP), firefox.rs and bidi.rs (WebDriver
                 BiDi), webkit.rs and webdriver.rs (WebDriver Classic), web.rs (a page in any engine:
-                the WebBrowser and WebPage enums every page caller drives), bridge.rs, inspector.rs,
+                the WebBrowser and WebPage enums every page caller drives), wir.rs (an open Safari tab
+                or WKWebView on a USB-cabled iPhone over Web Inspector, §13.1), bridge.rs, inspector.rs,
                 process.rs, isolate.rs (isolated launches), electron.rs, android_chrome.rs (Chrome on a
                 phone over adb, 13.1), webview.rs (apps on the OS's
                 webview, §13.8), native.rs (native apps, §13.7), a11y/ (the OS accessibility client: uia.rs, ax.rs, atspi.rs; input:
@@ -213,7 +214,9 @@ driver/         the bench file's `page`: over CDP, or a native app's accessibili
                 message loop (native.rs), or a terminal's bytes (tty.rs)
 font.rs         the embedded font every drawn image uses (cards, badges, terminal snapshots)
 probe/          collecting → trace.rs, cpu.rs, alloc.rs, heap.rs, symbols.rs (source maps),
-                census.rs, gecko.rs (Firefox's profiler and about:memory), coverage.rs, os/{windows,linux,macos}.rs, gpu/{pdh,nvml,d3dkmt,drm,ioreport}.rs,
+                census.rs, gecko.rs (Firefox's profiler and about:memory), webkit_inspector.rs
+                (WebKit Inspector Timeline, ScriptProfiler, Heap v3 → V8 heapsnapshot, Memory and
+                Network over wir), coverage.rs, os/{windows,linux,macos}.rs, gpu/{pdh,nvml,d3dkmt,drm,ioreport}.rs,
                 stacks.rs (native stacks: `Deep`, one sampler per OS: kernel_profile.rs in the helper,
                 suspend.rs on Windows, perf.rs on Linux, sample.rs on macOS), etw.rs (ETW sessions),
                 helper.rs (the deep-mode helper, §13.4), present/ (what reached the screen, §7.2:
@@ -380,19 +383,21 @@ engine, attachable targets (running apps and their bridge state, CDP endpoints f
 `DevToolsActivePort` files, installed apps), recordings disk use, last calibration.
 `--calibrate` runs the full calibration (§10.3).
 
-iOS devices (`ios` row, `ios.devices` in JSON): every phone the OS's usbmuxd sees, read beside the
-idle-load sample within 1.5 s for all of them (`--fast`: 250 ms, without the temperature): model
-(`ProductType`), iOS version, link (USB, Wi-Fi or both), battery level and charging (lockdownd's
-battery domain), battery temperature (diagnostics_relay's `IOPMPowerSource`, kept only between 0
-and 100 °C), and locked (on the lock screen with a passcode). A phone only on Wi-Fi is listed, not
-read. Never the phone's name: a personal phone's name is its owner's. The JSON carries the full
-UDID, to select the phone as a target; the text prints its last 8 characters (a current UDID's
-first 8 are the chip id, the same for every phone of a model). No usbmuxd (Windows without Apple
-Mobile Device Service, Linux without the usbmuxd package) is information, not a problem; Linux's
-usbmuxd runs only while a phone is plugged in, so an installed one without a socket reads as no
-phone. strobe reads with the trust the user already gave this computer (the
-pair record usbmuxd keeps) and is read-only toward the phone: it never pairs, sets a value or
-installs anything; an untrusted phone says to unlock it and tap Trust.
+iOS devices (`ios` row, `ios.devices` and `ios.pages` in JSON): every phone the OS's usbmuxd sees,
+read beside the idle-load sample within 1.5 s for all of them (`--fast`: 250 ms, without the
+temperature or page listing): model (`ProductType`), iOS version, link (USB, Wi-Fi or both), battery
+level and charging (lockdownd's battery domain), battery temperature (diagnostics_relay's
+`AppleSmartBatteryPack` `BatteryData` on iOS 27+, falling back to `IOPMPowerSource` on earlier iOS,
+kept only between 0 and 100 °C), locked (on the lock screen with a passcode), and on an unlocked USB
+phone its inspectable Web Inspector pages (`wir:<short_udid>/safari/<page_id>`, with scrubbed URL,
+title and whether another debugger is attached). A phone only on Wi-Fi is listed, not read. Never the
+phone's name: a personal phone's name is its owner's. The JSON carries the full UDID, to select the
+phone as a target; the text prints its last 8 characters (a current UDID's first 8 are the chip id,
+the same for every phone of a model). No usbmuxd (Windows without Apple Mobile Device Service, Linux
+without the usbmuxd package) is information, not a problem; Linux's usbmuxd runs only while a phone is
+plugged in, so an installed one without a socket reads as no phone. strobe reads with the trust the
+user already gave this computer (the pair record usbmuxd keeps) and is read-only toward the phone: it
+never pairs, sets a value or installs anything; an untrusted phone says to unlock it and tap Trust.
 
 Android devices (`android` row, `android.devices` in JSON; `strobe up` lists them too): every device
 of an adb server that runs (status starts none: "no adb server runs" is information), each read in
@@ -4770,6 +4775,49 @@ Wi-Fi adb, a channel given to strobe, its touch slop and timing) is designed, no
 - `strobe leave` also removes the lock files (`/data/local/tmp/.strobe-phone.lock` and `.json`) from
   each attached device of a running adb server where no strobe holds the lock.
 
+**Safari on an iPhone over Web Inspector** (`wir:[<selector>]`, `target::wir`, `probe::webkit_inspector`,
+`host::ios::logs`). Strictly read-only toward the phone (a developer's own personal iPhone over a USB
+cable, with Settings › Apps › Safari › Advanced › Web Inspector on): strobe never navigates, reloads,
+closes or changes a tab, never pauses the page (`WIRAutomaticallyPause = false`, and an already paused
+target is resumed), never pairs or writes to the phone, and never prints the phone's personal name.
+
+- Target selection (`wir:`, `wir:<page>`, `wir:<app>/<page>`, `wir:<udid>/<app>/<page>`, or
+  `wir:<url-or-title-substring>`): binds the USB entry (`WirelessTransport` on Wi-Fi-only, `DeviceAsleep`
+  while locked), discovers connected inspectable apps and web pages over `com.apple.webinspector`
+  (4-byte BE binary plists), refuses `DebuggerAttached` when `WIRHasLocalDebuggerKey` or another
+  debugger's `WIRConnectionIdentifierKey` holds the tab, and refuses bare `wir:` when multiple
+  non-blank tabs are open rather than guess on a personal phone. Commands wrap in
+  `Target.sendMessageToTarget` (at most 8 in flight, following `Target.didCommitProvisionalTarget`)
+  using native WebKit Inspector methods only, and detach always sends `_rpc_forwardDidClose:` (on
+  `Drop` and Ctrl-C too).
+- `strobe look wir:[<selector>]`: side-effect-free read of title, scrubbed URL, headings, buffered and
+  live `Console` messages, `innerText`, and a PNG from `Page.snapshotRect` (`Viewport`, or `Page` for
+  `--full` and `--element` without scrolling the user's viewport); detaches immediately after the shot.
+- `strobe record wir:[<selector>] [--for 10s]`: attribution capture (`Timeline`, `ScriptProfiler`,
+  `Memory`, `Heap`, `Network`, `Console`), always marked `timing: "perturbed"` and device-tagged (a
+  diff against a desktop or another device model refuses `NotComparable`):
+  - `ScriptProfiler` stack traces and turns become `cpu-0.cpuprofile` with source maps fetched via
+    `Page.getResourceTree` and `Network.loadResource` (`query hotspots`).
+  - `Timeline` (`RecalculateStyles`, `Layout`, `Paint`, `Composite`, caller `stackTrace`s) and
+    `Heap.garbageCollected` populate `webkit.json` (`query layout`, `query gc`, `query summary`,
+    `query insights`, and Perfetto tracks in `strobe open`).
+  - `Heap.snapshot` converts WebKit's version-3 snapshot into V8's `.heapsnapshot.gz` (`0600`
+    owner-only) for `query heap` and (`--probes memory` S0/S1/S2) `query leaks`; `Memory.trackingUpdate`
+    categories feed `query memory`.
+  - `Network` events plus `Runtime` Navigation, Paint and `performance.measure` spans write owner-only
+    `network.json.gz` (`query <rec> network [--reveal]`), never re-fetching URLs and keeping no headers.
+  - Device logs (`com.apple.os_trace_relay` with `PidList` + `StartActivity`, fallback
+    `com.apple.syslog_relay`) and crash/jetsam `.ips` reports in `[t0 - 2s, t1 + 5s]`
+    (`com.apple.crashreportmover` + strictly read-only AFC `com.apple.crashreportcopymobile`, no remove
+    or write opcode in the binary) filter in memory through an allowlist (`MobileSafari` +
+    `com.apple.WebKit.*` for Safari; the host app + `com.apple.WebKit.*` for a WKWebView) before
+    writing owner-only `device-log.json.gz` and `crashes.json.gz`. Apple's `<private>` stays as is;
+    `Cookie`, `Authorization`, `Bearer` tokens and secret query parameters are scrubbed unless
+    `--reveal` (`query <rec> log [--source console|device|crash] [--reveal]`). Crashes and WebContent
+    jetsams flag in `summary` and `insights`.
+  - Refused on `wir:`: `cpu.*`, `ui.*`, `gpu.*`, `memory.app.private` (`NotOnThisOs`) and `frames.*`
+    (`EngineUnsupported`).
+
 **Other engines.** A page target runs in one engine (`model::WebEngine`): Chromium over CDP (the
 default), Firefox over WebDriver BiDi, WebKit over WebDriver Classic (refused `EngineUnsupported` on
 Windows for good, where no WebKit browser runs for people). Every page caller (`driver`, `validity`, a block)
@@ -6273,13 +6321,13 @@ code is and where it chose differently, so nobody reads a promise as a feature.
 | anchors | image anchors and pixel waits (§9.6): image locators, `{ pixels }` waits, `page.query({ image })`, `expect.visible` and native launch `until` images, `resetPixels`, `look --until image=`, pixel proofs for `interaction.*` (§7.4), `driver.pixel_*`, `pixel_pct`, `AnchorNotFound`, `AnchorAmbiguous`, `SessionLocked` for points and images; `host::capture` on Windows.Graphics.Capture, macOS `CGWindowListCreateImage`, X11 `GetImage`, the headless Wayland compositor's copy; `--check` judging the pixel overhead. Checked with `scripts/dev/canvas.bench.ts` (`--check`): on adais locked with a GDI-drawn window: tiles found, @2x 0.950 and @1.5x 0.955, two ITEM tiles at 0.996 refused ambiguous (`look`), a lookalike refused by its colours, clicks at points and images refused `SessionLocked` before any read to aim, key reactions proved by `changed` in 2 reads and 4.6 ms a run at 0.56% of a core (a stable wait sleeping on frame events; 2.7% before), page queries 2.4% (40 to 65% before captures were closed between cases), a reset that left a bar refused by `resetPixels`; on vps with a GTK window painted from an image, on Xvfb and on the headless Wayland compositor, and headless Chromium on a canvas page: the same outcomes, XTest clicks counted, @2x 0.995 and @1.5x 0.997 on both displays, `changed` 2 reads and 6.5 ms a run on X11, 19 ms on Wayland, `interaction.*` refused `NoPresentSource` on Xvfb and `Headless` on Wayland and headless pages; on air (clippy natively, a Cocoa window built with swiftc): the same outcomes, and `interaction.p50` 67 ms from a pixel proof matched to ScreenCaptureKit's frame once a capture counts up to a refresh before the display (it was unshown before), refused `OverheadBudget` at 5.9% of a core (20 ms a read) | a page's launch timed to an image (refused `NotForTarget`); `interaction.*` from a pixel proof under the 2% budget on macOS; a headed page's window read inside timed runs (calibrated or checked viewport placement); X11 with a compositor (its copy of a window may precede the screen, as macOS's does); one `image` failure on air (two bars from no input of the case's, while another session's OS-input bench ran there) did not recur in 4 runs |
 | webview | apps on the OS's webview (§13.8): `kind: "webview"` profiles, `webview()` bench targets, `record app:<id>`; Windows WebView2 attached over CDP through its environment variables (checked on adais, locked, with a release Tauri v2 app: launch, the user's own WEBVIEW2_* removed, strobe's arguments beside the app's, browser pid in the process set, page eval, trace, CPU and memory over the app and its WebView2 processes, attribution and memory recordings, WebView2's GPU caches kept per executable, closing in 5 s instead of 11.5 s for a 1 s recording); Linux and macOS refused `EngineUnsupported` before anything launches (vps) | WebKit drivers (the WebKitGTK inspector route is checked, §13.8); on an unlocked Windows session: frames, input latency, window sizing to `viewport` and a `bench --check` of a `webview()` target; the override refusal against a real WebView2 policy; `look` of a webview profile reads its accessibility tree, not its page |
 | 6 | Windows: the deep helper (§13.4), OS present events (`record pid:|proc:`, `--os-frames`), native stacks and PDB symbols (`hotspots`, insights, reports) | context switches, core residency, symbols.electronjs.org; Linux perf stacks and macOS `sample` stacks with DWARF symbols are built (§13.4) |
-| ios | `host/ios.rs` (§5.4): usbmuxd (`/var/run/usbmuxd`, Windows 127.0.0.1:27015, `USBMUXD_SOCKET_ADDRESS`), `ListDevices`, `ReadPairRecord`, `Connect`; lockdownd `QueryType`, `GetValue`, `StartSession` with mutual TLS (rustls over a minimal in-tree crypto provider on the RustCrypto crates, `host/ios/tls.rs`: AES-GCM, X25519 and P-256, RSA; the device pinned by the pair record's DeviceCertificate SubjectPublicKeyInfo), `StartService` with `EnableServiceSSL`; diagnostics_relay `IORegistry` of `IOPMPowerSource`; one deadline over every read and write; the `status` row. Checked: builds and clippy on Windows, macOS and Linux; `ListDevices` on air with no phone returns an empty list; adais without Apple Mobile Device Service reports no usbmuxd; vps without usbmuxd says so; against a stand-in usbmuxd, lockdownd and diagnostics_relay on Node's TLS (OpenSSL) on adais: TLS 1.3 and 1.2, AES-128 and AES-256, X25519 and P-256 with the client certificate, a wrong device certificate refused, no pair record named, a silent device cut at the deadline (status 3.5 s in all, 0.65 s with `--fast`) | a real phone: the session handshake against iOS's TLS, the battery read and whether lockdownd still starts `com.apple.webinspector` on iOS 18/26 or it needs RemoteXPC; Web Inspector, device logs, crash reports, driven Safari benches |
+| ios | `host/ios.rs` (§5.4), `host/ios/logs.rs`, `target/wir.rs`, `probe/webkit_inspector.rs` (§13.1): usbmuxd (`/var/run/usbmuxd`, Windows 127.0.0.1:27015, `USBMUXD_SOCKET_ADDRESS`), `ListDevices`, `ReadPairRecord`, `Connect`; lockdownd `QueryType`, `GetValue`, `StartSession` with mutual TLS (`host/ios/tls.rs`: RustCrypto AES-GCM, X25519 and P-256, RSA; pinned to the pair record's DeviceCertificate SubjectPublicKeyInfo), `StartService` with `EnableServiceSSL`; diagnostics_relay `IORegistry` of `AppleSmartBatteryPack` (`BatteryData.Temperature` / `VirtualTemperature`, where OS 27 moved battery temperature) with fallback to `IOPMPowerSource`; Web Inspector (`com.apple.webinspector`) page listing in `status`, read-only attach (`WIRAutomaticallyPause = false`, `Target` mux with ≤8 in flight, `DebuggerAttached` refusal, `_rpc_forwardDidClose:` on detach and `Drop`), `look wir:` (`Runtime`, `Console`, `Page.snapshotRect`), and `record wir:` (`Timeline`, `ScriptProfiler` + `Network.loadResource` source maps → `hotspots`, `Heap.snapshot` v3 → V8 `.heapsnapshot.gz` → `heap`/`leaks`, `Memory` → `memory`, `Network` waterfall → `query network`, in-memory allowlisted `os_trace_relay`/`syslog_relay` logs and read-only AFC `crashreportcopymobile` crashes/jetsams → `query log`, Perfetto export). Checked on iPhone15,3 (iOS 27.0.1) in spike: lockdownd TLS, battery read and `com.apple.webinspector` application listing (`com.apple.mobilesafari`); builds, rustfmt and clippy `-D warnings` across Windows, macOS and Linux | live-phone end-to-end verification of `AppleSmartBatteryPack` temperature, `status` page listing, `look wir:` ×10 back-to-back detach, and `record wir:` (`hotspots`, `layout`, `heap`, `log`, `network`); driven Safari benches (`safaridriver`, M0.4) |
 | 7 | history: `strobe track` (points, E-divisive change points, paired confirmation, bisect to the culprit, alert hooks, daemon schedules), `history`, `query history` and `query changes`, `report history` (§25) | CI budgets, mesh; cheap paired points (each commit against the previous tracked one) |
 
 Query views built: `summary` (with per-run style, layout and paint), `frames`, `threads` (a native recording's: its threads' wakes and CPU;
 its `frames`: submissions per run, work per frame, gaps), `hotspots`, `alloc`, `layout`, `style`, `shifts`, `gc`, `heap` (and
 `a..b heap`), `leaks`, `memory` (and `a..b memory`; native recordings by what holds the memory), `gpu`
-(a trace's GPU process; without a trace the OS's per-process GPU statistics), `insights`, `actions`,
+(a trace's GPU process; without a trace the OS's per-process GPU statistics), `log` (`--source console|device|crash`, `--reveal`), `network` (`--reveal`), `insights`, `actions`,
 `sql`, `progress`. Not yet: `stack`, `cpu`, `timeline`, `--max-bytes`, `a..b gpu` (§11.1 listed it; no
 code). `a..b` (and `query exp_… <view>` for each series' base and head) answers `hotspots`, `alloc`,
 `layout`, `style`, `threads`, `frames`, `summary`, `heap` and `memory` (§11.1); before 2026-11-05

@@ -31,6 +31,7 @@ pub mod symbols;
 pub mod trace;
 pub mod video;
 pub mod wakes;
+pub mod webkit_inspector;
 
 /// Joins a capture's thread once it has been told to stop, waiting at most `wait`: a stop or a drop
 /// never hangs on a thread that does not end. None when it panicked or is still running (then it is

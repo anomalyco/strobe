@@ -11,6 +11,7 @@
 //! length and a plist, then TLS once a session starts. A service lockdownd starts is a second
 //! tunnel, under TLS when it says so.
 
+pub mod logs;
 mod tls;
 
 use crate::model::{Error, Result};
@@ -626,9 +627,62 @@ fn number(v: Option<&Value>) -> Option<f64> {
     v.and_then(|v| v.as_signed_integer().map(|i| i as f64).or_else(|| v.as_unsigned_integer().map(|u| u as f64)).or_else(|| v.as_real()))
 }
 
+fn apply_battery_dict(d: &Dictionary, b: &mut Battery, depth: usize) {
+    let scopes = [d.get("BatteryData").and_then(Value::as_dictionary), Some(d)];
+    for sc in scopes.into_iter().flatten() {
+        if b.temperature_c.is_none() {
+            // Hundredths of a degree Celsius; anything outside a battery's possible range is not a reading.
+            b.temperature_c = number(sc.get("Temperature")).or_else(|| number(sc.get("VirtualTemperature"))).map(|t| t / 100.0).filter(|t| *t > 0.0 && *t < 100.0);
+        }
+        if b.percent.is_none() {
+            b.percent = match (number(sc.get("AppleRawCurrentCapacity")), number(sc.get("AppleRawMaxCapacity"))) {
+                (Some(c), Some(m)) if m > 0.0 => Some(100.0 * c / m).filter(|p| (0.0..=100.0).contains(p)),
+                _ => None,
+            };
+        }
+        if b.charging.is_none() {
+            b.charging = sc.get("IsCharging").and_then(|v| v.as_boolean().or_else(|| v.as_unsigned_integer().map(|n| n > 0)).or_else(|| v.as_signed_integer().map(|n| n > 0)));
+        }
+    }
+    if depth < 2
+        && let Some(kids) = d.get("children").or_else(|| d.get("IORegistryEntryChildren")).and_then(Value::as_array)
+    {
+        for kid in kids.iter().filter_map(Value::as_dictionary) {
+            apply_battery_dict(kid, b, depth + 1);
+        }
+    }
+}
+
+fn query_ioreg(l: &mut Lockdown, svc: &mut Option<Service>, entry_class: &str) -> Option<Dictionary> {
+    for attempt in 0..2 {
+        if svc.is_none() {
+            *svc = l.start_service("com.apple.mobile.diagnostics_relay").ok();
+        }
+        let s = (*svc).as_mut()?;
+        let mut f = Dictionary::new();
+        f.insert("Request".into(), "IORegistry".into());
+        f.insert("EntryClass".into(), entry_class.into());
+        if s.send(&Value::Dictionary(f), false).is_ok()
+            && let Ok(r) = s.recv()
+        {
+            if r.get("Status").and_then(Value::as_string) == Some("Success") {
+                return r.get("Diagnostics").and_then(Value::as_dictionary).and_then(|d| d.get("IORegistry")).and_then(Value::as_dictionary).cloned();
+            }
+            return None;
+        }
+        // Some iOS builds close diagnostics_relay after one request; reopen once if needed.
+        *svc = None;
+        if attempt == 1 {
+            break;
+        }
+    }
+    None
+}
+
 /// Level and charging from lockdownd's battery domain; with `diagnostics`, the temperature from
-/// diagnostics_relay (a read of the I/O registry's IOPMPowerSource), whose raw capacities stand in
-/// only when lockdownd gave no level (its CurrentCapacity and MaxCapacity mix percent and mAh).
+/// diagnostics_relay: on iOS 27+ (and macOS 27+) `Temperature` and `VirtualTemperature` moved out of
+/// `AppleSmartBattery` (`IOPMPowerSource`) into the child `AppleSmartBatteryPack` entry's `BatteryData`
+/// dictionary, while iOS ≤26 keeps `Temperature` on `IOPMPowerSource`.
 pub fn battery(l: &mut Lockdown, diagnostics: bool) -> Battery {
     let mut b = Battery::default();
     if let Ok(Some(Value::Dictionary(d))) = l.get_value(Some("com.apple.mobile.battery"), None) {
@@ -638,29 +692,115 @@ pub fn battery(l: &mut Lockdown, diagnostics: bool) -> Battery {
     if !diagnostics {
         return b;
     }
-    let Ok(mut s) = l.start_service("com.apple.mobile.diagnostics_relay") else { return b };
-    let mut f = Dictionary::new();
-    f.insert("Request".into(), "IORegistry".into());
-    f.insert("EntryClass".into(), "IOPMPowerSource".into());
-    if s.send(&Value::Dictionary(f), false).is_ok()
-        && let Ok(r) = s.recv()
-        && r.get("Status").and_then(Value::as_string) == Some("Success")
-        && let Some(io) = r.get("Diagnostics").and_then(Value::as_dictionary).and_then(|d| d.get("IORegistry")).and_then(Value::as_dictionary)
-    {
-        // Hundredths of a degree; anything outside a battery's possible range is not a reading.
-        b.temperature_c = number(io.get("Temperature")).map(|t| t / 100.0).filter(|t| *t > 0.0 && *t < 100.0);
-        if b.percent.is_none() {
-            b.percent = match (number(io.get("AppleRawCurrentCapacity")), number(io.get("AppleRawMaxCapacity"))) {
-                (Some(c), Some(m)) if m > 0.0 => Some(100.0 * c / m).filter(|p| (0.0..=100.0).contains(p)),
-                _ => None,
-            };
-        }
-        b.charging = b.charging.or_else(|| io.get("IsCharging").and_then(Value::as_boolean));
+    let mut svc = l.start_service("com.apple.mobile.diagnostics_relay").ok();
+    if svc.is_none() {
+        return b;
     }
-    let mut bye = Dictionary::new();
-    bye.insert("Request".into(), "Goodbye".into());
-    let _ = s.send(&Value::Dictionary(bye), false);
+    if let Some(pack) = query_ioreg(l, &mut svc, "AppleSmartBatteryPack") {
+        apply_battery_dict(&pack, &mut b, 0);
+    }
+    if (b.temperature_c.is_none() || b.percent.is_none() || b.charging.is_none())
+        && let Some(ps) = query_ioreg(l, &mut svc, "IOPMPowerSource")
+    {
+        apply_battery_dict(&ps, &mut b, 0);
+    }
+    if let Some(mut s) = svc {
+        let mut bye = Dictionary::new();
+        bye.insert("Request".into(), "Goodbye".into());
+        let _ = s.send(&Value::Dictionary(bye), false);
+    }
     b
+}
+
+/// One USB-attached, unlocked, trusted iOS device ready for service connections.
+#[derive(Clone, Debug)]
+pub struct Connected {
+    pub device: Device,
+    pub udid: String,
+    pub product_type: Option<String>,
+    pub ios: Option<String>,
+    pub battery: Battery,
+    /// Seconds since Unix epoch on the phone's own wall clock (`TimeIntervalSince1970`).
+    pub wall_clock_s: Option<f64>,
+}
+
+/// Whether `query` names `udid` (exact full UDID or its trailing `short_udid`, case-insensitive).
+pub fn matches_udid(udid: &str, query: &str) -> bool {
+    !query.is_empty() && (udid.eq_ignore_ascii_case(query) || short_udid(udid).eq_ignore_ascii_case(query))
+}
+
+/// Opens a fresh authenticated lockdownd session on `device`, mapping lock-screen errors to `DeviceAsleep`.
+pub fn session_for(device: &Device, deadline: Option<Instant>) -> Result<Lockdown> {
+    let mut l = Lockdown::connect(device, deadline)?;
+    let pair = pair_record(&device.udid, deadline).map_err(|e| if e.code == 124 { e } else { not_paired(&device.udid, e) })?;
+    l.start_session(&pair).map_err(|e| {
+        if e.message.contains("PasswordProtected") { Error::refused("DeviceAsleep", format!("the phone ({}) is locked", short_udid(&device.udid)), "unlock the phone and run again") } else { e }
+    })?;
+    Ok(l)
+}
+
+/// Current wall-clock time on the phone (`TimeIntervalSince1970`), falling back to the host's wall clock.
+pub fn wall_clock_s(l: &mut Lockdown) -> f64 {
+    l.get_value(None, Some("TimeIntervalSince1970"))
+        .ok()
+        .flatten()
+        .and_then(|v| number(Some(&v)))
+        .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()))
+}
+
+/// Picks a USB-connected phone (filtered by `udid_filter` when `Some`), checks that it is trusted and
+/// unlocked, and returns an open `Lockdown` session plus device facts (never the device's personal name).
+pub fn open_usb(udid_filter: Option<&str>, diagnostics: bool, deadline: Option<Instant>) -> Result<(Lockdown, Connected)> {
+    let devices = list(deadline)?;
+    if devices.is_empty() {
+        return Err(Error::unreachable("no iOS device connected").hint("plug the iPhone into this computer with a USB cable, unlock it and tap Trust"));
+    }
+    let want = udid_filter.filter(|q| !q.is_empty());
+    let mut udids: Vec<String> = Vec::new();
+    for d in &devices {
+        if want.is_none_or(|q| matches_udid(&d.udid, q)) && !udids.contains(&d.udid) {
+            udids.push(d.udid.clone());
+        }
+    }
+    if udids.is_empty() {
+        let seen: Vec<String> = devices.iter().filter(|d| d.connection == Connection::Usb).map(|d| short_udid(&d.udid)).collect();
+        let hint = if seen.is_empty() { "plug the phone in with a USB cable and run strobe status".to_string() } else { format!("connected USB phones: {}", seen.join(", ")) };
+        return Err(Error::usage(format!("no connected iOS device matches {:?}", want.unwrap_or(""))).hint(hint));
+    }
+    let mut usb: Vec<Device> = Vec::new();
+    let mut wifi_only: Vec<String> = Vec::new();
+    for u in &udids {
+        match devices.iter().find(|d| &d.udid == u && d.connection == Connection::Usb) {
+            Some(d) => usb.push(d.clone()),
+            None => wifi_only.push(short_udid(u)),
+        }
+    }
+    if usb.is_empty() {
+        return Err(Error::refused(
+            "WirelessTransport",
+            format!("iOS device {} is connected over Wi-Fi only", wifi_only.join(", ")),
+            "plug the phone into this computer with a USB cable: strobe never reads or measures over Wi-Fi",
+        ));
+    }
+    if usb.len() > 1 {
+        let choices: Vec<String> = usb.iter().map(|d| format!("wir:{}/…", short_udid(&d.udid))).collect();
+        return Err(Error::usage(format!("{} iOS devices are plugged in over USB", usb.len())).hint(format!("name the phone in the target: {}", choices.join(" or "))));
+    }
+    let dev = usb.remove(0);
+    let mut l = session_for(&dev, deadline)?;
+    let values = l.get_value(None, None)?.and_then(Value::into_dictionary).unwrap_or_default();
+    let locked = match values.get("PasswordProtected").and_then(Value::as_boolean) {
+        Some(b) => Some(b),
+        None => l.get_value(None, Some("PasswordProtected"))?.and_then(|v| v.as_boolean()),
+    };
+    if locked == Some(true) {
+        return Err(Error::refused("DeviceAsleep", format!("the phone ({}) is locked, so Safari and Web Inspector will not expose tabs", short_udid(&dev.udid)), "unlock the phone and run again"));
+    }
+    let text = |k: &str| values.get(k).and_then(Value::as_string).map(str::to_string);
+    let wall = number(values.get("TimeIntervalSince1970")).or_else(|| Some(wall_clock_s(&mut l)));
+    let bat = battery(&mut l, diagnostics);
+    let info = Connected { device: dev.clone(), udid: dev.udid, product_type: text("ProductType"), ios: text("ProductVersion"), battery: bat, wall_clock_s: wall };
+    Ok((l, info))
 }
 
 /// One phone as `strobe status` shows it. Never its name: a personal phone's name is the owner's.

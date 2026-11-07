@@ -184,9 +184,10 @@ impl Rec {
         !token.is_empty() && source && (!p.attribution_only() || self.meta["probes"] == "attribution")
     }
 
-    /// What strobe read out of a Firefox recording's Gecko profile (`gecko.json`).
+    /// What strobe read out of a Firefox recording's Gecko profile (`gecko.json`) or an iOS Safari
+    /// Web Inspector recording (`webkit.json`).
     fn gecko(&self) -> Option<&Value> {
-        self.gecko.get_or_init(|| store::read_json(&self.dir.join(crate::probe::gecko::READ)).ok()).as_ref()
+        self.gecko.get_or_init(|| store::read_json(&self.dir.join(crate::probe::gecko::READ)).or_else(|_| store::read_json(&self.dir.join(crate::probe::webkit_inspector::READ))).ok()).as_ref()
     }
 
     /// A part's rows from a Firefox recording's Gecko profile.

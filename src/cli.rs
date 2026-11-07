@@ -85,6 +85,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("seed", Number, "record bench plan run track"),
     // query, report, open, history.
     ("by", Value, "query"),
+    ("source", Value, "query"),
     ("top", Number, "query history"),
     ("reveal", Switch, "query"),
     ("at", Value, "query"),
@@ -356,6 +357,9 @@ Use
                                   (--video: also film it, timing perturbed: the window's screen, or a headless page's renderer)
                                   (--mobile[=<serial>]: the page in Chrome on an Android phone over adb, its own screen
                                   and touch; timed: no emulator, no adb over Wi-Fi, no hot, saving or low phone)
+  record wir:[<selector>] [--for 10s] [--probes attribution|memory] [--served <dir>]
+                                  an open Safari tab (or WKWebView) on a USB-cabled iPhone over Web Inspector: Timeline,
+                                  ScriptProfiler, Heap, Network, Safari/WebKit device logs and crashes (read-only)
   record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--video]
                                   record one bench case (it drives the page: clicks, keys) with the attribution probes
   record pid:<n>|proc:<name> [--probes timing|deep|stacks-unprivileged] [--for 10s]
@@ -393,8 +397,8 @@ Use
                                   or go on with one (a unique prefix of the id works)
   config [<dir>]                  check the project's strobe.json (and your own) without a bench: where it is, each
                                   app profile resolved for this OS (its executable, guards, window), build and serve
-  query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--reveal] [--native] [--thread <name>]
-                                  views: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory insights
+  query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash] [--reveal] [--native] [--thread <name>]
+                                  views: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory log network insights
                                   actions sql
                                   (actions: what a bench block's hooks sent the target, in order; --phase; --reveal shows
                                   typed text, act values, ctx.call arguments and ctx.exec lines)
@@ -433,6 +437,8 @@ Use
                                   report history <ser_…|file> [--format card | --format badge [--scoreboard]])
   look <url|file> [--until <css>] [--wait 1s] [--size 1280x800] [--out <png>] [--chars 4000] [--full | --element <css>] [--headed]
        [--mobile[=<serial>]]       (the page in Chrome on an Android phone or emulator, at the phone's own screen)
+  look wir:[<selector>] [--until <selector>] [--wait 200ms] [--out <png>] [--chars 4000] [--full | --element <selector>]
+                                   (read-only snapshot of an open Safari tab on a USB-cabled iPhone; never navigates)
   look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40]
   look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s] [--home <seed>]
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,

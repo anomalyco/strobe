@@ -119,6 +119,7 @@ pub fn build(dir: &Path, out: &Path) -> Result<Built> {
     b.timeline(dir, &threads);
     b.presents(dir, &meta);
     b.memory(dir);
+    b.webkit(dir);
     b.strobe_itself(&meta);
     // Firefox's profile is drawn whole, its CPU profiles being cut from it.
     if dir.join(crate::probe::gecko::PROFILE).is_file() {
@@ -760,6 +761,88 @@ impl Builder {
             for t in list {
                 self.instant(track, MONOTONIC, t, "vblank", &[]);
                 self.count("vertical blanks");
+            }
+        }
+    }
+
+    /// WebKit Inspector (`wir:`) Timeline slices, Memory category counters and Network waterfall.
+    fn webkit(&mut self, dir: &Path) {
+        let Ok(wk) = store::read_json(&dir.join(crate::probe::webkit_inspector::READ)) else { return };
+        let run_t0 = wk["windows"][0][1].as_i64().unwrap_or(0).max(0) as u64;
+        let run_t1 = wk["windows"][0][2].as_i64().unwrap_or(0).max(0) as u64;
+        if run_t1 > run_t0 {
+            let run_track = self.track("runs", 0, None);
+            self.slice(run_track, MONOTONIC, run_t0, run_t1, "run:0", &[]);
+            self.runs.push((run_t0, run_t1));
+            self.count("runs");
+        }
+        if let Some(mut raw_slices) = wk["slices"].as_array().cloned() {
+            raw_slices.sort_by_key(|s| (s["t0_ns"].as_u64().unwrap_or(0), std::cmp::Reverse(s["t1_ns"].as_u64().unwrap_or(0))));
+            let group = self.track("WebKit Timeline", 15, None);
+            let mut lanes: Vec<(u64, u64)> = Vec::new();
+            for s in &raw_slices {
+                let (Some(kind), Some(a), Some(b)) = (s["kind"].as_str(), s["t0_ns"].as_u64(), s["t1_ns"].as_u64()) else { continue };
+                let args: Vec<(String, Value)> = s["detail"].as_str().map(|d| vec![("detail".to_string(), json!(d))]).unwrap_or_default();
+                if b <= a {
+                    let tr = self.track_under(Some(group), "marks", 0, None);
+                    self.instant(tr, MONOTONIC, a, kind, &args);
+                } else {
+                    let lane_idx = lanes.iter().position(|&(_, end)| end <= a).unwrap_or_else(|| {
+                        let i = lanes.len();
+                        let tr = self.track_under(Some(group), &format!("lane {}", i + 1), i as i32 + 1, None);
+                        lanes.push((tr, 0));
+                        i
+                    });
+                    lanes[lane_idx].1 = b;
+                    self.slice(lanes[lane_idx].0, MONOTONIC, a, b, kind, &args);
+                }
+                self.count("webkit timeline");
+            }
+        }
+        if let Some(mem) = wk["memory"].as_array()
+            && !mem.is_empty()
+        {
+            let group = self.track("WebKit Memory", 25, None);
+            for m in mem {
+                let Some(ts) = m["t_ns"].as_u64() else { continue };
+                for (cat, bytes) in m["categories"].as_object().into_iter().flatten() {
+                    if let Some(v) = bytes.as_f64() {
+                        let tr = self.track_under(Some(group), &format!("{cat} (MB)"), 0, Some("MB"));
+                        self.counter(tr, MONOTONIC, ts, v / (1024.0 * 1024.0));
+                    }
+                }
+                self.count("webkit memory");
+            }
+        }
+        if let Some(wf) = read_gz::<crate::probe::webkit_inspector::NetworkWaterfall>(&dir.join(crate::probe::webkit_inspector::NETWORK_FILE))
+            && !wf.requests.is_empty()
+        {
+            let group = self.track("WebKit Network", 18, None);
+            let mut reqs = wf.requests;
+            reqs.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+            let mut lanes: Vec<(u64, u64)> = Vec::new();
+            for r in reqs {
+                let a = run_t0.saturating_add((r.start_ms.max(0.0) * 1e6).round() as u64);
+                let dur_ns = (r.duration_ms.unwrap_or(0.0).max(0.1) * 1e6).round() as u64;
+                let b = a.saturating_add(dur_ns);
+                let clean = crate::host::ios::logs::scrub_url(&r.url, false);
+                let label = format!("{} {}", r.method, clean.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(&clean));
+                let mut args = vec![("url".to_string(), json!(clean)), ("type".to_string(), json!(r.resource_type)), ("encoded_bytes".to_string(), json!(r.encoded_bytes))];
+                if let Some(st) = r.status {
+                    args.push(("status".into(), json!(st)));
+                }
+                if let Some(pr) = &r.protocol {
+                    args.push(("protocol".into(), json!(pr)));
+                }
+                let lane_idx = lanes.iter().position(|&(_, end)| end <= a).unwrap_or_else(|| {
+                    let i = lanes.len();
+                    let tr = self.track_under(Some(group), &format!("waterfall {}", i + 1), i as i32, None);
+                    lanes.push((tr, 0));
+                    i
+                });
+                lanes[lane_idx].1 = b;
+                self.slice(lanes[lane_idx].0, MONOTONIC, a, b, &label, &args);
+                self.count("webkit network");
             }
         }
     }

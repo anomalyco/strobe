@@ -45,10 +45,10 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "record",
-        description: "Record one target on one timeline. Returns a handle (rec_…) and headline frame, main-thread and CPU metrics. Targets: https://… (strobe launches Chromium), app:<id>, exe:<path>, cdp:<port>, pid:<n>, file:<path> (import). With bench (file#case), records that bench case (it drives the app) with the attribution probes; target then names one of the bench file's targets.",
+        description: "Record one target on one timeline. Returns a handle (rec_…) and headline frame, main-thread and CPU metrics. Targets: https://… (strobe launches Chromium), wir:[<selector>] (an open Safari tab on a USB-cabled iPhone over Web Inspector, read-only attribution), app:<id>, exe:<path>, cdp:<port>, pid:<n>, file:<path> (import). With bench (file#case), records that bench case (it drives the app) with the attribution probes; target then names one of the bench file's targets.",
         args: &[(
             "target",
-            "https://…, a local page.html (or file:page.html), app:<id> (a strobe.json profile, Electron or native), exe:<path>, cdp:<port>, pid:<n>, proc:<name>, or file:<path> (a trace to import); with bench: a target name from the bench file",
+            "https://…, a local page.html (or file:page.html), wir:[<selector>] (iOS Safari tab over USB Web Inspector), app:<id> (a strobe.json profile, Electron or native), exe:<path>, cdp:<port>, pid:<n>, proc:<name>, or file:<path> (a trace to import); with bench: a target name from the bench file",
         )],
         flags: &[
             ("for", "duration, e.g. 10s (default 10s)"),
@@ -162,14 +162,18 @@ const TOOLS: &[Tool] = &[
             ("handle", "rec_…, exp_… (a unique prefix works) or rec_a..rec_b; history, changes or ser_… for tracked history"),
             (
                 "view",
-                "summary (default), frames, threads (a native recording: its threads' wakes, CPU, names), hotspots, waits, alloc, layout, shifts, gc, heap, leaks, memory, insights, actions, sql, progress (exp_… takes summary, progress, insights, actions, the base..head views hotspots, alloc, layout, style, threads, frames, heap and memory, and on a --check of one case any recording view)",
+                "summary (default), frames, threads (a native recording: its threads' wakes, CPU, names), hotspots, waits, alloc, layout, shifts, gc, heap, leaks, memory, log (wir: console, Safari/WebKit device logs and crashes), network (wir: network waterfall), insights, actions, sql, progress (exp_… takes summary, progress, insights, actions, the base..head views hotspots, alloc, layout, style, threads, frames, heap and memory, and on a --check of one case any recording view)",
             ),
             ("sql", "SQL for the sql view"),
         ],
         flags: &[
             ("by", "hotspots, waits and alloc: function, file, package; memory: process, layer, allocator"),
+            ("source", "log: console, device or crash"),
             ("top", "rows (default 15)"),
-            ("reveal", "heap: show string values (redacted by default; snapshots can hold user content); actions: show typed text, act values, ctx.call arguments and ctx.exec lines"),
+            (
+                "reveal",
+                "heap: show string values (redacted by default; snapshots can hold user content); log and network: show raw Cookie/Authorization/Bearer values and secret query parameters; actions: show typed text, act values, ctx.call arguments and ctx.exec lines",
+            ),
             ("at", "memory: which census (0 the first, -1 the last, default the last)"),
             ("native", "hotspots: the native stacks"),
             ("thread", "hotspots and waits of a native recording: one thread by name"),

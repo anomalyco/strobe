@@ -16,13 +16,14 @@ strobe status [--calibrate]
 ```
 
 - Environment, validity preflight, recent handles.
-- `ios`: phones on a cable: model, iOS, USB/Wi-Fi, battery, temperature, locked; never the name.
+- `ios`: phones on a cable: model, iOS, USB/Wi-Fi, battery, temperature, locked, and inspectable Safari/WKWebView pages (`wir:<udid>/safari/<id>`); never the phone's name.
 - Read-only toward the phone: an untrusted one needs the user to unlock it and tap Trust.
 
 ### `strobe record`
 
 ```text
 strobe record <target> [--probes timing|attribution|memory] [--for 10s] [--headless] [--emulate mobile|touch] [--mobile[=<serial>]] [--served <dir>]
+strobe record wir:[<selector>] [--for 10s] [--probes attribution|memory] [--served <dir>]
 strobe record https://… --engine firefox [--probes timing|attribution] [--headless] [--for 10s]
 strobe record --bench <file.bench.ts>#<case> [--head <variant>]
 strobe record pid:<n>|proc:<name> [--probes timing|deep|waits] [--for 10s]
@@ -39,6 +40,9 @@ strobe record <target> --video     (or record --bench … --video: a video of th
 - `--engine firefox`: the page in Firefox, from outside: CPU, GPU, memory, DOM nodes, and headed the OS's frames.
   - `--probes attribution`: Firefox's profiler and about:memory (`hotspots`, `layout`, `gc`, `memory`).
   - `--probes memory` refuses: Firefox gives no heap snapshots; use a bench leak run.
+- `wir:[<selector>]`: an open Safari tab (or WKWebView) on a USB-cabled iPhone over Web Inspector, strictly read-only (`timing: perturbed`, device-tagged).
+  - Feeds `hotspots` (with source maps), `layout`, `gc`, `heap`, `leaks` (`--probes memory`), `memory`, `log` (`--source console|device|crash`), `network`, `insights`, and `open`.
+  - Refuses `cpu.*`, `ui.*`, `gpu.*`, `memory.app.private` (`NotOnThisOs`), `frames.*` (`EngineUnsupported`), and `DebuggerAttached` if another Web Inspector holds the tab.
 
 ### `strobe bench`
 
@@ -104,7 +108,8 @@ strobe run --base "<command>" --head "<command>" [--aa | --check] [--primary cpu
 strobe query <rec_… | a..b | exp_…> <view> [args]
 ```
 
-- Views: `summary` `frames` `threads` `gpu` `hotspots` `waits` `alloc` `layout` `style` `shifts` `gc` `heap` `leaks` `memory` `insights` `actions` `sql`.
+- Views: `summary` `frames` `threads` `gpu` `hotspots` `waits` `alloc` `layout` `style` `shifts` `gc` `heap` `leaks` `memory` `log` `network` `insights` `actions` `sql`.
+- `log [--source console|device|crash] [--reveal] [--top N]` and `network [--reveal] [--top N]`: console, Safari/WebKit-allowlisted device logs, read-only crash/jetsam reports, and network waterfall of a `wir:` recording (`Cookie`, `Authorization`, `Bearer` and secret query params scrubbed unless `--reveal`).
 - `actions [--phase <name>] [--top N] [--reveal]`: what a bench block's hooks sent the target, in order (hook, run, phase, call, selector, the element hit, outcome, latency sample).
   - On a kept bench recording, or `exp_…` (every check case's, and the recordings a comparison kept); typed text, `act` values, `ctx.call` arguments and `ctx.exec` lines show as their length unless `--reveal`.
 - `hotspots` and `alloc` take `--by function|file|package` (`hotspots`: `--native`, `--thread <name>` for native samples).
@@ -184,6 +189,7 @@ strobe history [<ser_…|file>]
 
 ```text
 strobe look <url|file> [--until <selector>] [--wait 1s] [--out shot.png] [--full | --element <selector>]
+strobe look wir:[<selector>] [--until <selector>] [--wait 200ms] [--out shot.png] [--full | --element <selector>]
 strobe look app:<id> | exe:<path> [--build] [--until <selector>]
 ```
 
@@ -191,6 +197,7 @@ strobe look app:<id> | exe:<path> [--build] [--until <selector>]
   - Title, the headings `expect` checks, visible text, console messages and errors, a screenshot.
   - `--element <selector>`: the screenshot of that element only (one section of a long report).
   - Check a UI loads instead of writing a browser script.
+- `wir:[<selector>]`: read-only snapshot of an open Safari tab on a USB-cabled iPhone (title, URL, headings, buffered + live console, visible text, PNG from `Page.snapshotRect`); never navigates or scrolls.
 - `app:<id> | exe:<path>`: a native app launched isolated (`--build`: this checkout's build), then closed.
   - Window titles, the tree's dialogs and headings (what `expect` matches) and keyed elements.
   - Works on a locked session, so check `expect` with it.
@@ -224,6 +231,7 @@ strobe update [<version>] [--from <path>] [--check]
 ### Targets
 
 - `https://…`: Chromium, or Firefox with `--engine firefox` (stock Firefox only; `status` shows it)
+- `wir:[<selector>]`: an open Safari tab or WKWebView on a USB-cabled iPhone (`look` and `record`, read-only)
 - `cdp:<port>`
 - `app:<id>`: a profile in strobe.json `apps`, Electron or native
 - `exe:<path>`: `--native` for a native app

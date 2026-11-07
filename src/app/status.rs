@@ -14,10 +14,25 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some(p) = args.pos.first() {
         return Err(Error::usage(format!("status takes no target ({p}): it checks this device; strobe look {p} checks that a target loads")));
     }
-    // Cabled iOS devices, read beside the idle-load sample, within its time (SPEC §19); `--fast` skips
-    // the battery temperature (one more service and handshake).
+    // Cabled iOS devices and their inspectable Web Inspector pages, read beside the idle-load sample,
+    // within its time (SPEC §19); `--fast` skips the battery temperature and page listing.
     let fast = args.has("fast");
-    let ios = std::thread::spawn(move || host::ios::summaries(std::time::Duration::from_millis(if fast { 250 } else { 1500 }), !fast));
+    let ios = std::thread::spawn(move || -> Result<(Vec<host::ios::Summary>, Vec<crate::target::wir::InspectablePage>)> {
+        let summaries = host::ios::summaries(std::time::Duration::from_millis(if fast { 250 } else { 1500 }), !fast)?;
+        let mut pages = Vec::new();
+        if !fast {
+            for s in &summaries {
+                if s.problem.is_none()
+                    && s.locked == Some(false)
+                    && s.connections.contains(&host::ios::Connection::Usb)
+                    && let Ok(p) = crate::target::wir::list_pages_for_udid(&s.udid, std::time::Duration::from_millis(1200))
+                {
+                    pages.extend(p);
+                }
+            }
+        }
+        Ok((summaries, pages))
+    });
     // Android devices of an adb server that runs (status starts none), each read in one shell round trip.
     let android = std::thread::spawn(move || host::adb::summaries(std::time::Duration::from_millis(if fast { 500 } else { 3000 })));
     let env = host::env();
@@ -119,7 +134,21 @@ pub fn run(args: &Args) -> Result<Output> {
         "deep": { "access": deep, "presents": deep.presents(), "detail": deep_text },
         "native": { "ready": native_ok, "detail": native_text },
         "cycle_clock": { "detail": cycle_clock, "refused": cycles_refused },
-        "ios": match &ios { Ok(d) => json!({ "devices": d }), Err(e) => json!({ "devices": [], "detail": e.message }) },
+        "ios": match &ios {
+            Ok((d, pages)) => {
+                let devices: Vec<Value> = d
+                    .iter()
+                    .map(|s| {
+                        let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+                        let dev_pages: Vec<&crate::target::wir::InspectablePage> = pages.iter().filter(|p| p.udid == s.udid).collect();
+                        v["pages"] = json!(dev_pages);
+                        v
+                    })
+                    .collect();
+                json!({ "devices": devices, "pages": pages })
+            }
+            Err(e) => json!({ "devices": [], "pages": [], "detail": e.message }),
+        },
         "android": match &android { Ok(d) => json!({ "devices": d }), Err(e) => json!({ "devices": [], "detail": e.message }) },
     });
     let mark = |ok: bool| if ok { "✓" } else { "!" };
@@ -144,10 +173,16 @@ pub fn run(args: &Args) -> Result<Output> {
     t += &format!("  {} firefox    {}\n", if firefox.is_some() { "✓" } else { "i" }, firefox_text.as_deref().unwrap_or("none (only for --engine firefox)"));
     t += &format!("  {} webkit     {}\n", if webkit { "✓" } else { "i" }, webkit_text);
     match &ios {
-        Ok(d) if d.is_empty() => t += "  i ios        none on a cable\n",
-        Ok(d) => {
+        Ok((d, _)) if d.is_empty() => t += "  i ios        none on a cable\n",
+        Ok((d, pages)) => {
             for (i, s) in d.iter().enumerate() {
                 t += &format!("  {} {}{}\n", if s.problem.is_none() { "✓" } else { "!" }, if i == 0 { "ios        " } else { "           " }, host::ios::describe(s));
+                for p in pages.iter().filter(|p| p.udid == s.udid) {
+                    let title = if p.title.is_empty() { "(no title)" } else { p.title.as_str() };
+                    let url = if p.url.is_empty() { "about:blank" } else { p.url.as_str() };
+                    let dbg = if p.debugger_attached { " · debugger attached" } else { "" };
+                    t += &format!("               {} · {title} · {url}{dbg}\n", p.handle);
+                }
             }
         }
         Err(e) => t += &format!("  i ios        {}{}\n", e.message, e.hint.as_ref().map(|h| format!(" ({h})")).unwrap_or_default()),

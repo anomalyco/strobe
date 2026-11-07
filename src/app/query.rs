@@ -4,6 +4,7 @@ mod actions;
 mod diff;
 mod rec;
 mod waits;
+mod wir;
 
 use super::{Output, fmt};
 use crate::cli::Args;
@@ -128,6 +129,15 @@ pub fn run(args: &Args) -> Result<Output> {
             let sql = args.pos.get(2).ok_or_else(|| Error::usage("query <h> sql \"select …\""))?;
             sql_view(&trace, sql, top.max(50))
         }
+        "frames" if meta["wir"] == true => Err(Error::refused(
+            "EngineUnsupported",
+            "WebKit's Web Inspector reports main-thread RenderingFrame records, not screen presentation times or dropped refreshes",
+            format!("strobe query {} hotspots · strobe query {} layout", rec.id, rec.id),
+        )),
+        "threads" if meta["wir"] == true => Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no per-thread CPU or wake counters", format!("strobe query {} hotspots", rec.id))),
+        "gpu" if meta["wir"] == true => {
+            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", format!("strobe query {} memory --by layer", rec.id)))
+        }
         "frames" if dir.join("frames.json").exists() || meta["native"] == true => native_frames(&dir, top),
         "threads" if args.has("timeline") => thread_timeline(&dir, top),
         "threads" if dir.join("threads.json").exists() => native_threads(&dir, top),
@@ -169,6 +179,8 @@ pub fn run(args: &Args) -> Result<Output> {
         "leaks" => leaks(&rec, top, args.has("reveal")),
         "insights" => insights(&rec),
         "actions" => actions::recording(&dir, args, top),
+        "log" => wir::log(&dir, meta, args, top),
+        "network" => wir::network(&dir, meta, args, top),
         "memory" => {
             let by = args.get("by").unwrap_or("process");
             if !matches!(by, "process" | "layer" | "allocator") {
@@ -182,7 +194,7 @@ pub fn run(args: &Args) -> Result<Output> {
             }
             memory(&dir, by, top, args.get("at"))
         }
-        other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory insights actions sql"))),
+        other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory log network insights actions sql"))),
     }
 }
 
@@ -216,8 +228,22 @@ enum Gap {
     Style,
 }
 
-/// Refuses a view a Firefox recording cannot answer (`EngineUnsupported`), with what answers instead.
+/// Refuses a view a Firefox or iOS WebKit recording cannot answer (`EngineUnsupported`), with what answers instead.
 fn firefox_gap(rec: &Rec, gap: Gap) -> Result<()> {
+    if rec.meta["wir"] == true {
+        let (summary, fix) = match gap {
+            Gap::Heap => return Ok(()),
+            Gap::Alloc => (
+                "allocation samples: WebKit's Heap instrument snapshots live objects and GC pauses rather than allocation-site stacks",
+                "query heap and query gc show live retained memory and garbage collections",
+            ),
+            Gap::Style => (
+                "style invalidation tracking: WebKit's Timeline records RecalculateStyles spans without per-element selector invalidation causes",
+                "query layout ranks WebKit's RecalculateStyles and Layout work by the script that forced them",
+            ),
+        };
+        return Err(crate::model::Refusal::new(crate::model::ValidatorId::EngineUnsupported, summary).fix(fix).into());
+    }
     if rec.meta["engine"] != "firefox" {
         return Ok(());
     }
@@ -448,6 +474,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             vec![q("leaks"), q("memory")],
         );
     }
+    // Crash or Jetsam caught on an iOS device during `[t0, t1 + 5s]`.
+    for c in meta["crashes"].as_array().into_iter().flatten() {
+        let rule = if c["kind"] == "jetsam" { "jetsam" } else { "crash" };
+        hit(rule, "warn", c["summary"].as_str().unwrap_or("target process crashed or was jetsam-killed").to_string(), c.clone(), vec![q("log --source crash")]);
+    }
     let mut text = format!("insights · {id} · {} hit(s)\n", hits.len());
     for h in &hits {
         text += &format!("{} {}\n", if h["level"] == "warn" { "!" } else { "i" }, h["title"].as_str().unwrap_or(""));
@@ -626,6 +657,13 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
                     c["dom"]["nodes"],
                     mb(c["dom"]["bytes"].as_f64().unwrap_or(f64::NAN)),
                     mb(c["dom"]["orphan_bytes"].as_f64().unwrap_or(f64::NAN))
+                );
+            } else if c["engine"] == "webkit" {
+                text += &format!(
+                    "page      JavaScript {} (WebKit Heap; {} with JIT) · {} DOM nodes (WebCore categories; OS private memory refused on iOS)\n",
+                    mb(c["js_heap_bytes"].as_f64().unwrap_or(f64::NAN)),
+                    mb(c["js_heap_total_bytes"].as_f64().unwrap_or(f64::NAN)),
+                    c["dom"]["nodes"],
                 );
             } else {
                 text += &format!(

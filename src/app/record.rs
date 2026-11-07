@@ -119,6 +119,8 @@ pub fn run(args: &Args) -> Result<Output> {
         let ext = std::path::Path::new(p).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         matches!(ext.as_str(), "html" | "htm" | "xhtml" | "svg") && std::path::Path::new(p).is_file()
     };
+    let target = if target == "wir" { "wir:".to_string() } else { target };
+    let is_wir = target.starts_with("wir:");
     // `file:<path>`, `file:///<path>`, and on Windows `file:///C:/…`.
     let local = target.strip_prefix("file://").or_else(|| target.strip_prefix("file:")).map(|p| if cfg!(windows) && p.len() > 2 && p.as_bytes()[2] == b':' { &p[1..] } else { p });
     let target = match local {
@@ -138,7 +140,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let emulation = parse_emulation(args)?;
     if args.has("mobile") {
         mobile_usage(args, &target)?;
-    } else {
+    } else if !is_wir {
         if let Some(e) = args.get("engine").map(WebEngine::parse).transpose()?.and_then(|e| crate::target::web::refusal_as(e, args.has("headless"), &emulation)) {
             return Err(e);
         }
@@ -147,9 +149,8 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     }
     // A timed recording runs on the fastest power plan, as a bench does (SPEC §9.4); attribution,
-    // deep and memory recordings are not timed. A plan it switched to is said in the result, not as
-    // a progress line on stderr that reads like an error.
-    let power = if args.get("probes").unwrap_or("timing") == "timing" && !args.has("mobile") { Some(super::bench::power_quiet(args)?) } else { None };
+    // deep, memory and attached phone (`wir:`, `--mobile`) recordings do not switch this host's plan.
+    let power = if args.get("probes").unwrap_or("timing") == "timing" && !args.has("mobile") && !is_wir { Some(super::bench::power_quiet(args)?) } else { None };
     let mut out = recorded(args, target)?;
     // The user's plan is put back (the guard dropped) before the result says so.
     let switched = power.filter(|p| p.switched()).map(|p| p.used.clone());
@@ -163,6 +164,9 @@ pub fn run(args: &Args) -> Result<Output> {
 
 fn recorded(args: &Args, target: String) -> Result<Output> {
     video_refusal(args, &target)?;
+    if target.starts_with("wir:") {
+        return ios_wir(args, &target);
+    }
     if target.starts_with("pid:") || target.starts_with("proc:") {
         return super::outside::record(args, &target);
     }
@@ -1265,7 +1269,7 @@ fn video_refusal(args: &Args, target: &str) -> Result<()> {
     if !args.has("video") {
         return Ok(());
     }
-    if target.starts_with("pid:") || target.starts_with("proc:") || target.starts_with("cdp:") || target.starts_with("ws://") {
+    if target.starts_with("pid:") || target.starts_with("proc:") || target.starts_with("cdp:") || target.starts_with("ws://") || target.starts_with("wir:") {
         return Err(Error::refused(
             "NotForTarget",
             format!("--video films a window strobe launched; {target} is a process strobe attached to"),
@@ -1317,6 +1321,23 @@ pub(crate) fn phone_line(p: &Value) -> Option<String> {
         return None;
     }
     let sc = &p["screen"];
+    if p["platform"] == "ios" {
+        let mut parts = vec![p["model"].as_str().unwrap_or("iPhone").to_string(), format!("iOS {}", p["ios"].as_str().unwrap_or("?")), p["app"].as_str().unwrap_or("Safari").to_string()];
+        if let (Some(w), Some(h)) = (sc["viewport"][0].as_f64(), sc["viewport"][1].as_f64()) {
+            parts.push(format!("{w}×{h} @{}x", sc["dpr"].as_f64().map_or("?".to_string(), |d| format!("{d}"))));
+        }
+        parts.push(p["transport"].as_str().unwrap_or("usb").to_string());
+        if let Some(pct) = p["battery"]["percent"].as_f64() {
+            parts.push(format!("{pct:.0}%{}", if p["battery"]["charging"] == true { " charging" } else { "" }));
+        }
+        if let Some(t) = p["battery"]["temperature_c"].as_f64() {
+            parts.push(format!("{t:.1} °C"));
+        }
+        if let Some(id) = p["short_udid"].as_str() {
+            parts.push(id.to_string());
+        }
+        return Some(parts.join(" · "));
+    }
     let mut parts = vec![format!("{} {}", p["manufacturer"].as_str().unwrap_or(""), p["model"].as_str().unwrap_or("")).trim().to_string(), format!("Android {}", p["android"].as_str().unwrap_or("?"))];
     parts.push(p["channel"].as_str().unwrap_or("Chrome").to_string());
     if let (Some(w), Some(h)) = (sc["viewport"][0].as_f64(), sc["viewport"][1].as_f64()) {
@@ -1368,6 +1389,9 @@ fn summary_body(meta: &Value) -> String {
     }
     if meta["native"] == true {
         return native_summary(meta);
+    }
+    if meta["wir"] == true {
+        return wir_summary(meta);
     }
     if meta["engine"].as_str().is_some_and(|e| e != "chromium") {
         return engine_summary(meta);
@@ -1570,4 +1594,250 @@ fn civil(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `strobe record wir:[selector] [--for 10s]`: strictly read-only WebKit Inspector attribution (or
+/// `--probes memory` S0/S1/S2 heap leak capture) of an open iOS Safari tab or WKWebView over USB, plus
+/// a network waterfall, allowlisted Safari/WebKit device logs, and read-only crash/jetsam reports.
+fn ios_wir(args: &Args, target: &str) -> Result<Output> {
+    use crate::host::ios::logs::{Allowlist, LogStream, collect_crashes};
+    use crate::probe::webkit_inspector as wki;
+    use crate::target::wir;
+
+    for bad in ["headless", "emulate", "os-frames", "app", "home", "gpu-cache", "wayland", "native", "mobile", "engine", "until-line", "stop-line"] {
+        if args.has(bad) {
+            return Err(Error::usage(format!("--{bad} does not apply to wir: (an open Safari tab on an iPhone over USB)")));
+        }
+    }
+    let set = match args.get("probes") {
+        None | Some("attribution") => Set::Attribution,
+        Some("memory") => Set::Memory,
+        Some("timing") => {
+            return Err(Error::refused(
+                "EngineUnsupported",
+                "--probes timing on wir:: attaching Web Inspector runs WebKit's attribution instruments, which perturb timing (SPEC §1 rule 3)",
+                "drop --probes to record attribution (Timeline, ScriptProfiler, Heap, Network, logs) with timing marked perturbed",
+            ));
+        }
+        Some("waits" | "deep") => {
+            return Err(Error::refused(
+                "NotOnThisOs",
+                format!("--probes {} needs kernel or OS stack sampling, which iOS does not expose over unprivileged USB", args.get("probes").unwrap_or("")),
+                "drop --probes to record WebKit ScriptProfiler, Timeline, Heap, Network and logs",
+            ));
+        }
+        Some(other) => return Err(Error::usage(format!("--probes on wir:: attribution (default) or memory, not {other}"))),
+    };
+
+    let for_ms = match args.get("for") {
+        Some(d) => duration_ms(d)?,
+        None => 10_000,
+    };
+
+    let mut session = wir::Session::attach(target, true, Duration::from_secs(15))?;
+    let handle = session.page.handle.clone();
+    let usb_dev = session.usb_device().clone();
+    let allowlist = Allowlist::new(&session.page.bundle_id, session.page.app_pid);
+    let wall0_s = session.wall_clock_s();
+    let t0_ns = host::now_ns();
+
+    // Read viewport & DPR once without mutating anything on the page.
+    let screen = session
+        .eval("JSON.stringify({ viewport: [Math.round(innerWidth), Math.round(innerHeight)], dpr: devicePixelRatio || 1 })", Duration::from_secs(5))
+        .ok()
+        .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+        .unwrap_or_else(|| json!({ "viewport": [null, null], "dpr": null }));
+
+    let (id, draft) = claim(args)?;
+    let dir = draft.dir().to_path_buf();
+    let token = id.trim_start_matches("rec_").to_string();
+
+    let log_stream = LogStream::start(&usb_dev, allowlist.clone(), t0_ns);
+    progress(format!("recording {id} on {handle} ({}) for {}", session.phone.product_type.as_deref().unwrap_or("iPhone"), fmt::ms_duration(for_ms)));
+
+    if set == Set::Memory {
+        let mem_res = wki::record_memory(&mut session, &dir, for_ms, |m| progress(m));
+        session.refresh_battery();
+        let wall1_s = session.wall_clock_s();
+        let phone_meta = wir_phone_meta(&session, &handle, &screen);
+        session.close();
+        let dev_logs = log_stream.stop();
+        let crashes = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+        let mem = mem_res.map_err(|e| attach_crash_detail(e, &crashes))?;
+        let (values, census, leaks, console) = (mem.values, mem.census, mem.leaks, mem.console);
+        wki::write_owner_gz(&dir.join(wki::DEVICE_LOG_FILE), &dev_logs)?;
+        wki::write_owner_gz(&dir.join(wki::CRASHES_FILE), &crashes)?;
+        let mut refused = wir_refusals();
+        refused.remove("js.heap.used");
+        let meta = json!({
+            "id": id,
+            "kind": "record",
+            "wir": true,
+            "engine": "webkit",
+            "target": handle,
+            "url": session.page.url,
+            "probes": "memory",
+            "token": "",
+            "duration_ms": for_ms,
+            "browser": format!("Mobile Safari (iOS {})", phone_meta["ios"].as_str().unwrap_or("?")),
+            "env": host::env(),
+            "phone": phone_meta,
+            "values": values,
+            "refused": refused,
+            "census": census,
+            "leaks": { "count": leaks["count"], "self_size": leaks["self_size"], "retained_size": leaks["retained_size"], "classes_total": leaks["classes_total"] },
+            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "device_source": dev_logs.source, "crashes": crashes.len() },
+            "crashes": crashes,
+            "timing": "perturbed",
+            "created": now_iso(),
+            "valid": true,
+        });
+        store::write_json(&dir.join("meta.json"), &meta)?;
+        draft.keep();
+        return Ok(Output::new(summary_text(&meta), meta));
+    }
+
+    let cap_res = wki::record_attribution(&mut session, &dir, &token, for_ms, args.get("served").map(std::path::Path::new), |m| progress(m));
+    session.refresh_battery();
+    let wall1_s = session.wall_clock_s();
+    let phone_meta = wir_phone_meta(&session, &handle, &screen);
+    // Detach Web Inspector immediately before collecting crash reports over AFC.
+    session.close();
+
+    let dev_logs = log_stream.stop();
+    let crashes = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+    let cap = cap_res.map_err(|e| attach_crash_detail(e, &crashes))?;
+
+    wki::write_owner_gz(&dir.join(wki::DEVICE_LOG_FILE), &dev_logs)?;
+    wki::write_owner_gz(&dir.join(wki::CRASHES_FILE), &crashes)?;
+
+    let refused = wir_refusals();
+    let meta = json!({
+        "id": id,
+        "kind": "record",
+        "wir": true,
+        "engine": "webkit",
+        "target": handle,
+        "url": session.page.url,
+        "probes": "attribution",
+        "token": token,
+        "runs": 1,
+        "duration_ms": for_ms,
+        "browser": format!("Mobile Safari (iOS {})", phone_meta["ios"].as_str().unwrap_or("?")),
+        "env": host::env(),
+        "phone": phone_meta,
+        "values": cap.values,
+        "refused": refused,
+        "census": cap.census,
+        "sampling": cap.sampling,
+        "frames_refused": "EngineUnsupported: WebKit's Web Inspector reports main-thread RenderingFrame records, not screen presentation times or dropped refreshes",
+        "os_frames": { "refused": "EngineUnsupported: iOS screen presentation times are not exposed over Web Inspector" },
+        "logs": {
+            "console": cap.console_count,
+            "console_errors": cap.console_errors,
+            "device": dev_logs.entries.len(),
+            "device_source": dev_logs.source,
+            "crashes": crashes.len(),
+        },
+        "network": {
+            "requests": cap.network_requests,
+            "bytes": cap.network_bytes,
+        },
+        "crashes": crashes,
+        "timing": "perturbed",
+        "created": now_iso(),
+        "valid": true,
+    });
+    store::write_json(&dir.join("meta.json"), &meta)?;
+    draft.keep();
+    Ok(Output::new(summary_text(&meta), meta))
+}
+
+fn wir_phone_meta(session: &crate::target::wir::Session, handle: &str, screen: &Value) -> Value {
+    json!({
+        "platform": "ios",
+        "udid": session.phone.udid,
+        "short_udid": host::ios::short_udid(&session.phone.udid),
+        "model": session.phone.product_type,
+        "ios": session.phone.ios,
+        "app": session.page.app_name,
+        "bundle_id": session.page.bundle_id,
+        "page_id": session.page.page_id,
+        "handle": handle,
+        "transport": "usb",
+        "battery": session.phone.battery,
+        "screen": screen,
+    })
+}
+
+fn attach_crash_detail(err: Error, crashes: &[crate::host::ios::logs::CrashReport]) -> Error {
+    let Some(first) = crashes.first() else { return err };
+    let prev = err.hint.clone().unwrap_or_else(|| "the tab disconnected".into());
+    err.hint(format!("{prev}; device crash report in window: {}", first.summary))
+}
+
+fn wir_refusals() -> serde_json::Map<String, Value> {
+    use crate::model::{Refusal, ValidatorId};
+    let mut r = serde_json::Map::new();
+    let cpu_why = Refusal::new(ValidatorId::NotOnThisOs, "iOS gives an unprivileged USB client no per-process CPU or wake counters for Safari").message();
+    for m in ["cpu.app.total", "cpu.work", "cpu.wakes", "ui.cpu", "ui.wakes"] {
+        r.insert(m.into(), json!(cpu_why));
+    }
+    let mem_why = Refusal::new(
+        ValidatorId::NotOnThisOs,
+        "iOS gives an unprivileged USB client no OS private-memory footprint for Safari (query memory and query heap read WebKit's page categories and JS heap)",
+    )
+    .message();
+    r.insert("memory.app.private".into(), json!(mem_why));
+    let gpu_why = Refusal::new(ValidatorId::NotOnThisOs, "iOS gives an unprivileged USB client no GPU utilization or VRAM counters").message();
+    for m in ["gpu.process.3d", "gpu.vram", "gpu.shared"] {
+        r.insert(m.into(), json!(gpu_why));
+    }
+    let frames_why = Refusal::new(ValidatorId::EngineUnsupported, "WebKit's Web Inspector reports main-thread RenderingFrame records, not screen presentation times or dropped refreshes").message();
+    for m in [
+        "frames.n",
+        "frames.presented.count",
+        "frames.dropped",
+        "frames.dropped.pct",
+        "frames.interval.p50",
+        "frames.interval.p95",
+        "frames.interval.max",
+        "frames.presented.p50",
+        "frames.presented.p95",
+        "frames.presented.max",
+    ] {
+        r.insert(m.into(), json!(frames_why));
+    }
+    r
+}
+
+fn wir_summary(meta: &Value) -> String {
+    let v = &meta["values"];
+    let get = |k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
+    let id = meta["id"].as_str().unwrap_or("");
+    let mut s = format!(
+        "{id} · {} · {} · {} · {}\n",
+        meta["target"].as_str().unwrap_or(""),
+        fmt::ms_duration(meta["duration_ms"].as_u64().unwrap_or(0)),
+        meta["browser"].as_str().unwrap_or("Mobile Safari"),
+        meta["probes"].as_str().unwrap_or("attribution")
+    );
+    s += &format!("main     {} busy ({} work) · {} long tasks\n", fmt::value(get("main.busy"), "%"), fmt::value(get("main.work"), "ms"), fmt::value(get("main.tasks.long"), "count"));
+    s += &format!("heap     {} JS heap · {} DOM nodes\n", fmt::value(get("js.heap.used"), "MB"), fmt::value(get("dom.nodes"), "count"));
+    let net_reqs = meta["network"]["requests"].as_u64().unwrap_or(0);
+    let net_bytes = meta["network"]["bytes"].as_f64().unwrap_or(0.0);
+    s += &format!("network  {net_reqs} requests · {}\n", fmt::bytes(net_bytes));
+    let con = meta["logs"]["console"].as_u64().unwrap_or(0);
+    let con_err = meta["logs"]["console_errors"].as_u64().unwrap_or(0);
+    let dev = meta["logs"]["device"].as_u64().unwrap_or(0);
+    let crashes = meta["crashes"].as_array().map_or(0, Vec::len);
+    s += &format!("logs     {con} console ({con_err} errors) · {dev} Safari/WebKit device logs · {crashes} crashes/jetsams\n");
+    for c in meta["crashes"].as_array().into_iter().flatten() {
+        s += &format!("! Crash  {}\n", c["summary"].as_str().unwrap_or("crash or jetsam"));
+    }
+    s += &refused_lines(meta);
+    s += &sampling_line(meta);
+    s += "timing   perturbed: WebKit Inspector Timeline, ScriptProfiler and Heap ran on the attached tab; device-tagged, never compared to desktop\n";
+    s += &format!("next     strobe query {id} hotspots · strobe query {id} layout · strobe query {id} heap · strobe query {id} log · strobe query {id} network\n");
+    s
 }
