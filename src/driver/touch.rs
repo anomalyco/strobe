@@ -33,6 +33,11 @@ pub fn takes(call: &str, args: &[Value]) -> bool {
 /// 50 to 100 ms, and the press's frame shows before the release, as a click's does.
 const TAP_HOLD: Duration = Duration::from_millis(60);
 
+/// The longest a tap into a field may take to move focus there before its keys (`type`, `press`): a
+/// phone's browser holds a tap on a zoomable page until no second tap can follow (Chrome on Android,
+/// about 300 ms).
+const FOCUS_WAIT: Duration = Duration::from_secs(1);
+
 /// Between a double tap's taps (release to press): a person's, inside the 300 ms in which Android (and
 /// Chromium's gesture detector) takes two taps as one double tap, past its 40 ms minimum.
 const DOUBLE_TAP_GAP: Duration = Duration::from_millis(100);
@@ -135,7 +140,7 @@ pub struct Touch {
 
 /// `DeviceMismatch` for a call a phone has no device for.
 fn no_device(call: &str, why: &str, fix: &str) -> Error {
-    Refusal::new(ValidatorId::DeviceMismatch, format!("page.{call} on a page that emulates a phone: {why}")).fix(fix).into()
+    Refusal::new(ValidatorId::DeviceMismatch, format!("page.{call} on a phone's page: {why}")).fix(fix).into()
 }
 
 /// `EngineUnsupported` for `what` on a Firefox phone: headless Firefox does not pan on touch (no async
@@ -445,15 +450,28 @@ impl Driver {
             }
             "type" | "press" => {
                 let (target, o) = if call == "type" { (sel(0), opts(2)) } else { (opts(1)["selector"].clone(), opts(1)) };
-                let (x, y, focused) = self.aim_for(&Self::sel(&target)?, &o, true)?;
+                let sel = Self::sel(&target)?;
+                let (x, y, focused) = self.aim_for(&sel, &o, true)?;
                 if !focused {
                     // A tap into the field, never a sample; its frames (a caret, a focus ring) settle
-                    // before the first key, which is measured.
+                    // before the first key, which is measured. On a page a person can zoom, a phone's
+                    // browser holds the tap until no second one can follow, and focus moves only then:
+                    // the keys wait for the page's focusin (armed before the tap, `FOCUS_WAIT`), and a
+                    // tap that moved no focus there refuses the run rather than type into the body.
                     self.settle(Duration::ZERO)?;
+                    self.read(&format!("__strobe.armFocus({}, {})", sel.page_spec(), FOCUS_WAIT.as_millis()), Duration::from_secs(10))?;
                     sent(crate::host::now_ns(), false, None);
                     self.finger(t, Phase::Start, (x, y), true)?;
                     std::thread::sleep(TAP_HOLD);
                     self.finger(t, Phase::End, (x, y), false)?;
+                    if self.read("__strobe.focusWait", FOCUS_WAIT + Duration::from_secs(2))? != Value::Bool(true) {
+                        return Err(Refusal::new(
+                            ValidatorId::RunIncomplete,
+                            format!("page.{call}({}): the tap into it moved no focus there within {} ms, so its keys would reach whatever has focus", sel.source, FOCUS_WAIT.as_millis()),
+                        )
+                        .fix("tap an element that takes focus (a field, an editable element), or let the page settle before typing (an `until` on the call before)")
+                        .into());
+                    }
                     self.settle(self.refresh.get() * 2)?;
                 }
                 // The keys then go out as on a desktop, where focus now is.

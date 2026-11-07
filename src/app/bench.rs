@@ -330,7 +330,8 @@ fn identity(variants: &[Variant], file: &Path, harness: &Harness, args: &Args, s
     }
     // `--seed` is the workload only where a hook used it (`used_random`, set after the runs): the ledger
     // compares `seed` on its own. `--video` films untimed blocks after the timed ones: no verdict moves.
-    const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "max-time", "plan", "seed", "video"];
+    // `--mobile`'s phone is the page's (`identity.engines`, by its hardware key), never its serial of the day.
+    const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "max-time", "plan", "seed", "video", "mobile"];
     let flags: serde_json::Map<String, Value> = args.to_json()["flags"].as_object().into_iter().flatten().filter(|(k, _)| !SKIP.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
     // An implementation comparison's side is its target at a build: both are its identity, the build
     // resolved in that target's own project (its `cwd`'s repository and app profiles).
@@ -680,7 +681,9 @@ const TITLE_BAR_PT: f64 = 32.0;
 fn admit_window(ctx: &mut Ctx, s: &Series, v: &Variant, b: &Block) -> Result<()> {
     let target = &ctx.describe["targets"][v.target_of(s)];
     let windowed = !matches!(target["kind"].as_str(), Some("script" | "cli")) && target["window"] != false;
-    let asked = target["viewport"].as_object().map(|vp| (vp.get("width").and_then(Value::as_f64).unwrap_or(0.0), vp.get("height").and_then(Value::as_f64).unwrap_or(0.0)));
+    // A phone's page is its own screen: a target's viewport sizes only an emulated one.
+    let asked =
+        target["viewport"].as_object().filter(|_| ctx.phone.is_none()).map(|vp| (vp.get("width").and_then(Value::as_f64).unwrap_or(0.0), vp.get("height").and_then(Value::as_f64).unwrap_or(0.0)));
     // A launch is timed in the window the app opens (never resized): its sides are held to each other.
     match (asked.filter(|_| windowed && !s.launch.is_object()), b.client) {
         (Some((w, h)), Some(c)) if (c[0] - w).abs() > 2.0 || (c[1] - h).abs() > 2.0 => {
@@ -1095,6 +1098,8 @@ struct Ctx<'a> {
     runner_pin: Option<u64>,
     /// `--check --batch N`: up to N run cases per launch (`batch`).
     batch: Option<usize>,
+    /// `--mobile`: the phone whose Chrome runs the file's phone targets (SPEC 13.1 "Chrome on a phone").
+    phone: Option<crate::target::android_chrome::Phone>,
 }
 
 /// Every block's reservation, merged for the experiment's context.
@@ -1438,6 +1443,22 @@ pub fn run(args: &Args) -> Result<Output> {
             }
         }
     };
+    // `--mobile`: phone targets in Chrome on a phone, which draws on the phone and is no desktop engine.
+    if args.has("mobile") {
+        if args.has("headless") {
+            return Err(Error::usage("--headless with --mobile: a phone's Chrome draws on the phone's screen"));
+        }
+        if args.get("engine").is_some_and(|e| e != "chromium") {
+            return Err(Error::usage("--mobile drives Chrome on Android (Chromium): drop --engine"));
+        }
+        if args.get("probes") == Some("memory") {
+            return Err(Error::refused(
+                "NotForTarget",
+                "--probes memory on a phone: a leak run's census reads the browser's processes on this computer, and the page's are on the phone",
+                "leak-check the page on a desktop target, or record --probes attribution on the phone (it ends with a heap snapshot)",
+            ));
+        }
+    }
     if args.has("plan") {
         return plan::run(args);
     }
@@ -1578,7 +1599,19 @@ pub fn run(args: &Args) -> Result<Output> {
         folder_notes: Default::default(),
         runner_pin,
         batch,
+        phone: None,
     };
+    // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
+    // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check` or a
+    // pixel comparison takes none of them.
+    if let Some(serial) = args.get("mobile") {
+        let phone = crate::target::android_chrome::pick(serial)?;
+        if !matches!(mode, Mode::Check | Mode::Pixels) {
+            validity::phone_timed(&phone.facts)?;
+        }
+        progress(format!("phone {} {} · Android {} · {}", phone.facts.manufacturer, phone.facts.model, phone.facts.android, phone.device.serial));
+        ctx.phone = Some(phone);
+    }
     ctx.runner.batch(batch.is_some());
     // What `--resume` needs from another folder: the bench file and directory variants as full paths.
     ctx.saved["args"]["pos"] = json!([file]);
@@ -1608,8 +1641,9 @@ pub fn run(args: &Args) -> Result<Output> {
     ctx.projects = target_projects(&ctx.describe)?;
     ctx.implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     check_engines(&mut series, &ctx.describe, args, &variants, &config, &ctx.projects)?;
-    // A series the display cannot show refuses before anything counts it (journeys, the Holm family).
-    let (describe, headless) = (ctx.describe.clone(), ctx.headless);
+    // A series the display cannot show refuses before anything counts it (journeys, the Holm family). A
+    // phone's page is the phone's own screen: no window of this display's to fit.
+    let (describe, headless) = (ctx.describe.clone(), ctx.headless || ctx.phone.is_some());
     display_fit(Some(&mut ctx), &mut series, &describe, headless)?;
     // A check of two targets refuses what their comparison would before anything builds.
     if let Some((a, b)) = check_pair(&ctx.describe, args, &project)? {
@@ -1713,6 +1747,7 @@ pub fn run(args: &Args) -> Result<Output> {
         // The browser a page ran in is part of what was measured: another engine, version, a headless
         // run or other input devices is another experiment, never the same one rerun.
         // Both sides' targets in an implementation comparison.
+        let phone_identity = ctx.phone.as_ref().map(crate::target::android_chrome::identity);
         let pages: BTreeMap<String, Value> = series
             .iter()
             .flat_map(|s| std::iter::once(&s.target).chain(s.sides.iter().flat_map(|(b, h)| [b, h])))
@@ -1725,7 +1760,12 @@ pub fn run(args: &Args) -> Result<Output> {
                     Some(_) => validity::InputClass::Hybrid,
                     None => validity::InputClass::Desktop,
                 };
-                let mut page = json!({ "engine": engine_of(target), "browser": web::browser_identity(engine_of(target), target["headless"] == true), "headless": target["headless"] == true, "input": input });
+                // On a phone, the phone and its Chrome: another phone or Chrome version is another experiment.
+                let browser = match &phone_identity {
+                    Some(p) => json!(p),
+                    None => json!(web::browser_identity(engine_of(target), target["headless"] == true)),
+                };
+                let mut page = json!({ "engine": engine_of(target), "browser": browser, "headless": target["headless"] == true, "input": input });
                 if !target["emulate"].is_null() {
                     page["emulate"] = target["emulate"].clone();
                 }
@@ -2268,6 +2308,12 @@ fn check_output(exp: &str, dir: &Path, file: &Path, series: Vec<Value>, warnings
             }
             if let Some(line) = screen_line(&s["screen"]) {
                 text += &format!("      screen  {line}\n");
+            }
+            // `--mobile`: the phone the case ran on, as its recording keeps it.
+            if let Some(line) =
+                s["recording"].as_str().and_then(|r| store::resolve(r).ok()).and_then(|d| store::read_json(&d.join("meta.json")).ok()).and_then(|m| super::record::phone_line(&m["phone"]))
+            {
+                text += &format!("      phone  {line}\n");
             }
             if let Some(o) = serde_json::from_value::<Overhead>(s["overhead"].clone()).ok().map(|o| o.text()).filter(|t| !t.is_empty()) {
                 text += &format!("      self  {o}\n");
@@ -4055,6 +4101,10 @@ const BUSY_WAITS: u32 = 15;
 /// How many times a macOS block whose app lost the front while nobody used the Mac runs again.
 const HIDDEN_RETRIES: u32 = 5;
 
+/// How many times a block whose phone got hot (`Thermal`) runs again, each after its launch waited up to
+/// 3 minutes for the phone to cool.
+const HOT_RETRIES: u32 = 3;
+
 /// Runs a block while the screen is unlocked and lit: waits out a locked session, redoes a block the
 /// lock screen touched (Chromium hides its windows and nothing reaches the display, so its numbers
 /// describe nothing), and wakes a display that went dark on idle, once, before a block refuses
@@ -4200,13 +4250,32 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // A series that may run locked but met a hidden window on an unlocked screen (a `--check` or
     // `record --bench` of a windowed native case): it waits and retries as on-screen blocks do.
     let mut hidden_unlocked = false;
+    // A phone's page: this computer's lock and display are not its screen.
+    let phone = ctx.phone.is_some();
+    let mut hot = 0;
     if cases.iter().all(|s| runs_locked(ctx, s, x)) {
         loop {
-            let (start, locks, unlocks) = (host::session_locked(), ctx.awake.locks(), ctx.awake.unlocks());
-            let display = host::display_state();
+            let (start, locks, unlocks) = (host::session_locked() && !phone, ctx.awake.locks(), ctx.awake.unlocks());
+            let display = if phone { None } else { host::display_state() };
             let r = slotted(ctx, cases, v, pair, x);
             if retry_launch(ctx, s, v, failure_of(&r), &mut retries)? {
                 discard(&r);
+                continue;
+            }
+            // The phone is hot (before the block, or it got hot in it): discarded, and the block runs again
+            // once the phone cools, up to 3 minutes, holding nothing meanwhile (the bench slot, the
+            // phone's slot, its stay-awake setting).
+            if hot < HOT_RETRIES && refused_by(&r) == Some(ValidatorId::Thermal) {
+                hot += 1;
+                progress(format!("  the phone is hot for a {} block: it runs again once the phone cools ({hot} of {HOT_RETRIES})", v.role));
+                discard(&r);
+                release_machine(ctx);
+                ctx.reg.set("waiting", format!("{} {} block: the phone is hot", s.label(), v.role));
+                if let Some(p) = ctx.phone.clone() {
+                    let waiting = Instant::now();
+                    crate::target::android_chrome::cool(&p.device)?;
+                    ctx.waited_ms += waiting.elapsed().as_secs_f64() * 1e3;
+                }
                 continue;
             }
             // As an on-screen block's below: a headless page runs here, and a busy machine ended its bench.
@@ -4216,8 +4285,8 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 discard(&r);
                 continue;
             }
-            let end = host::session_locked();
-            let steady = start == end && if start { ctx.awake.unlocks() == unlocks } else { ctx.awake.locks() == locks };
+            let end = host::session_locked() && !phone;
+            let steady = phone || (start == end && if start { ctx.awake.unlocks() == unlocks } else { ctx.awake.locks() == locks });
             // The display turned off (or on) during the block: it ran in two machine states.
             let lit = display.is_none_or(|(_, n)| host::display_state().is_some_and(|(_, m)| m == n));
             if steady && lit && !start && refused_by(&r) == Some(ValidatorId::WindowHidden) {
@@ -4379,7 +4448,8 @@ fn hold_machine(ctx: &mut Ctx, what: &str) -> Result<()> {
             ctx.slot = Some(s);
         }
     }
-    if ctx.power.is_none() {
+    // A phone's blocks run on the phone: this computer's power plan is none of theirs (it stays awake).
+    if ctx.power.is_none() && ctx.phone.is_none() {
         let p = power_for(ctx.args)?;
         if let Some(why) = &p.kept
             && !ctx.warnings.iter().any(|w| w.id == "PowerPlan")
@@ -4480,7 +4550,8 @@ fn reserve_for(ctx: &mut Ctx, x: &Exec) -> Option<host::reserve::Reserve> {
         "off" => false,
         _ => x.measures_time(),
     };
-    if !wanted {
+    // A phone's page runs on none of this computer's CPUs.
+    if !wanted || ctx.phone.is_some() {
         return None;
     }
     // macOS has no CPU affinity: nothing is pinned or kept off anything, and nothing to say.
@@ -4624,13 +4695,14 @@ fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
     };
     let windowless = t["window"] == false || t["app"].as_str().and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
     // A pixels block compares what the window shows; only a headless page draws it without a screen.
-    if x.pixels.is_some() && !(matches!(t["kind"].as_str(), Some("web" | "url")) && headless_of(ctx, s)) {
+    if x.pixels.is_some() && !(matches!(t["kind"].as_str(), Some("web" | "url")) && (headless_of(ctx, s) || ctx.phone.is_some())) {
         return Some("it compares the case's snapshots (--pixels), which are pixels on screen".into());
     }
     match t["kind"].as_str().unwrap_or("") {
         "script" | "cli" => None,
-        // A headless page draws to no display: the lock screen covers nothing of it.
-        "web" | "url" if headless_of(ctx, s) => None,
+        // A headless page draws to no display: the lock screen covers nothing of it. A phone's page draws
+        // on the phone's.
+        "web" | "url" if headless_of(ctx, s) || ctx.phone.is_some() => None,
         _ if x.set == Set::Memory => None,
         "native" if windowless || x.untimed => {
             let on: Vec<&str> = declared_metrics(s)
@@ -4857,6 +4929,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // How the block's notes name its side (`side_of`), read before the runs' closures borrow ctx.
     let side = side_of(ctx, v).to_string();
     let url = if app { String::new() } else { variant_url(v, &target)? };
+    // `--mobile`: the page in Chrome on the phone (a local page served to it from this computer).
+    let phone = if app { None } else { ctx.phone.clone() };
+    let url = if phone.is_some() { crate::target::android_chrome::served(&url)? } else { url };
     let fixed_page = kind == "url" && !matches!(v.kind, Kind::Url(_));
     let mut window = ctx.window.clone();
     if let Some(vp) = target.get("viewport").filter(|v| v.is_object()) {
@@ -4873,7 +4948,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // Only CPUs strobe keeps for the target: an unpinned machine's every CPU is never all quiet (on
     // air every block waited the full 10 s).
     let settled = Instant::now();
-    if x.measures_time() && ctx.pin.is_some() {
+    if x.measures_time() && ctx.pin.is_some() && phone.is_none() {
         validity::wait_quiet(ctx.pin, Duration::from_secs(10));
     }
     let quiet_ms = settled.elapsed().as_secs_f64() * 1e3;
@@ -4895,11 +4970,17 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let (b, g, _) = electron::launch_with(&launch, seed.as_deref(), &window, ctx.pin, &electron::Extra { prepared: Some(home), ..Default::default() })?;
         guard = Some(g);
         b.into()
+    } else if let Some(p) = &phone {
+        // A timed block takes no phone that is hot, saving or asleep (`android_chrome::launch`).
+        let wait = ctx.args.get("unlock-wait").map(duration_ms).transpose()?.map_or(Duration::ZERO, Duration::from_millis);
+        crate::target::android_chrome::launch(p, &format!("bench {} {}", s.label(), v.role), x.measures_time(), wait)?.into()
     } else {
         web::launch_as(engine, &window, headless, ctx.pin, &emulation, reduce)?
     };
     let steps = RefCell::new(vec![("quiet".to_string(), quiet_ms), ("launch".to_string(), launched.elapsed().as_secs_f64() * 1e3)]);
-    ctx.target_qos = host::background_qos(Some(browser.pid()));
+    // The phone's Launch, for what only it has (its tunnels, its speed reference, its heat).
+    let on_phone = browser.cdp().and_then(|b| b.phone.as_deref());
+    ctx.target_qos = if on_phone.is_some() { None } else { host::background_qos(Some(browser.pid())) };
     let lapped = std::cell::Cell::new(Instant::now());
     let lap = |name: &str| {
         steps.borrow_mut().push((name.to_string(), lapped.get().elapsed().as_secs_f64() * 1e3));
@@ -4938,20 +5019,22 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // An emulated device's touch and user agent before anything sizes or loads the page; a phone's
         // viewport once the window is its size (headed, the window must have reached it:
         // `check_viewport`; after the override a page without a viewport tag lays out 980 wide).
-        if !app {
+        // A phone is what it is: nothing emulated, its own screen.
+        if !app && on_phone.is_none() {
             page.emulate(&emulation)?;
         }
-        // A command's app was started by its command: only DevTools' media emulation reaches its page.
+        // A command's app was started by its command, and Chrome on a phone by its launcher: only DevTools'
+        // media emulation reaches its page.
         if reduce.reduced()
-            && kind == "command"
+            && (kind == "command" || on_phone.is_some())
             && let Some(p) = page.cdp()
         {
             motion::emulate(p)?;
         }
-        if !app && (viewport || emulation.mobile) {
+        if !app && on_phone.is_none() && (viewport || emulation.mobile) {
             browser.fit_viewport(&page, window.width, window.height, headless)?;
         }
-        if emulation.mobile {
+        if emulation.mobile && on_phone.is_none() {
             if !headless {
                 page.check_viewport((window.width, window.height))?;
             }
@@ -4991,13 +5074,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let mut driver = Driver::new(page.clone(), token.clone());
         driver.pixels = x.pixels.clone();
         driver.headless = headless;
+        driver.phone = on_phone.is_some();
         // An emulated phone is driven by touch, in every hook (`driver::touch`).
         if emulation.mobile {
             driver.touch_input()?;
         }
         // This run's `count.<name>` values (the bench file's `ctx.count` and the page's counter global)
         // and the run's key, which names its phase marks.
-        let hooks = block::Hooks::new(ctx, || browser.processes().iter().map(|p| p.pid).collect());
+        // A phone's page reaches this computer's fixture through the adb server (a reverse): its connections.
+        let hooks = block::Hooks::new(ctx, || if on_phone.is_some() { crate::host::adb::server_pids() } else { browser.processes().iter().map(|p| p.pid).collect() });
         // TaskDuration (ms), then WORK_PARTS: cumulative per document (`Performance.enable` comes before the runs).
         let counters = || -> [f64; 6] {
             // Chromium's Performance domain; an engine without it has no such counters (NaN, never 0).
@@ -5160,7 +5245,14 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             match op {
                 "driver" => {
                     let call = a["call"].as_str().unwrap_or("");
-                    let args = a["args"].as_array().cloned().unwrap_or_default();
+                    let mut args = a["args"].as_array().cloned().unwrap_or_default();
+                    // On a phone, a page a run goes to on this computer (a local page, a loopback server) is
+                    // served or reversed to the phone first, as the first page was.
+                    if let (Some(p), "goto", Some(to)) = (on_phone, call, args.first().and_then(Value::as_str).map(str::to_string)) {
+                        let to = crate::target::android_chrome::served(&to)?;
+                        p.reach(&to)?;
+                        args[0] = Value::String(to);
+                    }
                     hooks.op(call, &args);
                     // From outside a page gets the OS's input (`os::OsInput`); one it cannot reach would get
                     // its driver's, where the other side gets the OS's (SPEC §9.10).
@@ -5273,25 +5365,53 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         lap("prepare");
         prepared.set(true);
+        // A phone's screen as its first page saw it, kept with the block.
+        let mut phone_screen = Value::Null;
         if !app {
+            // On a phone: the page's origin starts empty as a fresh desktop profile's would, and servers on
+            // this computer's loopback (the variant's, the fixture's) are reversed to the phone's.
+            if let (Some(p), Some(cp)) = (on_phone, page.cdp()) {
+                p.load(&first)?;
+                if let Some(f) = &ctx.fixture_running {
+                    p.reach(&f.url())?;
+                }
+                crate::target::android_chrome::clear_origin(cp, &first)?;
+            }
             page.navigate(&first, Duration::from_secs(60))?;
+            if let (Some(_), Some(cp)) = (on_phone, page.cdp()) {
+                phone_screen = crate::target::android_chrome::screen(cp);
+            }
             driver.touch_loaded()?;
-            if emulation.mobile {
+            if emulation.mobile && on_phone.is_none() {
                 page.check_device((window.width, window.height), window.scale, "once its page loaded")?;
             }
         }
         init_docs.set(page.documents());
         lap("load");
         validity::dev_build(&page)?;
-        let page_seen = if app { observed_input(ctx, s, &page) } else { Some(validity::emulated_input(&page, &emulation)?) };
+        let page_seen = if app {
+            observed_input(ctx, s, &page)
+        } else if on_phone.is_some() {
+            Some(validity::phone_input(&page)?)
+        } else {
+            Some(validity::emulated_input(&page, &emulation)?)
+        };
         let (input, reduced_motion) = (page_seen.map(|s| s.0), page_seen.map(|s| s.1));
         if reduce.reduced() {
-            motion::require(reduced_motion == Some(true), motion_how(kind, engine))?;
+            motion::require(reduced_motion == Some(true), motion_how(if on_phone.is_some() { "command" } else { kind }, engine))?;
         }
         let (pin, baseline) = (ctx.pin, ctx.baseline);
         // One speed check and the other work meanwhile. The calibration is Chromium's: another engine's
         // JS speed is compared with its own reference only, which a check under other work never joins.
         let check = || -> Result<(Result<Option<f64>>, OtherWork)> {
+            // A phone against its own reference in its Chrome, with nothing of this computer read: its CPUs
+            // are not the phone's. An emulator keeps none: it times nothing (`Emulator`), and its speed is
+            // this computer's moment.
+            if let Some(p) = on_phone {
+                let speed = validity::speed_check(&page)?;
+                let checked = if p.facts.emulator.is_some() { Ok(None) } else { validity::phone_throttled(&p.key(), &p.package, speed, true) };
+                return Ok((checked, OtherWork::default()));
+            }
             let during = Foreign::start(&browser);
             let speed = validity::speed_check(&page)?;
             Ok(match engine {
@@ -5308,6 +5428,14 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 }
             })
         };
+        // A slow check's refusal: a phone's says nothing of this computer's other work.
+        let slow = |e: Error, other: &OtherWork, again: &str| -> Error {
+            match (on_phone, e.refusal.clone()) {
+                (Some(_), Some(r)) if !again.is_empty() => (*r).detail(again.trim_start_matches("; ").to_string()).into(),
+                (Some(_), _) => e,
+                (None, _) => slow_check(e, other, again),
+            }
+        };
         let (mut checked, mut other) = check()?;
         // A slow check runs once more after the CPUs settle: a burst passes (the page's own work just
         // after its load, a neighbour on a VM's host, a process that just ended), while throttling
@@ -5316,9 +5444,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // (`Throttled`, info): never silently.
         let mut first_slow: Option<String> = None;
         if let Err(e) = &checked {
-            let first = format!("{}; other work on the target's CPUs {}; busiest processes on the machine: {}", e.message, other.on_cpus(), validity::named_work(&other.busiest, other.steal));
+            let first = if on_phone.is_some() {
+                e.message.clone()
+            } else {
+                format!("{}; other work on the target's CPUs {}; busiest processes on the machine: {}", e.message, other.on_cpus(), validity::named_work(&other.busiest, other.steal))
+            };
             progress(format!("  the {side} speed check ran slow ({}): it runs once more after the CPUs settle", e.message));
-            validity::wait_quiet(pin, Duration::from_secs(10));
+            if on_phone.is_none() {
+                validity::wait_quiet(pin, Duration::from_secs(10));
+            }
             std::thread::sleep(Duration::from_secs(2));
             (checked, other) = check()?;
             first_slow = Some(first);
@@ -5326,7 +5460,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let ratio = match checked {
             Err(e) => {
                 let again = first_slow.as_ref().map(|f| format!("; slow twice, the second time after the CPUs settled (the first: {f})")).unwrap_or_default();
-                return Err(slow_check(e, &other, &again));
+                return Err(slow(e, &other, &again));
             }
             Ok(r) => r,
         };
@@ -5355,7 +5489,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // `page.window`. An emulated phone's is its screen (`device_viewport`): a page without a viewport
         // tag lays out wider than the phone.
         let read_content = || {
-            if emulation.mobile {
+            if emulation.mobile && on_phone.is_none() {
                 return page.device_viewport().ok().map(|[w, h, s]| [w.round(), h.round(), s]);
             }
             page.eval("[innerWidth, innerHeight, devicePixelRatio]").ok().and_then(|v| Some([v[0].as_f64()?, v[1].as_f64()?, v[2].as_f64()?]))
@@ -5398,13 +5532,17 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         lap("setup");
         // `--video` (an untimed block): from before the first run to after the last.
         if x.video {
-            let w = host::main_window(&browser.pids()).filter(|_| !headless);
-            match super::video::Recorder::start(w.as_ref(), page.cdp(), headless) {
+            // A phone's page is filmed as a headless page's is: its renderer's own frames.
+            let offscreen = headless || on_phone.is_some();
+            let w = host::main_window(&browser.pids()).filter(|_| !offscreen);
+            match super::video::Recorder::start(w.as_ref(), page.cdp(), offscreen) {
                 Ok(r) => *video.borrow_mut() = Some(r),
                 Err(e) => ctx.warnings.push(validity::warn("Video", format!("{} · {side} block: no video: {}", s.label(), e.message))),
             }
         }
-        let procs0 = (host::now_ns(), host::all_processes());
+        // This computer's processes, for the block's other work and screen; none for a phone's page.
+        let snapshot_procs = || (host::now_ns(), if on_phone.is_some() { Vec::new() } else { host::all_processes() });
+        let procs0 = snapshot_procs();
         // A memory block (a leak run, SPEC §8.6) takes no trace: a live trace subscription would copy
         // every heap snapshot chunk, and nothing in it is timed. Its recording holds the snapshots.
         // What invalidated style (`query <rec> style`): attribution blocks of a series about style, or `--style`.
@@ -5436,8 +5574,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let gecko_dir = if gecko_on { Some(draft.insert(store::claim_recording(&id)?).dir().to_path_buf()) } else { None };
         // A leak run measures 2 × N runs (`Warmup`): N to S1 and N more to S2.
         let mut census: Vec<Value> = Vec::new();
-        // GPU engines and VRAM of the target's process tree, read from the OS (SPEC §13.6).
-        let sampler = probe::os::Sampler::start(browser.pid(), browser.profile());
+        // GPU engines and VRAM of the target's process tree, read from the OS (SPEC §13.6); none of this
+        // computer's is a phone's page's.
+        let sampler = on_phone.is_none().then(|| probe::os::Sampler::start(browser.pid(), browser.profile()));
         let sampled = Instant::now();
         // Renderer main-thread task time, a cumulative counter: the live work signal for warmup, and
         // main.busy when the trace carries no RunTask slices.
@@ -5947,7 +6086,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // after its measured runs too (no wait): a slowdown that came back over the runs refuses it.
             if let Some(first) = first_slow.as_ref().filter(|_| !batch) {
                 match check()? {
-                    (Err(e), other) => return Err(slow_check(e, &other, &format!("; right after the measured runs, after a first slow check ({first}) and a second at speed once the CPUs settled"))),
+                    (Err(e), other) => return Err(slow(e, &other, &format!("; right after the measured runs, after a first slow check ({first}) and a second at speed once the CPUs settled"))),
                     (Ok(_), _) => ctx.warnings.push(validity::info(
                         "Throttled",
                         format!("{} · {side} block: the first speed check ran slow ({first}); the second, after the CPUs settled, and a third right after the measured runs ran at speed, so the block went on", s0.label()),
@@ -5962,11 +6101,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let local = first..c.warmup.measured().end.clamp(first, c.runs.len());
                 (local.clone(), c.base + local.start..c.base + local.end)
             };
-            let samples = sampler.stop();
+            let samples = sampler.map(probe::os::Sampler::stop).unwrap_or_default();
             let sampler_pct = samples.cpu_ms.map(|c| 100.0 * c / (sampled.elapsed().as_secs_f64() * 1e3).max(1.0));
-            let procs1 = (host::now_ns(), host::all_processes());
+            let procs1 = snapshot_procs();
             let background = busiest_others(&procs0, &procs1);
-            let screen = screen_state(&procs0, &procs1);
+            // A phone's page reaches none of this computer's screens.
+            let screen = if on_phone.is_some() { Value::Null } else { screen_state(&procs0, &procs1) };
             // The window must have stayed visible for the whole block, and the browser strobe's alone.
             if !hidden_ok && !batch {
                 validity::window_visible(&page)?;
@@ -6315,7 +6455,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         Refusal::new(ValidatorId::EngineUnsupported, format!("{m}: a run loaded a page, and WebDriver Classic ({engine}) runs strobe's page scripts only after the page's own, so what the new page did first went unseen"))
                             .fix("keep the run on one page (load it in prepare or reset), or measure it in Chromium or Firefox")
                     });
-                    if let Some(r) = validity::engine_refusal(engine, m).or(webgpu).or(preload) {
+                    // On a phone, what strobe reads from this computer's processes is none of the page's.
+                    let phone_side = on_phone.and_then(|_| validity::phone_refusal(m));
+                    if let Some(r) = validity::engine_refusal(engine, m).or(phone_side).or(webgpu).or(preload) {
                         values.remove(m);
                         refused.insert(m.clone(), r);
                     }
@@ -6331,7 +6473,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     }
                 }
                 // Undeclared ones go too (default secondaries, descriptive rows): no value the engine cannot give.
-                values.retain(|k, _| !(no_webgpu && k.starts_with("canvas.")) && !unseen_start(k) && validity::engine_refusal(engine, k).is_none());
+                values.retain(|k, _| {
+                    !(no_webgpu && k.starts_with("canvas.")) && !unseen_start(k) && validity::engine_refusal(engine, k).is_none() && !(on_phone.is_some() && validity::phone_refusal(k).is_some())
+                });
                 let phases = metrics::phase_frames(&data);
                 let frames = metrics::run_frames(&data);
                 // Traceless, the frame pacing per run (`intervals`) comes from the OS's presents where this OS
@@ -6436,6 +6580,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             if batch {
                 meta["batch"] = batch::meta(page_cases.iter().map(|(k, c)| (&cases[*k], measured_of(c).1)).zip(&blocks).map(|((s, r), b)| (s, r, b)));
             }
+            if let Some(p) = on_phone {
+                meta["phone"] = p.meta(phone_screen.clone());
+            }
             if !census.is_empty() {
                 meta["census"] = json!(census);
             }
@@ -6470,7 +6617,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         Ok(Launch { cases: out, abort, notes, actions: None, log_at, case_ms })
     })();
     lapped.set(Instant::now());
+    // A timed block whose phone got hot during it describes a throttling phone (`Thermal`): it runs again.
+    let cooled = on_phone.filter(|_| x.measures_time()).map_or(Ok(()), |p| p.still_cool());
     browser.close();
+    if let (Err(e), Ok(_)) = (cooled, &result) {
+        return Err(e);
+    }
     let close_ms = lapped.get().elapsed().as_secs_f64() * 1e3;
     let mut result = result.map(|mut l| {
         for b in l.cases.iter_mut().flatten() {
@@ -7216,7 +7368,11 @@ fn series_window(ctx: &Ctx, s: &Series, blocks: &[Block]) -> Value {
     };
     let round = |x: f64| format!("{x:.2}").trim_end_matches('0').trim_end_matches('.').to_string();
     let scale = if (size[2] - 1.0).abs() > 0.005 { format!(" @{}x", round(size[2])) } else { String::new() };
-    let emulated = target["emulate"].as_str().map(|e| format!(" · emulated {e}")).unwrap_or_default();
+    let emulated = match target["emulate"].as_str() {
+        Some(_) if ctx.phone.is_some() => " · Chrome on a phone".to_string(),
+        Some(e) => format!(" · emulated {e}"),
+        None => String::new(),
+    };
     let reduced = if target["motion"] == "reduce" { format!(" · {}", motion::LABEL) } else { String::new() };
     json!(format!("{}×{}{scale}{emulated}{reduced}", size[0], size[1]))
 }
@@ -7229,6 +7385,9 @@ fn series_setup(ctx: &Ctx, s: &Series, window: Value, out: &mut Value) {
     out["windowless"] = json!(series_windowless(ctx, s));
     out["window"] = window;
     out["emulate"] = target["emulate"].clone();
+    // `--mobile`: the phone (its hardware key); its page was the phone's own, never emulated. A plan
+    // estimates a series only from earlier ones on the same phone, or on none.
+    out["mobile"] = json!(ctx.phone.as_ref().map(|p| p.key.clone()));
     // Both sides of an implementation comparison ask for the same (`implementation_preflight`).
     let side = s.sides.as_ref().map_or(&s.target, |(b, _)| b);
     out["motion"] = ctx.describe["targets"][side]["motion"].clone();
@@ -7531,6 +7690,9 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args) -> Resu
                 .fix("time work after the launch in a run case, or have the command start the app with --force-prefers-reduced-motion and drop the target's motion"),
         ));
     }
+    if args.has("mobile") {
+        return Ok(phone_refusal(s, name, t));
+    }
     if !page {
         return Ok(None);
     }
@@ -7589,6 +7751,35 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args) -> Resu
     } else {
         None
     })
+}
+
+/// `check_engines` for one target of a series in a `--mobile` run, whose phone targets (`emulate:
+/// "mobile"`) run in Chrome on the phone (SPEC 13.1 "Chrome on a phone"): any other target is not for the
+/// phone (`NotForTarget`: a desktop's or a touch screen's page, an app; `DeviceMismatch` would say the
+/// page saw the wrong device), nor is a target in another engine (`EngineUnsupported`), a launch case (its
+/// clock is the phone's), or a primary strobe reads from this computer's processes (`NotForTarget`).
+fn phone_refusal(s: &Series, name: &str, t: &Value) -> Option<Refusal> {
+    let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
+    let kind = t["kind"].as_str().unwrap_or("?");
+    let r = if !matches!(kind, "web" | "url") {
+        Refusal::new(ValidatorId::NotForTarget, format!("{on}--mobile runs a file's phone targets in Chrome on a phone, and this is a {kind} target"))
+            .fix("narrow the run to the phone targets (--target), or run this one without --mobile")
+    } else if t["emulate"] != "mobile" {
+        Refusal::new(
+            ValidatorId::NotForTarget,
+            format!("{on}--mobile runs a file's phone targets (emulate: \"mobile\") in Chrome on a phone, and this page is a {}", if t["emulate"] == "touch" { "touch screen's" } else { "desktop's" }),
+        )
+        .fix("give the phone's target emulate: \"mobile\" (it is emulated without --mobile), or run this one without --mobile")
+    } else if engine_of(t) != WebEngine::Chromium {
+        Refusal::new(ValidatorId::EngineUnsupported, format!("{on}--mobile drives Chrome on Android, and this target runs in {}", engine_of(t)))
+            .fix("drop the target's engine for the phone, or run it emulated without --mobile")
+    } else if s.launch.is_object() {
+        Refusal::new(ValidatorId::NotForTarget, format!("{on}a launch case on a phone: strobe times a launch from its own clock, and the page's is the phone's"))
+            .fix("time the load in a run case (a phase around page.goto)")
+    } else {
+        return validity::phone_refusal(&s.primary).map(|r| Refusal { summary: format!("{on}{}", r.summary), ..r });
+    };
+    Some(r)
 }
 
 /// The page's own changes since the last read (`CHANGES_SCRIPT`), on the host clock, as the earliest and

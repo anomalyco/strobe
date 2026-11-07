@@ -261,6 +261,29 @@ pub fn emulated_input(page: &Page, emulation: &crate::target::chromium::Emulatio
         .into())
 }
 
+/// `DeviceMismatch` for a page on a phone (`--mobile`) that does not see a touch screen as its primary
+/// input: its primary pointer is coarse and does not hover, with touch points and the touch event API.
+/// What else the phone has is the phone's (an emulator's mouse, a stylus: `(any-pointer: fine)`, which
+/// reads `hybrid`); a mouse or trackpad that took over the primary pointer is not a phone's input.
+/// Returns the class seen and whether it matched `(prefers-reduced-motion: reduce)`.
+pub fn phone_input(page: &Page) -> Result<(InputClass, bool)> {
+    let seen = InputSeen::read(page)?;
+    let mut wrong = Vec::new();
+    if seen.hover || seen.fine {
+        wrong.push("its primary pointer is a fine one or hovers (a mouse or trackpad connected?)");
+    }
+    if !seen.touch_api || seen.touch_points.is_none_or(|n| n < 1.0) {
+        wrong.push("it has no touch points or no touch event API");
+    }
+    if wrong.is_empty() {
+        return Ok((seen.class(), seen.reduced_motion));
+    }
+    Err(Refusal::new(ValidatorId::DeviceMismatch, format!("the phone's page does not see a touch screen as its input: {}", wrong.join(", ")))
+        .detail(format!("the page sees {}", seen.text()))
+        .fix("disconnect a mouse, trackpad or keyboard with a pointer from the phone")
+        .into())
+}
+
 /// The fixed speed-check workload; returns its time in ms (median of 3).
 pub fn speed_check(page: &Page) -> Result<f64> {
     let v = page.eval(
@@ -549,13 +572,25 @@ pub fn native_speed_checked(cpus: Option<u64>) -> Result<Option<f64>> {
 /// `keep` false (other work kept the target's CPUs busy during the check) compares without adding the
 /// check to the reference.
 pub fn engine_throttled(engine: WebEngine, cpus: Option<u64>, ms: f64, keep: bool) -> Result<Option<f64>> {
+    let key = format!("{engine}:{}", cpus.map_or("all".to_string(), |m| format!("{m:#x}")));
+    reference_throttled(&key, &format!("this device's reference for {engine} on these CPUs"), ms, keep)
+}
+
+/// `Throttled` for a page on a phone (`--mobile`): the in-page speed check against that phone's own
+/// reference in that browser (`<state>/engine-speed.json`, by hardware serial and package), never this
+/// computer's calibration.
+pub fn phone_throttled(phone: &str, package: &str, ms: f64, keep: bool) -> Result<Option<f64>> {
+    reference_throttled(&format!("android:{phone}:{package}"), &format!("this phone's reference for {package}"), ms, keep)
+}
+
+/// A speed check against the median of the last 20 passing checks kept under `key` (the first sets it).
+fn reference_throttled(key: &str, what: &str, ms: f64, keep: bool) -> Result<Option<f64>> {
     if !ms.is_finite() || ms <= 0.0 {
         return Ok(None);
     }
     let path = host::paths::state_dir().join("engine-speed.json");
     let mut saved: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}));
-    let key = format!("{engine}:{}", cpus.map_or("all".to_string(), |m| format!("{m:#x}")));
-    let mut kept: Vec<f64> = saved[&key]["ms"].as_array().into_iter().flatten().filter_map(Value::as_f64).filter(|m| *m > 0.0).collect();
+    let mut kept: Vec<f64> = saved[key]["ms"].as_array().into_iter().flatten().filter_map(Value::as_f64).filter(|m| *m > 0.0).collect();
     let reference = (!kept.is_empty()).then(|| {
         let mut s = kept.clone();
         s.sort_by(f64::total_cmp);
@@ -565,9 +600,9 @@ pub fn engine_throttled(engine: WebEngine, cpus: Option<u64>, ms: f64, keep: boo
     if let (Some(ratio), Some(r)) = (ratio, reference)
         && ratio > 1.5
     {
-        return Err(Refusal::new(ValidatorId::Throttled, format!("the page's speed check ran {ratio:.2}× slower than this device's reference for {engine} on these CPUs ({ms:.1} ms vs {r:.1} ms)"))
+        return Err(Refusal::new(ValidatorId::Throttled, format!("the page's speed check ran {ratio:.2}× slower than {what} ({ms:.1} ms vs {r:.1} ms)"))
             .fix(format!(
-                "remove CPU throttling, plug in power, leave power saving, let the machine cool down; a reference set by an unusually fast check goes with its entry {key:?} in {}",
+                "remove CPU throttling, plug in power, leave power saving, let the device cool down; a reference set by an unusually fast check goes with its entry {key:?} in {}",
                 path.display()
             ))
             .into());
@@ -578,7 +613,7 @@ pub fn engine_throttled(engine: WebEngine, cpus: Option<u64>, ms: f64, keep: boo
     kept.push(ms);
     let drop = kept.len().saturating_sub(KEPT);
     kept.drain(..drop);
-    saved[&key] = serde_json::json!({ "ms": kept });
+    saved[key] = serde_json::json!({ "ms": kept });
     let _ = host::paths::write_atomic(&path, saved.to_string().as_bytes());
     Ok(ratio)
 }
@@ -620,6 +655,73 @@ pub fn engine_refusal(engine: WebEngine, metric: &str) -> Option<Refusal> {
         _ => return None,
     };
     Some(Refusal::new(ValidatorId::EngineUnsupported, format!("{metric}: {engine} gives strobe no way to read it (it comes from Chromium's Performance domain or trace)")).fix(format!("measure it in Chromium, or use {instead}")))
+}
+
+/// The battery temperature from which a phone counts as hot (`Thermal`): phones throttle from about there.
+const HOT_BATTERY_C: f64 = 40.0;
+/// The battery level under which a phone is refused (`LowBattery`): phones slow down to make it last.
+const LOW_BATTERY_PCT: u32 = 20;
+
+/// Why a phone is too hot to time (`Thermal`, SPEC §10.1), or None: PowerManager's thermal status
+/// moderate or worse, a thermal headroom of 1.0 or more (where severe throttling starts), or the battery
+/// at 40 °C or more. A forced status (`cmd thermalservice override-status`), or a phone that reports
+/// neither a status nor a battery temperature, is not known to be cool.
+pub fn phone_hot(f: &host::adb::Facts) -> Option<String> {
+    let temp = f.battery.as_ref().and_then(|b| b.temp_c);
+    match &f.thermal {
+        Some(t) if t.overridden => return Some(format!("its thermal status is forced ({}, cmd thermalservice override-status): how hot it is is unknown", t.status_name)),
+        Some(t) if t.status >= 2 => return Some(format!("its thermal status is {} ({})", t.status_name, t.status)),
+        Some(t) if t.headroom.is_some_and(|h| h >= 1.0) => return Some(format!("its thermal headroom is {:.2} (severe throttling starts at 1.0)", t.headroom.unwrap_or(0.0))),
+        None if temp.is_none() => return Some("it reports neither a thermal status nor a battery temperature".into()),
+        _ => {}
+    }
+    temp.filter(|c| *c >= HOT_BATTERY_C).map(|c| format!("its battery is at {c:.1} °C (hot from {HOT_BATTERY_C:.0} °C)"))
+}
+
+/// `Thermal` for a phone `phone_hot` names.
+pub fn thermal_refusal(serial: &str, why: &str, when: &str) -> Refusal {
+    Refusal::new(ValidatorId::Thermal, format!("{serial} is hot {when}: {why}"))
+        .fix("let the phone cool (off the charger, out of the sun, nothing else running on it); a bench waits up to 3 minutes for it between blocks")
+}
+
+/// What refuses a timed run on a phone before it starts (SPEC §10.1): an emulator (`Emulator`: it runs
+/// on this computer's CPU, usually with a software GPU, as no phone does), adb over the network
+/// (`WirelessTransport`: the radio's work and the link's latency are in every number), Battery Saver
+/// (`PowerSave`) and a battery under 20% (`LowBattery`): both slow the phone down. Heat is `phone_hot`'s:
+/// a bench waits for it to pass. An untimed run (`--check`, `look`, attribution) takes none of these.
+pub fn phone_timed(f: &host::adb::Facts) -> Result<()> {
+    if let Some(why) = &f.emulator {
+        return Err(Refusal::new(ValidatorId::Emulator, format!("{} is an emulator ({why}): it runs on this computer's CPU and GPU, not a phone's, so its timing describes no phone", f.serial))
+            .fix("time the page on a phone on a cable; an emulator runs `bench --check`, `look` and attribution recordings")
+            .into());
+    }
+    if f.transport == host::adb::Transport::Wireless {
+        return Err(Refusal::new(
+            ValidatorId::WirelessTransport,
+            format!("{} is reached over the network (adb over Wi-Fi): the radio's work and the link's latency would be in the numbers", f.serial),
+        )
+        .fix("connect the phone with a USB cable (and `adb disconnect` its network address, or name the USB serial with --mobile=<serial>)")
+        .into());
+    }
+    if f.power_save == Some(true) {
+        return Err(Refusal::new(ValidatorId::PowerSave, format!("{} has Battery Saver on: it slows the CPU and GPU and defers work", f.serial)).fix("turn Battery Saver off on the phone").into());
+    }
+    if let Some(b) = f.battery.as_ref().filter(|b| b.level < LOW_BATTERY_PCT) {
+        return Err(Refusal::new(ValidatorId::LowBattery, format!("{}'s battery is at {}%: phones slow down under {LOW_BATTERY_PCT}% to make it last", f.serial, b.level))
+            .fix("charge the phone past 20% (keep it on the charger while strobe runs)")
+            .into());
+    }
+    Ok(())
+}
+
+/// What strobe reads from this computer's processes and OS (their CPU, memory, GPU, IO, energy, the UI
+/// thread), which a page on a phone is not: `NotForTarget`, never a number of the wrong machine.
+pub fn phone_refusal(metric: &str) -> Option<Refusal> {
+    let host_side = ["cpu.", "memory.", "gpu.", "ui.", "energy.", "io."].iter().any(|p| metric.starts_with(p)) && metric != "cpu.fixture" && metric != "gpu.compile";
+    host_side.then(|| {
+        Refusal::new(ValidatorId::NotForTarget, format!("{metric}: the page runs on a phone, and strobe reads it from this computer's processes, not the phone's"))
+            .fix("on a phone, measure the page's own work (main.work, main.*), its frames (frames.*), interaction.*, run.duration or a phase; or this metric on a desktop target")
+    })
 }
 
 /// The speed baseline from calibration, if any.

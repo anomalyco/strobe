@@ -198,7 +198,15 @@ pub fn run(args: &Args) -> Result<Output> {
             return Err(Error::usage(format!("--{app_only} is for a native app (look app:<id> or exe:<path>), not a page")));
         }
     }
+    // `--mobile`: the page in Chrome on a phone, at the phone's own screen.
+    let mobile = args.get("mobile").map(str::to_string);
+    if mobile.is_some()
+        && let Some(f) = ["size", "scale", "headed"].iter().find(|f| args.has(f))
+    {
+        return Err(Error::usage(format!("--{f} sizes a desktop browser's page; on a phone (--mobile) the page is the phone's own screen")));
+    }
     let url = address(target);
+    let url = if mobile.is_some() { crate::target::android_chrome::served(&url)? } else { url };
     let (width, height) = match args.get("size") {
         Some(s) => {
             let (w, h) = s.split_once(['x', 'X', '×']).ok_or_else(|| Error::usage(format!("--size WIDTHxHEIGHT, not {s}")))?;
@@ -215,13 +223,23 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     // A look stopped midway ends the browser it launched (its profile goes with the next strobe).
     let stop = crate::target::isolate::end_on_stop(None);
-    let browser = chromium::launch(&window, !args.has("headed"), None, &[])?;
+    let browser = match &mobile {
+        Some(serial) => {
+            let phone = crate::target::android_chrome::pick(serial)?;
+            progress(format!("look: {} {} ({})", phone.facts.manufacturer, phone.facts.model, phone.device.serial));
+            crate::target::android_chrome::launch(&phone, "look", false, Duration::ZERO)?
+        }
+        None => chromium::launch(&window, !args.has("headed"), None, &[])?,
+    };
     let result = (|| -> Result<Output> {
         let page = browser.page()?;
         let events = browser.cdp.events();
         page.send("Runtime.enable", json!({}))?;
         page.send("Log.enable", json!({}))?;
-        if !args.has("headed") {
+        // A look on a phone loads the page as the channel has it: it changes nothing of the channel's data.
+        if let Some(phone) = &browser.phone {
+            phone.load(&url)?;
+        } else if !args.has("headed") {
             page.send("Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": window.scale.unwrap_or(1.0), "mobile": false }))?;
         }
         progress(format!("look {url}"));
@@ -288,7 +306,21 @@ pub fn run(args: &Args) -> Result<Output> {
         std::fs::write(&out, &bytes)?;
         let errors = console.iter().filter(|c| matches!(c["level"].as_str(), Some("error" | "exception"))).count();
         let mut text = format!("{} · {}\n", info["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(no title)"), info["url"].as_str().unwrap_or(&url));
-        text += &format!("load     {} · {} · {width}×{height}\n", fmt::value(load_ms, "ms"), info["ready"].as_str().unwrap_or("?"));
+        // A phone's page is its own screen, read from the page.
+        let phone = browser.phone.as_ref().map(|p| p.meta(crate::target::android_chrome::screen(&page)));
+        let size = match &phone {
+            Some(p) => format!(
+                "{}×{} @{}x · {} {} · {}",
+                p["screen"]["viewport"][0],
+                p["screen"]["viewport"][1],
+                p["screen"]["dpr"],
+                p["manufacturer"].as_str().unwrap_or(""),
+                p["model"].as_str().unwrap_or(""),
+                browser.version
+            ),
+            None => format!("{width}×{height}"),
+        };
+        text += &format!("load     {} · {} · {size}\n", fmt::value(load_ms, "ms"), info["ready"].as_str().unwrap_or("?"));
         for p in &problems {
             text += &format!("!        {p}\n");
         }
@@ -319,7 +351,7 @@ pub fn run(args: &Args) -> Result<Output> {
             clip.as_ref().map(|c| format!(" ({} only, {:.0}×{:.0})", args.get("element").unwrap_or(""), c["width"].as_f64().unwrap_or(0.0), c["height"].as_f64().unwrap_or(0.0))).unwrap_or_default()
         );
         text += "expect   a case's `expect: { title, heading }` matches the title, and one of the headings\n";
-        let json = json!({ "url": info["url"], "title": info["title"], "load_ms": load_ms, "ready": info["ready"], "problems": problems, "headings": info["headings"], "console": console, "errors": errors, "text": body, "chars": total, "screenshot": out, "clip": clip });
+        let json = json!({ "url": info["url"], "title": info["title"], "load_ms": load_ms, "ready": info["ready"], "problems": problems, "headings": info["headings"], "console": console, "errors": errors, "text": body, "chars": total, "screenshot": out, "clip": clip, "phone": phone });
         let mut o = Output::new(text, json);
         // The page never loaded, or never showed `--until`: a timeout. Its own console errors are the
         // page's, and listed.

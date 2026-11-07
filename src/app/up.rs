@@ -56,6 +56,15 @@ pub fn run(args: &Args) -> Result<Output> {
     // Nothing `up` starts (the daemon, opencode's CLI) may hold a shell's pipe after `up` exits.
     #[cfg(windows)]
     host::win::private_std_handles();
+    // `up --mobile[=<serial>] --channel <name>`: gives strobe one Chrome channel on a phone, and nothing else.
+    if args.has("mobile") || args.has("channel") {
+        let (Some(serial), Some(channel)) = (args.get("mobile"), args.get("channel")) else {
+            return Err(Error::usage("strobe up --mobile[=<serial>] --channel canary|dev|beta gives strobe that Chrome channel on the phone: both, together"));
+        };
+        let phone = crate::target::android_chrome::pick(serial)?;
+        let text = crate::target::android_chrome::opt_in(&phone, channel)?;
+        return Ok(Output::new(text, json!({ "serial": phone.device.serial, "channel": channel, "channels": crate::target::android_chrome::opted_in(&phone.device) })));
+    }
     let check = args.has("check");
     let skip: Vec<&str> = args.get("skip").map(|s| s.split(',').collect()).unwrap_or_default();
     let device = host::device_name();
@@ -77,6 +86,9 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let webkit = [false, true].into_iter().any(|h| crate::target::webkit::find(h).is_some());
     s.line(if webkit { "✓" } else { "i" }, "webkit", crate::target::webkit::describe());
+    for (i, (mark, line)) in android_lines(&host::adb::summaries(Duration::from_secs(3))).into_iter().enumerate() {
+        s.line(mark, &if i == 0 { "android".to_string() } else { format!("android {}", i + 1) }, line);
+    }
     match runner::find_bun() {
         Some(p) => s.line("✓", "bun", p.display().to_string()),
         None => s.line("!", "bun", "missing: bench files need Bun (https://bun.sh)"),
@@ -118,6 +130,29 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     }
     Ok(s.done("strobe up"))
+}
+
+/// The attached Android devices (`--mobile`), one line each with its mark: what `status` and `up` show.
+/// Information, never a problem: a phone is needed only for `--mobile`.
+pub(super) fn android_lines(list: &Result<Vec<host::adb::Summary>>) -> Vec<(&'static str, String)> {
+    match list {
+        Ok(d) if d.is_empty() => vec![("i", "none attached (only --mobile needs one)".into())],
+        Ok(d) => d
+            .iter()
+            .map(|s| {
+                // A phone (not an emulator) runs --mobile only in a channel given to strobe there.
+                let given = s.facts.as_ref().filter(|f| f.emulator.is_none()).map(|f| crate::target::android_chrome::given(&host::adb::key_of(&f.serial, f.hardware_serial.as_deref())));
+                let channel = match &given {
+                    Some(g) if g.is_empty() => format!(" · no Chrome channel given to strobe (strobe up --mobile={} --channel canary)", s.listed.serial),
+                    Some(g) => format!(" · strobe's: {}", crate::target::android_chrome::names(g)),
+                    None => String::new(),
+                };
+                let ready = s.problem.is_none() && given.as_ref().is_some_and(|g| !g.is_empty());
+                (if ready { "✓" } else { "i" }, format!("{}{channel}", host::adb::describe(s)))
+            })
+            .collect(),
+        Err(e) => vec![("i", format!("{}{}", e.message, e.hint.as_ref().map(|h| format!(" ({h})")).unwrap_or_default()))],
+    }
 }
 
 pub(super) fn install_dir() -> PathBuf {
@@ -662,6 +697,10 @@ pub fn leave(args: &Args) -> Result<Output> {
     }
     // The daemon is gone now: what it held on a phone (stay awake, tunnels) is put back before its journals go.
     crate::host::adb::restore_stale();
+    let phones = crate::host::adb::leave_phones();
+    if !phones.is_empty() {
+        s.line("✓", "phones", format!("removed strobe's lock files from {}", phones.join(", ")));
+    }
     if args.has("yes") {
         let _ = std::fs::remove_dir_all(paths::state_dir());
         s.line("✓", "state", "removed (recordings and experiments included)");

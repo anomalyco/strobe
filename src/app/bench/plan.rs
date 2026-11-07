@@ -57,7 +57,7 @@ pub fn run(args: &Args) -> Result<Output> {
     // What a bench would refuse before anything builds, the plan refuses (or lists, per series) too.
     let projects = super::target_projects(&describe)?;
     super::check_engines(&mut series, &describe, args, &variants, &config, &projects)?;
-    super::display_fit(None, &mut series, &describe, args.has("headless"))?;
+    super::display_fit(None, &mut series, &describe, args.has("headless") || args.has("mobile"))?;
     if variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2 {
         super::implementation_preflight(&describe, &series, &variants, &config, &projects)?;
     }
@@ -151,8 +151,9 @@ impl History {
     }
 
     /// Up to 5 newest earlier runs of this series (same bench file name, series label and primary, and the
-    /// same `motion`: a reduced-motion series is never estimated from an animated one).
-    fn same_series(&mut self, file_name: &str, s: &Series, motion: &Value) -> Vec<Past> {
+    /// same setup, `setup_of`: a reduced-motion series is never estimated from an animated one, nor a
+    /// phone's from a desktop's or another phone's).
+    fn same_series(&mut self, file_name: &str, s: &Series, setup: &Value) -> Vec<Past> {
         let label = s.label();
         let ids: Vec<String> = self
             .index
@@ -167,7 +168,7 @@ impl History {
         let sides = s.sides.as_ref().map(|(b, h)| json!({ "base": b, "head": h }));
         for id in ids {
             let Some(r) = self.result(&id) else { continue };
-            let same = |x: &&Value| x["label"] == label.as_str() && x["motion"] == *motion && sides.as_ref().is_none_or(|t| x["targets"] == *t);
+            let same = |x: &&Value| x["label"] == label.as_str() && setup_of(x) == *setup && sides.as_ref().is_none_or(|t| x["targets"] == *t);
             if let Some(p) = r["series"].as_array().into_iter().flatten().find(same).and_then(|x| past(&id, x)) {
                 out.push(p);
             }
@@ -179,8 +180,8 @@ impl History {
     }
 
     /// Up to 5 newest series of any bench file whose primary is this metric on this kind of target, with
-    /// the same `motion`.
-    fn same_metric(&mut self, metric: &str, kind: &str, motion: &Value) -> Vec<Past> {
+    /// the same setup (`setup_of`).
+    fn same_metric(&mut self, metric: &str, kind: &str, setup: &Value) -> Vec<Past> {
         let ids: Vec<String> = self
             .index
             .iter()
@@ -192,7 +193,7 @@ impl History {
         let mut out = Vec::new();
         for id in ids {
             let Some(r) = self.result(&id) else { continue };
-            for x in r["series"].as_array().into_iter().flatten().filter(|x| x["primary"]["metric"] == metric && x["target_kind"] == kind && x["motion"] == *motion) {
+            for x in r["series"].as_array().into_iter().flatten().filter(|x| x["primary"]["metric"] == metric && x["target_kind"] == kind && setup_of(x) == *setup) {
                 if let Some(p) = past(&id, x) {
                     out.push(p);
                 }
@@ -205,9 +206,15 @@ impl History {
     }
 }
 
-/// A `--check` of this series (with the same `motion`): one cold block with one run, plus the warmup and
-/// runs a timed block adds.
-fn check_block(file_name: &str, label: &str, runs: f64, motion: &Value) -> Option<(f64, String)> {
+/// What a series ran in that its plan's history must share: its `motion` and the phone it ran on
+/// (`mobile`, its hardware key; null on a desktop and in results from before it).
+fn setup_of(series: &Value) -> Value {
+    json!([series["motion"], series["mobile"]])
+}
+
+/// A `--check` of this series (with the same setup, `setup_of`): one cold block with one run, plus the
+/// warmup and runs a timed block adds.
+fn check_block(file_name: &str, label: &str, runs: f64, setup: &Value) -> Option<(f64, String)> {
     for (id, _) in store::list("exp", 40) {
         let path = host::paths::experiments().join(&id).join("result.json");
         if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > 2 << 20 {
@@ -217,7 +224,7 @@ fn check_block(file_name: &str, label: &str, runs: f64, motion: &Value) -> Optio
         if r["kind"] != "check" || Path::new(r["file"].as_str().unwrap_or("")).file_name().is_none_or(|f| f.to_string_lossy() != file_name) {
             continue;
         }
-        let Some(s) = r["series"].as_array().into_iter().flatten().find(|s| s["label"] == label && s["passed"] == true && s["motion"] == *motion) else { continue };
+        let Some(s) = r["series"].as_array().into_iter().flatten().find(|s| s["label"] == label && s["passed"] == true && setup_of(s) == *setup) else { continue };
         let one = s["values"]["run.duration"].as_f64().unwrap_or(0.0);
         return Some((s["elapsed_ms"].as_f64()? + (runs + 1.0) * one, id));
     }
@@ -240,6 +247,11 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         .map(|b| b / 100.0)
         .unwrap_or_else(|| config["metrics"]["equivalence"].as_str().and_then(|e| e.trim_end_matches('%').parse::<f64>().ok()).unwrap_or(2.0) / 100.0);
     let why = args.get("why").unwrap_or(if args.get("probes") == Some("timing") { "never" } else { "auto" });
+    // `--mobile`: the phone the series run on, by its hardware key (a series' `mobile`).
+    let mobile = match args.get("mobile") {
+        Some(serial) => crate::target::android_chrome::pick(serial).map_or(json!("?"), |p| json!(p.key)),
+        None => Value::Null,
+    };
     let mut out = Vec::new();
     let mut total = 0.0;
     for s in series {
@@ -250,13 +262,14 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         let target = &describe["targets"][&s.target];
         let kind = target["kind"].as_str().unwrap_or("");
         let def = model::metric(&s.primary);
-        // Its motion (both sides of an implementation comparison ask for the same).
+        // Its motion (both sides of an implementation comparison ask for the same) and phone.
         let motion = &describe["targets"][s.sides.as_ref().map_or(&s.target, |(b, _)| b)]["motion"];
-        let same = history.same_series(&file_name, s, motion);
+        let setup = json!([motion, mobile]);
+        let same = history.same_series(&file_name, s, &setup);
         // The spread from this series when it ran 4 pairs or more here, else from other series of its metric.
         let from_series = same.iter().map(|p| p.d.len()).sum::<usize>() >= 4;
         let spread_from = if from_series { "series" } else { "metric" };
-        let metric_pool = if from_series { Vec::new() } else { history.same_metric(&s.primary, kind, motion) };
+        let metric_pool = if from_series { Vec::new() } else { history.same_metric(&s.primary, kind, &setup) };
         let pool: Vec<&Past> = if from_series { same.iter().collect() } else { metric_pool.iter().collect() };
         // The spread of one pair's difference, from each experiment's differences around its own median.
         let centred: Vec<f64> = pool
@@ -283,7 +296,7 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         // A block's time comes only from this series: another case's blocks say nothing about this one's.
         let (block_ms, block_source) = match same.first() {
             Some(_) => (same.iter().map(|p| p.block_ms).sum::<f64>() / same.len() as f64, format!("mean of {} earlier", same.len())),
-            None => match check_block(&file_name, &s.label(), runs, motion) {
+            None => match check_block(&file_name, &s.label(), runs, &setup) {
                 Some((ms, id)) => (ms, format!("from the --check {id} plus warmup and {runs} runs; rough: a check's block is a cold launch")),
                 None => (GUESS_BLOCK_MS, "a guess: no earlier run of this case here".to_string()),
             },

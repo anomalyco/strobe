@@ -8,17 +8,14 @@
 //! turns the connection into a stream to that device's adbd, which then takes one service: a shell
 //! (`shell,v2,raw:`: framed stdout, stderr and the exit code), `sync:` (files), `reverse:*`.
 
-// The mobile targets (validators, `--mobile`, Android Chrome) build on this; until they land only
-// `restore_stale` has a caller.
+// Some of the client (sync, device tracking) has no caller until the on-device probes land.
 #![allow(dead_code)]
 
 mod awake;
 mod facts;
 
-#[allow(unused_imports)]
-pub use awake::{PhoneSlot, StayAwake};
-#[allow(unused_imports)]
-pub use facts::{Battery, Display, Facts, Thermal};
+pub use awake::{CHROME_COMMAND_LINE, CommandLine, Held, PhoneSlot, StayAwake, key_of, leave_phones};
+pub use facts::Facts;
 
 use crate::host::{paths, spawn};
 use crate::model::{Error, Result};
@@ -666,6 +663,25 @@ impl Device {
     pub fn facts(&self) -> Result<Facts> {
         facts::read(self)
     }
+
+    /// This phone in a file name: its hardware serial (the same over USB and Wi-Fi), else its serial.
+    pub fn key(&self) -> String {
+        awake::phone_key(self, self.hardware_serial().as_deref())
+    }
+}
+
+/// The adb server's processes (an `adb` listening on the server's port): a phone's connections to this
+/// computer's loopback (a reverse) are theirs here, as a fixture's check reads them.
+pub fn server_pids() -> Vec<u32> {
+    let port = server_port();
+    let adb: Vec<u32> = crate::host::all_processes().into_iter().filter(|p| matches!(p.name.to_ascii_lowercase().as_str(), "adb" | "adb.exe")).map(|p| p.pid).collect();
+    let listening = crate::host::tcp::sockets(&adb).unwrap_or_default();
+    adb.into_iter().filter(|pid| listening.iter().any(|s| s.pid == *pid && s.listening && s.local.1 == port)).collect()
+}
+
+/// Whether the strobe a journal's `owner` names still runs.
+pub fn alive(owner: &str) -> bool {
+    owner_alive(owner)
 }
 
 /// One shell v2 packet before `deadline`: (id, data), at most 1 MiB.
@@ -690,6 +706,97 @@ fn sync_request(c: &mut Conn, id: &[u8; 4], data: &[u8]) -> Result<()> {
 fn sync_head(c: &mut Conn) -> Result<([u8; 4], usize)> {
     let h = c.read_n(8)?;
     Ok(([h[0], h[1], h[2], h[3]], u32::from_le_bytes([h[4], h[5], h[6], h[7]]) as usize))
+}
+
+/// One device as `strobe status` and `strobe up` list it: as the server lists it, with its facts when it
+/// takes requests (else why not).
+#[derive(Clone, Debug, Serialize)]
+pub struct Summary {
+    #[serde(flatten)]
+    pub listed: Listed,
+    pub facts: Option<Facts>,
+    pub problem: Option<String>,
+}
+
+/// Every device of an adb server that runs now (never one started for this): each read in its own
+/// thread, within `budget` in all; a device not read in time says so. Err when no server answers.
+pub fn summaries(budget: Duration) -> Result<Vec<Summary>> {
+    let adb = Adb::running().ok_or_else(|| Error::unreachable(format!("no adb server runs on 127.0.0.1:{}", server_port())).hint("`adb start-server` starts it; a --mobile run starts one itself"))?;
+    let deadline = Instant::now() + budget;
+    let listed = adb.devices()?;
+    let reads: Vec<_> = listed
+        .iter()
+        .map(|l| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if l.state == State::Device {
+                let d = adb.device(&l.serial);
+                std::thread::spawn(move || {
+                    let _ = tx.send(d.facts());
+                });
+            }
+            rx
+        })
+        .collect();
+    Ok(listed
+        .into_iter()
+        .zip(reads)
+        .map(|(l, rx)| {
+            let (facts, problem) = match &l.state {
+                State::Device => match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(Ok(f)) => (Some(f), None),
+                    Ok(Err(e)) => (None, Some(e.message)),
+                    Err(_) => (None, Some("no answer in time".into())),
+                },
+                State::Unauthorized => (None, Some("unauthorized: unlock it and accept \"Allow USB debugging?\"".into())),
+                s => (None, Some(state_text(s))),
+            };
+            Summary { listed: l, facts, problem }
+        })
+        .collect())
+}
+
+/// The one-line form: model, Android, link, battery, heat, screen, and what a run may do with it.
+pub fn describe(s: &Summary) -> String {
+    let l = &s.listed;
+    let link = match l.transport {
+        Transport::Usb => "USB",
+        Transport::Wireless => "Wi-Fi",
+        Transport::Local => "emulator",
+    };
+    let mut parts = Vec::new();
+    match &s.facts {
+        Some(f) => {
+            parts.push(format!("{} {}", f.manufacturer, f.model).trim().to_string());
+            parts.push(format!("Android {}", f.android));
+            parts.push(link.into());
+            if let Some(b) = &f.battery {
+                parts.push(format!("{}%{}", b.level, if b.plugged.is_some() { " on power" } else { "" }));
+                if let Some(t) = b.temp_c {
+                    parts.push(format!("{t:.1} °C"));
+                }
+            }
+            if let Some(t) = &f.thermal {
+                parts.push(format!("thermal {}", t.status_name));
+            }
+            if f.screen_on == Some(false) {
+                parts.push("screen off".into());
+            } else if f.keyguard == Some(true) {
+                parts.push(if f.secure_lock == Some(true) { "locked (PIN)" } else { "lock screen" }.into());
+            }
+            if f.emulator.is_some() {
+                parts.push("check and look only (Emulator)".into());
+            } else if l.transport == Transport::Wireless {
+                parts.push("untimed only (WirelessTransport)".into());
+            }
+        }
+        None => parts.push(link.into()),
+    }
+    parts.push(l.serial.clone());
+    let mut t = parts.join(" · ");
+    if let Some(p) = &s.problem {
+        t += &format!(": {p}");
+    }
+    t
 }
 
 /// The tunnels this strobe holds, as journaled.
@@ -758,7 +865,7 @@ pub fn restore_stale() {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".json") || !(name.starts_with("stayon-") || name.starts_with("tunnels-")) {
+            if !name.ends_with(".json") || !["stayon-", "tunnels-", "cmdline-"].iter().any(|p| name.starts_with(p)) {
                 return None;
             }
             let v = std::fs::read_to_string(e.path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
@@ -790,7 +897,11 @@ pub fn restore_stale() {
         } else if v.is_null() {
             let _ = std::fs::remove_file(&path);
         } else if let Some(adb) = adb {
-            awake::restore_journal(&adb, &path, &v);
+            if name.starts_with("cmdline-") {
+                awake::restore_cmdline(&adb, &path, &v);
+            } else {
+                awake::restore_journal(&adb, &path, &v);
+            }
         }
     }
 }

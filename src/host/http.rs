@@ -136,6 +136,71 @@ pub fn serve_static(files: Vec<(&'static str, &'static str, &'static str)>) -> s
     Ok(port)
 }
 
+/// Serves the files under `root` on a free loopback port, one server per folder for the process (a
+/// local page loaded where no file of this computer is: a phone); returns the port. Paths are taken
+/// percent-decoded; any `..` or a path outside `root` is a 404.
+pub fn serve_folder(root: &std::path::Path) -> std::io::Result<u16> {
+    static SERVED: std::sync::Mutex<Vec<(std::path::PathBuf, u16)>> = std::sync::Mutex::new(Vec::new());
+    let root = std::fs::canonicalize(root)?;
+    let mut served = SERVED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, port)) = served.iter().find(|(r, _)| *r == root) {
+        return Ok(*port);
+    }
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let base = root.clone();
+    let handler: Arc<dyn Fn(Request) -> Response + Send + Sync> = Arc::new(move |req: Request| {
+        let raw = req.path.split(['?', '#']).next().unwrap_or("/");
+        let mut bytes = Vec::new();
+        let mut it = raw.bytes();
+        while let Some(b) = it.next() {
+            let hex = |c: Option<u8>| c.and_then(|c| (c as char).to_digit(16));
+            match b {
+                b'%' => match (hex(it.next()), hex(it.next())) {
+                    (Some(h), Some(l)) => bytes.push((h * 16 + l) as u8),
+                    _ => return Response::text(400, "bad path"),
+                },
+                _ => bytes.push(b),
+            }
+        }
+        let rel = String::from_utf8_lossy(&bytes).trim_start_matches('/').to_string();
+        if rel.split(['/', '\\']).any(|p| p == "..") {
+            return Response::text(404, "not found");
+        }
+        let mut path = base.join(&rel);
+        if path.is_dir() {
+            path = path.join("index.html");
+        }
+        if !path.canonicalize().is_ok_and(|p| p.starts_with(&base)) {
+            return Response::text(404, "not found");
+        }
+        let kind = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+            Some("html" | "htm") => "text/html; charset=utf-8",
+            Some("xhtml") => "application/xhtml+xml",
+            Some("js" | "mjs") => "text/javascript; charset=utf-8",
+            Some("css") => "text/css; charset=utf-8",
+            Some("json" | "map") => "application/json",
+            Some("svg") => "image/svg+xml",
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("woff2") => "font/woff2",
+            Some("woff") => "font/woff",
+            Some("wasm") => "application/wasm",
+            Some("txt") => "text/plain; charset=utf-8",
+            _ => "application/octet-stream",
+        };
+        match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() => Response { file: Some((path, 0, m.len())), ..Response::new(200, kind, Vec::new()) },
+            _ => Response::text(404, "not found"),
+        }
+    });
+    std::thread::spawn(move || serve(listener, handler));
+    served.push((root, port));
+    Ok(port)
+}
+
 /// Compares in constant time.
 pub fn same(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {

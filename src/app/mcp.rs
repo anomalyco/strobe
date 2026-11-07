@@ -61,6 +61,10 @@ const TOOLS: &[Tool] = &[
                 "engine",
                 "a page's browser engine: chromium (default) or firefox (CPU, GPU, memory and OS frames, no trace; probes attribution runs Firefox's own profiler and about:memory; probes memory refuses)",
             ),
+            (
+                "mobile",
+                "true, or an adb serial: the page in Chrome on an Android phone (or emulator) over adb instead of a desktop browser; the phone's own screen and touch, no emulation; a timed recording is refused on an emulator (Emulator) or over Wi-Fi (WirelessTransport); on a phone (not an emulator) strobe drives only a Chrome channel given to it once (strobe up --mobile=<serial> --channel canary)",
+            ),
             ("served", "folder the target's http origin serves, to resolve source-mapped frames to files on disk"),
             ("style", "also trace what invalidated style (query <rec> style)"),
             ("os-frames", "a Chromium record also takes the OS present events beside its trace"),
@@ -91,6 +95,10 @@ const TOOLS: &[Tool] = &[
             ("batch", "with check: up to N run cases per launch (one prepare and setup), each held to the launch's start after its reset; a failing or dirty case ends its launch and the next case gets a fresh one"),
             ("headless", "page targets in a headless browser (check and timed blocks): no display needed, runs through a locked session; frame, input-latency and GPU-use metrics refused (Headless)"),
             ("engine", "page targets' browser engine: chromium or firefox; the file's targets of that engine, else every page target in it"),
+            (
+                "mobile",
+                "true, or an adb serial: the file's phone targets (emulate: \"mobile\") run in Chrome on an Android phone over adb instead of being emulated (every other target refused NotForTarget); timed blocks are refused on an emulator (Emulator; check runs there) or over Wi-Fi (WirelessTransport); on a phone (not an emulator) strobe drives only a Chrome channel given to it once (strobe up --mobile=<serial> --channel canary)",
+            ),
             ("blocks", "N timed blocks of head alone and their values, nothing compared (what track records for a commit)"),
             ("filter", "case names, comma-separated; exact unless a name holds * (a glob)"),
             ("target", "target names from the file, comma-separated"),
@@ -181,9 +189,10 @@ fn tools() -> Value {
             }
             for (k, d) in t.flags {
                 let ty = match cli::kind(k) {
-                    Some(Kind::Switch) => "boolean",
-                    Some(Kind::Number) => "number",
-                    _ => "string",
+                    Some(Kind::Switch) => json!("boolean"),
+                    Some(Kind::Number) => json!("number"),
+                    Some(Kind::Optional) => json!(["boolean", "string"]),
+                    Some(Kind::Value) | None => json!("string"),
                 };
                 props.insert(k.to_string(), json!({ "type": ty, "description": d }));
             }
@@ -231,6 +240,10 @@ fn to_args(name: &str, input: &Value) -> Result<(Vec<String>, u64, Option<String
             (Some(Kind::Number), Value::Number(n)) => flags.extend([format!("--{k}"), n.to_string()]),
             (Some(Kind::Number), Value::String(s)) if s.trim_end_matches('%').parse::<f64>().is_ok() => flags.extend([format!("--{k}"), s.clone()]),
             (Some(Kind::Number), _) => return Err(Error::usage(format!("{name}: {k} is a number"))),
+            (Some(Kind::Optional), Value::Bool(false)) => {}
+            (Some(Kind::Optional), Value::Bool(true)) => flags.push(format!("--{k}")),
+            (Some(Kind::Optional), Value::String(s)) => flags.push(if s.is_empty() { format!("--{k}") } else { format!("--{k}={s}") }),
+            (Some(Kind::Optional), _) => return Err(Error::usage(format!("{name}: {k} is true or a string"))),
             (_, Value::String(s)) => flags.extend([format!("--{k}"), s.clone()]),
             (_, Value::Number(n)) => flags.extend([format!("--{k}"), n.to_string()]),
             _ => return Err(Error::usage(format!("{name}: {k} is a string"))),

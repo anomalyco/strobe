@@ -31,7 +31,8 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
     b.set("filter", case);
     // Recordings of one executable share its GPU caches, as `record` does.
     b.set("gpu-store", "exe");
-    for k in ["target", "params", "id", "pin", "power", "runs", "style", "headless", "engine", "seed", "video"] {
+    // `--mobile` too, bare (`""`) or naming a serial: the case's phone target on the phone.
+    for k in ["target", "params", "id", "pin", "power", "runs", "style", "headless", "engine", "seed", "video", "mobile"] {
         if let Some(v) = args.get(k) {
             b.set(k, v);
         }
@@ -135,16 +136,20 @@ pub fn run(args: &Args) -> Result<Output> {
     };
     // An engine this OS cannot run refuses before anything changes (the power plan below).
     let emulation = parse_emulation(args)?;
-    if let Some(e) = args.get("engine").map(WebEngine::parse).transpose()?.and_then(|e| crate::target::web::refusal_as(e, args.has("headless"), &emulation)) {
-        return Err(e);
-    }
-    if let Some(e) = phone_refusal(&emulation, args.has("headless")) {
-        return Err(e);
+    if args.has("mobile") {
+        mobile_usage(args, &target)?;
+    } else {
+        if let Some(e) = args.get("engine").map(WebEngine::parse).transpose()?.and_then(|e| crate::target::web::refusal_as(e, args.has("headless"), &emulation)) {
+            return Err(e);
+        }
+        if let Some(e) = phone_refusal(&emulation, args.has("headless")) {
+            return Err(e);
+        }
     }
     // A timed recording runs on the fastest power plan, as a bench does (SPEC §9.4); attribution,
     // deep and memory recordings are not timed. A plan it switched to is said in the result, not as
     // a progress line on stderr that reads like an error.
-    let power = if args.get("probes").unwrap_or("timing") == "timing" { Some(super::bench::power_quiet(args)?) } else { None };
+    let power = if args.get("probes").unwrap_or("timing") == "timing" && !args.has("mobile") { Some(super::bench::power_quiet(args)?) } else { None };
     let mut out = recorded(args, target)?;
     // The user's plan is put back (the guard dropped) before the result says so.
     let switched = power.filter(|p| p.switched()).map(|p| p.used.clone());
@@ -209,7 +214,21 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
         Some(engine) => return engine_page(args, engine, &target, set, for_ms, &emulation),
     }
     let mut guard = None;
-    let browser = if attach {
+    // `--mobile`: Chrome on a phone, its own screen and touch. A timed recording takes no emulator, no
+    // phone over Wi-Fi and no hot or saving phone (`android_chrome::launch`).
+    let mobile = args.get("mobile").map(str::to_string);
+    let target = if mobile.is_some() { crate::target::android_chrome::served(&target)? } else { target };
+    let browser = if let Some(serial) = &mobile {
+        let phone = crate::target::android_chrome::pick(serial)?;
+        progress(format!("recording on {} {} ({})", phone.facts.manufacturer, phone.facts.model, phone.device.serial));
+        let timed = set == Set::Timing && !args.has("video");
+        // A timed recording waits (up to 3 minutes) for a hot phone to cool; the launch reads it again.
+        if timed {
+            crate::validity::phone_timed(&phone.facts)?;
+            crate::target::android_chrome::cool(&phone.device)?;
+        }
+        crate::target::android_chrome::launch(&phone, &format!("record {target}"), timed, Duration::ZERO)?
+    } else if attach {
         chromium::attach(&target)?
     } else if let Some(app) = &app {
         let app = &with_gpu_store(args, app)?;
@@ -229,6 +248,13 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
         g.check("after the app opened its window")?;
         // The app loads itself; give it time to settle before recording.
         std::thread::sleep(Duration::from_secs(3));
+    } else if let Some(phone) = &browser.phone {
+        // The page's origin starts empty, as in a fresh desktop profile; a server on this computer's
+        // loopback is reversed to the phone's.
+        phone.load(&target)?;
+        crate::target::android_chrome::clear_origin(&page, &target)?;
+        progress(format!("loading {target} in {}", browser.version));
+        page.navigate(&target, Duration::from_secs(60))?;
     } else if !attach {
         // Touch and the user agent before anything loads; a phone's viewport once the window is its size.
         page.emulate(&emulation)?;
@@ -245,7 +271,10 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     }
     // A page strobe launched sees its emulation's input (`DeviceMismatch`); an app's page or an attached
     // browser the machine's, as it saw it.
-    let input = if app.is_none() && !attach {
+    let input = if browser.phone.is_some() {
+        // A phone's page sees a touch screen as its input.
+        Some(validity::phone_input(&page.clone().into())?.0)
+    } else if app.is_none() && !attach {
         Some(validity::emulated_input(&page.clone().into(), &emulation)?.0)
     } else {
         let seen = validity::InputSeen::read(&page.clone().into()).ok().map(|s| s.class());
@@ -255,12 +284,15 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
         seen
     };
     let gpu = gpu?;
+    // A phone's page runs on the phone: no process, priority or screen of this computer's is its.
+    let phone = browser.phone.is_some();
     // A launched target inherits strobe's priority; an attached one runs as its user left it.
-    let qos = if attach { None } else { host::background_qos(None).or_else(|| host::background_qos(Some(browser.pid))) };
+    let qos = if attach || phone { None } else { host::background_qos(None).or_else(|| host::background_qos(Some(browser.pid))) };
     validity::window_visible(&page.clone().into())?;
     // A headless target draws off screen, so only a headed one cares about the lock screen.
     let on_screen = !args.has("headless");
-    if on_screen && host::session_locked() {
+    let host_screen = on_screen && !phone;
+    if host_screen && host::session_locked() {
         return Err(validity::locked());
     }
     let awake = host::Awake::start();
@@ -271,7 +303,7 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let driver = Driver::new(page.clone().into(), token.clone());
     if set == Set::Memory {
         let meta = memory(&page, &browser, &dir, &id, &target, for_ms, json!({ "input": input, "headless": !on_screen, "emulate": meta_emulate(&emulation) }))?;
-        if on_screen && (awake.locks() > 0 || host::session_locked()) {
+        if host_screen && (awake.locks() > 0 || host::session_locked()) {
             return Err(validity::locked());
         }
         draft.keep();
@@ -290,11 +322,11 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
         probe::alloc::start(&page)?;
     }
     std::thread::sleep(Duration::from_millis(300));
-    let sampler = (!attach).then(|| probe::os::Sampler::start(browser.pid, browser.profile.clone()));
+    let sampler = (!attach && !phone).then(|| probe::os::Sampler::start(browser.pid, browser.profile.clone()));
     // `--os-frames`: the OS's present events beside the trace's frames, a cross-check of both.
     let os_frames = (args.has("os-frames") && !attach).then(crate::probe::present::PresentCapture::start);
-    // `--video`: the window (headed) or the renderer's own frames (headless), over the run.
-    let video = args.has("video").then(|| super::video::Recorder::start(host::main_window(&browser.pids()).filter(|_| on_screen).as_ref(), Some(&page), !on_screen)).transpose()?;
+    // `--video`: the window (headed) or the renderer's own frames (headless, and a phone's page), over the run.
+    let video = args.has("video").then(|| super::video::Recorder::start(host::main_window(&browser.pids()).filter(|_| host_screen).as_ref(), Some(&page), !host_screen)).transpose()?;
     // CPU in cycles over the time stamp counter, as native targets read it: process times move in
     // clock ticks (15.6 ms on Windows), so an idle page read 0.00% on one run and 0.52% on the next.
     let cycles = || -> (u64, Option<u64>) { (browser.processes().iter().map(|p| p.cycles).sum(), host::tsc()) };
@@ -311,7 +343,7 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     // The browser's process set (its tree, what carries its profile's stamp, its job), for the OS frames.
     let tree = browser.pids();
     let os_frames = os_frames.map(|r| r.and_then(|c| c.stop()));
-    if on_screen && (awake.locks() > 0 || host::session_locked()) {
+    if host_screen && (awake.locks() > 0 || host::session_locked()) {
         return Err(validity::locked());
     }
     let mut sampling = None;
@@ -334,9 +366,13 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
         probe::heap::snapshot(&page, &dir.join("heap-0.heapsnapshot.gz"))?;
     }
     let version = browser.version.clone();
+    let phone_meta = browser.phone.as_ref().map(|p| p.meta(crate::target::android_chrome::screen(&page)));
+    // A timed recording whose phone got hot describes a throttling phone (`Thermal`).
+    let cooled = browser.phone.as_ref().filter(|_| set == Set::Timing && video.is_none()).map_or(Ok(()), |p| p.still_cool());
     if !attach {
         browser.close();
     }
+    cooled?;
     if let Some(g) = &guard {
         g.check("after the app closed")?;
     }
@@ -349,6 +385,11 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
             extra.entry("cpu.app.total".into()).or_default().insert("run:0".into(), 100.0 * cpu1.0.saturating_sub(cpu0.0) as f64 / (b - a) as f64);
         }
         _ if attach => {}
+        _ if phone => {
+            if let Some(r) = validity::phone_refusal("cpu.app.total") {
+                refused.insert("cpu.app.total".into(), json!(r.message()));
+            }
+        }
         _ => {
             let r = super::outside::not_on_this_os("cpu.app.total").unwrap_or_else(|| crate::model::Refusal::new(crate::model::ValidatorId::RunIncomplete, "cpu.app.total: no CPU of the browser's processes could be read"));
             refused.insert("cpu.app.total".into(), json!(r.message()));
@@ -384,12 +425,42 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
         // app with a debug C runtime is a debug build (`DevBuild`).
         "timing": if set == Set::Attribution || video.is_some() { "perturbed" } else if debug.is_some() { "debug build" } else { "clean" }, "debug_runtime": debug,
         "created": now_iso(), "valid": true, "sampling": sampling, "video": video,
-        "headless": !on_screen, "frames_refused": drawn, "emulate": meta_emulate(&emulation),
+        "headless": !on_screen, "frames_refused": drawn, "emulate": meta_emulate(&emulation), "phone": phone_meta,
     });
     refuse_background(&mut meta, qos);
     store::write_json(&dir.join("meta.json"), &meta)?;
     draft.keep();
     Ok(Output::new(summary_text(&meta), meta))
+}
+
+/// `--mobile`: a page (an http(s) address or a local page) in Chrome on a phone, nothing that sets up a
+/// desktop browser's page.
+fn mobile_usage(args: &Args, target: &str) -> Result<()> {
+    if !(target.starts_with("http://") || target.starts_with("https://") || target.starts_with("file://")) {
+        return Err(Error::usage(format!("--mobile records a page in Chrome on a phone (https://…, a local page.html), not {target}")));
+    }
+    let why = [
+        ("headless", "a phone's Chrome draws on the phone's screen"),
+        ("emulate", "the phone is the device: nothing is emulated"),
+        ("os-frames", "the phone's frames come from Chrome's trace, not this computer's OS"),
+        ("app", "an app profile is a desktop app's"),
+        ("home", "a phone's Chrome keeps its own profile"),
+        ("gpu-cache", "a phone's Chrome keeps its own GPU caches"),
+    ];
+    if let Some((f, why)) = why.iter().find(|(f, _)| args.has(f)) {
+        return Err(Error::usage(format!("--{f} with --mobile: {why}")));
+    }
+    if args.get("probes") == Some("memory") {
+        return Err(Error::refused(
+            "NotForTarget",
+            "--probes memory on a phone: its census reads the browser's processes on this computer, and the page's are on the phone",
+            "record --probes attribution on the phone (it ends with a heap snapshot), or the memory recording on a desktop browser",
+        ));
+    }
+    match args.get("engine").map(WebEngine::parse).transpose()? {
+        Some(WebEngine::Firefox | WebEngine::Webkit) => Err(Error::usage("--mobile drives Chrome on Android (Chromium): drop --engine")),
+        Some(WebEngine::Chromium) | None => Ok(()),
+    }
 }
 
 /// `--emulate mobile|touch`: what a page strobe launches emulates (a desktop without it).
@@ -1205,6 +1276,9 @@ fn context_lines(meta: &Value) -> String {
     if let Some(line) = super::bench::screen_line(&meta["screen"]) {
         s += &format!("screen   {line}\n");
     }
+    if let Some(line) = phone_line(&meta["phone"]) {
+        s += &format!("phone    {line}\n");
+    }
     if let Some(c) = meta["gpu_cache"].as_str() {
         s += &format!("gpu      shader caches {c} at the launch{}\n", if c == "cold" { " (the driver compiled them during it)" } else { "" });
     }
@@ -1215,6 +1289,31 @@ fn context_lines(meta: &Value) -> String {
         s += &format!("! Unattributed  {why}: cpu, memory, wakes and GPU cover the app's own processes only\n");
     }
     s
+}
+
+/// `Google Pixel 8a · Android 15 · Chrome · 412×915 @2.625x · usb · 31.0 °C`: the phone a recording or
+/// block ran on (`android_chrome::Launch::meta`), the page's screen as it saw it; an emulator says so.
+pub(crate) fn phone_line(p: &Value) -> Option<String> {
+    if !p.is_object() {
+        return None;
+    }
+    let sc = &p["screen"];
+    let mut parts = vec![format!("{} {}", p["manufacturer"].as_str().unwrap_or(""), p["model"].as_str().unwrap_or("")).trim().to_string(), format!("Android {}", p["android"].as_str().unwrap_or("?"))];
+    parts.push(p["channel"].as_str().unwrap_or("Chrome").to_string());
+    if let (Some(w), Some(h)) = (sc["viewport"][0].as_f64(), sc["viewport"][1].as_f64()) {
+        parts.push(format!("{w}×{h} @{}x", sc["dpr"].as_f64().map_or("?".to_string(), |d| format!("{d}"))));
+    }
+    parts.push(p["transport"].as_str().unwrap_or("?").to_string());
+    if let Some(t) = p["battery"]["temp_c"].as_f64() {
+        parts.push(format!("{t:.1} °C"));
+    }
+    if let Some(e) = p["emulator"].as_str() {
+        parts.push(format!("an emulator ({e}): untimed only"));
+    }
+    if let Some(k) = p["command_line_kept"].as_str() {
+        parts.push(format!("its own chrome-command-line kept: {k}"));
+    }
+    Some(parts.join(" · "))
 }
 
 fn summary_body(meta: &Value) -> String {

@@ -18,17 +18,23 @@ pub fn take(browser: &Browser, page: &Page) -> Value {
     let _ = page.send("HeapProfiler.collectGarbage", json!({}));
     let heap = page.send("Runtime.getHeapUsage", json!({})).unwrap_or(Value::Null);
     let dom = page.send("Memory.getDOMCounters", json!({})).unwrap_or(Value::Null);
-    let types: BTreeMap<u64, String> = browser
-        .cdp
-        .send("SystemInfo.getProcessInfo", json!({}), None)
-        .ok()
-        .and_then(|r| r["processInfo"].as_array().map(|a| a.iter().filter_map(|p| Some((p["id"].as_u64()?, p["type"].as_str()?.to_string()))).collect()))
-        .unwrap_or_default();
-    let processes: Vec<Value> = browser
-        .processes()
-        .iter()
-        .map(|p| json!({ "pid": p.pid, "name": p.name, "type": types.get(&(p.pid as u64)).map_or("other", String::as_str), "private_bytes": p.private_bytes, "working_set_bytes": p.working_set }))
-        .collect();
+    // A phone's Chrome runs on the phone: no process of this computer's is its (null, never none).
+    let processes = if browser.phone.is_some() {
+        Value::Null
+    } else {
+        let types: BTreeMap<u64, String> = browser
+            .cdp
+            .send("SystemInfo.getProcessInfo", json!({}), None)
+            .ok()
+            .and_then(|r| r["processInfo"].as_array().map(|a| a.iter().filter_map(|p| Some((p["id"].as_u64()?, p["type"].as_str()?.to_string()))).collect()))
+            .unwrap_or_default();
+        let list: Vec<Value> = browser
+            .processes()
+            .iter()
+            .map(|p| json!({ "pid": p.pid, "name": p.name, "type": types.get(&(p.pid as u64)).map_or("other", String::as_str), "private_bytes": p.private_bytes, "working_set_bytes": p.working_set }))
+            .collect();
+        Value::Array(list)
+    };
     json!({
         "at_ns": host::now_ns(),
         "js_heap_bytes": heap["usedSize"], "js_heap_total_bytes": heap["totalSize"],

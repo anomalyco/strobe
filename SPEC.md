@@ -203,7 +203,8 @@ model/          plain data: Target, Probe, Recording, Run, Metric, Verdict, Env,
 target/         finding and driving targets → chromium.rs (CDP), firefox.rs and bidi.rs (WebDriver
                 BiDi), webkit.rs and webdriver.rs (WebDriver Classic), web.rs (a page in any engine:
                 the WebBrowser and WebPage enums every page caller drives), bridge.rs, inspector.rs,
-                process.rs, isolate.rs (isolated launches), electron.rs, webview.rs (apps on the OS's
+                process.rs, isolate.rs (isolated launches), electron.rs, android_chrome.rs (Chrome on a
+                phone over adb, 13.1), webview.rs (apps on the OS's
                 webview, §13.8), native.rs (native apps, §13.7), a11y/ (the OS accessibility client: uia.rs, ax.rs, atspi.rs; input:
                 input.rs (posted messages), cg_input.rs (Quartz), xtest.rs; keys.rs shared)
 driver/         the bench file's `page`: over CDP, or a native app's accessibility tree and
@@ -229,7 +230,8 @@ validity/       validators, analysers, calibration, A/A (§10)
 symbol/         source maps, packages, owners, PDBs (§12)
 report/         views → text, JSON, markdown, HTML (§11)
 mcp/            MCP server: Streamable HTTP for the daemon, stdio (hidden)
-host/           paths, processes, sockets, autostart, opencode registration, mesh, git, iOS devices
+host/           paths, processes, sockets, autostart, opencode registration, mesh, git, iOS devices,
+                Android devices (adb.rs)
 ui/             embedded viewer and calibration assets
 ```
 
@@ -321,7 +323,13 @@ Idempotent; re-running is the repair command.
 
 ```
 strobe up [--yes] [--check] [--skip <step,...>]
+strobe up --mobile[=<serial>] --channel canary|dev|beta
 ```
+
+`up --mobile --channel` does only this: it gives strobe that Chrome channel on the phone (installed;
+kept in `<state>/phones.json` by the phone's hardware serial), the one step before `--mobile` runs on
+a phone may force-stop it and clear the origins they load (13.1 "Chrome on a phone"). Never Chrome
+itself (`--channel` takes no `stable`); one not installed is exit 3.
 
 Steps (each checks first, prints ✓ / ! / ✗):
 
@@ -383,13 +391,31 @@ phone. strobe reads with the trust the user already gave this computer (the
 pair record usbmuxd keeps) and is read-only toward the phone: it never pairs, sets a value or
 installs anything; an untrusted phone says to unlock it and tap Trust.
 
+Android devices (`android` row, `android.devices` in JSON; `strobe up` lists them too): every device
+of an adb server that runs (status starts none: "no adb server runs" is information), each read in
+one shell round trip (`adb::Facts`) within 3 s for all (`--fast`: 500 ms): manufacturer and model,
+Android version, link (USB, Wi-Fi, emulator), battery level and whether it is on power, battery
+temperature, thermal status, a screen that is off or locked, and what a run may do with it: an
+emulator `check and look only (Emulator)`, a phone on Wi-Fi `untimed only (WirelessTransport)`. The
+serial selects it (`--mobile=<serial>`, 13.1 "Chrome on a phone"). An unauthorized phone says to
+accept "Allow USB debugging?". Information, never a problem.
+
 ### 5.5 `strobe record`
 
 ```
 strobe record <target> [--probes <set|list>] [--for <duration> | --bench <file>#<case>]
                        [--ring <duration>] [--pin] [--name <text>] [--video] [--headless]
-                       [--emulate mobile|touch] [--json]
+                       [--emulate mobile|touch] [--mobile[=<serial>]] [--json]
 ```
+
+- `--mobile[=<serial>]` records a page (https://…, a local page) in Chrome on an Android phone or
+  emulator over adb, at the phone's own screen with its touch (13.1 "Chrome on a phone"; on a phone,
+  only in a Chrome channel given to strobe with `strobe up --mobile=<serial> --channel canary`). A timed
+  recording refuses an emulator (`Emulator`), adb over Wi-Fi, Battery Saver and a low battery, waits up
+  to 3 minutes for a hot phone, and refuses `Thermal` when it got hot during the recording; `--probes
+  attribution` runs on an emulator. The recording keeps `phone`; `cpu.app.total` is refused
+  `NotForTarget` (the page's processes are the phone's). Not with `--headless`, `--emulate`,
+  `--os-frames`, an app, or `--probes memory`.
 
 - `--emulate mobile|touch` launches a page as a phone or a desktop with a touch screen (13.1 "Emulated
   phones and touch screens"); without it a page is a desktop. Not with `--bench` (the bench target
@@ -620,6 +646,14 @@ browser runs there for people), and with `--headless` on macOS (Safari has no he
 refuses its series before anything builds (`EngineUnsupported`, with the closest metric it can), as does
 a launch case on WebKit (no preload script); `--probes attribution|memory` on a WebKit page refuses
 the run. Declared secondaries the engine cannot measure are refused per block.
+**On a phone** (`--mobile[=<serial>]`, 13.1 "Chrome on a phone"): the file's phone targets (`emulate:
+"mobile"`) run in Chrome on an Android phone or emulator instead of being emulated; every other series
+is refused `NotForTarget` before anything builds. A timed bench (anything but `--check` and
+`--pixels-only`) refuses an emulator, a phone on Wi-Fi, Battery Saver or a low battery before anything
+builds; each block then holds the phone's slot and stay-awake setting, and a hot phone (`Thermal`,
+before the block or during it) is waited out holding nothing and the block runs again. A phone block
+reads nothing of this computer's (no OS sampler, process snapshots, CPU reservation or power-plan
+switch). `bench --plan --mobile` estimates from earlier runs on the same phone.
 **Refused series:** a series refused before anything builds (one case's Chromium-only primary in a
 file run on Firefox) is listed, never run, and the rest of the file runs: `--check` prints `refused
 <series>  <validator>: <why>` with its fix and counts it apart from the cases that passed or failed
@@ -785,7 +819,10 @@ on the page, so one section of a long report reads; a selector that matches noth
 error). A local file opens as `file://`. A page-only flag given to a native look, or an app-only one
 (`--keys`, `--build`, `--app`, `--home`) to a page's, is a usage error rather than ignored. Exit 124 when the load event or `--until` never came; the
 page's own errors are listed, not an exit code. It is a CLI command only, not an MCP tool (§17): it
-answers no measurement question.
+answers no measurement question. `--mobile[=<serial>]`: the page in Chrome on an Android phone or
+emulator (13.1 "Chrome on a phone"), at the phone's own screen (`--size`, `--scale` and `--headed`
+are usage errors); a local file is served to the phone from its folder; the load line names the
+phone, its viewport and device pixel ratio, and the JSON keeps `phone`.
 
 `look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--timeout
 60s]`: a native app launched in an isolated home as a bench block launches it (its profile from
@@ -2621,7 +2658,18 @@ The calls keep their names and aim as above (`Covered` and `OutOfView` apply at 
   document scrolls instead (a 300 px list swiped 400 px read `scrollTop` 0 and `scrollY` 284 on adais
   and vps alike), so a swipe there is not a phone's scroll.
 - `type` and `press` with an element tap into it first (no sample), as they click on a desktop; keys,
-  and `down`/`up` of a key, go to the keyboard as on a desktop.
+  and `down`/`up` of a key, go to the keyboard as on a desktop. The keys wait until focus is in the
+  element: before the tap strobe arms one wait in the page (`__strobe.armFocus`: the element found once,
+  then the page's own `focusin`, no polling and no layout after the tap) and reads it once after the
+  lift; focus that does not come within a second refuses the run `RunIncomplete`, never typing into
+  whatever has focus. On a page a person can zoom, Chrome on a phone holds the tap until no second tap
+  can follow (about 300 ms on the emulator, `count.clickdelay` 237 to 253 ms), and focus moves only then;
+  keys sent at once went nowhere (`typed ""`).
+- On a phone's own Chrome (`--mobile`, 13.1 "Chrome on a phone") the same touches go over CDP, as the
+  phone's page takes them: two taps on a page a person can zoom are a double-tap zoom there, not two
+  clicks (the emulated phone's `double tap` case timed out waiting for its second click on the
+  emulator), and a 600 px `scroll` scrolled 552 to 560 px (Android's touch slop is wider than desktop
+  Chromium's emulated one); what a person's finger does on that phone.
 - Refused `DeviceMismatch` before anything is sent, naming what a phone lacks: `hover` and `move` (a
   finger does not hover and moves only while it touches), `wheel` (scroll instead), `down`/`up` of a
   mouse button (the SDK has no touch down/up: a finger down, moved and lifted is `drag`), a `button`
@@ -3427,7 +3475,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `NotOnThisOs` | a declared metric this OS gives strobe no way to read for another process (refuses that metric, with the OS's reason): the §13.6 matrix |
 | `EngineUnsupported` | a target, metric, probe set, hook or case kind needs a browser engine strobe does not drive on it: a webview target on Linux (WebKitGTK) or macOS (WKWebView), refused before anything launches with the fix `kind: "native"` (§13.8); and a page's engine that gives strobe no way to measure it (Firefox: `main.*`, `layout.count`, `style.count`, `layout.shift`, `gpu.compile`, `js.heap.*`, `span.*`, `frames.presented.p*`, attribution and memory probes and a launch's attribution block, `ctx.playwright`; `canvas.*` on a page without WebGPU; WebKit also launch cases (no preload script), `net.*`, `input.rate`, `input.gap.p95`, `ctx.mock`, a window `scale`, pointer input where the browser drops it (WPE's headless view), `page.scroll` on a Firefox page that emulates a phone and a `page.drag` there that the browser would pan (headless Firefox does not pan on touch, 9.6), pointer input on a page that emulates a phone (strobe sends no touches yet, §13.1), and `count.*`, `canvas.*`, `interaction.*`, `scroll.latency.*` of a run that loaded a document, a `page.goto` after `ctx.addInitScript`), or an engine strobe cannot run here (`webkit` on Windows for good, Safari `--headless`, a window `scale` on WebKit): a primary refuses its series before anything builds, with the closest metric the engine has, and the rest of the file runs (§5.6 "Refused series"); a declared secondary is refused per block, and an undeclared one (a default secondary, a descriptive row) is left out of the block's values |
 | `Headless` | a frame, input-latency, scrolling, canvas or GPU-use metric of a page that runs headless (`--headless`, a target's `headless`): a primary refuses its series before anything builds (§5.6 "Refused series"); a secondary is refused per block; a run of a headless page measured from outside that sends input (no window for the OS's input); `page.window` on a headless page |
-| `NotForTarget` | a declared metric this kind of target or case has none of (a browser engine's on a native app, a run's on a launch case, the UI thread's on a windowless app, `cpu.foreign` with `--pin none`): refuses that metric; `page.window` on a windowless native target |
+| `NotForTarget` | a declared metric this kind of target or case has none of (a browser engine's on a native app, a run's on a launch case, the UI thread's on a windowless app, `cpu.foreign` with `--pin none`): refuses that metric; `page.window` on a windowless native target; a page on a phone (`--mobile`): what strobe reads from this computer's processes and OS (`cpu.*` but `cpu.fixture`, `memory.*`, `gpu.*` but `gpu.compile`, `ui.*`, `energy.*`, `io.*`; `validity::phone_refusal`), and in a `--mobile` run a target that is no phone target, a launch case and `--probes memory` |
 | `Throttled` | the block-start speed check (a fixed JS workload in the page) runs more than 1.5× slower than this device's calibration: emulated throttling, thermal throttling, power saving or battery mode. Native targets have no page: strobe runs a fixed integer workload on the target's CPUs before the launch, once those CPUs are quiet (two 100 ms looks under 5% mean busy and no CPU over 25%, up to 10 s: the last block's app may still be freeing its memory and GPU objects), and compares it with this device's reference for that CPU mask: the median of its last 20 passing checks there (`<state>/native-speed.json`, per mask; the first check sets it). A slow check is tried again: up to 3 slow tries on quiet CPUs, and for up to 2 minutes while other processes keep the target's CPUs over 25% of a core busy during the check. Slow while other work was busy there is `Background` (naming the busiest processes), not `Throttled`. A page's slow check runs once more after the CPUs settle (the same quiet wait, up to 10 s, then 2 s): a burst passes (the page's own work just after its load, a neighbour on a VM's host, a process that just ended) while throttling lasts, so a second slow check refuses the block (`Background` or `Throttled`, by the other work during it, saying it was slow twice and quoting the first) and a fast one lets the runs go on. Such a block is accepted only if one more check, right after its measured runs (no wait), is at speed too: then a `Throttled` note (info) quotes the first; slow again refuses the block as above, quoting the first. It never goes on silently. The busiest processes named are every process but the browser's and strobe's own, strobe's tree included and marked `the bench's` (the runner, the servers it started: their work counts as other work on the target's CPUs, and once went unnamed as "system work"). strobe reads the processes before the idle counters at the check's start and after them at its end, so its own reading is outside the span (read inside it, it showed as a quarter of a core of other work on vps). On Linux the other work carries the idle counters' resolution (`±N%`: `/proc/stat` counts idle in 10 ms ticks, so over a check of tens of ms each CPU's reading is off by up to a tick). A Linux guest reads the hypervisor's steal over the check on the target's CPUs (`/proc/stat`'s steal, their mean) and names it as a cause from 0.5% of those CPUs' time (`none named (hypervisor steal 37% of those CPUs during the check)`, and after the named processes when there are some); under that, `none named (system work; 0% hypervisor steal)`; bare metal and other OSes say `none named (system work)`. The native check reads the process lists outside the idle counters' span and takes strobe's own CPU over the span out of the busy time, rather than assuming its check thread used one whole core (with a single target CPU, other work could then never read above 0) |
 | `Background` (refusing) | the native speed check stayed slow for 2 minutes while other processes kept the target's CPUs busy (an antivirus scanning new files, an update, a build): the message names the busiest. A bench block waits it out first, holding nothing (a minute, then until the CPUs are quiet, and the check again), up to 15 times, about an hour: on a shared machine another agent's build ends. Blocks that run through a locked session (a headless page, a windowless app) wait the same way: they once ended the bench at the first busy check |
 | `BackgroundPriority` | the target runs at background priority, inherited from strobe or its own: macOS `taskpolicy -b` (`PRIO_DARWIN_PROCESS`), Windows' idle priority class, efficiency mode (EcoQoS) or background mode (very low memory priority), Linux `SCHED_IDLE` or nice 19. The OS keeps it on efficiency cores, at low clocks or behind other work: a drag in an Electron app read 83–91% dropped frames under `taskpolicy -b` against 0.4% at normal priority. Refuses frame and input-latency metrics (`frames.*`, `interaction.*`, `scroll.*`, `canvas.*`, `input.*`, `launch.painted`, `launch.settled`): a primary among them refuses the bench before anything builds (strobe's own priority) or at the block (the target's), a secondary shows refused, and `record` prints `frames refused`. CPU, memory and counters stay, with a warning to compare them only with runs at the same priority. Attribution and memory blocks are untimed and keep running. `record pid:` measures a process as its user runs it and is not checked |
@@ -3436,7 +3484,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `NoDisplayForBudget` | a budget metric is requested without a real display |
 | `TailTooShort` | a percentile lacks its minimum n (refuses that metric only) |
 | `ClockUnsynced` | sources cannot be aligned within 1 ms (§6); a page launch whose own time for `until` falls outside strobe's span from its navigation command to hearing of it, by over 2 ms (9.6) |
-| `LiveChannel` | an app profile would launch the user's own running app, or a macOS app whose data lives in the user's Library (§13.2); a WebKit page whose Safari (or Safari Technology Preview) already runs (§13.1) |
+| `LiveChannel` | an app profile would launch the user's own running app, or a macOS app whose data lives in the user's Library (§13.2); a WebKit page whose Safari (or Safari Technology Preview) already runs (§13.1); `--mobile` where every Chrome channel strobe may drive on the phone (on a phone, only one given to it with `strobe up --mobile --channel`; never Chrome itself) holds a tab a person opened (13.1 "Chrome on a phone"): strobe drives only a channel whose tabs are blank or its own. A running one with a person's tabs holds the DevTools socket: exit 3 naming it |
 | `NoPhase`, `NoInput` | a declared `phase.<name>` no measured run entered; `input.*` with no drag in the runs (refuse that metric) |
 | `NoSpan` | a declared `span.<name>` no measured run's page measured, or a target with no page (§7.3) |
 | `NoMetric` | a declared `metric.<name>` that a measured run of a `cli()` target's command did not print (`strobe:metric <name>=<value>`): a run that printed none is not 0 (9.6) |
@@ -3446,7 +3494,14 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `OutOfView` | a page input's element (a click, hover, drag, scroll, wheel or `down` at it, the click that focuses for `type` or `press`) shows no part in the viewport even scrolled into view: an ancestor clips it away (`overflow: clip`), or what shows is under a pixel. Input aimed there would land beside it; the message names the clipping ancestor (9.6 "Where input aims") |
 | `Covered` | a page input's element shows, but another element is where strobe would aim at every point it tries (its centre, its line boxes, then scrolled to the middle of the viewport, the centre and the centres of its visible part's quarters): a click there would reach that instead, as for a person. The message names the covering element; not transient (an overlay that stays). A native app's covered window is `WindowHidden` (9.6 "Where input aims") |
 | `DisplayTooSmall` | a headed page's declared viewport is larger than this display shows of a page in that browser: its work area (less the menu bar and Dock, the taskbar, panels) less the browser window's own part. Named with the most it can be, the work area and the window's part; checked right after the engine checks, before the first block (and by `strobe plan` from what strobe kept), refusing that series alone, and again when a block fits its window. Not transient: the device, not the variant (9.10 "Declared viewport"); and a `page.window` resize whose content and window part exceed the display's work area, or that the OS clamped to it (the call) |
-| `DeviceMismatch` | a page target's page does not see the input devices its target is for (13.1 "Desktop input is checked"): a desktop page target's page, read once loaded and before `setup`, does not match `(hover: hover)`, `(pointer: fine)` or `(any-pointer: fine)`, matches `(any-pointer: coarse)`, has `ontouchstart` or `navigator.maxTouchPoints` above 0 (strobe turns touch off in Chromium and Firefox, so a touch screen passes there). Its own id, not `VariantMismatch` (two sides set up unlike each other, which also refuses sides whose pages saw different input) or `InputMismatch` (two sides got other input calls): it holds for one page alone. The detail lists what the page saw; the fix names the engine's settings (Chromium's `--blink-settings` and `--touch-events`, Firefox's pointer capabilities and touch preferences, none in WebKit). Also a driver call that sends input an emulated phone has no device for (`hover`, `move`, `wheel`, a mouse button's `down`/`up`, a `button` other than `left`, a tap's `modifiers`; 9.6 "Touch on an emulated phone"), refused before anything is sent |
+| `DeviceMismatch` | a page target's page does not see the input devices its target is for (13.1 "Desktop input is checked"): a desktop page target's page, read once loaded and before `setup`, does not match `(hover: hover)`, `(pointer: fine)` or `(any-pointer: fine)`, matches `(any-pointer: coarse)`, has `ontouchstart` or `navigator.maxTouchPoints` above 0 (strobe turns touch off in Chromium and Firefox, so a touch screen passes there). Its own id, not `VariantMismatch` (two sides set up unlike each other, which also refuses sides whose pages saw different input) or `InputMismatch` (two sides got other input calls): it holds for one page alone. The detail lists what the page saw; the fix names the engine's settings (Chromium's `--blink-settings` and `--touch-events`, Firefox's pointer capabilities and touch preferences, none in WebKit). Also a driver call that sends input an emulated phone has no device for (`hover`, `move`, `wheel`, a mouse button's `down`/`up`, a `button` other than `left`, a tap's `modifiers`; 9.6 "Touch on an emulated phone"), refused before anything is sent; a page on a phone (`--mobile`) whose primary pointer is fine or hovers, or that has no touch points or touch event API (`validity::phone_input`: a mouse or trackpad connected to the phone) |
+| `Thermal` | a phone too hot to time (`validity::phone_hot`): PowerManager's thermal status moderate (2) or worse, a thermal headroom of 1.0 or more (`cmd thermalservice headroom`), its battery at 40 °C or more, a forced status (`override-status`), or neither a status nor a battery temperature to read. Read at each timed launch (again once the phone's slot is held) and after a timed block's runs. Transient: a bench waits up to 3 minutes (read every 15 s) holding nothing (the bench slot, the phone's slot and stay-awake setting go back) and runs the block again, 3 times at most; a timed `record --mobile` waits before it launches and refuses when its phone got hot during it. Untimed runs (`--check`, `look`, attribution) take none of it |
+| `PowerSave` | a timed run on a phone with Battery Saver on (`settings global low_power`): it slows the CPU and GPU and defers work |
+| `LowBattery` | a timed run on a phone whose battery is under 20%: phones slow down to make it last |
+| `DeviceAsleep` | a phone whose screen stays off or shows its lock screen after strobe woke it (`input keyevent KEYCODE_WAKEUP`, `wm dismiss-keyguard` without a PIN); one locked with a PIN, pattern or password waits `--unlock-wait` for a person first. Transient. Every run on a phone, timed or not |
+| `Emulator` | a timed bench, track or record on an Android emulator (`ro.boot.qemu`, `ro.kernel.qemu`, the emulator's boards, `ro.build.characteristics=emulator`, an `emulator-` serial; `adb::Facts::emulator`): it runs on this computer's CPU, usually with a software GPU, so its timing describes no phone. Refused before anything builds; `--check`, `look`, pixel comparisons and attribution recordings run there |
+| `WirelessTransport` | a timed run on a phone reached by adb over the network (`adb connect`, wireless debugging): the radio's work and the link's latency are in the numbers. Untimed runs take it |
+| `NotProfileable` | attribution that needs the phone's own profilers (native stacks with simpleperf or Perfetto's `traced_perf`) on an app without `<profileable android:shell="true"/>` (iOS: without `get-task-allow`). Reserved: no target strobe drives on a phone takes on-device native stacks yet, so nothing refuses it now (a phone's Chrome is attributed through DevTools, which needs none) |
 
 Validators are one type in the code (`model::ValidatorId`, these ids), and a refusal is data:
 `Refusal { validator, summary, detail, fix, hidden }`. A refused run's error carries it (exit 4;
@@ -4408,6 +4463,124 @@ resolve to native symbols; the residue stays visible as `unresolved`.
   `1400×900 · reduced motion` (a series with no window of its own says `reduced motion` beside it), a
   PR's machine line and an implementation comparison's fairness line say "reduced motion" (or "OS
   reduces motion"), and so does `strobe history`'s fingerprint line.
+
+**Chrome on a phone** (`--mobile[=<serial>]`, `target::android_chrome`, over `host::adb`). One switch
+for record, bench and look (the MCP record and bench tools' `mobile`: `true` or a serial; rule 7): the
+page runs in Chrome on an Android phone or emulator instead of a desktop browser, with the phone's own
+screen and touch and nothing emulated. Bench files stay as they are: a bench's `--mobile` runs the
+file's phone targets (`emulate: "mobile"`, the declaration that a target is a phone) on the phone
+instead of emulating them; the device is the run's choice, like `--headless` or `--engine`, never the
+file's. Any other target of the run is refused `NotForTarget` (a desktop's or touch screen's page, an
+app, a script: run it without `--mobile`, or narrow with `--target`), a target in another engine
+`EngineUnsupported`, a launch case `NotForTarget` (strobe times a launch from its own clock, and the
+page's is the phone's), all before anything builds, and the rest runs. `--headless` and `--engine
+firefox|webkit` with `--mobile` are usage errors; `--probes memory` is refused `NotForTarget` (a leak
+run's census reads the browser's processes on this computer). `record --mobile` takes an http(s)
+address or a local page; `look --mobile` refuses `--size`, `--scale` and `--headed`. `record --bench
+<file>#<case> --mobile` forwards it (bare or with a serial) to the bench it runs.
+
+**Real phones are unverified.** Everything below ran on Android 15 emulators only (§24); no strobe has
+driven a physical phone yet, so what a real phone does (its thermal and battery readings, a PIN lock,
+Wi-Fi adb, a channel given to strobe, its touch slop and timing) is designed, not checked.
+
+- The phone: `--mobile` alone is the one attached device (`ANDROID_SERIAL` names one), `--mobile=<serial>`
+  one by its serial; never the next argument (`cli::Kind::Optional`). A bench picks it once; `status` and
+  `up` list attached devices from an adb server that runs (they start none): model, Android, link,
+  battery, temperature, thermal status, screen, `check and look only (Emulator)` or `untimed only
+  (WirelessTransport)`, and on a phone the channels given to strobe (or the `up` that gives one).
+- A phone's own Chrome is a person's (rule 10). Force-stopping a channel ends its incognito tabs, the web
+  apps it installed, the Custom Tabs it shows inside other apps and its downloads, and clearing an origin
+  signs its person out. So on a phone (not an emulator) strobe never drives Chrome itself
+  (`com.android.chrome`), and drives a dedicated channel (Canary, then Dev, then Beta) only once a person
+  gave it to strobe for that phone: `strobe up --mobile=<serial> --channel canary|dev|beta` (installed,
+  its first run finished), kept in `<state>/phones.json` by the phone's hardware serial. Without one a
+  launch is exit 3 naming that command. An emulator's channels (Chrome, Beta, Dev, Canary, in that order)
+  need none.
+- Per launch (a block, a recording, a look), the phone is read afresh (`adb::Facts`), and again once its
+  slot is held: a timed launch refuses what describes no phone at speed (`validity::phone_timed`:
+  `Emulator`, `WirelessTransport`, `PowerSave`, `LowBattery`; a timed bench refuses them before anything
+  builds too) and a hot phone (`Thermal`). The phone's slot (`PhoneSlot`, so another computer's strobe is
+  refused `ConcurrentBench`) and its stay-awake setting (`StayAwake`) are held for the launch alone; an
+  asleep phone is woken (`input keyevent KEYCODE_WAKEUP`, and `wm dismiss-keyguard` without a PIN), one
+  locked with a PIN waits `--unlock-wait`, else `DeviceAsleep`. A bench waits for a hot phone between
+  blocks holding nothing (the bench slot, the phone's slot and its stay-awake setting go back), up to 3
+  minutes read every 15 s (`android_chrome::cool`), and runs the block again, 3 times at most; a timed
+  `record --mobile` waits the same before it launches and refuses `Thermal` when its phone got hot during
+  the recording. A block's and a recording's `phone` is the launch's own reading.
+- The channel: the ones strobe may drive that are installed (`pm list packages`). Every channel answers
+  on one DevTools socket (`@chrome_devtools_remote`), and strobe takes the one that answers only when its
+  `/json/version` names that package (`Android-Package`). Two channels running at once is exit 3 (close
+  one); a running channel strobe may not drive (a phone's own Chrome, one not given to strobe) is exit 3
+  naming it: it holds the socket, and strobe stops no channel it may not drive. A running channel strobe
+  may drive is read first through its socket (`/json/list`: what it holds, no change); one not running is
+  started as its launcher starts it (MAIN, no address: it restores its tabs and opens none) to read its
+  tabs. A tab that is not blank (`about:blank`, a new tab page) and not strobe's own (the last tab strobe
+  opened there, `<state>/adb/chrome-<phone>.json`: by its id; one a killed strobe left open also by the
+  address strobe loaded, which a tab Chrome restored under a new id still shows; one strobe closed only by
+  its id, since a person may open that address since) is a person's; a tab with no address yet (Chrome
+  restoring it after a start) is read again for up to 3 s and is a person's if it keeps none. A running
+  channel with a person's tabs is exit 3 (it holds the socket: close its tabs or close it); one strobe
+  started is stopped again and refused `LiveChannel`, and strobe tries the next; when none is left, the
+  launch refuses `LiveChannel` naming each. A channel whose socket never opens is on its first-run screens:
+  exit 3 ("open that Chrome on the phone once and finish its first run"). strobe force-stops and starts
+  only a channel it may drive that holds no person's tab, so every launch's browser is fresh. Never `pm
+  clear`, never `am set-debug-app`, never Chrome's command-line file on a phone that is not debuggable. On a debuggable
+  device (an emulator: `ro.debuggable=1`) strobe writes `/data/local/tmp/chrome-command-line` (`_
+  --disable-fre --no-default-browser-check --no-first-run`: the first-run screens keep the socket
+  closed) only where none is (`adb::CommandLine`, journaled `<state>/adb/cmdline-<phone>.json` before it
+  is written, removed when the launch ends while it still holds what strobe wrote, and by the next
+  strobe's `restore_stale` when strobe was killed); one that is there is someone's: kept as it is, and
+  the recording says so. A channel an emulator started at boot, before strobe wrote the file, starts again
+  to read it.
+- The page: an adb forward to the socket (`tcp:0`, a `Tunnel`, journaled), CDP to the browser target, and
+  a tab of strobe's own (`Target.createTarget about:blank`, activated): `chromium::Browser` with
+  `phone` set, so the driver, the trace, profiles and heap snapshots work as on a desktop Chromium, and
+  `navigator.webdriver` false as on a desktop launch. Before a bench block's or a recording's first load
+  the page's origin is cleared (`Storage.clearDataForOrigin`, all types) and the HTTP cache
+  (`Network.clearBrowserCache`), as a fresh desktop profile starts: the channel is strobe's (given to it,
+  or an emulator's) and holds no person's tabs. `look --mobile` clears nothing: it loads the page as the
+  channel has it. A server on this computer's loopback (`http://127.0.0.1:<port>`, the variant's `serve`
+  and the fixture) is reversed to the same port on the phone (`adb reverse`), so the page loads the same
+  address; a local page (`file://…`) is served from its folder on a loopback port strobe reverses
+  (`http::serve_folder`, one server per folder per process); a run's `page.goto` to either is served or
+  reversed the same way first. The fixture's connection check reads the
+  adb server's connections (`adb::server_pids`): the phone's reach this computer through it. When the
+  launch ends, strobe closes its tab, waits until the browser no longer lists it and half a second more
+  (Chrome saves its tabs a moment after one closes: stopped first, it brought a closed tab back), then
+  force-stops the channel; then the reverses, the forward, its command line, the stay-awake setting and
+  the slot go back.
+- What a phone's page is measured by: its trace (frames, `main.*`, `interaction.*` from Chrome's touch
+  EventLatency, layout and style counts, phases, spans), its Performance domain, the driver's own reads
+  (`dom.nodes`, `js.heap.used`, `input.*`, `count.*`, `net.*`) and `run.duration`. What strobe reads from
+  this computer's processes and OS (`cpu.*` but `cpu.fixture`, `memory.*`, `gpu.*` but `gpu.compile`,
+  `ui.*`, `energy.*`, `io.*`) is no number of the phone's: `NotForTarget` (`validity::phone_refusal`; a
+  primary before anything builds, a declared secondary per block, an undeclared one left out). The
+  speed check runs in the page against the phone's own reference in that channel (`engine-speed.json`,
+  `android:<hardware serial>:<package>`), never this computer's calibration; an emulator keeps none and
+  refuses nothing on it. A block's lock state, display state and the wait for an unlock are this
+  computer's, none of the phone's page: a phone series runs through a locked session. A phone block reads
+  nothing of this computer's: no OS sampler, no process snapshots for its other work or screen state (its
+  `screen` is null), no wait for quiet CPUs, no CPU reservation, no power-plan switch (the machine is
+  only kept awake), and an attribution census's `processes` is null (unknown, never none). Its window is
+  the phone's own screen: a target's `viewport` is not held against it (`admit_window`), what it drew
+  in is the page's `innerWidth`×`innerHeight` at its `devicePixelRatio`, and `page.window` is refused
+  `NotForTarget`.
+  The input is the phone's: `validity::phone_input` (`DeviceMismatch`) wants its primary pointer coarse
+  and not hovering, with touch points and the touch event API; what else the phone has stays the phone's
+  (an emulator's mouse, a stylus: `(any-pointer: fine)`, read `hybrid`). The driver's pointer input is
+  touch, as on an emulated phone (9.6). Reduced motion is DevTools' `Emulation.setEmulatedMedia` on the
+  tab, as a command's page takes it. `--video` films the tab's own frames (a screencast), as headless.
+- What a recording and a block keep (`phone` in meta.json, `android_chrome::Launch::meta`): serial,
+  manufacturer, model, SoC, Android, SDK, fingerprint, build type, emulator evidence, ABI, transport,
+  display, battery, thermal status, the package and channel, a kept command line, and the page's
+  screen as its first page saw it (`innerWidth`×`innerHeight`, `devicePixelRatio`, `screen`). Text
+  prints it as `phone  Google Pixel 8a · Android 15 · Chrome Canary · 412×915 @2.625x · usb · 31.0 °C`;
+  a series says `· Chrome on a phone` beside its window and keeps the phone's hardware serial
+  (`mobile`). The rerun ledger's identity names the phone and its Chrome (`identity.engines.<target>.browser`:
+  `phone <key> (<model>, <fingerprint>) · <package> <version>`, not the serial of the day), and a plan
+  estimates a series only from earlier runs on the same phone (or, for a desktop series, on none).
+- `strobe leave` also removes the lock files (`/data/local/tmp/.strobe-phone.lock` and `.json`) from
+  each attached device of a running adb server where no strobe holds the lock.
 
 **Other engines.** A page target runs in one engine (`model::WebEngine`): Chromium over CDP (the
 default), Firefox over WebDriver BiDi, WebKit over WebDriver Classic (refused `EngineUnsupported` on
@@ -7115,6 +7288,59 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   phone itself (toybox `flock` held by an open shell stream; the kernel frees it when the stream
   closes), so another computer's strobe is refused `ConcurrentBench` naming that host. Checked on
   Android 15 emulators (x86_64 WHPX on adais, arm64 HVF on air); no real phone yet.
+- **Phones: validators, `--mobile`, Chrome on Android (mobile M1.2 and M1.3)**: the validators
+  `Thermal`, `PowerSave`, `LowBattery`, `DeviceAsleep`, `Emulator`, `WirelessTransport` and
+  `NotProfileable` (reserved: no on-device profiler yet) in `model::ValidatorId`, the schema and §10.1;
+  `--mobile[=<serial>]` on record, bench and look and the MCP record and bench tools (`cli::Kind::Optional`:
+  `--mobile` or `--mobile=<serial>`, never the next argument; MCP `true` or a serial); `status` and `up`
+  list an adb server's devices (§5.4); `target::android_chrome` (13.1 "Chrome on a phone"). Checked on
+  adais against an Android 15 x86_64 emulator (WHPX, SwiftShader, Chrome 124, its first run never
+  finished, Chrome started at boot), the session locked: `look https://example.com --mobile` (412×811
+  @2.625x, the first-run screens skipped by strobe's command line on the emulator, which it then
+  removed; no forward, reverse, command line or journal left, Chrome stopped); `look` of a local page
+  served and reversed to the phone; `bench scripts/dev/touch.bench.ts --check --mobile`: tap, tap
+  fixed, type (after the focus wait), drag, drag prevented, swipe page and scroll list pass, hover,
+  wheel and mouse down refused `DeviceMismatch` as meant, the desktop target refused `NotForTarget`;
+  `double tap` timed out (a double-tap zoom on a zoomable page) and `scroll page` read 552-560 px of
+  600 (the bench's 570-630 band is the emulated phone's); a stray tab of a failed block that Chrome
+  brought back after a force-stop was refused `LiveChannel` before the close waited for the tab to go;
+  the same file without `--mobile` still passes its emulated cases headless. A strobe killed mid-look
+  left its tab, forward, command line and stay-awake setting: the next strobe's start put the setting
+  back and removed the command line and the forward, and its launch closed the tab by its journaled
+  address after Chrome had restarted (the tab's id had changed). A person's tab (`example.org`) in
+  Chrome, stopped or running, refused `LiveChannel` (exit 4) and left Chrome as it was (stopped again,
+  or the same process still running, and a command-line file that was there kept). The emulator once
+  died mid-bench (its SwiftShader context): the cases after it failed `device not found`, and the next
+  strobe's start restored what that bench held. A bench file with the
+  `load-home` case and setup of a site's bench, against its live address on a `url()` phone target:
+  `load-home` passes (main.work 4 s on the emulator). Timed: `bench --aa --mobile` and `record
+  --mobile` refuse `Emulator` (exit 4) before anything builds or launches; `record --mobile --probes
+  attribution` keeps a CPU profile and heap snapshot of the phone's page, `cpu.app.total` refused
+  `NotForTarget`. Not checked: a real phone (none attached: `Thermal`, `PowerSave`, `LowBattery`,
+  `WirelessTransport`, the cooldown, `DeviceAsleep` with a PIN and `LiveChannel` against a person's
+  tabs have run on no phone), a fixture reached through a reverse, other channels than Chrome, and the
+  10-pair `--aa` and calibration M1.3 asks for, which need a phone on a cable.
+  After review: on a phone strobe never drives Chrome itself and drives a dedicated channel only once
+  given it (`up --mobile --channel`); the DevTools socket counts only when it names the package; a tab
+  with no address is no blank one; a closed tab of strobe's is known only by its id; a running channel
+  that holds the socket is exit 3 naming it; `look` clears nothing; facts are read per launch and after
+  the phone's slot, and a bench waits out a hot phone holding nothing; a phone block reads nothing of
+  this computer's; the phone's own screen is not held to a target's viewport and `page.window` refuses
+  `NotForTarget`; `record --bench` forwards `--mobile`; `type`/`press` wait for focus with one in-page
+  wait and refuse `RunIncomplete` without it; the ledger's identity and the plan's history know the phone;
+  a run's `goto` to a local page or a loopback server is served or reversed; `leave` removes idle phones'
+  lock files. Checked again on the adais emulator: `touch.bench.ts --check --mobile` (tap, tap fixed,
+  type, drag, drag prevented, swipe page, scroll list and this time scroll page pass; double tap still
+  zooms); a phone target with a 390×844 viewport ran at the emulator's 412×811 unrefused; a run's
+  `goto` to another local page loaded it served (`http://127.0.0.1:<port>`); `page.window` refused
+  `NotForTarget` and a `type` into an element that takes no focus `RunIncomplete`; a person's tab in a
+  stopped Chrome refused `LiveChannel` (exit 4), in a running one exit 3 naming it, Chrome left as it was
+  both times; a killed look's tab closed by its id at the next launch; `up --mobile --channel canary`
+  exit 3 (not installed), `--channel stable` exit 2; `record --bench …#tap --mobile` recorded on the
+  emulator; timed bench and record still refuse `Emulator`. The emulator hung once under a bench (adb
+  shell no answer) mid-write of Chrome's command-line file and left it empty; the next strobe removes an
+  empty file its journal names too (checked with a planted journal). Not run: `strobe leave` (it would undo this
+  machine's install), and the opt-in path itself, which needs a phone that is not an emulator.
 - **A web team's report on a GPU-less Linux VM (2026-11-07)**, checked on vps (KVM, 2 vCPUs) with a
   site's headless bench, 0.16.0 against this build:
   - Point-in-time readings before the reset (§9.6): a load case that resets to `about:blank` read

@@ -50,6 +50,9 @@ pub struct Browser {
     pub embedded: bool,
     /// A browser `launch` started for pages: each page it opens gets `NOT_AUTOMATED` first.
     pub as_person: bool,
+    /// Chrome on an Android phone (`android_chrome::launch`): what strobe holds on the phone for it (its
+    /// tab, the DevTools forward, the stay-awake setting, the phone's slot), given back when it closes.
+    pub phone: Option<Box<super::android_chrome::Launch>>,
 }
 
 /// `navigator.webdriver` false, as for a person, where the browser says otherwise. A preload reaches the
@@ -382,7 +385,7 @@ pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, extra: &[St
     let cdp = Cdp::connect(&ws)?;
     let version = cdp.send("Browser.getVersion", json!({}), None)?.get("product").and_then(Value::as_str).unwrap_or("").to_string();
     let (child, profile) = launching.done();
-    Ok(Browser { cdp, ws, child, pid, profile, fresh: true, exe, version, window: window.clone(), embedded: false, as_person: true })
+    Ok(Browser { cdp, ws, child, pid, profile, fresh: true, exe, version, window: window.clone(), embedded: false, as_person: true, phone: None })
 }
 
 /// Attaches to a running endpoint: `cdp:<port>`, `cdp:ws://…` or a bare `ws://…`.
@@ -404,7 +407,7 @@ pub fn attach(endpoint: &str) -> Result<Browser> {
     };
     let cdp = Cdp::connect(&url)?;
     let version = cdp.send("Browser.getVersion", json!({}), None)?.get("product").and_then(Value::as_str).unwrap_or("").to_string();
-    Ok(Browser { cdp, ws: url, child: None, pid: 0, profile: None, fresh: false, exe: PathBuf::new(), version, window: Window::default(), embedded: false, as_person: false })
+    Ok(Browser { cdp, ws: url, child: None, pid: 0, profile: None, fresh: false, exe: PathBuf::new(), version, window: Window::default(), embedded: false, as_person: false, phone: None })
 }
 
 /// One GET on a debugging port. Chrome and Node keep the connection open after the reply, even with
@@ -481,13 +484,18 @@ impl Browser {
         // A browser strobe launched opens its about:blank window a moment after its debugging port: wait for
         // that page rather than create a second window beside it, which stayed open and blank all run.
         let deadline = std::time::Instant::now() + Duration::from_secs(if self.child.is_some() { 5 } else { 0 });
-        let target = loop {
-            let targets = self.cdp.send("Target.getTargets", json!({}), None)?;
-            let found = targets["targetInfos"].as_array().and_then(|a| a.iter().find(|t| t["type"] == "page")).and_then(|t| t["targetId"].as_str()).map(str::to_string);
-            if found.is_some() || std::time::Instant::now() >= deadline {
-                break found;
+        // On a phone, the tab strobe opened: the phone's other tabs are none of strobe's.
+        let target = if let Some(p) = &self.phone {
+            Some(p.tab.clone())
+        } else {
+            loop {
+                let targets = self.cdp.send("Target.getTargets", json!({}), None)?;
+                let found = targets["targetInfos"].as_array().and_then(|a| a.iter().find(|t| t["type"] == "page")).and_then(|t| t["targetId"].as_str()).map(str::to_string);
+                if found.is_some() || std::time::Instant::now() >= deadline {
+                    break found;
+                }
+                std::thread::sleep(Duration::from_millis(25));
             }
-            std::thread::sleep(Duration::from_millis(25));
         };
         let target = match target {
             Some(t) => t,
@@ -537,6 +545,10 @@ impl Browser {
 
     /// Every process that belongs to this target, with CPU times and private bytes.
     pub fn processes(&self) -> Vec<host::ProcTimes> {
+        // A phone's Chrome has no process on this computer: nothing to read.
+        if self.phone.is_some() {
+            return Vec::new();
+        }
         host::process_set(self.pid, self.profile.as_deref())
     }
 
@@ -554,6 +566,12 @@ impl Browser {
     /// Closes the browser as a person would (`Browser.close`, up to 5 s for it to exit), then ends
     /// what is left and removes the profile (an attached browser is only asked to close).
     pub fn close(mut self) {
+        // Chrome on a phone is not strobe's to close: the phone's launch closes strobe's tab and stops the
+        // channel it started (`android_chrome::Launch`'s drop).
+        if self.phone.is_some() {
+            self.phone = None;
+            return;
+        }
         // A launcher that already exited handed the window to a process it started (Edge): that one is
         // the browser to wait for.
         let handed_over = self.as_person && self.child.as_mut().is_some_and(|c| c.exited().is_some());

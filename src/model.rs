@@ -122,6 +122,13 @@ validators!(
     Covered,
     DisplayTooSmall,
     DeviceMismatch,
+    Thermal,
+    PowerSave,
+    LowBattery,
+    DeviceAsleep,
+    Emulator,
+    WirelessTransport,
+    NotProfileable,
 );
 
 impl ValidatorId {
@@ -130,16 +137,16 @@ impl ValidatorId {
     }
 
     /// The machine's state at the moment, not the target or the bench: a locked session, a hidden
-    /// window (a display off on idle, another app in front), other work on the CPUs. It passes, so a
-    /// bench waits it out or runs the block again rather than give up.
+    /// window (a display off on idle, another app in front), other work on the CPUs, a phone that is
+    /// hot or asleep. It passes, so a bench waits it out or runs the block again rather than give up.
     pub fn is_transient_environment(self) -> bool {
         use ValidatorId::*;
         match self {
-            SessionLocked | WindowHidden | Background => true,
+            SessionLocked | WindowHidden | Background | Thermal | DeviceAsleep => true,
             SoftwareGpu | DevBuild | DebuggerAttached | WrongScreen | UnpacedSpin | NoPresentSource | AmbiguousInteraction | PatternInput | ConcurrentBench | VariantMismatch | RunIncomplete
             | Throttled | BackgroundPriority | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter
             | NotOnThisOs | NotForTarget | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent
-            | Untimed | OutOfView | Covered | DisplayTooSmall | DeviceMismatch => false,
+            | Untimed | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | PowerSave | LowBattery | Emulator | WirelessTransport | NotProfileable => false,
         }
     }
 }

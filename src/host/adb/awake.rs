@@ -22,8 +22,13 @@ const ALL_POWER: u32 = 1 | 2 | 4;
 
 /// A phone in a file name: its hardware serial (the same over USB and Wi-Fi), else the adb serial,
 /// with anything but letters, digits, `.`, `_`, `-` as `_`.
-fn phone_key(d: &Device, hw: Option<&str>) -> String {
-    hw.unwrap_or(&d.serial).chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect()
+pub(super) fn phone_key(d: &Device, hw: Option<&str>) -> String {
+    key_of(&d.serial, hw)
+}
+
+/// `phone_key` from a serial and the hardware serial, as `Facts` has them.
+pub fn key_of(serial: &str, hw: Option<&str>) -> String {
+    hw.unwrap_or(serial).chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect()
 }
 
 fn journal(key: &str) -> PathBuf {
@@ -151,6 +156,84 @@ impl Drop for StayAwake {
     }
 }
 
+/// Where Chrome on Android reads extra command-line flags at its start, on a debuggable device only.
+pub const CHROME_COMMAND_LINE: &str = "/data/local/tmp/chrome-command-line";
+
+/// A Chrome command line strobe wrote on a debuggable device (an emulator), removed when dropped while the
+/// file still holds what strobe wrote. Journaled in `<state>/adb/cmdline-<phone>.json` before it is
+/// written, so a killed strobe's file is removed by the next (`restore_stale`).
+pub struct CommandLine {
+    device: Device,
+    path: PathBuf,
+    content: String,
+}
+
+/// What `CommandLine::hold` found.
+pub enum Held {
+    /// strobe wrote it, and removes it when this drops.
+    Written(CommandLine),
+    /// Someone's own file was there: kept as it is, with what it holds.
+    Kept(String),
+}
+
+fn cmdline_journal(key: &str) -> PathBuf {
+    journal_dir().join(format!("cmdline-{key}.json"))
+}
+
+/// Removes the file if it still holds `content`, or nothing (a write the phone never finished: an emulator
+/// that hung under it left the file empty); whether the journal is done with (removed, or changed by
+/// someone since).
+fn remove_cmdline(d: &Device, content: &str) -> bool {
+    let Ok(o) = d.shell(&format!("cat {CHROME_COMMAND_LINE}")) else { return false };
+    if !o.ok() {
+        return true;
+    }
+    let now = o.stdout_text().trim_end().to_string();
+    (now != content && !now.is_empty()) || d.sh(&format!("rm -f {CHROME_COMMAND_LINE}")).is_ok()
+}
+
+/// `restore_stale` for one command-line journal of a strobe that no longer runs: on its phone, found by
+/// serial or hardware serial, else nothing yet.
+pub(super) fn restore_cmdline(adb: &Adb, path: &Path, v: &Value) {
+    let (serial, hw) = (v["serial"].as_str().unwrap_or(""), v["hw_serial"].as_str());
+    let ready: Vec<String> = adb.devices().unwrap_or_default().into_iter().filter(|l| l.state == State::Device).map(|l| l.serial).collect();
+    let found = ready.iter().find(|s| *s == serial && hw.is_none()).map(|s| adb.device(s)).or_else(|| {
+        let hw = hw?;
+        ready.iter().map(|s| adb.device(s)).find(|d| d.hardware_serial().as_deref() == Some(hw))
+    });
+    let Some(d) = found else { return };
+    if remove_cmdline(&d, v["content"].as_str().unwrap_or("")) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+impl CommandLine {
+    /// Writes `content` as Chrome's command line on `d` unless a file is there already, which is kept.
+    pub fn hold(d: &Device, content: &str) -> Result<Held> {
+        let existing = d.shell(&format!("cat {CHROME_COMMAND_LINE}"))?;
+        if existing.ok() {
+            return Ok(Held::Kept(existing.stdout_text().trim_end().to_string()));
+        }
+        let hw = d.hardware_serial();
+        let path = cmdline_journal(&phone_key(d, hw.as_deref()));
+        let body = json!({ "owner": spawn::owner_stamp(), "serial": d.serial, "hw_serial": hw, "content": content });
+        paths::write_owner_only(&path, body.to_string().as_bytes()).map_err(|e| Error::msg(format!("could not journal {}'s Chrome command line: {e}", d.serial)))?;
+        if let Err(e) = d.sh(&format!("echo {} > {CHROME_COMMAND_LINE}", quote(content))) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+        Ok(Held::Written(CommandLine { device: d.clone(), path, content: content.to_string() }))
+    }
+}
+
+impl Drop for CommandLine {
+    fn drop(&mut self) {
+        if remove_cmdline(&self.device, &self.content) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// The phone's slot: one strobe at a time drives a phone. Two locks: on this computer an exclusive
 /// lock on `<run>/phones/<phone>.slot` (who holds it beside it in `<phone>.json`), and on the phone a
 /// `flock` on `/data/local/tmp/.strobe-phone.lock` held by a shell whose stream stays open (who holds
@@ -204,6 +287,25 @@ fn device_lock(d: &Device, holder: &Value) -> Result<std::result::Result<Conn, V
         Some(info) => Ok(Err(serde_json::from_str(info.trim()).unwrap_or_else(|_| json!({ "serial": d.serial })))),
         None => Err(Error::msg(format!("{}: the phone's lock did not answer ({:?})", d.serial, text.trim())).hint("strobe needs toybox's flock on the phone (Android 7 and later)")),
     }
+}
+
+/// `strobe leave`: removes the phone lock files (`.strobe-phone.lock`, `.strobe-phone.json`) from every
+/// attached device of an adb server that runs, where no strobe holds the lock; a held one stays. The
+/// devices whose files went.
+pub fn leave_phones() -> Vec<String> {
+    let Some(adb) = Adb::running() else { return Vec::new() };
+    let script = format!("{{ if flock -n 9; then rm -f {DEVICE_LOCK} {DEVICE_INFO}; echo removed; else echo held; fi; }} 9>>{DEVICE_LOCK}");
+    adb.devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l.state == State::Device)
+        .filter(|l| {
+            let d = adb.device(&l.serial);
+            // Only where strobe left them: a device that never had one gets none made.
+            d.stat(DEVICE_LOCK).ok().flatten().is_some() && d.sh(&script).is_ok_and(|o| o.trim() == "removed")
+        })
+        .map(|l| l.serial)
+        .collect()
 }
 
 impl PhoneSlot {

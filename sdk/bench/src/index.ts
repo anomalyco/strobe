@@ -549,6 +549,14 @@ export interface PageOptions {
    * it (EngineUnsupported). Checked before anything is measured (DeviceMismatch). A phone's page takes touch: `click`
    * taps, `drag` moves a finger, `scroll` swipes (Chromium), `type` and `press` tap into their element; `hover`, `move`,
    * `wheel` and a mouse button's `down`/`up` are refused (DeviceMismatch). A touch screen keeps the mouse.
+   *
+   * `strobe bench --mobile[=<serial>]` runs the `"mobile"` targets in Chrome on an Android phone or emulator over adb
+   * instead: the phone's own screen (its `viewport` and `scale`, not the target's) and touch, nothing emulated, the same
+   * calls. Other targets are refused (NotForTarget). Timed blocks refuse an emulator (Emulator; `--check` runs there),
+   * adb over Wi-Fi, Battery Saver, a low battery and a hot phone; what strobe reads from this computer's processes
+   * (`cpu.*`, `memory.*`, `gpu.*`) is refused there (NotForTarget): measure `main.*`, `frames.*`, `interaction.*`,
+   * `run.duration` or a phase. On a phone (not an emulator) strobe drives only a Chrome channel given to it once
+   * (`strobe up --mobile=<serial> --channel canary`), never the phone's own Chrome.
    */
   emulate?: Emulate
   /** {@link Motion}: Chromium's `--force-prefers-reduced-motion`, Firefox's `ui.prefersReducedMotion` or WebKitGTK's GTK setting, in this launch only. Safari and WPE refuse it (EngineUnsupported). */

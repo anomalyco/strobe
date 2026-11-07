@@ -3,15 +3,18 @@
 use crate::model::{Error, Result};
 use std::collections::HashMap;
 
-/// How a flag takes its value. `Number` is a value that MCP tool schemas type as a number.
+/// How a flag takes its value. `Number` is a value that MCP tool schemas type as a number. `Optional`
+/// is a switch that may name one thing, only as `--name=<value>` (`--mobile`, `--mobile=<serial>`): the
+/// next argument is never taken as its value. Bare, it reads as an empty value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Switch,
     Value,
     Number,
+    Optional,
 }
 
-use Kind::{Number, Switch, Value};
+use Kind::{Number, Optional, Switch, Value};
 
 /// Every flag strobe reads, how it takes its value, and the commands that read it (`*`: every
 /// command), which `strobe <command> --help` lists. The parser refuses any other flag (a typo is an
@@ -33,6 +36,8 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("engine", Value, "record bench plan track"),
     ("served", Value, "record"),
     ("emulate", Value, "record"),
+    ("mobile", Optional, "record bench plan look up"),
+    ("channel", Value, "up"),
     ("style", Switch, "record bench"),
     ("native", Switch, "record query"),
     ("app", Value, "record look"),
@@ -166,7 +171,14 @@ pub fn help(command: &str) -> String {
     let mut out = format!("strobe {command}\n\n{}\n\nFlags\n", lines.join("\n"));
     let mut row = String::from(" ");
     for (name, kind, _) in FLAGS.iter().filter(|(_, _, c)| c.split(' ').any(|c| c == command)) {
-        let flag = format!(" --{name}{}", if *kind == Switch { "" } else { " <value>" });
+        let flag = format!(
+            " --{name}{}",
+            match kind {
+                Switch => "",
+                Optional => "[=<value>]",
+                Value | Number => " <value>",
+            }
+        );
         if row.len() + flag.len() > 100 {
             out += &format!("{row}\n");
             row = String::from(" ");
@@ -243,15 +255,23 @@ impl Args {
                 match (kind(key).ok_or_else(|| unknown_flag(key))?, value) {
                     // `--check=false` is the switch off, not on.
                     (Switch, "true") => flags.insert(key.to_string(), "true".to_string()),
-                    (Switch, "false") => flags.remove(key),
+                    (Switch | Optional, "false") => flags.remove(key),
                     (Switch, _) => return Err(Error::usage(format!("--{key} is a switch: --{key}, --{key}=true or --{key}=false, not --{key}={value}"))),
+                    (Optional, "true") => flags.insert(key.to_string(), String::new()),
                     _ => flags.insert(key.to_string(), value.to_string()),
                 };
                 continue;
             }
-            if kind(&name).ok_or_else(|| unknown_flag(&name))? == Switch {
-                flags.insert(name, "true".to_string());
-                continue;
+            match kind(&name).ok_or_else(|| unknown_flag(&name))? {
+                Switch => {
+                    flags.insert(name, "true".to_string());
+                    continue;
+                }
+                Optional => {
+                    flags.insert(name, String::new());
+                    continue;
+                }
+                Value | Number => {}
             }
             let value = iter.next().ok_or_else(|| Error::usage(format!("--{name} needs a value")))?;
             flags.insert(name, value);
@@ -331,6 +351,8 @@ Use
                                   record a target; prints a handle (rec_…); exe:<path> --native for a native app
                                   (a native app: --gpu-cache warm|cold, its GPU shader caches from earlier recordings of it)
                                   (--video: also film it, timing perturbed: the window's screen, or a headless page's renderer)
+                                  (--mobile[=<serial>]: the page in Chrome on an Android phone over adb, its own screen
+                                  and touch; timed: no emulator, no adb over Wi-Fi, no hot, saving or low phone)
   record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--video]
                                   record one bench case (it drives the page: clicks, keys) with the attribution probes
   record pid:<n>|proc:<name> [--probes timing|deep|stacks-unprivileged] [--for 10s]
@@ -343,6 +365,8 @@ Use
         [--pixels | --pixels-only]     (compare base and head at the case's page.snapshot()s, after or instead of timing)
         [--video]                      (film untimed: the check run, or one warmed run per side after the timed pairs)
         [--check --batch N]            (up to N run cases per launch, each held to the launch's start after its reset)
+        [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over adb instead
+                                        of emulated; timed blocks refuse an emulator: --check runs there)
         [--pin auto|none|ccdN|<cpus>]  (auto: the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its fastest cores;
                                         otherwise all but the last 1-2 whole cores, which strobe and the runner get;
                                         fewer than 4 cores, more than 64 CPUs, or macOS: unpinned)
@@ -405,6 +429,7 @@ Use
                                   journeys x commits (query history|changes, query <ser_…> history|changes;
                                   report history <ser_…|file> [--format card | --format badge [--scoreboard]])
   look <url|file> [--until <css>] [--wait 1s] [--size 1280x800] [--out <png>] [--chars 4000] [--full | --element <css>] [--headed]
+       [--mobile[=<serial>]]       (the page in Chrome on an Android phone or emulator, at the phone's own screen)
   look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40]
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
                                   console messages and uncaught errors, and a screenshot (exit 124 when it never loads)
@@ -422,6 +447,9 @@ Use
 Setup
   up [--skip deep,daemon,mcp,calibrate]  install, download the engine, deep mode (one UAC prompt), start the daemon,
                                   register MCP and the skill
+  up --mobile[=<serial>] --channel canary|dev|beta
+                                  give strobe that Chrome channel on the phone, once: --mobile runs may force-stop it and
+                                  clear the origins they load (strobe never drives a phone's own Chrome)
   update [<version>] [--from <path>] [--check] [--force]
                                   install the latest npm release (or that version, or a local build) over the installed
                                   copy; refreshes the skill, MCP, the helper where installed, and restarts the daemon;

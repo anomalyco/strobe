@@ -18,6 +18,8 @@ pub fn run(args: &Args) -> Result<Output> {
     // the battery temperature (one more service and handshake).
     let fast = args.has("fast");
     let ios = std::thread::spawn(move || host::ios::summaries(std::time::Duration::from_millis(if fast { 250 } else { 1500 }), !fast));
+    // Android devices of an adb server that runs (status starts none), each read in one shell round trip.
+    let android = std::thread::spawn(move || host::adb::summaries(std::time::Duration::from_millis(if fast { 500 } else { 3000 })));
     let env = host::env();
     let topo = host::topology();
     let busy = host::system_busy(if args.has("fast") { 300 } else { 3000 });
@@ -102,6 +104,7 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let cycle_clock = host::cycle_clock_text();
     let ios = ios.join().unwrap_or_else(|_| Err(Error::msg("the iOS device read panicked")));
+    let android = android.join().unwrap_or_else(|_| Err(Error::msg("the Android device read panicked")));
     let calibration = if args.has("calibrate") { super::up::calibrate(true)? } else { state.get("last_calibration").cloned().unwrap_or(Value::Null) };
     if calibration.is_null() {
         problems.push("no calibration yet (strobe up)".into());
@@ -117,6 +120,7 @@ pub fn run(args: &Args) -> Result<Output> {
         "native": { "ready": native_ok, "detail": native_text },
         "cycle_clock": { "detail": cycle_clock, "refused": cycles_refused },
         "ios": match &ios { Ok(d) => json!({ "devices": d }), Err(e) => json!({ "devices": [], "detail": e.message }) },
+        "android": match &android { Ok(d) => json!({ "devices": d }), Err(e) => json!({ "devices": [], "detail": e.message }) },
     });
     let mark = |ok: bool| if ok { "✓" } else { "!" };
     let mut t = String::new();
@@ -141,6 +145,9 @@ pub fn run(args: &Args) -> Result<Output> {
             }
         }
         Err(e) => t += &format!("  i ios        {}{}\n", e.message, e.hint.as_ref().map(|h| format!(" ({h})")).unwrap_or_default()),
+    }
+    for (i, (mark, line)) in super::up::android_lines(&android).iter().enumerate() {
+        t += &format!("  {mark} {}{line}\n", if i == 0 { "android    " } else { "           " });
     }
     t += &format!("  {} bun        {}\n", mark(bun.is_some()), bun.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into()));
     t += &format!("  {} deep       {}\n", mark(deep.presents() && deep.helper), deep_text);

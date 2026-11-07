@@ -187,7 +187,14 @@
         "OutOfView",
         "Covered",
         "DisplayTooSmall",
-        "DeviceMismatch"
+        "DeviceMismatch",
+        "Thermal",
+        "PowerSave",
+        "LowBattery",
+        "DeviceAsleep",
+        "Emulator",
+        "WirelessTransport",
+        "NotProfileable"
       ]
     },
     "verdictKind": {
@@ -333,6 +340,7 @@
         "input": { "enum": ["desktop", "hybrid", "touch", "none", null], "description": "The input devices the series' pages saw (each block keeps its own). desktop: a fine pointer that hovers, nothing coarse, no touch, which a page target sees unless it emulates a device, headless too (checked before setup: DeviceMismatch); a page target with emulate: \"mobile\" sees touch and one with emulate: \"touch\" hybrid, checked the same way; an app's page (Electron, a webview, a command's browser) sees the machine's: hybrid (a fine pointer with touch beside it), touch (no fine pointer), none (no pointer at all). Sides that saw different ones are refused (VariantMismatch). Part of a page series' tracked fingerprint. Null without a page, and in results from before strobe recorded it." },
         "browser": { "type": ["string", "null"], "description": "The browser versions this series' blocks ran (`a / b` when the sides of an implementation comparison ran two); part of a tracked series' fingerprint." },
         "emulate": { "enum": ["mobile", "touch", null], "description": "What the series' page target emulates (its `emulate`): a phone or a touch screen; null for a desktop. Part of a tracked series' fingerprint." },
+        "mobile": { "type": ["string", "null"], "description": "bench --mobile: the adb serial of the phone (or emulator) whose Chrome ran the series' phone target, its own screen and touch, nothing emulated; its blocks' recordings keep the phone (meta.json phone). Null otherwise." },
         "motion": { "enum": ["reduce", null], "description": "The series' target's `motion`: reduce (the page or app prefers reduced motion, set in strobe's launch alone; a page was checked with matchMedia before setup, a native app took its profile's declared motion.reduce); null: the OS's own setting (env.reduced_motion). Part of a tracked series' fingerprint and the rerun ledger's identity." },
         "window": { "type": ["string", "null"], "description": "The window the series drew in, as reports print it: `1400×900`, `390×844 @3x · emulated mobile`, `1400×900 · reduced motion` (its blocks' content area, else the window it asked for). Null without a window, for a series refused before it ran, and in an implementation comparison (see fairness.window)." },
         "windowless": { "type": "boolean", "description": "Every target the series runs opens no window (a script, a command line, an app with window: false)." },

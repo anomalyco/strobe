@@ -293,6 +293,18 @@ pub(crate) const HELPER: &str = r#"window.__strobe ??= (() => {
   }
   const focusedIn = (el) => el.contains(document.activeElement) || el.matches(":focus-within")
   s.focused = (q) => { const el = s.find(q); return !!el && focusedIn(el) }
+  // Armed before a tap into a field (`waitFocus`), read once after it: whether focus came into the element within
+  // `timeout` ms, from the page's own focusin, with no polling and no layout after the tap.
+  s.armFocus = (q, timeout) => {
+    const el = s.find(q)
+    s.focusWait = !el ? Promise.resolve(false) : focusedIn(el) ? Promise.resolve(true) : new Promise((res) => {
+      const done = (v) => { removeEventListener("focusin", on, true); clearTimeout(t); res(v) }
+      const on = () => { if (focusedIn(el)) done(true) }
+      addEventListener("focusin", on, true)
+      const t = setTimeout(() => done(focusedIn(el)), timeout)
+    })
+    return true
+  }
   // The flat tree's parent, which layout follows: a slotted element's slot, else its parent, else a shadow root's host.
   const flatUp = (el) => el.assignedSlot ?? el.parentElement ?? el.getRootNode().host ?? null
   // Whether an element is a containing block for fixed descendants (and so for absolute ones).
@@ -850,6 +862,8 @@ pub struct Driver {
     base: RefCell<Option<String>>,
     /// The page runs in a headless browser: no window for `page.window` to size.
     pub headless: bool,
+    /// The page runs in Chrome on a phone (`--mobile`): its screen is the phone's, with no window to size.
+    pub phone: bool,
     /// `page.window` sizing of the browser's window over the block.
     sizer: window::Sizer,
     /// An emulated phone's page: its pointer input is touch (`touch_input`).
@@ -878,6 +892,7 @@ impl Driver {
             reads: Cell::new(0),
             base: RefCell::new(None),
             headless: false,
+            phone: false,
             sizer: window::Sizer::default(),
             touch: std::cell::OnceCell::new(),
         }
@@ -904,6 +919,11 @@ impl Driver {
         };
         if self.headless {
             return Err(Refusal::new(ValidatorId::Headless, "page.window() sizes the browser's window through the OS, and a headless browser has none").fix("run the case headed (drop --headless and the target's headless) to size its window").into());
+        }
+        if self.phone {
+            return Err(Refusal::new(ValidatorId::NotForTarget, "page.window() sizes a desktop browser's window, and a phone's page is the phone's own screen")
+                .fix("size the window on a desktop target, or run the case without --mobile")
+                .into());
         }
         let w = self.browser_window()?;
         // The viewport in device-independent pixels: CSS pixels times the device pixels per CSS pixel,
