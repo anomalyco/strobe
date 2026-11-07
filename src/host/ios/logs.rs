@@ -133,7 +133,7 @@ impl LogStream {
     pub fn stop(mut self) -> DeviceLogs {
         self.stop.store(true, Ordering::SeqCst);
         let Some(h) = self.handle.take() else { return DeviceLogs::default() };
-        let deadline = Instant::now() + Duration::from_millis(600);
+        let deadline = Instant::now() + Duration::from_millis(1500);
         while !h.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }

@@ -280,7 +280,7 @@ pub fn record_memory(session: &mut Session, dir: &Path, for_ms: u64, on_progress
             "at_ms": started.elapsed().as_millis() as u64,
             "taken": match i { 0 => "at the start (S0)", 1 => "at the middle (S1)", _ => "at the end (S2)" },
             "js_heap_bytes": self_bytes,
-            "js_heap_total_bytes": self_bytes,
+            "js_heap_total_bytes": Value::Null,
             "dom_nodes": dom_nodes,
             "dom": { "nodes": dom_nodes },
             "processes": [],
@@ -838,7 +838,7 @@ fn convert_events(
             "taken": "at the end of the recording",
             "page_pid": app_pid.unwrap_or(1),
             "js_heap_bytes": js_used_bytes,
-            "js_heap_total_bytes": js_cat.map(|j| j + jit_cat).or(js_used_bytes),
+            "js_heap_total_bytes": js_cat.map(|j| j + jit_cat),
             "dom": { "nodes": page_perf["dom"] },
             "processes": [{
                 "pid": app_pid.unwrap_or(1),
@@ -1069,10 +1069,11 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
 
     // Step 2: Identify Web Inspector scaffolding (`InjectedScript` / `CommandLineAPI`) and exclude
     // objects reachable from `<root>` exclusively through those inspector roots/edges.
+    let is_window_class = |c: &str| matches!(c, "Window" | "DOMWindow" | "JSWindowProxy" | "GlobalObject");
     let n_raw = wk_nodes.len();
     let mut insp_seed = vec![false; n_raw];
     for (i, &(_, _, cname, _)) in wk_nodes.iter().enumerate().skip(1) {
-        if is_inspector_class(cname) {
+        if !is_window_class(cname) && is_inspector_class(cname) {
             insp_seed[i] = true;
         }
     }
@@ -1087,7 +1088,7 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
         let extra = e[3].as_u64().unwrap_or(0) as u32;
         let ename = if matches!(wk_kind, "Property" | "Variable") { edge_names.get(extra as usize).copied().unwrap_or("") } else { "" };
         let insp_edge = is_inspector_edge(ename);
-        if insp_edge && v != 0 {
+        if insp_edge && u == 0 && v != 0 && !is_window_class(wk_nodes[v].2) {
             insp_seed[v] = true;
         }
         raw_adj[u].push((v, wk_kind, extra, insp_edge));
@@ -1096,7 +1097,7 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
     // Also treat a root-held scope/object whose direct properties include InjectedScriptHost or
     // CommandLineAPIHost as an inspector root (the InjectedScript closure environment in JSC).
     for &(v, _, _, _) in &raw_adj[0] {
-        if v != 0 && wk_nodes[v].2 != "Window" && wk_nodes[v].2 != "JSWindowProxy" && raw_adj[v].iter().any(|&(w, _, _, ie)| ie || (w != 0 && is_inspector_class(wk_nodes[w].2))) {
+        if v != 0 && !is_window_class(wk_nodes[v].2) && raw_adj[v].iter().any(|&(w, _, _, ie)| ie || (w != 0 && is_inspector_class(wk_nodes[w].2))) {
             insp_seed[v] = true;
         }
     }
@@ -1157,8 +1158,6 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
 
         let (v8_type, display_name) = if raw_idx == 0 || nid == 0 || cname == "<root>" {
             (9u8, "")
-        } else if insp_seed[raw_idx] {
-            (0, "(Web Inspector)")
         } else if flags & 4 != 0 {
             (8, cname)
         } else if cname == "string" {
@@ -1178,9 +1177,9 @@ pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
         } else {
             (3, cname)
         };
-        let is_win = matches!(cname, "Window" | "DOMWindow" | "JSWindowProxy" | "GlobalObject");
+        let is_win = is_window_class(cname);
         let name_idx = intern_str(display_name);
-        if !insp_seed[raw_idx] {
+        if raw_idx != 0 && nid != 0 && cname != "<root>" {
             total_self += u64::from(sz);
         }
         nodes.push((v8_type, name_idx, nid.min(u32::MAX as u64) as u32, sz, is_win));
@@ -1316,17 +1315,8 @@ fn load_webkit_text(session: &mut Session, frame_id: &str, url: &str, deadline: 
     if left.is_zero() {
         return None;
     }
-    if let Ok(r) = session.call("Network.loadResource", json!({ "frameId": frame_id, "url": url }), left.min(Duration::from_secs(5)))
-        && r["status"].as_i64().unwrap_or(200) < 400
-        && let Some(c) = r["content"].as_str()
-        && !c.is_empty()
-    {
-        return Some(c.to_string());
-    }
-    let left = deadline.saturating_duration_since(std::time::Instant::now());
-    if left.is_zero() || session.stopped() {
-        return None;
-    }
+    // Prefer WebCore's in-memory frame resource cache for already-loaded scripts before falling
+    // back to `Network.loadResource` (which fetches external `.map` files).
     if let Ok(r) = session.call("Page.getResourceContent", json!({ "frameId": frame_id, "url": url }), left.min(Duration::from_secs(4)))
         && let Some(c) = r["content"].as_str()
         && !c.is_empty()
@@ -1335,6 +1325,17 @@ fn load_webkit_text(session: &mut Session, frame_id: &str, url: &str, deadline: 
             use base64::Engine as _;
             return base64::engine::general_purpose::STANDARD.decode(c).ok().and_then(|b| String::from_utf8(b).ok());
         }
+        return Some(c.to_string());
+    }
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() || session.stopped() {
+        return None;
+    }
+    if let Ok(r) = session.call("Network.loadResource", json!({ "frameId": frame_id, "url": url }), left.min(Duration::from_secs(5)))
+        && r["status"].as_i64().unwrap_or(200) < 400
+        && let Some(c) = r["content"].as_str()
+        && !c.is_empty()
+    {
         return Some(c.to_string());
     }
     None

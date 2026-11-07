@@ -81,8 +81,9 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         })
         .collect();
 
+    let cap_note = if raw_device.dropped > 0 { format!(" (+{} dropped at cap)", raw_device.dropped) } else { String::new() };
     let mut text = format!(
-        "log · {id} · {} crashes/jetsams · {} console · {} Safari/WebKit device logs{}\n",
+        "log · {id} · {} crashes/jetsams · {} console · {}{cap_note} Safari/WebKit device logs{}\n",
         crashes.len(),
         console.len(),
         dev_entries.len(),
@@ -122,10 +123,11 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         }
     }
 
-    if want_device && (!dev_entries.is_empty() || raw_device.observer_dropped > 0 || source == Some("device")) {
+    if want_device && (!dev_entries.is_empty() || raw_device.dropped > 0 || raw_device.observer_dropped > 0 || source == Some("device")) {
         let via = if raw_device.source.is_empty() { "device" } else { raw_device.source.as_str() };
+        let cap = if raw_device.dropped > 0 { format!("; {} dropped at cap", raw_device.dropped) } else { String::new() };
         let obs = if raw_device.observer_dropped > 0 { format!("; {} webinspectord/message-trace lines dropped", raw_device.observer_dropped) } else { String::new() };
-        text += &format!("device ({} entries via {via}, Safari + WebKit allowlist only{obs})\n", dev_entries.len());
+        text += &format!("device ({} entries via {via}, Safari + WebKit allowlist only{cap}{obs})\n", dev_entries.len());
         for e in dev_entries.iter().take(top) {
             let pid = e["pid"].as_u64().map(|p| format!("[{p}]")).unwrap_or_default();
             let label = match (e["subsystem"].as_str(), e["category"].as_str()) {

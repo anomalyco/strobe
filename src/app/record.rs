@@ -1687,7 +1687,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "refused": refused,
             "census": census,
             "leaks": { "count": leaks["count"], "self_size": leaks["self_size"], "retained_size": leaks["retained_size"], "classes_total": leaks["classes_total"] },
-            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len() },
+            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "device_dropped": dev_logs.dropped, "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len() },
             "crashes": redacted_crashes,
             "timing": "perturbed",
             "created": now_iso(),
@@ -1738,6 +1738,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "console": cap.console_count,
             "console_errors": cap.console_errors,
             "device": dev_logs.entries.len(),
+            "device_dropped": dev_logs.dropped,
             "observer_dropped": dev_logs.observer_dropped,
             "device_source": dev_logs.source,
             "crashes": crashes.len(),
@@ -1856,10 +1857,12 @@ fn wir_summary(meta: &Value) -> String {
     let con = meta["logs"]["console"].as_u64().unwrap_or(0);
     let con_err = meta["logs"]["console_errors"].as_u64().unwrap_or(0);
     let dev = meta["logs"]["device"].as_u64().unwrap_or(0);
+    let cap_drop = meta["logs"]["device_dropped"].as_u64().unwrap_or(0);
+    let cap_note = if cap_drop > 0 { format!(" (+{cap_drop} dropped at cap)") } else { String::new() };
     let obs = meta["logs"]["observer_dropped"].as_u64().unwrap_or(0);
     let obs_note = if obs > 0 { format!(" ({obs} inspector IPC lines dropped)") } else { String::new() };
     let crashes = meta["crashes"].as_array().map_or(0, Vec::len);
-    s += &format!("logs     {con} console ({con_err} errors) · {dev} Safari/WebKit device logs{obs_note} · {crashes} crashes/jetsams\n");
+    s += &format!("logs     {con} console ({con_err} errors) · {dev}{cap_note} Safari/WebKit device logs{obs_note} · {crashes} crashes/jetsams\n");
     for c in meta["crashes"].as_array().into_iter().flatten() {
         s += &format!("! Crash  {}\n", c["summary"].as_str().unwrap_or("crash or jetsam"));
     }

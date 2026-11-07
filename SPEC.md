@@ -4799,7 +4799,7 @@ target is resumed), never pairs or writes to the phone, and never prints the pho
   diff against a desktop or another device model refuses `NotComparable`):
   - `ScriptProfiler` leaf-first JSC `SamplingProfiler` stack traces are reversed into root-first V8
     `.cpuprofile` trees (`0600` owner-only) with source maps fetched under a bounded 12 s deadline via
-    `Page.getResourceTree` and `Network.loadResource` (`query hotspots`).
+    `Page.getResourceTree`, `Page.getResourceContent` and `Network.loadResource` (`query hotspots`).
   - `Timeline` (`RecalculateStyles`, `Layout`, `Paint`, `Composite`, caller `stackTrace`s) and
     `Heap.garbageCollected` populate owner-only `webkit.json` (`query layout`, `query gc`,
     `query summary`, `query insights`, and Perfetto tracks in `strobe open`).

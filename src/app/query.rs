@@ -664,7 +664,18 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
                     if has { mb(tracked) } else { "—".into() },
                     if has { mb(private - tracked) } else { "—".into() }
                 );
-                rows.push(json!({ "pid": p["pid"], "type": ty, "strobe_own": ty == "tracing (strobe's)", "page": page_pid.as_deref() == Some(pid.as_str()), "name": p["name"], "private_bytes": private, "working_set_bytes": p["working_set_bytes"], "allocator_bytes": if has { json!(tracked) } else { Value::Null }, "unexplained_bytes": if has { json!(private - tracked) } else { Value::Null }, "layers": layers(&pid) }));
+                rows.push(json!({
+                    "pid": p["pid"],
+                    "type": ty,
+                    "strobe_own": ty == "tracing (strobe's)",
+                    "page": page_pid.as_deref() == Some(pid.as_str()),
+                    "name": p["name"],
+                    "private_bytes": if private.is_finite() { json!(private) } else { Value::Null },
+                    "working_set_bytes": p["working_set_bytes"],
+                    "allocator_bytes": if has { json!(tracked) } else { Value::Null },
+                    "unexplained_bytes": if has && private.is_finite() { json!(private - tracked) } else { Value::Null },
+                    "layers": layers(&pid),
+                }));
             }
             if c["engine"] == "firefox" {
                 text += &format!(
@@ -676,10 +687,10 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
                     mb(c["dom"]["orphan_bytes"].as_f64().unwrap_or(f64::NAN))
                 );
             } else if c["engine"] == "webkit" {
+                let jit_part = c["js_heap_total_bytes"].as_f64().map(|t| format!("; {} with JIT", mb(t))).unwrap_or_default();
                 text += &format!(
-                    "page      JavaScript {} (WebKit Heap; {} with JIT) · {} DOM nodes (WebCore categories; OS private memory refused on iOS)\n",
+                    "page      JavaScript {} (WebKit Heap{jit_part}) · {} DOM nodes (WebCore categories; OS private memory refused on iOS)\n",
                     mb(c["js_heap_bytes"].as_f64().unwrap_or(f64::NAN)),
-                    mb(c["js_heap_total_bytes"].as_f64().unwrap_or(f64::NAN)),
                     c["dom"]["nodes"],
                 );
             } else {
@@ -740,12 +751,16 @@ pub fn memory_diff(a: &Path, b: &Path, top: usize) -> Result<Output> {
                 Some((service, _)) => service,
                 None => ty,
             };
-            *m.entry(format!("OS private · {ty}")).or_default() += p["private_bytes"].as_f64().unwrap_or(0.0);
+            if let Some(pb) = p["private_bytes"].as_f64() {
+                *m.entry(format!("OS private · {ty}")).or_default() += pb;
+            }
             for (k, v) in c["allocators"][p["pid"].to_string()]["layers"].as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "tracing") {
                 *m.entry(format!("{k} · {ty}")).or_default() += v.as_f64().unwrap_or(0.0);
             }
         }
-        m.insert("JS heap · page".into(), c["js_heap_bytes"].as_f64().unwrap_or(0.0));
+        if let Some(jh) = c["js_heap_bytes"].as_f64() {
+            m.insert("JS heap · page".into(), jh);
+        }
         Ok(m)
     };
     let (base, head) = (totals(a)?, totals(b)?);
