@@ -209,7 +209,9 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let window = emulated_window(&emulation, args.has("headless"));
     // `--engine`: a page in another browser engine; Chromium (the default) records below.
     match args.get("engine").map(WebEngine::parse).transpose()? {
-        Some(_) if attach || app.is_some() => return Err(Error::usage("--engine picks the browser strobe launches for a page (https://…, page.html); an attached endpoint or app is the browser it is")),
+        Some(_) if attach || app.is_some() => {
+            return Err(Error::usage("--engine picks the browser strobe launches for a page (https://…, page.html); an attached endpoint or app is the browser it is"));
+        }
         Some(WebEngine::Chromium) | None => {}
         Some(engine) => return engine_page(args, engine, &target, set, for_ms, &emulation),
     }
@@ -391,7 +393,8 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
             }
         }
         _ => {
-            let r = super::outside::not_on_this_os("cpu.app.total").unwrap_or_else(|| crate::model::Refusal::new(crate::model::ValidatorId::RunIncomplete, "cpu.app.total: no CPU of the browser's processes could be read"));
+            let r = super::outside::not_on_this_os("cpu.app.total")
+                .unwrap_or_else(|| crate::model::Refusal::new(crate::model::ValidatorId::RunIncomplete, "cpu.app.total: no CPU of the browser's processes could be read"));
             refused.insert("cpu.app.total".into(), json!(r.message()));
         }
     }
@@ -822,7 +825,8 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             })
         });
         let waits = args.get("probes") == Some("waits");
-        let stacks = (set == Set::Attribution && crate::probe::stacks::stacks_available()).then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), waits));
+        let stacks =
+            (set == Set::Attribution && crate::probe::stacks::stacks_available()).then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), waits));
         let cycles = || -> (Cycles, Option<u64>) { (per_process(&n.processes()), host::tsc()) };
         progress(match &stop {
             Some(re) => format!("recording {id} until the app prints a line matching {re}"),
@@ -903,7 +907,12 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let stacks_note = match stacks {
             Some(Ok(d)) => {
                 crate::symbol::write_gz(&dir.join("deep.json.gz"), &d)?;
-                format!("native stacks: {} samples (query hotspots){}{}", d.samples.len(), crate::probe::stacks::stacks_how(&d), d.waits.as_ref().map(|w| format!("; {} off-CPU waits (query waits)", w.waits.len())).unwrap_or_default())
+                format!(
+                    "native stacks: {} samples (query hotspots){}{}",
+                    d.samples.len(),
+                    crate::probe::stacks::stacks_how(&d),
+                    d.waits.as_ref().map(|w| format!("; {} off-CPU waits (query waits)", w.waits.len())).unwrap_or_default()
+                )
             }
             Some(Err(e)) => format!("native stacks failed: {}", e.message),
             None => crate::probe::stacks::no_stacks().into(),
@@ -1160,7 +1169,9 @@ fn sampling_line(meta: &Value) -> String {
 }
 
 fn background_line(meta: &Value) -> Option<String> {
-    meta["background_priority"].as_str().map(|why| format!("frames   refused (BackgroundPriority): the target ran at {why}; frames and input latencies there describe no person's machine (CPU is kept)\n"))
+    meta["background_priority"]
+        .as_str()
+        .map(|why| format!("frames   refused (BackgroundPriority): the target ran at {why}; frames and input latencies there describe no person's machine (CPU is kept)\n"))
 }
 
 /// A page recorded in another engine than Chromium (`engine_page`): what it measured from outside.

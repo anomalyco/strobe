@@ -277,7 +277,9 @@ impl<'a> Hooks<'a> {
         }
         let name: String = a["name"].as_str().unwrap_or("phase").chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect();
         if self.untimed_now() {
-            return Err(Error::usage(format!("ctx.phase({name:?}) inside ctx.untimed: a stretch leaves the phases it is in, so a phase in it would time nothing; put the untimed stretch inside the phase")));
+            return Err(Error::usage(format!(
+                "ctx.phase({name:?}) inside ctx.untimed: a stretch leaves the phases it is in, so a phase in it would time nothing; put the untimed stretch inside the phase"
+            )));
         }
         Ok(Some(format!("{run}:phase:{name}:{}", a["edge"].as_str().unwrap_or("start"))))
     }

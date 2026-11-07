@@ -231,7 +231,26 @@ impl ActionLog {
         };
         let mut rest = rest;
         let args_truncated = rest.iter_mut().fold(false, |cut, v| bound(v) | cut);
-        Some(ActionRecord { seq: 0, hook, case: None, run, untimed, phase, t_ns, press_ns: None, end_ns: t_ns, measured: false, call, selector, hit: None, touch: false, args: rest, args_truncated, outcome: Outcome::Ok, sample: None })
+        Some(ActionRecord {
+            seq: 0,
+            hook,
+            case: None,
+            run,
+            untimed,
+            phase,
+            t_ns,
+            press_ns: None,
+            end_ns: t_ns,
+            measured: false,
+            call,
+            selector,
+            hit: None,
+            touch: false,
+            args: rest,
+            args_truncated,
+            outcome: Outcome::Ok,
+            sample: None,
+        })
     }
 
     /// Each timed run action that ended `ok` gets its latency sample, from the block's per-input outcomes (`each`: by when

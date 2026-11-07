@@ -16,9 +16,9 @@
 //! A present replaced before it was shown (a newer one InFrame for the window, a Discarded token, a
 //! later present of the swapchain displayed first) ends `discarded`.
 
-use crate::probe::etw::{self, Field, Handler, Provider, Running, Schema, uint, uint_at};
 use super::{Present, Presents};
 use crate::model::Result;
+use crate::probe::etw::{self, Field, Handler, Provider, Running, Schema, uint, uint_at};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -141,7 +141,16 @@ impl Capture {
     pub fn stop(self) -> Result<Presents> {
         let t1 = crate::host::now_ns();
         let ((presents, vsyncs), stats) = self.running.stop()?;
-        Ok(Presents { presents, vsyncs, events: stats.events, events_lost: stats.events_lost + stats.buffers_lost, consumer_cpu_ms: stats.consumer_cpu_ms, t0_ns: self.t0, t1_ns: t1, ..Presents::default() })
+        Ok(Presents {
+            presents,
+            vsyncs,
+            events: stats.events,
+            events_lost: stats.events_lost + stats.buffers_lost,
+            consumer_cpu_ms: stats.consumer_cpu_ms,
+            t0_ns: self.t0,
+            t1_ns: t1,
+            ..Presents::default()
+        })
     }
 }
 

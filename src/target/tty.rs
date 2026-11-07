@@ -869,8 +869,15 @@ mod win {
                 let mut list = vec![0u8; size];
                 let attrs = list.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
                 if InitializeProcThreadAttributeList(attrs, 1, 0, &mut size) == 0
-                    || UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize, hpc as *const std::ffi::c_void, std::mem::size_of::<HPCON>(), std::ptr::null_mut(), std::ptr::null())
-                        == 0
+                    || UpdateProcThreadAttribute(
+                        attrs,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                        hpc as *const std::ffi::c_void,
+                        std::mem::size_of::<HPCON>(),
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                    ) == 0
                 {
                     ClosePseudoConsole(hpc);
                     return Err(Error::msg(format!("the terminal's attribute list: {}", std::io::Error::last_os_error())));

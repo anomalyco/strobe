@@ -238,7 +238,8 @@ fn parse_battery(text: &str) -> Option<Battery> {
         Some(5) => "full",
         _ => "unknown",
     };
-    let plugged = [("AC powered", "ac"), ("USB powered", "usb"), ("Wireless powered", "wireless"), ("Dock powered", "dock")].into_iter().find(|(k, _)| val(k).as_deref() == Some("true")).map(|(_, v)| v);
+    let plugged =
+        [("AC powered", "ac"), ("USB powered", "usb"), ("Wireless powered", "wireless"), ("Dock powered", "dock")].into_iter().find(|(k, _)| val(k).as_deref() == Some("true")).map(|(_, v)| v);
     Some(Battery { level, temp_c: val("temperature").and_then(|t| t.parse::<f64>().ok()).map(|t| t / 10.0), status, plugged })
 }
 

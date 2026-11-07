@@ -482,7 +482,11 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
         match shown {
             Some(p) => {
                 let ms = (p.screen_ns - t) as f64 / 1e6;
-                if s.scroll { out.scroll.push(ms) } else { out.interaction.push((ms, edge)) }
+                if s.scroll {
+                    out.scroll.push(ms)
+                } else {
+                    out.interaction.push((ms, edge))
+                }
                 out.each.push((s.t_ns, if s.scroll { Outcome::Scroll(ms) } else { Outcome::Timed(edge, ms) }));
             }
             None => {
@@ -530,7 +534,9 @@ impl Reactions {
                     format!("NoPresentSource: {prefix}.*: the runs sent no input of this kind")
                 })
             } else if busy * 2 > tried {
-                Some(format!("AmbiguousInteraction: {prefix}.*: the app was still drawing when {busy} of {tried} inputs were sent (an animation, a caret, or a press's own look still on its way after 300 ms), so the next frame may not be their reaction"))
+                Some(format!(
+                    "AmbiguousInteraction: {prefix}.*: the app was still drawing when {busy} of {tried} inputs were sent (an animation, a caret, or a press's own look still on its way after 300 ms), so the next frame may not be their reaction"
+                ))
             } else if events_lost == 0 && unshown as f64 > UNMATCHED_MAX * (tried - busy) as f64 {
                 Some(format!(
                     "PresentsUnmatched: {prefix}.*: {unshown} of {} inputs that changed the app's tree showed no frame within a second: the app presents in a way the session does not follow, or reacted only in its tree",

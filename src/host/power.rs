@@ -125,15 +125,7 @@ mod imp {
     }
 
     fn text(g: &GUID) -> String {
-        format!(
-            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{}",
-            g.data1,
-            g.data2,
-            g.data3,
-            g.data4[0],
-            g.data4[1],
-            g.data4[2..].iter().map(|b| format!("{b:02x}")).collect::<String>()
-        )
+        format!("{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{}", g.data1, g.data2, g.data3, g.data4[0], g.data4[1], g.data4[2..].iter().map(|b| format!("{b:02x}")).collect::<String>())
     }
 
     fn parse(s: &str) -> Option<GUID> {

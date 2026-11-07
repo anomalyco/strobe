@@ -50,10 +50,7 @@ fn candidates() -> Vec<PathBuf> {
     }
     if let Some(dir) = playwright.and_then(|d| std::fs::read_dir(d).ok()) {
         // `ffmpeg-<revision>`, newest revision first (by number: 1013 after 999).
-        let mut found: Vec<(u64, PathBuf)> = dir
-            .flatten()
-            .filter_map(|e| Some((e.file_name().to_string_lossy().strip_prefix("ffmpeg-")?.parse::<u64>().ok()?, e.path().join(exe))))
-            .collect();
+        let mut found: Vec<(u64, PathBuf)> = dir.flatten().filter_map(|e| Some((e.file_name().to_string_lossy().strip_prefix("ffmpeg-")?.parse::<u64>().ok()?, e.path().join(exe)))).collect();
         found.sort_by_key(|f| std::cmp::Reverse(f.0));
         v.extend(found.into_iter().map(|f| f.1));
     }

@@ -215,7 +215,10 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let threads_top: Vec<Value> = busy.iter().take(6).map(|t| json!({ "tid": t.tid, "pid": t.pid, "name": names.get(&t.tid), "cpu_ms": t.cpu_ms })).collect();
     let spans = std::slice::from_ref(&span);
     store::write_json(&dir.join("threads.json"), &json!(wakes::by_thread(spans, &names, &wakes::modules(spans))))?;
-    store::write_json(&dir.join("runs.json"), &json!([{ "run": "run:0", "ms": ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]))?;
+    store::write_json(
+        &dir.join("runs.json"),
+        &json!([{ "run": "run:0", "ms": ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
+    )?;
     // What holds the tree's memory, read after the window.
     values.insert("memory.app.private".into(), tree.iter().map(|p| p.private_bytes).sum::<u64>() as f64 / (1024.0 * 1024.0));
     let reading = probe::memory::Reading::take(&tree, "after the recording");
@@ -333,9 +336,6 @@ pub fn text(meta: &Value) -> String {
     }
     s += &super::record::memory_lines(meta);
     s += &super::record::refused_lines(meta);
-    s += &format!(
-        "next     strobe query {id} threads · strobe query {id} memory · strobe query {id} gpu · strobe record {} --probes deep (native stacks)\n",
-        meta["target"].as_str().unwrap_or("")
-    );
+    s += &format!("next     strobe query {id} threads · strobe query {id} memory · strobe query {id} gpu · strobe record {} --probes deep (native stacks)\n", meta["target"].as_str().unwrap_or(""));
     s
 }

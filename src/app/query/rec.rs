@@ -629,4 +629,3 @@ create perfetto table _u as
   where a.name glob '*:untimed:*:start';"
     )
 }
-

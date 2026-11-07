@@ -58,8 +58,8 @@ pub use imp::Session;
 
 mod imp {
     use super::*;
-    use crate::probe::present::PresentCapture;
     use crate::host;
+    use crate::probe::present::PresentCapture;
     use crate::target::a11y::input::{self, Button, Key, Mods, Named, Poster, Target};
     use crate::target::a11y::{self, Accessibility, Action, Selector, Tree};
     use std::cell::Cell;
@@ -877,8 +877,14 @@ mod imp {
                 return e;
             }
             let rect = |r: [f64; 4]| format!("({:.0}, {:.0}, {:.0} × {:.0})", r[0], r[1], r[2], r[3]);
-            Error::timeout(format!("{}. The element clicked ({:?}) moved: its visible part was at {} when strobe aimed and is at {} now, so the click may have landed beside it", e.message, sel.source, rect(aimed), rect(now)))
-                .hint("click once the element settles (until: what moves it, or page.idle() first), or click an element that stays put")
+            Error::timeout(format!(
+                "{}. The element clicked ({:?}) moved: its visible part was at {} when strobe aimed and is at {} now, so the click may have landed beside it",
+                e.message,
+                sel.source,
+                rect(aimed),
+                rect(now)
+            ))
+            .hint("click once the element settles (until: what moves it, or page.idle() first), or click an element that stays put")
         }
     }
 
@@ -1190,7 +1196,9 @@ mod imp {
                     let o = opts(1);
                     let w = self.windows(o["window"].as_str())?[0];
                     if w == 0 {
-                        return Err(crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "page.window(): the app shows no window (a windowless target)").fix("drop page.window from a case of a windowless target").into());
+                        return Err(crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "page.window(): the app shows no window (a windowless target)")
+                            .fix("drop page.window from a case of a windowless target")
+                            .into());
                     }
                     let action = args.first().cloned().unwrap_or(Value::Null);
                     let at = match crate::driver::window::Sizing::parse(&action)? {

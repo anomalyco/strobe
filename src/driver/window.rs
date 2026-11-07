@@ -32,7 +32,11 @@ pub enum Sizing {
 impl Sizing {
     /// The sizing `action` names; None for the other window actions (`show`, `hide`, …, native only).
     pub fn parse(action: &Value) -> Result<Option<Sizing>> {
-        let bad = || Error::usage(format!("page.window({action}): \"maximize\", \"restore\" or {{ resize: {{ width, height }} }} (device-independent pixels of the content: the viewport on a page, the client area on a native app); native apps also take \"show\", \"hide\", \"minimize\", \"focus\" and \"close\""));
+        let bad = || {
+            Error::usage(format!(
+                "page.window({action}): \"maximize\", \"restore\" or {{ resize: {{ width, height }} }} (device-independent pixels of the content: the viewport on a page, the client area on a native app); native apps also take \"show\", \"hide\", \"minimize\", \"focus\" and \"close\""
+            ))
+        };
         match action {
             Value::String(s) if s == "maximize" => Ok(Some(Sizing::Maximize)),
             Value::String(s) if s == "restore" => Ok(Some(Sizing::Restore)),
@@ -137,9 +141,12 @@ impl Sizer {
             return Ok(());
         }
         let when = if after { format!("a run after the last (run {}) would start", run.saturating_sub(1)) } else { format!("run {run} started") };
-        Err(Refusal::new(ValidatorId::ResetIncomplete, format!("{when} with the window {} where the first run started with it {}: the case sized it (page.window) and did not size it back", now.describe(), first.describe()))
-            .fix("size the window back in the case's reset (page.window(\"restore\") puts it as it was when run 1 started), or set resetCheck: false for runs that build on each other on purpose")
-            .into())
+        Err(Refusal::new(
+            ValidatorId::ResetIncomplete,
+            format!("{when} with the window {} where the first run started with it {}: the case sized it (page.window) and did not size it back", now.describe(), first.describe()),
+        )
+        .fix("size the window back in the case's reset (page.window(\"restore\") puts it as it was when run 1 started), or set resetCheck: false for runs that build on each other on purpose")
+        .into())
     }
 
     /// Does `s` to window `hwnd`, whose content (DIP) `content` reads, and waits up to a second for the
@@ -245,7 +252,14 @@ impl Sizer {
                 }
                 Err(Refusal::new(
                     ValidatorId::VariantMismatch,
-                    format!("page.window({}): the content stayed {:.0}×{:.0}, not {:.0}×{:.0}, in a window that fits the display: the app keeps its own least or most size", s.name(), last.0, last.1, w.0, w.1),
+                    format!(
+                        "page.window({}): the content stayed {:.0}×{:.0}, not {:.0}×{:.0}, in a window that fits the display: the app keeps its own least or most size",
+                        s.name(),
+                        last.0,
+                        last.1,
+                        w.0,
+                        w.1
+                    ),
                 )
                 .fix("ask for a size the app takes (its window's least and most sizes are its own), or measure at the size it keeps")
                 .into())

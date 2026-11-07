@@ -915,12 +915,7 @@ pub fn timeline(dir: &Path) -> Option<Timeline> {
         }
         out.push(TimelineThread { pid: t.pid, tid: t.tid, name: t.name.to_string(), process: processes.get(&t.pid).cloned().unwrap_or_default(), stacks, samples, markers });
     }
-    let runs = read
-        .and_then(|g| g["windows"].as_array().cloned())
-        .into_iter()
-        .flatten()
-        .filter_map(|w| Some((w[0].as_str()?.to_string(), w[1].as_u64()?, w[2].as_u64()?)))
-        .collect();
+    let runs = read.and_then(|g| g["windows"].as_array().cloned()).into_iter().flatten().filter_map(|w| Some((w[0].as_str()?.to_string(), w[1].as_u64()?, w[2].as_u64()?))).collect();
     Some(Timeline { threads: out, libs, runs })
 }
 

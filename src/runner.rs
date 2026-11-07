@@ -155,7 +155,23 @@ impl Runner {
             }
         });
         let pid = child.pid();
-        let mut runner = Runner { child: Some(child), pid, conn, lines: rx, next: 1, log, seed: None, used_random: false, actions: RefCell::default(), collect: false, runs: 0, untimed: false, phases: Vec::new(), batch: false, read_case: false };
+        let mut runner = Runner {
+            child: Some(child),
+            pid,
+            conn,
+            lines: rx,
+            next: 1,
+            log,
+            seed: None,
+            used_random: false,
+            actions: RefCell::default(),
+            collect: false,
+            runs: 0,
+            untimed: false,
+            phases: Vec::new(),
+            batch: false,
+            read_case: false,
+        };
         runner.wait_ready()?;
         Ok(runner)
     }

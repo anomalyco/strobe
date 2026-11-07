@@ -790,9 +790,12 @@ pub(crate) fn pixel_point((x, y, space): (f64, f64, Option<String>), size: (f64,
         Some(s) => return Err(Error::usage(format!("a point's space here is \"dip\" ({what}'s own pixels) or \"norm\" (0 to 1 of it), not {s:?}"))),
     };
     if !(0.0..size.0).contains(&px) || !(0.0..size.1).contains(&py) {
-        return Err(Refusal::new(ValidatorId::OutOfView, format!("point ({x}, {y}){} is off the {:.0}×{:.0} {what}, so input there would land on nothing of the target's", space.map(|s| format!(" in {s}")).unwrap_or_default(), size.0, size.1))
-            .fix(format!("give a point inside the {what}: [x, y] from its top left, or {{ x, y, space: \"norm\" }} from 0 to 1"))
-            .into());
+        return Err(Refusal::new(
+            ValidatorId::OutOfView,
+            format!("point ({x}, {y}){} is off the {:.0}×{:.0} {what}, so input there would land on nothing of the target's", space.map(|s| format!(" in {s}")).unwrap_or_default(), size.0, size.1),
+        )
+        .fix(format!("give a point inside the {what}: [x, y] from its top left, or {{ x, y, space: \"norm\" }} from 0 to 1"))
+        .into());
     }
     Ok((px, py))
 }
@@ -966,7 +969,9 @@ impl Driver {
             )));
         };
         if self.headless {
-            return Err(Refusal::new(ValidatorId::Headless, "page.window() sizes the browser's window through the OS, and a headless browser has none").fix("run the case headed (drop --headless and the target's headless) to size its window").into());
+            return Err(Refusal::new(ValidatorId::Headless, "page.window() sizes the browser's window through the OS, and a headless browser has none")
+                .fix("run the case headed (drop --headless and the target's headless) to size its window")
+                .into());
         }
         if self.phone {
             return Err(Refusal::new(ValidatorId::NotForTarget, "page.window() sizes a desktop browser's window, and a phone's page is the phone's own screen")
@@ -1482,7 +1487,10 @@ impl Driver {
                 match &self.page {
                     Page::Chromium(p) => {
                         sent(crate::host::now_ns(), true, None);
-                        p.send_long("Input.synthesizeScrollGesture", json!({ "x": x, "y": y, "yDistance": -by, "xDistance": -by_x, "speed": speed, "gestureSourceType": "mouse", "preventFling": true }))?;
+                        p.send_long(
+                            "Input.synthesizeScrollGesture",
+                            json!({ "x": x, "y": y, "yDistance": -by, "xDistance": -by_x, "speed": speed, "gestureSourceType": "mouse", "preventFling": true }),
+                        )?;
                     }
                     Page::Firefox(_) | Page::Webkit(_) => self.paced_wheel((x, y), (by_x, by), speed)?,
                 }
@@ -1634,7 +1642,14 @@ impl Driver {
         let hit = |b: &Value| {
             let rect = b["rect"].as_array().filter(|r| r.len() == 4).map(|r| std::array::from_fn(|i| r[i].as_f64().unwrap_or(0.0)));
             let point = b["x"].as_f64().zip(b["y"].as_f64()).map(|(x, y)| [x, y]);
-            Hit { role: b["role"].as_str().unwrap_or("").to_string(), key: b["key"].as_str().filter(|k| !k.is_empty()).map(str::to_string), name: b["name"].as_str().unwrap_or("").to_string(), point, rect, scrolled }
+            Hit {
+                role: b["role"].as_str().unwrap_or("").to_string(),
+                key: b["key"].as_str().filter(|k| !k.is_empty()).map(str::to_string),
+                name: b["name"].as_str().unwrap_or("").to_string(),
+                point,
+                rect,
+                scrolled,
+            }
         };
         if focus && b["focused"] == true && b["x"].is_null() {
             aimed(hit(&b));

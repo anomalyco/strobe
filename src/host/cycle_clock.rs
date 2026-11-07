@@ -51,7 +51,11 @@ pub fn clock() -> &'static Clock {
     CLOCK.get_or_init(|| {
         let key = boot_key();
         let path = super::paths::state_dir().join("cycle-clock.json");
-        let cached = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).filter(|v| v["key"] == key.as_str()).and_then(|v| serde_json::from_value::<Verdict>(v["verdict"].clone()).ok());
+        let cached = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(|v| v["key"] == key.as_str())
+            .and_then(|v| serde_json::from_value::<Verdict>(v["verdict"].clone()).ok());
         let (verdict, how) = match cached {
             Some(v) => (Ok(v), "cached".to_string()),
             None => match check() {
@@ -72,7 +76,9 @@ fn unit(verdict: Result<Verdict, String>) -> Result<Unit, String> {
         Ok(Verdict::Counter { cycles, ticks }) => Ok(Unit::Counter { cycles, ticks }),
         // x64: the TSC is invariant, so raw cycles over it are time (as before 24H2, or unchecked).
         Ok(Verdict::Raw) | Err(_) if cfg!(target_arch = "x86_64") => Ok(Unit::Tsc),
-        Ok(Verdict::Raw) => Err("its cycle times are the cores' clock cycles (PMCCNTR_EL0, Windows before 11 24H2), whose rate follows the clock and which stop while a core idles, so they are not time".into()),
+        Ok(Verdict::Raw) => {
+            Err("its cycle times are the cores' clock cycles (PMCCNTR_EL0, Windows before 11 24H2), whose rate follows the clock and which stop while a core idles, so they are not time".into())
+        }
         Ok(Verdict::Mixed { why }) => Err(why),
         Err(why) => Err(format!("the unit of its cycle times could not be checked: {why}")),
     }
@@ -174,13 +180,17 @@ fn check() -> Result<Verdict, String> {
     }
     if let Some(cpu) = fits.iter().position(|f| !f) {
         let c = &per_cpu[cpu];
-        return Ok(Verdict::Mixed { why: format!("CPU {cpu}'s cycle times are not whole performance-counter ticks ({} of {} steps) while others' are, so a process's cycles mix units", c.fit, c.used) });
+        return Ok(Verdict::Mixed {
+            why: format!("CPU {cpu}'s cycle times are not whole performance-counter ticks ({} of {} steps) while others' are, so a process's cycles mix units", c.fit, c.used),
+        });
     }
     let (cycles, ticks) = per_cpu.iter().fold((0u64, 0u64), |(s, t), c| (s + c.cycles, t + c.ticks));
     let all = cycles as f64 / ticks as f64;
     if let Some((cpu, c)) = per_cpu.iter().enumerate().find(|(_, c)| (c.cycles as f64 / c.ticks as f64 / all - 1.0).abs() > 0.002) {
         let mhz = |f: f64| f * qpf() as f64 / 1e6;
-        return Ok(Verdict::Mixed { why: format!("CPUs charge cycles at different rates (CPU {cpu}: {:.1} MHz, all: {:.1} MHz), so a process's cycles mix units", mhz(c.cycles as f64 / c.ticks as f64), mhz(all)) });
+        return Ok(Verdict::Mixed {
+            why: format!("CPUs charge cycles at different rates (CPU {cpu}: {:.1} MHz, all: {:.1} MHz), so a process's cycles mix units", mhz(c.cycles as f64 / c.ticks as f64), mhz(all)),
+        });
     }
     Ok(Verdict::Counter { cycles, ticks })
 }
@@ -218,12 +228,8 @@ fn fit(steps: &[(u64, u64, u64)]) -> Result<Fit, String> {
         }
     }
     let used: Vec<&(u64, u64, u64)> = steps.iter().filter(|s| (1..=128).contains(&ticks(s.0, f))).collect();
-    let good: Vec<(u64, u64)> = used
-        .iter()
-        .map(|s| (s.0, ticks(s.0, f), s.1, s.2))
-        .filter(|&(c, k, lo, hi)| k >= lo && k <= hi && (c as f64 - k as f64 * f).abs() <= 1.5)
-        .map(|(c, k, _, _)| (c, k))
-        .collect();
+    let good: Vec<(u64, u64)> =
+        used.iter().map(|s| (s.0, ticks(s.0, f), s.1, s.2)).filter(|&(c, k, lo, hi)| k >= lo && k <= hi && (c as f64 - k as f64 * f).abs() <= 1.5).map(|(c, k, _, _)| (c, k)).collect();
     let (cycles, ticks) = good.iter().fold((0u64, 0u64), |a, &(c, k)| (a.0 + c, a.1 + k));
     Ok(Fit { cycles, ticks: ticks.max(1), fit: good.len(), used: used.len() })
 }

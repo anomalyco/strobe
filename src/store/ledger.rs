@@ -97,12 +97,9 @@ fn attempt(line: &Value, current: &Value, later: bool) -> Value {
     targets.dedup();
     for t in targets {
         let show = |e: Option<&Value>| match e {
-            Some(e) => format!(
-                "{}{}{}",
-                e["browser"].as_str().unwrap_or("?"),
-                if e["headless"] == true { " headless" } else { "" },
-                e["input"].as_str().map(|i| format!(" {i} input")).unwrap_or_default()
-            ),
+            Some(e) => {
+                format!("{}{}{}", e["browser"].as_str().unwrap_or("?"), if e["headless"] == true { " headless" } else { "" }, e["input"].as_str().map(|i| format!(" {i} input")).unwrap_or_default())
+            }
             None => "none".into(),
         };
         if ea.get(t) != eb.get(t) {

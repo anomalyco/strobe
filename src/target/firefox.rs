@@ -128,7 +128,8 @@ pub fn find() -> Option<PathBuf> {
             c.push(host::home().join(format!("Applications/{app}.app/Contents/MacOS/firefox")));
         }
     } else {
-        for p in ["/usr/lib/firefox/firefox", "/usr/lib64/firefox/firefox", "/opt/firefox/firefox", "/usr/lib/firefox-esr/firefox-esr", "/usr/bin/firefox", "/usr/bin/firefox-esr", "/snap/bin/firefox"] {
+        for p in ["/usr/lib/firefox/firefox", "/usr/lib64/firefox/firefox", "/opt/firefox/firefox", "/usr/lib/firefox-esr/firefox-esr", "/usr/bin/firefox", "/usr/bin/firefox-esr", "/snap/bin/firefox"]
+        {
             c.push(p.into());
         }
     }
@@ -204,7 +205,9 @@ fn emulation_prefs(emulation: &Emulation, exe: &Path) -> Vec<(String, String)> {
 /// `launch` as `emulation` (`emulation_prefs`) and with `motion` (`motion::FIREFOX_PREF`), set in the
 /// profile before Firefox starts.
 pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, emulation: &Emulation, motion: super::motion::Motion) -> Result<Browser> {
-    let exe = find().ok_or_else(|| Error::msg("no Firefox found").hint("install Firefox from mozilla.org (winget install Mozilla.Firefox, brew install --cask firefox, or the distribution's package), or set STROBE_FIREFOX"))?;
+    let exe = find().ok_or_else(|| {
+        Error::msg("no Firefox found").hint("install Firefox from mozilla.org (winget install Mozilla.Firefox, brew install --cask firefox, or the distribution's package), or set STROBE_FIREFOX")
+    })?;
     if !headless && let Some(e) = super::chromium::headed_refusal("Firefox") {
         return Err(e);
     }

@@ -10,8 +10,8 @@
 //! in `dropped`; a thread preempted while runnable in user code still counts. Samples carry no time
 //! (`untimed`), and processes started after the capture began are not sampled.
 
-use crate::probe::stacks::{Deep, Module, Targets};
 use crate::model::{Error, Result};
+use crate::probe::stacks::{Deep, Module, Targets};
 use std::collections::{BTreeMap, HashMap};
 use std::process::{Child, Command, Stdio};
 
@@ -280,7 +280,11 @@ fn parse(text: &str, pid: u32, t0: u64, deep: &mut Deep, index: &mut HashMap<Vec
     if let Some(images) = text.split("Binary Images:").nth(1) {
         for l in images.lines() {
             let f: Vec<&str> = l.split_whitespace().collect();
-            let (Some(a), Some(b)) = (f.first().and_then(|x| u64::from_str_radix(x.trim_start_matches("0x"), 16).ok()), f.get(2).and_then(|x| u64::from_str_radix(x.trim_start_matches("0x"), 16).ok())) else { continue };
+            let (Some(a), Some(b)) =
+                (f.first().and_then(|x| u64::from_str_radix(x.trim_start_matches("0x"), 16).ok()), f.get(2).and_then(|x| u64::from_str_radix(x.trim_start_matches("0x"), 16).ok()))
+            else {
+                continue;
+            };
             let shown = l.rsplit("> ").next().unwrap_or("").trim().to_string();
             let path = if shown.contains('*') { region_file(pid, a).unwrap_or(shown) } else { shown };
             deep.modules.push(Module { pid, base: a, size: b.saturating_sub(a) + 1, path });

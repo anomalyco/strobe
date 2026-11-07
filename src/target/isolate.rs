@@ -7,7 +7,7 @@
 
 use crate::host;
 pub use crate::host::kill_tree;
-use crate::host::spawn::{HOME_VAR, Owned, OWNER_VAR, Stamp, home_key as key, owner_stamp, parse_owner, stamp_of, stamped};
+use crate::host::spawn::{HOME_VAR, OWNER_VAR, Owned, Stamp, home_key as key, owner_stamp, parse_owner, stamp_of, stamped};
 use crate::model::{Error, Result};
 use serde_json::{Value, json};
 use std::net::{SocketAddr, TcpStream};
@@ -996,7 +996,8 @@ pub type OutputLine = (f64, u64, String);
 pub fn lines(child: &mut Owned) -> std::sync::mpsc::Receiver<OutputLine> {
     let (tx, rx) = std::sync::mpsc::channel();
     let (out, err) = child.output();
-    let readers: Vec<Box<dyn std::io::Read + Send>> = [out.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), err.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)].into_iter().flatten().collect();
+    let readers: Vec<Box<dyn std::io::Read + Send>> =
+        [out.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), err.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)].into_iter().flatten().collect();
     for r in readers {
         let tx = tx.clone();
         std::thread::spawn(move || {
@@ -1492,7 +1493,11 @@ mod macos_library {
     pub fn check(app: &App) -> Result<()> {
         let (id, places) = places(app);
         if sandboxed(app) {
-            return Err(Error::refused("LiveChannel", format!("{id} is sandboxed: its container lives in your ~/Library, which no launch can redirect"), "measure a build without the App Sandbox entitlement"));
+            return Err(Error::refused(
+                "LiveChannel",
+                format!("{id} is sandboxed: its container lives in your ~/Library, which no launch can redirect"),
+                "measure a build without the App Sandbox entitlement",
+            ));
         }
         // Only a folder known to be absent counts as absent: one macOS will not let strobe look at
         // (another developer's app data, macOS 27) may exist, and `restore` would remove it.

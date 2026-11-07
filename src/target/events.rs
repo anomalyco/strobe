@@ -59,7 +59,10 @@ pub struct Event {
 /// One line of the stream, or why it is none.
 fn parse(line: &str, at_ns: u64) -> std::result::Result<Event, String> {
     let v: Value = serde_json::from_str(line).map_err(|_| format!("not JSON: {line}"))?;
-    let name = v["name"].as_str().filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))).ok_or_else(|| format!("no name (letters, digits, _ - .): {line}"))?;
+    let name = v["name"]
+        .as_str()
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .ok_or_else(|| format!("no name (letters, digits, _ - .): {line}"))?;
     let num = |k: &str| v[k].as_f64().filter(|f| f.is_finite());
     let kind = match v["strobe"].as_str() {
         Some("state") => Kind::State,
@@ -159,7 +162,9 @@ impl Events {
         #[cfg(windows)]
         {
             use std::os::windows::ffi::OsStrExt;
-            use windows_sys::Win32::Storage::FileSystem::{FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
+            };
             use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForMultipleObjects};
             std::fs::write(&path, b"")?;
             let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();

@@ -5,8 +5,8 @@
 pub mod dwarf;
 pub mod pdb;
 
-use crate::probe::stacks::Deep;
 use crate::model::{Error, Result};
+use crate::probe::stacks::Deep;
 use crate::probe::symbols::Frame;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -217,7 +217,8 @@ pub fn resolve_cached(dir: &Path, deep: &Deep, cache: &str) -> Result<HashMap<St
     });
     // Names the sampling tool gave (macOS `sample`), for addresses no debug info named.
     let named: HashMap<(u32, u64), &Named> = deep.located.iter().map(|l| ((l.0, l.1), l)).collect();
-    let addr_of: HashMap<String, (u32, u64)> = deep.samples.iter().flat_map(|s| deep.stacks.get(s.4 as usize).into_iter().flatten().enumerate().map(move |(i, &a)| (addr_key(s.1, a, i == 0), (s.1, a)))).collect();
+    let addr_of: HashMap<String, (u32, u64)> =
+        deep.samples.iter().flat_map(|s| deep.stacks.get(s.4 as usize).into_iter().flatten().enumerate().map(move |(i, &a)| (addr_key(s.1, a, i == 0), (s.1, a)))).collect();
     for (items, path, located) in results {
         let module = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
         let fallback = module_package(&path);
@@ -286,7 +287,10 @@ pub fn crate_of(file: &str) -> Option<String> {
 pub fn module_package(path: &str) -> String {
     if path.starts_with('/') || path.starts_with('[') {
         let module = path.rsplit('/').next().unwrap_or(path).to_string();
-        let gpu = ["libnvidia", "libcuda", "libvulkan_", "libGLX_", "libEGL_", "libgallium", "libdrm", "libMTL", "AGX", "libGPU", "libigdrcl"].iter().any(|p| module.starts_with(p)) || module.ends_with("_dri.so") || path.contains("/dri/") || path.contains("/Extensions/AGX");
+        let gpu = ["libnvidia", "libcuda", "libvulkan_", "libGLX_", "libEGL_", "libgallium", "libdrm", "libMTL", "AGX", "libGPU", "libigdrcl"].iter().any(|p| module.starts_with(p))
+            || module.ends_with("_dri.so")
+            || path.contains("/dri/")
+            || path.contains("/Extensions/AGX");
         return if path == "[kernel.kallsyms]" {
             "(kernel)".into()
         } else if gpu {

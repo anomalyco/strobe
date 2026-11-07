@@ -561,14 +561,13 @@ extern "C" fn on_frame(this: Id, _cmd: Sel, _stream: Id, sbuf: *mut c_void, kind
     let mut changed = false;
     if status == Some(0) {
         let (size, scale) = *sink.geometry.lock().unwrap_or_else(|e| e.into_inner());
-        let own = if rects.is_null() { vec![CGRect { origin: Default::default(), size: crate::host::macos::CGSize { width: size.0, height: size.1 } }] } else { app_rects(&dirty, size.0, size.1, scale) };
+        let own =
+            if rects.is_null() { vec![CGRect { origin: Default::default(), size: crate::host::macos::CGSize { width: size.0, height: size.1 } }] } else { app_rects(&dirty, size.0, size.1, scale) };
         let mut prev = sink.prev.lock().unwrap_or_else(|e| e.into_inner());
         // The first frame only fills `prev`; without readable pixels, a dirty rectangle of the app's counts.
         changed = pixels_changed(unsafe { CMSampleBufferGetImageBuffer(sbuf) }, &own, &mut prev).unwrap_or(!own.is_empty()) && !first;
     }
-    if changed
-        && let Some(t) = shown
-    {
+    if changed && let Some(t) = shown {
         let at = crate::host::macos::mach_ns(t as u64);
         sh.presents.push(Present {
             pid: sink.pid,
@@ -622,10 +621,7 @@ impl Capture {
     pub fn start() -> Result<Capture> {
         if unsafe { CGPreflightScreenCaptureAccess() } == 0 {
             let who = crate::host::macos::screen_recording_grantee();
-            return Err(Error::msg(format!(
-                "frames on screen come from ScreenCaptureKit, which needs the Screen Recording permission for {who}: {}",
-                crate::host::macos::screen_recording_pane()
-            )));
+            return Err(Error::msg(format!("frames on screen come from ScreenCaptureKit, which needs the Screen Recording permission for {who}: {}", crate::host::macos::screen_recording_pane())));
         }
         let queue = unsafe { dispatch_queue_create(c"strobe.frames".as_ptr(), std::ptr::null()) };
         let watch: Watcher = Arc::default();
@@ -754,9 +750,11 @@ impl Capture {
     }
 
     fn open(&mut self, ids: &[u32]) -> Result<()> {
-        let content = with_completion(Duration::from_secs(5), false, |b| {
-            send!((); class("SCShareableContent"), "getShareableContentExcludingDesktopWindows:onScreenWindowsOnly:completionHandler:", i8 = 1, i8 = 1, *mut Block = b)
-        });
+        let content = with_completion(
+            Duration::from_secs(5),
+            false,
+            |b| send!((); class("SCShareableContent"), "getShareableContentExcludingDesktopWindows:onScreenWindowsOnly:completionHandler:", i8 = 1, i8 = 1, *mut Block = b),
+        );
         let Some((content, err)) = content else { return Err(Error::msg("ScreenCaptureKit did not list the windows in 5 s")) };
         if content.is_null() {
             let why = description(err);
@@ -810,7 +808,8 @@ impl Capture {
             return Err(Error::msg("ScreenCaptureKit made no stream for the window"));
         }
         let output: Id = send!(Id; output_class(), "new");
-        let sink = Box::new(Sink { pid, window: id, shared: self.shared.clone(), live: self.live.clone(), geometry: Mutex::new((size, scale)), prev: Mutex::new(Prev::default()), seen_first: false.into() });
+        let sink =
+            Box::new(Sink { pid, window: id, shared: self.shared.clone(), live: self.live.clone(), geometry: Mutex::new((size, scale)), prev: Mutex::new(Prev::default()), seen_first: false.into() });
         unsafe { object_setIvar(output, class_getInstanceVariable(output_class(), c"sink".as_ptr()), Box::into_raw(sink) as Id) };
         let mut err: Id = std::ptr::null_mut();
         let added: i8 = send!(i8; stream, "addStreamOutput:type:sampleHandlerQueue:error:", Id = output, isize = 0, *mut c_void = self.queue, *mut Id = &mut err);

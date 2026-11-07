@@ -46,10 +46,16 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "record",
         description: "Record one target on one timeline. Returns a handle (rec_…) and headline frame, main-thread and CPU metrics. Targets: https://… (strobe launches Chromium), app:<id>, exe:<path>, cdp:<port>, pid:<n>, file:<path> (import). With bench (file#case), records that bench case (it drives the app) with the attribution probes; target then names one of the bench file's targets.",
-        args: &[("target", "https://…, a local page.html (or file:page.html), app:<id> (a strobe.json profile, Electron or native), exe:<path>, cdp:<port>, pid:<n>, proc:<name>, or file:<path> (a trace to import); with bench: a target name from the bench file")],
+        args: &[(
+            "target",
+            "https://…, a local page.html (or file:page.html), app:<id> (a strobe.json profile, Electron or native), exe:<path>, cdp:<port>, pid:<n>, proc:<name>, or file:<path> (a trace to import); with bench: a target name from the bench file",
+        )],
         flags: &[
             ("for", "duration, e.g. 10s (default 10s)"),
-            ("probes", "timing (default), attribution (CPU stacks, allocations, forced layouts, GC, a heap snapshot) or memory (a heap snapshot); pid:/proc: targets also deep; native targets (pid:, a native app) also waits: deep plus off-CPU waits and who woke each thread (query view waits), which costs the target at every context switch and refuses NoWaits (exit 4) where this OS or setup cannot take them"),
+            (
+                "probes",
+                "timing (default), attribution (CPU stacks, allocations, forced layouts, GC, a heap snapshot) or memory (a heap snapshot); pid:/proc: targets also deep; native targets (pid:, a native app) also waits: deep plus off-CPU waits and who woke each thread (query view waits), which costs the target at every context switch and refuses NoWaits (exit 4) where this OS or setup cannot take them",
+            ),
             ("native", "exe:<path> is a native app (no browser engine): recorded from outside: CPU, thread wakes, IO, GPU, memory, the UI thread's CPU and what reached the screen"),
             ("app", "exe:<path>: the strobe.json app profile it borrows"),
             ("headless", "draw off screen: attribution data stays meaningful, frame metrics do not"),
@@ -88,11 +94,20 @@ const TOOLS: &[Tool] = &[
         description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
         args: &[("file", "absolute path to the .bench.ts file (not with stop or resume)")],
         flags: &[
-            ("head", "variant under test: an absolute directory, a git ref, exe:<absolute path>, url:<href>, cmd:<line> (a cli() target's command line); or a target of the file, target[=variant] (target:name to disambiguate), for an implementation comparison (required through the daemon, whose working folder is not your project; stdio: default .)"),
-            ("base", "baseline variant: an absolute directory, a git ref (e.g. origin/dev), url:<href>, cmd:<line> (a cli() target's command line); or a target of the file, target[=variant]: base and head naming two targets compare two implementations"),
+            (
+                "head",
+                "variant under test: an absolute directory, a git ref, exe:<absolute path>, url:<href>, cmd:<line> (a cli() target's command line); or a target of the file, target[=variant] (target:name to disambiguate), for an implementation comparison (required through the daemon, whose working folder is not your project; stdio: default .)",
+            ),
+            (
+                "base",
+                "baseline variant: an absolute directory, a git ref (e.g. origin/dev), url:<href>, cmd:<line> (a cli() target's command line); or a target of the file, target[=variant]: base and head naming two targets compare two implementations",
+            ),
             ("aa", "same build on both sides (checks the method)"),
             ("check", "validate the file: each case once on head, pass or fail with a screenshot, no statistics"),
-            ("batch", "with check: up to N run cases per launch (one prepare and setup), each held to the launch's start after its reset; a failing or dirty case ends its launch and the next case gets a fresh one"),
+            (
+                "batch",
+                "with check: up to N run cases per launch (one prepare and setup), each held to the launch's start after its reset; a failing or dirty case ends its launch and the next case gets a fresh one",
+            ),
             ("headless", "page targets in a headless browser (check and timed blocks): no display needed, runs through a locked session; frame, input-latency and GPU-use metrics refused (Headless)"),
             ("engine", "page targets' browser engine: chromium or firefox; the file's targets of that engine, else every page target in it"),
             (
@@ -115,7 +130,10 @@ const TOOLS: &[Tool] = &[
             ("repeat", "leak run: N runs to the middle snapshot and N more to the last (default 10)"),
             ("seed", "the seed of the bench file's ctx.seed and ctx.random() (a 32-bit unsigned integer): replays a seeded workload; default: drawn, kept in result.json plan.seed and printed"),
             ("bisect", "good..bad: find the commit on the first-parent line that moved the primary (one series)"),
-            ("pin", "auto (the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its fastest cores; otherwise all but the last 1-2 whole cores; fewer than 4 cores, more than 64 CPUs or macOS: unpinned), none, ccdN, or a CPU list"),
+            (
+                "pin",
+                "auto (the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its fastest cores; otherwise all but the last 1-2 whole cores; fewer than 4 cores, more than 64 CPUs or macOS: unpinned), none, ccdN, or a CPU list",
+            ),
             ("power", "high (default: the fastest plan for the run, restored after) or keep"),
             ("reserve-cpus", "auto (default: this user's other processes kept off the target's CPUs during timed blocks, put back after; Windows and Linux), on (every block, check too) or off"),
             ("why", "attribution blocks: auto (default, only when the primary differs), always, never"),

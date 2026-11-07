@@ -518,7 +518,9 @@ impl Action {
             "invoke" => Action::Invoke,
             "toggle" => Action::Toggle,
             // A missing value (or one that is neither a string nor a number) set "" without a word.
-            "setValue" | "value" => Action::SetValue(value.ok_or_else(|| Error::usage(format!("page.act(sel, \"{name}\", {{ value }}): give the value, a string or a number (\"\" clears a field)")))?.to_string()),
+            "setValue" | "value" => {
+                Action::SetValue(value.ok_or_else(|| Error::usage(format!("page.act(sel, \"{name}\", {{ value }}): give the value, a string or a number (\"\" clears a field)")))?.to_string())
+            }
             "expand" => Action::Expand,
             "collapse" => Action::Collapse,
             "select" => Action::Select,

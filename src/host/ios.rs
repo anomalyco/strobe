@@ -324,7 +324,10 @@ fn not_paired(udid: &str, e: Error) -> Error {
 // plist framing
 
 fn parse(bytes: &[u8]) -> Result<Dictionary> {
-    Value::from_reader(Cursor::new(bytes)).map_err(|e| Error::msg(format!("bad plist from the device: {e}")))?.into_dictionary().ok_or_else(|| Error::msg("the device sent a plist that is not a dictionary"))
+    Value::from_reader(Cursor::new(bytes))
+        .map_err(|e| Error::msg(format!("bad plist from the device: {e}")))?
+        .into_dictionary()
+        .ok_or_else(|| Error::msg("the device sent a plist that is not a dictionary"))
 }
 
 /// Writes `value` as one framed message: a 4-byte big-endian length, then the plist (XML, or

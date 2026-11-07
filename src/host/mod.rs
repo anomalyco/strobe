@@ -2,9 +2,17 @@
 
 pub(crate) mod adb;
 pub mod build;
+#[cfg(windows)]
+pub mod cycle_clock;
+#[cfg(target_os = "linux")]
+pub mod dbus;
 pub mod git;
 pub mod http;
 pub mod ios;
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod motion;
 pub mod paths;
 pub mod power;
@@ -12,15 +20,7 @@ pub mod reserve;
 pub mod spawn;
 pub mod tcp;
 #[cfg(windows)]
-pub mod cycle_clock;
-#[cfg(windows)]
 pub mod win;
-#[cfg(target_os = "linux")]
-pub mod dbus;
-#[cfg(target_os = "linux")]
-pub mod linux;
-#[cfg(target_os = "macos")]
-pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod x11;
 

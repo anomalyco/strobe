@@ -55,7 +55,15 @@ pub fn run(args: &Args) -> Result<Output> {
             _ => sha256(&installed).ok().is_some_and(|a| sha256(&new).ok().as_ref() == Some(&a)),
         };
         if args.has("check") {
-            let text = if same { format!("up to date: {current}") } else { format!("installed {}; available {reported}{}", if current.is_empty() { "nothing".into() } else { current.clone() }, version.as_deref().map(|v| format!(" (npm {v})")).unwrap_or_default()) };
+            let text = if same {
+                format!("up to date: {current}")
+            } else {
+                format!(
+                    "installed {}; available {reported}{}",
+                    if current.is_empty() { "nothing".into() } else { current.clone() },
+                    version.as_deref().map(|v| format!(" (npm {v})")).unwrap_or_default()
+                )
+            };
             return Ok(Output::new(text, json!({ "installed": current, "available": reported, "current": same })));
         }
         if same {
@@ -69,7 +77,9 @@ pub fn run(args: &Args) -> Result<Output> {
             let mut p = v.split('.').map(|x| x.parse::<u64>().ok());
             Some((p.next()??, p.next()??, p.next()??))
         };
-        if wanted.is_none() && args.get("from").is_none() && !args.has("force")
+        if wanted.is_none()
+            && args.get("from").is_none()
+            && !args.has("force")
             && let (Some(a), Some(b)) = (semver(&current), semver(&reported))
             && a >= b
         {
@@ -109,7 +119,10 @@ pub fn run(args: &Args) -> Result<Output> {
         #[cfg(not(windows))]
         skip.push("deep");
         let status = run_relayed(Command::new(&new).args(["up", "--skip", &skip.join(",")])).map_err(|e| Error::msg(format!("run {}: {e}", new.display())))?;
-        let mut out = Output::new(format!("strobe update: {} → {reported}", if current.is_empty() { "nothing" } else { current.as_str() }), json!({ "installed": reported, "previous": current, "updated": status.success() }));
+        let mut out = Output::new(
+            format!("strobe update: {} → {reported}", if current.is_empty() { "nothing" } else { current.as_str() }),
+            json!({ "installed": reported, "previous": current, "updated": status.success() }),
+        );
         if !status.success() {
             out.text = format!("strobe update: the new build's `strobe up` failed (exit {}); the steps above say which", status.code().unwrap_or(1));
             out.code = 1;
@@ -254,4 +267,3 @@ fn sha256(path: &Path) -> Result<String> {
     use sha2::Digest;
     Ok(sha2::Sha256::digest(std::fs::read(path)?).iter().map(|b| format!("{b:02x}")).collect())
 }
-

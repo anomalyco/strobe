@@ -127,7 +127,8 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         }
         std::thread::sleep(wait);
         let windows = crate::host::top_windows(&n.pids());
-        let mut titles: Vec<String> = windows.iter().filter(|w| Some(w.0) == main).chain(windows.iter().filter(|w| Some(w.0) != main)).map(|w| w.1.trim().to_string()).filter(|t| !t.is_empty()).collect();
+        let mut titles: Vec<String> =
+            windows.iter().filter(|w| Some(w.0) == main).chain(windows.iter().filter(|w| Some(w.0) != main)).map(|w| w.1.trim().to_string()).filter(|t| !t.is_empty()).collect();
         let (mut headings, mut keyed) = (Vec::new(), Vec::new());
         match &session {
             Some(Ok(se)) => {
@@ -149,7 +150,11 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         }
         let locked = crate::host::session_locked();
         let mut text = format!("{} · {}\n", titles.first().map(String::as_str).unwrap_or("(no title)"), app.exe.display());
-        text += &format!("window   {}{}\n", if main.is_some() { format!("after {}", fmt::value(window_ms, "ms")) } else { "none".into() }, if locked { " · session locked (the tree still reads; pixels and input do not)" } else { "" });
+        text += &format!(
+            "window   {}{}\n",
+            if main.is_some() { format!("after {}", fmt::value(window_ms, "ms")) } else { "none".into() },
+            if locked { " · session locked (the tree still reads; pixels and input do not)" } else { "" }
+        );
         for p in &problems {
             text += &format!("!        {p}\n");
         }
@@ -282,7 +287,12 @@ fn terminal(args: &Args, line: &str) -> Result<Output> {
         }
         let got = events.between(0, u64::MAX);
         if !got.is_empty() || !events.bad().is_empty() {
-            out += &format!("events   {} on $STROBE_EVENTS ({}){}\n", got.len(), got.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "), if events.bad().is_empty() { String::new() } else { format!(" · {} lines that are no event", events.bad().len()) });
+            out += &format!(
+                "events   {} on $STROBE_EVENTS ({}){}\n",
+                got.len(),
+                got.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "),
+                if events.bad().is_empty() { String::new() } else { format!(" · {} lines that are no event", events.bad().len()) }
+            );
         }
         for p in &problems {
             out += &format!("!        {p}\n");
@@ -312,7 +322,8 @@ fn terminal(args: &Args, line: &str) -> Result<Output> {
 }
 
 pub fn run(args: &Args) -> Result<Output> {
-    let target = args.pos.first().ok_or_else(|| Error::usage("look needs a page or an app: strobe look <url | file | app:<id> | exe:<path> | tty:<command>> [--until <css>] [--wait 2s] [--out shot.png]"))?;
+    let target =
+        args.pos.first().ok_or_else(|| Error::usage("look needs a page or an app: strobe look <url | file | app:<id> | exe:<path> | tty:<command>> [--until <css>] [--wait 2s] [--out shot.png]"))?;
     if target.starts_with("app:") || target.starts_with("exe:") {
         return native(args, target);
     }
@@ -422,7 +433,10 @@ pub fn run(args: &Args) -> Result<Output> {
                 match crate::driver::element_box(&page.clone().into(), &sel, Duration::from_secs(10))? {
                     Some([x, y, w, h]) if w >= 1.0 && h >= 1.0 => Some(json!({ "x": x, "y": y, "width": w, "height": h, "scale": 1 })),
                     Some(_) => return Err(Error::usage(format!("--element {:?}: the element has no size to show (0×0)", sel.source))),
-                    None => return Err(Error::usage(format!("--element {:?}: no visible element matches it", sel.source)).hint("strobe look <page> lists the headings and text; a selector is CSS, then role=, text=, index=")),
+                    None => {
+                        return Err(Error::usage(format!("--element {:?}: no visible element matches it", sel.source))
+                            .hint("strobe look <page> lists the headings and text; a selector is CSS, then role=, text=, index="));
+                    }
                 }
             }
             None => None,

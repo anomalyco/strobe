@@ -12,15 +12,15 @@ mod github;
 mod implementations;
 mod markdown;
 
-use extract::*;
+use crate::model::{self, Better, Error, Result, VerdictKind};
+use crate::stats;
+use crate::store;
 pub(crate) use extract::judged;
+use extract::*;
 use github::*;
 pub use github::{Updated, hero_level, relevel, splice, update_pr};
 pub use implementations::{claim, cpu_scope, factor_or_pct, fairness, range_x, ready_noun};
 use markdown::*;
-use crate::model::{self, Better, Error, Result, VerdictKind};
-use crate::stats;
-use crate::store;
 use serde_json::Value;
 use std::collections::BTreeMap;
 

@@ -445,7 +445,8 @@ impl Conn {
         let mut whole = head.to_vec();
         whole.extend_from_slice(&rest[..fields_len]);
         let mut r = Reader { b: &whole, at: 16 };
-        let mut m = Message { kind: head[1], reply_to: None, sig: String::new(), body: Vec::new(), err: None, sender: String::new(), path: String::new(), iface: String::new(), member: String::new(), fds };
+        let mut m =
+            Message { kind: head[1], reply_to: None, sig: String::new(), body: Vec::new(), err: None, sender: String::new(), path: String::new(), iface: String::new(), member: String::new(), fds };
         while r.at < whole.len() {
             r.align(8);
             if r.at >= whole.len() {

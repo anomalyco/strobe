@@ -406,7 +406,12 @@ unsafe fn read(e: &IUIAutomationElement, parent: Option<usize>, window: usize) -
             (role == UIA_RadioButtonControlTypeId.0 && patterns & PATTERN_SELECT != 0).then(|| bool_of(e, UIA_SelectionItemIsSelectedPropertyId))
         };
         // A range control without a text value (a slider): its number.
-        let range = || bool_of(e, UIA_IsRangeValuePatternAvailablePropertyId).then(|| e.GetCachedPropertyValue(UIA_RangeValueValuePropertyId).ok().and_then(|v| f64::try_from(&v).ok())).flatten().map(|d| d.to_string());
+        let range = || {
+            bool_of(e, UIA_IsRangeValuePatternAvailablePropertyId)
+                .then(|| e.GetCachedPropertyValue(UIA_RangeValueValuePropertyId).ok().and_then(|v| f64::try_from(&v).ok()))
+                .flatten()
+                .map(|d| d.to_string())
+        };
         let value = match value.filter(|_| patterns & PATTERN_VALUE != 0) {
             Some(t) if !t.is_empty() => Some(t),
             t => range().or(t),

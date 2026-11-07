@@ -968,7 +968,16 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "renderer JS heap in use at the end of each measured run, before its reset (median over the runs)",
     },
-    MetricDef { name: "dom.nodes", unit: "count", better: Better::Lower, kind: Kind::Timed, words: COUNT, min_n: 0, across: Across::PerSide, about: "DOM nodes at the end of each measured run, before its reset (median over the runs)" },
+    MetricDef {
+        name: "dom.nodes",
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "DOM nodes at the end of each measured run, before its reset (median over the runs)",
+    },
     MetricDef {
         name: "js.heap.growth",
         unit: "MB/min",

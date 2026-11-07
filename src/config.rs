@@ -324,12 +324,7 @@ fn suggest<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
         "win32" | "win" | "win64" => "windows",
         other => other,
     };
-    known
-        .iter()
-        .map(|k| (if k.to_lowercase() == alias { 0 } else { edits(&lower, &k.to_lowercase()) }, *k))
-        .filter(|(d, _)| *d <= 2)
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, k)| k)
+    known.iter().map(|k| (if k.to_lowercase() == alias { 0 } else { edits(&lower, &k.to_lowercase()) }, *k)).filter(|(d, _)| *d <= 2).min_by_key(|(d, _)| *d).map(|(_, k)| k)
 }
 
 fn edits(a: &str, b: &str) -> usize {

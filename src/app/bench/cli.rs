@@ -53,7 +53,8 @@ fn line_for(asked: &Value, v: &Variant, target: &Value) -> Result<String> {
 #[cfg(not(windows))]
 fn simple(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or("");
-    const SHELL_WORDS: &[&str] = &["if", "for", "while", "until", "case", "{", "!", "[", "[[", "cd", "export", "set", "unset", ".", "source", "eval", "exec", "test", "alias", "ulimit", "umask", "time"];
+    const SHELL_WORDS: &[&str] =
+        &["if", "for", "while", "until", "case", "{", "!", "[", "[[", "cd", "export", "set", "unset", ".", "source", "eval", "exec", "test", "alias", "ulimit", "umask", "time"];
     !line.contains([';', '&', '|', '<', '>', '(', ')', '`', '\n']) && !line.contains("$(") && !first.contains('=') && !SHELL_WORDS.contains(&first)
 }
 
@@ -211,7 +212,10 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
     let mut metrics: BTreeMap<String, (f64, Option<Direction>)> = BTreeMap::new();
     for m in lines.iter().filter_map(|l| metric_line(l)) {
         let (name, value, dir) = m.map_err(|l| {
-            Error::from(Refusal::new(ValidatorId::NoMetric, format!("`{line}` printed a metric line strobe cannot read: {l}")).fix("print `strobe:metric <name>=<number>` with an optional `lower` or `higher` after it"))
+            Error::from(
+                Refusal::new(ValidatorId::NoMetric, format!("`{line}` printed a metric line strobe cannot read: {l}"))
+                    .fix("print `strobe:metric <name>=<number>` with an optional `lower` or `higher` after it"),
+            )
         })?;
         let e = metrics.entry(name).or_insert((0.0, Some(dir)));
         e.0 += value;
@@ -355,7 +359,11 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         let share = ticks_ms.iter().sum::<f64>() / measured.iter().filter_map(|r| cpu(&r.0)).sum::<f64>().max(1e-9);
         ctx.warnings.push(validity::warn(
             "TickSampledCpu",
-            format!("{}: {:.0}% of cpu.work is the processes the command started, which Windows counts in 15.6 ms clock ticks (sampled, not exact); the command's own process is exact", s.label(), share * 100.0),
+            format!(
+                "{}: {:.0}% of cpu.work is the processes the command started, which Windows counts in 15.6 ms clock ticks (sampled, not exact); the command's own process is exact",
+                s.label(),
+                share * 100.0
+            ),
         ));
     }
     put("cpu.wakes", per(&|r| sum_of(r, |x| x.usage.switches.map(|n| n as f64)).map(|n| n / (wall(r) / 1e3).max(1e-9))), &|| {
@@ -405,7 +413,10 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         let r = if probe::wakes::COUNTER_METRICS.contains(&m.as_str()) {
             Refusal::new(ValidatorId::NoCounter, format!("{m}: a command's counters are not read (it ends inside the run)"))
         } else {
-            Refusal::new(ValidatorId::NotForTarget, format!("{m}: a cli target is measured from outside its commands (cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.*, metric.<name>)"))
+            Refusal::new(
+                ValidatorId::NotForTarget,
+                format!("{m}: a cli target is measured from outside its commands (cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.*, metric.<name>)"),
+            )
         };
         refused.insert(m.clone(), r);
     }

@@ -69,7 +69,9 @@ pub fn point(v: &Value, size: (u16, u16)) -> Option<Result<(u16, u16)>> {
             Some(other) => return Err(Error::usage(format!("a terminal's point is in cells ([col, row], space \"cell\") or \"norm\" (0 to 1 of the grid), not space {other:?}"))),
         };
         if !(0.0..cols).contains(&c) || !(0.0..rows).contains(&r) {
-            return Err(Refusal::new(ValidatorId::OutOfView, format!("cell [{x}, {y}] is off the {}×{} grid", size.0, size.1)).fix("give a cell inside the grid: [col, row] from 0, or { x, y, space: \"norm\" }").into());
+            return Err(Refusal::new(ValidatorId::OutOfView, format!("cell [{x}, {y}] is off the {}×{} grid", size.0, size.1))
+                .fix("give a cell inside the grid: [col, row] from 0, or { x, y, space: \"norm\" }")
+                .into());
         }
         Ok((c as u16, r as u16))
     }))
@@ -156,7 +158,14 @@ pub fn key_bytes(m: Mods, k: Key, modes: &Modes, release: bool) -> Result<Vec<u8
     // Functional keys: a final letter (`CSI 1;m X`, SS3 without modifiers where xterm sends it) or
     // a number with a tilde (`CSI n;m ~`).
     let letter = |fin: char, ss3: bool, m: Mods| {
-        if release || m.any() { format!("\x1b[1;{}{event}{fin}", mod_param(m)) } else if ss3 { format!("\x1bO{fin}") } else { format!("\x1b[{fin}") }.into_bytes()
+        if release || m.any() {
+            format!("\x1b[1;{}{event}{fin}", mod_param(m))
+        } else if ss3 {
+            format!("\x1bO{fin}")
+        } else {
+            format!("\x1b[{fin}")
+        }
+        .into_bytes()
     };
     let tilde = |n: u8, m: Mods| format!("\x1b[{n}{}~", ev_mods(m)).into_bytes();
     if release && kitty & EVENTS == 0 {
@@ -300,7 +309,16 @@ pub struct Driver<'a> {
 
 impl<'a> Driver<'a> {
     pub fn new(tty: &'a Tty, events: Option<&'a crate::target::events::Events>) -> Driver<'a> {
-        Driver { tty, events, inputs: RefCell::new(Vec::new()), held: Cell::new(Mods::default()), pressed: Cell::new(None), pointer: Cell::new(None), start_size: tty.size(), focusing: Cell::new(false) }
+        Driver {
+            tty,
+            events,
+            inputs: RefCell::new(Vec::new()),
+            held: Cell::new(Mods::default()),
+            pressed: Cell::new(None),
+            pointer: Cell::new(None),
+            start_size: tty.size(),
+            focusing: Cell::new(false),
+        }
     }
 
     /// Every input so far.
@@ -365,7 +383,8 @@ impl<'a> Driver<'a> {
         let n = self.tty.grid(|g| find(g, sel).len());
         let why = if n > 0 && sel.index() != 0 { format!("it shows {n} times, too few for index={}", sel.index()) } else { "the grid never showed it".into() };
         let rows: Vec<String> = self.tty.grid(|g| g.text()).into_iter().filter(|l| !l.trim().is_empty()).take(6).collect();
-        Error::timeout(format!("{:?}: {why} in {} s", sel.source, t.as_secs())).hint(format!("the grid's first rows: {}", rows.iter().map(|r| format!("{:?}", r.trim())).collect::<Vec<_>>().join(", ")))
+        Error::timeout(format!("{:?}: {why} in {} s", sel.source, t.as_secs()))
+            .hint(format!("the grid's first rows: {}", rows.iter().map(|r| format!("{:?}", r.trim())).collect::<Vec<_>>().join(", ")))
     }
 
     /// After an input: `until` a selector shows, the next grid change, or the grid at rest.
@@ -375,10 +394,10 @@ impl<'a> Driver<'a> {
         // A state the program announces on its event stream after the input.
         if let Some(name) = u.get("state").and_then(Value::as_str) {
             let events = self.events.ok_or_else(|| Error::usage("until: { state }: this launch has no event stream"))?;
-            return events
-                .wait_state(name, after, Instant::now() + t)
-                .map(|_| ())
-                .ok_or_else(|| Error::timeout(format!("until: {{ state: {name:?} }}: the program wrote no such state to $STROBE_EVENTS in {} s", t.as_secs())).hint("the program appends {\"strobe\":\"state\",\"name\":\"…\"} lines to the path in STROBE_EVENTS"));
+            return events.wait_state(name, after, Instant::now() + t).map(|_| ()).ok_or_else(|| {
+                Error::timeout(format!("until: {{ state: {name:?} }}: the program wrote no such state to $STROBE_EVENTS in {} s", t.as_secs()))
+                    .hint("the program appends {\"strobe\":\"state\",\"name\":\"…\"} lines to the path in STROBE_EVENTS")
+            });
         }
         match u.as_str() {
             Some("idle") => self.idle(after, t),
@@ -392,7 +411,8 @@ impl<'a> Driver<'a> {
         if self.tty.quiet(IDLE, since_ns, Instant::now() + t) {
             Ok(())
         } else {
-            Err(Error::timeout(format!("idle: the grid kept changing for {} s (never {} ms still)", t.as_secs(), IDLE.as_millis())).hint("a program that animates never rests: wait for text (waitFor) instead"))
+            Err(Error::timeout(format!("idle: the grid kept changing for {} s (never {} ms still)", t.as_secs(), IDLE.as_millis()))
+                .hint("a program that animates never rests: wait for text (waitFor) instead"))
         }
     }
 
@@ -425,7 +445,8 @@ impl<'a> Driver<'a> {
         if ok {
             return Ok(m);
         }
-        let what = if motion { if self.pressed.get().is_some() { "it moves the mouse with a button held" } else { "it moves the mouse with no button held" } } else { "it sends a mouse button or the wheel" };
+        let what =
+            if motion { if self.pressed.get().is_some() { "it moves the mouse with a button held" } else { "it moves the mouse with no button held" } } else { "it sends a mouse button or the wheel" };
         Err(no_mouse(call, what, m.mouse))
     }
 
@@ -573,7 +594,8 @@ impl<'a> Driver<'a> {
                 // A terminal's wheel moves in notches, no pixels: `dy`/`by` notches down (negative up),
                 // `dx`/`byX` right.
                 let (dx, dy) = if call == "wheel" { (d["dx"].as_f64().unwrap_or(0.0), d["dy"].as_f64().unwrap_or(0.0)) } else { (d["byX"].as_f64().unwrap_or(0.0), d["by"].as_f64().unwrap_or(0.0)) };
-                let steps: Vec<u8> = std::iter::repeat_n(if dy < 0.0 { 64 } else { 65 }, dy.abs().round() as usize).chain(std::iter::repeat_n(if dx < 0.0 { 66 } else { 67 }, dx.abs().round() as usize)).collect();
+                let steps: Vec<u8> =
+                    std::iter::repeat_n(if dy < 0.0 { 64 } else { 65 }, dy.abs().round() as usize).chain(std::iter::repeat_n(if dx < 0.0 { 66 } else { 67 }, dx.abs().round() as usize)).collect();
                 if steps.is_empty() {
                     return Err(Error::usage(format!("page.{call}(): a terminal's wheel moves in notches; give at least one ({} in notches)", if call == "wheel" { "dy, dx" } else { "by, byX" })));
                 }
@@ -637,13 +659,20 @@ impl<'a> Driver<'a> {
                         n("width").zip(n("height")).ok_or_else(|| Error::usage("page.window({ resize: { width, height } }): a terminal's size is in cells, columns and rows from 1"))?
                     }
                     _ => {
-                        return Err(Refusal::new(ValidatorId::NotForTarget, format!("page.window({action}): a terminal's window only takes a size ({{ resize: {{ width: cols, height: rows }} }}) or \"restore\"")).into());
+                        return Err(Refusal::new(
+                            ValidatorId::NotForTarget,
+                            format!("page.window({action}): a terminal's window only takes a size ({{ resize: {{ width: cols, height: rows }} }}) or \"restore\""),
+                        )
+                        .into());
                     }
                 };
                 if cfg!(windows) && o["until"] == "frame" {
-                    return Err(Refusal::new(ValidatorId::NotOnThisOs, "page.window(resize, { until: \"frame\" }): ConPTY's console host redraws its own buffer at a resize before the program hears of it, so the next change is the host's")
-                        .fix(RESIZE_FIX)
-                        .into());
+                    return Err(Refusal::new(
+                        ValidatorId::NotOnThisOs,
+                        "page.window(resize, { until: \"frame\" }): ConPTY's console host redraws its own buffer at a resize before the program hears of it, so the next change is the host's",
+                    )
+                    .fix(RESIZE_FIX)
+                    .into());
                 }
                 let rested = self.settle();
                 let at = host::now_ns();

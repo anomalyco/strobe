@@ -184,7 +184,8 @@ impl Poster {
                     let lower = c.to_lowercase().next().filter(|l| *l != c)?;
                     self.code(char_sym(lower)).map(|(k, _, g)| (k, true, g))
                 });
-                let (code, shift, altgr) = found.ok_or_else(|| Error::usage(format!("character {c:?} has no key on the X server's keyboard mapping: strobe types keys, as a person does (an input method's text is not built)")))?;
+                let (code, shift, altgr) = found
+                    .ok_or_else(|| Error::usage(format!("character {c:?} has no key on the X server's keyboard mapping: strobe types keys, as a person does (an input method's text is not built)")))?;
                 Ok((code, mods.or(Mods { shift, ..Mods::default() }), altgr))
             }
         }

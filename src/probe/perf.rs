@@ -12,8 +12,8 @@
 //! - Needs `perf_event_paranoid` ≤ 2 for the user's own processes (Debian ships 3), or CAP_PERFMON;
 //!   kernel frames need ≤ 1 or CAP_PERFMON. `strobe status` names the one setting to change.
 
-use crate::probe::stacks::{Deep, Module, Targets};
 use crate::model::{Error, Result};
+use crate::probe::stacks::{Deep, Module, Targets};
 use framehop::{ExplicitModuleSectionInfo, Unwinder};
 use object::{Object, ObjectSection, ObjectSegment};
 use std::collections::{HashMap, HashSet};
@@ -519,8 +519,8 @@ impl Drop for Capture {
 // - Tracepoint samples with their raw fields need CAP_PERFMON (or root, or perf_event_paranoid -1),
 //   and the event ids and field offsets come from tracefs.
 
-use crate::probe::stacks::{Wait, WaitKind, Waits, Waker};
 use crate::model::Refusal;
+use crate::probe::stacks::{Wait, WaitKind, Waits, Waker};
 
 const SAMPLE_RAW: u64 = 1 << 10;
 const RECORD_SWITCH: u32 = 14;
@@ -729,7 +729,12 @@ impl WaitCapture {
         for &c in &cpus {
             match open_ring(waking.id, -1, c, false) {
                 Ok(r) => wakers.push(r),
-                Err(e) => return Err(crate::probe::stacks::no_waits(format!("sched_waking on CPU {c}: {e}"), "give strobe CAP_PERFMON and CAP_IPC_LOCK once: sudo setcap cap_perfmon,cap_ipc_lock+ep $(command -v strobe)")),
+                Err(e) => {
+                    return Err(crate::probe::stacks::no_waits(
+                        format!("sched_waking on CPU {c}: {e}"),
+                        "give strobe CAP_PERFMON and CAP_IPC_LOCK once: sudo setcap cap_perfmon,cap_ipc_lock+ep $(command -v strobe)",
+                    ));
+                }
             }
         }
         let state = Arc::new(AtomicU8::new(RUN));
@@ -1114,4 +1119,3 @@ impl Groups {
         Ok(out)
     }
 }
-

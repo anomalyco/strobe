@@ -96,7 +96,10 @@ pub fn experiment(result: &Value, view: &str, args: &Args, top: usize) -> Result
         let what = format!("{} compares {} with {}", result["id"].as_str().unwrap_or("this experiment"), name(1), name(0));
         let mut e = not_comparable(&what, view, &recs);
         if recs.is_empty() {
-            e = e.hint(format!("this experiment kept no attribution recordings (bench --why always keeps one per side); its per-side numbers: strobe query {} summary", result["id"].as_str().unwrap_or("")));
+            e = e.hint(format!(
+                "this experiment kept no attribution recordings (bench --why always keeps one per side); its per-side numbers: strobe query {} summary",
+                result["id"].as_str().unwrap_or("")
+            ));
         }
         return Err(e);
     }
@@ -372,7 +375,13 @@ impl Weighted {
         }
         let scale = self.kind.scale();
         let var = |s: usize, o: usize| {
-            let raw = if row.n[s] > 0 { row.var[s] } else if row.n[o] > 0 { 2.0 * row.var[o] / row.n[o] as f64 } else { 0.0 };
+            let raw = if row.n[s] > 0 {
+                row.var[s]
+            } else if row.n[o] > 0 {
+                2.0 * row.var[o] / row.n[o] as f64
+            } else {
+                0.0
+            };
             raw * scale * scale / (self.runs[s] * self.runs[s])
         };
         Some(1.96 * (var(0, 1) + var(1, 0)).sqrt())
@@ -457,9 +466,15 @@ impl Weighted {
         }
         text += &format!("total     {} → {} ({}){}\n", k.show(self.total[0]), k.show(self.total[1]), k.signed(self.total[1] - self.total[0]), if k == Kind::Cpu { ", idle left out" } else { "" });
         text += match k {
-            Kind::Cpu => "~ within sampling noise: the change is inside its 95% interval from sampling (each sample weighs the time to the next). One profiled launch per side: the interval covers sampling only, not launch-to-launch variation\n",
-            Kind::Native => "~ within sampling noise: the change is inside its 95% interval from sampling (one interval per sample). One profiled launch per side: the interval covers sampling only, not launch-to-launch variation\n",
-            Kind::Alloc => "~ within sampling noise: the change is inside its 95% interval from V8's allocation sampling (a large allocation is always sampled, a small one stands for the sampling interval). One profiled launch per side: the interval covers sampling only, not launch-to-launch variation\n",
+            Kind::Cpu => {
+                "~ within sampling noise: the change is inside its 95% interval from sampling (each sample weighs the time to the next). One profiled launch per side: the interval covers sampling only, not launch-to-launch variation\n"
+            }
+            Kind::Native => {
+                "~ within sampling noise: the change is inside its 95% interval from sampling (one interval per sample). One profiled launch per side: the interval covers sampling only, not launch-to-launch variation\n"
+            }
+            Kind::Alloc => {
+                "~ within sampling noise: the change is inside its 95% interval from V8's allocation sampling (a large allocation is always sampled, a small one stands for the sampling interval). One profiled launch per side: the interval covers sampling only, not launch-to-launch variation\n"
+            }
             Kind::Layout => "traced: every forced layout and recalc in the measured runs counted, one launch per side (no interval across launches)\n",
         };
         let json = json!({
@@ -872,7 +887,18 @@ fn summary(a: &Rec, b: &Rec) -> Result<Output> {
         let (u, v) = (x.get(k).copied().unwrap_or(f64::NAN), y.get(k).copied().unwrap_or(f64::NAN));
         let show = |x: f64| fmt::value(x, if unit.is_empty() { "count" } else { unit });
         // A percentage changes by percentage points.
-        let change = |x: f64| fmt::value(x, if unit == "%" { "pp" } else if unit.is_empty() { "count" } else { unit });
+        let change = |x: f64| {
+            fmt::value(
+                x,
+                if unit == "%" {
+                    "pp"
+                } else if unit.is_empty() {
+                    "count"
+                } else {
+                    unit
+                },
+            )
+        };
         let rel = if u.is_finite() && v.is_finite() && u != 0.0 { v / u - 1.0 } else { f64::NAN };
         table.push(vec![show(u), show(v), if u.is_finite() && v.is_finite() { signed(v - u, &change) } else { "—".into() }, fmt::pct(rel), k.clone()]);
         rows.push(json!({ "metric": k, "unit": unit, "base": u, "head": v, "delta": v - u, "relative": rel }));

@@ -119,21 +119,15 @@ pub fn wake_bus() {
 
 impl Atspi {
     pub fn start(pids: &[u32]) -> Result<Atspi> {
-        let mut session = Conn::session().map_err(|e| {
-            Error::msg(format!("AT-SPI: no session D-Bus ({e}); the accessibility bus is found through it (DBUS_SESSION_BUS_ADDRESS or $XDG_RUNTIME_DIR/bus)"))
-        })?;
-        let addr = session
-            .call("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", &[])
-            .ok()
-            .and_then(|v| v.first().and_then(Value::as_str).map(str::to_string))
-            .ok_or_else(|| Error::msg("AT-SPI: the session has no accessibility bus (at-spi2-core's at-spi-bus-launcher answers org.a11y.Bus): install at-spi2-core, or the app exposes no tree"))?;
+        let mut session =
+            Conn::session().map_err(|e| Error::msg(format!("AT-SPI: no session D-Bus ({e}); the accessibility bus is found through it (DBUS_SESSION_BUS_ADDRESS or $XDG_RUNTIME_DIR/bus)")))?;
+        let addr =
+            session.call("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", &[]).ok().and_then(|v| v.first().and_then(Value::as_str).map(str::to_string)).ok_or_else(|| {
+                Error::msg("AT-SPI: the session has no accessibility bus (at-spi2-core's at-spi-bus-launcher answers org.a11y.Bus): install at-spi2-core, or the app exposes no tree")
+            })?;
         let enabled = matches!(session.get_property("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", "IsEnabled"), Ok(Value::Bool(true)));
         let mut restore = None;
-        if !enabled
-            && session
-                .call("org.a11y.Bus", "/org/a11y/bus", PROPS, "Set", &[Arg::Str("org.a11y.Status"), Arg::Str("IsEnabled"), Arg::Var(Box::new(Arg::Bool(true)))])
-                .is_ok()
-        {
+        if !enabled && session.call("org.a11y.Bus", "/org/a11y/bus", PROPS, "Set", &[Arg::Str("org.a11y.Status"), Arg::Str("IsEnabled"), Arg::Var(Box::new(Arg::Bool(true)))]).is_ok() {
             restore = Some(session);
         }
         let mut bus = Conn::open(&addr, false).map_err(err("connect to the accessibility bus"))?;
@@ -152,10 +146,7 @@ impl Atspi {
         *signal.pids.lock().unwrap_or_else(|e| e.into_inner()) = pids.to_vec();
         let stop = Arc::new(AtomicBool::new(false));
         let (sig, st) = (signal.clone(), stop.clone());
-        let events = std::thread::Builder::new()
-            .name("strobe-a11y".into())
-            .spawn(move || listen(ev, &sig, &st))
-            .map_err(|e| Error::msg(format!("start the accessibility thread: {e}")))?;
+        let events = std::thread::Builder::new().name("strobe-a11y".into()).spawn(move || listen(ev, &sig, &st)).map_err(|e| Error::msg(format!("start the accessibility thread: {e}")))?;
         let worker = Worker { bus, pids: HashMap::new(), elements: Vec::new(), index: HashMap::new(), windows: Vec::new(), last: Tree::default() };
         Ok(Atspi { worker: Mutex::new(worker), signal, stop, events: Some(events), restore: Mutex::new(restore) })
     }
@@ -291,7 +282,8 @@ impl Worker {
     fn read(&mut self, apps: &[Ref]) -> Result<Vec<Raw>> {
         let tops = self.batch(&apps.iter().map(|a| (a.clone(), ACC, "GetChildren", vec![])).collect::<Vec<_>>());
         let mut raws: Vec<Raw> = Vec::new();
-        let mut level: Vec<(Ref, Option<usize>)> = tops.into_iter().flatten().flat_map(|v| v.first().map(Value::fields).unwrap_or(&[]).iter().filter_map(obj).collect::<Vec<_>>()).map(|r| (r, None)).collect();
+        let mut level: Vec<(Ref, Option<usize>)> =
+            tops.into_iter().flatten().flat_map(|v| v.first().map(Value::fields).unwrap_or(&[]).iter().filter_map(obj).collect::<Vec<_>>()).map(|r| (r, None)).collect();
         let mut depth = 0;
         while !level.is_empty() && raws.len() < MAX_NODES {
             level.truncate(MAX_NODES - raws.len());
@@ -489,7 +481,13 @@ impl Worker {
                 self.do_action(&el, &["expand or contract", "expand", "collapse", "toggle", "open", "click", "press"], "ExpandCollapse")
             }
             Action::SetValue(v) => {
-                let ifaces = self.bus.call(&el.0, &el.1, ACC, "GetInterfaces", &[]).ok().and_then(|r| r.first().cloned()).map(|a| a.fields().iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
+                let ifaces = self
+                    .bus
+                    .call(&el.0, &el.1, ACC, "GetInterfaces", &[])
+                    .ok()
+                    .and_then(|r| r.first().cloned())
+                    .map(|a| a.fields().iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>())
+                    .unwrap_or_default();
                 if ifaces.iter().any(|f| f == "org.a11y.atspi.EditableText") {
                     call(self, "org.a11y.atspi.EditableText", "SetTextContents", &[Arg::Str(v)])
                 } else if ifaces.iter().any(|f| f == "org.a11y.atspi.Value") {
@@ -520,7 +518,13 @@ impl Worker {
     /// What node `i` holds now: an editable text's text, or a value's current value.
     fn value(&mut self, i: usize) -> Result<Option<String>> {
         let el = self.elements.get(i).cloned().ok_or_else(|| Error::msg("value: no such element in the last snapshot"))?;
-        let ifaces = self.bus.call(&el.0, &el.1, ACC, "GetInterfaces", &[]).ok().and_then(|r| r.first().cloned()).map(|a| a.fields().iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
+        let ifaces = self
+            .bus
+            .call(&el.0, &el.1, ACC, "GetInterfaces", &[])
+            .ok()
+            .and_then(|r| r.first().cloned())
+            .map(|a| a.fields().iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .unwrap_or_default();
         let got = if ifaces.iter().any(|f| f == "org.a11y.atspi.EditableText") {
             self.bus.call(&el.0, &el.1, "org.a11y.atspi.Text", "GetText", &[Arg::I32(0), Arg::I32(-1)])
         } else if ifaces.iter().any(|f| f == "org.a11y.atspi.Value") {
@@ -638,17 +642,137 @@ fn role_id(role: u32) -> i32 {
 
 /// AT-SPI's role names, by role number.
 const ROLE_NAMES: &[&str] = &[
-    "invalid", "accelerator label", "alert", "animation", "arrow", "calendar", "canvas", "check box", "check menu item", "color chooser", "column header", "combo box", "date editor",
-    "desktop icon", "desktop frame", "dial", "dialog", "directory pane", "drawing area", "file chooser", "filler", "focus traversable", "font chooser", "frame", "glass pane",
-    "html container", "icon", "image", "internal frame", "label", "layered pane", "list", "list item", "menu", "menu bar", "menu item", "option pane", "page tab", "page tab list",
-    "panel", "password text", "popup menu", "progress bar", "push button", "radio button", "radio menu item", "root pane", "row header", "scroll bar", "scroll pane", "separator",
-    "slider", "spin button", "split pane", "status bar", "table", "table cell", "table column header", "table row header", "tearoff menu item", "terminal", "text", "toggle button",
-    "tool bar", "tool tip", "tree", "tree table", "unknown", "viewport", "window", "extended", "header", "footer", "paragraph", "ruler", "application", "autocomplete", "edit bar",
-    "embedded", "entry", "chart", "caption", "document frame", "heading", "page", "section", "redundant object", "form", "link", "input method window", "table row", "tree item",
-    "document spreadsheet", "document presentation", "document text", "document web", "document email", "comment", "list box", "grouping", "image map", "notification", "info bar",
-    "level bar", "title bar", "block quote", "audio", "video", "definition", "article", "landmark", "log", "marquee", "math", "rating", "timer", "static", "math fraction", "math root",
-    "subscript", "superscript", "description list", "description term", "description value", "footnote", "content deletion", "content insertion", "mark", "suggestion",
-    "push button menu", "switch",
+    "invalid",
+    "accelerator label",
+    "alert",
+    "animation",
+    "arrow",
+    "calendar",
+    "canvas",
+    "check box",
+    "check menu item",
+    "color chooser",
+    "column header",
+    "combo box",
+    "date editor",
+    "desktop icon",
+    "desktop frame",
+    "dial",
+    "dialog",
+    "directory pane",
+    "drawing area",
+    "file chooser",
+    "filler",
+    "focus traversable",
+    "font chooser",
+    "frame",
+    "glass pane",
+    "html container",
+    "icon",
+    "image",
+    "internal frame",
+    "label",
+    "layered pane",
+    "list",
+    "list item",
+    "menu",
+    "menu bar",
+    "menu item",
+    "option pane",
+    "page tab",
+    "page tab list",
+    "panel",
+    "password text",
+    "popup menu",
+    "progress bar",
+    "push button",
+    "radio button",
+    "radio menu item",
+    "root pane",
+    "row header",
+    "scroll bar",
+    "scroll pane",
+    "separator",
+    "slider",
+    "spin button",
+    "split pane",
+    "status bar",
+    "table",
+    "table cell",
+    "table column header",
+    "table row header",
+    "tearoff menu item",
+    "terminal",
+    "text",
+    "toggle button",
+    "tool bar",
+    "tool tip",
+    "tree",
+    "tree table",
+    "unknown",
+    "viewport",
+    "window",
+    "extended",
+    "header",
+    "footer",
+    "paragraph",
+    "ruler",
+    "application",
+    "autocomplete",
+    "edit bar",
+    "embedded",
+    "entry",
+    "chart",
+    "caption",
+    "document frame",
+    "heading",
+    "page",
+    "section",
+    "redundant object",
+    "form",
+    "link",
+    "input method window",
+    "table row",
+    "tree item",
+    "document spreadsheet",
+    "document presentation",
+    "document text",
+    "document web",
+    "document email",
+    "comment",
+    "list box",
+    "grouping",
+    "image map",
+    "notification",
+    "info bar",
+    "level bar",
+    "title bar",
+    "block quote",
+    "audio",
+    "video",
+    "definition",
+    "article",
+    "landmark",
+    "log",
+    "marquee",
+    "math",
+    "rating",
+    "timer",
+    "static",
+    "math fraction",
+    "math root",
+    "subscript",
+    "superscript",
+    "description list",
+    "description term",
+    "description value",
+    "footnote",
+    "content deletion",
+    "content insertion",
+    "mark",
+    "suggestion",
+    "push button menu",
+    "switch",
 ];
 
 impl Accessibility for Atspi {

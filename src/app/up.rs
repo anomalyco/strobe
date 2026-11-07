@@ -75,7 +75,11 @@ pub fn run(args: &Args) -> Result<Output> {
         topo.groups.iter().enumerate().map(|(i, g)| format!("CCD{i} {} MB L3{}", g.l3_mb, if topo.vcache().is_some_and(|v| v.mask == g.mask) { " (V-Cache)" } else { "" })).collect();
     s.line("✓", "cpu", format!("{} · {} logical{}", env.cpu, env.logical_cpus, if groups.is_empty() { String::new() } else { format!(" · {}", groups.join(", ")) }));
     let fast = env.power_plan.contains("performance");
-    s.line(if fast { "✓" } else { "i" }, "power", if fast { env.power_plan.clone() } else { format!("{} (benches and timed recordings switch to High performance for the run, then back)", env.power_plan) });
+    s.line(
+        if fast { "✓" } else { "i" },
+        "power",
+        if fast { env.power_plan.clone() } else { format!("{} (benches and timed recordings switch to High performance for the run, then back)", env.power_plan) },
+    );
     match chromium::locate() {
         Ok(p) => s.line("✓", "browser", p.display().to_string()),
         Err(e) => s.line("✗", "browser", format!("{}: {}", e.message, e.hint.unwrap_or_default())),
@@ -630,7 +634,8 @@ pub fn leave(args: &Args) -> Result<Output> {
     // A daemon that quits mid-bench skips putting back the power plan and the CPU sets it changed.
     if mcp::running() && daemon_benching() {
         let running: Vec<String> = super::bench::slot::list().iter().filter(|b| b["daemon"] == true).filter_map(|b| b["exp"].as_str().map(str::to_string)).collect();
-        return Err(Error::usage(format!("the daemon is running a bench ({}): leave would end it halfway", running.join(", "))).hint(format!("strobe bench --stop {}, then strobe leave", running.first().map(String::as_str).unwrap_or("<exp>"))));
+        return Err(Error::usage(format!("the daemon is running a bench ({}): leave would end it halfway", running.join(", ")))
+            .hint(format!("strobe bench --stop {}, then strobe leave", running.first().map(String::as_str).unwrap_or("<exp>"))));
     }
     let mut s = Steps::new("strobe leave");
     // Asked to quit first: removing a service manager's registration would end it mid-write.
@@ -797,4 +802,3 @@ mod jsonc {
         Some(format!("{}{}", &text[..prefix], text[end..].trim_start_matches([' ', '\t']).trim_start_matches(['\r', '\n'])))
     }
 }
-

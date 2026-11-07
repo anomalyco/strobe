@@ -343,14 +343,17 @@ impl Owned {
     pub fn run_to_exit(mut self, deadline: std::time::Duration, stamp: Option<&Path>, on_exit: impl FnOnce()) -> std::io::Result<Usage> {
         let stamped = |me: u32| -> Vec<(u32, String)> {
             stamp
-                .map(|h| pids_in_home(h).into_iter().filter(|p| *p != me).map(|p| (p, super::exe_of(p).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default())).collect())
+                .map(|h| {
+                    pids_in_home(h).into_iter().filter(|p| *p != me).map(|p| (p, super::exe_of(p).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default())).collect()
+                })
                 .unwrap_or_default()
         };
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
             use windows_sys::Win32::System::JobObjects::{
-                JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+                JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation, JobObjectExtendedLimitInformation,
+                QueryInformationJobObject,
             };
             use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, WaitForSingleObject};
             use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
@@ -391,7 +394,9 @@ impl Owned {
             match job {
                 Some(j) => {
                     let mut acct: JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
-                    let ok = unsafe { QueryInformationJobObject(j as _, JobObjectBasicAndIoAccountingInformation, &mut acct as *mut _ as *mut _, std::mem::size_of_val(&acct) as u32, std::ptr::null_mut()) } != 0;
+                    let ok = unsafe {
+                        QueryInformationJobObject(j as _, JobObjectBasicAndIoAccountingInformation, &mut acct as *mut _ as *mut _, std::mem::size_of_val(&acct) as u32, std::ptr::null_mut())
+                    } != 0;
                     if ok {
                         let job_100ns = (acct.BasicInfo.TotalUserTime + acct.BasicInfo.TotalKernelTime).max(0) as u64;
                         usage.started = acct.BasicInfo.TotalProcesses.saturating_sub(1);
@@ -404,7 +409,9 @@ impl Owned {
                         usage.io_refused = Some("Windows: the job holding the command and what it started could not be read".into());
                     }
                     let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-                    if unsafe { QueryInformationJobObject(j as _, JobObjectExtendedLimitInformation, &mut limits as *mut _ as *mut _, std::mem::size_of_val(&limits) as u32, std::ptr::null_mut()) } != 0 {
+                    if unsafe { QueryInformationJobObject(j as _, JobObjectExtendedLimitInformation, &mut limits as *mut _ as *mut _, std::mem::size_of_val(&limits) as u32, std::ptr::null_mut()) }
+                        != 0
+                    {
                         usage.peak_bytes = Some(limits.PeakProcessMemoryUsed as u64);
                     }
                     let pids = || job_pids(j).into_iter().map(|p| (p, super::exe_of(p).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default())).collect::<Vec<_>>();

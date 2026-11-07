@@ -126,16 +126,7 @@ fn covered(x: &X, w: &Info, stack: &[Window]) -> f64 {
 }
 
 fn top(x: &X, w: &Info, stack: &[Window]) -> TopWindow {
-    TopWindow {
-        hwnd: w.win as isize,
-        pid: w.pid,
-        rect: w.rect,
-        client: w.client,
-        visible: w.viewable,
-        iconic: w.hidden,
-        cloaked: w.viewable && covered(x, w, stack) >= 0.99,
-        dpi: x.dpi,
-    }
+    TopWindow { hwnd: w.win as isize, pid: w.pid, rect: w.rect, client: w.client, visible: w.viewable, iconic: w.hidden, cloaked: w.viewable && covered(x, w, stack) >= 0.99, dpi: x.dpi }
 }
 
 /// The largest viewable window of `pids` (at least 100×100 pixels: a strip such as a menu bar is no

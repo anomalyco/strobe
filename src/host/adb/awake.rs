@@ -260,10 +260,7 @@ const DEVICE_INFO: &str = "/data/local/tmp/.strobe-phone.json";
 fn device_lock(d: &Device, holder: &Value) -> Result<std::result::Result<Conn, Value>> {
     // The group's redirection, not `exec 9>>`: the shell opens `exec`'s descriptors close-on-exec, so
     // `flock` would not get it. `cat` keeps the shell, and its descriptor, until the stream closes.
-    let script = format!(
-        "{{ if flock -n 9; then echo {} > {DEVICE_INFO}; echo ok; cat >/dev/null; else echo busy; cat {DEVICE_INFO}; fi; }} 9>>{DEVICE_LOCK}",
-        quote(&holder.to_string())
-    );
+    let script = format!("{{ if flock -n 9; then echo {} > {DEVICE_INFO}; echo ok; cat >/dev/null; else echo busy; cat {DEVICE_INFO}; fi; }} 9>>{DEVICE_LOCK}", quote(&holder.to_string()));
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut c = d.open_shell(&script, Duration::from_secs(10))?;
     let mut out = Vec::new();

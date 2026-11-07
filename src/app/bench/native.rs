@@ -8,8 +8,8 @@ use super::super::record::{Cycles, per_process};
 use super::launch::{Line, found_all, joined, milestones, no_page, screen_times, tail};
 use super::*;
 use crate::driver::native::{Log, Session};
-use crate::probe::present::{PresentCapture, frames};
 use crate::probe::memory;
+use crate::probe::present::{PresentCapture, frames};
 use crate::probe::wakes::{self, Snapshot, Span};
 use crate::target::native::{self as nt, Native};
 use std::cell::OnceCell;
@@ -326,7 +326,8 @@ fn runs(
             Err(e) => presents_err = Some(e.message),
         }
     }
-    let stacks = (set == Set::Attribution && crate::probe::stacks::stacks_available()).then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), ctx.args.get("probes") == Some("waits")));
+    let stacks = (set == Set::Attribution && crate::probe::stacks::stacks_available())
+        .then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), ctx.args.get("probes") == Some("waits")));
     let (root, dir) = (n.pid, home.dir.clone());
     let hooks = super::block::Hooks::new(ctx, move || host::process_set(root, Some(&dir)).iter().map(|p| p.pid).collect());
     let pixels = x.pixels.clone();
@@ -475,10 +476,12 @@ fn runs(
         let _ = se.screen(Duration::from_secs(5));
     }
     let changes_seen = Cell::new(0u64);
-    let read_start = || drive.session.get().and_then(shown::native_start).map(|(st, seen)| {
-        changes_seen.set(seen);
-        st
-    });
+    let read_start = || {
+        drive.session.get().and_then(shown::native_start).map(|(st, seen)| {
+            changes_seen.set(seen);
+            st
+        })
+    };
     let wait_start = |t: Duration| match drive.session.get() {
         Some(se) => se.wait_change(changes_seen.get(), t),
         None => std::thread::sleep(t),
@@ -505,7 +508,10 @@ fn runs(
             && let (Some(sc), Some(from)) = (&start_screen, &launch_screen)
         {
             let se = drive.session.get();
-            let left = shown::expect(&s.expect, sc, "before the runs", se.is_some(), &|sel| se.map_or(Ok(true), |se| se.shows(sel, Duration::from_secs(5)))).err().map(|e| e.message).or_else(|| sc.drifted(from));
+            let left = shown::expect(&s.expect, sc, "before the runs", se.is_some(), &|sel| se.map_or(Ok(true), |se| se.shows(sel, Duration::from_secs(5))))
+                .err()
+                .map(|e| e.message)
+                .or_else(|| sc.drifted(from));
             if let Some(why) = left {
                 notes.push((k - 1, super::batch::left_screen(s, &why)));
                 break;
@@ -986,7 +992,8 @@ fn runs(
             if let Some(why) = &presents_err {
                 // Said once for the bench, so frames that never show are not mistaken for none being drawn.
                 if !ctx.warnings.iter().any(|w| w.id == "NoPresentSource") {
-                    ctx.warnings.push(validity::info("NoPresentSource", format!("frames refused: the OS present events gave nothing ({why}); frames.* and interaction.* are missing from every block")));
+                    ctx.warnings
+                        .push(validity::info("NoPresentSource", format!("frames refused: the OS present events gave nothing ({why}); frames.* and interaction.* are missing from every block")));
                 }
                 for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| frame_metric(m)) {
                     refused.entry(m.clone()).or_insert_with(|| Refusal::new(ValidatorId::NoPresentSource, format!("{m}: OS present events: {why}")));
@@ -1132,7 +1139,8 @@ fn runs(
             .map(|(key, r)| json!({ "run": key, "ms": r.ms, "cpu_ms": r.cpu, "switches": r.span.switches, "wakes_per_s": r.span.wakes_per_s(), "io_read": r.span.io_read, "io_write": r.span.io_write, "counts": r.counts, "elements": r.elements }))
             .collect();
         store::write_json(&dir.join("runs.json"), &json!(run_rows))?;
-        let per: serde_json::Map<String, Value> = all.iter().map(|(key, r)| (key.clone(), json!({ "t0_ns": r.t0, "t1_ns": r.t1, "untimed": r.timed.untimed, "inputs": r.log.inputs, "marks": r.log.marks, "changes": r.changes }))).collect();
+        let per: serde_json::Map<String, Value> =
+            all.iter().map(|(key, r)| (key.clone(), json!({ "t0_ns": r.t0, "t1_ns": r.t1, "untimed": r.timed.untimed, "inputs": r.log.inputs, "marks": r.log.marks, "changes": r.changes }))).collect();
         let first_ok = blocks.iter().flatten().next();
         store::write_json(&dir.join("frames.json"), &json!({ "pids": pids, "display_hz": first_ok.and_then(|b| b.values.get("display.hz")), "runs": per }))?;
         if let Some(Ok(p)) = &presents {
@@ -1157,8 +1165,12 @@ fn runs(
                     })
                     .collect();
                 let runs = native_cases.iter().flat_map(|(_, c)| &c.runs);
-                let sent: Vec<crate::app::video::Sent> =
-                    runs.clone().flat_map(|r| &r.log.inputs).filter(|i| i.kind == "discrete" || (i.kind == "scroll" && i.first)).map(|i| crate::app::video::Sent { t_ns: i.t_ns, press_ns: i.press_ns }).collect();
+                let sent: Vec<crate::app::video::Sent> = runs
+                    .clone()
+                    .flat_map(|r| &r.log.inputs)
+                    .filter(|i| i.kind == "discrete" || (i.kind == "scroll" && i.first))
+                    .map(|i| crate::app::video::Sent { t_ns: i.t_ns, press_ns: i.press_ns })
+                    .collect();
                 let mut marks: Vec<(String, u64)> = runs.flat_map(|r| r.log.marks.iter().cloned()).collect();
                 marks.extend(case_marks.iter().cloned());
                 st.keep(&dir, &filmed, &sent, &marks)
@@ -1212,8 +1224,7 @@ fn runs(
             "note": if set == Set::Attribution { format!("a native block's attribution: OS samples, not timed; {stacks_note}") } else { String::new() },
         });
         if batch {
-            let done: Vec<(&Series, std::ops::Range<usize>, &Block)> =
-                native_cases.iter().zip(&blocks).filter_map(|((k, c), b)| Some((&cases[*k], measured_of(c).1, b.as_ref().ok()?))).collect();
+            let done: Vec<(&Series, std::ops::Range<usize>, &Block)> = native_cases.iter().zip(&blocks).filter_map(|((k, c), b)| Some((&cases[*k], measured_of(c).1, b.as_ref().ok()?))).collect();
             meta["batch"] = super::batch::meta(done.into_iter());
         }
         store::write_json(&dir.join("meta.json"), &meta)?;
@@ -1470,7 +1481,11 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     // A launch timed to its pixels on a Mac without Screen Recording would wait for pixels that never come.
     #[cfg(target_os = "macos")]
     if matches!(until, Until::Painted | Until::Settled) && !host::macos::screen_capture_allowed() {
-        return Err(Error::refused("NoPresentSource", format!("{}: launch.until.window {}: {}", s.case, until_text(&until), super::launch::no_pixels(true)), "grant Screen Recording, or time the launch to a selector or a milestone"));
+        return Err(Error::refused(
+            "NoPresentSource",
+            format!("{}: launch.until.window {}: {}", s.case, until_text(&until), super::launch::no_pixels(true)),
+            "grant Screen Recording, or time the launch to a selector or a milestone",
+        ));
     }
     let warm = match spec["profile"].as_str().unwrap_or("fresh") {
         "fresh" => false,
@@ -1520,7 +1535,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     unattributed(ctx, v, &n);
     // An attribution launch samples native stacks from right after the spawn (the session follows
     // the new tree) until ready, through the helper when it is installed.
-    let mut stacks = (profile && crate::probe::stacks::stacks_available()).then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), ctx.args.get("probes") == Some("waits")));
+    let mut stacks = (profile && crate::probe::stacks::stacks_available())
+        .then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), ctx.args.get("probes") == Some("waits")));
     let result = (|| -> Result<Block> {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1691,7 +1707,9 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             Some(w) => {
                 let session = Session::open(&n.pids(), w.hwnd);
                 let end = shown::native(ctx, s, v, pair, "end", &n.pids(), Some(w.hwnd), session.as_ref().map_err(|e| e.message.clone()));
-                shown::expect(&s.expect, &end, "when the launch was ready", true, &|sel| session.as_ref().map_err(|e| Error::msg(e.message.clone())).and_then(|se| se.shows(sel, Duration::from_secs(5))))?;
+                shown::expect(&s.expect, &end, "when the launch was ready", true, &|sel| {
+                    session.as_ref().map_err(|e| Error::msg(e.message.clone())).and_then(|se| se.shows(sel, Duration::from_secs(5)))
+                })?;
                 // `expect.same` once ready, outside the launch's timed span (SPEC 9.10).
                 same.read(super::journey::When::Setup, &|sel| session.as_ref().map_err(|e| Error::msg(e.message.clone()))?.text(sel, Duration::from_secs(2)))?;
                 Some(shown::Shown { start: shown::Screen::default(), end })
@@ -1761,7 +1779,10 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 let names: BTreeMap<u32, String> = span.threads.iter().filter_map(|t| Some((t.tid, host::thread_name(t.tid)?))).collect();
                 let spans = std::slice::from_ref(span);
                 store::write_json(&dir.join("threads.json"), &json!(wakes::by_thread(spans, &names, &wakes::modules(spans))))?;
-                store::write_json(&dir.join("runs.json"), &json!([{ "run": "launch", "ms": span.ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]))?;
+                store::write_json(
+                    &dir.join("runs.json"),
+                    &json!([{ "run": "launch", "ms": span.ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
+                )?;
                 if !span.threads.is_empty() {
                     meta_values["cpu.wakes"] = json!(span.wakes_per_s());
                     meta_values["io.read"] = json!(span.io_read);

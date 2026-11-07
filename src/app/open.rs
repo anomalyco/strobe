@@ -50,7 +50,8 @@ pub fn run(args: &Args) -> Result<Output> {
         // An older daemon (or none): serve here. `strobe up` lets the daemon serve it instead.
         print!("{text}");
         println!("serving the Perfetto UI here until Ctrl-C (the running daemon {}; `strobe up` lets it serve)", if super::mcp::running() { "is another build" } else { "is not running" });
-        let handler: std::sync::Arc<dyn Fn(http::Request) -> http::Response + Send + Sync> = std::sync::Arc::new(move |req: http::Request| serve(&req, port).unwrap_or_else(|| http::Response::text(404, "not found")));
+        let handler: std::sync::Arc<dyn Fn(http::Request) -> http::Response + Send + Sync> =
+            std::sync::Arc::new(move |req: http::Request| serve(&req, port).unwrap_or_else(|| http::Response::text(404, "not found")));
         http::serve(listener, handler);
     }
     Ok(Output::new(text, out))

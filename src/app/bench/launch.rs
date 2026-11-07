@@ -550,10 +550,9 @@ pub(super) fn refusals(s: &Series, values: &BTreeMap<String, f64>, pixels: &str,
         }
         let r = super::super::outside::not_on_this_os(m).unwrap_or_else(|| match m.as_str() {
             "launch.painted" | "launch.settled" => Refusal::new(ValidatorId::NoPresentSource, format!("{m} reads the window's pixels: {pixels}")),
-            _ if m.starts_with("launch.node.") => Refusal::new(
-                ValidatorId::NotForTarget,
-                format!("{m} is Node's own timing, read over --inspect from an app or exe target's main process (launch.inspect: true); this launch gave none"),
-            ),
+            _ if m.starts_with("launch.node.") => {
+                Refusal::new(ValidatorId::NotForTarget, format!("{m} is Node's own timing, read over --inspect from an app or exe target's main process (launch.inspect: true); this launch gave none"))
+            }
             "cpu.work" => Refusal::new(ValidatorId::RunIncomplete, "cpu.work: no CPU of the app's processes could be read when it was ready"),
             "memory.app.private" | "memory.app.host" if web => {
                 Refusal::new(ValidatorId::NotForTarget, format!("{m}: a page's launch runs in the browser strobe started before it, so its memory is not the launch's"))

@@ -249,7 +249,8 @@ fn sysctl_string(name: &str) -> Option<String> {
         return None;
     }
     let mut buf = vec![0u8; len];
-    (unsafe { libc::sysctlbyname(c.as_ptr(), buf.as_mut_ptr() as *mut c_void, &mut len, std::ptr::null_mut(), 0) } == 0).then(|| String::from_utf8_lossy(&buf[..len]).trim_end_matches('\0').trim().to_string())
+    (unsafe { libc::sysctlbyname(c.as_ptr(), buf.as_mut_ptr() as *mut c_void, &mut len, std::ptr::null_mut(), 0) } == 0)
+        .then(|| String::from_utf8_lossy(&buf[..len]).trim_end_matches('\0').trim().to_string())
 }
 
 fn sysctl_i64(name: &str) -> Option<i64> {
@@ -540,7 +541,14 @@ pub fn own_responsibility(cmd: &mut std::process::Command) -> bool {
         unsafe { libc::posix_spawnattr_destroy(&mut attr) };
         return true;
     }
-    let exec = Disclaimed { argv_p: argv.iter().map(|a| a.as_ptr()).chain([std::ptr::null()]).collect(), envp_p: envp.iter().map(|e| e.as_ptr()).chain([std::ptr::null()]).collect(), path, _argv: argv, _envp: envp, attr };
+    let exec = Disclaimed {
+        argv_p: argv.iter().map(|a| a.as_ptr()).chain([std::ptr::null()]).collect(),
+        envp_p: envp.iter().map(|e| e.as_ptr()).chain([std::ptr::null()]).collect(),
+        path,
+        _argv: argv,
+        _envp: envp,
+        attr,
+    };
     // Only async-signal-safe work after fork: everything is built above.
     unsafe {
         cmd.pre_exec(move || {
@@ -1374,7 +1382,9 @@ pub fn window_placement(id: isize) -> Option<super::Placement> {
 pub fn set_window_frame(id: isize, frame: [f64; 4]) -> crate::model::Result<()> {
     if !accessibility_trusted() {
         let (who, pane) = (responsible_app(), accessibility_pane());
-        return Err(crate::model::Error::usage(format!("page.window() sizes another app's window through the accessibility permission, which {who} (the app strobe runs under) does not have: {pane}")));
+        return Err(crate::model::Error::usage(format!(
+            "page.window() sizes another app's window through the accessibility permission, which {who} (the app strobe runs under) does not have: {pane}"
+        )));
     }
     let w = window_state(id).ok_or_else(|| crate::model::Error::msg("page.window(): the window closed"))?;
     let set = |win: CFTypeRef, name: &str, kind: u32, v: *const c_void| {
@@ -1503,7 +1513,9 @@ pub fn front_window_at(x: f64, y: f64) -> Option<(u32, u32, String)> {
 pub fn window_at(pids: &[u32], x: f64, y: f64) -> Option<u32> {
     windows(LIST_ON_SCREEN | EXCLUDE_DESKTOP, 0)
         .into_iter()
-        .find(|w| pids.contains(&w.pid) && w.alpha > 0.0 && x >= w.bounds.origin.x && y >= w.bounds.origin.y && x < w.bounds.origin.x + w.bounds.size.width && y < w.bounds.origin.y + w.bounds.size.height)
+        .find(|w| {
+            pids.contains(&w.pid) && w.alpha > 0.0 && x >= w.bounds.origin.x && y >= w.bounds.origin.y && x < w.bounds.origin.x + w.bounds.size.width && y < w.bounds.origin.y + w.bounds.size.height
+        })
         .map(|w| w.id)
 }
 

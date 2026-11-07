@@ -153,7 +153,8 @@ fn svg(g: &Grid) -> String {
     }
     // A shown cursor, as a hollow box: where the program left it is part of what it shows.
     if g.cursor_on {
-        out += &format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="{}" stroke-width="2"/>"#, g.cursor.1 as f32 * W + 1.0, g.cursor.0 as f32 * H + 1.0, W - 2.0, H - 2.0, hex(FG));
+        out +=
+            &format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="{}" stroke-width="2"/>"#, g.cursor.1 as f32 * W + 1.0, g.cursor.0 as f32 * H + 1.0, W - 2.0, H - 2.0, hex(FG));
     }
     out + "</svg>"
 }

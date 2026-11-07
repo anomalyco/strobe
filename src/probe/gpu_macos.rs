@@ -10,7 +10,7 @@
 //! in its physical footprint, `memory.app.private`), so `gpu.vram` is refused here, never 0.
 
 use super::gpu::{Adapter, Device, DeviceSample, EngineUse, VramUse};
-use crate::host::macos::{Cf, CFTypeRef, cf_array, cf_get, cf_i64, cf_string, cfstr};
+use crate::host::macos::{CFTypeRef, Cf, cf_array, cf_get, cf_i64, cf_string, cfstr};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char};
 use std::time::{Duration, Instant};

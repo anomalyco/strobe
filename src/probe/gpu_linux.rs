@@ -16,7 +16,8 @@ fn pci_id(addr: &str) -> u64 {
 /// The DRM cards (`/sys/class/drm/cardN`): driver, PCI address and vendor:device ids.
 pub fn adapters() -> Vec<Adapter> {
     let mut out = Vec::new();
-    let mut cards: Vec<_> = std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with("card") && !n.contains('-')).collect();
+    let mut cards: Vec<_> =
+        std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with("card") && !n.contains('-')).collect();
     cards.sort();
     for card in cards {
         let dev = std::path::Path::new("/sys/class/drm").join(&card).join("device");
@@ -59,7 +60,17 @@ fn parse(text: &str, pid: u32) -> Option<(String, Client)> {
         let Some((k, v)) = line.split_once(':') else { continue };
         let v = v.trim();
         let num = || v.split_whitespace().next().and_then(|n| n.parse::<u64>().ok());
-        let bytes = || num().map(|n| n * if v.ends_with("KiB") { 1024 } else if v.ends_with("MiB") { 1 << 20 } else { 1 });
+        let bytes = || {
+            num().map(|n| {
+                n * if v.ends_with("KiB") {
+                    1024
+                } else if v.ends_with("MiB") {
+                    1 << 20
+                } else {
+                    1
+                }
+            })
+        };
         if k == "drm-client-id" {
             id = Some(v.to_string());
         } else if k == "drm-pdev" {
@@ -79,7 +90,13 @@ fn parse(text: &str, pid: u32) -> Option<(String, Client)> {
         }
     }
     // Resident where the driver says, else committed, else the older per-region counters (amdgpu).
-    let regions = if !resident.is_empty() { resident } else if !total.is_empty() { total } else { legacy };
+    let regions = if !resident.is_empty() {
+        resident
+    } else if !total.is_empty() {
+        total
+    } else {
+        legacy
+    };
     for (r, b) in regions {
         if r.starts_with("vram") || r.starts_with("local") || r.starts_with("stolen") {
             c.local += b;
@@ -115,11 +132,7 @@ fn rendering_cards() -> Vec<u64> {
         .collect();
     let driver = |dev: &std::path::Path| std::fs::read_link(dev.join("driver")).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default();
     let renders: Vec<&std::path::PathBuf> = entries.iter().filter(|(n, d)| n.starts_with("renderD") && driver(d) != "vgem").map(|(_, d)| d).collect();
-    entries
-        .iter()
-        .filter(|(n, d)| n.starts_with("card") && !n.contains('-') && renders.contains(&d))
-        .filter_map(|(_, d)| d.file_name().map(|f| pci_id(&f.to_string_lossy())))
-        .collect()
+    entries.iter().filter(|(n, d)| n.starts_with("card") && !n.contains('-') && renders.contains(&d)).filter_map(|(_, d)| d.file_name().map(|f| pci_id(&f.to_string_lossy()))).collect()
 }
 
 impl Kmt {
@@ -249,7 +262,12 @@ impl Nvml {
         let mut devices = Vec::new();
         let mut paths = Vec::new();
         for (i, a) in adapters.iter().enumerate() {
-            let card = std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten().map(|e| e.path().join("device")).find(|d| std::fs::canonicalize(d).ok().and_then(|p| p.file_name().map(|n| pci_id(&n.to_string_lossy()))) == Some(a.luid));
+            let card = std::fs::read_dir("/sys/class/drm")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path().join("device"))
+                .find(|d| std::fs::canonicalize(d).ok().and_then(|p| p.file_name().map(|n| pci_id(&n.to_string_lossy()))) == Some(a.luid));
             let Some(dev) = card.filter(|d| d.join("gpu_busy_percent").is_file()) else { continue };
             let total = std::fs::read_to_string(dev.join("mem_info_vram_total")).ok().and_then(|s| s.trim().parse::<f64>().ok()).map(|b| b / (1 << 20) as f64);
             devices.push(Device { name: a.name.clone(), adapter: Some(i as u16), vram_total_mb: total });
@@ -262,7 +280,12 @@ impl Nvml {
         out.clear();
         for p in &self.paths {
             let read = |f: &str| std::fs::read_to_string(p.join(f)).ok().and_then(|s| s.trim().parse::<f64>().ok());
-            out.push(DeviceSample { gpu_pct: read("gpu_busy_percent"), mem_pct: read("mem_busy_percent"), vram_used_mb: read("mem_info_vram_used").map(|b| b / (1 << 20) as f64), ..DeviceSample::default() });
+            out.push(DeviceSample {
+                gpu_pct: read("gpu_busy_percent"),
+                mem_pct: read("mem_busy_percent"),
+                vram_used_mb: read("mem_info_vram_used").map(|b| b / (1 << 20) as f64),
+                ..DeviceSample::default()
+            });
         }
     }
 }

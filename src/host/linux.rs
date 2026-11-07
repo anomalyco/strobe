@@ -87,10 +87,7 @@ fn name(s: &Stat) -> String {
 /// Private memory: resident and swapped pages no other process maps (`smaps_rollup`).
 fn private_bytes(pid: u32) -> u64 {
     let Some(text) = read(format!("/proc/{pid}/smaps_rollup")) else { return 0 };
-    text.lines()
-        .filter(|l| l.starts_with("Private_Clean:") || l.starts_with("Private_Dirty:") || l.starts_with("Swap:"))
-        .filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-        .sum::<u64>()
+    text.lines().filter(|l| l.starts_with("Private_Clean:") || l.starts_with("Private_Dirty:") || l.starts_with("Swap:")).filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).sum::<u64>()
         * 1024
 }
 
@@ -582,7 +579,10 @@ pub fn os_name() -> String {
 pub fn cpu_name() -> String {
     let info = read("/proc/cpuinfo").unwrap_or_default();
     let field = |k: &str| info.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_once(':')).map(|(_, v)| v.trim().to_string()).filter(|v| !v.is_empty());
-    field("model name").or_else(|| field("Hardware")).or_else(|| read("/sys/firmware/devicetree/base/model").map(|s| s.trim_end_matches('\0').to_string())).unwrap_or_else(|| std::env::consts::ARCH.into())
+    field("model name")
+        .or_else(|| field("Hardware"))
+        .or_else(|| read("/sys/firmware/devicetree/base/model").map(|s| s.trim_end_matches('\0').to_string()))
+        .unwrap_or_else(|| std::env::consts::ARCH.into())
 }
 
 /// The CPU frequency policy: cpufreq's governor (and the energy preference and platform profile when
@@ -619,7 +619,9 @@ pub fn virtual_machine() -> Option<String> {
     let flagged = read("/proc/cpuinfo").is_some_and(|t| t.lines().any(|l| l.starts_with("flags") && l.split_whitespace().any(|f| f == "hypervisor")));
     let dmi = |f: &str| read(format!("/sys/class/dmi/id/{f}")).map(|s| s.trim().to_string()).unwrap_or_default();
     let text = format!("{} {}", dmi("sys_vendor"), dmi("product_name")).trim().to_string();
-    let named = ["QEMU", "KVM", "VMware", "VirtualBox", "Xen", "Parallels", "Virtual Machine", "Bochs", "Google Compute Engine", "Amazon EC2", "Droplet", "OpenStack", "Hetzner"].iter().any(|m| text.contains(m));
+    let named = ["QEMU", "KVM", "VMware", "VirtualBox", "Xen", "Parallels", "Virtual Machine", "Bochs", "Google Compute Engine", "Amazon EC2", "Droplet", "OpenStack", "Hetzner"]
+        .iter()
+        .any(|m| text.contains(m));
     (flagged || named).then(|| if text.is_empty() { "hypervisor".into() } else { text })
 }
 
@@ -669,7 +671,8 @@ pub fn keep_awake(system: bool, display: bool) {
     }
     if display && held.1.is_none() {
         held.1 = Conn::session().ok().and_then(|mut c| {
-            let r = c.call("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver", "Inhibit", &[Arg::Str("strobe"), Arg::Str("a measurement is running")]).ok()?;
+            let r =
+                c.call("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver", "Inhibit", &[Arg::Str("strobe"), Arg::Str("a measurement is running")]).ok()?;
             let cookie = r.first()?.as_i64()? as u32;
             Some((c, cookie))
         });
@@ -792,7 +795,8 @@ pub fn outputs() -> Vec<Output> {
         let fd = f.as_raw_fd();
         let mut name = [0u8; 64];
         let mut v = Version { major: 0, minor: 0, patch: 0, name_len: name.len(), name: name.as_mut_ptr(), date_len: 0, date: std::ptr::null_mut(), desc_len: 0, desc: std::ptr::null_mut() };
-        let driver = if unsafe { libc::ioctl(fd, iowr(0x00, std::mem::size_of::<Version>()) as _, &mut v) } == 0 { String::from_utf8_lossy(&name[..v.name_len.min(64)]).to_string() } else { String::new() };
+        let driver =
+            if unsafe { libc::ioctl(fd, iowr(0x00, std::mem::size_of::<Version>()) as _, &mut v) } == 0 { String::from_utf8_lossy(&name[..v.name_len.min(64)]).to_string() } else { String::new() };
         let mut res = CardRes::default();
         if unsafe { libc::ioctl(fd, iowr(0xA0, 64) as _, &mut res) } != 0 || res.n_crtcs == 0 {
             continue;

@@ -35,6 +35,18 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+  # The tree stays rustfmt-clean, so a builder's `cargo fmt` only ever touches its own lines.
+  fmt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
+      - name: Format
+        run: cargo fmt --all --check
+
   # Rule 15 (SPEC §1): no product names outside scripts/generic.ts's allowlist.
   generic:
     runs-on: ubuntu-24.04

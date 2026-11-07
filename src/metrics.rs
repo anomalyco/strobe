@@ -93,7 +93,8 @@ pub struct Vsync {
 /// The stages of a frame report (Chromium's `PipelineReporter` children) on the renderer's side: its
 /// compositor thread begins the frame, the main thread runs and commits, the compositor activates the
 /// tree and submits the frame (or, with the display tree in the GPU process, its update).
-pub const STAGES_RENDERER: [&str; 6] = ["BeginImplFrameToSendBeginMainFrame", "SendBeginMainFrameToCommit", "Commit", "Activation", "EndActivateToSubmitCompositorFrame", "EndActivateToSubmitUpdateDisplayTree"];
+pub const STAGES_RENDERER: [&str; 6] =
+    ["BeginImplFrameToSendBeginMainFrame", "SendBeginMainFrameToCommit", "Commit", "Activation", "EndActivateToSubmitCompositorFrame", "EndActivateToSubmitUpdateDisplayTree"];
 /// The GPU process's side: tiles raster between commit and activation, and the display compositor
 /// draws to its swap (the children of the submit-to-presentation stage, by name on each platform).
 /// Its waits (the frame in flight to the display compositor, its deadline, the buffer's latch and the
@@ -484,7 +485,15 @@ select 'paint', w.k, c.ts, null, null,
                 let (state, kind, split, id) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
                 let split = split.split_once(':').and_then(|(c, g)| Some((c.parse::<f64>().ok()? as i64, g.parse::<f64>().ok()? as i64)));
                 let id = id.parse::<i64>().unwrap_or(-1);
-                data.frames.entry(key).or_default().push(Frame { ts: num(&row[2]), dur: num(&row[3]), state: state.to_string(), seq: row[4].clone().unwrap_or_default(), forked: kind == "FORKED", split, id });
+                data.frames.entry(key).or_default().push(Frame {
+                    ts: num(&row[2]),
+                    dur: num(&row[3]),
+                    state: state.to_string(),
+                    seq: row[4].clone().unwrap_or_default(),
+                    forked: kind == "FORKED",
+                    split,
+                    id,
+                });
             }
             "task" => data.tasks.entry(key).or_default().push((num(&row[2]), num(&row[3]))),
             "lat" => data.latencies.entry(key).or_default().push((num(&row[2]), num(&row[3]), row[5].clone().unwrap_or_default())),

@@ -40,7 +40,10 @@ impl From<chromium::Page> for WebPage {
 /// no browser a person runs (Safari is macOS only, Playwright's WebKit build is a test shell), and
 /// Safari has no headless mode; a headed page on Linux with no display has no window to open.
 pub fn refusal(engine: WebEngine, headless: bool) -> Option<Error> {
-    if !headless && cfg!(target_os = "linux") && let Some(why) = chromium::no_display() {
+    if !headless
+        && cfg!(target_os = "linux")
+        && let Some(why) = chromium::no_display()
+    {
         let (name, fix) = match engine {
             WebEngine::Chromium => ("Chromium", "run it headless (--headless), or give it a virtual display (xvfb-run -a strobe …), where frame and GPU metrics are refused as software rendering"),
             WebEngine::Firefox => ("Firefox", "run it headless (--headless), or give it a virtual display (xvfb-run -a strobe …), where frame and GPU metrics are refused as software rendering"),
@@ -60,11 +63,10 @@ pub fn refusal(engine: WebEngine, headless: bool) -> Option<Error> {
         }
         // Without a display a headless WebKit page would run in WPE, whose headless view is a touch device
         // to its pages ((hover: none), a coarse pointer, no fine one): every desktop block would refuse.
-        WebEngine::Webkit if headless && webkit::find(true).is_some_and(|i| i.flavor == webkit::Flavor::Wpe) => Refusal::new(
-            ValidatorId::DeviceMismatch,
-            "a headless WebKit page here runs in WPE WebKit (no display for WebKitGTK), whose headless view is a touch device to its pages, not a desktop",
-        )
-        .fix("run WebKitGTK on a virtual display (xvfb-run -a strobe … --headless), or measure the page in Chromium or Firefox"),
+        WebEngine::Webkit if headless && webkit::find(true).is_some_and(|i| i.flavor == webkit::Flavor::Wpe) => {
+            Refusal::new(ValidatorId::DeviceMismatch, "a headless WebKit page here runs in WPE WebKit (no display for WebKitGTK), whose headless view is a touch device to its pages, not a desktop")
+                .fix("run WebKitGTK on a virtual display (xvfb-run -a strobe … --headless), or measure the page in Chromium or Firefox")
+        }
         _ => return None,
     };
     Some(r.into())
@@ -234,9 +236,12 @@ pub fn launch(engine: WebEngine, window: &Window, headless: bool, cpus: Option<u
 pub fn refusal_as(engine: WebEngine, headless: bool, emulation: &Emulation) -> Option<Error> {
     if engine == WebEngine::Webkit && *emulation != Emulation::default() {
         return Some(
-            Refusal::new(ValidatorId::EngineUnsupported, format!("an emulated {} page in WebKit: WebDriver Classic has no setting for the input devices, touch points or user agent a page sees", emulation.kind()))
-                .fix("emulate the phone or touch screen in Chromium or Firefox, or measure the page as a desktop in WebKit")
-                .into(),
+            Refusal::new(
+                ValidatorId::EngineUnsupported,
+                format!("an emulated {} page in WebKit: WebDriver Classic has no setting for the input devices, touch points or user agent a page sees", emulation.kind()),
+            )
+            .fix("emulate the phone or touch screen in Chromium or Firefox, or measure the page as a desktop in WebKit")
+            .into(),
         );
     }
     refusal(engine, headless)
@@ -578,9 +583,12 @@ impl WebPage {
         if got == (viewport.0 as u64, viewport.1 as u64) {
             return Ok(());
         }
-        Err(Refusal::new(ValidatorId::DisplayTooSmall, format!("the page is {}×{}, not the {}×{} viewport it was fitted to: a desktop browser's window has a minimum size", got.0, got.1, viewport.0, viewport.1))
-            .fix("run a phone headless (--headless), which has no window to keep wide")
-            .into())
+        Err(Refusal::new(
+            ValidatorId::DisplayTooSmall,
+            format!("the page is {}×{}, not the {}×{} viewport it was fitted to: a desktop browser's window has a minimum size", got.0, got.1, viewport.0, viewport.1),
+        )
+        .fix("run a phone headless (--headless), which has no window to keep wide")
+        .into())
     }
 
     /// Navigates and waits for the load event.

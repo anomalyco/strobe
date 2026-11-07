@@ -16,9 +16,9 @@
 //! strobe takes no lock of the target and calls nothing in it, so the target cannot stall strobe.
 //! Samples are capped at one per thread per 2 ms and 4,000 a second in all.
 
-use crate::probe::stacks::{Deep, Module, SuspendStats, Targets};
 use crate::host;
 use crate::model::{Error, Result};
+use crate::probe::stacks::{Deep, Module, SuspendStats, Targets};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -340,7 +340,12 @@ fn functions(process: HANDLE, base: u64) -> Vec<(u32, u32, u32)> {
             return Some(Vec::new());
         }
         let raw = read_bytes(process, base + rva as u64, size as usize - size as usize % 12)?;
-        let mut f: Vec<(u32, u32, u32)> = raw.as_chunks::<12>().0.iter().map(|c| (u32::from_le_bytes([c[0], c[1], c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]), u32::from_le_bytes([c[8], c[9], c[10], c[11]]))).collect();
+        let mut f: Vec<(u32, u32, u32)> = raw
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|c| (u32::from_le_bytes([c[0], c[1], c[2], c[3]]), u32::from_le_bytes([c[4], c[5], c[6], c[7]]), u32::from_le_bytes([c[8], c[9], c[10], c[11]])))
+            .collect();
         f.sort_unstable();
         Some(f)
     };
@@ -382,14 +387,24 @@ fn unwind(p: &mut Process, mut regs: [u64; 17], stack: &[u8]) -> Vec<u64> {
         let (handle, base) = (p.handle, p.modules[i].base);
         let table = p.modules[i].functions.get_or_insert_with(|| functions(handle, base));
         let rva = (at - base) as u32;
-        let f = match table.binary_search_by(|f| if rva < f.0 { std::cmp::Ordering::Greater } else if rva >= f.1 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Equal }) {
+        let f = match table.binary_search_by(|f| {
+            if rva < f.0 {
+                std::cmp::Ordering::Greater
+            } else if rva >= f.1 {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        }) {
             Ok(k) => Some(table[k]),
             Err(_) => None,
         };
         let ok = match f {
             // A leaf function (no unwind data): the return address is at RSP.
             None => pop_return(&mut regs, &mem),
-            Some((begin, _, info)) => (depth == 0 && epilog(handle, &mut regs, &mem)) || unwind_info(p, base, info, rva - begin, true, &mut regs, &mem).is_some_and(|machine| machine || pop_return(&mut regs, &mem)),
+            Some((begin, _, info)) => {
+                (depth == 0 && epilog(handle, &mut regs, &mem)) || unwind_info(p, base, info, rva - begin, true, &mut regs, &mem).is_some_and(|machine| machine || pop_return(&mut regs, &mem))
+            }
         };
         if !ok || regs[4] < lo {
             break;
@@ -427,11 +442,29 @@ fn unwind_info(p: &mut Process, base: u64, rva: u32, offset: u32, primary: bool,
         let (at, op, info) = (codes[2 * k] as u32, codes[2 * k + 1] & 0xF, (codes[2 * k + 1] >> 4) as usize);
         let slots = match op {
             0 | 2 | 3 | 10 => 1,
-            1 => if info == 0 { 2 } else { 3 },
+            1 => {
+                if info == 0 {
+                    2
+                } else {
+                    3
+                }
+            }
             4 | 8 => 2,
             5 | 9 => 3,
-            6 => if version >= 2 { 1 } else { 2 },
-            7 => if version >= 2 { 2 } else { 3 },
+            6 => {
+                if version >= 2 {
+                    1
+                } else {
+                    2
+                }
+            }
+            7 => {
+                if version >= 2 {
+                    2
+                } else {
+                    3
+                }
+            }
             _ => return None,
         };
         if k + slots > count {

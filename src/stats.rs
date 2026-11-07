@@ -652,7 +652,26 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
         let estimate = if dist <= 0.0 || hw <= 0.0 { usize::MAX } else { ((n as f64) * (hw / dist).powi(2)).ceil() as usize };
         estimate.max(min_pairs(confidence))
     });
-    Comparison { metric: name.to_string(), n, base, head, estimate: est, lo, hi, relative, confidence: achieved, p, bound: bound_abs, verdict, kind, decided, needed_pairs, exact: false, noworse: None, refusal: None }
+    Comparison {
+        metric: name.to_string(),
+        n,
+        base,
+        head,
+        estimate: est,
+        lo,
+        hi,
+        relative,
+        confidence: achieved,
+        p,
+        bound: bound_abs,
+        verdict,
+        kind,
+        decided,
+        needed_pairs,
+        exact: false,
+        noworse: None,
+        refusal: None,
+    }
 }
 
 /// Pairs a verdict needs, projected from a robust spread of the differences so far (1.4826·MAD,

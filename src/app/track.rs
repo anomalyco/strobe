@@ -290,7 +290,14 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         let label = s["label"].as_str().unwrap_or("").to_string();
         let blocks_v: Vec<&Value> = s["blocks"].as_array().into_iter().flatten().collect();
         let values: Vec<f64> = blocks_v.iter().filter_map(|b| b["values"][&metric].as_f64()).filter(|v| v.is_finite()).collect();
-        let displays: Vec<&str> = blocks_v.iter().map(|b| match b["display"].as_u64() { Some(0) => "off", Some(_) => "on", None => "unknown" }).collect();
+        let displays: Vec<&str> = blocks_v
+            .iter()
+            .map(|b| match b["display"].as_u64() {
+                Some(0) => "off",
+                Some(_) => "on",
+                None => "unknown",
+            })
+            .collect();
         let display = majority(&displays);
         let session = match s["session"].as_str() {
             Some("mixed") | None => majority(&blocks_v.iter().map(|b| if b["locked"] == true { "locked" } else { "unlocked" }).collect::<Vec<_>>()),
@@ -303,7 +310,13 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
             // A refusal across the blocks (TailTooShort, NoPhase, a block's): no value, whatever the blocks hold.
             why = Some(s["primary"]["verdict"].as_str().unwrap_or("refused").to_string());
         } else if values.len() < MIN_BLOCKS {
-            why = Some(blocks_v.iter().find_map(|b| b["refused"][&metric].as_str()).map(|w| format!("refused ({w})")).unwrap_or_else(|| format!("{} of {} blocks gave {metric}", values.len(), blocks_v.len())));
+            why = Some(
+                blocks_v
+                    .iter()
+                    .find_map(|b| b["refused"][&metric].as_str())
+                    .map(|w| format!("refused ({w})"))
+                    .unwrap_or_else(|| format!("{} of {} blocks gave {metric}", values.len(), blocks_v.len())),
+            );
         } else if s["session"] == "mixed" {
             why = Some("refused (SessionLocked): blocks ran both locked and unlocked".into());
         } else if displays.iter().any(|d| *d != displays[0]) {
@@ -395,9 +408,11 @@ fn majority(v: &[&str]) -> String {
 /// The equivalence bound for a series: `--equivalence`, else the project's, else 2%.
 pub(crate) fn bound(args: &Args, s: &history::Series) -> f64 {
     let root = PathBuf::from(s.meta["root"].as_str().unwrap_or("."));
-    args.num("equivalence").ok().flatten().map(|b| b / 100.0).unwrap_or_else(|| {
-        config::load(&root).unwrap_or_default()["metrics"]["equivalence"].as_str().and_then(|e| e.trim_end_matches('%').parse::<f64>().ok()).unwrap_or(2.0) / 100.0
-    })
+    args.num("equivalence")
+        .ok()
+        .flatten()
+        .map(|b| b / 100.0)
+        .unwrap_or_else(|| config::load(&root).unwrap_or_default()["metrics"]["equivalence"].as_str().and_then(|e| e.trim_end_matches('%').parse::<f64>().ok()).unwrap_or(2.0) / 100.0)
 }
 
 /// Runs the detector on a series and appends the changes it has not seen yet as `suspected`. A port's
@@ -420,8 +435,10 @@ fn detect_run(s: &history::Series, args: &Args, valid: &[&Value], logs: bool) ->
     let ratio = !logs && valid.iter().all(|p| p["ratio"] == true);
     let tf = |v: f64| if ratio { v.ln() } else { v };
     let back = |v: f64| if ratio || logs { v.exp() } else { v };
-    let pts: Vec<detect::Point> =
-        valid.iter().map(|p| detect::Point { x: tf(p["median"].as_f64().unwrap_or(f64::NAN)), blocks: p["values"].as_array().into_iter().flatten().filter_map(Value::as_f64).map(tf).collect() }).collect();
+    let pts: Vec<detect::Point> = valid
+        .iter()
+        .map(|p| detect::Point { x: tf(p["median"].as_f64().unwrap_or(f64::NAN)), blocks: p["values"].as_array().into_iter().flatten().filter_map(Value::as_f64).map(tf).collect() })
+        .collect();
     let b = bound(args, s);
     let level = detect::median(&valid.iter().filter_map(|p| p["median"].as_f64()).collect::<Vec<_>>()).abs();
     let params = detect::Params { min_segment: 3, alpha: 0.001, bound: if ratio || logs { (1.0 + b).ln() } else { (b * level).max(0.5) }, k_sigma: 3.0 };
@@ -632,7 +649,12 @@ fn confirm(args: &Args, s: &history::Series, c: &Value) -> Result<(String, Value
     }
     history::append(&s.id, &json!({ "t": "change", "id": cid, "culprit": culprit, "bisect": bisect }))?;
     text += &match (&culprit, &bisect) {
-        (Value::Object(_), _) => format!("  {cid}  culprit {} {}{}\n", culprit["short"].as_str().unwrap_or(""), culprit["subject"].as_str().unwrap_or(""), bisect["exp"].as_str().map(|e| format!(" · bisect {e}")).unwrap_or_default()),
+        (Value::Object(_), _) => format!(
+            "  {cid}  culprit {} {}{}\n",
+            culprit["short"].as_str().unwrap_or(""),
+            culprit["subject"].as_str().unwrap_or(""),
+            bisect["exp"].as_str().map(|e| format!(" · bisect {e}")).unwrap_or_default()
+        ),
         (_, b) => format!("  {cid}  bisect: {}\n", b["verdict"].as_str().or(b["error"].as_str()).unwrap_or("")),
     };
     result["culprit"] = culprit.clone();
@@ -667,9 +689,17 @@ fn alert(args: &Args, s: &history::Series, c: &Value) -> Result<Value> {
     let change = if cf["relative"] == true {
         format!("{} [{} … {}]", fmt::pct(cf["estimate"].as_f64().unwrap_or(f64::NAN)), fmt::pct(cf["lo"].as_f64().unwrap_or(f64::NAN)), fmt::pct(cf["hi"].as_f64().unwrap_or(f64::NAN)))
     } else {
-        format!("{} [{} … {}]", fmt::signed(cf["estimate"].as_f64().unwrap_or(f64::NAN), unit), fmt::signed(cf["lo"].as_f64().unwrap_or(f64::NAN), unit), fmt::signed(cf["hi"].as_f64().unwrap_or(f64::NAN), unit))
+        format!(
+            "{} [{} … {}]",
+            fmt::signed(cf["estimate"].as_f64().unwrap_or(f64::NAN), unit),
+            fmt::signed(cf["lo"].as_f64().unwrap_or(f64::NAN), unit),
+            fmt::signed(cf["hi"].as_f64().unwrap_or(f64::NAN), unit)
+        )
     };
-    let culprit = c["culprit"]["short"].as_str().map(|sh| format!("{sh} {}", c["culprit"]["subject"].as_str().unwrap_or(""))).unwrap_or_else(|| format!("in {}..{}", c["good_short"].as_str().unwrap_or(""), c["bad_short"].as_str().unwrap_or("")));
+    let culprit = c["culprit"]["short"]
+        .as_str()
+        .map(|sh| format!("{sh} {}", c["culprit"]["subject"].as_str().unwrap_or("")))
+        .unwrap_or_else(|| format!("in {}..{}", c["good_short"].as_str().unwrap_or(""), c["bad_short"].as_str().unwrap_or("")));
     // A port's change was confirmed on its head alone: say whose.
     let label = match (s.implementations(), s.meta["head_name"].as_str(), s.meta["base_name"].as_str()) {
         (true, Some(h), Some(b)) => format!("{} ({h} vs {b}; paired A/B of {h})", s.meta["label"].as_str().unwrap_or("")),

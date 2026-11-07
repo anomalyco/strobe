@@ -271,11 +271,7 @@ pub fn activate(pid: u32) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    Err(Error::refused(
-        "WindowHidden",
-        "macOS gives keys only to the active app, and the app did not come to the front",
-        "let the app be the active one while strobe types into it",
-    ))
+    Err(Error::refused("WindowHidden", "macOS gives keys only to the active app, and the app did not come to the front", "let the app be the active one while strobe types into it"))
 }
 
 /// The process whose element the window server hit-tests at a point, and that element (`describe`
@@ -587,11 +583,7 @@ impl Worker {
         let title = copy(at.0, "AXTitle").and_then(|v| cf_string(v.0)).unwrap_or_default();
         let id = copy(at.0, "AXIdentifier").and_then(|v| cf_string(v.0)).filter(|s| !s.is_empty()).map(|s| format!(" (key {s:?})")).unwrap_or_default();
         let what = format!("{} {title:?}{id}", role.trim_start_matches("AX").to_lowercase());
-        Ok(Err(if self.pids.contains(&(pid as u32)) {
-            format!("{what} of the app itself, such as a dialog or an overlay it shows over the element")
-        } else {
-            format!("{what} of process {pid}")
-        }))
+        Ok(Err(if self.pids.contains(&(pid as u32)) { format!("{what} of the app itself, such as a dialog or an overlay it shows over the element") } else { format!("{what} of process {pid}") }))
     }
 
     fn act(&self, i: usize, action: &Action) -> Result<u64> {

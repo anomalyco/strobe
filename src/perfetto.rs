@@ -716,7 +716,12 @@ impl Builder {
         for (pid, list) in by_pid {
             let track = self.track_under(Some(group), &format!("presents · pid {pid}{}", if app.contains(&pid) { " (the app)" } else { "" }), if app.contains(&pid) { 0 } else { 1 }, None);
             for x in list {
-                let mut args: Vec<(String, Value)> = vec![("mode".into(), x.mode.clone().into()), ("tid".into(), x.tid.into()), ("swapchain".into(), format!("{:#x}", x.swapchain).into()), ("sync_interval".into(), x.sync_interval.into())];
+                let mut args: Vec<(String, Value)> = vec![
+                    ("mode".into(), x.mode.clone().into()),
+                    ("tid".into(), x.tid.into()),
+                    ("swapchain".into(), format!("{:#x}", x.swapchain).into()),
+                    ("sync_interval".into(), x.sync_interval.into()),
+                ];
                 if x.screen_ns > 0 {
                     args.push(("on screen after (ms)".into(), (x.screen_ns.saturating_sub(x.start_ns) as f64 / 1e6).into()));
                 }
@@ -786,11 +791,7 @@ impl Builder {
         // Each part's value on a tick and the span it covers before the tick's end (0: a reading
         // at the end, not a rate): CPU every tick, GPU and memory on the ticks that read them.
         type Part = fn(&crate::probe::os::OwnTick) -> Option<(f32, u64)>;
-        let parts: [(&str, &str, Part); 3] = [
-            ("CPU % of a core", "%", |t| Some((t.2?, t.1))),
-            ("GPU % of an engine", "%", |t| Some((t.3?, t.4))),
-            ("private memory (MB)", "MB", |t| Some((t.5?, 0))),
-        ];
+        let parts: [(&str, &str, Part); 3] = [("CPU % of a core", "%", |t| Some((t.2?, t.1))), ("GPU % of an engine", "%", |t| Some((t.3?, t.4))), ("private memory (MB)", "MB", |t| Some((t.5?, 0)))];
         let group = self.track("strobe itself (its own process)", 40, None);
         for (name, unit, get) in parts {
             let points: Vec<(u64, u64, f32)> = own.ticks.iter().filter_map(|t| get(t).map(|(v, span)| (t.0, span, v))).collect();
@@ -822,7 +823,12 @@ impl Builder {
         let mut args = Vec::new();
         flatten("", meta, &["os.cores", "os.strobe.ticks", "census", "token", "background"], &mut args);
         let track = self.track("recording", -1, None);
-        let name = format!("{} · {}{}", meta["id"].as_str().unwrap_or("recording"), if meta["valid"] == false { "invalid" } else { "valid" }, meta["timing"].as_str().map(|t| format!(" · timing {t}")).unwrap_or_default());
+        let name = format!(
+            "{} · {}{}",
+            meta["id"].as_str().unwrap_or("recording"),
+            if meta["valid"] == false { "invalid" } else { "valid" },
+            meta["timing"].as_str().map(|t| format!(" · timing {t}")).unwrap_or_default()
+        );
         self.slice(track, clock, lo, hi, &name, &args);
     }
 
@@ -1089,7 +1095,17 @@ impl Builder {
                         if !*ok && frames.last().is_some_and(|f| !f.ok && f.name == *name) {
                             continue;
                         }
-                        frames.push(StackFrame { name: name.clone(), file: file.clone(), line: *line, column: 0, mapping: mapping.clone(), rel_pc: Some(rel), kind: Some(if a >= kernel { 2 } else { 1 }), kind_str: None, ok: *ok });
+                        frames.push(StackFrame {
+                            name: name.clone(),
+                            file: file.clone(),
+                            line: *line,
+                            column: 0,
+                            mapping: mapping.clone(),
+                            rel_pc: Some(rel),
+                            kind: Some(if a >= kernel { 2 } else { 1 }),
+                            kind_str: None,
+                            ok: *ok,
+                        });
                     }
                 }
                 (!frames.is_empty()).then(|| st.callstack(&frames))

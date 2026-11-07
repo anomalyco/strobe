@@ -465,7 +465,8 @@ impl Counters {
         #[cfg(target_os = "linux")]
         {
             c.missing[1] = Some(Uncounted::NoSource(
-                "Linux gives no per-process CPU energy: RAPL counts a whole package (every process on it, and strobe), so no share of it is the app's, and strobe never estimates one from CPU time".into(),
+                "Linux gives no per-process CPU energy: RAPL counts a whole package (every process on it, and strobe), so no share of it is the app's, and strobe never estimates one from CPU time"
+                    .into(),
             ));
             c.missing[2] = Some(Uncounted::NoSource("Linux counts no package idle wakeups per process".into()));
             if let Some(perf) = perf {

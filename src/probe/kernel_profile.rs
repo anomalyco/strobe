@@ -269,10 +269,47 @@ fn wait_kind(state: u8, reason: u8) -> (crate::probe::stacks::WaitKind, &'static
     use crate::probe::stacks::WaitKind::*;
     // KTHREAD_STATE: Ready 1, Standby 3, DeferredReady 7 (preempted, still runnable); Waiting 5.
     const REASONS: [&str; 41] = [
-        "Executive", "FreePage", "PageIn", "PoolAllocation", "DelayExecution", "Suspended", "UserRequest", "WrExecutive", "WrFreePage", "WrPageIn", "WrPoolAllocation", "WrDelayExecution", "WrSuspended",
-        "WrUserRequest", "WrEventPair", "WrQueue", "WrLpcReceive", "WrLpcReply", "WrVirtualMemory", "WrPageOut", "WrRendezvous", "WrKeyedEvent", "WrTerminated", "WrProcessInUse", "WrCpuRateControl",
-        "WrCalloutStack", "WrKernel", "WrResource", "WrPushLock", "WrMutex", "WrQuantumEnd", "WrDispatchInt", "WrPreempted", "WrYieldExecution", "WrFastMutex", "WrGuardedMutex", "WrRundown",
-        "WrAlertByThreadId", "WrDeferredPreempt", "WrPhysicalFault", "WrIoRing",
+        "Executive",
+        "FreePage",
+        "PageIn",
+        "PoolAllocation",
+        "DelayExecution",
+        "Suspended",
+        "UserRequest",
+        "WrExecutive",
+        "WrFreePage",
+        "WrPageIn",
+        "WrPoolAllocation",
+        "WrDelayExecution",
+        "WrSuspended",
+        "WrUserRequest",
+        "WrEventPair",
+        "WrQueue",
+        "WrLpcReceive",
+        "WrLpcReply",
+        "WrVirtualMemory",
+        "WrPageOut",
+        "WrRendezvous",
+        "WrKeyedEvent",
+        "WrTerminated",
+        "WrProcessInUse",
+        "WrCpuRateControl",
+        "WrCalloutStack",
+        "WrKernel",
+        "WrResource",
+        "WrPushLock",
+        "WrMutex",
+        "WrQuantumEnd",
+        "WrDispatchInt",
+        "WrPreempted",
+        "WrYieldExecution",
+        "WrFastMutex",
+        "WrGuardedMutex",
+        "WrRundown",
+        "WrAlertByThreadId",
+        "WrDeferredPreempt",
+        "WrPhysicalFault",
+        "WrIoRing",
     ];
     let word = REASONS.get(reason as usize).copied().unwrap_or("other");
     let kind = match state {
@@ -408,7 +445,7 @@ impl Handler for Sampler {
 /// waited), and the last ReadyThread of it inside is its waker (pid 0, the idle process: an interrupt
 /// or DPC, no thread). A thread's end drops what it had open.
 fn pair_waits(mut sched: Vec<Sched>, mut switch_walks: HashMap<(u64, u32), Vec<u64>>, mut ready_walks: HashMap<(u64, u32), Vec<u64>>, modules: Vec<Module>, freq: u64) -> crate::probe::stacks::Waits {
-    use crate::probe::stacks::{Wait, Waker, Waits};
+    use crate::probe::stacks::{Wait, Waits, Waker};
     sched.sort_by_key(Sched::ts);
     let ns = |t: u64| etw::ns(t, freq);
     let mut out = Waits { modules, ..Default::default() };

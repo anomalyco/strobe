@@ -57,7 +57,11 @@ pub fn run(args: &Args) -> Result<Output> {
     let status = status?;
     let code = status.code().unwrap_or(1);
     let moved = report.as_ref().map(|r| r.moved_total()).unwrap_or(0);
-    let text = format!("ran {program} in {} · exit {code} · {pin_label}{}\n", super::fmt::ms_duration(ms as u64), if report.is_some() { format!(" · {moved} other processes kept off its CPUs") } else { String::new() });
+    let text = format!(
+        "ran {program} in {} · exit {code} · {pin_label}{}\n",
+        super::fmt::ms_duration(ms as u64),
+        if report.is_some() { format!(" · {moved} other processes kept off its CPUs") } else { String::new() }
+    );
     let mut out = Output::new(text, json!({ "id": id, "command": cmd, "exit": code, "ms": ms, "waited_ms": waited.as_secs_f64() * 1e3, "pin": pin_label, "moved": moved }));
     out.code = code;
     Ok(out)

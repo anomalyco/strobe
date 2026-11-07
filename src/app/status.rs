@@ -129,9 +129,15 @@ pub fn run(args: &Args) -> Result<Output> {
     t += &format!("  {} power      {}{}\n", mark(!env.on_battery), env.power_plan, if env.on_battery { " · on battery" } else { "" });
     t += &format!("  {} load       {:.0}% of all CPUs busy\n", mark(busy <= 0.10), busy * 100.0);
     t += &format!("  {} cycles     {cycle_clock}\n", mark(cycles_refused.is_none()));
-    t += &format!("  {} priority   {}\n", mark(qos.is_none()), qos.as_ref().map(|w| format!("{w}: frame and input-latency metrics are refused (run strobe at normal priority)")).unwrap_or_else(|| "normal".into()));
+    t += &format!(
+        "  {} priority   {}\n",
+        mark(qos.is_none()),
+        qos.as_ref().map(|w| format!("{w}: frame and input-latency metrics are refused (run strobe at normal priority)")).unwrap_or_else(|| "normal".into())
+    );
     if let Some(why) = &timers {
-        t += &format!("  ! timers     {why}: its waits and the app's timers fire late, and the app's wakes are not a terminal's (run strobe from a terminal, or give that job ProcessType Interactive in its launchd plist)\n");
+        t += &format!(
+            "  ! timers     {why}: its waits and the app's timers fire late, and the app's wakes are not a terminal's (run strobe from a terminal, or give that job ProcessType Interactive in its launchd plist)\n"
+        );
     }
     t += &format!("  {} screen     {}\n", mark(!locked), if locked { "locked: benches wait for an unlock" } else { "unlocked" });
     t += &format!("  {} browser    {browser_text}\n", mark(browser.is_some()));

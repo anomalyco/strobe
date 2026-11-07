@@ -94,10 +94,8 @@ pub fn locate() -> Result<PathBuf> {
         return Ok(p.clone());
     }
     let pw = playwright_root().map(|r| format!(" and Playwright's builds in {}", r.display())).unwrap_or_default();
-    Err(Error::msg("no Chromium found").hint(format!(
-        "install Chrome or Edge, run `bunx playwright install chromium`, or set STROBE_BROWSER to a Chromium executable (strobe looked at {} places{pw})",
-        c.len()
-    )))
+    Err(Error::msg("no Chromium found")
+        .hint(format!("install Chrome or Edge, run `bunx playwright install chromium`, or set STROBE_BROWSER to a Chromium executable (strobe looked at {} places{pw})", c.len())))
 }
 
 /// Where Chrome, Chromium, Edge and Playwright's full Chromium builds install, in the order strobe

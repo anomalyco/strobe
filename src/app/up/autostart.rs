@@ -154,7 +154,11 @@ pub fn install(exe: &Path) -> Result<Installed, String> {
             let manager = run("systemctl", &["--user", "show-environment"]).unwrap_or_default();
             let missing: Vec<&str> = ["DISPLAY", "WAYLAND_DISPLAY"].into_iter().filter(|v| std::env::var_os(v).is_some() && !manager.lines().any(|l| l.starts_with(&format!("{v}=")))).collect();
             (!missing.is_empty()).then(|| {
-                format!("the user manager has no {}, so the daemon's windowed benches would find no display (`systemctl --user import-environment {}` gives it this session's)", missing.join(" or "), missing.join(" "))
+                format!(
+                    "the user manager has no {}, so the daemon's windowed benches would find no display (`systemctl --user import-environment {}` gives it this session's)",
+                    missing.join(" or "),
+                    missing.join(" ")
+                )
             })
         };
         Ok(Installed { what: format!("{} {}", if cfg!(target_os = "macos") { "LaunchAgent" } else { "systemd user unit" }, p.display()), changed, note })

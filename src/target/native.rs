@@ -15,7 +15,8 @@ pub const COVERED: &str = "window is covered by other apps' windows (strobe brin
 
 /// macOS: every block measures the app as the active one (`host::raise_windows`), so one that is
 /// not is a different state, not a measurement.
-pub const NOT_ACTIVE: &str = "app is not the active app (on macOS strobe measures every block with it active, and makes it so only after a minute without keyboard or mouse input, with the Accessibility permission)";
+pub const NOT_ACTIVE: &str =
+    "app is not the active app (on macOS strobe measures every block with it active, and makes it so only after a minute without keyboard or mouse input, with the Accessibility permission)";
 
 /// Whether the app owning a window is not the active one, where strobe measures it active (macOS).
 fn inactive(pid: u32) -> bool {
@@ -54,17 +55,7 @@ pub fn launch(app: &App, home: &Home, env: &[(String, String)], output: bool, cp
     guard.shared = home.shared.clone();
     isolate::live(app, &guard)?;
     let s = isolate::spawn(app, home, &[], env, output, cpus)?;
-    let n = Native {
-        child: Some(s.child),
-        pid: s.pid,
-        home: home.dir.clone(),
-        fresh: home.fresh,
-        exe: app.exe.clone(),
-        epoch_ms: s.epoch_ms,
-        at_ns: s.at_ns,
-        output: s.output,
-        window: None,
-    };
+    let n = Native { child: Some(s.child), pid: s.pid, home: home.dir.clone(), fresh: home.fresh, exe: app.exe.clone(), epoch_ms: s.epoch_ms, at_ns: s.at_ns, output: s.output, window: None };
     Ok((n, guard))
 }
 
@@ -95,9 +86,10 @@ impl Native {
     /// native Wayland window, which no other client sees.
     fn wayland_note(&self) -> &'static str {
         let wayland = cfg!(target_os = "linux")
-            && self.pids().iter().any(|p| {
-                std::fs::read(format!("/proc/{p}/environ")).is_ok_and(|e| e.split(|&b| b == 0).any(|kv| kv.strip_prefix(b"WAYLAND_DISPLAY=").is_some_and(|v| !v.is_empty())))
-            });
+            && self
+                .pids()
+                .iter()
+                .any(|p| std::fs::read(format!("/proc/{p}/environ")).is_ok_and(|e| e.split(|&b| b == 0).any(|kv| kv.strip_prefix(b"WAYLAND_DISPLAY=").is_some_and(|v| !v.is_empty()))));
         if wayland {
             ": the app has WAYLAND_DISPLAY, and a native Wayland window is invisible to strobe (Wayland shows no client another's windows, and takes no XTest input); run it under X11 or XWayland: unset WAYLAND_DISPLAY in the app profile (`unset`), or use the app's own switch to X11"
         } else {
@@ -185,7 +177,8 @@ impl Native {
         // macOS: which apps' windows still cover it (after strobe brought the app forward, a window
         // that opens or floats on top), so the refusal says what to close.
         #[cfg(target_os = "macos")]
-        let by = state.as_ref().filter(|_| why == Some(COVERED)).map(|s| host::macos::covering(s.hwnd)).filter(|c| !c.is_empty()).map(|c| format!("; in front of it: {}", c.join(", "))).unwrap_or_default();
+        let by =
+            state.as_ref().filter(|_| why == Some(COVERED)).map(|s| host::macos::covering(s.hwnd)).filter(|c| !c.is_empty()).map(|c| format!("; in front of it: {}", c.join(", "))).unwrap_or_default();
         #[cfg(not(target_os = "macos"))]
         let by = String::new();
         let hidden = match why {
@@ -194,7 +187,9 @@ impl Native {
             _ => Hidden::Other,
         };
         match why {
-            Some(why) => Err(Refusal::window_hidden(hidden, format!("the app's {why}{by}")).fix("keep the window visible and unminimized while strobe measures; a hidden window may skip its frames").into()),
+            Some(why) => {
+                Err(Refusal::window_hidden(hidden, format!("the app's {why}{by}")).fix("keep the window visible and unminimized while strobe measures; a hidden window may skip its frames").into())
+            }
             None => Ok(()),
         }
     }

@@ -7,9 +7,9 @@
 use super::chromium::{Browser, Window};
 use super::electron::{Extra, Started};
 use super::isolate::App;
-use crate::model::Error;
 #[cfg(windows)]
 use super::isolate::{self, Guard, Home};
+use crate::model::Error;
 #[cfg(windows)]
 use crate::model::Result;
 #[cfg(windows)]

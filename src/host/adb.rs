@@ -335,9 +335,10 @@ impl Adb {
         let named = |l: &Listed| format!("{} ({})", l.serial, state_text(&l.state));
         let list = || all.iter().map(named).collect::<Vec<_>>().join(", ");
         let one = match &want {
-            Some(s) => all.iter().find(|l| &l.serial == s).ok_or_else(|| {
-                Error::unreachable(format!("no device {s} is attached{}", if all.is_empty() { String::new() } else { format!(" (attached: {})", list()) }))
-            })?,
+            Some(s) => all
+                .iter()
+                .find(|l| &l.serial == s)
+                .ok_or_else(|| Error::unreachable(format!("no device {s} is attached{}", if all.is_empty() { String::new() } else { format!(" (attached: {})", list()) })))?,
             None => {
                 let ready: Vec<&Listed> = all.iter().filter(|l| l.state == State::Device).collect();
                 match ready.as_slice() {
@@ -352,7 +353,9 @@ impl Adb {
                         match many.iter().find(|l| l.transport == Transport::Usb) {
                             Some(usb) if same => *usb,
                             _ => {
-                                return Err(Error::usage(format!("{} devices are attached: {}", many.len(), many.iter().map(|l| named(l)).collect::<Vec<_>>().join(", "))).hint("name one by its serial"));
+                                return Err(
+                                    Error::usage(format!("{} devices are attached: {}", many.len(), many.iter().map(|l| named(l)).collect::<Vec<_>>().join(", "))).hint("name one by its serial")
+                                );
                             }
                         }
                     }

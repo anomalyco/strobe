@@ -57,4 +57,3 @@ fn chunk(out: &mut impl Write, ev: &Value, session: &str) -> Result<()> {
     }
     Ok(())
 }
-

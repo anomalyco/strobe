@@ -139,9 +139,7 @@ pub fn describe() -> String {
     match (find(false), find(true)) {
         (None, None) if cfg!(windows) => "none: no WebKit browser runs on Windows for people (--engine webkit refuses)".into(),
         (None, None) if cfg!(target_os = "macos") => "none (only for --engine webkit: Safari or Safari Technology Preview)".into(),
-        (None, None) => {
-            "none (only for --engine webkit: install webkit2gtk-driver; headless pages run it on a virtual display, xvfb-run)".into()
-        }
+        (None, None) => "none (only for --engine webkit: install webkit2gtk-driver; headless pages run it on a virtual display, xvfb-run)".into(),
         (a, b) => {
             let gtk_headless = b.as_ref().is_some_and(|i| i.flavor == Flavor::Gtk);
             let mut found: Vec<Install> = [a, b].into_iter().flatten().collect();
@@ -295,11 +293,13 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
         } else if headless {
             no_headless()
         } else {
-            Error::msg("no WebKitGTK WebDriver found (WebKitWebDriver and WebKitGTK's MiniBrowser)")
-                .hint("install webkit2gtk-driver (Debian, Ubuntu) or webkitgtk6.0 / webkit2gtk4.1 (Fedora, Arch)")
+            Error::msg("no WebKitGTK WebDriver found (WebKitWebDriver and WebKitGTK's MiniBrowser)").hint("install webkit2gtk-driver (Debian, Ubuntu) or webkitgtk6.0 / webkit2gtk4.1 (Fedora, Arch)")
         }
     })?;
-    if install.flavor == Flavor::Gtk && !headless && let Some(why) = super::chromium::no_display() {
+    if install.flavor == Flavor::Gtk
+        && !headless
+        && let Some(why) = super::chromium::no_display()
+    {
         // Not WPE headless: its pages see no pointer at all, which a desktop page target refuses
         // (`DeviceMismatch`).
         return Err(Refusal::new(ValidatorId::NoPresentSource, format!("a headed WebKitGTK page needs a display, and {why}"))
@@ -364,9 +364,7 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(h.join("run"), std::fs::Permissions::from_mode(0o700));
             }
-            cmd.env("XDG_RUNTIME_DIR", text(h.join("run")))
-                .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", h.join("run").join("no-bus").display()))
-                .env("NO_AT_BRIDGE", "1");
+            cmd.env("XDG_RUNTIME_DIR", text(h.join("run"))).env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", h.join("run").join("no-bus").display())).env("NO_AT_BRIDGE", "1");
             if !windowed {
                 cmd.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
             }

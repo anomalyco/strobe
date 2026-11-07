@@ -337,7 +337,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 Ok(())
             }),
             "line" if a["in"] == "events" => watches.borrow_mut().serve(&events, a),
-            "line" if a["in"] == "output" && a["step"] == "watch" => Err(Error::usage("waitForLine on a tty target: its output is its screen (page.waitFor(\"text=…\")); in: \"events\" reads its STROBE_EVENTS lines, a glob its log files")),
+            "line" if a["in"] == "output" && a["step"] == "watch" => {
+                Err(Error::usage("waitForLine on a tty target: its output is its screen (page.waitFor(\"text=…\")); in: \"events\" reads its STROBE_EVENTS lines, a glob its log files"))
+            }
             "line" => lines.borrow_mut().serve(None, &home_dir, a),
             "call" => Err(Error::usage("ctx.call is a script() target's; a tty target is driven with page (type, press, click, …)")),
             "exec" => Err(Error::usage("ctx.exec is a cli() target's; a tty target is driven with page (type, press, click, …)")),
@@ -453,7 +455,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     });
                     driver.release_all()?;
                     if s.reset {
-                        ctx.runner.call("reset", json!({ "case": s.case }), rt, serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, &screen_note(&tty), "fix the case's reset"))?;
+                        ctx.runner
+                            .call("reset", json!({ "case": s.case }), rt, serve)
+                            .map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, &screen_note(&tty), "fix the case's reset"))?;
                     }
                     warmup.after(&runs.iter().map(|r| if r.cpu.is_finite() { r.cpu } else { r.ms }).collect::<Vec<_>>());
                 }
@@ -494,7 +498,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // Events whose app clock disagrees with their arrival describe a late stream.
                 Events::sync(&measured.iter().flat_map(|r| events.between(r.timed.t0, r.timed.t1)).collect::<Vec<_>>())?;
                 if events.lost() > 0 {
-                    return Err(Error::refused("RunIncomplete", format!("{}: the program wrote more event lines than strobe keeps ({} dropped), so its counts and metrics are short", s.case, events.lost()), "write fewer event lines (counts with n, not one line each)"));
+                    return Err(Error::refused(
+                        "RunIncomplete",
+                        format!("{}: the program wrote more event lines than strobe keeps ({} dropped), so its counts and metrics are short", s.case, events.lost()),
+                        "write fewer event lines (counts with n, not one line each)",
+                    ));
                 }
                 let counted: Vec<(String, &probe::wakes::Counted)> = measured.iter().enumerate().map(|(j, r)| (key(j), &r.counted)).collect();
                 let (counts, uncounted) = probe::wakes::counter_metrics(&counted, declared_metrics(s));
@@ -524,7 +532,12 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     values.insert("tty.latency.silent".into(), lat.silent as f64);
                 }
                 // Synchronized frames: how long each took from its begin to its end, pooled.
-                let mut frame_ms: Vec<f64> = stretches.iter().flat_map(|r| tty.updates(r.t0, r.t1).into_iter().filter(|u| u.synced && !r.untimed.iter().any(|g| u.commit_ns >= g.0 && u.commit_ns < g.1)).map(|u| (u.commit_ns - u.start_ns) as f64 / 1e6)).collect();
+                let mut frame_ms: Vec<f64> = stretches
+                    .iter()
+                    .flat_map(|r| {
+                        tty.updates(r.t0, r.t1).into_iter().filter(|u| u.synced && !r.untimed.iter().any(|g| u.commit_ns >= g.0 && u.commit_ns < g.1)).map(|u| (u.commit_ns - u.start_ns) as f64 / 1e6)
+                    })
+                    .collect();
                 frame_ms.sort_by(f64::total_cmp);
                 if !frame_ms.is_empty() {
                     values.insert("tty.frame.n".into(), frame_ms.len() as f64);
@@ -580,7 +593,13 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let stamped = |k: &str| ["tty.latency.", "tty.settle.", "tty.frame."].iter().any(|p| k.starts_with(p));
                     for m in values.keys().filter(|k| stamped(k)).cloned().collect::<Vec<_>>() {
                         values.remove(&m);
-                        refused.insert(m.clone(), Refusal::new(ValidatorId::OverheadBudget, format!("{m}: strobe's terminal reader used {:.2}% of a core (budget 0.5%), so it stamped the program's output late", terminal_pct.unwrap_or(0.0))));
+                        refused.insert(
+                            m.clone(),
+                            Refusal::new(
+                                ValidatorId::OverheadBudget,
+                                format!("{m}: strobe's terminal reader used {:.2}% of a core (budget 0.5%), so it stamped the program's output late", terminal_pct.unwrap_or(0.0)),
+                            ),
+                        );
                     }
                 }
                 refuse_not_on_this_os(s, &mut values, &mut refused);
@@ -672,7 +691,10 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         return Err(Error::usage(format!("{}: launch milestone {}: a terminal program has no page: in: \"screen\" (its grid's text) or a glob of log files under its home", s.case, m.name)));
     }
     if state.is_some() && marks.iter().any(|m| m.source == "screen") {
-        return Err(Error::usage(format!("{}: a launch until a state on the event stream reads no screen milestones (their first showing is timed while strobe waits on the grid): time it until text, or give log milestones", s.case)));
+        return Err(Error::usage(format!(
+            "{}: a launch until a state on the event stream reads no screen milestones (their first showing is timed while strobe waits on the grid): time it until text, or give log milestones",
+            s.case
+        )));
     }
     let wanted = spec["until"]["milestone"].as_str().map(str::to_string);
     if let Some(w) = &wanted
@@ -694,9 +716,16 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
     let t = Duration::from_secs(120);
     let mut steps: Vec<(String, f64)> = Vec::new();
     let result = (|| -> Result<Block> {
-        ctx.runner.call("block", json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": v.root, "home": home.dir, "env": env, "exe": program(&tspec.run) }), t, launch::no_page)?;
+        ctx.runner.call(
+            "block",
+            json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": v.root, "home": home.dir, "env": env, "exe": program(&tspec.run) }),
+            t,
+            launch::no_page,
+        )?;
         if spec["before"] == true {
-            ctx.runner.call("before", json!({ "case": s.case }), Duration::from_secs(900), launch::no_page).map_err(|e| crate::runner::incomplete(&format!("{} before", s.case), "before", e, "", "fix the launch's before hook"))?;
+            ctx.runner
+                .call("before", json!({ "case": s.case }), Duration::from_secs(900), launch::no_page)
+                .map_err(|e| crate::runner::incomplete(&format!("{} before", s.case), "before", e, "", "fix the launch's before hook"))?;
         }
         let lapped = Instant::now();
         let clock = host::tsc();
@@ -716,20 +745,20 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
             ready.is_some()
         } else {
             tty.wait(deadline, |g, last, _| {
-            let rows = g.text();
-            for (name, p) in &screen {
-                if !seen.contains_key(name) && rows.iter().any(|r| p.is_match(r)) {
-                    seen.insert(name.clone(), last);
+                let rows = g.text();
+                for (name, p) in &screen {
+                    if !seen.contains_key(name) && rows.iter().any(|r| p.is_match(r)) {
+                        seen.insert(name.clone(), last);
+                    }
                 }
-            }
-            if ready.is_none() {
-                ready = match (&until, &wanted) {
-                    (Some(sel), _) => (!drv::find(g, sel).is_empty()).then_some(last),
-                    (None, Some(w)) => seen.get(w).copied(),
-                    _ => None,
-                };
-            }
-            ready.is_some()
+                if ready.is_none() {
+                    ready = match (&until, &wanted) {
+                        (Some(sel), _) => (!drv::find(g, sel).is_empty()).then_some(last),
+                        (None, Some(w)) => seen.get(w).copied(),
+                        _ => None,
+                    };
+                }
+                ready.is_some()
             })
         };
         let cpu_at_ready = super::super::record::per_process(&host::process_set(tty.pid, Some(&home.dir))).values().sum::<u64>();
@@ -771,7 +800,8 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         // Log milestones: the first matching line in files under the home by now, at when it was read.
         for m in marks.iter().filter(|m| m.source != "screen") {
             let now = host::now_ns();
-            let hit = super::launch::matching(&home.dir, &m.source).iter().filter_map(|p| std::fs::read_to_string(p).ok()).any(|text| text.lines().any(|l| m.pattern.is_match(&isolate::strip_ansi(l))));
+            let hit =
+                super::launch::matching(&home.dir, &m.source).iter().filter_map(|p| std::fs::read_to_string(p).ok()).any(|text| text.lines().any(|l| m.pattern.is_match(&isolate::strip_ansi(l))));
             if hit {
                 values.insert(format!("launch.{}", m.name), (now - tty.started_ns) as f64 / 1e6);
             }

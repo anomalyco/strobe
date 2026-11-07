@@ -73,7 +73,8 @@ pub fn run(args: &Args) -> Result<Output> {
                         }
                         [] => {
                             let timed: Vec<&str> = series.iter().flat_map(|s| s["timing_recordings"].as_array().into_iter().flatten()).filter_map(|t| t["recording"].as_str()).collect();
-                            let others = if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): strobe query <rec> {other} with one of {}", timed.join(", ")) };
+                            let others =
+                                if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): strobe query <rec> {other} with one of {}", timed.join(", ")) };
                             Err(Error::usage(format!(
                                 "{id} kept no attribution recording: a timed block runs no profiler (it would weigh on its times), and bench --blocks N --why always adds one attribution block of head per series{others}"
                             )))
@@ -301,7 +302,8 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     let wakes = v["cpu.wakes"].as_f64().unwrap_or(0.0);
     if meta["native"] == true && meta["kind"] == "record" && wakes >= 50.0 {
         // Rows with a wake count: macOS counts wakes per process, and its thread rows carry none.
-        let threads: Vec<Value> = store::read_json(&dir.join("threads.json")).ok().and_then(|t| t.as_array().cloned()).unwrap_or_default().into_iter().filter(|t| t["wakes_per_s"].is_number()).collect();
+        let threads: Vec<Value> =
+            store::read_json(&dir.join("threads.json")).ok().and_then(|t| t.as_array().cloned()).unwrap_or_default().into_iter().filter(|t| t["wakes_per_s"].is_number()).collect();
         let line = |t: &Value| {
             let module = t["module"].as_str().map(|m| format!(" ({m})")).unwrap_or_default();
             format!("{}{module} {}", t["name"].as_str().unwrap_or("(unnamed)"), fmt::value(t["wakes_per_s"].as_f64().unwrap_or(0.0), "/s"))
@@ -994,7 +996,12 @@ pub fn native_threads(dir: &Path, top: usize) -> Result<Output> {
     let listed: f64 = all.iter().filter_map(|r| r["cpu_ms_per_run"].as_f64()).sum();
     let gone = total - listed;
     if gone.is_finite() && gone > (0.05 * total).max(5.0) {
-        text += &format!("{} per run in threads no longer there at the run's end (they exited during it): the processes spent {} per run, the threads above {}\n", fmt::value(gone, "ms"), fmt::value(total, "ms"), fmt::value(listed, "ms"));
+        text += &format!(
+            "{} per run in threads no longer there at the run's end (they exited during it): the processes spent {} per run, the threads above {}\n",
+            fmt::value(gone, "ms"),
+            fmt::value(total, "ms"),
+            fmt::value(listed, "ms")
+        );
     }
     // Threads that exited before the end, from the timeline (sampled every half second from the launch).
     let mut exited_json = Vec::new();
@@ -1033,7 +1040,10 @@ pub fn native_threads(dir: &Path, top: usize) -> Result<Output> {
         "wakes: context switches of the thread, each a switch in to run after a wait or a preemption; whose: app (started in the app's own code), driver (a device driver's user-mode part, such as GPU driver workers), os (the OS's thread pool and services; a pool thread may run the app's callbacks).{}\n",
         if dir.join("timeline.json.gz").exists() { " When each ran: --timeline" } else { " A thread that exited during a run is not listed" }
     );
-    Ok(Output::new(text, json!({ "threads": all.into_iter().take(top).collect::<Vec<_>>(), "cpu_ms_per_run": total, "cpu_refused": cpu_refused, "exited_ms_per_run": gone.is_finite().then_some(gone.max(0.0)), "exited": exited_json })))
+    Ok(Output::new(
+        text,
+        json!({ "threads": all.into_iter().take(top).collect::<Vec<_>>(), "cpu_ms_per_run": total, "cpu_refused": cpu_refused, "exited_ms_per_run": gone.is_finite().then_some(gone.max(0.0)), "exited": exited_json }),
+    ))
 }
 
 fn read_timeline(dir: &Path) -> Option<crate::probe::wakes::TimelineData> {
@@ -1156,11 +1166,7 @@ fn native_frames(dir: &Path, top: usize) -> Result<Output> {
     };
     let pids: Vec<u32> = f["pids"].as_array().into_iter().flatten().filter_map(|p| p.as_u64().map(|p| p as u32)).collect();
     // The block's own display rate when it kept one: macOS and X11 sessions have no vertical blanks.
-    let refresh = f["display_hz"]
-        .as_f64()
-        .filter(|hz| *hz > 1.0)
-        .map(|hz| 1000.0 / hz)
-        .or_else(|| crate::probe::present::frames::refresh_ms(&presents.vsyncs, presents.t0_ns, presents.t1_ns, None));
+    let refresh = f["display_hz"].as_f64().filter(|hz| *hz > 1.0).map(|hz| 1000.0 / hz).or_else(|| crate::probe::present::frames::refresh_ms(&presents.vsyncs, presents.t0_ns, presents.t1_ns, None));
     let quiet = crate::probe::present::frames::quiet_ns(refresh.unwrap_or(1000.0 / 60.0));
     let mut text = String::new();
     let mut runs_json = Vec::new();
@@ -1308,8 +1314,7 @@ pub fn hotspots(dir: &Path, by: &str, top: usize) -> Result<Output> {
 }
 
 /// What a sampler coarser than asked costs a profile (`probe::cpu::Sampling::coarse`).
-pub const COARSE: &str =
-    "coarser than asked: every time is its samples' own gaps, but a function that runs for less than one gap shows only when a sample lands in it (± per row: how sure)";
+pub const COARSE: &str = "coarser than asked: every time is its samples' own gaps, but a function that runs for less than one gap shows only when a sample lands in it (± per row: how sure)";
 
 /// `hotspots` of an opened recording: its JavaScript profile, else its native samples.
 pub fn hotspots_of(rec: &Rec, by: &str, top: usize) -> Result<Output> {
@@ -1346,7 +1351,13 @@ pub fn native_hotspots(dir: &Path, by: &str, top: usize, thread: Option<&str>, p
 
 pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>, phase: Option<&str>) -> Result<Output> {
     let dir = rec.dir.as_path();
-    let missing = || if rec.meta["kind"] == "block" && rec.meta["probes"] != "attribution" { no_profile(&rec.meta, "native samples", "hotspots") } else { Error::usage("this recording has no native samples; record with --probes deep") };
+    let missing = || {
+        if rec.meta["kind"] == "block" && rec.meta["probes"] != "attribution" {
+            no_profile(&rec.meta, "native samples", "hotspots")
+        } else {
+            Error::usage("this recording has no native samples; record with --probes deep")
+        }
+    };
     // A thread or phase selects samples: symbolized for that question alone; all samples are shared.
     let filtered;
     let n: &NativeStacks = if thread.is_some() || phase.is_some() {
@@ -1369,7 +1380,8 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>,
     for r in out.json["rows"].as_array_mut().into_iter().flatten() {
         r["self_ms"] = json!(r["weight"].as_f64().unwrap_or(0.0) / 1000.0);
     }
-    let deep: Option<crate::probe::stacks::Deep> = std::fs::File::open(dir.join("deep.json.gz")).ok().and_then(|f| serde_json::from_reader(std::io::BufReader::new(flate2::read::GzDecoder::new(f))).ok());
+    let deep: Option<crate::probe::stacks::Deep> =
+        std::fs::File::open(dir.join("deep.json.gz")).ok().and_then(|f| serde_json::from_reader(std::io::BufReader::new(flate2::read::GzDecoder::new(f))).ok());
     if let (0, Some(t), Some(d)) = (n.samples, thread, deep.as_ref())
         && !d.samples.is_empty()
     {

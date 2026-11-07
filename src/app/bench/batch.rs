@@ -58,12 +58,7 @@ impl Batching {
 /// The text line for `result.batch`.
 pub(super) fn line(b: &Value) -> Option<String> {
     let launches = b["launches"].as_u64()?;
-    let mut t = format!(
-        "batch  {} cases in {launches} launch{} (--batch {})",
-        b["cases"].as_u64().unwrap_or(0),
-        if launches == 1 { "" } else { "es" },
-        b["size"].as_u64().unwrap_or(0)
-    );
+    let mut t = format!("batch  {} cases in {launches} launch{} (--batch {})", b["cases"].as_u64().unwrap_or(0), if launches == 1 { "" } else { "es" }, b["size"].as_u64().unwrap_or(0));
     if let Some(own) = b["launch_ms_mean"].as_f64() {
         t += &format!(
             ": about {} saved against a launch per case (a launch took {} besides its cases: its start, prepare and setup, its trace, its recording and its close)",

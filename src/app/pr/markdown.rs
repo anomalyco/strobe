@@ -81,7 +81,12 @@ impl<'a> Doc<'a> {
             }
             // The medians beside a paired change that went the other way: say why they disagree.
             if let (Some(m), false) = (uneven(&s["primary"]), matches!(self.primary_out(s), Out::Refused | Out::NotRun) || s["kind"] == "leak") {
-                line = format!("{}; **uneven pairs**: the medians moved {} while the pairs' own changes centre on {} (see Details).", line.trim_end_matches('.'), nb(&delta(&s["primary"], m)), nb(&delta(&s["primary"], f(&s["primary"]["estimate"]))));
+                line = format!(
+                    "{}; **uneven pairs**: the medians moved {} while the pairs' own changes centre on {} (see Details).",
+                    line.trim_end_matches('.'),
+                    nb(&delta(&s["primary"], m)),
+                    nb(&delta(&s["primary"], f(&s["primary"]["estimate"])))
+                );
             }
             let mut lines = vec![format!("**{}:** {line}", cell(&self.title(s)))];
             if let Some(b) = self.drift(s) {

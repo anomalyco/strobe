@@ -396,7 +396,13 @@ impl Waits {
             for &(a, b) in spans {
                 let (from, to) = (w.from_ns.max(a), w.to_ns.min(b));
                 if to > from {
-                    out.push(Wait { from_ns: from, to_ns: to, ready_ns: w.ready_ns.filter(|r| *r >= from && *r <= to), waker: w.waker.clone().filter(|_| w.ready_ns.is_some_and(|r| r >= from && r <= to)), ..w.clone() });
+                    out.push(Wait {
+                        from_ns: from,
+                        to_ns: to,
+                        ready_ns: w.ready_ns.filter(|r| *r >= from && *r <= to),
+                        waker: w.waker.clone().filter(|_| w.ready_ns.is_some_and(|r| r >= from && r <= to)),
+                        ..w.clone()
+                    });
                 }
             }
         }

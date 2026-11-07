@@ -93,7 +93,10 @@ pub fn update_pr(n: &str, repo: Option<&str>, id: &str, block: &str, force: bool
                 return true;
             }
         }
-        crate::app::progress(format!("strobe: GitHub still served PR {n}'s old body {} s after the edit; it may lag: check with gh pr view {n} before another --update-pr (a rerun puts the block in again)", LAG.as_secs()));
+        crate::app::progress(format!(
+            "strobe: GitHub still served PR {n}'s old body {} s after the edit; it may lag: check with gh pr view {n} before another --update-pr (a rerun puts the block in again)",
+            LAG.as_secs()
+        ));
         false
     };
     let edit = |text: &str, files: &[std::path::PathBuf]| -> Result<bool> {

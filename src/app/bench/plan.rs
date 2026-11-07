@@ -301,7 +301,8 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
                 None => (GUESS_BLOCK_MS, "a guess: no earlier run of this case here".to_string()),
             },
         };
-        let gpu_warm = matches!(kind, "native" | "app" | "exe" | "webview") && s.launch.is_null() && s.gpu_cache.as_deref().or(target["gpuCache"].as_str()) != Some("cold") && !cfg!(target_os = "macos");
+        let gpu_warm =
+            matches!(kind, "native" | "app" | "exe" | "webview") && s.launch.is_null() && s.gpu_cache.as_deref().or(target["gpuCache"].as_str()) != Some("cold") && !cfg!(target_os = "macos");
         let (warmup_blocks, warmup_ms) = match same.first() {
             Some(p) if p.warmup_blocks > 0.0 => (p.warmup_blocks, p.warmup_ms),
             _ if gpu_warm || s.launch.is_object() => (2.0, 2.0 * block_ms),
@@ -415,11 +416,7 @@ fn builds(series: &[Series], describe: &Value, config: &Value, project: &Path, v
             };
             let Some(build) = build else { continue };
             let root = match &v.kind {
-                Kind::Git(_) => v
-                    .commit
-                    .as_deref()
-                    .and_then(|c| host::git::out(project, &["rev-parse", c]))
-                    .map(|sha| host::paths::sub("builds").join(&sha[..12.min(sha.len())])),
+                Kind::Git(_) => v.commit.as_deref().and_then(|c| host::git::out(project, &["rev-parse", c])).map(|sha| host::paths::sub("builds").join(&sha[..12.min(sha.len())])),
                 _ => v.root.clone(),
             };
             let marker = root.as_ref().map(|r| host::paths::sub("builds").join(format!("{}.key", super::hash_str(&r.to_string_lossy()))));

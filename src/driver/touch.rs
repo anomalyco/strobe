@@ -379,7 +379,13 @@ impl Driver {
         if short - LEAD < SWIPE_MIN {
             return Err(Refusal::new(
                 ValidatorId::DisplayTooSmall,
-                format!("page.scroll({}) on a phone: a finger at ({:.0}, {:.0}) has {:.0} px to travel past its lead-in inside the {w:.0}×{h:.0} viewport, too little to clear the browser's touch slop", sel.source, at.0, at.1, short - LEAD),
+                format!(
+                    "page.scroll({}) on a phone: a finger at ({:.0}, {:.0}) has {:.0} px to travel past its lead-in inside the {w:.0}×{h:.0} viewport, too little to clear the browser's touch slop",
+                    sel.source,
+                    at.0,
+                    at.1,
+                    short - LEAD
+                ),
             )
             .fix("scroll an element with more of itself on the screen, or page.drag the finger along a path that fits")
             .into());
@@ -393,7 +399,16 @@ impl Driver {
         // One keyframe a frame: the lead-in on the first, then evenly to the end at `speed`.
         let frame = self.frame_period()?;
         let steps = ((len / speed.max(1.0) * 1e3) / frame).ceil().max(1.0) as usize + 1;
-        let path: Vec<(f64, f64)> = (0..=steps).map(|k| if k == 0 { (0.0, 0.0) } else { let f = (k - 1) as f64 / (steps - 1) as f64; (-lx - sx * f, -ly - sy * f) }).collect();
+        let path: Vec<(f64, f64)> = (0..=steps)
+            .map(|k| {
+                if k == 0 {
+                    (0.0, 0.0)
+                } else {
+                    let f = (k - 1) as f64 / (steps - 1) as f64;
+                    (-lx - sx * f, -ly - sy * f)
+                }
+            })
+            .collect();
         self.settle(Duration::ZERO)?;
         for i in 0..n as u32 {
             if i > 0 {
@@ -492,7 +507,9 @@ impl Driver {
                 }
                 self.dispatch(call, &args)
             }
-            "hover" | "move" => Err(no_device(call, "a finger does not hover, and moves only while it touches", "tap the element (page.click), or drag across it (page.drag); measure hover on a desktop target")),
+            "hover" | "move" => {
+                Err(no_device(call, "a finger does not hover, and moves only while it touches", "tap the element (page.click), or drag across it (page.drag); measure hover on a desktop target"))
+            }
             "wheel" => Err(no_device(call, "a phone has no mouse wheel", "scroll it with the finger: page.scroll(selector, { by })")),
             "down" | "up" => Err(no_device(
                 call,
@@ -523,7 +540,10 @@ impl Driver {
                 sent(crate::host::now_ns(), false, None);
                 self.finger(t, Phase::End, (from.0 + dx, from.1 + dy), false)?;
                 if pans && self.page.eval("__strobeTouch.prevented()")? != Value::Bool(true) {
-                    return Err(firefox_pans("page.drag", "a drag where the browser would pan (touch-action leaves it the axis, something there scrolls along it, and the page prevented neither the touch's start nor its first move)"));
+                    return Err(firefox_pans(
+                        "page.drag",
+                        "a drag where the browser would pan (touch-action leaves it the axis, something there scrolls along it, and the page prevented neither the touch's start nor its first move)",
+                    ));
                 }
                 self.until(&o)
             }

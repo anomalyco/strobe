@@ -312,7 +312,9 @@ impl OsInput {
     fn landed(&self, page: &Page, what: &str) -> Result<()> {
         self.look_landed(page)?;
         match self.missed.take() {
-            Some(why) => Err(refused(format!("after the window size strobe was asked for (page.window), the last pointer move strobe posted in the {what} {why}: input went to points mapped for another place"))),
+            Some(why) => Err(refused(format!(
+                "after the window size strobe was asked for (page.window), the last pointer move strobe posted in the {what} {why}: input went to points mapped for another place"
+            ))),
             None => Ok(()),
         }
     }

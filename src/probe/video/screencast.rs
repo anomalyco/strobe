@@ -93,7 +93,17 @@ impl Drop for Capture {
 #[allow(clippy::too_many_arguments)]
 /// `t0` is the host clock when the capture started (media time 0); the first frame stands from there
 /// until the next, as the page looked when the screencast began.
-fn run(cdp: &Cdp, session: &str, events: std::sync::mpsc::Receiver<Value>, (t0, offset): (u64, i128), stop: &AtomicBool, end: &Mutex<u64>, exe: &Path, encoder: ffmpeg::Encoder, base: &Path) -> Result<Video> {
+fn run(
+    cdp: &Cdp,
+    session: &str,
+    events: std::sync::mpsc::Receiver<Value>,
+    (t0, offset): (u64, i128),
+    stop: &AtomicBool,
+    end: &Mutex<u64>,
+    exe: &Path,
+    encoder: ffmpeg::Encoder,
+    base: &Path,
+) -> Result<Video> {
     let cpu = super::ThreadCpu::start();
     let mut ff: Option<Ffmpeg> = None;
     let mut size = (0u32, 0u32);

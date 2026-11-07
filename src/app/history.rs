@@ -35,8 +35,10 @@ fn select(which: Option<&str>) -> Result<Vec<Series>> {
     }
     let abs = std::fs::canonicalize(w).ok().map(|p| p.display().to_string().trim_start_matches(r"\\?\").to_string());
     let norm = w.replace('\\', "/");
-    let found: Vec<Series> =
-        history::list().into_iter().filter(|s| abs.as_deref().is_some_and(|a| s.meta["abs_file"] == a) || s.meta["file"].as_str().is_some_and(|f| f == norm || f.ends_with(&format!("/{norm}")))).collect();
+    let found: Vec<Series> = history::list()
+        .into_iter()
+        .filter(|s| abs.as_deref().is_some_and(|a| s.meta["abs_file"] == a) || s.meta["file"].as_str().is_some_and(|f| f == norm || f.ends_with(&format!("/{norm}"))))
+        .collect();
     if found.is_empty() {
         return Err(Error::usage(format!("no tracked series for {w} on this device (strobe track {w} --ref <branch> starts one)")));
     }
@@ -180,7 +182,12 @@ fn detail(s: &Series, top: Option<usize>) -> String {
     for p in &s.points[skip..] {
         let commit = p["commit"].as_str().unwrap_or("");
         // A change's first point after it gets its marker.
-        let mark = s.changes.iter().find(|c| c["bad"] == commit).map(|c| format!("  ◆ {} {} ({})", c["direction"].as_str().unwrap_or(""), c["id"].as_str().unwrap_or(""), c["state"].as_str().unwrap_or(""))).unwrap_or_default();
+        let mark = s
+            .changes
+            .iter()
+            .find(|c| c["bad"] == commit)
+            .map(|c| format!("  ◆ {} {} ({})", c["direction"].as_str().unwrap_or(""), c["id"].as_str().unwrap_or(""), c["state"].as_str().unwrap_or("")))
+            .unwrap_or_default();
         let date = p["at"].as_str().unwrap_or("").get(..10).unwrap_or("");
         // A port's point: its pairs and the confidence they reach (3 pairs: 75%), never read as 95%.
         let n = if s.implementations() { format!("{} pairs, {}", p["n"], port::confidence_text(p["confidence"].as_f64().unwrap_or(f64::NAN))) } else { format!("n={}", p["n"]) };

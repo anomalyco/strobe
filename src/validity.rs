@@ -200,7 +200,10 @@ fn desktop_input(page: &Page, seen: &InputSeen) -> Result<InputClass> {
         }
         WebEngine::Webkit => "WebKit has no setting for the input devices a page sees: measure it headed on a machine with a mouse and no touch screen, or the page in Chromium or Firefox",
     };
-    Err(Refusal::new(ValidatorId::DeviceMismatch, format!("a desktop page target's page sees {} input, not a desktop's", class.name())).detail(format!("the page sees {}", seen.text())).fix(fix).into())
+    Err(Refusal::new(ValidatorId::DeviceMismatch, format!("a desktop page target's page sees {} input, not a desktop's", class.name()))
+        .detail(format!("the page sees {}", seen.text()))
+        .fix(fix)
+        .into())
 }
 
 /// `DeviceMismatch` for any emulation (`chromium::Emulation`), in the same input classes: a desktop as
@@ -251,8 +254,12 @@ pub fn emulated_input(page: &Page, emulation: &crate::target::chromium::Emulatio
         return Ok((class, seen.reduced_motion));
     }
     let fix = match page.engine() {
-        WebEngine::Chromium => "strobe launches Chromium with the emulation's pointer (--blink-settings) and emulates its touch points and user agent over DevTools: a STROBE_BROWSER wrapper that rewrites strobe's arguments can drop them; run with strobe's arguments as they are",
-        WebEngine::Firefox => "strobe sets the emulation in the Firefox profile (ui.*PointerCapabilities, dom.w3c_touch_events.enabled, dom.maxtouchpoints.testing.value, general.useragent.override): a Firefox that ignores them is not one strobe supports for it; emulate it in Chromium",
+        WebEngine::Chromium => {
+            "strobe launches Chromium with the emulation's pointer (--blink-settings) and emulates its touch points and user agent over DevTools: a STROBE_BROWSER wrapper that rewrites strobe's arguments can drop them; run with strobe's arguments as they are"
+        }
+        WebEngine::Firefox => {
+            "strobe sets the emulation in the Firefox profile (ui.*PointerCapabilities, dom.w3c_touch_events.enabled, dom.maxtouchpoints.testing.value, general.useragent.override): a Firefox that ignores them is not one strobe supports for it; emulate it in Chromium"
+        }
         WebEngine::Webkit => "WebKit has no setting for the input devices or user agent a page sees: emulate it in Chromium or Firefox",
     };
     Err(Refusal::new(ValidatorId::DeviceMismatch, format!("a page target emulating {} does not see one: {}", emulation.kind(), wrong.join(", ")))
@@ -634,7 +641,9 @@ pub fn engine_refusal(engine: WebEngine, metric: &str) -> Option<Refusal> {
     if engine == WebEngine::Webkit {
         let classic = match metric {
             m if m.starts_with("net.") => Some(("WebDriver Classic reports no network requests", "measure it in Chromium or Firefox")),
-            "input.rate" | "input.gap.p95" => Some(("WebDriver Classic delivers input actions in batches inside the browser, so strobe's send times are not the page's input times", "measure it in Chromium or Firefox")),
+            "input.rate" | "input.gap.p95" => {
+                Some(("WebDriver Classic delivers input actions in batches inside the browser, so strobe's send times are not the page's input times", "measure it in Chromium or Firefox"))
+            }
             _ => None,
         };
         if let Some((why, fix)) = classic {
@@ -654,7 +663,10 @@ pub fn engine_refusal(engine: WebEngine, metric: &str) -> Option<Refusal> {
         m if m.starts_with("span.") => "phase.<name> around the same work in the case",
         _ => return None,
     };
-    Some(Refusal::new(ValidatorId::EngineUnsupported, format!("{metric}: {engine} gives strobe no way to read it (it comes from Chromium's Performance domain or trace)")).fix(format!("measure it in Chromium, or use {instead}")))
+    Some(
+        Refusal::new(ValidatorId::EngineUnsupported, format!("{metric}: {engine} gives strobe no way to read it (it comes from Chromium's Performance domain or trace)"))
+            .fix(format!("measure it in Chromium, or use {instead}")),
+    )
 }
 
 /// The battery temperature from which a phone counts as hot (`Thermal`): phones throttle from about there.

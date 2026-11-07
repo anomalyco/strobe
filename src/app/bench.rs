@@ -925,7 +925,8 @@ fn has_video(rec: &str) -> bool {
 /// a screencast.
 fn no_video(ctx: &Ctx, name: &str) -> Option<String> {
     let t = &ctx.describe["targets"][name];
-    let windowless = matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
+    let windowless =
+        matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
     if windowless {
         return Some(format!("{name} opens no window (a script, a command, a terminal program, or window: false)"));
     }
@@ -1214,19 +1215,25 @@ struct Overhead {
 impl Overhead {
     /// `strobe 1.2% · runner 0.3% · sampler 0.08% of a core`.
     fn text(&self) -> String {
-        let parts: Vec<String> = [("strobe", self.strobe_pct), ("runner", self.runner_pct), ("sampler", self.sampler_pct), ("presents", self.present_pct), ("reserve", self.reserve_pct), ("terminal", self.terminal_pct)]
-            .into_iter()
-            .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
-            .collect();
+        let parts: Vec<String> =
+            [("strobe", self.strobe_pct), ("runner", self.runner_pct), ("sampler", self.sampler_pct), ("presents", self.present_pct), ("reserve", self.reserve_pct), ("terminal", self.terminal_pct)]
+                .into_iter()
+                .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
+                .collect();
         if parts.is_empty() { String::new() } else { format!("{} of a core", parts.join(" · ")) }
     }
 
     /// Where a part went over its §19 budget: (part, its share, the budget).
     fn over(&self) -> Vec<(&'static str, f64, f64)> {
-        [("the sampler", self.sampler_pct, 0.5), ("the present session's consumer", self.present_pct, 0.5), ("the reserved-CPU sweep", self.reserve_pct, 5.0), ("the terminal's reader", self.terminal_pct, 0.5)]
-            .into_iter()
-            .filter_map(|(n, p, b)| p.filter(|p| *p > b).map(|p| (n, p, b)))
-            .collect()
+        [
+            ("the sampler", self.sampler_pct, 0.5),
+            ("the present session's consumer", self.present_pct, 0.5),
+            ("the reserved-CPU sweep", self.reserve_pct, 5.0),
+            ("the terminal's reader", self.terminal_pct, 0.5),
+        ]
+        .into_iter()
+        .filter_map(|(n, p, b)| p.filter(|p| *p > b).map(|p| (n, p, b)))
+        .collect()
     }
 }
 
@@ -1843,7 +1850,10 @@ pub fn run(args: &Args) -> Result<Output> {
         && matches!(mode, Mode::Check | Mode::Blocks(_))
         && let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && ctx.describe["targets"][&s.target]["kind"] == "cli")
     {
-        return Err(Error::usage(format!("{}: a cli() case has no attribution recording: its commands end inside each run (profile a long-running command with strobe record pid:<n> --probes deep)", s.case)));
+        return Err(Error::usage(format!(
+            "{}: a cli() case has no attribution recording: its commands end inside each run (profile a long-running command with strobe record pid:<n> --probes deep)",
+            s.case
+        )));
     }
     let mut batching = batch.map(batch::Batching::new);
     for (i, s) in series.iter().enumerate() {
@@ -2225,7 +2235,18 @@ fn head_attribution(ctx: &mut Ctx, s: &Series, v: &Variant, runs: usize) -> Resu
 
 /// `seeded`: the experiment's seed, and whether a hook used it.
 #[allow(clippy::too_many_arguments)]
-fn check_output(exp: &str, dir: &Path, file: &Path, series: Vec<Value>, warnings: Vec<Warning>, matrix: Option<String>, require_parity: bool, seeded: (u32, bool), batched: Value, halted: bool) -> Result<Output> {
+fn check_output(
+    exp: &str,
+    dir: &Path,
+    file: &Path,
+    series: Vec<Value>,
+    warnings: Vec<Warning>,
+    matrix: Option<String>,
+    require_parity: bool,
+    seeded: (u32, bool),
+    batched: Value,
+    halted: bool,
+) -> Result<Output> {
     // A gap is listed, not failed; journeys whose sides differ (`journey_refusal`) fail.
     let gaps = series.iter().filter(|s| s["kind"] == "gap").count();
     // Refused before it ran (`check_engines`): listed, not failed, as a gap is; the rest of the file ran.
@@ -2284,12 +2305,8 @@ fn check_output(exp: &str, dir: &Path, file: &Path, series: Vec<Value>, warnings
         let milestones = s["values"].as_object().into_iter().flatten().map(|(k, _)| k.as_str()).filter(|k| k.starts_with("launch.") && !declared.contains(k));
         // Every declared metric, with its value, its refusal, or that it got none: a metric left out
         // read as measured and fine.
-        let value = declared
-            .iter()
-            .map(|n| shown(n).unwrap_or_else(|| format!("{n} no value (nothing in this block measured it)")))
-            .chain(milestones.filter_map(shown))
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let value =
+            declared.iter().map(|n| shown(n).unwrap_or_else(|| format!("{n} no value (nothing in this block measured it)"))).chain(milestones.filter_map(shown)).collect::<Vec<_>>().join(" · ");
         let secs = s["elapsed_ms"].as_f64().unwrap_or(0.0) / 1e3;
         // Which of a batch's launches ran the case, and its place there.
         let launch = s["batch_id"].as_u64().map(|id| format!(" · launch {id}.{}", s["batch_seq"])).unwrap_or_default();
@@ -3002,7 +3019,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     if split == Counting::Separate && halted.is_none() && !pairs.is_empty() {
         let other = secondary_names(s, script, false).into_iter().filter(|m| counted_apart(m) != main_counters).count();
         let k = holm_pairs(other).max(min_pairs).min(pairs.len());
-        counters_note = Some(format!("separate blocks: cpu.instructions in counter blocks (perf events), times in timing blocks; {} → {k} pairs", if main_counters { "times" } else { "cpu.instructions" }));
+        counters_note =
+            Some(format!("separate blocks: cpu.instructions in counter blocks (perf events), times in timing blocks; {} → {k} pairs", if main_counters { "times" } else { "cpu.instructions" }));
         progress(format!("  {} blocks: {k} pairs (Linux perf events never run in a timing block)", if main_counters { "timing" } else { "counter" }));
         match pass_pairs(ctx, s, variants, !main_counters, k) {
             Ok(p) => pass = Some(p),
@@ -3075,7 +3093,13 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // A launch's milestones and CPU, a process's CPU, and a command's launch, are context like the fixed list.
     let found: Vec<String> = blocks
         .first()
-        .map(|b| b.values.keys().filter(|k| k.starts_with("launch.") || k.starts_with("metric.") || *k == "memory.peak" || *k == "cpu.work" || *k == "cli.launch" || (*k == "cpu.app.total" && rate_context)).cloned().collect())
+        .map(|b| {
+            b.values
+                .keys()
+                .filter(|k| k.starts_with("launch.") || k.starts_with("metric.") || *k == "memory.peak" || *k == "cpu.work" || *k == "cli.launch" || (*k == "cpu.app.total" && rate_context))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
     for name in DESCRIPTIVE.iter().map(|n| n.to_string()).chain(found) {
         let name = name.as_str();
@@ -3272,7 +3296,10 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let mut videos = json!({});
     if ctx.args.has("video") && halted.is_none() {
         if s.launch.is_object() {
-            warnings.push(validity::info("Video", format!("{}: no video: a launch case starts before its window or page exists, which every source films from, so a video would miss the launch it times", s.label())));
+            warnings.push(validity::info(
+                "Video",
+                format!("{}: no video: a launch case starts before its window or page exists, which every source films from, so a video would miss the launch it times", s.label()),
+            ));
         } else {
             progress("  video blocks (one warmed run per variant; not timed)");
             for v in variants.iter() {
@@ -3823,12 +3850,8 @@ fn analyse(s: &Series, def: &MetricDef, blocks: &[Block], pairs: &[(usize, usize
     }
     // On the comparison's own scale: log ratios, or differences for counts and anything that read 0
     // (a ratio of 0 dropped those pairs, and a count's every pair).
-    let d: Vec<f64> = pairs
-        .iter()
-        .map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary)))
-        .map(|(a, b)| if relative { (b / a).ln() } else { b - a })
-        .filter(|x| x.is_finite())
-        .collect();
+    let d: Vec<f64> =
+        pairs.iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).map(|(a, b)| if relative { (b / a).ln() } else { b - a }).filter(|x| x.is_finite()).collect();
     if d.len() >= 8 {
         let rho = validity::spearman(&d);
         // A trend smaller than 1% end to end (rounding of a near-constant difference) changes no verdict.
@@ -4526,13 +4549,23 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         let mut launch = launch?;
         let taken = std::mem::take(&mut launch.cases);
         for (r, s) in taken.into_iter().zip(cases) {
-            let r = r.and_then(|b| priority_state(ctx, s, x, b)).map(|b| headless_state(ctx, s, b)).map(|b| software_state(ctx, s, b)).map(|b| phase_state(ctx, s, b)).map(|b| counter_state(s, x, b)).map(|b| tail_state(x, b)).inspect(|b| restate_recording(ctx, s, b));
+            let r = r
+                .and_then(|b| priority_state(ctx, s, x, b))
+                .map(|b| headless_state(ctx, s, b))
+                .map(|b| software_state(ctx, s, b))
+                .map(|b| phase_state(ctx, s, b))
+                .map(|b| counter_state(s, x, b))
+                .map(|b| tail_state(x, b))
+                .inspect(|b| restate_recording(ctx, s, b));
             // A timed or check block that refused its primary refuses the block, as a native one does:
             // pairs of nothing would end `unclear` instead of saying why.
             let r = r.and_then(|b| match b.refused.get(&s.primary).filter(|_| x.set != Set::Attribution && x.set != Set::Memory) {
                 Some(why) => Err(Refusal {
                     summary: if why.summary.starts_with(&format!("{}:", s.primary)) { why.summary.clone() } else { format!("{}: {}", s.primary, why.summary) },
-                    fix: why.fix.clone().or_else(|| Some("pick a primary this target can measure".into())), ..why.clone() }.into()),
+                    fix: why.fix.clone().or_else(|| Some("pick a primary this target can measure".into())),
+                    ..why.clone()
+                }
+                .into()),
                 None => Ok(b),
             });
             let r = match &report {
@@ -4758,7 +4791,9 @@ fn session_state(s: &Series, mut b: Block, locked: bool) -> Block {
 /// `BackgroundPriority`). At background QoS a drag read 83-91% dropped frames that dropped 0.4% at
 /// normal priority.
 pub(crate) fn foreground_metric(m: &str) -> bool {
-    ["frames.", "interaction.", "scroll.", "canvas.", "input.", "display.", "tty.latency.", "tty.settle.", "tty.frame."].iter().any(|p| m.starts_with(p)) || m == "launch.painted" || m == "launch.settled"
+    ["frames.", "interaction.", "scroll.", "canvas.", "input.", "display.", "tty.latency.", "tty.settle.", "tty.frame."].iter().any(|p| m.starts_with(p))
+        || m == "launch.painted"
+        || m == "launch.settled"
 }
 
 /// A kept recording's values and refusals as the block ended with them: the block wrote its
@@ -5373,9 +5408,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 (Some(b), Some(p)) => (json!(b.ws), json!(p.target)),
                 _ => (Value::Null, Value::Null),
             };
-            let r = ctx
-                .runner
-                .call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &serve);
+            let r = ctx.runner.call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &serve);
             // A batch's prepare that read `ctx.case` is refused whether or not it went on to fail.
             batch::launch_hook_case(ctx, "the target's prepare")?;
             let r = r.map_err(|e| crate::runner::incomplete("prepare", "prepare", e, "", "fix the target's prepare in the bench file"))?;
@@ -5519,7 +5552,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         batch::launch_hook_case(ctx, "the bench file's setup")?;
         setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, &snapshot(&page, &ctx.exp, "setup"), "fix the bench file's setup"))?;
         if late_init.get() && !ctx.warnings.iter().any(|w| w.id == "InitScript") {
-            ctx.warnings.push(validity::info("InitScript", format!("{}: {engine} has no preload script: ctx.addInitScript ran after the first document's own scripts; a block that loads another document is refused", s.label())));
+            ctx.warnings.push(validity::info(
+                "InitScript",
+                format!("{}: {engine} has no preload script: ctx.addInitScript ran after the first document's own scripts; a block that loads another document is refused", s.label()),
+            ));
         }
         hooks.check_fixture();
         // A page without WebGPU (an engine or OS that does not ship it, or an origin that is not a secure
@@ -5908,7 +5944,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // started on, or one its expect does not show, it is never measured from there; it goes to a
             // fresh launch, and the case before is noted.
             if k > 0 {
-                let left = shown::expect(&s.expect, &start_screen, "before the runs", true, &|sel| shown::page_shows(&page, sel)).err().map(|e| e.message).or_else(|| start_screen.drifted(&launch_screen));
+                let left =
+                    shown::expect(&s.expect, &start_screen, "before the runs", true, &|sel| shown::page_shows(&page, sel)).err().map(|e| e.message).or_else(|| start_screen.drifted(&launch_screen));
                 if let Some(why) = left {
                     notes.push((k - 1, batch::left_screen(s, &why)));
                     break;
@@ -5988,7 +6025,18 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     // first run: it asks whether a case works, not what it costs. From outside or in an engine
                     // without that counter, the work is the processes' CPU, as a native app's; where this machine
                     // gives no CPU time (cycles refused), the run's wall time.
-                    let work: Vec<f64> = runs.iter().map(|r| if !traceless { r.task } else if r.work.is_finite() { r.work } else { r.ms }).collect();
+                    let work: Vec<f64> = runs
+                        .iter()
+                        .map(|r| {
+                            if !traceless {
+                                r.task
+                            } else if r.work.is_finite() {
+                                r.work
+                            } else {
+                                r.ms
+                            }
+                        })
+                        .collect();
                     if warmup.after(&work) && !x.untimed {
                         if let (Some(dir), Some(b)) = (&gecko_dir, firefox) {
                             match probe::gecko::census(b, &page, &dir.join("memory-0.json.gz"), "after warmup, before the profiler started and the measured runs") {
@@ -6469,11 +6517,18 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 // document's own, so a run that loaded one missed its counter calls, canvas frames and changes.
                 let unseen_start = |m: &str| c.loaded_document && ["count.", "canvas.", "interaction.", "scroll.latency."].iter().any(|p| m.starts_with(p));
                 for m in declared_metrics(s) {
-                    let webgpu = (no_webgpu && m.starts_with("canvas."))
-                        .then(|| Refusal::new(ValidatorId::EngineUnsupported, format!("{m}: the page has no WebGPU here (no GPUCanvasContext: {engine} on this OS does not ship it, or the origin is not a secure context)")));
+                    let webgpu = (no_webgpu && m.starts_with("canvas.")).then(|| {
+                        Refusal::new(
+                            ValidatorId::EngineUnsupported,
+                            format!("{m}: the page has no WebGPU here (no GPUCanvasContext: {engine} on this OS does not ship it, or the origin is not a secure context)"),
+                        )
+                    });
                     let preload = unseen_start(m).then(|| {
-                        Refusal::new(ValidatorId::EngineUnsupported, format!("{m}: a run loaded a page, and WebDriver Classic ({engine}) runs strobe's page scripts only after the page's own, so what the new page did first went unseen"))
-                            .fix("keep the run on one page (load it in prepare or reset), or measure it in Chromium or Firefox")
+                        Refusal::new(
+                            ValidatorId::EngineUnsupported,
+                            format!("{m}: a run loaded a page, and WebDriver Classic ({engine}) runs strobe's page scripts only after the page's own, so what the new page did first went unseen"),
+                        )
+                        .fix("keep the run on one page (load it in prepare or reset), or measure it in Chromium or Firefox")
                     });
                     // On a phone, what strobe reads from this computer's processes is none of the page's.
                     let phone_side = on_phone.and_then(|_| validity::phone_refusal(m));
@@ -6507,7 +6562,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 if case_presents.is_some() {
                     for (j, r) in measured.iter().enumerate() {
                         let (sent, changes, _) = run_inputs_kept.get(first + j).cloned().unwrap_or_default();
-                        let sent: Vec<Value> = sent.iter().map(|s| json!({ "t_ns": s.t_ns, "kind": if s.scroll { "scroll" } else { "discrete" }, "first": true, "press_ns": s.press, "acted": s.acted, "burst": s.burst })).collect();
+                        let sent: Vec<Value> = sent
+                            .iter()
+                            .map(|s| json!({ "t_ns": s.t_ns, "kind": if s.scroll { "scroll" } else { "discrete" }, "first": true, "press_ns": s.press, "acted": s.acted, "burst": s.burst }))
+                            .collect();
                         frames_runs.insert(key(j), json!({ "t0_ns": r.t0, "t1_ns": r.t1, "untimed": r.timed.untimed, "inputs": sent, "marks": run_marks.get(first + j), "changes": changes }));
                     }
                     os_presents = case_presents;
@@ -7477,7 +7535,10 @@ fn apply_engines(describe: &mut Value, args: &Args) -> Result<()> {
         }
         if !t["emulate"].is_null() {
             if !page(t) {
-                return Err(Error::usage(format!("target {name}: emulate is for page targets (web, url): an app's page sees the machine's own input; this is a {} target", t["kind"].as_str().unwrap_or("?"))));
+                return Err(Error::usage(format!(
+                    "target {name}: emulate is for page targets (web, url): an app's page sees the machine's own input; this is a {} target",
+                    t["kind"].as_str().unwrap_or("?")
+                )));
             }
             emulation_of(t, name)?;
         }
@@ -8210,8 +8271,7 @@ fn resolve_variant(role: &'static str, spec: &str, project: &Path, config: &Valu
         name: String::new(),
     };
     if let Kind::Git(r) = &v.kind {
-        let sha = git::out(project, &["rev-parse", "--short=10", r])
-            .ok_or_else(|| Error::usage(format!("{spec} is neither a directory nor a git ref in {}", project.display())))?;
+        let sha = git::out(project, &["rev-parse", "--short=10", r]).ok_or_else(|| Error::usage(format!("{spec} is neither a directory nor a git ref in {}", project.display())))?;
         v.label = format!("{r}@{sha}");
         v.commit = Some(sha);
     }
@@ -8295,9 +8355,7 @@ struct Harness {
 
 fn harness(file: &Path, project: &Path, config: &Value) -> Harness {
     let dir = file.parent().unwrap_or(Path::new("."));
-    let from = git::toplevel(dir)
-        .and_then(|p| std::fs::canonicalize(p).ok())
-        .unwrap_or_else(|| project.to_path_buf());
+    let from = git::toplevel(dir).and_then(|p| std::fs::canonicalize(p).ok()).unwrap_or_else(|| project.to_path_buf());
     let rel = |p: &Path| std::fs::canonicalize(p).ok().and_then(|c| c.strip_prefix(&from).ok().map(Path::to_path_buf));
     let mut paths: Vec<PathBuf> = [rel(dir), rel(&project.join("strobe.json"))].into_iter().flatten().filter(|p| !p.as_os_str().is_empty()).collect();
     paths.extend(config["harness"].as_array().into_iter().flatten().filter_map(Value::as_str).map(PathBuf::from));
@@ -8509,9 +8567,7 @@ fn cache_fill(s: &str, root: &Path) -> String {
     if !s.contains("{cache}") {
         return s.to_string();
     }
-    let common = git::out(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .and_then(|d| std::fs::canonicalize(d).ok())
-        .unwrap_or_else(|| root.to_path_buf());
+    let common = git::out(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).and_then(|d| std::fs::canonicalize(d).ok()).unwrap_or_else(|| root.to_path_buf());
     let dir = host::paths::sub("builds").join("cache").join(hash_str(&common.to_string_lossy().to_lowercase()));
     let _ = std::fs::create_dir_all(&dir);
     s.replace("{cache}", &dir.display().to_string())
@@ -8828,13 +8884,7 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
             let (_, lo, hi, c) = stats::hodges_lehmann(&values, 0.95);
             (lo, hi, c)
         };
-        out += &format!(
-            "\n★ {metric}  median {}  [{} … {}] ({:.0}% over the blocks)\n",
-            fmt::value(metrics::median(&values), unit),
-            fmt::value(lo, unit),
-            fmt::value(hi, unit),
-            100.0 * conf
-        );
+        out += &format!("\n★ {metric}  median {}  [{} … {}] ({:.0}% over the blocks)\n", fmt::value(metrics::median(&values), unit), fmt::value(lo, unit), fmt::value(hi, unit), 100.0 * conf);
     }
     let each = s["blocks"].as_array().into_iter().flatten().map(|b| b["values"][metric].as_f64().filter(|v| v.is_finite()).map_or("—".to_string(), |v| fmt::value(v, unit)));
     out += &format!("  blocks  {}\n", each.collect::<Vec<_>>().join(" · "));
