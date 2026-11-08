@@ -2046,6 +2046,13 @@ function blocksFor(s, metric) {
 }
 
 function pairsOf(s, metric) {
+  // The primary's pairs are those of the look that decided it (`primary_pairs`): pairs run on past it
+  // for the secondaries are not in its verdict, tally or plots.
+  const k = metric === s?.primary?.metric && finite(s?.primary_pairs) ? s.primary_pairs : Infinity;
+  return pairsAll(s, metric).filter((p) => p.pair < k);
+}
+
+function pairsAll(s, metric) {
   const blocks = blocksFor(s, metric).filter((b) => finite(b.pair) && b.pair < 1e6);
   const map = new Map();
   blocks.forEach((b, idx) => {

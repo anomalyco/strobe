@@ -642,7 +642,24 @@ impl<'a> Doc<'a> {
     /// Every pair of every series: a real change shows in most of them. Each cell is before → this PR,
     /// so the table stays narrow enough for a phone.
     pub(super) fn pairs_section(&self) -> String {
-        let all: Vec<(&Value, Vec<Pair>)> = self.series.iter().map(|s| (*s, pairs(s))).filter(|(_, p)| !p.is_empty()).collect();
+        // The main metric's pairs: those of the look that decided it (`primary_pairs`); pairs run on
+        // past it for the secondaries' tests are said in the footnote.
+        let mut after: Vec<String> = Vec::new();
+        let all: Vec<(&Value, Vec<Pair>)> = self
+            .series
+            .iter()
+            .map(|s| {
+                let mut ps = pairs(s);
+                if let Some(k) = primary_pairs(s).filter(|k| ps.iter().any(|p| p.n > *k)) {
+                    let who = if self.multi() { format!(" of {}", self.title(s)) } else { String::new() };
+                    let last = ps.iter().map(|p| p.n).max().unwrap_or(k);
+                    after.push(format!("Pairs {}–{last}{who} ran after the main metric was decided at pair {k}, for the other metrics' tests: not in its change.", k + 1));
+                    ps.retain(|p| p.n <= k);
+                }
+                (*s, ps)
+            })
+            .filter(|(_, p)| !p.is_empty())
+            .collect();
         if all.is_empty() {
             return String::new();
         }
@@ -737,6 +754,7 @@ impl<'a> Doc<'a> {
             foot.push(format!("{left} quiet pairs left out for length."));
         }
         foot.extend(summed);
+        foot.extend(after);
         t + &format!("\n<sub>{}</sub>\n\n", foot.join(" "))
     }
 

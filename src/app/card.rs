@@ -376,7 +376,9 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let mut dots = Vec::new();
     // A pair with the same value on both sides is neither better nor worse.
     let (mut won, mut lost, mut n) = (0, 0, 0);
-    for (b, h) in pairs(super::pr::blocks_for(s, m)) {
+    // The primary's pairs are those of the look that decided it (`primary_pairs`).
+    let keep = if std::ptr::eq(c, &s["primary"]) { s["primary_pairs"].as_u64().unwrap_or(u64::MAX) } else { u64::MAX };
+    for (b, h) in pairs(super::pr::blocks_for(s, m)).into_iter().filter(|(b, _)| b["pair"].as_u64().is_some_and(|p| p < keep)) {
         let (x, y) = (f(&b["values"][m]), f(&h["values"][m]));
         if !x.is_finite() || !y.is_finite() {
             continue;

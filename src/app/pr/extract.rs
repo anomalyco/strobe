@@ -242,7 +242,19 @@ pub(super) fn bv(b: &Value, m: &str) -> f64 {
 /// Pairs of series `s` in which head did better and did worse on comparison `c`'s metric, of those
 /// with both values: a pair with the same value on both sides is neither.
 pub(super) fn wins(s: &Value, c: &Value) -> (usize, usize, usize) {
-    wins_in(&pairs_for(s, c["metric"].as_str().unwrap_or("")), s, c)
+    let mut ps = pairs_for(s, c["metric"].as_str().unwrap_or(""));
+    // The primary's verdict is of the look that decided it: pairs run on past it for the secondaries
+    // are not its (`primary_pairs`, SPEC 9.3).
+    if let Some(k) = primary_pairs(s).filter(|_| std::ptr::eq(c, &s["primary"])) {
+        ps.retain(|p| p.n <= k);
+    }
+    wins_in(&ps, s, c)
+}
+
+/// How many of the series' first pairs the primary's comparison is of (`primary_pairs`; every pair in
+/// results from before it).
+pub(super) fn primary_pairs(s: &Value) -> Option<usize> {
+    s["primary_pairs"].as_u64().map(|k| k as usize)
 }
 
 /// `wins` over some of the series' pairs.

@@ -170,7 +170,7 @@ function blocksFor(s: J, m: string): J[] {
   if (p?.blocks?.length && (m === "cpu.instructions") === !!p.counters) return p.blocks
   return s.blocks ?? []
 }
-function pairs(s: J, m: string): [number, number][] {
+function pairs(s: J, m: string, below = Infinity): [number, number][] {
   const by = new Map<number, J>()
   for (const b of blocksFor(s, m)) {
     if (!Number.isFinite(b.pair) || b.pair >= 1e6) continue
@@ -178,10 +178,11 @@ function pairs(s: J, m: string): [number, number][] {
     e[b.variant] = b
     by.set(b.pair, e)
   }
-  return [...by.entries()].sort((a, b) => a[0] - b[0]).map(([, e]) => [e.base?.values?.[m], e.head?.values?.[m]] as [number, number]).filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b))
+  return [...by.entries()].filter(([p]) => p < below).sort((a, b) => a[0] - b[0]).map(([, e]) => [e.base?.values?.[m], e.head?.values?.[m]] as [number, number]).filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b))
 }
 function tally(s: J, c: J) {
-  const ps = pairs(s, c.metric), up = higher(s, c)
+  // The primary's tally is of the pairs its verdict is of (`primary_pairs`, the look that decided it).
+  const ps = pairs(s, c.metric, c === s.primary && Number.isFinite(s.primary_pairs) ? s.primary_pairs : Infinity), up = higher(s, c)
   return { better: ps.filter(([a, b]) => (up ? b > a : b < a)).length, worse: ps.filter(([a, b]) => (up ? b < a : b > a)).length, n: ps.length }
 }
 const rows = (s: J): { c: J; role: string }[] => [
@@ -258,7 +259,7 @@ function checkResult(r: J) {
         const improved = (c.hi < 0) !== higher(s, c)
         if (improved !== (k === "better") && !(c.lo <= 0 && c.hi >= 0)) flagIt("CRIT", where, `verdict_kind ${k} but the interval [${c.lo}, ${c.hi}] says ${improved ? "better" : "worse"} for a metric better ${higher(s, c) ? "higher" : "lower"}`)
       }
-      const n = pairs(s, c.metric).length
+      const n = pairs(s, c.metric, role === "primary" && Number.isFinite(s.primary_pairs) ? s.primary_pairs : Infinity).length
       if (Number.isInteger(c.n) && k !== "refused" && n && c.n !== n) flagIt("MED", where, `n ${c.n}, the blocks hold ${n} pairs with both values`)
     }
   }
