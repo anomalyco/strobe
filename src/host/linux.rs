@@ -76,10 +76,12 @@ fn stat(pid: u32) -> Option<Stat> {
 /// the key of their throttled time and its unit in ns: cgroup v2 `throttled_usec` where `cpu.max` is not
 /// `max`, v1 `throttled_time` where `cpu.cfs_quota_us` is not -1 (the controller's folder is named by
 /// its controllers, `cpu,cpuacct`, else plain `cpu`). Found once: a cgroup without a quota is never
-/// throttled, and strobe reads these around every run, inside its span.
+/// throttled, and strobe reads these around every run, inside its span. Found after strobe settled in
+/// the cgroup its launches go beside (`cgroup::parent`, which may move it into a scope of its own once).
 fn quota_stats() -> &'static [(PathBuf, &'static str, u64)] {
     static STATS: std::sync::OnceLock<Vec<(PathBuf, &'static str, u64)>> = std::sync::OnceLock::new();
     STATS.get_or_init(|| {
+        let _ = super::cgroup::parent();
         let mut out = Vec::new();
         for line in read("/proc/self/cgroup").unwrap_or_default().lines() {
             let mut f = line.splitn(3, ':');
@@ -248,6 +250,12 @@ pub fn tree_pids_of(roots: &super::PickRoots) -> Vec<u32> {
 pub fn tree_pids(root: u32) -> Vec<u32> {
     let all = all_stats();
     tree_of(&all, &[root]).into_iter().map(|i| all[i].pid).collect()
+}
+
+/// Children of `parents` that exited and are not reaped yet (zombies), by pid and start time, with
+/// their parent's pid.
+pub fn zombies_of(parents: &[u32]) -> std::collections::BTreeMap<(u32, u64), u32> {
+    all_stats().into_iter().filter(|s| s.gone && parents.contains(&s.ppid)).map(|s| ((s.pid, s.start), s.ppid)).collect()
 }
 
 pub fn all_processes() -> Vec<ProcInfo> {

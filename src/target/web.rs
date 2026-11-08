@@ -432,6 +432,16 @@ impl WebBrowser {
         self.processes().iter().map(|p| p.pid).collect()
     }
 
+    /// The pids of `processes`, read without each process's memory (`host::process_set_pids`): cheap
+    /// enough at a run's edges.
+    pub fn live_pids(&self) -> Vec<u32> {
+        match self {
+            WebBrowser::Chromium(b) => b.live_pids(),
+            WebBrowser::Firefox(b) => b.live_pids(),
+            WebBrowser::Webkit(b) => b.live_pids(),
+        }
+    }
+
     /// Each process's role (`renderer`, `gpu`, `browser`) by pid, where the browser says.
     pub fn process_roles(&self) -> Vec<(u32, &'static str)> {
         match self {

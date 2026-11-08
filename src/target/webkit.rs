@@ -595,6 +595,11 @@ impl Browser {
         host::process_set(self.pid, self.home.as_deref()).into_iter().filter(|p| p.pid != self.driver_pid).collect()
     }
 
+    /// The pids of `processes`, without reading each one's memory.
+    pub fn live_pids(&self) -> Vec<u32> {
+        host::process_set_pids(self.pid, self.home.as_deref()).into_iter().filter(|&p| p != self.driver_pid).collect()
+    }
+
     pub fn pids(&self) -> Vec<u32> {
         self.processes().iter().map(|p| p.pid).collect()
     }

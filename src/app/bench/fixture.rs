@@ -205,11 +205,12 @@ pub(super) struct Running {
     /// A side's process that served the fixture's port itself: listened on it, or answered a side's
     /// connection to it.
     own_port: Cell<Option<u32>>,
-    /// Its CPU so far as `cpu` adds it up (each process against its own last reading), the last reading
-    /// (by process, and what tells an ended one, `host::ended_marks`), and how many times a process of
-    /// it ended between two readings, taking its CPU there with it.
+    /// Its CPU so far as `cpu` adds it up (each process against its own last reading, with what ended
+    /// processes used where that is known), the last reading (by process, and what tells an ended one,
+    /// `host::ended_marks`), and how many times a process of it ended between two readings, taking its
+    /// CPU there with it unknown.
     total: Cell<u64>,
-    last: RefCell<Option<(super::super::record::Cycles, BTreeMap<u32, u64>)>>,
+    last: RefCell<Option<(super::super::record::Cycles, host::EndedMarks)>>,
     lost: Cell<u64>,
 }
 
@@ -253,8 +254,9 @@ impl Running {
     }
 
     /// The fixture's CPU so far: its process set's cycles (its tree and what carries its home's stamp,
-    /// a server it detached included), each process against its own last reading (`record::cycles_used`:
-    /// one that ended never lowers the sum), and the cycle clock.
+    /// a server it detached included), each process against its own last reading (`record::timed_cpu`:
+    /// one that ended never lowers the sum, and adds what it used where its cgroup kept it), and the
+    /// cycle clock.
     pub(super) fn cpu(&self) -> (u64, Option<u64>) {
         let procs = host::process_set(self.pid, Some(&self.home));
         let now = super::super::record::per_process(&procs);
@@ -262,12 +264,13 @@ impl Running {
         let tsc = host::tsc();
         let mut last = self.last.borrow_mut();
         match last.as_ref() {
-            Some((a, e)) => {
-                self.total.set(self.total.get() + super::super::record::cycles_used(a, &now));
-                if super::super::record::gone(&[a, &now]) > 0 || host::ended_between(e, &ended) {
+            Some((a, e)) => match super::super::record::timed_cpu(&[a, &now], &[e, &ended]) {
+                Some(c) => self.total.set(self.total.get() + c.total),
+                None => {
+                    self.total.set(self.total.get() + super::super::record::cycles_used(a, &now));
                     self.lost.set(self.lost.get() + 1);
                 }
-            }
+            },
             None => self.total.set(now.values().sum()),
         }
         *last = Some((now, ended));

@@ -3,6 +3,8 @@
 pub(crate) mod adb;
 pub mod build;
 pub mod capture;
+#[cfg(target_os = "linux")]
+pub mod cgroup;
 #[cfg(windows)]
 pub mod cycle_clock;
 #[cfg(target_os = "linux")]
@@ -655,49 +657,142 @@ pub fn all_processes() -> Vec<ProcInfo> {
     }
 }
 
-/// Counts that grow when a process of a set ends between two readings of it, even one neither reading
-/// saw (`ended_between`): per process, what its ended children left it (Linux: their CPU ticks and page
-/// faults, `cutime`, `cstime`, `cminflt` and `cmajflt` of `/proc/<pid>/stat`, which every exec moves;
-/// macOS: their CPU time); Windows: the processes that ended in the jobs strobe launched for `home`
-/// (key 0). A process that ended takes the CPU it used since the first reading with it, so a sum of the
-/// set's CPU over the two is short.
-pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> std::collections::BTreeMap<u32, u64> {
-    let mut out = std::collections::BTreeMap::new();
+/// A process's CPU so far by its pid and start time (`start_time`'s): `app::record::Cycles`.
+pub type CpuByProcess = std::collections::BTreeMap<(u32, u64), u64>;
+
+/// What tells that a process of a set ended between two readings of it, even one neither reading saw
+/// (`ended_since`), and on Linux what the CPU of the ended ones came to (`dead_since`). A process that
+/// ended took the CPU it used since the first reading with it, so a sum of the set's processes' CPU
+/// over the two is short.
+#[derive(Clone, Debug, Default)]
+pub struct EndedMarks {
+    /// Per process of the set, by pid and start time: what its ended children left it, which grows at
+    /// each one it waits for (Linux: their page faults and CPU ticks, `cminflt`, `cmajflt`, `cutime`
+    /// and `cstime` of `/proc/<pid>/stat`, which every exec moves; macOS: their CPU ns). One the first
+    /// reading did not see started in between, with none: it counts from 0.
+    pub reaped: CpuByProcess,
+    /// Children of the set's processes that ended and are not reaped yet (zombies: in no process
+    /// tree, their CPU in no parent's count), by pid and start time, with their parent's pid (Unix).
+    pub zombies: std::collections::BTreeMap<(u32, u64), u32>,
+    /// Windows: the processes that ended in the jobs strobe launched for the set's home, or rooted at
+    /// one of its processes for a launch for no folder (a script's host).
+    pub jobs: Option<u64>,
+    /// Linux: the CPU of the set's launch cgroups (`cgroup`), where its launches have them.
+    #[cfg(target_os = "linux")]
+    pub cgroup: Option<cgroup::Reading>,
+    /// Linux: a process of the set (as listed with its cycles, just before) had ended when these were
+    /// read: its CPU would be both in that listing and in the cgroups' count of what ended.
+    pub skewed: bool,
+}
+
+impl EndedMarks {
+    /// A process of the set ended since `earlier`, as far as the marks tell: a count of a process grew
+    /// (from 0 for one `earlier` did not see), a child that ended waits to be reaped that did not
+    /// then, or a job counted another.
+    pub fn ended_since(&self, earlier: &EndedMarks) -> bool {
+        self.reaped.iter().any(|(k, v)| *v > earlier.reaped.get(k).copied().unwrap_or(0))
+            || self.zombies.keys().any(|k| !earlier.zombies.contains_key(k))
+            || self.jobs.unwrap_or(0) > earlier.jobs.unwrap_or(0)
+    }
+
+    /// The CPU (ns) the set's processes that ended since `earlier` used since then, with the processes
+    /// they started that ended too: Linux's launch cgroups' count over the two readings, less what the
+    /// processes still running in them used. `set_a` and `set_b` are the set's processes' CPU at the
+    /// two readings. None where that is not known: no launch cgroup at either reading (other OSes, a
+    /// target strobe did not launch), one removed in between, or something ended outside them (a
+    /// process of the set that ended or reaped one outside the cgroups, or one that left them running).
+    /// None too where the cgroups and the set's listing disagree: a process in the cgroups that is
+    /// none of the set's at either reading (a grandchild reparented out of the tree the set follows,
+    /// one that dropped the launch's stamp: what it used would be taken out of what ended as running
+    /// while the set counts none of it), or one that ended between the listing and the cgroups'
+    /// reading (`skewed`: counted in both).
+    pub fn dead_since(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            let (a, b) = (earlier.cgroup.as_ref()?, self.cgroup.as_ref()?);
+            if !a.launches.is_subset(&b.launches) || earlier.skewed || self.skewed {
+                return None;
+            }
+            if a.members.keys().any(|k| !set_a.contains_key(k)) || b.members.keys().any(|k| !set_b.contains_key(k)) {
+                return None;
+            }
+            // Left the cgroups still running (still in the set), or ended outside them.
+            if a.members.keys().any(|k| !b.members.contains_key(k) && set_b.contains_key(k)) || set_a.keys().any(|k| !set_b.contains_key(k) && !a.members.contains_key(k)) {
+                return None;
+            }
+            let inside = |pid: u32| a.members.keys().chain(b.members.keys()).any(|k| k.0 == pid);
+            if self.reaped.iter().any(|(k, v)| *v > earlier.reaped.get(k).copied().unwrap_or(0) && !inside(k.0)) {
+                return None;
+            }
+            if self.zombies.iter().any(|(k, parent)| !earlier.zombies.contains_key(k) && !inside(*parent)) {
+                return None;
+            }
+            let running: u64 = b.members.iter().map(|(k, c)| c.saturating_sub(a.members.get(k).copied().unwrap_or(0))).sum();
+            Some(b.usage_ns.saturating_sub(a.usage_ns).saturating_sub(running))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (earlier, set_a, set_b);
+            None
+        }
+    }
+}
+
+/// A set's `EndedMarks` now: `pids` are its processes, `home` the folder its launches were for.
+pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> EndedMarks {
+    let mut out = EndedMarks::default();
     #[cfg(windows)]
     {
-        if let Some(n) = spawn::jobs_ended(pids, home) {
-            out.insert(0, n);
-        }
+        out.jobs = spawn::jobs_ended(pids, home);
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = home;
+        out.cgroup = cgroup::read(pids, home);
         for &pid in pids {
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                out.skewed = true;
+                continue;
+            };
             // After `(comm)`: state is field 0, ppid 1, …, minflt 7, cminflt 8, majflt 9, cmajflt 10,
-            // utime 11, stime 12, cutime 13, cstime 14 (proc(5)); only the children's.
+            // utime 11, stime 12, cutime 13, cstime 14, …, starttime 19 (proc(5)); only the children's.
             let Some(close) = stat.rfind(')') else { continue };
             let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+            out.skewed |= matches!(rest.first(), Some(&"Z" | &"X" | &"x"));
+            let Some(start) = rest.get(19).and_then(|s| s.parse::<u64>().ok()) else { continue };
             let sum = [8, 10, 13, 14].iter().filter_map(|&i| rest.get(i)?.parse::<u64>().ok()).fold(0u64, u64::wrapping_add);
-            out.insert(pid, sum);
+            out.reaped.insert((pid, start), sum);
         }
+        out.zombies = linux::zombies_of(pids);
     }
     #[cfg(target_os = "macos")]
     {
         let _ = home;
         for &pid in pids {
             if let Ok(k) = macos::counts(pid) {
-                out.insert(pid, k.child_time);
+                out.reaped.insert((pid, k.start_us), k.child_time);
             }
         }
+        out.zombies = macos::zombies_of(pids);
     }
     out
 }
 
-/// Whether a process of the set ended between two `ended_marks` readings: a count of a process in both
-/// grew.
-pub fn ended_between(a: &std::collections::BTreeMap<u32, u64>, b: &std::collections::BTreeMap<u32, u64>) -> bool {
-    b.iter().any(|(k, v)| a.get(k).is_some_and(|x| v > x))
+/// Linux: the CPU (ns) that processes of a set's launches used and took with them when they ended,
+/// since the launches started (`cgroup::Reading::ended`): what a launch's CPU from its spawn adds to
+/// its running processes' (read just before). None without launch cgroups, where a process of the set
+/// runs outside them, and on other OSes.
+pub fn launch_ended_cpu(pids: &[u32], home: Option<&Path>) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let r = cgroup::read(pids, home)?;
+        let same = pids.iter().all(|p| r.members.keys().any(|k| k.0 == *p)) && r.members.keys().all(|k| pids.contains(&k.0));
+        same.then(|| r.ended())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pids, home);
+        None
+    }
 }
 
 /// PIDs of the tree rooted at `root` (root first), from one system snapshot. Children that started

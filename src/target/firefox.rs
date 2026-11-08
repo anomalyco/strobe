@@ -360,6 +360,11 @@ impl Browser {
         self.processes().iter().map(|p| p.pid).collect()
     }
 
+    /// The pids of `processes`, without reading each one's memory.
+    pub fn live_pids(&self) -> Vec<u32> {
+        host::process_set_pids(self.pid, self.profile.as_deref())
+    }
+
     /// The top-level browsing context strobe drives.
     pub fn context(&self) -> &str {
         &self.context

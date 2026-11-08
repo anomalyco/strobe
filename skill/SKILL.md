@@ -559,6 +559,9 @@ export default bench({
   - `NotForTarget`: the target or case has none (a run's metric on a launch case, `ui.*` without a window).
   - `NoMetric`: a declared `metric.<name>` a run's command did not print; `NoWaits`: `query waits` on a capture without waits, saying why.
 - A native app that exits is refused `RunIncomplete` with its exit code and, with `output: true` on the target, its last output lines.
+- A process of the target that ends inside a run takes its CPU counter with it:
+  - Linux: strobe's launches run in cgroups of their own, so `cpu.work` keeps what it used (the `EndedCpu` note says how much); needs a systemd user session or root (or a delegated cgroup).
+  - Elsewhere, or a target strobe did not launch: `cpu.work`, `cpu.app.total` and `cpu.<role>` are refused `RunIncomplete`. End such processes in the reset, or put them in `ctx.untimed`.
 - `strobe <command> --help` lists that command's flags.
 - `strobe config` checks the project's strobe.json and every app profile on this OS without a bench, read-only.
 - `strobe record page.html` records a local page.

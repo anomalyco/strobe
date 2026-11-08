@@ -1061,17 +1061,17 @@ pub fn cycles_timed(edges: &[&Cycles], keep: impl Fn(u32) -> bool) -> u64 {
 
 /// A process set's CPU at one moment: each process's cycles, what tells one that ended
 /// (`host::ended_marks`), and the cycle clock.
-pub type SetReading = (Cycles, BTreeMap<u32, u64>, Option<u64>);
+pub type SetReading = (Cycles, host::EndedMarks, Option<u64>);
 
 pub fn read_set(procs: &[host::ProcTimes], home: Option<&std::path::Path>) -> SetReading {
     let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
     (per_process(procs), host::ended_marks(&pids, home), host::tsc())
 }
 
-/// Cycles the set used between two readings, each process against its own; None when a process of it
-/// ended in between, taking its CPU there with it.
+/// Cycles the set used between two readings, each process against its own, with what the processes
+/// that ended in between used there (`timed_cpu`); None when that is not known.
 pub fn set_used(a: &SetReading, b: &SetReading) -> Option<u64> {
-    (gone(&[&a.0, &b.0]) == 0 && !host::ended_between(&a.1, &b.1)).then(|| cycles_used(&a.0, &b.0))
+    timed_cpu(&[&a.0, &b.0], &[&a.1, &b.1]).map(|c| c.total)
 }
 
 /// Processes in a timed part's first reading that are gone at its last (`cycles_timed`'s edges, in
@@ -1080,21 +1080,53 @@ pub fn gone(edges: &[&Cycles]) -> usize {
     edges.as_chunks::<2>().0.iter().map(|[a, b]| a.keys().filter(|k| !b.contains_key(k)).count()).sum()
 }
 
-/// Whether a process of the set ended inside a timed part: `cycles` and `ended` are the readings at a
-/// run's start, at each untimed stretch's edges and at its end (`cycles_timed`'s edges, with their
-/// `host::ended_marks`), in pairs. One that ended inside a stretch took nothing of the timed parts.
-pub fn lost_in_parts(cycles: &[&Cycles], ended: &[&BTreeMap<u32, u64>]) -> bool {
-    cycles.as_chunks::<2>().0.iter().zip(ended.as_chunks::<2>().0).any(|([a, b], [x, y])| gone(&[a, b]) > 0 || host::ended_between(x, y))
+/// A set's CPU over a run's timed parts (`timed_cpu`).
+#[derive(Clone, Debug, Default)]
+pub struct SetCpu {
+    /// Cycles: each process against its own readings (`cycles_timed`), plus `ended`.
+    pub total: u64,
+    /// What the processes that ended inside a timed part used there, and those they started and that
+    /// ended (Linux's launch cgroups, `host::EndedMarks::dead_since`), in cycles.
+    pub ended: u64,
+    /// The processes in a part's first reading and gone at its last (by pid): their share of a role's
+    /// CPU (`cpu.renderer`, …) is in `ended`, which is no role's.
+    pub gone: std::collections::BTreeSet<u32>,
 }
 
-/// `RunIncomplete` for a CPU metric over a span some process of the set ended in (`gone`,
-/// `host::ended_between`): its CPU left with it, so the set's CPU is short.
+/// The set's CPU over a run's timed parts: `cycles` and `ended` are the readings at the run's start,
+/// at each untimed stretch's edges and at its end (`cycles_timed`'s edges, with their
+/// `host::ended_marks`), in pairs. A part in which no process of the set ended (none gone, no mark
+/// moved) is `cycles_used` of its readings; one in which some did adds what they used there
+/// (`host::EndedMarks::dead_since`), and is None (the set's CPU is short by an unknown amount) where
+/// that is not known. One that ended inside a stretch took nothing of the timed parts.
+pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> Option<SetCpu> {
+    let mut out = SetCpu::default();
+    for ([a, b], [x, y]) in cycles.as_chunks::<2>().0.iter().zip(ended.as_chunks::<2>().0) {
+        let gone: Vec<u32> = a.keys().filter(|k| !b.contains_key(k)).map(|k| k.0).collect();
+        out.total += cycles_used(a, b);
+        if gone.is_empty() && !y.ended_since(x) {
+            continue;
+        }
+        let dead = y.dead_since(x, a, b)?;
+        out.total += dead;
+        out.ended += dead;
+        out.gone.extend(gone);
+    }
+    Some(out)
+}
+
+/// `RunIncomplete` for a CPU metric over a span some process of the set ended in, where what it used
+/// there is not known (`timed_cpu`): its CPU left with it, so the set's CPU is short.
 pub fn cpu_lost(metric: &str, runs: usize, of: usize, what: &str) -> crate::model::Refusal {
     crate::model::Refusal::new(
         crate::model::ValidatorId::RunIncomplete,
         format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run, and the CPU it used there ended with it, so the CPU of the process set is short"),
     )
-    .fix("keep the processes running until the run's end (warm up what the app starts and ends, or end it in the reset), or compare run.duration")
+    .fix(if cfg!(target_os = "linux") {
+        "let strobe launch the target (its launches' cgroups count what ended: under systemd strobe asks for a scope, so run it in a user session or as root), keep the processes running until the run's end, or compare run.duration"
+    } else {
+        "keep the processes running until the run's end (warm up what the app starts and ends, or end it in the reset), or compare run.duration"
+    })
 }
 
 /// A new recording's id and folder, held as a draft until its meta.json is written: `--id` (a handle

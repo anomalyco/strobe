@@ -1,7 +1,7 @@
 //! A small blocking D-Bus client (Linux): one connection, method calls with basic arguments and
 //! their replies decoded into `Value`, calls sent ahead of their replies (a tree read pipelines
 //! hundreds), signals queued for whoever reads them, and file descriptors in replies (logind's
-//! inhibitor). Enough for logind and the accessibility bus (AT-SPI). Little-endian wire format,
+//! inhibitor). Enough for logind, systemd's scopes and the accessibility bus (AT-SPI). Little-endian wire format,
 //! EXTERNAL authentication.
 
 use std::collections::{HashMap, VecDeque};
@@ -73,6 +73,10 @@ pub enum Arg<'a> {
     Strs(&'a [&'a str]),
     /// `v`
     Var(Box<Arg<'a>>),
+    /// `a<element>`: the element's signature, then the items (each of that signature).
+    Array(&'a str, Vec<Arg<'a>>),
+    /// `(…)`
+    Struct(Vec<Arg<'a>>),
 }
 
 impl Arg<'_> {
@@ -86,6 +90,8 @@ impl Arg<'_> {
             Arg::F64(_) => "d".into(),
             Arg::Strs(_) => "as".into(),
             Arg::Var(_) => "v".into(),
+            Arg::Array(elem, _) => format!("a{elem}"),
+            Arg::Struct(fields) => format!("({})", fields.iter().map(Arg::sig).collect::<String>()),
         }
     }
 
@@ -114,7 +120,37 @@ impl Arg<'_> {
                 put_sig(body, &inner.sig());
                 inner.put(body);
             }
+            Arg::Array(elem, items) => {
+                pad(body, 4);
+                let at = body.len();
+                body.extend_from_slice(&[0; 4]);
+                // The elements start aligned to their type even when there are none; the length
+                // counts from the first.
+                pad(body, align_of(elem));
+                let start = body.len();
+                for item in items {
+                    item.put(body);
+                }
+                let n = (body.len() - start) as u32;
+                body[at..at + 4].copy_from_slice(&n.to_le_bytes());
+            }
+            Arg::Struct(fields) => {
+                pad(body, 8);
+                for f in fields {
+                    f.put(body);
+                }
+            }
         }
+    }
+}
+
+/// The alignment of a value of signature `sig`.
+fn align_of(sig: &str) -> usize {
+    match sig.chars().next().unwrap_or('y') {
+        'x' | 't' | 'd' | '(' | '{' => 8,
+        'n' | 'q' => 2,
+        'y' | 'g' | 'v' => 1,
+        _ => 4,
     }
 }
 
@@ -561,13 +597,7 @@ impl Reader<'_> {
             'a' => {
                 let elem = element(sig)?;
                 let n = self.u32()? as usize;
-                let first = elem.chars().next().unwrap_or('y');
-                self.align(match first {
-                    'x' | 't' | 'd' | '(' | '{' => 8,
-                    'n' | 'q' => 2,
-                    'y' | 'g' | 'v' => 1,
-                    _ => 4,
-                });
+                self.align(align_of(&elem));
                 let end = self.at + n;
                 let mut items = Vec::new();
                 while self.at < end {

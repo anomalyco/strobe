@@ -341,8 +341,8 @@ pub struct Counts {
     pub energy_nj: u64,
     /// Its own package idle wakeups and its reaped children's (XNU keeps that for children).
     pub idle_wakes: u64,
-    /// CPU time of its children it reaped (Mach time): one that grew had a child run and end, whose
-    /// instructions and energy XNU keeps nowhere.
+    /// CPU time of its children it reaped (ns; XNU sums them in Mach time, as `ri_user_time`): one that
+    /// grew had a child run and end, whose instructions and energy XNU keeps nowhere.
     pub child_time: u64,
 }
 
@@ -360,7 +360,7 @@ pub fn counts(pid: u32) -> Result<Counts, i32> {
         instructions: ri.v4.ri_instructions,
         energy_nj: ri.ri_energy_nj,
         idle_wakes: ri.v4.ri_pkg_idle_wkups + ri.v4.ri_child_pkg_idle_wkups,
-        child_time: ri.v4.ri_child_user_time + ri.v4.ri_child_system_time,
+        child_time: mach_ns(ri.v4.ri_child_user_time + ri.v4.ri_child_system_time),
     })
 }
 
@@ -610,6 +610,12 @@ pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {
 pub fn tree_pids(root: u32) -> Vec<u32> {
     let all = all_bsd();
     tree_of(&all, &[root], false).into_iter().map(|i| all[i].pid).collect()
+}
+
+/// Children of `parents` that exited and are not reaped yet (zombies), by pid and start time, with
+/// their parent's pid.
+pub fn zombies_of(parents: &[u32]) -> std::collections::BTreeMap<(u32, u64), u32> {
+    all_bsd().into_iter().filter(|b| b.zombie && parents.contains(&b.ppid)).map(|b| ((b.pid, b.start), b.ppid)).collect()
 }
 
 /// What `host::kill_tree` ends: `tree_pids`, and when `root` has exited but is not reaped (a launch

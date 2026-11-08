@@ -1,6 +1,7 @@
 //! What strobe starts and owns. A child starts on given CPUs without moving strobe (the child has the
 //! mask before it runs any code, and strobe's own threads keep theirs), in a group strobe ends whole
-//! (a job object on Windows, its own process group on Unix), and stamped with the folder it was
+//! (a job object on Windows, its own process group on Unix, and on Linux a cgroup of its own that
+//! also counts the CPU of what ended, `cgroup`), and stamped with the folder it was
 //! launched for, which whatever it starts inherits: what left the group (a detached service, a
 //! double-forked daemon) still carries the stamp.
 
@@ -153,6 +154,10 @@ pub struct Owned {
     /// before the spawn, `peak_floor`).
     #[cfg(target_os = "linux")]
     floor: Option<u64>,
+    /// Linux: the launch's cgroup, which counts the CPU of everything it started, ended processes too
+    /// (`cgroup`); None where strobe may make none.
+    #[cfg(target_os = "linux")]
+    cgroup: Option<super::cgroup::Launch>,
 }
 
 /// Linux: what a child's `ru_maxrss` starts from. The kernel folds the resident high-water mark of the
@@ -285,8 +290,15 @@ impl Owned {
     }
 
     /// Ends the child's tree (read first: ending the group orphans it), its group, then the child,
-    /// and reaps it. Idempotent.
+    /// and reaps it; on Linux then whatever is left in its cgroup (what left the group, a `setsid`
+    /// daemon), and the cgroup. Idempotent.
     pub fn end(&mut self) {
+        self.end_group();
+        #[cfg(target_os = "linux")]
+        drop(self.cgroup.take());
+    }
+
+    fn end_group(&mut self) {
         let Some(group) = self.group.take() else { return };
         // Held while ending: a stop's `end_launches` either ended this launch already or waits.
         let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -757,11 +769,12 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         // responsible process, as a person starts an app, so its XPC services join its process set.
         #[cfg(target_os = "macos")]
         let bundle = home.is_some() && super::macos::own_responsibility(cmd);
-        #[cfg(not(target_os = "macos"))]
-        let _ = home;
-        // Read just before the spawn: strobe's reader threads' buffers grow after it.
         #[cfg(target_os = "linux")]
-        let floor = peak_floor(_forks);
+        let cgroup = into_cgroup(cmd);
+        // Read just before the spawn: strobe's reader threads' buffers grow after it. The cgroup's move
+        // is a `pre_exec` closure too: Rust forks then.
+        #[cfg(target_os = "linux")]
+        let floor = peak_floor(_forks || cgroup.is_some());
         let child = cmd.spawn()?;
         let pgid = child.id();
         // `spawn` returns once the exec is done: whether the disclaim took is known now.
@@ -776,15 +789,39 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
             start: super::start_time(pgid),
             #[cfg(target_os = "linux")]
             floor,
+            #[cfg(target_os = "linux")]
+            cgroup: cgroup.map(|(c, _)| c.adopt(pgid, home)),
         })
     }
+}
+
+/// Linux: a launch cgroup the child moves itself into between fork and exec (`cgroup::create`), with
+/// what it moves through, held open until the spawn returns.
+#[cfg(target_os = "linux")]
+fn into_cgroup(cmd: &mut Command) -> Option<(super::cgroup::Launch, std::fs::File)> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let (launch, procs) = super::cgroup::create()?;
+    let fd = procs.as_raw_fd();
+    // Between fork and exec only async-signal-safe calls. A move that fails fails the spawn: a child
+    // outside its launch's cgroup would be counted wrong.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::write(fd, b"0".as_ptr() as *const libc::c_void, 1) != 1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Some((launch, procs))
 }
 
 /// `spawn_owned` for a program on a pseudo-terminal (Unix): the child starts a session of its own
 /// (`setsid`, which also makes it its process group, the group `Owned` ends) whose controlling
 /// terminal is its stdin, as a terminal emulator starts a shell. `cmd`'s stdin must be the terminal.
+/// `home` is the folder the launch is for, as `spawn_owned`'s.
 #[cfg(unix)]
-pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>) -> std::io::Result<Owned> {
+pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&Path>) -> std::io::Result<Owned> {
     use std::os::unix::process::CommandExt;
     // Held from before the spawn until the launch is listed: a stop in between ends it too.
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -799,6 +836,10 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>) -> std::io::Re
         });
     }
     #[cfg(target_os = "linux")]
+    let cgroup = into_cgroup(cmd);
+    #[cfg(not(target_os = "linux"))]
+    let _ = home;
+    #[cfg(target_os = "linux")]
     let floor = peak_floor(true);
     let child = cmd.spawn()?;
     let pgid = child.id();
@@ -811,6 +852,8 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>) -> std::io::Re
         start,
         #[cfg(target_os = "linux")]
         floor,
+        #[cfg(target_os = "linux")]
+        cgroup: cgroup.map(|(c, _)| c.adopt(pgid, home)),
     })
 }
 

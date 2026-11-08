@@ -464,10 +464,10 @@ struct Run {
     /// what the departed document counted (the Performance domain's counters, the page's `count.*`) was
     /// never read, so `main.work`, `WORK_PARTS` and `count.*` would be short or negative.
     doc_lost: bool,
-    /// A process of the target's set ended in a timed part of the run: its CPU there went with it
-    /// (`record::lost_in_parts`), so the set's CPU is short.
+    /// A process of the target's set ended in a timed part of the run and what it used there is not
+    /// known (`record::timed_cpu`), so the set's CPU is short.
     cpu_lost: bool,
-    /// One ended anywhere in the run's span, untimed stretches too: `cpu_whole` is short.
+    /// So anywhere in the run's span, untimed stretches too: `cpu_whole` is short.
     whole_lost: bool,
     /// A headless page: the style and layout time (ms) and layouts its frame after the run's end did,
     /// work the run's last step left for that frame (`HeadlessFrame`); NaN where none was waited for.
@@ -475,6 +475,11 @@ struct Run {
     /// The wall time (ms) `task` was counted over: from asking the Performance domain at the run's start
     /// to its last answer after the run (and, headless, the frame after it), untimed stretches out.
     counted_ms: f64,
+    /// Per `PROCESS_ROLES`: a process of that role ended in a timed part, or what ended processes used
+    /// (no role's) is over 1% of the role's CPU.
+    role_lost: [bool; 3],
+    /// What processes that ended in the run's timed parts used there (ms), in `cpu`.
+    ended_ms: f64,
 }
 
 /// The point-in-time state a run left (SPEC §9.6): read once its span closed and before its reset,
@@ -497,6 +502,38 @@ const PROCESS_ROLES: [(&str, &str); 3] = [("renderer", "cpu.renderer"), ("gpu", 
 /// Each browser process's index in `PROCESS_ROLES`, by pid; empty where the browser does not say.
 fn process_roles(browser: &WebBrowser) -> BTreeMap<u32, usize> {
     browser.process_roles().into_iter().filter_map(|(pid, role)| Some((pid, PROCESS_ROLES.iter().position(|(r, _)| *r == role)?))).collect()
+}
+
+/// `EndedCpu`, once per series: its measured runs' CPU counts what processes that ended inside them
+/// used there (`record::SetCpu::ended`; per run, ms, and whether the run's CPU was lost anyway).
+fn note_ended(warnings: &mut Vec<validity::Warning>, s: &Series, runs: &[(f64, bool)]) {
+    let ended: Vec<f64> = runs.iter().filter(|r| !r.1 && r.0.is_finite()).map(|r| r.0).collect();
+    let label = format!("{}: ", s.label());
+    if ended.iter().all(|ms| *ms <= 0.0) || warnings.iter().any(|w| w.id == "EndedCpu" && w.text.starts_with(&label)) {
+        return;
+    }
+    warnings.push(validity::info(
+        "EndedCpu",
+        format!(
+            "{label}processes ended inside {} of {} measured runs; the CPU they used there ({} a run, median of those) is counted from their launch's cgroup, so cpu.work holds it",
+            ended.iter().filter(|ms| **ms > 0.0).count(),
+            runs.len(),
+            fmt::value(metrics::median(&ended.iter().copied().filter(|ms| *ms > 0.0).collect::<Vec<_>>()), "ms")
+        ),
+    ));
+}
+
+/// `EndedCpu` for a launch, once per series: its `cpu.work` counts what processes of it that ended
+/// before it was ready used (ms; `host::launch_ended_cpu`). Only for a launch whose `cpu.work` stands.
+fn note_ended_launch(warnings: &mut Vec<validity::Warning>, s: &Series, ms: f64) {
+    let label = format!("{}: ", s.label());
+    if ms.is_nan() || ms <= 0.0 || warnings.iter().any(|w| w.id == "EndedCpu" && w.text.starts_with(&label)) {
+        return;
+    }
+    warnings.push(validity::info(
+        "EndedCpu",
+        format!("{label}processes of the launch ended before it was ready; the CPU they used ({}) is counted from its cgroup, so cpu.work holds it", fmt::value(ms, "ms")),
+    ));
 }
 
 #[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
@@ -5807,18 +5844,56 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // (`host::process_cycles`), never walking the system's processes inside the run's span.
         let walked: RefCell<super::record::Cycles> = RefCell::new(BTreeMap::new());
         // The known processes' cycles and the cycle clock: the clock outside the cycles, so the span it
-        // gives holds them. One that exited reads none, which `record::gone` and `lost_in_parts` see.
+        // gives holds them. One that exited reads none, which `record::timed_cpu` sees.
         let fast_read = |ending: bool| -> (super::record::Cycles, Option<u64>) {
             let before = if ending { None } else { host::tsc() };
             let cycles = walked.borrow().keys().filter_map(|&(pid, start)| Some(((pid, start), host::process_cycles(pid)?))).collect();
             (cycles, if ending { host::tsc() } else { before })
         };
+        // The set's processes running now: on Linux listed from the processes' stat lines (no memory
+        // read), those born since the walk known from here on, so the edges read them (a renderer a
+        // cross-site navigation started) and their launch cgroups' members are all in the set
+        // (`EndedMarks::dead_since`); elsewhere the walked ones.
+        let listed_now = || -> Vec<u32> {
+            if !cfg!(target_os = "linux") {
+                return walked.borrow().keys().map(|k| k.0).collect();
+            }
+            let pids = browser.live_pids();
+            let mut known = walked.borrow_mut();
+            for &pid in &pids {
+                if !known.keys().any(|k| k.0 == pid)
+                    && let Some(start) = host::start_time(pid)
+                {
+                    known.insert((pid, start), 0);
+                }
+            }
+            pids
+        };
+        // At a timed part's end, right after the known processes' cycles (`fast_read(true)`): those born
+        // since, read now (`listed_now`), and what tells one that ended, of the processes running now.
+        let joined = |mut cycles: super::record::Cycles| -> (super::record::Cycles, host::EndedMarks) {
+            let pids = listed_now();
+            let born: Vec<(u32, u64)> = walked.borrow().keys().filter(|k| pids.contains(&k.0) && !cycles.contains_key(k)).copied().collect();
+            for (pid, start) in born {
+                if let Some(c) = host::process_cycles(pid) {
+                    cycles.insert((pid, start), c);
+                }
+            }
+            let ended = host::ended_marks(&cycles.keys().map(|k| k.0).collect::<Vec<_>>(), browser.profile().as_deref());
+            (cycles, ended)
+        };
         // strobe's own calls into the page at an edge (its reads, marks, counts and the OS input's
         // checks) stay inside the stretch: after the processes' cycles at its start (`fast`, read first),
-        // before them at its end (read last), so none of their round trips is the run's CPU.
+        // before them at its end (read last), so none of their round trips is the run's CPU. What tells a
+        // process that ended is read after the cycles at a part's end and before them at its start.
         let reading = |fast: Option<(super::record::Cycles, Option<u64>)>| {
-            let pids: Vec<u32> = walked.borrow().keys().map(|k| k.0).collect();
-            let ended = host::ended_marks(&pids, browser.profile().as_deref());
+            let (fast, ended) = match fast {
+                Some((cycles, tsc)) => {
+                    let (cycles, ended) = joined(cycles);
+                    (Some((cycles, tsc)), ended)
+                }
+                None => (None, host::ended_marks(&listed_now(), browser.profile().as_deref())),
+            };
             let (c, carry) = (counters(), *carried.borrow());
             doc_check();
             let (cycles, tsc) = fast.unwrap_or_else(|| fast_read(false));
@@ -6357,8 +6432,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 os.begin(&page)?;
             }
             // The run's edges nest: the processes' walk (with the wake counters), the profiler, the mark,
-            // the Performance domain's counters, strobe's own cost, the cycle clock, each known process's
-            // cycles, what tells one that ended, `t0` … `t1`, and back in reverse. The marks'
+            // the Performance domain's counters, what tells one that ended, strobe's own cost, the cycle
+            // clock, each known process's cycles, `t0` … `t1`, and back in reverse (at `t1` the set listed
+            // again for one born in the run, `joined`). The marks'
             // window and the counters' difference (`main.work`) hold none of strobe's evaluates but the
             // marks; the cycles and the clock that divides them span the same moments, right at `t0` and
             // `t1` (the walks, which list the system's processes, once sat inside the cycles' span and
@@ -6381,11 +6457,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let c0 = counters();
             doc_lost.set(false);
             doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
+            // What tells a process that ended, read right at the run's edges too: read at the walks, it took
+            // the marks and counters around the run for the run's. Before the cycle clock here and after it
+            // at the end, so its scan of the system's processes stays out of the cycles' span.
+            let ended0 = host::ended_marks(&pids0, browser.profile().as_deref());
             cost.start();
             let (at0, tsc0) = fast_read(false);
-            // What tells a process that ended, read right at the run's edges too (per process, no walk):
-            // read at the walks, it took the marks and counters around the run for the run's.
-            let ended0 = host::ended_marks(&pids0, browser.profile().as_deref());
             let t0 = host::now_ns();
             runner
                 .call("run", json!({ "case": s.case }), run_timeout, &serve)
@@ -6399,9 +6476,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 driver.dispatch("frame", &[])?;
             }
             let t1 = host::now_ns();
-            let ended1 = host::ended_marks(&pids0, browser.profile().as_deref());
             let (fast1, tsc1) = fast_read(true);
             cost.end();
+            let (fast1, ended1) = joined(fast1);
             let mut c1 = counters();
             let mut c1_at = host::now_ns();
             doc_check();
@@ -6435,10 +6512,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let (walk1, cyc1, _, cpu1) = read();
             let pids1: Vec<u32> = walk1.keys().map(|k| k.0).collect();
             let k1 = probe::wakes::Counters::take(listed, &pids1, perf.as_ref());
-            // The known processes as read at `t1`; one born during the run (a renderer after a cross-site
-            // navigation) from the walk after it, counted from zero.
+            // The known processes as read at `t1`, with those born during the run (a renderer after a
+            // cross-site navigation): on Linux as `t1`'s edge listed them (`joined`; one the walk after it
+            // finds more was born after the run), elsewhere from that walk, counted from zero.
             let mut at1 = fast1;
-            for (k, c) in walk1.iter().filter(|(k, _)| !walk0.contains_key(*k)) {
+            for (k, c) in walk1.iter().filter(|(k, _)| !walk0.contains_key(*k) && !cfg!(target_os = "linux")) {
                 at1.insert(*k, *c);
             }
             // The page's scripts' function ranges, before the reset can leave the page.
@@ -6485,13 +6563,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             cycles_at.push(&at1);
             let timed_cycles = |keep: &dyn Fn(u32) -> bool| super::record::cycles_timed(&cycles_at, keep);
             // A process of the browser ended in a timed part of the run (a renderer a cross-site navigation
-            // left, a utility process): its CPU there went with it. One that ended in an untimed stretch
-            // took nothing of the timed parts, but the whole span's CPU (`cpu_whole`, for cpu.foreign) is short.
-            let mut ended_at: Vec<&BTreeMap<u32, u64>> = vec![&ended0];
+            // left, a zygote's helper, a utility process): its CPU there went with it, and counts only where
+            // its launch's cgroup kept it (`record::timed_cpu`). One that ended in an untimed stretch took
+            // nothing of the timed parts, but is in the whole span's CPU (`cpu_whole`, for cpu.foreign).
+            let mut ended_at: Vec<&host::EndedMarks> = vec![&ended0];
             ended_at.extend(e.iter().map(|x| &x.3));
             ended_at.push(&ended1);
-            let cpu_lost = super::record::lost_in_parts(&cycles_at, &ended_at);
-            let whole_lost = cpu_lost || super::record::gone(&[&at0, &at1]) > 0 || host::ended_between(&ended0, &ended1);
+            let timed_cpu = super::record::timed_cpu(&cycles_at, &ended_at);
+            let whole_cpu = super::record::timed_cpu(&[&at0, &at1], &[&ended0, &ended1]);
+            let (cpu_lost, whole_lost) = (timed_cpu.is_none(), timed_cpu.is_none() || whole_cpu.is_none());
             if counting {
                 hooks.add(&page_counts());
             }
@@ -6566,10 +6646,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 (Some(a), Some(b)) if b > a + untimed_tsc => Some(100.0 * cycles as f64 / (b - a - untimed_tsc) as f64),
                 _ => None,
             };
-            let cpu = match share(super::record::cycles_used(&at0, &at1), 0) {
+            let cpu = match share(whole_cpu.as_ref().map_or(0, |c| c.total), 0) {
                 // No process readings (an OS without a process sampler yet): unknown, never 0%.
                 _ if cyc1 == 0 && cpu1 == 0 => (f64::NAN, f64::NAN),
-                Some(whole) if cyc0 > 0 => (share(timed_cycles(&|_| true), gap.0).unwrap_or(f64::NAN), whole),
+                Some(whole) if cyc0 > 0 => (share(timed_cpu.as_ref().map_or(0, |c| c.total), gap.0).unwrap_or(f64::NAN), whole),
                 // Never from process times, which move in 15.6 ms ticks on Windows (where cycles are not
                 // time, as on Windows on Arm before 11 24H2, the metric is refused instead).
                 _ => (f64::NAN, f64::NAN),
@@ -6584,11 +6664,23 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let parts = std::array::from_fn(|i| if doc_gone { f64::NAN } else { c1[i + 1] + carry[i + 1] - c0[i + 1] - gap.1[i + 1] });
             // Cycles only: a process's share needs the exact counter, and a process born during the run
             // (a renderer after a cross-site navigation) counts from zero. A role no process has (a browser
-            // that composites in its own process: no GPU process) is absent, never 0.
-            let roles = std::array::from_fn(|i| match share(timed_cycles(&|pid| roles.get(&pid) == Some(&i)), gap.0) {
-                Some(pct) if roles.values().any(|&r| r == i) && !cpu_lost => pct,
+            // that composites in its own process: no GPU process) is absent, never 0. What ended processes
+            // used is no role's: a role stands when none of its processes ended and what ended is within
+            // 1% of its CPU (it could all be that role's), else that role's is lost (`Run::role_lost`).
+            let role_cycles: [u64; 3] = std::array::from_fn(|i| timed_cycles(&|pid| roles.get(&pid) == Some(&i)));
+            let role_lost: [bool; 3] = std::array::from_fn(|i| match &timed_cpu {
+                Some(c) => c.gone.iter().any(|p| roles.get(p) == Some(&i)) || c.ended.saturating_mul(100) > role_cycles[i],
+                None => true,
+            });
+            let roles = std::array::from_fn(|i| match share(role_cycles[i], gap.0) {
+                Some(pct) if roles.values().any(|&r| r == i) && !role_lost[i] => pct,
                 _ => f64::NAN,
             });
+            // What processes that ended used in the run's timed parts (ms at the cycle clock's rate).
+            let ended_ms = match (&timed_cpu, share(1, gap.0)) {
+                (Some(c), Some(pct)) => c.ended as f64 * pct / 100.0 * wall / 1e6,
+                _ => 0.0,
+            };
             let counted = probe::wakes::counted(&k0, &k1);
             let work = cpu * wall / 1e6 / 100.0;
             let task = if doc_gone { f64::NAN } else { c1[0] + carry[0] - c0[0] - gap.1[0] };
@@ -6614,6 +6706,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 whole_lost,
                 deferred: left,
                 counted_ms,
+                role_lost,
+                ended_ms,
             })
         };
         // Warm until two consecutive runs do the same main-thread work (within 5%); both of them count
@@ -7296,7 +7390,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         refused.insert(m.clone(), r);
                     }
                 }
-                // A run in which a process of the browser ended: the set's CPU is short (`Run::cpu_lost`).
+                // A run in which a process of the browser ended and what it used is not known: the set's CPU
+                // is short (`Run::cpu_lost`); one whose ended processes' CPU is no role's: that role's is.
                 let gone = measured.iter().filter(|r| r.cpu_lost).count();
                 if gone > 0 {
                     let cpu = |m: &str| matches!(m, "cpu.app.total" | "cpu.process.total" | "cpu.work") || PROCESS_ROLES.iter().any(|p| p.1 == m);
@@ -7314,6 +7409,26 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         }
                     }
                 }
+                for (i, (role, m)) in PROCESS_ROLES.iter().enumerate() {
+                    let lost = measured.iter().filter(|r| !r.cpu_lost && r.role_lost[i]).count();
+                    if gone == 0 && lost > 0 {
+                        values.remove(*m);
+                        if declared_metrics(s).iter().any(|d| d == m) {
+                            let mut r = Refusal::new(
+                                ValidatorId::RunIncomplete,
+                                format!("{m}: in {lost} of {} measured runs a process of the browser ended inside the run: what it used there counts in cpu.work, but as no process role's, and it was a {role} process or over 1% of the {role} processes' CPU", measured.len()),
+                            )
+                            .fix("keep the browser's processes running until the run's end, or compare cpu.work");
+                            // Filmed: the screencast itself starts and ends processes of the browser in the run.
+                            if x.video {
+                                r.summary += " (the block was filmed: Chromium's screencast starts and ends processes in the run)";
+                                r.fix = Some(FILMED_CPU_FIX.into());
+                            }
+                            refused.insert(m.to_string(), r);
+                        }
+                    }
+                }
+                note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>());
                 // A run the page took to another document without strobe's `goto`: what the departed one
                 // counted was never read (`Run::doc_lost`).
                 let lost = measured.iter().filter(|r| r.doc_lost).count();
@@ -8263,7 +8378,7 @@ type RunInputs = (Vec<probe::present::frames::Sent>, Vec<probe::present::frames:
 
 /// The browser's processes, the cycle clock and the page's counters (with what departed documents
 /// carried) at one edge of a run's untimed stretch.
-type WebEdge = (super::record::Cycles, Option<u64>, [f64; 6], BTreeMap<u32, u64>);
+type WebEdge = (super::record::Cycles, Option<u64>, [f64; 6], host::EndedMarks);
 
 /// The page engine a target runs in (`web`, `url`; `apply_engines` set it): Chromium unless it says.
 fn engine_of(target: &Value) -> WebEngine {

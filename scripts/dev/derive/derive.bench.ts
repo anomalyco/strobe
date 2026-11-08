@@ -3,7 +3,10 @@
 //   strobe bench scripts/dev/derive/derive.bench.ts --head . --check
 // Truth per run (runner-side waits, so each is the wait plus a mark's round trip, about 1 ms):
 //   phases        phase.twice = 100 + 50 ms (entered twice in a row); phase.nested = 80 ms (entered inside itself)
-//   other site    frames on both sites: 300 ms of animation on each side of a goto to another site's renderer
+//   other site    frames on both sites: 300 ms of animation on each side of a goto to another site's renderer;
+//                 the new renderer's start may end a process inside the run (Linux: the zygote's helper,
+//                 about 22 ms), whose CPU Linux's launch cgroups keep: cpu.work and cpu.app.total stand
+//                 (EndedCpu says how much), and cpu.renderer is refused when it did (what ended is no role's)
 //   two hops      the page goes to a second site and on by itself to a third: frames in all three renderers
 //                 (`strobe query <recording> frames`, per process by `query <recording> sql`)
 //   link          a navigation by a click on a link (no goto): main.work refused, never negative or short
@@ -41,7 +44,7 @@ export default bench({
     "other site": {
       targets: ["page"],
       primary: "run.duration",
-      metrics: ["main.busy", "cpu.app.total"],
+      metrics: ["main.busy", "cpu.app.total", "cpu.work"],
       run: async (ctx: any) => {
         await ctx.page.eval(() => ((document.getElementById("box") as HTMLElement).dataset.run = "1"))
         await ctx.page.wait(300)

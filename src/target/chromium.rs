@@ -567,6 +567,14 @@ impl Browser {
         host::process_set(self.pid, self.profile.as_deref())
     }
 
+    /// The pids of `processes`, without reading each one's memory.
+    pub fn live_pids(&self) -> Vec<u32> {
+        if self.phone.is_some() {
+            return Vec::new();
+        }
+        host::process_set_pids(self.pid, self.profile.as_deref())
+    }
+
     /// GPU devices and whether compositing runs on a hardware adapter.
     pub fn gpu(&self) -> Result<Gpu> {
         let info = self.cdp.send("SystemInfo.getInfo", json!({}), None)?;

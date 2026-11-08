@@ -233,9 +233,11 @@ fn cycles(pid: u32, home: &Path) -> (super::super::record::Cycles, Option<u64>) 
     (super::super::record::per_process(&host::process_set(pid, Some(home))), host::tsc())
 }
 
-/// What tells a process of the program's set that ended (`host::ended_marks`).
-fn ended(pid: u32, home: &Path) -> BTreeMap<u32, u64> {
-    host::ended_marks(&host::process_set_pids(pid, Some(home)), Some(home))
+/// What tells a process of the program's set that ended (`host::ended_marks`), of the processes a
+/// `cycles` reading just listed (None: listed now).
+fn ended(pid: u32, cycles: Option<&super::super::record::Cycles>, home: &Path) -> host::EndedMarks {
+    let pids = cycles.map_or_else(|| host::process_set_pids(pid, Some(home)), |c| c.keys().map(|k| k.0).collect());
+    host::ended_marks(&pids, Some(home))
 }
 
 /// The pseudo-console host's cycles (Windows' conhost: the terminal's work, never the program's).
@@ -269,8 +271,11 @@ struct Run {
     cells: u64,
     /// The program's private memory as the run left it (MB), where it may be the last measured run.
     end_mb: Option<f64>,
-    /// A process of the program's set ended in a timed part: its CPU there went with it.
+    /// A process of the program's set ended in a timed part and what it used there is not known
+    /// (`record::timed_cpu`): its CPU there went with it.
     cpu_lost: bool,
+    /// What processes that ended in the run's timed parts used there (ms), in `cpu`.
+    ended_ms: f64,
     /// strobe's terminal reader's CPU over the run's timed parts and the cycle clock over them (both in
     /// `host::tsc` units).
     reader: (u64, u64),
@@ -324,7 +329,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let watches = RefCell::new(EventWatches::default());
     // The program's CPU at each edge of the run's untimed stretches, the console host's, and strobe's
     // terminal reader's with the cycle clock.
-    let edges: RefCell<Vec<(super::super::record::Cycles, BTreeMap<u32, u64>)>> = RefCell::new(Vec::new());
+    let edges: RefCell<Vec<(super::super::record::Cycles, host::EndedMarks)>> = RefCell::new(Vec::new());
     let host_edges: RefCell<Vec<u64>> = RefCell::new(Vec::new());
     let reader_edges: RefCell<Vec<(u64, Option<u64>)>> = RefCell::new(Vec::new());
     // The set's threads and IO at the same edges: switches and IO over the timed parts.
@@ -351,7 +356,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 if start {
                     cost.pause();
                 }
-                edges.borrow_mut().push((cycles(pid, &set_home).0, ended(pid, &set_home)));
+                let c = cycles(pid, &set_home).0;
+                let e = ended(pid, Some(&c), &set_home);
+                edges.borrow_mut().push((c, e));
                 host_edges.borrow_mut().push(host_cycles(&tty));
                 reader_edges.borrow_mut().push((tty.reader_cycles(), host::tsc()));
                 snap_edges.borrow_mut().push(probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), None));
@@ -412,9 +419,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let k0 = probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref());
                     edges.borrow_mut().clear();
                     host_edges.borrow_mut().clear();
-                    let ended0 = ended(pid, &set_home);
                     reader_edges.borrow_mut().clear();
                     snap_edges.borrow_mut().clear();
+                    // Right before the cycles (nothing read between), so it adds nothing to the run's CPU; a
+                    // process that differs between the two is refused, never miscounted (`dead_since`).
+                    let ended0 = ended(pid, None, &set_home);
                     let c0 = cycles(pid, &set_home);
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
@@ -428,7 +437,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let read_end = || {
                         let t1 = host::now_ns();
                         let busy = busy.as_ref().zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
-                        let (r1, h1, c1, ended1) = (tty.reader_cycles(), host_cycles(&tty), cycles(pid, &set_home), ended(pid, &set_home));
+                        let (r1, h1, c1) = (tty.reader_cycles(), host_cycles(&tty), cycles(pid, &set_home));
+                        // Right after the cycles, of the processes they listed (`dead_since`).
+                        let ended1 = ended(pid, Some(&c1.0), &set_home);
                         (t1, busy, r1, h1, c1, ended1, probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()))
                     };
                     // A run may return right after its last input (no until), before the program draws its
@@ -450,10 +461,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         _ => end.0,
                     };
                     let (t1, busy, r1, h1, c1, ended1, k1) = end;
-                    // Other work on the program's CPUs (`cpu.foreign`): their busy time less the program's and the
-                    // console host's cycles; unknown once a process of the program ended in the run.
-                    let gone = c0.0.keys().any(|k| !c1.0.contains_key(k)) || host::ended_between(&ended0, &ended1);
-                    let foreign = busy.filter(|_| !gone).and_then(|b| b.other_cycles(super::super::record::cycles_used(&c0.0, &c1.0) + h1.saturating_sub(h0)));
+                    // Other work on the program's CPUs (`cpu.foreign`): their busy time less the program's (with
+                    // what processes of it that ended used, `record::timed_cpu`) and the console host's cycles;
+                    // unknown where what ended is not known.
+                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0.0, &c1.0], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total + h1.saturating_sub(h0)));
                     hooks.end();
                     ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &screen_note(&tty), "the run threw or timed out"))?;
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
@@ -476,18 +487,20 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let mut at: Vec<&super::super::record::Cycles> = vec![&c0.0];
                     at.extend(e.iter().map(|x| &x.0));
                     at.push(&c1.0);
-                    let mut ended_at: Vec<&BTreeMap<u32, u64>> = vec![&ended0];
+                    let mut ended_at: Vec<&host::EndedMarks> = vec![&ended0];
                     ended_at.extend(e.iter().map(|x| &x.1));
                     ended_at.push(&ended1);
-                    let cpu_lost = super::super::record::lost_in_parts(&at, &ended_at);
+                    let timed_cpu = super::super::record::timed_cpu(&at, &ended_at);
+                    let cpu_lost = timed_cpu.is_none();
                     let wall = (t1 - t0) as f64 / 1e6;
                     let rate = c0.1.zip(c1.1).filter(|(a, b)| b > a).map(|(a, b)| (b - a) as f64 / wall);
                     // Short CPU is none (warmup falls back to the run's time).
-                    let cpu = match rate {
-                        _ if cpu_lost => f64::NAN,
-                        Some(r) if c1.0.values().any(|c| *c > 0) => super::super::record::cycles_timed(&at, |_| true) as f64 / r,
+                    let ms = |cycles: u64| match rate {
+                        Some(r) if c1.0.values().any(|c| *c > 0) => cycles as f64 / r,
                         _ => f64::NAN,
                     };
+                    let cpu = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
+                    let ended_ms = timed_cpu.as_ref().map_or(0.0, |c| ms(c.ended));
                     // The console host's cycles over the timed parts (its readings at the same edges).
                     let mut he = host_edges.take();
                     if he.len() % 2 == 1 {
@@ -535,6 +548,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         timed,
                         end_mb,
                         cpu_lost,
+                        ended_ms,
                         reader,
                         foreign,
                     });
@@ -563,8 +577,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let per = |f: &dyn Fn(&Run) -> f64| -> BTreeMap<String, f64> { measured.iter().enumerate().map(|(j, r)| (key(j), f(r))).filter(|(_, v)| v.is_finite()).collect() };
                 let mut extra: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
                 extra.insert("run.duration".into(), per(&|r| r.ms));
-                // A process of the program's set that ended in a timed part took its CPU with it: none.
+                // A process of the program's set that ended in a timed part took its CPU with it, where what it
+                // used there is not known: none.
                 let gone = measured.iter().filter(|r| r.cpu_lost).count();
+                super::note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>());
                 if gone == 0 && measured.iter().all(|r| r.cpu.is_finite()) {
                     extra.insert("cpu.work".into(), per(&|r| r.cpu));
                     extra.insert("cpu.app.total".into(), per(&|r| 100.0 * r.cpu / r.ms.max(1e-9)));
@@ -888,10 +904,13 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
                 ready.is_some()
             })
         };
-        let cpu_at_ready = super::super::record::per_process(&host::process_set(tty.pid, Some(&home.dir))).values().sum::<u64>();
+        let procs_at_ready = host::process_set(tty.pid, Some(&home.dir));
         // A process of the launch that ended before it was ready took its CPU with it (every count starts
-        // at 0 at the spawn).
-        let launch_lost = tty.ended() || ended(tty.pid, &home.dir).values().any(|c| *c > 0);
+        // at 0 at the spawn), unless its launch's cgroup kept it (`host::launch_ended_cpu`, read with the
+        // set's cycles).
+        let ended_at_ready = host::launch_ended_cpu(&procs_at_ready.iter().map(|p| p.pid).collect::<Vec<_>>(), Some(&home.dir));
+        let cpu_at_ready = super::super::record::per_process(&procs_at_ready).values().sum::<u64>() + ended_at_ready.unwrap_or(0);
+        let launch_lost = ended_at_ready.is_none() && (tty.ended() || ended(tty.pid, None, &home.dir).ended_since(&host::EndedMarks::default()));
         let tsc_at_ready = host::tsc();
         let wall_at_ready = lapped.elapsed();
         if !done {
@@ -919,7 +938,11 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
             && cpu_at_ready > 0
             && !launch_lost
         {
-            values.insert("cpu.work".into(), cpu_at_ready as f64 / ((b - a) as f64 / (wall_at_ready.as_secs_f64() * 1e3)));
+            let per_ms = (b - a) as f64 / (wall_at_ready.as_secs_f64() * 1e3);
+            values.insert("cpu.work".into(), cpu_at_ready as f64 / per_ms);
+            if let (Some(c), true) = (ended_at_ready, timed) {
+                super::note_ended_launch(&mut ctx.warnings, s, c as f64 / per_ms);
+            }
         }
         let ups = tty.updates(tty.started_ns, ready_ns);
         values.insert("tty.updates".into(), ups.len() as f64);

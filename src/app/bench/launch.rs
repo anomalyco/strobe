@@ -229,11 +229,16 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         };
         // CPU of the target's processes in cycles (exact; process times move in 15.6 ms ticks), from
         // spawn, or from navigation for a web target whose browser was already up.
-        let cpu_now = || -> u64 { browser.processes().iter().map(|p| p.cycles).sum() };
+        // With what its processes that ended used since the spawn, read with it (`host::launch_ended_cpu`).
+        let cpu_now = || -> (u64, Option<u64>) {
+            let procs = browser.processes();
+            let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+            (procs.iter().map(|p| p.cycles).sum(), host::launch_ended_cpu(&pids, browser.profile().as_deref()))
+        };
         let mut cpu0 = 0;
         // A web launch's browser was up before it: each process against its own reading at the navigation
-        // (`record::cycles_used`), and what tells a process of it ended in between.
-        let mut at0: Option<(super::super::record::Cycles, BTreeMap<u32, u64>)> = None;
+        // (`record::timed_cpu`), and what tells a process of it ended in between.
+        let mut at0: Option<(super::super::record::Cycles, host::EndedMarks)> = None;
         // `ctx.mock` on a page whose engine gives the runner no CDP session: through strobe (`mocks`), for
         // the whole launch.
         let mocks = super::mocks::Mocks::default();
@@ -291,7 +296,8 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             started.epoch_ms
         };
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
-        let (ready_at, page, cpu1) = match &window_until {
+        // `cpu1` holds what ended processes used where that is known (`ended`).
+        let (ready_at, page, cpu1, ended) = match &window_until {
             Some(until) => {
                 let deadline = Instant::now() + timeout;
                 let mut wait = super::native::WindowWait::default();
@@ -317,13 +323,24 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 let WebBrowser::Chromium(b) = &browser else { return Err(Error::msg("internal: a window launch of a page")) };
                 let main = electron::main_page(b)?;
                 let page: Page = watch.page(&main.target).unwrap_or(main).into();
-                (ready.at, page, ready.cycles)
+                (ready.at, page, ready.cycles + ready.ended.unwrap_or(0), ready.ended)
             }
             None => match watch.ready(timeout) {
                 Ok((at, received, page)) => {
-                    let cycles = match &at0 {
-                        Some((a, _)) => cpu0 + super::super::record::cycles_used(a, &super::super::record::per_process(&browser.processes())),
-                        None => cpu_now(),
+                    let (cycles, ended) = match &at0 {
+                        Some((a, e0)) => {
+                            let procs = browser.processes();
+                            let now = super::super::record::per_process(&procs);
+                            let marks = host::ended_marks(&procs.iter().map(|p| p.pid).collect::<Vec<_>>(), browser.profile().as_deref());
+                            match super::super::record::timed_cpu(&[a, &now], &[e0, &marks]) {
+                                Some(c) => (cpu0 + c.total, Some(c.ended)),
+                                None => (cpu0 + super::super::record::cycles_used(a, &now), None),
+                            }
+                        }
+                        None => {
+                            let (c, ended) = cpu_now();
+                            (c + ended.unwrap_or(0), ended)
+                        }
                     };
                     // The page's time is on its own clock (`performance.timeOrigin`, which Firefox coarsens to
                     // 1 ms): it must fall between strobe's start and when strobe heard of it, and the page's
@@ -338,7 +355,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                     if !(now >= c0 - CLOCK_SLACK_MS && now <= c1 + CLOCK_SLACK_MS) {
                         return Err(clock(format!("the page's clock read {:+.1} ms from the host's wall clock in a read that took {:.1} ms", now - c0, c1 - c0)));
                     }
-                    (at, page, cycles)
+                    (at, page, cycles, ended)
                 }
                 Err(e) => {
                     let shot = watch.any_page().map(|p| snapshot(&p, &ctx.exp, "launch")).unwrap_or_default();
@@ -348,22 +365,30 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         };
         // Never from process times (15.6 ms ticks): without cycles over the cycle clock, unknown, and
         // `refusals` says why.
-        let cpu_ms = match (clock.0, host::tsc()) {
-            (Some(a), Some(b)) if b > a && cpu1 > 0 => cpu1.saturating_sub(cpu0) as f64 / ((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
-            _ => f64::NAN,
+        // Cycle-clock ticks a ms.
+        let per_ms = match (clock.0, host::tsc()) {
+            (Some(a), Some(b)) if b > a && cpu1 > 0 => Some((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
+            _ => None,
         };
+        let cpu_ms = per_ms.map_or(f64::NAN, |r| cpu1.saturating_sub(cpu0) as f64 / r);
         // A process that ended before the launch was ready (a launcher that handed over, a helper, a
-        // browser process the navigation left) took its CPU with it: the set's cycles then are short.
-        let launch_lost = {
+        // browser process the navigation left) took its CPU with it: the set's cycles then are short,
+        // unless what it used is known (Linux's launch cgroups: `ended`).
+        let launch_lost = ended.is_none() && {
             let procs = browser.processes();
             let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
-            let ended = host::ended_marks(&pids, browser.profile().as_deref());
+            let marks = host::ended_marks(&pids, browser.profile().as_deref());
             match &at0 {
-                Some((a, e0)) => super::super::record::gone(&[a, &super::super::record::per_process(&procs)]) > 0 || host::ended_between(e0, &ended),
+                Some((a, e0)) => super::super::record::gone(&[a, &super::super::record::per_process(&procs)]) > 0 || marks.ended_since(e0),
                 // An app's launch counts from its spawn, where every count starts at 0.
-                None => !pids.contains(&pid) || ended.values().any(|c| *c > 0),
+                None => !pids.contains(&pid) || marks.ended_since(&host::EndedMarks::default()),
             }
         };
+        if let (Some(c), Some(r), false, false) = (ended, per_ms, profile, launch_lost)
+            && cpu_ms.is_finite()
+        {
+            super::note_ended_launch(&mut ctx.warnings, s, c as f64 / r);
+        }
         lap("ready", &mut steps);
         if watch.late() {
             return Err(Error::refused(

@@ -106,11 +106,12 @@ fn unquote(s: &str) -> Option<String> {
     None
 }
 
+/// `Delegate=yes`: the daemon's benches make their launches' cgroups under its own (`host::cgroup`).
 #[cfg(target_os = "linux")]
 fn content(exe: &Path) -> String {
     let env: String = captured().iter().map(|(k, v)| format!("Environment={}\n", quote(&format!("{k}={v}")))).collect();
     format!(
-        "# Written by strobe up; strobe leave removes it.\n[Unit]\nDescription=strobe daemon (MCP and reports)\n\n[Service]\nExecStart={} daemon\nWorkingDirectory={}\nKillMode=process\n{env}\n[Install]\nWantedBy=default.target\n",
+        "# Written by strobe up; strobe leave removes it.\n[Unit]\nDescription=strobe daemon (MCP and reports)\n\n[Service]\nExecStart={} daemon\nWorkingDirectory={}\nKillMode=process\nDelegate=yes\n{env}\n[Install]\nWantedBy=default.target\n",
         quote(&exe.display().to_string()),
         // WorkingDirectory takes the path as written (no quotes); only specifiers need escaping.
         exe.parent().unwrap_or(Path::new("/")).display().to_string().replace('%', "%%")

@@ -2791,23 +2791,73 @@ CPU.
   id reused by another thread counts from zero. Pages' `cpu.*` read each process this way with or
   without stretches (they used to sum the processes, so an exiting renderer lowered the sum).
   `cpu.fixture` is the run's less each stretch's.
-- **Processes that end:** a process of the set that ends inside a run takes the CPU it used there
-  with it, and one that starts and ends between two readings is in neither. Either one in a timed
-  part of a measured run refuses the set's CPU (`cpu.work`, `cpu.app.total`, `cpu.process.total`, the
-  browser's `cpu.<role>`; page, native, script and tty runs, launches, `record`; `cpu.fixture` has
-  none), `RunIncomplete`, never a short number. One that ended inside a `ctx.untimed` stretch took
-  nothing of the timed parts: it only leaves the run out of `cpu.foreign` (the whole span's CPU is
-  short). Seen per timed part (the readings at the run's edges and each stretch's): a process in one
-  reading and gone from the next (`record::gone`), or `host::ended_marks` moving between them
-  (`record::lost_in_parts`): Linux a process's ended children's `cminflt`, `cmajflt`, `cutime` and
-  `cstime` (`/proc/<pid>/stat` fields 11, 13, 16, 17; every exec faults), macOS their CPU time, Windows
-  the ended processes of the jobs strobe launched for the target's home, or rooted at the target's
-  process for a launch with no home (a script's host). A launch counts from its spawn, so any ended
-  process refuses its `cpu.work`, but for one: the launched process itself, ended cleanly with
-  nothing else ended (a launcher that handed over), whose own CPU strobe still reads through its held
-  process handle (Windows) or unreaped zombie (Unix) and adds (native launches). Checked with
-  `scripts/dev/derive/script.bench.ts` on adais: a 200 ms child that ends in the run refuses
-  `cpu.work`; the same child inside `ctx.untimed` and then 100 ms of the host's own read 100.4 ms.
+- **Processes that end:** a process of the set that ends inside a run takes its own CPU counter with
+  it, and one that starts and ends between two readings is in neither. Seen per timed part (the
+  readings at the run's edges and each stretch's; `record::timed_cpu`): a process in one reading and
+  gone from the next, or `host::EndedMarks` moving between them (`ended_since`): per process (by pid
+  and start time, so one born inside the part that reaped a child counts from 0) its ended children's
+  `cminflt`, `cmajflt`, `cutime` and `cstime` on Linux (`/proc/<pid>/stat`; every exec faults), their
+  CPU ns on macOS (`ri_child_*_time`, Mach time converted); an unreaped child of the set's processes
+  (a zombie, in no process tree); Windows the ended processes of the jobs strobe launched for the
+  target's home, or rooted at the target's process for a launch with no home (a script's host).
+  - **Linux recovers what they used.** Every launch strobe makes (`spawn_owned`) runs in a cgroup v2
+    of its own (`host::cgroup`), which the child joins before its exec, so all it starts, reaped or
+    orphaned, counts there; its `cpu.stat` `usage_usec` keeps what ended processes used. A part in
+    which something ended adds the cgroups' count over the part less what the processes still running
+    in them used there (`EndedMarks::dead_since`, each read just before the count): the CPU of what
+    ended, exact to the µs, which the set's CPU then holds (`cpu.work`, `cpu.app.total`,
+    `cpu.process.total`, `cpu_whole` for `cpu.foreign`, a fixture's). A browser's `cpu.<role>` stands
+    only when no process of that role ended in the part and what ended is within 1% of the role's CPU
+    (what ended is no role's), else that role alone is refused `RunIncomplete`. A launch adds what its
+    cgroups kept since the spawn (`host::launch_ended_cpu`, read with the ready reading), whatever
+    ended (a launcher that handed over, a helper). The bench says so once per series (`EndedCpu`,
+    info: how many runs and the median ms, or the launch's ms, §10.2). Still unknown, and refused: a
+    process of the set outside the cgroups (one strobe did not launch, one that moved itself out, as
+    Chromium's browser process into a systemd scope of its own under a user manager) that ended or
+    reaped one, one that left the cgroups still running, a process in them that is none of the set's
+    at either reading (a grandchild reparented out of the tree a script host's set follows: subtracted
+    as running while the set counts none of it, so `cpu.work` would read short; a WebKit launch's
+    WebDriver server), a cgroup gone between the readings, or a set listing and
+    a cgroup reading that disagree (a process ended between them, or one the later listing lacks still
+    runs in the cgroups: the reading at a part's end follows its cycles with nothing between, the one
+    at a run's start comes just before them).
+  - **Where strobe makes them**, once per strobe process, at its first launch: under its own cgroup
+    when it was handed to it (the cgroup it was handed, its own up through cgroups strobes made, has
+    systemd's `user.delegate` mark, or is the cgroup of the unit it runs in and that unit has
+    `Delegate=yes`, as `strobe up`'s unit has; a strobe a strobe launched uses its launch's); else under
+    systemd a scope of its own (`strobe-<pid>-<start>.scope`: `StartTransientUnit`, `Delegate=true`, its
+    pid; the system manager as root, the user's otherwise; systemd moves strobe out of the cgroup it
+    started in, so it leaves its login session's scope; never where that would leave a `cpu.max` or
+    `memory.max` set on strobe's cgroup or one above it, below the root cgroup for root or the user's
+    `user-<uid>.slice` otherwise: there launches have no cgroup, and the quota's throttling stays
+    strobe's to see, §10.1); without systemd its own cgroup when it may
+    write it. strobe moves itself into `host/` there and makes `launch-<pid>-<start>-<n>` beside it. A
+    child joins its launch's cgroup before its exec, and a spawn whose child could not join fails. No
+    controller is enabled (`cpu.stat` counts in every cgroup). Never in the root cgroup or a cgroup
+    systemd manages for someone else (systemd's delegation rules; a root strobe in a user manager's
+    service is in such a cgroup). A launch's end kills what is left in its cgroup (`cgroup.kill`, or
+    before Linux 5.14 SIGKILL to each process listed until none is; what left its process group too, as
+    Windows' job) and removes it. A killed strobe ran no ends: the next strobe's first launch ends the
+    launches of strobes that are gone (by pid and start time) beside its own and in their scopes, and
+    systemd removes those scopes once empty. Nowhere to make one (no cgroup v2, a non-root user with no
+    user manager, a container's read-only cgroup tree): as on other OSes below.
+  - **Elsewhere, refused.** Where what ended is not known (macOS, Windows, Linux without a launch
+    cgroup) a part in which a process ended refuses the set's CPU (`cpu.work`, `cpu.app.total`,
+    `cpu.process.total`, the browser's `cpu.<role>`; page, native, script and tty runs, launches,
+    `record`; `cpu.fixture` has none), `RunIncomplete`, never a short number. A launch counts from its
+    spawn, so any ended process refuses its `cpu.work`, but for one: the launched process itself,
+    ended cleanly with nothing else ended (a launcher that handed over), whose own CPU strobe still
+    reads through its held process handle (Windows) or unreaped zombie (Unix) and adds (native
+    launches). The reaped children's CPU is not added: a descendant orphaned to a reaper outside the
+    set (a double fork, `cmd &` in a shell that exits) ends in no count of the set's, so the sum would
+    be short by an unknown amount; it only tells that something ended, and macOS's only in whole Mach
+    ticks of what it reaped.
+  - One that ended inside a `ctx.untimed` stretch took nothing of the timed parts: it only leaves the
+    run out of `cpu.foreign` where its CPU is not known (the whole span's CPU is short). Checked with
+    `scripts/dev/derive/script.bench.ts`: on adais a 200 ms child that ends in the run refuses
+    `cpu.work`; the same child inside `ctx.untimed` and then 100 ms of the host's own read 100.4 ms. On
+    vps (§24.2) the child read 198–204 ms and a 200 ms orphaned grandchild 207–211 ms; with no user
+    manager (no cgroup) both are refused.
 - **Documents:** Chromium's Performance counters (`main.work`, `main.script`, `main.layout`,
   `main.style`, `layout.count`, `style.count`, lean `main.busy`) and the page's counter global are the
   document's: a `goto` reads the departing one's first. A run whose page loaded another document
@@ -3798,15 +3848,18 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   boundaries (per side), outside the CPU window, which brackets the run alone (in every page block),
   and warmup waits for the processes' CPU to hold steady. In every page block a run's edges nest: the processes' walk
   (with the wake counters), the profiler's start, the mark, the Performance domain's counters,
-  strobe's own cost, the cycle clock, each known process's cycles (`host::process_cycles`, one cheap
-  read each) and what tells one that ended (`host::ended_marks`, per process: read at the walks, a
-  helper that ended among the marks around a run refused a vps run `RunIncomplete`), `t0` … `t1`, and
-  back in reverse. The marks' window
+  what tells a process that ended (`host::ended_marks`, read at the walks a helper that ended among
+  the marks around a run refused a vps run `RunIncomplete`; its scan of the system's processes stays
+  out of the cycles' span), strobe's own cost, the cycle clock, each known process's cycles
+  (`host::process_cycles`, one cheap read each), `t0` … `t1`, and back in reverse. The marks' window
   (a trace's run window, `main.busy`'s denominator) and the counters' difference (`main.work`) hold
   no evaluate of strobe's (the marks' own are outside `main.work`), and the cycles and the clock that
-  divides them span the same moments at `t0` and `t1`; a process born during the run is read from
-  the walk after it, from zero. A `ctx.untimed` edge reads the same way: the cycles first where a
-  timed part ends, last where one starts. `strobe_pct` is strobe's cost from `t0` to `t1`. Before: the
+  divides them span the same moments at `t0` and `t1`. A process born during the run is read from
+  zero: on Linux where `t1`'s edge lists the set (its stat lines, no memory read) right after the
+  known processes' cycles, and what tells one that ended is read of the processes running then;
+  elsewhere from the walk after the run. A `ctx.untimed` edge reads the same way: the cycles first
+  where a timed part ends (then the list and what ended), last where one starts (after them), and
+  what that list adds is read at every later edge. `strobe_pct` is strobe's cost from `t0` to `t1`. Before: the
   wake counters, the profilers and the Performance counters sat inside the marks' window (a 166 ms
   run's was 190 ms, so a traced block read `main.busy` 52.8% for a run 60.5% busy), and the walks,
   which list the system's processes, sat inside the cycles' span (a Firefox 100 ms spin read 91 to
@@ -4011,6 +4064,8 @@ writes it as `Refusal`s). Schema: `schema/result.v1.json`.
 ### 10.2 Analysers (warn in the result)
 
 `MultimodalDistribution` · `HighVariance` · `Underpowered` · `StateDrift` · `Background` ·
+`EndedCpu` (info, once per series: Linux's launch cgroups kept what processes that ended inside runs
+used, or before a launch was ready, and `cpu.work` holds it: how many runs and the median ms, §9.6) ·
 `Throttling` · `HeadlessFrame` (a headless run's last step left its style and layout to the frame after the run, 7.3) · `Drift` (trend across pairs: Spearman |ρ| > 0.6 with tied ranks averaged, over ≥ 8 pairs, on the comparison's own scale: the log ratio moving at least 1% end to end, or for a metric compared by difference (counts, and any metric with a 0 in a pair) the difference moving at least 1% of base's median, so a near-constant difference never trends and a count's trend is not dropped) · `CounterUnstable` (an exact counter that did not hold one value on a side in every paired block, with each side's range: compared like a timed metric, by its noise, not exactly) · `ProbeOverhead` ·
 `Unresolved` (samples without a symbol above 5%) · `PowerPlan` (the user's plan was kept: `--power
 keep`, on battery, or no faster plan to switch to) · `Battery` · `VirtualMachine` · `BackgroundPriority`
@@ -8458,6 +8513,36 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   counted 0 of 0 pairs; refused metrics labelled "sparse" or shown with numbers; report.html rounded
   exact ties away from zero and printed bytes, rates and points otherwise than the text; the
   primary's tallies and plots read the pairs past its look (`primary_pairs`).
+- **CPU of processes that end in a run (2026-11-08)**: Linux launches run in cgroups of their own
+  (`host::cgroup`), and a timed part in which a process ended adds what the cgroups kept
+  (`record::timed_cpu`, §9.6). Checked with `scripts/dev/derive` on vps (`--check`, root, then a user's
+  PAM session, then the same user with no user manager): `child timed` (a 200 ms child) read
+  198–204 ms where it was refused (`EndedCpu`: 196–202 ms of ended processes), `orphan timed` (a 200 ms
+  grandchild adopted outside the host's tree) 207–211 ms; with no user manager (no scope, no cgroup)
+  both are refused as before, and on adais (Windows: job objects, unchanged) too. A strobe killed
+  mid-bench left its scope's launches running; the next strobe's first launch ended them and systemd
+  removed the scope (no cgroup left after any run). A launcher that hands over and exits at once
+  (`scripts/dev/fake-handoff.bench.ts`) kept its app, and its launch's `cpu.work` the launcher's 5 ms
+  (an exiting or unreaped process still reports its cgroup on cgroup v2, 200 of 200 polls on vps); the
+  launch is listed without reading that back, and a child that cannot join its cgroup fails its spawn.
+  A grandchild orphaned out of the script host's tree and still running at the run's end (`outlive`)
+  read `cpu.work` 53.0–53.6 ms, short by what it ran meanwhile (taken out of what ended as running,
+  counted in no process of the set); it is refused now. kweb's known-answer page on vps, whose
+  `spin100` and `tasks3x30` blocks were sometimes refused `RunIncomplete` (a process of the browser
+  ended in 1 of 5 runs), keep `cpu.work` (102 and 92 ms, `EndedCpu` 22.5 and 23.9 ms in that run),
+  and only that block's `cpu.renderer`, `cpu.gpu` and `cpu.browser` are refused. Under a `cpu.max` set
+  on strobe's cgroup (chaos's quota check on vps) strobe makes no scope and stays in it, its target
+  too: the runs stay refused `Throttled` (682–694 ms of throttled time). Headless Chromium's `other site` kept `cpu.work` and `cpu.app.total`
+  (203–214 ms) where `cpu.app.total` was refused; when the zygote's helper ended inside the timed part
+  it had used 22 ms, over 1% of the renderers' CPU, so `cpu.renderer` alone was refused (in a run where
+  it ended outside the timed part all three stood). Chromium's browser process moves itself into a
+  systemd scope of its own under a user manager, so what it reaps itself stays unknown. Ended-process
+  markers are keyed by pid and start time: a process born inside a part that reaped a child was in no
+  earlier reading and went unseen; an unreaped child (a zombie) of the set is seen too. macOS's
+  `ri_child_*_time` is Mach time (XNU sums the children's `ri_user_time`, `fill_task_rusage`'s
+  `total_user`), now ns; unchecked on a Mac. The reaper-only fallback the plan weighed (add the reaped
+  children's CPU where no cgroup is) is not built: a descendant orphaned to a reaper outside the set
+  is in no count, so it would read short.
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

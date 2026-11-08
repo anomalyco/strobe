@@ -746,7 +746,7 @@ fn open(spec: &Spec, env: &[(String, String)], cpus: Option<u64>) -> Result<Open
     };
     cmd.env_clear().envs(env.iter().cloned()).current_dir(&spec.cwd);
     cmd.stdin(slave.try_clone()?).stdout(slave.try_clone()?).stderr(slave);
-    let owned = host::spawn::spawn_owned_terminal(&mut cmd, cpus).map_err(|e| Error::msg(format!("start {}: {e}", spec.run.text())))?;
+    let owned = host::spawn::spawn_owned_terminal(&mut cmd, cpus, spec.home.as_deref()).map_err(|e| Error::msg(format!("start {}: {e}", spec.run.text())))?;
     drop(cmd);
     let pid = owned.pid();
     let read = std::fs::File::from(master.try_clone()?);
