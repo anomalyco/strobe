@@ -94,6 +94,9 @@ pub struct DeviceLogs {
     /// Web Inspector relay / message-trace lines dropped in memory so strobe does not log its own IPC.
     #[serde(default)]
     pub observer_dropped: u64,
+    /// Set when `TimeIntervalSince1970` was unavailable so wall-clock filtering was skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_note: Option<String>,
 }
 
 /// Whether a device log line is Web Inspector's own IPC / message-trace observer traffic.
@@ -120,9 +123,9 @@ pub struct LogStream {
 }
 
 impl LogStream {
-    /// Starts streaming allowlisted live device logs (`wall_s >= wall0_s - 1.0`, no historical buffer)
-    /// on a background thread. If neither log relay is available, returns an empty capture on stop.
-    pub fn start(device: &Device, allowlist: Allowlist, t0_ns: u64, wall0_s: f64) -> Self {
+    /// Starts streaming allowlisted live device logs (`wall_s >= wall0_s - 1.0` when `wall0_s` is known,
+    /// no historical buffer) on a background thread.
+    pub fn start(device: &Device, allowlist: Allowlist, t0_ns: u64, wall0_s: Option<f64>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let dev = device.clone();
@@ -147,9 +150,10 @@ impl Drop for LogStream {
     }
 }
 
-fn run_log_stream(dev: &Device, mut allow: Allowlist, t0_ns: u64, wall0_s: f64, stop: &AtomicBool) -> DeviceLogs {
+fn run_log_stream(dev: &Device, mut allow: Allowlist, t0_ns: u64, wall0_s: Option<f64>, stop: &AtomicBool) -> DeviceLogs {
     let setup_deadline = Some(Instant::now() + Duration::from_secs(3));
     let Ok(mut l) = session_for(dev, setup_deadline) else { return DeviceLogs::default() };
+    let wall0_s = wall0_s.or_else(|| super::wall_clock_s(&mut l));
     // Enrich the allowlist with live PIDs from PidList when os_trace_relay supports it.
     if let Ok(mut s) = l.start_service("com.apple.os_trace_relay") {
         s.set_deadline(Some(Instant::now() + Duration::from_millis(800)));
@@ -173,7 +177,10 @@ fn run_log_stream(dev: &Device, mut allow: Allowlist, t0_ns: u64, wall0_s: f64, 
         return out;
     }
     if let Ok(mut s) = l.start_service("com.apple.syslog_relay") {
-        let out = read_syslog(&mut s, &allow, t0_ns, stop);
+        let mut out = read_syslog(&mut s, &allow, t0_ns, stop);
+        if wall0_s.is_none() {
+            out.clock_note = Some("phone wall clock unavailable (TimeIntervalSince1970 failed): log timestamps use host arrival time".into());
+        }
         s.close();
         return out;
     }
@@ -237,8 +244,9 @@ enum ParsedLog {
     Filtered,
 }
 
-fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, wall0_s: f64, stop: &AtomicBool) -> DeviceLogs {
-    let mut logs = DeviceLogs { source: "os_trace_relay".into(), entries: Vec::new(), dropped: 0, observer_dropped: 0 };
+fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, wall0_s: Option<f64>, stop: &AtomicBool) -> DeviceLogs {
+    let clock_note = wall0_s.is_none().then(|| "phone wall clock unavailable (TimeIntervalSince1970 failed): log wall-clock filter skipped and timestamps use host arrival time".into());
+    let mut logs = DeviceLogs { source: "os_trace_relay".into(), entries: Vec::new(), dropped: 0, observer_dropped: 0, clock_note };
     while !stop.load(Ordering::Relaxed) {
         s.set_deadline(Some(Instant::now() + Duration::from_millis(150)));
         let mut tag = [0u8; 1];
@@ -279,15 +287,19 @@ fn read_ostrace(s: &mut Service, allow: &Allowlist, t0_ns: u64, wall0_s: f64, st
     logs
 }
 
-fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64, wall0_s: f64) -> ParsedLog {
+fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64, wall0_s: Option<f64>) -> ParsedLog {
     if pkt.len() < TRACE_HEADER_LEN {
         return ParsedLog::Filtered;
     }
     let pid = u32::from_le_bytes([pkt[9], pkt[10], pkt[11], pkt[12]]);
-    let seconds = i64::from_le_bytes([pkt[55], pkt[56], pkt[57], pkt[58], pkt[59], pkt[60], pkt[61], pkt[62]]) as f64;
+    let seconds = i64::from_le_bytes([pkt[55], pkt[56], pkt[57], pkt[58], pkt[59], pkt[60], pkt[61], pkt[62]]);
     let micros = u32::from_le_bytes([pkt[63], pkt[64], pkt[65], pkt[66]]) as f64;
-    let wall_s = seconds + micros * 1e-6;
-    if wall0_s > 0.0 && wall_s > 0.0 && wall_s < wall0_s - 1.0 {
+    let has_pkt_wall = seconds > 0;
+    let wall_s = seconds as f64 + micros * 1e-6;
+    if let Some(w0) = wall0_s
+        && has_pkt_wall
+        && wall_s < w0 - 1.0
+    {
         return ParsedLog::Filtered;
     }
     let level_byte = pkt[68];
@@ -343,12 +355,15 @@ fn parse_ostrace_entry(pkt: &[u8], allow: &Allowlist, t0_ns: u64, wall0_s: f64) 
         _ => "notice",
     }
     .to_string();
-    let at_ms = crate::host::now_ns().saturating_sub(t0_ns) as f64 / 1e6;
-    ParsedLog::Keep(DeviceLogEntry { at_ms, wall_s: Some(wall_s), pid: Some(pid), process: process.to_string(), level, subsystem, category, message })
+    let at_ms = match wall0_s.filter(|_| has_pkt_wall) {
+        Some(w0) => ((wall_s - w0) * 1e3).max(0.0),
+        None => crate::host::now_ns().saturating_sub(t0_ns) as f64 / 1e6,
+    };
+    ParsedLog::Keep(DeviceLogEntry { at_ms, wall_s: has_pkt_wall.then_some(wall_s), pid: Some(pid), process: process.to_string(), level, subsystem, category, message })
 }
 
 fn read_syslog(s: &mut Service, allow: &Allowlist, t0_ns: u64, stop: &AtomicBool) -> DeviceLogs {
-    let mut logs = DeviceLogs { source: "syslog_relay".into(), entries: Vec::new(), dropped: 0, observer_dropped: 0 };
+    let mut logs = DeviceLogs { source: "syslog_relay".into(), entries: Vec::new(), dropped: 0, observer_dropped: 0, clock_note: None };
     let mut pending = Vec::new();
     let mut buf = [0u8; 4096];
     while !stop.load(Ordering::Relaxed) {
@@ -557,19 +572,28 @@ pub struct CrashReport {
 
 /// Flushes staged crash reports (`crashreportmover`), then reads `.ips` reports in
 /// `[window_start_s - 2s, window_end_s + 5s]` over read-only AFC and filters them in memory through
-/// `allow` so personal apps' crashes and Jetsam rows never touch disk.
-pub fn collect_crashes(dev: &Device, allow: &Allowlist, window_start_s: f64, window_end_s: f64, deadline: Option<Instant>) -> Vec<CrashReport> {
-    let Ok(mut l) = session_for(dev, deadline) else { return Vec::new() };
+/// `allow` so personal apps' crashes and Jetsam rows never touch disk. Never falls back to host
+/// wall time: when the phone's `TimeIntervalSince1970` is unavailable at start, end and here, skips
+/// `st_mtime` filtering and returns a diagnostic `clock_note`.
+pub fn collect_crashes(dev: &Device, allow: &Allowlist, wall0_s: Option<f64>, wall1_s: Option<f64>, elapsed_s: f64, deadline: Option<Instant>) -> (Vec<CrashReport>, Option<String>) {
+    let Ok(mut l) = session_for(dev, deadline) else { return (Vec::new(), None) };
+    let w1 = wall1_s.or_else(|| super::wall_clock_s(&mut l));
+    let span_s = elapsed_s.max(0.0);
+    let bounds_ns = match (wall0_s, w1) {
+        (Some(a), Some(b)) => Some((((a - 2.0).max(0.0) * 1e9) as u64, ((b.max(a) + 5.0).max(0.0) * 1e9) as u64)),
+        (Some(a), None) => Some((((a - 2.0).max(0.0) * 1e9) as u64, ((a + span_s + 5.0).max(0.0) * 1e9) as u64)),
+        (None, Some(b)) => Some(((((b - span_s - 2.0).max(0.0)) * 1e9) as u64, ((b + 5.0).max(0.0) * 1e9) as u64)),
+        (None, None) => None,
+    };
+    let clock_note = bounds_ns.is_none().then(|| "phone wall clock unavailable (TimeIntervalSince1970 failed): crash/jetsam .ips wall-clock window filter was skipped".into());
     if let Ok(mut mover) = l.start_service("com.apple.crashreportmover") {
         mover.set_deadline(Some(Instant::now() + Duration::from_millis(1500)));
         let mut ping = [0u8; 5];
         let _ = mover.read(&mut ping);
     }
-    let Ok(mut svc) = l.start_service("com.apple.crashreportcopymobile") else { return Vec::new() };
+    let Ok(mut svc) = l.start_service("com.apple.crashreportcopymobile") else { return (Vec::new(), clock_note) };
     svc.set_deadline(deadline.or_else(|| Some(Instant::now() + Duration::from_secs(4))));
     let mut afc = ReadOnlyAfc::new(svc);
-    let lo_ns = ((window_start_s - 2.0).max(0.0) * 1e9) as u64;
-    let hi_ns = ((window_end_s + 5.0).max(0.0) * 1e9) as u64;
     let mut reports = Vec::new();
     for dir in [".", "Retired"] {
         let Ok(entries) = afc.read_dir(dir) else { continue };
@@ -586,9 +610,11 @@ pub fn collect_crashes(dev: &Device, allow: &Allowlist, window_start_s: f64, win
             if size == 0 || size > MAX_CRASH_BYTES {
                 continue;
             }
-            let mtime = info.get("st_mtime").or_else(|| info.get("st_birthtime")).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            if mtime < lo_ns || mtime > hi_ns {
-                continue;
+            if let Some((lo_ns, hi_ns)) = bounds_ns {
+                let mtime = info.get("st_mtime").or_else(|| info.get("st_birthtime")).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                if mtime < lo_ns || mtime > hi_ns {
+                    continue;
+                }
             }
             let Ok(raw) = afc.read_file(&path, MAX_CRASH_BYTES) else { continue };
             if let Ok(text) = std::str::from_utf8(&raw) {
@@ -596,7 +622,7 @@ pub fn collect_crashes(dev: &Device, allow: &Allowlist, window_start_s: f64, win
             }
         }
     }
-    reports
+    (reports, clock_note)
 }
 
 fn parse_ips(text: &str, filename: &str, allow: &Allowlist) -> Vec<CrashReport> {

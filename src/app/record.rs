@@ -1638,7 +1638,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     let handle = session.page.handle.clone();
     let usb_dev = session.usb_device().clone();
     let allowlist = Allowlist::new(&session.page.bundle_id, session.page.app_pid);
-    let wall0_s = session.wall_clock_s();
+    let wall0_s = session.wall_clock_s().or(session.phone.wall_clock_s);
     let t0_ns = host::now_ns();
 
     // Read viewport & DPR once without mutating anything on the page.
@@ -1659,10 +1659,12 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
         let mem_res = wki::record_memory(&mut session, &dir, for_ms, |m| progress(m));
         session.refresh_battery();
         let wall1_s = session.wall_clock_s();
+        let elapsed_s = host::now_ns().saturating_sub(t0_ns) as f64 / 1e9;
         let phone_meta = wir_phone_meta(&session, &handle, &screen);
         session.close();
         let dev_logs = log_stream.stop();
-        let crashes = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+        let (crashes, crash_clock_note) = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, elapsed_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+        let clock_note = crash_clock_note.or_else(|| dev_logs.clock_note.clone());
         let redacted_crashes = redact_crashes(&crashes);
         let mem = mem_res.map_err(|e| attach_crash_detail(e, &crashes))?;
         let (values, census, leaks, console) = (mem.values, mem.census, mem.leaks, mem.console);
@@ -1687,7 +1689,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "refused": refused,
             "census": census,
             "leaks": { "count": leaks["count"], "self_size": leaks["self_size"], "retained_size": leaks["retained_size"], "classes_total": leaks["classes_total"] },
-            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "device_dropped": dev_logs.dropped, "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len() },
+            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "device_dropped": dev_logs.dropped, "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len(), "clock_note": clock_note },
             "crashes": redacted_crashes,
             "timing": "perturbed",
             "created": now_iso(),
@@ -1701,12 +1703,14 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     let cap_res = wki::record_attribution(&mut session, &dir, &token, for_ms, args.get("served").map(std::path::Path::new), |m| progress(m));
     session.refresh_battery();
     let wall1_s = session.wall_clock_s();
+    let elapsed_s = host::now_ns().saturating_sub(t0_ns) as f64 / 1e9;
     let phone_meta = wir_phone_meta(&session, &handle, &screen);
     // Detach Web Inspector immediately before collecting crash reports over AFC.
     session.close();
 
     let dev_logs = log_stream.stop();
-    let crashes = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+    let (crashes, crash_clock_note) = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, elapsed_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
+    let clock_note = crash_clock_note.or_else(|| dev_logs.clock_note.clone());
     let redacted_crashes = redact_crashes(&crashes);
     let cap = cap_res.map_err(|e| attach_crash_detail(e, &crashes))?;
 
@@ -1742,6 +1746,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "observer_dropped": dev_logs.observer_dropped,
             "device_source": dev_logs.source,
             "crashes": crashes.len(),
+            "clock_note": clock_note,
         },
         "network": {
             "requests": cap.network_requests,
@@ -1863,6 +1868,9 @@ fn wir_summary(meta: &Value) -> String {
     let obs_note = if obs > 0 { format!(" ({obs} inspector IPC lines dropped)") } else { String::new() };
     let crashes = meta["crashes"].as_array().map_or(0, Vec::len);
     s += &format!("logs     {con} console ({con_err} errors) · {dev}{cap_note} Safari/WebKit device logs{obs_note} · {crashes} crashes/jetsams\n");
+    if let Some(note) = meta["logs"]["clock_note"].as_str() {
+        s += &format!("! Clock  {note}\n");
+    }
     for c in meta["crashes"].as_array().into_iter().flatten() {
         s += &format!("! Crash  {}\n", c["summary"].as_str().unwrap_or("crash or jetsam"));
     }

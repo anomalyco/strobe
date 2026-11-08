@@ -81,6 +81,7 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         })
         .collect();
 
+    let clock_note = raw_device.clock_note.as_deref().or_else(|| meta["logs"]["clock_note"].as_str());
     let cap_note = if raw_device.dropped > 0 { format!(" (+{} dropped at cap)", raw_device.dropped) } else { String::new() };
     let mut text = format!(
         "log · {id} · {} crashes/jetsams · {} console · {}{cap_note} Safari/WebKit device logs{}\n",
@@ -89,11 +90,14 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         dev_entries.len(),
         if reveal { " · revealed" } else { " · secrets scrubbed (--reveal shows raw)" }
     );
+    if let Some(note) = clock_note {
+        text += &format!("! {note}\n");
+    }
 
     if want_crash && (!crashes.is_empty() || source == Some("crash")) {
         text += &format!("crashes ({})\n", crashes.len());
         if crashes.is_empty() {
-            text += "  none in [t0, t1 + 5s]\n";
+            text += if clock_note.is_some() { "  none\n" } else { "  none in [t0, t1 + 5s]\n" };
         }
         for c in crashes.iter().take(top) {
             text += &format!("  ! {:<7} {}\n", c["kind"].as_str().unwrap_or("crash"), c["summary"].as_str().unwrap_or(""));
@@ -147,6 +151,7 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         "recording": id,
         "source": source,
         "revealed": reveal,
+        "clock_note": clock_note,
         "crashes": if want_crash { Value::Array(crashes) } else { Value::Null },
         "console": if want_console { Value::Array(console) } else { Value::Null },
         "device": if want_device {
@@ -154,6 +159,7 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
                 "relay": raw_device.source,
                 "dropped": raw_device.dropped,
                 "observer_dropped": raw_device.observer_dropped,
+                "clock_note": raw_device.clock_note,
                 "entries": dev_entries,
             })
         } else {

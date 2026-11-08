@@ -860,13 +860,10 @@ pub fn session_for(device: &Device, deadline: Option<Instant>) -> Result<Lockdow
     Ok(l)
 }
 
-/// Current wall-clock time on the phone (`TimeIntervalSince1970`), falling back to the host's wall clock.
-pub fn wall_clock_s(l: &mut Lockdown) -> f64 {
-    l.get_value(None, Some("TimeIntervalSince1970"))
-        .ok()
-        .flatten()
-        .and_then(|v| number(Some(&v)))
-        .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()))
+/// Current wall-clock time on the phone (`TimeIntervalSince1970`), or `None` if unavailable.
+/// Never falls back to the host's wall clock (host/phone clock skew would misfilter logs and crashes).
+pub fn wall_clock_s(l: &mut Lockdown) -> Option<f64> {
+    l.get_value(None, Some("TimeIntervalSince1970")).ok().flatten().and_then(|v| number(Some(&v))).filter(|&t| t.is_finite() && t > 0.0)
 }
 
 /// Picks a USB-connected phone (filtered by `udid_filter` when `Some`), checks that it is trusted and
@@ -918,7 +915,7 @@ pub fn open_usb(udid_filter: Option<&str>, diagnostics: bool, deadline: Option<I
         return Err(Error::refused("DeviceAsleep", format!("the phone ({}) is locked, so Safari and Web Inspector will not expose tabs", short_udid(&dev.udid)), "unlock the phone and run again"));
     }
     let text = |k: &str| values.get(k).and_then(Value::as_string).map(str::to_string);
-    let wall = number(values.get("TimeIntervalSince1970")).or_else(|| Some(wall_clock_s(&mut l)));
+    let wall = number(values.get("TimeIntervalSince1970")).filter(|&t| t.is_finite() && t > 0.0).or_else(|| wall_clock_s(&mut l));
     let bat = battery(&mut l, diagnostics);
     let info = Connected { device: dev.clone(), udid: dev.udid, product_type: text("ProductType"), ios: text("ProductVersion"), battery: bat, wall_clock_s: wall };
     Ok((l, info))

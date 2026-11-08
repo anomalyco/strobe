@@ -586,12 +586,9 @@ impl Session {
         &self.phone.device
     }
 
-    /// Reads the phone's current wall-clock time (`TimeIntervalSince1970`) if its lockdown session is open.
-    pub fn wall_clock_s(&mut self) -> f64 {
-        match &mut self.lockdown {
-            Some(l) => ios::wall_clock_s(l),
-            None => std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()),
-        }
+    /// Reads the phone's current wall-clock time (`TimeIntervalSince1970`), or `None` if unavailable.
+    pub fn wall_clock_s(&mut self) -> Option<f64> {
+        self.lockdown.as_mut().and_then(ios::wall_clock_s)
     }
 
     /// Re-reads the phone's battery temperature to catch mid-recording overheating.

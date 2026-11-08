@@ -4808,17 +4808,22 @@ target is resumed), never pairs or writes to the phone, and never prints the pho
     `Page.getResourceTree`, `Page.getResourceContent` and `Network.loadResource` (`query hotspots`).
   - `Timeline` (`RecalculateStyles`, `Layout`, `Paint`, `Composite`, caller `stackTrace`s) and
     `Heap.garbageCollected` populate owner-only `webkit.json` (`query layout`, `query gc`,
-    `query summary`, `query insights`, and Perfetto tracks in `strobe open`).
+    `query summary`, `query insights`, and Perfetto tracks in `strobe open`); the run window derives
+    from the page's own start/end marks so USB `Runtime.evaluate` round trips are excluded.
   - `Heap.snapshot` converts WebKit's version-3 snapshot into V8's `.heapsnapshot.gz` (`0600`
     owner-only, excluding `InjectedScript` / `CommandLineAPI` debugger scaffolding via two-BFS
     dominator filtering) for `query heap` and (`--probes memory` S0/S1/S2) `query leaks`;
     `Memory.trackingUpdate` categories feed `query memory` (with `private_bytes: null`, never
     conflated with OS private memory).
-  - `Network` events plus `Runtime` Navigation, Paint, pre-attach `Resource Timing` and
-    `performance.measure` spans write owner-only `network.json.gz` (`query <rec> network [--reveal]`),
+  - `Network` events (requiring `secureConnectionStart > 0` for `tls_ms`) plus `Runtime` Navigation,
+    Paint, pre-attach `Resource Timing` and in-window `performance.measure` spans (merged/summed per
+    name into `span.<name>`) write owner-only `network.json.gz` (`query <rec> network [--reveal]`),
     never re-fetching URLs and keeping no headers.
   - Device logs (`com.apple.os_trace_relay` with `PidList` + `StartActivity` `StreamFlags = 0x34`,
-    fallback `com.apple.syslog_relay`) and crash/jetsam `.ips` reports in `[t0 - 2s, t1 + 5s]`
+    fallback `com.apple.syslog_relay`) and crash/jetsam `.ips` reports in `[t0 - 2s, t1 + 5s]` on the
+    phone's own `TimeIntervalSince1970` clock (never falling back to host wall time; when unavailable,
+    wall-clock filtering is skipped with a `clock_note`, and `os_trace_relay` `at_ms` derives from phone
+    wall time when available)
     (`com.apple.crashreportmover` + strictly read-only AFC `com.apple.crashreportcopymobile`, no remove
     or write opcode in the binary) filter in memory through an allowlist (`MobileSafari` +
     `com.apple.WebKit.*` for Safari; the host app + `com.apple.WebKit.*` for a WKWebView) and drop
