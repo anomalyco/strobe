@@ -68,8 +68,10 @@ fn log_of(c: &Value, x: f64) -> f64 {
     if c["relative"] == true {
         (1.0 + x).max(1e-9).ln()
     } else {
-        let b = f(&c["base"]).abs().max(1e-9);
-        (1.0 + x / b).max(1e-9).ln()
+        // A difference from a base of 0 has no ratio: dividing by a floor put it ±20 log units out and
+        // squashed every other row. Such a row shows its change in words, without an interval.
+        let b = f(&c["base"]).abs();
+        if b > 0.0 && 1.0 + x / b > 0.0 { (1.0 + x / b).ln() } else { f64::NAN }
     }
 }
 
@@ -145,7 +147,7 @@ pub(super) fn build(r: &Value) -> Forest {
             }
         };
         // Better always to the left: a metric where higher is better plots its log ratio negated.
-        let way = if lower_better(metric(c)) { 1.0 } else { -1.0 };
+        let way = if lower_better(c) { 1.0 } else { -1.0 };
         let ci = (!gap && !matches!(o, Out::NotRun | Out::Refused))
             .then(|| {
                 let (a, e, b) = (way * log_of(c, f(&c["lo"])), way * log_of(c, f(&c["estimate"])), way * log_of(c, f(&c["hi"])));

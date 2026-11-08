@@ -296,6 +296,20 @@
         "refusal": { "$ref": "#/definitions/refusal" }
       }
     },
+    "gapPrimary": {
+      "description": "implementations: a journey one side cannot run (a parity gap): its primary, refused ParityGap, with nothing compared.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "verdict", "verdict_kind", "refusal"],
+      "properties": {
+        "metric": { "type": "string" },
+        "verdict": { "type": "string" },
+        "verdict_kind": { "const": "refused" },
+        "decided": { "const": false },
+        "holm_decided": { "type": ["boolean", "null"] },
+        "refusal": { "$ref": "#/definitions/refusal" }
+      }
+    },
     "overhead": {
       "description": "What strobe cost inside the measured runs, as % of one core (SPEC 19); a series holds its blocks' mean.",
       "type": ["object", "null"],
@@ -342,7 +356,7 @@
         "target_kind": {},
         "kind": { "type": "string", "description": "runs, launch or leak; check (--check), pixels (--pixels-only), blocks (--blocks: one build's timed blocks, nothing compared)." },
         "params": { "type": ["object", "null"] },
-        "primary": { "anyOf": [{ "$ref": "#/definitions/comparison" }, { "$ref": "#/definitions/leakPrimary" }, { "$ref": "#/definitions/checkPrimary" }, { "$ref": "#/definitions/blocksPrimary" }] },
+        "primary": { "anyOf": [{ "$ref": "#/definitions/comparison" }, { "$ref": "#/definitions/leakPrimary" }, { "$ref": "#/definitions/checkPrimary" }, { "$ref": "#/definitions/blocksPrimary" }, { "$ref": "#/definitions/gapPrimary" }] },
         "headless": { "type": "boolean", "description": "A page target ran in a headless browser (--headless, or the target's headless): no display, so its frame, input-to-screen latency, scroll, canvas and GPU-use metrics are refused (Headless); CPU, counters, memory and input pacing stay." },
         "engine": { "enum": ["chromium", "firefox", "webkit", null], "description": "A page target's browser engine (--engine, or the target's engine)." },
         "input": { "enum": ["desktop", "hybrid", "touch", "none", null], "description": "The input devices the series' pages saw (each block keeps its own). desktop: a fine pointer that hovers, nothing coarse, no touch, which a page target sees unless it emulates a device, headless too (checked before setup: DeviceMismatch); a page target with emulate: \"mobile\" sees touch and one with emulate: \"touch\" hybrid, checked the same way; an app's page (Electron, a webview, a command's browser) sees the machine's: hybrid (a fine pointer with touch beside it), touch (no fine pointer), none (no pointer at all). Sides that saw different ones are refused (VariantMismatch). Part of a page series' tracked fingerprint. Null without a page, and in results from before strobe recorded it." },

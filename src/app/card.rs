@@ -151,8 +151,9 @@ fn metric(c: &Value) -> &str {
     c["metric"].as_str().unwrap_or("")
 }
 
-fn lower_better(m: &str) -> bool {
-    model::metric(m).map(|d| d.better == Better::Lower).unwrap_or(true)
+/// Whether comparison `c` counted lower as better (a `metric.<name>` may be better higher).
+fn lower_better(c: &Value) -> bool {
+    super::pr::better_in(c) == Better::Lower
 }
 
 fn unit_of(m: &str) -> &'static str {
@@ -174,7 +175,7 @@ fn outcome(c: &Value, aa: bool) -> Out {
         VerdictKind::Worse if c["noworse"].is_number() => Out::Worse,
         VerdictKind::Better | VerdictKind::Worse if !(hi < 0.0 || lo > 0.0) => Out::Unclear,
         VerdictKind::Better | VerdictKind::Worse if aa => Out::AaFalse,
-        VerdictKind::Better | VerdictKind::Worse if (hi < 0.0) == lower_better(metric(c)) => Out::Better,
+        VerdictKind::Better | VerdictKind::Worse if (hi < 0.0) == lower_better(c) => Out::Better,
         VerdictKind::Better | VerdictKind::Worse => Out::Worse,
     }
 }
@@ -247,6 +248,8 @@ fn short(m: &str) -> (String, Option<(&'static str, &'static str)>) {
         "interaction.p95" => "input response (p95)",
         "scroll.latency.p95" => "scroll response (p95)",
         "js.heap.used" => "JavaScript heap",
+        "js.heap.growth" => "heap growth",
+        "dom.nodes.growth" => return ("DOM growth".into(), fewer),
         "dom.nodes" => return ("DOM nodes".into(), fewer),
         _ => "",
     };
@@ -261,6 +264,10 @@ fn short(m: &str) -> (String, Option<(&'static str, &'static str)>) {
     }
     if let Some(rest) = m.strip_prefix("span.") {
         return (format!("time in {rest} spans"), None);
+    }
+    // A command's own number goes by the name its lines gave it.
+    if let Some(rest) = m.strip_prefix("metric.").or_else(|| m.strip_prefix("app.")) {
+        return (rest.to_string(), None);
     }
     if let Some(rest) = m.strip_prefix("count.") {
         return (format!("{} count", rest.replace(['-', '_'], " ")), Some(("lower", "higher")));
@@ -301,7 +308,21 @@ fn disp(v: f64, unit: &str) -> String {
         "/s" => format!("{}/s", sig3(v)),
         "bytes" => super::fmt::bytes(v),
         "count" | "" => super::fmt::value(v, "count"),
+        // A number the target printed in a unit of its own.
+        "value" => sig3(v),
         u => format!("{} {u}", sig3(v)),
+    }
+}
+
+/// `+60`, `−1.5 ms`: a difference with its sign; one that shows as zero has none.
+fn signed_disp(v: f64, unit: &str) -> String {
+    let body = disp(v.abs(), unit);
+    if body == disp(0.0, unit) {
+        body
+    } else if v < 0.0 {
+        format!("−{body}")
+    } else {
+        format!("+{body}")
     }
 }
 
@@ -335,9 +356,11 @@ struct Tile {
 fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let m = metric(c);
     let est = f(&c["estimate"]);
-    let lower = lower_better(m);
+    let lower = lower_better(c);
     let (noun, words) = short(m);
     let (good, bad) = words.or_else(|| model::metric(m).map(|d| d.words)).unwrap_or(("less", "more"));
+    // A `metric.<name>` its lines made better higher turns the catalog's words round.
+    let (good, bad) = if model::metric(m).is_some_and(|d| (d.better == Better::Lower) != lower) { (bad, good) } else { (good, bad) };
     let improved = (est < 0.0) == lower;
     let word = if improved { good } else { bad };
     let relative = c["relative"] == true;
@@ -351,7 +374,8 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let delta = format!("{sign}{amount}");
     let unit = unit_of(m);
     let mut dots = Vec::new();
-    let (mut won, mut n) = (0, 0);
+    // A pair with the same value on both sides is neither better nor worse.
+    let (mut won, mut lost, mut n) = (0, 0, 0);
     for (b, h) in pairs(s) {
         let (x, y) = (f(&b["values"][m]), f(&h["values"][m]));
         if !x.is_finite() || !y.is_finite() {
@@ -362,6 +386,8 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
         n += 1;
         if (lower && y < x) || (!lower && y > x) {
             won += 1;
+        } else if y != x {
+            lost += 1;
         }
         dots.push(d);
     }
@@ -373,7 +399,7 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     };
     let tally = match (o, n) {
         (_, 0) => String::new(),
-        (Out::Worse, _) => format!("worse in {} of {n} pairs", n - won),
+        (Out::Worse, _) => format!("worse in {lost} of {n} pairs"),
         _ => format!("better in {won} of {n} pairs"),
     };
     let band = f(&c["bound"]).abs();
@@ -564,15 +590,23 @@ fn calm(series: &[&Value], aa: bool) -> (String, Option<Box<Tile>>) {
         let t = tile(s, &s["primary"], String::new());
         if t.dots.is_empty() { None } else { Some(Box::new(t)) }
     };
-    if let Some(s) = series.iter().find(|s| s["kind"] == "leak") {
+    // The leak run that leaks, before one that did not (the heading names the regression).
+    let leaks = |s: &&&Value| s["kind"] == "leak" && primary_out(s, aa) == Out::Worse;
+    if let Some(s) = series.iter().find(leaks).or_else(|| series.iter().find(|s| s["kind"] == "leak")) {
         return (capitalize(verdict(&s["primary"]).split(';').next().unwrap_or("")), None);
     }
+    // A ratio comparison's change as a percentage, a difference's in the metric's unit (a DOM node
+    // count up by 60 is `+60`, not `+6000%`).
+    let change = |c: &Value| {
+        let est = f(&c["estimate"]);
+        if c["relative"] == true { super::fmt::pct(est) } else { signed_disp(est, abs_unit(unit_of(metric(c)))) }
+    };
     if let Some(s) = find(Out::Worse) {
         let c = &s["primary"];
-        return (format!("{}: {} per pair, past the margin allowed", noun(s), super::fmt::pct(f(&c["estimate"]))), with_tile(s));
+        return (format!("{}: {} per pair, past the margin allowed", noun(s), change(c)), with_tile(s));
     }
     if let Some(s) = find(Out::AaFalse) {
-        let d = super::fmt::pct(f(&s["primary"]["estimate"]));
+        let d = change(&s["primary"]);
         return (format!("{} differed by {d} between two identical builds: this setup is not steady enough yet", noun(s)), with_tile(s));
     }
     if let Some(s) = find(Out::Unclear) {
@@ -584,7 +618,7 @@ fn calm(series: &[&Value], aa: bool) -> (String, Option<Box<Tile>>) {
         let c = &s["primary"];
         let unit = unit_of(metric(c));
         let b = f(&c["bound"]);
-        let bound = if c["relative"] == true { format!("±{:.0}%", b * 100.0) } else { format!("±{}", disp(b, abs_unit(unit))) };
+        let bound = if c["relative"] == true { format!("±{}", super::pr::pct_bound(b)) } else { format!("±{}", disp(b, abs_unit(unit))) };
         return (format!("{}: {} → {}, within {bound}", noun(s), disp(f(&c["base"]), unit), disp(f(&c["head"]), unit)), with_tile(s));
     }
     if let Some(s) = find(Out::Refused) {

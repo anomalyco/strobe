@@ -3579,6 +3579,11 @@ fn pixels_series(ctx: &mut Ctx, s: &Series, variants: &[Variant]) -> Result<Valu
 
 /// A comparison's cells as the tables show them: base, head, change, interval.
 fn cells(c: &Value) -> (String, String, String, String) {
+    // A refused comparison shows no number: results from before `Comparison::refuse` cleared them still
+    // hold some.
+    if stats::kind_of(c) == VerdictKind::Refused {
+        return ("—".into(), "—".into(), "—".into(), "—".into());
+    }
     let name = c["metric"].as_str().unwrap_or("");
     let unit = model::metric(name).map(|m| m.unit).unwrap_or("");
     let rel = c["relative"].as_bool().unwrap_or(false);

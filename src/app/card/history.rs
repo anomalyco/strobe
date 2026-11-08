@@ -93,7 +93,7 @@ fn svg(p: &Port, theme: Theme) -> String {
     ]);
     let f2 = match p.epochs.last() {
         Some(e) => format!("{} at {}", crate::app::track::comparator_updated(e), e["short"].as_str().unwrap_or("").chars().take(7).collect::<String>()),
-        None => format!("{} the same at every point · a word only when the whole interval lies past ±{:.0}%", p.base, p.bound * 100.0),
+        None => format!("{} the same at every point · a word only when the whole interval lies past ±{}", p.base, crate::app::pr::pct_bound(p.bound)),
     };
     let fw = W - 2.0 * LEFT;
     svg.text(LEFT, H - FOOT_I + 32.0, (17.0, false), Ink::Muted, "start", &clip(&f1, fw, 17.0, false));
@@ -294,7 +294,14 @@ fn rows(svg: &mut Svg, p: &Port, b: &Board, top: f32, bottom: f32) {
     let score = format!("{}{}", capitalize(&b.words()), if hidden > 0 { format!(" · {hidden} more in strobe history") } else { String::new() });
     let sy = bottom - 38.0;
     svg.text(x0, sy, (18.0, true), Ink::Fg, "start", &clip(&score, x1 - x0, 18.0, true));
-    svg.text(x0, sy + 24.0, (15.0, false), Ink::Muted, "start", &clip(&format!("tracked points at the newest commit, not a verdict · bound ±{:.0}%", p.bound * 100.0), x1 - x0, 15.0, false));
+    svg.text(
+        x0,
+        sy + 24.0,
+        (15.0, false),
+        Ink::Muted,
+        "start",
+        &clip(&format!("tracked points at the newest commit, not a verdict · bound ±{}", crate::app::pr::pct_bound(p.bound)), x1 - x0, 15.0, false),
+    );
 }
 
 /// The badge: `vs <base> (tracked, 3 pairs) | better in 4/5 · worse in 1 · 1 gap`, from the points at

@@ -1533,8 +1533,18 @@ const LABELS = {
 
 const labelOf = (m) => LABELS[m] || m;
 
+// A metric's catalog entry; families resolve by their base, as model::metric does (`metric.score` →
+// `metric`, `launch.first-paint` → `launch.milestone`, `net.requests{*.js}` → `net.requests`).
+function catalogOf(name) {
+  const base = String(name).split("{")[0];
+  if (CATALOG.has(base)) return CATALOG.get(base);
+  const [fam, ...rest] = base.split(".");
+  if (!rest.length) return undefined;
+  return fam === "launch" ? CATALOG.get("launch.milestone") : ["count", "phase", "span", "metric", "app"].includes(fam) ? CATALOG.get(fam) : undefined;
+}
+
 function unitOf(name) {
-  const cat = CATALOG.get(name)?.unit;
+  const cat = catalogOf(name)?.unit;
   if (cat) return cat;
   // Families resolve by their base, as model::metric does.
   if (/^(span|phase|launch)\../.test(name)) return "ms";
@@ -1549,32 +1559,65 @@ function unitOf(name) {
   return "count";
 }
 
-const higherBetter = (name) => (CATALOG.get(name)?.better ? CATALOG.get(name).better === "higher" : name === "frames.presented.count");
-const absUnit = (u) => (u === "%" ? "pts" : u);
+// A comparison's own direction first: a `metric.<name>` whose command's lines said `higher` is better
+// higher whatever the catalog's family says (result.json `better`).
+const higherBetter = (name, c) => (c?.better ? c.better === "higher" : catalogOf(name)?.better ? catalogOf(name).better === "higher" : name === "frames.presented.count");
+const absUnit = (u) => (u === "%" ? "pp" : u);
 
+// Rust's `{:.d}`, which the text and markdown print with: the nearest decimal, an exact tie to even
+// (toFixed breaks a tie away from zero, so 12.5 MB read 13 MB here and 12 MB in the text).
+function rfix(v, d) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, Math.abs(v));
+  const hi = dv.getUint32(0), lo = dv.getUint32(4), exp = (hi >>> 20) & 0x7ff;
+  let mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
+  const e = exp === 0 ? -1074 : exp - 1075;
+  if (exp !== 0) mant |= 1n << 52n;
+  if (!finite(v) || e >= 0) return v.toFixed(d);
+  const num = mant * 10n ** BigInt(d), den = 1n << BigInt(-e);
+  if ((num % den) * 2n !== den) return v.toFixed(d);
+  let q = num / den;
+  if (q % 2n === 1n) q += 1n;
+  const digits = q.toString().padStart(d + 1, "0");
+  const body = d ? `${digits.slice(0, -d)}.${digits.slice(-d)}` : digits;
+  return (v < 0 && q !== 0n ? "-" : "") + body;
+}
+
+// The text's `fmt::value`, so every surface prints a number the same way.
 function fmtVal(v, u) {
   if (!finite(v)) return "—";
   const d = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
-  if (u === "ms") return v.toFixed(d) + " ms";
-  if (u === "%") return v.toFixed(d) + "%";
-  if (u === "pts") return v.toFixed(d) + " pts";
-  if (u === "MB") return v.toFixed(0) + " MB";
-  if (u === "MB/min") return v.toFixed(d) + " MB/min";
-  if (u === "count/min") return (Math.abs(v) >= 10 ? Math.round(v).toLocaleString("en-US") : v.toFixed(1)) + " /min";
-  if (u === "Hz") return v.toFixed(0) + " Hz";
-  if (u === "count") return Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : v.toFixed(1);
+  // A value that rounds to zero prints without a sign (not −0.00%).
+  if (Math.round(v * 10 ** d) === 0) v = 0;
+  if (u === "ms") return rfix(v, d) + " ms";
+  if (u === "%") return rfix(v, d) + "%";
+  if (u === "pp") return rfix(v, d) + " pp";
+  if (u === "MB") return rfix(v, 0) + " MB";
+  if (u === "MB/min") return rfix(v, d) + " MB/min";
+  if (u === "count/min") return (Math.abs(v) >= 10 ? Math.round(v).toLocaleString("en-US") : rfix(v, 1)) + " /min";
+  if (u === "Hz") return rfix(v, 0) + " Hz";
+  if (u === "/s") return rfix(v, d) + "/s";
+  if (u === "value") return rfix(v, d);
+  if (u === "bytes") {
+    const a = Math.abs(v);
+    if (a >= 1024 ** 3) return rfix(v / 1024 ** 3, 2) + " GB";
+    if (a >= 1024 ** 2) return rfix(v / 1024 ** 2, 1) + " MB";
+    if (a >= 1024) return rfix(v / 1024, 0) + " KB";
+    return rfix(v, 0) + " B";
+  }
+  if (u === "count") return Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : rfix(v, 1);
   if (u === "instructions") {
     const a = Math.abs(v);
-    if (a >= 1e9) return (v / 1e9).toFixed(2) + " G instr";
-    if (a >= 1e7) return (v / 1e6).toFixed(1) + " M instr";
-    if (a >= 1e6) return (v / 1e6).toFixed(2) + " M instr";
-    if (a >= 1e3) return (v / 1e3).toFixed(0) + " k instr";
-    return v.toFixed(0) + " instr";
+    if (a >= 1e9) return rfix(v / 1e9, 2) + " G instr";
+    if (a >= 1e7) return rfix(v / 1e6, 1) + " M instr";
+    if (a >= 1e6) return rfix(v / 1e6, 2) + " M instr";
+    if (a >= 1e3) return rfix(v / 1e3, 0) + " k instr";
+    return rfix(v, 0) + " instr";
   }
-  return v.toFixed(d) + (u ? " " + u : "");
+  return rfix(v, d) + (u ? " " + u : "");
 }
 
-const fmtBare = (v, u) => fmtVal(v, u).replace(/\s*(ms|MB|Hz|pts|%)$/, "");
+const fmtBare = (v, u) => fmtVal(v, u).replace(/\s*(ms|MB|Hz|pp|%)$/, "");
 const shortNum = (v) => (!finite(v) ? "—" : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
 const capFirst = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
 
@@ -1601,14 +1644,16 @@ function fmtSignedBytes(bytes) {
 function fmtPct(r) {
   if (!finite(r)) return "—";
   const p = r * 100;
-  const body = Math.abs(p) < 10 ? Math.abs(p).toFixed(1) : Math.abs(p).toFixed(0);
+  const body = Math.abs(p) < 10 ? rfix(Math.abs(p), 1) : rfix(Math.abs(p), 0);
   return (p < -0.05 ? "−" : p > 0.05 ? "+" : "") + body + "%";
 }
 
+// The text's `fmt::signed`: one that shows as zero has no sign (`0 MB`, not `−0 MB`).
 function fmtSigned(v, u) {
   if (!finite(v)) return "—";
   const body = fmtVal(Math.abs(v), u);
-  return v < -1e-9 ? "−" + body : v > 1e-9 ? "+" + body : body;
+  if (body === fmtVal(0, u)) return body;
+  return v < 0 ? "−" + body : v > 0 ? "+" + body : body;
 }
 
 function fmtSignedMatched(vA, vB, u) {
@@ -1623,6 +1668,8 @@ function fmtSignedMatched(vA, vB, u) {
 const fmtDelta = (v, c, u) => (c?.relative !== false ? fmtPct(v) : fmtSigned(v, absUnit(u)));
 const fmtRange = (c, u, sep = " to ") => (!finite(c?.lo) || !finite(c?.hi) ? "—" : `${fmtDelta(c.lo, c, u)}${sep}${fmtDelta(c.hi, c, u)}`);
 const fmtBound = (c, u) => (c?.relative !== false ? `±${parseFloat(((c?.bound ?? 0.02) * 100).toPrecision(3))}%` : `±${fmtVal(c?.bound ?? 0.5, absUnit(u))}`);
+// A no-worse margin as the verdict words it: `≤2%`, `≤0.50 ms`.
+const fmtMargin = (c, u) => `≤${c?.relative !== false ? `${parseFloat(((c?.noworse ?? c?.bound ?? 0.02) * 100).toPrecision(3))}%` : fmtVal(c?.noworse ?? c?.bound ?? 0.5, absUnit(u))}`;
 const fmtP = (p) => (!finite(p) ? "—" : p < 0.001 ? "<0.001" : p < 0.1 ? p.toFixed(3) : p.toFixed(2));
 
 function fmtDuration(ms) {
@@ -1667,6 +1714,17 @@ function upperBound(sorted, x) {
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
     if (sorted[mid] <= x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// How many of `sorted` are below x (the first index at or past it).
+function lowerBound(sorted, x) {
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] < x) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -1870,15 +1928,28 @@ function renderRetainerDrawer(path, locB, locH, allocations) {
 }
 
 /* ---------- Outcome Classification & Data Queries ---------- */
+// A refused comparison's validator and why: its `refusal`, or in results from before it, its verdict's
+// words (`refused (TailTooShort): 51 frames < 200`).
+function refusalOf(c) {
+  if (c?.refusal?.validator) return c.refusal;
+  const m = /^refused\s*\(([^)]+)\):?\s*(.*)$/.exec(String(c?.verdict || ""));
+  return m ? { validator: m[1], summary: m[2] } : {};
+}
+
+// What a comparison decided, from its verdict_kind (its words in results from before that field).
 function classify(c, metric, aa) {
   const v = c?.verdict || "";
-  if (v === "·") return { kind: "desc", tone: "neutral" };
-  if (v === "—" || !v) return { kind: "unconfirmed", tone: "neutral" };
-  if (/^refused/.test(v)) return { kind: "refused", tone: "warn" };
-  if (v.startsWith("same")) return { kind: "same", tone: "neutral" };
-  if (/^(unclear|underpowered)/.test(v) || !(c.hi < 0 || c.lo > 0)) return { kind: "inconclusive", tone: "neutral" };
+  const k = c?.verdict_kind;
+  if (k === "descriptive" || v === "·") return { kind: "desc", tone: "neutral" };
+  if (k === "refused" || /^refused/.test(v)) return { kind: "refused", tone: "warn" };
+  if (k === "untested" || v === "—" || !v) return { kind: "unconfirmed", tone: "neutral" };
+  if (k === "same" || (!k && v.startsWith("same"))) return { kind: "same", tone: "neutral" };
+  // No worse: the interval's worse end inside the margin, which its other end may not be: never a shift.
+  if (k === "no_worse" || (!k && v.startsWith("no worse"))) return { kind: "noworse", tone: "neutral" };
+  // Only a better or worse verdict has a direction (a stopped or saturated series' interval may clear 0).
+  if ((k ? k !== "better" && k !== "worse" : /^(unclear|underpowered|stopped|saturated)/.test(v)) || !(c.hi < 0 || c.lo > 0)) return { kind: "inconclusive", tone: "neutral" };
   if (aa) return { kind: "aa-fp", tone: "warn" };
-  const improved = (c.hi < 0) !== higherBetter(metric);
+  const improved = (c.hi < 0) !== higherBetter(metric, c);
   const small = /\(small\)/.test(v);
   return { kind: improved ? (small ? "win-small" : "win") : (small ? "loss-small" : "loss"), tone: improved ? "win" : "loss" };
 }
@@ -1916,8 +1987,17 @@ function allComparisons(s) {
   ].filter((x) => x && x.c && x.c.metric);
 }
 
+// The blocks that measured `metric`: a series that counts cpu.instructions apart from its times (Linux
+// perf events never run in a timing block, SPEC §7.5) keeps the other kind's blocks in `pass`
+// (`counters`: whether they are the counter blocks).
+function blocksFor(s, metric) {
+  const pass = s?.pass;
+  if (!pass || !Array.isArray(pass.blocks) || !pass.blocks.length) return s?.blocks || [];
+  return (metric === "cpu.instructions") === !!pass.counters ? pass.blocks : s.blocks || [];
+}
+
 function pairsOf(s, metric) {
-  const blocks = timedBlocks(s);
+  const blocks = blocksFor(s, metric).filter((b) => finite(b.pair) && b.pair < 1e6);
   const map = new Map();
   blocks.forEach((b, idx) => {
     const entry = map.get(b.pair) || {};
@@ -2218,8 +2298,9 @@ function shortSeriesOutcome(c, m, u, cl, aa) {
   const d = fmtDelta(c.estimate, c, u);
   if (cl.kind === "aa-fp") return `${d} false positive`;
   if (cl.kind === "same") return aa ? "Control passed (±2%)" : `Equivalent (${fmtBound(c, u)})`;
+  if (cl.kind === "noworse") return `No worse (${fmtMargin(c, u)})`;
   if (cl.kind === "inconclusive") return "Inconclusive";
-  if (cl.kind === "refused") return "Refused (sparse)";
+  if (cl.kind === "refused") return `Refused (${refusalOf(c).validator || "see why"})`;
   // Only a decided shift has a direction (rule 1): no verdict, or a descriptive metric, says so.
   if (cl.tone !== "win" && cl.tone !== "loss") return cl.kind === "desc" ? "Descriptive" : "No verdict";
   return `${d} (${cl.tone === "win" ? "better" : "worse"})`;
@@ -2232,7 +2313,11 @@ function humanHeadline(c, m, u, cl, s, aa) {
     : fmtVal(Math.abs(c.estimate), absUnit(u));
 
   if (cl.kind === "refused") {
-    return { pill: "Measurement refused", headline: `Not enough samples to evaluate ${labelOf(m).toLowerCase()}` };
+    const { validator, summary } = refusalOf(c);
+    return { pill: `Measurement refused${validator ? ` · ${validator}` : ""}`, headline: `${labelOf(m)} not measured${summary ? `: ${summary}` : ""}` };
+  }
+  if (cl.kind === "noworse") {
+    return { pill: `Confirmed · No worse (${fmtMargin(c, u)})`, headline: `${labelOf(m)} no worse, within the ${fmtMargin(c, u).slice(1)} allowed` };
   }
   if (aa) {
     if (cl.kind === "aa-fp") return { pill: "A/A Control · False positive", headline: `${absPct} random drift between identical builds` };
@@ -2286,7 +2371,8 @@ function buildHeroProse(r, s, c, cl, aa) {
   const m = c.metric;
   const u = unitOf(m);
   const ps = pairsOf(s, m);
-  const wins = ps.filter((p) => (higherBetter(m) ? p.b > p.a : p.b < p.a)).length;
+  const wins = ps.filter((p) => (higherBetter(m, c) ? p.b > p.a : p.b < p.a)).length;
+  const losses = ps.filter((p) => (higherBetter(m, c) ? p.b < p.a : p.b > p.a)).length;
   const nPairs = ps.length || s.pairs || 0;
   const runDur = allComparisons(s).find((x) => x.c.metric === "run.duration")?.c.base
     ?? median(timedBlocks(s).map((b) => b.values?.["run.duration"]));
@@ -2298,14 +2384,14 @@ function buildHeroProse(r, s, c, cl, aa) {
   if (aa && cl.kind === "aa-fp") {
     return h("p", { class: "hero-prose" },
       "Both sides ran the exact same build across ", h("strong", {}, `${nPairs} alternating launch pairs`),
-      `, yet random variation leaned one way in ${Math.max(wins, nPairs - wins)} of ${nPairs} pairs (${fmtRange(c, u)}). `,
+      `, yet random variation leaned one way in ${Math.max(wins, losses)} of ${nPairs} pairs (${fmtRange(c, u)}). `,
       "This happens by chance in ~5% of A/A control runs and reflects natural harness variance rather than a code change."
     );
   }
   if (aa && cl.kind === "same") {
     return h("p", { class: "hero-prose" },
       "Identical builds were compared across ", h("strong", {}, `${nPairs} fresh-launch pairs`),
-      ` (${wins}–${nPairs - wins} split) and landed cleanly inside ${fmtBound(c, u)} (${fmtRange(c, u)}), confirming the test harness introduces no directional bias.`
+      ` (${wins}–${losses} split) and landed cleanly inside ${fmtBound(c, u)} (${fmtRange(c, u)}), confirming the test harness introduces no directional bias.`
     );
   }
   if (cl.kind === "same") {
@@ -2313,6 +2399,13 @@ function buildHeroProse(r, s, c, cl, aa) {
       SIDES ? `${labelOf(m)} the same on both: ${SIDES.head} ` : `${labelOf(m)} held steady at `, h("strong", {}, fmtVal(c.head, u)), SIDES ? ` vs ${SIDES.base} ` : " vs ", h("strong", {}, fmtVal(c.base, u)),
       ` (${fmtDelta(c.estimate, c, u)}). Across ${nPairs} fresh-launch pairs, the true change is bounded within `,
       h("strong", {}, fmtRange(c, u)), `, inside the ${fmtBound(c, u)} practical equivalence zone.`
+    );
+  }
+  if (cl.kind === "noworse") {
+    return h("p", { class: "hero-prose" },
+      SIDES ? `${labelOf(m)}: ${SIDES.head} ` : `${labelOf(m)} measured `, h("strong", {}, fmtVal(c.head, u)), SIDES ? ` vs ${SIDES.base} ` : " vs ", h("strong", {}, fmtVal(c.base, u)),
+      ` (${fmtDelta(c.estimate, c, u)}). Across ${nPairs} fresh-launch pairs the change lies within `, h("strong", {}, fmtRange(c, u)),
+      `: its worse end is inside the ${fmtMargin(c, u)} allowed, so no worse.`
     );
   }
   if (cl.kind === "inconclusive") {
@@ -2339,9 +2432,11 @@ function buildHeroProse(r, s, c, cl, aa) {
       ? ` (${fmtSignedMatched(c.base, c.head, "ms")} per ${fmtDuration(runDur)} run)`
       : "";
 
+  // The pairs that moved the way the verdict did: head better in them for a win, worse for a loss.
+  const along = cl.tone === "win" ? wins : losses;
   const smallCaveat = cl.kind.endsWith("-small")
-    ? ` Statistically confirmed (${wins} of ${nPairs} pairs moved in the same direction), though the conservative bound (${fmtRange(c, u)}) reaches inside the ${fmtBound(c, u)} practical threshold.`
-    : ` ${sideWord("head", true)} ${cl.tone === "win" ? "outperformed" : "trailed"} ${sideWord("base")} in ${wins === nPairs ? `all ${nPairs} of ${nPairs}` : `${wins} of ${nPairs}`} fresh-launch pairs.`;
+    ? ` Statistically confirmed (${along} of ${nPairs} pairs moved in the same direction), though the conservative bound (${fmtRange(c, u)}) reaches inside the ${fmtBound(c, u)} practical threshold.`
+    : ` ${sideWord("head", true)} ${cl.tone === "win" ? "outperformed" : "trailed"} ${sideWord("base")} in ${along === nPairs ? `all ${nPairs} of ${nPairs}` : `${along} of ${nPairs}`} fresh-launch pairs.`;
 
   // Two implementations: one number each, never a shift from one to the other.
   if (SIDES) {
@@ -2907,6 +3002,9 @@ function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
   } else if (SIDES && cl.kind === "same") {
     pill = `The same as ${SIDES.base} (${fmtBound(c, u)})`;
     headline = `No meaningful difference from ${SIDES.base}`;
+  } else if (SIDES && cl.kind === "noworse") {
+    pill = `No worse than ${SIDES.base} (${fmtMargin(c, u)})`;
+    headline = `${SIDES.head} is no worse than ${SIDES.base}, within the ${fmtMargin(c, u).slice(1)} allowed`;
   }
 
   const realWarnings = dedupWarnings([...(r.warnings || []), ...(s.warnings || [])]).filter((w) => w.level === "warn" || w.level === "error");
@@ -2952,12 +3050,12 @@ function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
           h("div", { class: "ba-compare" },
             h("div", { class: "ba-col" },
               h("span", { class: "ba-label" }, h("i", { class: "swatch base" }), SIDES ? baseTag : `Base · ${baseTag}`),
-              h("span", { class: "ba-val muted" }, fmtVal(c.base, u))
+              h("span", { class: "ba-val muted" }, fmtVal(cl.kind === "refused" ? null : c.base, u))
             ),
             h("span", { class: "ba-arrow" }, SIDES ? "vs" : "→"),
             h("div", { class: "ba-col" },
               h("span", { class: "ba-label" }, h("i", { class: `swatch head ${cl.tone}` }), SIDES ? headTag : `Head · ${headTag}`),
-              h("span", { class: "ba-val" }, fmtVal(c.head, u))
+              h("span", { class: "ba-val" }, fmtVal(cl.kind === "refused" ? null : c.head, u))
             )
           ),
           baseVar?.subject || headVar?.subject
@@ -2972,10 +3070,10 @@ function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
         ),
         h("div", { class: "ruler-box" },
           h("div", { class: "ruler-top" },
-            h("span", { class: "ruler-title" }, "Likely change: ", h("b", {}, fmtRange(c, u))),
-            h("span", { class: "ruler-ci-tag" }, `Shaded: ${fmtBound(c, u)} equiv · ${ciExplain} · p = ${fmtP(c.p)}`)
+            h("span", { class: "ruler-title" }, "Likely change: ", h("b", {}, fmtRange(cl.kind === "refused" ? {} : c, u))),
+            h("span", { class: "ruler-ci-tag" }, `Shaded: ${finite(c.noworse) ? `no worse (${fmtMargin(c, u).replace("≤", higherBetter(m, c) ? "≥−" : "≤+")})` : `${fmtBound(c, u)} equiv`} · ${ciExplain} · p = ${fmtP(c.p)}`)
           ),
-          chartBox(76, (w) => drawEquivalenceRuler(w, c, m, u, cl, aa))
+          chartBox(76, (w) => drawEquivalenceRuler(w, cl.kind === "refused" ? { ...c, lo: null, hi: null, estimate: null } : c, m, u, cl, aa))
         )
       )
     )
@@ -2996,7 +3094,16 @@ function drawEquivalenceRuler(w, c, m, u, cl, aa) {
   const cy = 28;
   const axisY = 48;
 
-  if (finite(bnd) && bnd > 0) {
+  if (finite(c.noworse)) {
+    // A no-worse margin is one-sided: everything on the better side of +margin (worse side) passes.
+    const worseUp = !higherBetter(m, c);
+    const edge = x(worseUp ? bnd : -bnd);
+    const [bx0, bx1] = worseUp ? [padX, edge] : [edge, w - padX];
+    svg.append(
+      S("rect", { x: bx0, y: 8, width: Math.max(2, bx1 - bx0), height: axisY - 8, rx: 3, fill: "var(--equiv-band)" }),
+      S("line", { x1: edge, y1: 8, x2: edge, y2: axisY, stroke: "var(--equiv-stroke)", "stroke-dasharray": "3 2" })
+    );
+  } else if (finite(bnd) && bnd > 0) {
     const bx0 = x(-bnd), bx1 = x(bnd);
     svg.append(
       S("rect", { x: bx0, y: 8, width: Math.max(2, bx1 - bx0), height: axisY - 8, rx: 3, fill: "var(--equiv-band)" }),
@@ -3022,7 +3129,7 @@ function drawEquivalenceRuler(w, c, m, u, cl, aa) {
     );
   }
 
-  const leftBetter = !higherBetter(m);
+  const leftBetter = !higherBetter(m, c);
   svg.append(
     S("text", { x: padX, y: H - 1, "text-anchor": "start", class: "sans", style: "font-size:10.5px;fill:var(--ink-3)" }, aa ? "← Head lower" : leftBetter ? "← Better" : "← Worse"),
     S("text", { x: w - padX, y: H - 1, "text-anchor": "end", class: "sans", style: "font-size:10.5px;fill:var(--ink-3)" }, aa ? "Head higher →" : leftBetter ? "Worse →" : "Better →")
@@ -3212,7 +3319,9 @@ function renderEvidenceSection(r, s, aa) {
   const P = ps.length;
   const deltas = ps.map((p) => (rel ? p.b / p.a - 1 : p.b - p.a));
 
-  const wins = ps.filter((p) => (higherBetter(metric) ? p.b > p.a : p.b < p.a)).length;
+  const wins = ps.filter((p) => (higherBetter(metric, comp) ? p.b > p.a : p.b < p.a)).length;
+  // A tie is neither: worse counts its own pairs.
+  const losses = ps.filter((p) => (higherBetter(metric, comp) ? p.b < p.a : p.b > p.a)).length;
   const cl = item.role !== "descriptive" && comp.decided ? classify(comp, metric, aa) : { tone: "neutral", kind: "context" };
 
   let winSummary = `${P} launch pairs`;
@@ -3221,12 +3330,12 @@ function renderEvidenceSection(r, s, aa) {
     const hd = sideWord("head", true);
     if (aa) winSummary = `Head lower in ${ps.filter((p) => p.b < p.a).length} of ${P} pairs`;
     else if (cl.tone === "win") { winSummary = SIDES ? `${hd} better in ${wins} of ${P} pairs` : `Head won ${wins} of ${P} pairs`; winTone = "win"; }
-    else if (cl.tone === "loss") { winSummary = SIDES ? `${hd} worse in ${P - wins} of ${P} pairs` : `Head regressed in ${P - wins} of ${P} pairs`; winTone = "loss"; }
+    else if (cl.tone === "loss") { winSummary = SIDES ? `${hd} worse in ${losses} of ${P} pairs` : `Head regressed in ${losses} of ${P} pairs`; winTone = "loss"; }
     else winSummary = `${hd} better in ${wins} of ${P} pairs`;
   }
 
   let geoLeft = null, geoRight = null;
-  const leftBox = chartBox(164, (w) => { const out = drawPairedRaw(w, ps, metric, u, cl, aa); geoLeft = out.geo; return out.svg; });
+  const leftBox = chartBox(164, (w) => { const out = drawPairedRaw(w, ps, metric, u, cl, aa, comp); geoLeft = out.geo; return out.svg; });
   const rightBox = chartBox(164, (w) => { const out = drawPairDeltas(w, ps, deltas, comp, metric, u, rel, cl, aa); geoRight = out.geo; return out.svg; });
 
   const bindScrub = (box, getGeo) => {
@@ -3286,7 +3395,7 @@ function renderEvidenceSection(r, s, aa) {
   );
 }
 
-function drawPairedRaw(w, ps, metric, u, cl, aa) {
+function drawPairedRaw(w, ps, metric, u, cl, aa, comp) {
   const H = 164;
   const m = { l: 52, r: 14, t: 10, b: 24 };
   const svg = S("svg", { class: "plot", width: w, height: H, viewBox: `0 0 ${w} ${H}` });
@@ -3320,7 +3429,7 @@ function drawPairedRaw(w, ps, metric, u, cl, aa) {
 
   ps.forEach((p, i) => {
     const k = i + 1, cx = x(k);
-    const better = higherBetter(metric) ? p.b > p.a : p.b < p.a;
+    const better = higherBetter(metric, comp) ? p.b > p.a : p.b < p.a;
     const dotColor = aa ? "var(--accent)" : better ? (cl.tone === "win" ? "var(--win)" : "var(--accent)") : (cl.tone === "loss" ? "var(--loss)" : "var(--ink-3)");
     if (state.hoverPair === k) {
       const colW = Math.max(14, (w - m.l - m.r) / (P + 0.5));
@@ -3380,7 +3489,7 @@ function drawPairDeltas(w, ps, deltas, comp, metric, u, rel, cl, aa) {
   deltas.forEach((d, i) => {
     if (!finite(d)) return;
     const k = i + 1, cx = x(k);
-    const better = higherBetter(metric) ? d > 0 : d < 0;
+    const better = higherBetter(metric, comp) ? d > 0 : d < 0;
     const color = aa ? "var(--ink-3)" : better ? (cl.tone === "win" ? "var(--win)" : "var(--accent)") : (cl.tone === "loss" ? "var(--loss)" : "var(--ink-3)");
     if (state.hoverPair === k) {
       const colW = Math.max(14, (w - m.l - m.r) / (P + 0.5));
@@ -3575,7 +3684,9 @@ function renderMainThreadPhaseSection(s, aa) {
             ? `  (${fmtBare(p.cnt.base, "count")}→${fmtVal(p.cnt.head, "count")} passes)`
             : "";
           const clear = finite(c.lo) && finite(c.hi) && (c.lo > 0 || c.hi < 0);
-          const deltaTxt = fmtSignedMatched(c.base, c.head, "ms");
+          // The paired change (the median of the pairs' own changes), which the colour and range are
+          // of: the medians' difference can point the other way. A row without a comparison has none.
+          const deltaTxt = finite(c.lo) && finite(c.hi) ? fmtDelta(c.estimate, c, "ms") : "—";
           return h("div", { class: "phase-trow" },
             h("span", { style: "font-weight:500;display:flex;align-items:center" }, h("i", { class: `ph-dot ${p.cls}` }), p.name),
             h("span", { class: "mono", style: "color:var(--ink-2);font-size:11.5px" },
@@ -4517,8 +4628,15 @@ function framesKept(s, b) {
   return s.headless !== true && (b.values?.["frames.n"] || 0) > 0 && !refused;
 }
 
+// Gaps come from the pairs whose two blocks both kept frames, each with at least 30 gaps, as the PR
+// block's late frames count them (extract::late_frames): a pair's other half is never pooled alone.
 function getFrameArrays(s, kind) {
-  const blocks = timedBlocks(s).filter((b) => framesKept(s, b));
+  const inPair = new Set();
+  for (const p of pairsOf(s, "frames.n")) {
+    const ok = (b) => framesKept(s, b) && (kind !== "gaps" || (b.intervals || []).length >= 30);
+    if (ok(p.base) && ok(p.head)) { inPair.add(p.base); inPair.add(p.head); }
+  }
+  const blocks = timedBlocks(s).filter((b) => inPair.has(b));
   const per = blocks
     .map((b) => ({ variant: b.variant, arr: Float64Array.from((kind === "gaps" ? b.intervals : b.frames) || []).sort() }))
     .filter((x) => x.arr.length > 0);
@@ -4538,9 +4656,10 @@ function renderFramePacingSection(r, s, imp) {
 
   const bucketShare = (arr) => {
     const n = arr.length;
-    const c1 = upperBound(arr, 1.5 * vs);
-    const c2 = upperBound(arr, 2.5 * vs);
-    const c3 = upperBound(arr, 3.5 * vs);
+    // Late from 1.5 frame times (a gap of exactly 1.5 is late, as the PR block counts it).
+    const c1 = lowerBound(arr, 1.5 * vs);
+    const c2 = lowerBound(arr, 2.5 * vs);
+    const c3 = lowerBound(arr, 3.5 * vs);
     return { onTime: c1 / n, v2: (c2 - c1) / n, v3: (c3 - c2) / n, v4: (n - c3) / n, missed: (n - c1) / n };
   };
 
@@ -4550,7 +4669,7 @@ function renderFramePacingSection(r, s, imp) {
 
   const missedRowEl = (label, swCls, bk) => h("div", { class: "missed-row" },
     h("span", { class: "missed-lbl" }, h("i", { class: `swatch ${swCls}` }), label),
-    h("div", { class: "missed-bar-bg", title: `${(bk.missed * 100).toFixed(2)}% of frame gaps exceeded 1.5× vsync` },
+    h("div", { class: "missed-bar-bg", title: `${(bk.missed * 100).toFixed(2)}% of frame gaps were 1.5× vsync or longer` },
       bk.v2 > 0 ? h("i", { class: "missed-seg-2", style: `width:${(bk.v2 / maxMissed) * 100}%` }) : null,
       bk.v3 > 0 ? h("i", { class: "missed-seg-3", style: `width:${(bk.v3 / maxMissed) * 100}%` }) : null,
       bk.v4 > 0 ? h("i", { class: "missed-seg-4", style: `width:${(bk.v4 / maxMissed) * 100}%` }) : null
@@ -4753,7 +4872,9 @@ function renderAllMetricsDisclosure(s, aa) {
 }
 
 function forestRow(item, dom, focus, aa) {
-  const c = item.c;
+  // A refused comparison shows no number: results from before strobe cleared them still hold some.
+  const refusedRow = item.c?.verdict_kind === "refused" || /^refused/.test(item.c?.verdict || "");
+  const c = refusedRow ? { ...item.c, base: null, head: null, estimate: null, lo: null, hi: null } : item.c;
   const m = c.metric;
   const u = unitOf(m);
   const cl = item.role !== "descriptive" && c.decided ? classify(c, m, aa) : { tone: "neutral", kind: item.role === "descriptive" ? "desc" : "unconfirmed" };
@@ -4771,7 +4892,11 @@ function forestRow(item, dom, focus, aa) {
   const inBoundsEst = finite(c.estimate) && rawPct(c.estimate) >= 0 && rawPct(c.estimate) <= 100;
 
   const track = h("div", { class: "f-track" },
-    b > 0 ? h("i", { class: "f-band", style: `left:${pct(-b)}%;width:${pct(b) - pct(-b)}%` }) : null,
+    // A no-worse margin passes everything on the better side of it: one-sided.
+    b > 0 ? (() => {
+      const [l, r] = !finite(c.noworse) ? [pct(-b), pct(b)] : higherBetter(m, c) ? [pct(-b), 100] : [0, pct(b)];
+      return h("i", { class: "f-band", style: `left:${l}%;width:${r - l}%` });
+    })() : null,
     h("i", { class: "f-zero", style: "left:50%" }),
     finite(c.lo) && finite(c.hi) && rawPct(c.hi) >= 0 && rawPct(c.lo) <= 100
       ? h("i", { class: "f-ci", style: `left:${pct(c.lo)}%;width:${Math.max(0.8, pct(c.hi) - pct(c.lo))}%` })
@@ -4781,11 +4906,14 @@ function forestRow(item, dom, focus, aa) {
     inBoundsEst ? h("i", { class: "f-dot", style: `left:${pct(c.estimate)}%` }) : null
   );
 
-  const outcomeStr = /^refused/.test(c.verdict || "")
-    ? "Refused (sparse)"
+  const outcomeStr = refusedRow
+    ? `Refused (${refusalOf(c).validator || "see why"})`
     : item.role === "descriptive" ? "Context"
+    : c.verdict_kind === "untested" ? "Not tested"
     : !c.decided ? (c.lo > 0 || c.hi < 0 ? "Unconfirmed" : "Inconclusive")
     : cl.kind === "same" ? `Same (${fmtBound(c, u)})`
+    : cl.kind === "noworse" ? `No worse (${fmtMargin(c, u)})`
+    : cl.kind === "inconclusive" ? "Inconclusive"
     : cl.kind === "aa-fp" ? "False positive"
     : cl.tone === "win" ? "Confirmed better" : "Confirmed worse";
 
@@ -4816,7 +4944,7 @@ function renderTraceQueriesDisclosure(r, s) {
   const a = s.attribution || {};
   if (a.head) cmds.push(["Open head's profiled launch in Perfetto (flame graphs, timeline)", `strobe open ${a.head}`]);
   if (a.base) cmds.push(["Open base's profiled launch in Perfetto", `strobe open ${a.base}`]);
-  for (const b of timedBlocks(s).filter((b) => b.recording)) cmds.push([`Open the kept ${b.variant || ""} block (pair ${b.pair ?? "?"}) in Perfetto`, `strobe open ${b.recording}`]);
+  for (const b of timedBlocks(s).filter((b) => b.recording)) cmds.push([`Open the kept ${b.variant || ""} block (pair ${finite(b.pair) ? b.pair + 1 : "?"}) in Perfetto`, `strobe open ${b.recording}`]);
   if (a.head) {
     cmds.push(["CPU hotspots in head (by package)", `strobe query ${a.head} hotspots --by package`]);
     cmds.push(["Forced layout & style stacks in head", `strobe query ${a.head} layout`]);

@@ -170,8 +170,11 @@ pub fn magnitude(c: &Value) -> f64 {
         (1.0 + est).max(1e-9).ln().abs()
     } else if b > 0.0 && h > 0.0 {
         (h / b).ln().abs()
+    } else if b.abs() > 0.0 {
+        (est / b.abs()).abs().ln_1p()
     } else {
-        (est / b.abs().max(1e-9)).abs().ln_1p()
+        // From a base of 0 there is no ratio to weigh (a floor made it ~21 log units, so it always led).
+        0.0
     };
     if m.is_finite() { m } else { 0.0 }
 }

@@ -189,15 +189,15 @@ impl<'a> Doc<'a> {
         let noun = self.noun_in(s, m);
         let o = self.primary_out(s);
         let medians = format!("medians {}", before_after(c));
-        let (w, n) = wins(&pairs(s), m);
+        let (w, worse, n) = wins(&pairs(s), c);
         let bound = bound_text(c);
         let change = nb(&delta(c, f(&c["estimate"])));
-        let margin = c["noworse"].as_f64().map(|x| if c["relative"] == true { format!("{:.0}%", x * 100.0) } else { disp(x, abs_unit(unit_of(m))) }).unwrap_or_else(|| bound.clone());
+        let margin = c["noworse"].as_f64().map(|x| if c["relative"] == true { super::pct_bound(x) } else { disp(x, abs_unit(unit_of(m))) }).unwrap_or_else(|| bound.clone());
         match o {
             Out::NotRun => format!("not run ({}).", cell(s["halt"]["message"].as_str().unwrap_or("the bench stopped first")).trim_end_matches('.')),
             _ if s["kind"] == "leak" => format!("{}.", cell(&capitalize(verdict(c))).trim_end_matches('.')),
             Out::Better | Out::Worse if !beyond_margin(c) => {
-                let (k, word) = if o == Out::Better { (w, "better") } else { (n - w, "worse") };
+                let (k, word) = if o == Out::Better { (w, "better") } else { (worse, "worse") };
                 let small = if small(c) { format!(", perhaps by under {}", bound.trim_start_matches('±')) } else { String::new() };
                 format!("{noun} **{change}** per pair ({medians}), {word} in {k} of {n} pairs, likely {}{small}.", range(c))
             }
@@ -242,7 +242,7 @@ impl<'a> Doc<'a> {
                 continue;
             }
             let (lo, hi, b) = (f(&c["lo"]), f(&c["hi"]), f(&c["bound"]).abs());
-            let lower = better_of(m) == Better::Lower;
+            let lower = better_of(c) == Better::Lower;
             let bound = if b.is_finite() && b > 0.0 { b } else { 0.02 };
             if lo.is_finite() && hi.is_finite() && ((lower && lo > bound) || (!lower && hi < -bound)) {
                 untested.push((size(c), format!("{} {}", lc(&noun(m)), nb(&delta(c, f(&c["estimate"]))))));
@@ -263,8 +263,8 @@ impl<'a> Doc<'a> {
     pub(super) fn hero_parts(&self, c: &Value) -> (String, &'static str, String) {
         let m = c["metric"].as_str().unwrap_or("");
         let est = f(&c["estimate"]);
-        let (good, bad) = model::metric(m).map(|d| d.words).unwrap_or(("less", "more"));
-        let word = if (est < 0.0) == (better_of(m) == Better::Lower) { good } else { bad };
+        let (good, bad) = words_of(c);
+        let word = if (est < 0.0) == (better_of(c) == Better::Lower) { good } else { bad };
         let pct = (est * 100.0).abs();
         let amount = match c["relative"] == true {
             true if pct < 10.0 => format!("{pct:.1}%"),
@@ -339,8 +339,8 @@ impl<'a> Doc<'a> {
                 continue;
             }
             let worse = |c: &Value| {
-                let (w, n) = wins(&pairs(s), c["metric"].as_str().unwrap_or(""));
-                (n - w, n)
+                let (_, worse, n) = wins(&pairs(s), c);
+                (worse, n)
             };
             let p = &s["primary"];
             if self.primary_out(s) == Out::Worse {
@@ -366,6 +366,12 @@ impl<'a> Doc<'a> {
     /// The heading when nothing is worth celebrating: what happened, calmly.
     pub(super) fn calm(&self) -> String {
         let outs: Vec<(Out, &Value)> = self.series.iter().map(|s| (self.primary_out(s), *s)).collect();
+        // A leak run has no paired change to phrase (its estimate is none, its catalog unit per minute):
+        // its own verdict, per run, is the regression.
+        if let Some((_, s)) = outs.iter().find(|(o, s)| *o == Out::Worse && s["kind"] == "leak") {
+            let who = if self.multi() { format!("{} ", self.title(s)) } else { String::new() };
+            return format!("Regression: {who}{}", verdict(&s["primary"]).split(';').next().unwrap_or("").trim());
+        }
         if let Some((_, s)) = outs.iter().find(|(o, s)| *o == Out::Worse && !beyond_margin(&s["primary"])) {
             return self.hero_phrase(&s["primary"]);
         }
@@ -741,7 +747,8 @@ impl<'a> Doc<'a> {
         let (first, last) = (rest[0].n, rest[rest.len() - 1].n);
         let which = if last - first + 1 == rest.len() { format!("pairs {first}–{last}") } else { format!("{} other pairs", rest.len()) };
         let owned: Vec<Pair> = rest.iter().map(|p| **p).collect();
-        let (w, n) = wins(&owned, m);
+        let c = all_rows(s).into_iter().find(|c| c["metric"] == m).unwrap_or(&s["primary"]);
+        let (w, _, n) = wins(&owned, c);
         let ratio = s["primary"]["relative"] == true;
         let ch = pair_changes(rest, m, ratio);
         let who = if self.multi() { format!(" of {}", self.title(s)) } else { String::new() };
@@ -980,7 +987,7 @@ impl<'a> Doc<'a> {
         // When the main metric moved decidedly, the functions that moved the same way explain it.
         let p = &s["primary"];
         let way = match self.primary_out(s) {
-            Out::Better | Out::Worse if better_of(p["metric"].as_str().unwrap_or("")) == Better::Lower => f(&p["estimate"]).signum(),
+            Out::Better | Out::Worse if better_of(p) == Better::Lower => f(&p["estimate"]).signum(),
             _ => 0.0,
         };
         let along = |x: &Value| way == 0.0 || (f(&x["head_per_run"]) - f(&x["base_per_run"])).signum() == way;

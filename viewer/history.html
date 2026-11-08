@@ -96,12 +96,18 @@ function chart(s, host) {
   }
   // Segment medians between change points that are not rejected.
   const cps = s.changes.filter(c => c.state !== "rejected").map(c => ({ c, i: pts.findIndex(p => p.commit === c.bad) })).filter(o => o.i > 0).sort((a, b) => a.i - b.i);
-  const bounds = [0, ...cps.map(o => o.i), pts.length];
+  // A comparator update starts another baseline: no segment median spans it.
+  const epochs = (s.marks || []).filter(m => m.t === "epoch").map(m => ({ m, i: pts.findIndex(p => p.commit === m.commit) })).filter(o => o.i > 0);
+  const bounds = [...new Set([0, ...cps.map(o => o.i), ...epochs.map(o => o.i), pts.length])].sort((a, b) => a - b);
   for (let k = 0; k + 1 < bounds.length; k++) {
     const seg = pts.slice(bounds[k], bounds[k + 1]).filter(p => p.valid).map(p => p.median).sort((a, b) => a - b);
     if (!seg.length) continue;
     const m = seg.length % 2 ? seg[(seg.length - 1) / 2] : (seg[seg.length / 2 - 1] + seg[seg.length / 2]) / 2;
     g += `<line x1="${x(bounds[k])}" x2="${x(bounds[k + 1] - 1)}" y1="${y(m)}" y2="${y(m)}" stroke="var(--accent)" stroke-opacity="0.45" stroke-width="2"/>`;
+  }
+  for (const { m, i } of epochs) {
+    const cx = (x(i - 1) + x(i)) / 2;
+    g += `<line x1="${cx}" x2="${cx}" y1="${T}" y2="${H - B}" stroke="var(--ink-4)" stroke-dasharray="1 3"/><text x="${cx + 4}" y="${H - B - 6}" font-size="11" fill="var(--ink-3)">comparator updated${m.name ? " · " + esc(m.name) : ""}</text>`;
   }
   for (const { c, i } of cps) {
     const cx = (x(i - 1) + x(i)) / 2;
@@ -135,7 +141,8 @@ function chart(s, host) {
 function changeRow(s, c) {
   // A port's confirmation compares the head alone, in its metric's unit (never a log ratio).
   const unit = (s.meta.comparison === "implementations" ? s.meta.metric_unit : s.meta.unit) || "";
-  const f = (v, rel) => rel ? pct(v) : val(v, unit);
+  // A change is signed either way: a difference in the unit too (`−1.20 ms`, not `1.20 ms`).
+  const f = (v, rel) => rel ? pct(v) : v == null || !isFinite(v) ? "—" : (val(Math.abs(v), unit) === val(0, unit) ? "" : v < 0 ? "−" : v > 0 ? "+" : "") + val(Math.abs(v), unit);
   const cf = c.confirm || {};
   return `<tr><td class="mono">${esc(c.id)}</td><td><span class="pill ${tone(c)}">${esc(c.state)} ${esc(c.direction)}</span></td>
     <td class="mono">${esc(c.good_short)}..${esc(c.bad_short)}</td><td class="num mono">${esc(f(c.estimate, c.relative))}</td>
@@ -147,7 +154,7 @@ function render() {
   const app = document.getElementById("app");
   if (!DATA) { app.innerHTML = "<p>No data.</p>"; return; }
   let html = `<div><h1>History</h1><div class="sub">${esc(DATA.device)} · ${DATA.series.length} series · ${esc(DATA.created)}</div></div>
-    <div class="legend"><span>● median of a commit's blocks</span><span>│ its interval (each point says how sure: 6 blocks reach 97%, 3 pairs 75%)</span><span>— segment median</span><span>┊ change point (confirmed regressions red, improvements green, unconfirmed amber, rejected grey)</span><span>× no value (refused)</span></div>`;
+    <div class="legend"><span>● median of a commit's blocks</span><span>│ its interval (each point says how sure: 6 blocks reach 97%, 3 pairs 75%)</span><span>— segment median</span><span>┊ change point (confirmed regressions red, improvements green, unconfirmed amber, rejected grey)</span><span>┆ comparator updated (a new baseline: segments restart)</span><span>× no value (refused)</span></div>`;
   DATA.series.forEach((s, k) => {
     const fp = s.meta.fingerprint || {};
     const m = fp.machine || {};

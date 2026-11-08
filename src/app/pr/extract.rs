@@ -25,8 +25,17 @@ pub(super) fn verdict(c: &Value) -> &str {
     c["verdict"].as_str().unwrap_or("")
 }
 
-pub(super) fn better_of(metric: &str) -> Better {
-    model::metric(metric).map(|m| m.better).unwrap_or(Better::Lower)
+/// The direction comparison `c` counted as better (a `metric.<name>` may be better higher).
+pub(super) fn better_of(c: &Value) -> Better {
+    super::better_in(c)
+}
+
+/// The words for comparison `c`'s better and worse directions (`faster`, `slower`): the catalog's,
+/// turned round for a `metric.<name>` its lines made better higher (`more`, `less`).
+pub(super) fn words_of(c: &Value) -> (&'static str, &'static str) {
+    let def = model::metric(c["metric"].as_str().unwrap_or(""));
+    let (good, bad) = def.map(|d| d.words).unwrap_or(("less", "more"));
+    if def.is_some_and(|d| d.better != better_of(c)) { (bad, good) } else { (good, bad) }
 }
 
 pub(super) fn unit_of(metric: &str) -> &'static str {
@@ -53,7 +62,7 @@ pub(super) fn noworse_side(c: &Value) -> Option<Out> {
         return None;
     }
     let (lo, hi) = (f(&c["lo"]), f(&c["hi"]));
-    let (w_lo, w_hi) = if better_of(c["metric"].as_str().unwrap_or("")) == Better::Lower { (lo, hi) } else { (-hi, -lo) };
+    let (w_lo, w_hi) = if better_of(c) == Better::Lower { (lo, hi) } else { (-hi, -lo) };
     if w_hi < 0.0 {
         Some(Out::Better)
     } else if w_lo > 0.0 {
@@ -88,7 +97,7 @@ pub(super) fn outcome(c: &Value, aa: bool) -> Out {
         VerdictKind::Better | VerdictKind::Worse if !(hi < 0.0 || lo > 0.0) => Out::Unclear,
         VerdictKind::Better | VerdictKind::Worse if aa => Out::AaFalse,
         VerdictKind::Better | VerdictKind::Worse => {
-            let improved = (hi < 0.0) == (better_of(c["metric"].as_str().unwrap_or("")) == Better::Lower);
+            let improved = (hi < 0.0) == (better_of(c) == Better::Lower);
             if improved { Out::Better } else { Out::Worse }
         }
     }
@@ -208,11 +217,15 @@ pub(super) fn bv(b: &Value, m: &str) -> f64 {
     f(&b["values"][m])
 }
 
-/// Pairs in which head did better on `metric`, of those with both values.
-pub(super) fn wins(ps: &[Pair], metric: &str) -> (usize, usize) {
-    let lower = better_of(metric) == Better::Lower;
+/// Pairs in which head did better and did worse on comparison `c`'s metric, of those with both values:
+/// a pair with the same value on both sides is neither.
+pub(super) fn wins(ps: &[Pair], c: &Value) -> (usize, usize, usize) {
+    let metric = c["metric"].as_str().unwrap_or("");
+    let lower = better_of(c) == Better::Lower;
     let both: Vec<(f64, f64)> = ps.iter().map(|p| (bv(p.base, metric), bv(p.head, metric))).filter(|(a, b)| a.is_finite() && b.is_finite()).collect();
-    (both.iter().filter(|(a, b)| if lower { b < a } else { b > a }).count(), both.len())
+    let better = both.iter().filter(|(a, b)| if lower { b < a } else { b > a }).count();
+    let worse = both.iter().filter(|(a, b)| if lower { b > a } else { b < a }).count();
+    (better, worse, both.len())
 }
 
 /// Past this many pairs a series' rows are its first and last `SHOWN_ENDS` and one summary row.
@@ -726,6 +739,8 @@ pub(super) fn disp(v: f64, unit: &str) -> String {
         "/s" => format!("{}/s", sig3(v)),
         "bytes" => fmt::bytes(v),
         "count" | "" => fmt::value(v, "count"),
+        // A number the target printed in a unit of its own.
+        "value" => sig3(v),
         u => format!("{} {u}", sig3(v)),
     }
 }
@@ -797,7 +812,7 @@ pub(super) fn bound_text(c: &Value) -> String {
     if !b.is_finite() || b <= 0.0 {
         return "±2%".into();
     }
-    if c["relative"] == true { format!("±{:.0}%", b * 100.0) } else { format!("±{}", fmt::value(b, abs_unit(unit_of(c["metric"].as_str().unwrap_or(""))))) }
+    if c["relative"] == true { format!("±{}", super::pct_bound(b)) } else { format!("±{}", fmt::value(b, abs_unit(unit_of(c["metric"].as_str().unwrap_or(""))))) }
 }
 
 /// A commit subject without pull request references: `#551` would link to this PR's repository,

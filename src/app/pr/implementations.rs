@@ -47,7 +47,7 @@ impl Claim {
 pub fn claim(c: &Value) -> Claim {
     let m = c["metric"].as_str().unwrap_or("");
     let est = f(&c["estimate"]);
-    let lower = better_of(m) == Better::Lower;
+    let lower = better_of(c) == Better::Lower;
     let improved = (est < 0.0) == lower;
     let relative = c["relative"] == true;
     let times = relative && est >= 1.0;
@@ -58,7 +58,7 @@ pub fn claim(c: &Value) -> Claim {
         (true, false) => format!("{pct:.0}%"),
         (false, _) => disp(est.abs(), abs_unit(unit_of(m))),
     };
-    let (good, bad) = model::metric(m).map(|d| d.words).unwrap_or(("less", "more"));
+    let (good, bad) = words_of(c);
     let dir = if improved { good } else { bad };
     let quick = if improved { "faster" } else { "slower" };
     let mk = |verb: String, word: &str, noun: String, after: &str| Claim { verb, amount: amount.clone(), word: word.to_string(), noun, after: after.to_string() };
@@ -245,10 +245,10 @@ impl<'a> Doc<'a> {
             let lines: Vec<String> = regs
                 .iter()
                 .map(|(s, c, confirmed)| {
-                    let (w, n) = wins(&pairs(s), c["metric"].as_str().unwrap_or(""));
+                    let (_, worse, n) = wins(&pairs(s), c);
                     let what = if std::ptr::eq(*c, &s["primary"]) { String::new() } else { format!(" ({})", lc(&noun(c["metric"].as_str().unwrap_or("")))) };
                     let label = if *confirmed { "**Regression:**".to_string() } else { format!("**Unconfirmed regression** (this journey alone, not after Holm across {}):", fam.compared) };
-                    format!("> {label} {}{what}: {} {} than {} (medians {}, worse in {} of {n} pairs).", cell(&self.title(s)), cell(&hn), claim(c).pr(false), cell(&bn), before_after(c), n - w)
+                    format!("> {label} {}{what}: {} {} than {} (medians {}, worse in {} of {n} pairs).", cell(&self.title(s)), cell(&hn), claim(c).pr(false), cell(&bn), before_after(c), worse)
                 })
                 .collect();
             out += &lines.join("\n");
@@ -381,7 +381,7 @@ impl<'a> Doc<'a> {
         let c = &s["primary"];
         let m = c["metric"].as_str().unwrap_or("");
         let o = self.primary_out(s);
-        let (w, n) = wins(&pairs(s), m);
+        let (w, worse, n) = wins(&pairs(s), c);
         let medians = format!("medians {}", before_after(c));
         let thing = ready_noun(s).map(|n| capitalize(&n)).unwrap_or_else(|| self.noun_in(s, m));
         let same = same_line(s);
@@ -389,7 +389,7 @@ impl<'a> Doc<'a> {
             Out::Better | Out::Worse if !beyond_margin(c) => {
                 let cl = claim(c);
                 let metric = if matches!(cl.verb.as_str(), "uses" | "has") { String::new() } else { format!("{}, ", lc(&thing)) };
-                let (k, word) = if o == Out::Better { (w, "better") } else { (n - w, "worse") };
+                let (k, word) = if o == Out::Better { (w, "better") } else { (worse, "worse") };
                 let alone = if alone { format!("; {word} on its own, not after Holm across {compared} journeys") } else { String::new() };
                 format!("{} ({metric}{medians}), {word} in {k} of {n} pairs, likely {}{alone}.", cl.pr(true), range_x(c))
             }
@@ -687,7 +687,7 @@ impl<'a> Doc<'a> {
 /// A no-worse margin as it was given: `≤5%`.
 fn margin_text(c: &Value) -> String {
     match c["noworse"].as_f64() {
-        Some(x) if c["relative"] == true => format!("≤{:.0}%", x * 100.0),
+        Some(x) if c["relative"] == true => format!("≤{}", super::pct_bound(x)),
         Some(x) => format!("≤{}", disp(x, abs_unit(unit_of(c["metric"].as_str().unwrap_or(""))))),
         None => bound_text(c),
     }
