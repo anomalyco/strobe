@@ -43,15 +43,19 @@ pub fn digits_for(v: f64, min: usize, max: usize) -> usize {
     d.clamp(min, max)
 }
 
-/// Decimals an interval `[lo, hi]` (in the unit it prints in) needs so its width shows its first
-/// significant digit, at most `max` (SPEC §9.3 "Digits"): a 3-point-wide interval prints whole numbers,
-/// 0.2 tenths, 0.02 hundredths.
+/// Decimals an interval `[lo, hi]` (in the unit it prints in) needs so its width shows its significant
+/// digits, at most `max` (SPEC §9.3 "Digits"), as the Particle Data Group rounds an uncertainty: two
+/// when the width's leading digits are 100 to 354 (1.6 points: tenths; 3 points: tenths), else one
+/// (0.8: tenths; 6: whole numbers). One digit alone printed a 1.6-point interval `[+1% … +2%]`.
 pub fn width_digits(lo: f64, hi: f64, max: usize) -> usize {
     let w = (hi - lo).abs();
     if !w.is_finite() || w == 0.0 {
         return 0;
     }
-    ((-w.log10().floor()).max(0.0) as usize).min(max)
+    let exp = w.log10().floor();
+    let lead = w / 10f64.powf(exp - 2.0);
+    let sig = if lead < 354.5 { 2.0 } else { 1.0 };
+    ((sig - 1.0 - exp).max(0.0) as usize).min(max)
 }
 
 /// The usual decimals of a percentage: none from 10%, one from 0.1%, and below that as many as show its
@@ -85,11 +89,11 @@ pub fn pct(r: f64) -> String {
 }
 
 /// An estimate and its interval as percentages whose precision follows the interval's width (SPEC §9.3
-/// "Digits"): all three at the decimals that show the width's first significant digit (a 166-point
-/// interval in whole percent, a 0.8-point one in tenths); a number that would round to 0 there keeps
-/// its own first digit, so a decided interval never prints an end of 0.0%. Without an interval, the
-/// estimate's usual digits (`pct`). `+15.2% [+15.1% … +15.3%]`, `+0.03% [+0.02% … +0.04%]`,
-/// `+7% [−51% … +116%]`.
+/// "Digits"): all three at the decimals that show the width's significant digits (`width_digits`: a
+/// 166-point interval in whole percent, a 0.8- or 1.6-point one in tenths); a number that would round
+/// to 0 there keeps its own first digit, so a decided interval never prints an end of 0.0%. Without
+/// an interval, the estimate's usual digits (`pct`). `+5.0% [+4.6% … +5.4%]`, `+1.0% [+0.4% … +2.0%]`,
+/// `+0.030% [+0.020% … +0.040%]`, `+7% [−51% … +116%]`.
 pub fn pct_ci(est: f64, lo: f64, hi: f64) -> (String, String, String) {
     if !(lo.is_finite() && hi.is_finite()) || hi == lo {
         return (pct(est), pct(lo), pct(hi));

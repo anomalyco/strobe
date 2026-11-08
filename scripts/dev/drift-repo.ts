@@ -1,7 +1,7 @@
 // A throwaway git repository whose bench primary drifts a little at every commit (dev, not shipped):
 // the known answer for `--bisect` when a change built up over many commits and no one commit did it.
 //
-//   bun scripts/dev/drift-repo.ts <dir> [--commits 20] [--step 0.004] [--noise 0.01]
+//   bun scripts/dev/drift-repo.ts <dir> [--commits 20] [--step 0.004] [--noise 0.01] [--seed 0]
 //   strobe bench <dir>/drift.bench.ts --bisect c0..c20 --pairs 10 --runs 1
 //
 // Commit ck holds level.txt = 100 × (1 + step)^k. print.ts prints `strobe:metric score=<level × (1 +
@@ -19,7 +19,7 @@ const opt = (name: string, d: number) => {
   const i = args.indexOf(`--${name}`)
   return i >= 0 ? Number(args[i + 1]) : d
 }
-const commits = opt("commits", 20), step = opt("step", 0.004), noise = opt("noise", 0.01)
+const commits = opt("commits", 20), step = opt("step", 0.004), noise = opt("noise", 0.01), seed = opt("seed", 0)
 rmSync(dir, { recursive: true, force: true })
 rmSync(`${dir}.noise.json`, { force: true })
 mkdirSync(dir, { recursive: true })
@@ -38,7 +38,7 @@ const home = process.env.STROBE_HOME ?? "none"
 let i = s.homes.indexOf(home)
 if (i < 0) { s.homes.push(home); i = s.homes.length - 1; writeFileSync(file, JSON.stringify(s)) }
 // A seeded normal draw for block i (Box–Muller on an LCG), the same on every run of the block.
-let x = 2463534242 + i * 2654435761
+let x = 2463534242 + ${seed} * 40503 + i * 2654435761
 const u = () => ((x = (Math.imul(x, 1103515245) + 12345) >>> 0) + 0.5) / 2 ** 32
 for (let k = 0; k < 3; k++) u()
 const z = Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u())
