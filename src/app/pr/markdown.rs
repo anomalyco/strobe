@@ -265,9 +265,10 @@ impl<'a> Doc<'a> {
         let est = f(&c["estimate"]);
         let (good, bad) = words_of(c);
         let word = if (est < 0.0) == (better_of(c) == Better::Lower) { good } else { bad };
-        // `fmt::pct`'s digits without its sign: a decided +0.03% is not `0.0%`.
+        // The change at its interval's digits without its sign (`delta`, as the proof line and the card
+        // print it): a decided +0.03% is not `0.0%`, and +98.6% is not `99%` in the heading alone.
         let amount = match c["relative"] == true {
-            true => fmt::pct(est.abs()).trim_start_matches('+').to_string(),
+            true => delta(c, est).trim_start_matches(['+', '−']).to_string(),
             false => nb(&disp(est.abs(), abs_unit(unit_of(m)))),
         };
         (amount, word, lc(&noun(m)).trim_end_matches(" per run").to_string())

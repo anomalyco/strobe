@@ -51,11 +51,11 @@ pub fn claim(c: &Value) -> Claim {
     let improved = (est < 0.0) == lower;
     let relative = c["relative"] == true;
     let times = relative && est >= 1.0;
-    let pct = (est * 100.0).abs();
     let amount = match (relative, times) {
         (true, true) => format!("{}×", factor(1.0 + est)),
         // `fmt::pct`'s digits without its sign: a decided +0.03% is not `0.0%`.
-        (true, false) => fmt::pct(pct / 100.0).trim_start_matches('+').to_string(),
+        // At its interval's digits (`delta`), as the journey line and the card print it.
+        (true, false) => delta(c, est).trim_start_matches(['+', '−']).to_string(),
         (false, _) => disp(est.abs(), abs_unit(unit_of(m))),
     };
     let (good, bad) = words_of(c);
