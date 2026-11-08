@@ -2042,6 +2042,9 @@ flowchart LR
   longer split evenly: simulated with a +3.4% first block at σ 6%, false `faster` 2.53% against
   `slower` 1.45% (1.75% and 1.71% with the blocks discarded), and a `--noworse 0%` A/A's `no worse`
   3.9% with a +30% first block (2.1% discarded). The series keeps what they read (`warmup_values`).
+  Checked on vps (100 A/A of the same command, 2026-11-08): pair 0 now −0.57% (standard error
+  0.67%; −3.38% before), every pair within ±1.3%, and the discarded base block read 3.3% (se 0.9%)
+  above pair 0's base: the slow first block is the one thrown away.
 - **Pinning** (`--pin auto` by default, §9.4) may narrow the target to fewer CPUs than the machine
   has; results from before that rule are not comparable on such machines.
 - **Stop rule** (`--pairs auto`): verdicts only at planned looks, after pairs 8, 12, 18, 26 and
