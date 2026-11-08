@@ -1462,17 +1462,18 @@ pub fn hotspots_of(rec: &Rec, by: &str, top: usize) -> Result<Output> {
     // 2 ms when asked for 1 ms (`probe::gecko::interval_us`).
     let sampling = rec.sampling();
     let at = sampling.map(|s| format!(", {}", s.text())).unwrap_or_default();
-    let mut header = format!("hotspots by {by} · self time · {{samples}} samples{at}{{mapped}}");
+    let mut header = format!("hotspots by {by} · self time, then total time (with what it called) · {{samples}} samples{at}{{mapped}}");
     // Each sample weighs the gap it kept, so the times hold; what a coarser sampler loses is the short.
     if sampling.is_some_and(|s| s.coarse()) {
         header += &format!("\n! {COARSE}");
     }
-    let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"));
+    let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), true);
     out.json["interval_us"] = json!(sampling.map(|s| s.median_us));
     out.json["sampling"] = json!(sampling);
     out.json["total_ms"] = json!(out.json["total"].as_f64().unwrap_or(0.0) / 1000.0);
     for r in out.json["rows"].as_array_mut().into_iter().flatten() {
         r["self_ms"] = json!(r["weight"].as_f64().unwrap_or(0.0) / 1000.0);
+        r["total_ms"] = json!(r["inclusive"].as_f64().unwrap_or(0.0) / 1000.0);
     }
     Ok(out)
 }
@@ -1502,9 +1503,9 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>,
         rec.native()?.ok_or_else(missing)?
     };
     let share = if n.samples > 0 { 100.0 * n.resolved as f64 / n.samples as f64 } else { 0.0 };
-    let header = format!("native hotspots by {by} · self time · {{samples}} samples at {} µs · {share:.1}% resolved{{mapped}}", n.interval_us);
+    let header = format!("native hotspots by {by} · self time, then total time (with what it called) · {{samples}} samples at {} µs · {share:.1}% resolved{{mapped}}", n.interval_us);
     let facts = &n.facts;
-    let mut out = rank(&n.stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"));
+    let mut out = rank(&n.stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), true);
     out.json["native"] = json!(true);
     out.json["untimed"] = json!(n.untimed);
     out.json["interval_us"] = json!(n.interval_us);
@@ -1514,6 +1515,7 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>,
     out.json["unsymbolized"] = facts["unsymbolized"].clone();
     for r in out.json["rows"].as_array_mut().into_iter().flatten() {
         r["self_ms"] = json!(r["weight"].as_f64().unwrap_or(0.0) / 1000.0);
+        r["total_ms"] = json!(r["inclusive"].as_f64().unwrap_or(0.0) / 1000.0);
     }
     let deep: Option<crate::probe::stacks::Deep> =
         std::fs::File::open(dir.join("deep.json.gz")).ok().and_then(|f| serde_json::from_reader(std::io::BufReader::new(flate2::read::GzDecoder::new(f))).ok());
@@ -1583,7 +1585,7 @@ fn phase_spans(dir: &Path, phase: &str) -> Result<Vec<(u64, u64)>> {
 /// (attribution only): who allocates, with full stacks, including objects already collected.
 pub fn alloc(rec: &Rec, by: &str, top: usize) -> Result<Output> {
     let header = format!("allocations by {by} · sampled every {} KB on average · {{samples}} samples{{mapped}}", crate::probe::alloc::INTERVAL_BYTES / 1024);
-    let mut out = rank(rec.alloc()?, by, top, &header, fmt::bytes);
+    let mut out = rank(rec.alloc()?, by, top, &header, fmt::bytes, false);
     out.json["interval_bytes"] = json!(crate::probe::alloc::INTERVAL_BYTES);
     Ok(out)
 }
@@ -1673,7 +1675,7 @@ pub fn layout(rec: &Rec, top: usize) -> Result<Output> {
         per_run(f.totals[1][0]),
         per_run(f.totals[1][1]),
     );
-    let mut out = rank(&f.stacks, "function", top, &header, |us| fmt::value(us / 1000.0, "ms"));
+    let mut out = rank(&f.stacks, "function", top, &header, |us| fmt::value(us / 1000.0, "ms"), false);
     let summary = |(n, ms): (u64, f64)| json!({ "count": n, "ms": ms, "count_per_run": n as f64 / runs, "ms_per_run": ms / runs });
     out.json["runs"] = json!(f.runs);
     out.json["forced"] = json!({ "layout": summary(f.totals[0][0]), "style": summary(f.totals[0][1]) });
@@ -2108,8 +2110,10 @@ fn row_key(f: &Frame, by: &str, packages: &mut BTreeMap<String, String>) -> Stri
 
 /// Ranks weighted stacks (leaf = the frame that spent the time or allocated the bytes) by function, file
 /// or package. Rows keep complete locations; by function, each row keeps its three heaviest full stacks
-/// and the text prints the heaviest in full. `header` may use `{samples}` and `{mapped}`.
-fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) -> String) -> Output {
+/// and the text prints the heaviest in full. `header` may use `{samples}` and `{mapped}`. `with_total`
+/// (CPU time): each row's total too, every stack its frame is in, once a stack; a function that only
+/// calls is a row by its total, after the rows with time of their own.
+fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) -> String, with_total: bool) -> Output {
     type ByStack<'a> = BTreeMap<&'a [u32], (f64, u64)>;
     /// (name, where) → (weight, samples, stacks).
     type Row<'a> = ((String, String), (f64, u64, ByStack<'a>));
@@ -2119,6 +2123,8 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
     let samples: u64 = stacks.weights.iter().map(|w| w.n).sum();
     let mut packages: BTreeMap<String, String> = BTreeMap::new();
     let mut lines: BTreeMap<(String, String), BTreeMap<i64, f64>> = BTreeMap::new();
+    // Inclusive weight: each row whose frame is anywhere in a stack, once per stack (recursion too).
+    let mut inclusive: BTreeMap<(String, String), f64> = BTreeMap::new();
     for Weight { stack, w, n: hits, .. } in &stacks.weights {
         let Some(f) = stack.last().map(|&i| frame(i)) else { continue };
         // strobe's page driver at work: its own rows, never a share of the app's scripts.
@@ -2145,6 +2151,23 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
         if native && by == "function" {
             *lines.entry((key.clone(), detail.clone())).or_default().entry(f.line).or_default() += w;
         }
+        if with_total {
+            let mut within: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+            within.insert((key.clone(), detail.clone()));
+            for g in stack[..stack.len() - 1].iter().map(|&i| frame(i)) {
+                let d = match by {
+                    "function" if g.package.is_some() && g.line > 0 => g.file.clone(),
+                    "function" => g.location(),
+                    _ => String::new(),
+                };
+                // strobe's page driver by file or package is its own row, never the app's.
+                let k = if by != "function" && g.url == crate::driver::SOURCE_URL { DRIVER.to_string() } else { row_key(g, by, &mut packages) };
+                within.insert((k, d));
+            }
+            for k in within {
+                *inclusive.entry(k).or_default() += w;
+            }
+        }
         let e = rows.entry((key, detail)).or_insert((0.0, 0, ByStack::new()));
         e.0 += w;
         e.1 += hits;
@@ -2155,8 +2178,12 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
         }
         total += w;
     }
+    // Callers that spent no time themselves (a function that only calls) are rows too, by their total.
+    for k in inclusive.keys() {
+        rows.entry(k.clone()).or_insert((0.0, 0, ByStack::new()));
+    }
     let mut rows: Vec<Row> = rows.into_iter().collect();
-    rows.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
+    rows.sort_by(|a, b| b.1.0.total_cmp(&a.1.0).then_with(|| inclusive.get(&b.0).unwrap_or(&0.0).total_cmp(inclusive.get(&a.0).unwrap_or(&0.0))));
     let mapped_text = if mapped > 0 { format!(" · {:.0}% of script samples source-mapped", 100.0 * mapped as f64 / scripts.max(1) as f64) } else { String::new() };
     let mut text = header.replace("{samples}", &samples.to_string()).replace("{mapped}", &mapped_text) + "\n";
     let mut json_rows = Vec::new();
@@ -2164,7 +2191,10 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
     for ((k, detail), (w, hits, row_stacks)) in rows.iter().take(top) {
         let share = if total > 0.0 { w / total } else { 0.0 };
         let ci = 1.96 * (share * (1.0 - share) / n).sqrt();
-        text += &format!("  {:>9}  {:>5.1}% ±{:>4.2}  {}  {}\n", show(*w), share * 100.0, ci * 100.0, k, detail);
+        let incl = inclusive.get(&(k.clone(), detail.clone())).copied().unwrap_or(*w);
+        let incl_share = if total > 0.0 { incl / total } else { 0.0 };
+        let total_col = if with_total { format!("{:>9} {:>5.1}%  ", show(incl), incl_share * 100.0) } else { String::new() };
+        text += &format!("  {:>9}  {:>5.1}% ±{:>4.2}  {total_col}{}  {}\n", show(*w), share * 100.0, ci * 100.0, k, detail);
         let mut hot: Vec<(i64, f64)> = lines.get(&(k.clone(), detail.clone())).map(|l| l.iter().map(|(a, b)| (*a, *b)).collect()).unwrap_or_default();
         hot.sort_by(|a, b| b.1.total_cmp(&a.1));
         if !hot.is_empty() {
@@ -2182,6 +2212,10 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
         let stacks_json: Vec<Value> =
             heavy.iter().take(3).map(|(stack, (sw, sn))| json!({ "weight": sw, "samples": sn, "frames": stack.iter().map(|&i| frame(i).json()).collect::<Vec<_>>() })).collect();
         let mut row = json!({ "name": k, "weight": w, "samples": hits, "share": share, "share_ci": ci, "where": detail, "stacks": stacks_json });
+        if with_total {
+            row["inclusive"] = json!(incl);
+            row["total_share"] = json!(incl_share);
+        }
         if !hot.is_empty() {
             row["line"] = json!(hot[0].0);
             row["lines"] = json!(hot.iter().take(10).map(|(l, x)| json!({ "line": l, "weight": x })).collect::<Vec<_>>());

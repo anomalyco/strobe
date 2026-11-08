@@ -477,6 +477,12 @@ struct Run {
     cpu_lost: bool,
     /// One ended anywhere in the run's span, untimed stretches too: `cpu_whole` is short.
     whole_lost: bool,
+    /// A headless page: the style and layout time (ms) and layouts its frame after the run's end did,
+    /// work the run's last step left for that frame (`HeadlessFrame`); NaN where none was waited for.
+    deferred: (f64, f64),
+    /// The wall time (ms) `task` was counted over: from asking the Performance domain at the run's start
+    /// to its last answer after the run (and, headless, the frame after it), untimed stretches out.
+    counted_ms: f64,
 }
 
 /// The point-in-time state a run left (SPEC §9.6): read once its span closed and before its reset,
@@ -1978,6 +1984,14 @@ pub fn run(args: &Args) -> Result<Output> {
         };
         let out = match r {
             Ok(out) => out,
+            // A headless Chromium page's wall-time primary met the display off mid-bench (`dark_state`):
+            // that series is refused, and the rest of the file (CPU, counts, network) runs on.
+            Err(e) if e.refusal.as_ref().is_some_and(|r| r.validator == ValidatorId::Throttled) && dark_page(&ctx, s) && dark_metric(&s.primary) => {
+                let r = e.refusal.map(|r| *r).unwrap_or_else(|| dark_refusal(&s.primary));
+                progress(format!("\n{}  refused: {}", s.label(), refused_text(&json!(r))));
+                series_out.push(refused_series(&ctx, s, &r));
+                continue;
+            }
             Err(e) => {
                 halted = Some(if e.code == 130 || stop_requested() { stop_error() } else { e });
                 not_run.push(s.label());
@@ -4472,7 +4486,20 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     if cases.iter().all(|s| runs_locked(ctx, s, x)) {
         loop {
             let (start, locks, unlocks) = (host::session_locked() && !own_screen, ctx.awake.locks(), ctx.awake.unlocks());
-            let display = if own_screen { None } else { host::display_state() };
+            let mut display = if own_screen { None } else { host::display_state() };
+            let dark_primary = |ctx: &Ctx| cases.iter().find(|s| dark_page(ctx, s) && dark_metric(&s.primary)).map(|s| s.primary.clone());
+            if display.is_some_and(|d| d.0 == 0) && !x.untimed && !matches!(x.set, Set::Attribution | Set::Memory) && dark_primary(ctx).is_some() {
+                // An unlocked session's display went to sleep: woken once, it may stay on for the block.
+                if !host::session_locked() {
+                    host::wake_display();
+                    std::thread::sleep(Duration::from_secs(3));
+                    display = host::display_state();
+                }
+                // Still off: this series is refused (the bench's loop lists it and runs the rest).
+                if let Some(p) = dark_primary(ctx).filter(|_| display.is_some_and(|d| d.0 == 0)) {
+                    return Err(dark_refusal(&format!("the primary {p}")).into());
+                }
+            }
             let r = slotted(ctx, cases, v, pair, x);
             // A launch that runs again (or a stop during its wait) leaves no recordings.
             if retry_launch(ctx, s, v, failure_of(&r), &mut retries).inspect_err(|_| discard(&r))? {
@@ -4523,9 +4550,10 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 break;
             }
             if steady && lit {
+                let shown = display.map(|d| d.0);
                 return stamped(r, cases, |s, mut b| {
-                    b.display = display.map(|d| d.0);
-                    session_state(s, b, start)
+                    b.display = shown;
+                    dark_state(ctx, s, x, shown, session_state(s, b, start))
                 });
             }
             discard(&r);
@@ -5143,6 +5171,61 @@ fn priority_state(ctx: &mut Ctx, s: &Series, x: &Exec, mut b: Block) -> Result<B
     Ok(b)
 }
 
+/// A headless Chromium page (not a phone's): with the console display off, its frames and timers run
+/// on a throttled clock of the browser's own (two animation frames took 60 to 165 ms on adais, 8 to
+/// 18 ms with a display), so what is wall time or a share of it describes that clock (`dark_metric`).
+fn dark_page(ctx: &Ctx, s: &Series) -> bool {
+    let t = &ctx.describe["targets"][&s.target];
+    matches!(t["kind"].as_str(), Some("web" | "url")) && headless_of(ctx, s) && engine_of(t) == WebEngine::Chromium && ctx.phone.is_none() && s.sides.is_none()
+}
+
+/// What a headless Chromium page's throttled clock moves with the display off: wall times and shares
+/// of them. CPU and main-thread time per run, counts, network and memory stay.
+fn dark_metric(m: &str) -> bool {
+    matches!(m, "run.duration" | "main.busy" | "main.busy.cdp" | "cpu.app.total" | "cpu.process.total" | "cpu.renderer" | "cpu.gpu" | "cpu.browser" | "input.rate" | "input.gap.p95")
+        || m.starts_with("phase.")
+        || m.starts_with("span.")
+}
+
+fn dark_refusal(what: &str) -> Refusal {
+    Refusal::new(
+        ValidatorId::Throttled,
+        format!("{what}: the console display was off, and a headless Chromium page then runs its frames and timers on a throttled clock of its own, so wall time and shares of it describe that clock"),
+    )
+    .fix("run with the display on (unlocked, awake), or measure cpu.work or main.work, which hold")
+}
+
+/// `Throttled` for a headless Chromium page's wall times with the display off: a block about to run
+/// with a primary among them refuses (a `--check` refuses it per metric, as a secondary), and a block
+/// that ran keeps none of them.
+fn dark_state(ctx: &Ctx, s: &Series, x: &Exec, display: Option<u8>, mut b: Block) -> Block {
+    if display != Some(0) || !dark_page(ctx, s) || matches!(x.set, Set::Attribution | Set::Memory) {
+        return b;
+    }
+    b.values.retain(|k, _| !dark_metric(k));
+    b.phases.clear();
+    for m in declared_metrics(s).into_iter().filter(|m| dark_metric(m)) {
+        b.refused.insert(m.clone(), dark_refusal(m));
+    }
+    b
+}
+
+/// `main.tasks.long` of a lean block: its trace holds no task-loop slices (RunTask) to find them in.
+fn lean_long_tasks() -> Refusal {
+    Refusal::new(ValidatorId::NotForTarget, "main.tasks.long: a lean bench trace records no RunTask slices, so no task's length")
+        .fix("bench with --trace full to count long tasks, or measure main.work")
+}
+
+/// What a `script()` target's runs give no reading of: the host's context switches and IO.
+pub(super) fn script_unread(m: &str) -> bool {
+    matches!(m, "cpu.wakes" | "io.read" | "io.write")
+}
+
+pub(super) fn script_unread_refusal(m: &str) -> Refusal {
+    Refusal::new(ValidatorId::NotForTarget, format!("{m}: a script target's runs are timed on its host's CPU and wall clock; strobe reads no context switches or IO of the host"))
+        .fix("measure cpu.work, or run the code as a cli() command, whose wakes and IO strobe counts")
+}
+
 /// What one case of a page launch ran (`run_chunk`), kept until the launch's trace is read.
 struct PageCase {
     /// Its first run's index among the launch's runs: its runs are `run:<base + i>`.
@@ -5156,6 +5239,8 @@ struct PageCase {
     end: Option<shown::Screen>,
     /// Keys its measured runs typed in a burst.
     burst: usize,
+    /// `page.eval` calls its runs made outside untimed stretches: script Chromium's `ScriptDuration` leaves out.
+    evals: usize,
     /// WebKit: a run loaded a document, in which strobe's page scripts ran only after the page's own.
     loaded_document: bool,
     steps: Vec<(String, f64)>,
@@ -5274,6 +5359,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let harvested: RefCell<PageChanges> = RefCell::new(PageChanges::default());
         // Keys the measured runs typed in a burst (`type(…, { burst: true })`).
         let burst_keys = std::cell::Cell::new(0usize);
+        // `page.eval` calls in the runs' timed parts (`main.script`).
+        let evals = std::cell::Cell::new(0usize);
         if let Some(g) = &guard {
             g.check("after the app opened its window")?;
         }
@@ -5462,16 +5549,26 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let reads_before = Cell::new((0u64, 0.0f64));
         let pixels_before = Cell::new((0u64, 0.0f64, 0.0f64));
         let counted_before: RefCell<BTreeMap<String, f64>> = RefCell::new(BTreeMap::new());
+        // The processes the run's start walked (`run_once`), whose cycles each edge reads one by one
+        // (`host::process_cycles`), never walking the system's processes inside the run's span.
+        let walked: RefCell<super::record::Cycles> = RefCell::new(BTreeMap::new());
+        // The known processes' cycles and the cycle clock: the clock outside the cycles, so the span it
+        // gives holds them. One that exited reads none, which `record::gone` and `lost_in_parts` see.
+        let fast_read = |ending: bool| -> (super::record::Cycles, Option<u64>) {
+            let before = if ending { None } else { host::tsc() };
+            let cycles = walked.borrow().keys().filter_map(|&(pid, start)| Some(((pid, start), host::process_cycles(pid)?))).collect();
+            (cycles, if ending { host::tsc() } else { before })
+        };
         // strobe's own calls into the page at an edge (its reads, marks, counts and the OS input's
-        // checks) stay inside the stretch: after the processes' readings at its start, before them at
-        // its end, so none of their round trips is the run's CPU.
-        let reading = || {
-            let procs = browser.processes();
-            let tsc = host::tsc();
-            let ended = host::ended_marks(&procs.iter().map(|p| p.pid).collect::<Vec<_>>(), browser.profile().as_deref());
+        // checks) stay inside the stretch: after the processes' cycles at its start (`fast`, read first),
+        // before them at its end (read last), so none of their round trips is the run's CPU.
+        let reading = |fast: Option<(super::record::Cycles, Option<u64>)>| {
+            let pids: Vec<u32> = walked.borrow().keys().map(|k| k.0).collect();
+            let ended = host::ended_marks(&pids, browser.profile().as_deref());
             let (c, carry) = (counters(), *carried.borrow());
             doc_check();
-            edges.borrow_mut().push((super::record::per_process(&procs), tsc, std::array::from_fn(|i| c[i] + carry[i]), ended));
+            let (cycles, tsc) = fast.unwrap_or_else(|| fast_read(false));
+            edges.borrow_mut().push((cycles, tsc, std::array::from_fn(|i| c[i] + carry[i]), ended));
         };
         // The OS input posted on each side of an edge reached the page, counted on its own: input in a
         // stretch never covers for a timed one lost (or the other way round).
@@ -5486,6 +5583,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         };
         // A trace's mark goes nearest the stretch's start: the trace's readers cut the run there.
         let edge = |start: bool, n: usize| -> Result<()> {
+            // A timed part ends at the processes' cycles, before strobe's own work at the edge.
+            let ending = start.then(|| fast_read(true));
             if start {
                 cost.pause();
             }
@@ -5503,7 +5602,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 driver.mark(&hooks.untimed_mark(n, start))?;
             }
             if start {
-                reading();
+                reading(ending);
             }
             let (k, ms) = driver.take_reads();
             let (pk, pms, pcpu) = driver.take_pixel_reads();
@@ -5523,7 +5622,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             }
             os_edge()?;
             if !start {
-                reading();
+                reading(None);
                 cost.resume();
             }
             Ok(())
@@ -5546,6 +5645,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         args[0] = Value::String(to);
                     }
                     hooks.op(call, &args);
+                    if call == "eval" && hooks.in_run() && !hooks.untimed_now() {
+                        evals.set(evals.get() + 1);
+                    }
                     // From outside a page gets the OS's input (`os::OsInput`); one it cannot reach would get
                     // its driver's, where the other side gets the OS's (SPEC §9.10).
                     if let Some(r) = no_os_input.as_ref().filter(|_| hooks.in_run() && crate::driver::os::INPUT.contains(&call)) {
@@ -5974,9 +6076,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             if let Some(n) = &net {
                 n.borrow_mut().drain(None);
             }
-            let c0 = counters();
-            doc_lost.set(false);
-            doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
             driver.drags.borrow_mut().clear();
             driver.inputs.borrow_mut().clear();
             driver.set_pids(browser.pids());
@@ -6003,44 +6102,98 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 os.take_log();
                 os.begin(&page)?;
             }
+            // The run's edges nest: the processes' walk (with the wake counters), the profiler, the mark,
+            // the Performance domain's counters, strobe's own cost, the cycle clock, each known process's
+            // cycles, what tells one that ended, `t0` … `t1`, and back in reverse. The marks'
+            // window and the counters' difference (`main.work`) hold none of strobe's evaluates but the
+            // marks; the cycles and the clock that divides them span the same moments, right at `t0` and
+            // `t1` (the walks, which list the system's processes, once sat inside the cycles' span and
+            // not the clock's: a 100 ms spin read 104 ms; inside both, 91 to 96 ms); `strobe_pct` is
+            // strobe's cost from `t0` to `t1`.
             // From outside the run is strobe's own span on the host clock, as a native app's: no page
             // mark, and no wait for the page's next frame.
-            if !traceless || gecko_on {
-                driver.mark(&format!("{key}:start"))?;
-            }
             let listed = probe::wakes::wall_us();
-            let (at0, cyc0, tsc0, _) = read();
-            let k0 = probe::wakes::Counters::take(listed, &at0.keys().map(|k| k.0).collect::<Vec<_>>(), perf.as_ref());
-            let ended0 = host::ended_marks(&at0.keys().map(|k| k.0).collect::<Vec<_>>(), browser.profile().as_deref());
+            let (walk0, cyc0, _, _) = read();
+            let pids0: Vec<u32> = walk0.keys().map(|k| k.0).collect();
+            let k0 = probe::wakes::Counters::take(listed, &pids0, perf.as_ref());
+            *walked.borrow_mut() = walk0.clone();
             if profile {
                 profile_start()?;
             }
-            // strobe's own cost over the run.
+            if !traceless || gecko_on {
+                driver.mark(&format!("{key}:start"))?;
+            }
+            let c0_at = host::now_ns();
+            let c0 = counters();
+            doc_lost.set(false);
+            doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
             cost.start();
+            let (at0, tsc0) = fast_read(false);
+            // What tells a process that ended, read right at the run's edges too (per process, no walk):
+            // read at the walks, it took the marks and counters around the run for the run's.
+            let ended0 = host::ended_marks(&pids0, browser.profile().as_deref());
             let t0 = host::now_ns();
             runner
                 .call("run", json!({ "case": s.case }), run_timeout, &serve)
                 .map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &snapshot(&page, &exp, "run"), "the run threw or timed out; fix the bench file or the app"))?;
             // The page's next frame ends the run (what its last step drew), except after an untimed
-            // stretch, whose own frames are none of the run's.
-            if !outside && !hooks.ended_untimed() {
+            // stretch, whose own frames are none of the run's. A headless page's run ends at its last
+            // step: its frames come from a clock of the browser's own, which with the display off took
+            // 60 to 165 ms for two (SPEC 7.2); the frame is waited for after the run, untimed.
+            let frame_after = !outside && !hooks.ended_untimed();
+            if frame_after && !headless {
                 driver.dispatch("frame", &[])?;
             }
             let t1 = host::now_ns();
+            let ended1 = host::ended_marks(&pids0, browser.profile().as_deref());
+            let (fast1, tsc1) = fast_read(true);
             cost.end();
+            let mut c1 = counters();
+            let mut c1_at = host::now_ns();
+            doc_check();
+            if !traceless || gecko_on {
+                driver.mark(&format!("{key}:end"))?;
+            }
             // A run that ended inside an untimed stretch left its profilers stopped already.
             paused.set(false);
             if profiling.get() {
                 profile_stop()?;
+            }
+            // The frame a headless run's last step left. The Performance domain answers on the page's main
+            // thread, so a frame that began before `c1`'s read was in it (vps: a run of 7 ms read main.work
+            // 43 ms and main.busy 610%, the frame's layout in it) and one after it was not (adais): read
+            // after the frame, `main.work` holds that frame's work every time, as a headed run's span
+            // holds its frame. What the frame did after `c1` is what `HeadlessFrame` names.
+            let mut left = (f64::NAN, f64::NAN);
+            if frame_after && headless {
+                driver.dispatch("frame", &[])?;
+                let c2 = counters();
+                left = (c2[2] - c1[2] + c2[3] - c1[3], c2[4] - c1[4]);
+                if c2.iter().all(|v| v.is_finite()) {
+                    c1 = c2;
+                    c1_at = host::now_ns();
+                }
+            }
+            // The wall time the counters' difference covers, from asking for `c0` to the last answer:
+            // the main thread's tasks in it can take no more (`main.busy`, never over 100%).
+            let counted_ms = (c1_at - c0_at) as f64 / 1e6;
+            let listed = probe::wakes::wall_us();
+            let (walk1, cyc1, _, cpu1) = read();
+            let pids1: Vec<u32> = walk1.keys().map(|k| k.0).collect();
+            let k1 = probe::wakes::Counters::take(listed, &pids1, perf.as_ref());
+            // The known processes as read at `t1`; one born during the run (a renderer after a cross-site
+            // navigation) from the walk after it, counted from zero.
+            let mut at1 = fast1;
+            for (k, c) in walk1.iter().filter(|(k, _)| !walk0.contains_key(*k)) {
+                at1.insert(*k, *c);
             }
             // The page's scripts' function ranges, before the reset can leave the page.
             if profile && (last || s.reset) {
                 ranges.borrow_mut().merge(probe::symbols::Ranges::take(&page)?);
             }
             let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
-            let (at1, cyc1, tsc1, cpu1) = read();
-            let k1 = probe::wakes::Counters::take(probe::wakes::wall_us(), &at1.keys().map(|k| k.0).collect::<Vec<_>>(), perf.as_ref());
-            let ended1 = host::ended_marks(&at1.keys().map(|k| k.0).collect::<Vec<_>>(), browser.profile().as_deref());
+            // The untimed stretches leave the counters' span as they leave their difference (`gap`).
+            let counted_ms = counted_ms - timed.untimed_in(t0, t1) as f64 / 1e6;
             // OS input's log: its inputs for latency, its drags for `input.rate` (those begun untimed left out).
             let sent = driver.os.get().map(|os| os.take_log());
             // The OS's input (from outside) is the video's markers' edges, as the driver's are.
@@ -6050,11 +6203,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let mut drags = sent.as_ref().map_or_else(|| driver.drags.take(), |l| l.drags.clone());
             drags.retain(|d| d.first().is_none_or(|t| !timed.untimed_at(*t)));
             let input = crate::driver::input_pacing(&drags);
-            let c1 = counters();
-            doc_check();
-            if !traceless || gecko_on {
-                driver.mark(&format!("{key}:end"))?;
-            }
             // Read once the run's span and CPU window closed: the page's own count of its time.
             let reads = driver.take_reads();
             let reads = (reads.0 + reads_before.get().0, reads.1 + reads_before.get().1);
@@ -6210,6 +6358,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 doc_lost: doc_lost.get(),
                 cpu_lost,
                 whole_lost,
+                deferred: left,
+                counted_ms,
             })
         };
         // Warm until two consecutive runs do the same main-thread work (within 5%); both of them count
@@ -6292,6 +6442,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 }
                 loaded_document.set(false);
                 let burst0 = burst_keys.get();
+                let evals0 = evals.get();
                 let mark = format!("case:{k}:{}", batch::mark_name(&s.case));
                 if batch {
                     if !traceless {
@@ -6422,7 +6573,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 } else {
                     None
                 };
-                Ok(PageCase { base, runs, nodes, warmup, same, start, end, burst: burst_keys.get() - burst0, loaded_document: loaded_document.get(), steps })
+                Ok(PageCase { base, runs, nodes, warmup, same, start, end, burst: burst_keys.get() - burst0, evals: evals.get() - evals0, loaded_document: loaded_document.get(), steps })
             })();
             case_ms.push(case_began.elapsed().as_secs_f64() * 1e3);
             match r {
@@ -6651,7 +6802,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let run_ms: Vec<f64> = measured.iter().map(|r| r.ms).collect();
                 let walls: BTreeMap<String, f64> = measured.iter().enumerate().map(|(j, r)| (key(j), r.ms)).collect();
                 let cpu: BTreeMap<String, f64> = measured.iter().enumerate().map(|(j, r)| (key(j), r.cpu)).collect();
-                let busy: BTreeMap<String, f64> = measured.iter().enumerate().filter(|(_, r)| r.task.is_finite() && r.ms > 0.0).map(|(j, r)| (key(j), 100.0 * r.task / r.ms)).collect();
+                // Over the wall time the task counter covered (the run, its edges' reads and, headless, the
+                // frame it left), never the run's alone, which holds less than the counter can.
+                let busy: BTreeMap<String, f64> = measured.iter().enumerate().filter(|(_, r)| r.task.is_finite() && r.counted_ms > 0.0).map(|(j, r)| (key(j), 100.0 * r.task / r.counted_ms)).collect();
                 let work: BTreeMap<String, f64> = measured.iter().enumerate().filter(|(_, r)| r.task.is_finite()).map(|(j, r)| (key(j), r.task)).collect();
                 let spans: Vec<(String, u64, u64)> = measured.iter().enumerate().map(|(j, r)| (key(j), r.t0, r.t1)).collect();
                 let nodes = c.nodes.get(local.clone()).unwrap_or_default().to_vec();
@@ -6770,8 +6923,30 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         extra.insert(metric.to_string(), per_run);
                     }
                 }
-                if set == Set::Lean {
+                // The task counter over more than the wall time it covered: some task's time was counted in
+                // a run it did not run in (vps, headless: a frame's layout spilled into the next run), so the
+                // share is no run's (a 4 ms run read 385%). Never printed.
+                let busy_over = busy.values().filter(|b| **b > 100.5).count();
+                if set == Set::Lean && busy_over == 0 {
                     extra.insert("main.busy".to_string(), busy);
+                }
+                // A headless run ends at its last step (SPEC 7.3): style and layout that step left for the
+                // next frame falls past its wall time (main.work holds it). Said when it is real work.
+                let med = |f: &dyn Fn(&Run) -> f64| metrics::median(&measured.iter().map(f).collect::<Vec<_>>());
+                let (deferred_ms, deferred_n) = (med(&|r| r.deferred.0), med(&|r| r.deferred.1));
+                let (work_ms, layouts, layout_ms) = (med(&|r| r.task), med(&|r| r.parts[3]), med(&|r| r.parts[1]));
+                let real = deferred_ms >= 1.0 && deferred_ms >= 0.05 * work_ms;
+                let only_there = deferred_n > 0.0 && (layouts == 0.0 || layout_ms == 0.0);
+                if deferred_ms.is_finite() && (real || only_there) && !ctx.warnings.iter().any(|w| w.id == "HeadlessFrame" && w.text.starts_with(&s.label())) {
+                    ctx.warnings.push(validity::warn(
+                        "HeadlessFrame",
+                        format!(
+                            "{}: the frame after each headless run did {} of style and layout ({deferred_n:.0} layouts) its last step left: main.work ({}) counts it, run.duration does not; pass {{ until: \"frame\" }} to that step to time it",
+                            s.label(),
+                            fmt::value(deferred_ms, "ms"),
+                            fmt::value(work_ms, "ms"),
+                        ),
+                    ));
                 }
                 // canvas.*: frames per run, and gaps between consecutive frames pooled over the measured runs, as
                 // frames.interval pools presented frames. A gap never spans two documents.
@@ -6810,7 +6985,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         values.insert("canvas.interval.max".into(), canvas_gaps.last().copied().unwrap_or(0.0));
                     }
                 }
-                if set != Set::Lean && busy_cdp.is_finite() {
+                if set != Set::Lean && busy_cdp.is_finite() && busy_over == 0 {
                     // The same quantity from the Performance domain, next to the trace's: they must agree.
                     values.insert("main.busy.cdp".into(), busy_cdp);
                 }
@@ -6895,6 +7070,36 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             );
                         }
                     }
+                }
+                // Script a run evaluated through `page.eval` (DevTools' Runtime.evaluate) is in `main.work`
+                // and none of `ScriptDuration`: a 100 ms evaluated spin read main.script 0.03 ms.
+                if c.evals > 0 {
+                    values.remove("main.script");
+                }
+                if c.evals > 0 && declares("main.script") && !refused.contains_key("main.script") {
+                    refused.insert(
+                        "main.script".into(),
+                        Refusal::new(ValidatorId::NotForTarget, "main.script: the run called page.eval(), which Chromium's ScriptDuration leaves out")
+                            .fix("measure main.work, or drive the page through its UI (clicks, keys) and keep page.eval to setup and reset"),
+                    );
+                }
+                if busy_over > 0 && set == Set::Lean && declares("main.busy") && !refused.contains_key("main.busy") {
+                    values.remove("main.busy");
+                    refused.insert(
+                        "main.busy".into(),
+                        Refusal::new(
+                            ValidatorId::RunIncomplete,
+                            format!(
+                                "main.busy: in {busy_over} of {} measured runs the Performance domain counted more task time than the wall time it covered: work of one run was counted in another",
+                                measured.len()
+                            ),
+                        )
+                        .fix("end each run on what its last step shows ({ until: \"frame\" }), or bench with --trace full, whose main.busy is the trace's"),
+                    );
+                }
+                // A lean trace has no task-loop slices to find long tasks in.
+                if declares("main.tasks.long") && !values.contains_key("main.tasks.long") && !refused.contains_key("main.tasks.long") && set == Set::Lean {
+                    refused.insert("main.tasks.long".into(), lean_long_tasks());
                 }
                 if c.burst > 0 {
                     let line = probe::present::frames::burst_refusal(c.burst);
@@ -8255,6 +8460,13 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
             .fix("time the launch to a selector (a page's canvas element, a heading) or text, or launch the app as a native target"),
         ));
     }
+    if t["kind"] == "script" && script_unread(&s.primary) {
+        return Ok(Some(script_unread_refusal(&s.primary)));
+    }
+    // An app's page traced over DevTools as a page is: lean unless --trace full.
+    if matches!(t["kind"].as_str(), Some("app" | "exe" | "webview")) && s.primary == "main.tasks.long" && args.get("trace") != Some("full") {
+        return Ok(Some(lean_long_tasks()));
+    }
     if !page {
         return Ok(None);
     }
@@ -8305,6 +8517,19 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
         )
     } else if let Some(r) = validity::engine_refusal(engine, &s.primary) {
         Some(Refusal { summary: format!("{on}{}", r.summary), ..r })
+    } else if s.primary == "main.tasks.long" && args.get("trace") != Some("full") {
+        Some(lean_long_tasks())
+    } else if headless
+        && engine == WebEngine::Chromium
+        && s.sides.is_none()
+        && dark_metric(&s.primary)
+        && !args.has("check")
+        && !matches!(args.get("probes"), Some("attribution" | "memory"))
+        && host::display_state().is_some_and(|d| d.0 == 0)
+    {
+        // The display is off now: the series is listed refused and the rest of the file runs (a block
+        // whose display turns off later refuses that series then, `dark_state`).
+        Some(dark_refusal(&format!("the primary {}", s.primary)))
     } else if (t["headless"] == true || args.has("headless")) && (display_metric(&s.primary) || gpu_use(&s.primary)) {
         Some(
             Refusal::new(ValidatorId::Headless, format!("{on}the primary {} needs a display, and the page runs headless: nothing it draws reaches one", s.primary))

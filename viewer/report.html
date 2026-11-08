@@ -3714,8 +3714,10 @@ function renderCpuHotspotsSection(s, aa) {
 
   const canFiles = !!(hs.base.files?.length && hs.head.files?.length);
   const byFile = state.whyBy === "file" && canFiles;
-  const listB = byFile ? hs.base.files : hs.base.rows;
-  const listH = byFile ? hs.head.files : hs.head.rows;
+  // Self-time tables: a row that only calls (self 0, listed by its total) is none of them.
+  const selfRows = (l) => (l || []).filter((r) => (r.weight ?? r.self_ms ?? 0) > 0);
+  const listB = selfRows(byFile ? hs.base.files : hs.base.rows);
+  const listH = selfRows(byFile ? hs.head.files : hs.head.rows);
   const runsB = hs.base.runs || STROBE?.data?.plan?.runs_per_block || 1;
   const runsH = hs.head.runs || STROBE?.data?.plan?.runs_per_block || 1;
   const rowMs = (r) => (finite(r.self_ms) ? r.self_ms : finite(r.weight) ? r.weight / 1000 : 0);
@@ -5196,7 +5198,8 @@ function renderSingleCpuHotspots(att) {
   const rowMs = (r) => (finite(r.self_ms) ? r.self_ms : finite(r.weight) ? r.weight / 1000 : 0);
   const isSys = (n) => /^\((idle|program|garbage collector|root)\)$/.test(n);
 
-  const activeRows = list.filter((r) => !isSys(r.name)).slice(0, 8);
+  // Self time only: a row that only calls (self 0, listed by its total) is left out.
+  const activeRows = list.filter((r) => !isSys(r.name) && (r.weight ?? r.self_ms ?? 0) > 0).slice(0, 8);
   if (!activeRows.length) return null;
   const maxMs = Math.max(...activeRows.map((r) => rowMs(r) / runs), 0.1);
   const activeTotalMs = list.filter((r) => r.name !== "(idle)").reduce((s, r) => s + rowMs(r) / runs, 0) || 1;

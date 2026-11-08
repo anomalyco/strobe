@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>known costs</title>
+<style>
+  html, body { margin: 0; font: 13px/18px system-ui, sans-serif }
+  #box { width: 80px; height: 80px; background: #009fff }
+</style>
+</head>
+<body>
+<h1>known costs</h1>
+<div id="box"></div>
+<button id="dirty" onclick="known.dirty(2000)">dirty 2000</button>
+<div id="grid"></div>
+<button id="spin" onclick="spin(50); this.dataset.done = (Number(this.dataset.done ?? 0) + 1)">spin 50 ms</button>
+<script>
+// Work whose true cost is known by construction (scripts/dev/known-web.bench.ts). Each function is one
+// call from the bench's run through page.eval, so the run's work is exactly what it says plus strobe's
+// one evaluate.
+const box = document.getElementById("box")
+// Busy-waits exactly `ms` on the main thread.
+function spin(ms) { const end = performance.now() + ms; while (performance.now() < end) {} }
+// Two named functions for hotspots: A costs three times B.
+function hotA(ms) { spin(ms) }
+function hotB(ms) { spin(ms) }
+const kept = []
+window.__flip = 0
+window.known = {
+  spin,
+  // `n` tasks of `ms` each, every one its own task (a message per task, no timer clamping).
+  tasks(n, ms) {
+    return new Promise((done) => {
+      const ch = new MessageChannel()
+      let left = n
+      ch.port1.onmessage = () => { spin(ms); if (--left > 0) ch.port2.postMessage(0); else done(n) }
+      ch.port2.postMessage(0)
+    })
+  },
+  // Exactly `k` forced layouts: a style write, then a geometry read. The width alternates across calls
+  // too, so a run's first write is a change even when the run before ended on the other width.
+  layouts(k) {
+    let h = 0
+    for (let i = 0; i < k; i++) { box.style.width = 80 + (++window.__flip % 2) + "px"; h += box.offsetHeight }
+    return h
+  },
+  // `n` doubles kept forever, in arrays of 50,000 (preallocated, so their elements are one flat store of
+  // exactly 50,000 × 8 bytes plus a 16-byte header each; one array of a million would be a dictionary).
+  keepDoubles(n) {
+    for (let k = 0; k < n; k += 50000) { const a = new Array(50000); for (let i = 0; i < 50000; i++) a[i] = i + 0.5; kept.push(a) }
+    return kept.length
+  },
+  // The page's own time for two animation frames: what a wait for the next frame costs a run.
+  twoFrames() { return new Promise((done) => { const t = performance.now(); requestAnimationFrame(() => requestAnimationFrame(() => done(performance.now() - t))) }) },
+  // `bytes` of ArrayBuffer kept forever, every page written (committed and resident).
+  keepBuffer(bytes) { const b = new Uint8Array(bytes); for (let i = 0; i < bytes; i += 4096) b[i] = 1; kept.push(b); return kept.length },
+  // `bytes` kept by the first call only: later runs keep nothing more.
+  keepBufferOnce(bytes) { if (!window.__buffer) { window.__buffer = new Uint8Array(bytes); for (let i = 0; i < bytes; i += 4096) window.__buffer[i] = 1 } return window.__buffer.length },
+  // Fetches each size once, uncached; resolves with the bytes the bodies held.
+  async fetchAll(sizes) {
+    let total = 0
+    for (const n of sizes) { const r = await fetch(`/blob/${n}?r=${Math.random()}`, { cache: "no-store" }); total += (await r.arrayBuffer()).byteLength }
+    return total
+  },
+  // Changes the width of `n` text cells and reads nothing: their style and layout wait for the next frame.
+  dirty(n) {
+    const grid = document.getElementById("grid")
+    while (grid.childElementCount < n) grid.appendChild(Object.assign(document.createElement("span"), { textContent: "cell with some text " }))
+    const w = 40 + (++window.__flip % 2) * 20 + "px"
+    for (const c of grid.children) c.style.width = w
+    for (const c of grid.children) c.style.display = "inline-block"
+  },
+  hot(aMs, bMs, rounds) { for (let i = 0; i < rounds; i++) { hotA(aMs); hotB(bMs) } },
+  // Counts `n` frames of requestAnimationFrame, then resolves.
+  frames(n) { return new Promise((done) => { let left = n; const tick = () => { box.style.transform = `translateX(${left % 40}px)`; if (--left > 0) requestAnimationFrame(tick); else done(n) }; requestAnimationFrame(tick) }) },
+  // `n` frames where `blocked` of them spin `ms` inside their animation callback.
+  blockedFrames(n, blocked, ms) {
+    return new Promise((done) => {
+      let i = 0
+      const tick = () => { box.style.transform = `translateX(${i % 40}px)`; if (i < blocked) spin(ms); if (++i < n) requestAnimationFrame(tick); else done(n) }
+      requestAnimationFrame(tick)
+    })
+  },
+}
+// For `strobe record` (no runs to drive it): `?busy=<ms>&every=<ms>` spins busy ms in a task of its own every
+// `every` ms, so the main thread is busy busy/every of the time and each task is long when busy > 50.
+const q = new URLSearchParams(location.search)
+if (q.has("busy")) setInterval(() => spin(Number(q.get("busy"))), Number(q.get("every") ?? 200))
+</script>
+</body>
+</html>

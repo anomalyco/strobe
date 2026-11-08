@@ -58,9 +58,12 @@ pub fn clock() -> &'static Clock {
             .and_then(|v| serde_json::from_value::<Verdict>(v["verdict"].clone()).ok());
         let (verdict, how) = match cached {
             Some(v) => (Ok(v), "cached".to_string()),
-            None => match check() {
+            None => match check_again_if_mixed() {
                 Ok(v) => {
-                    let _ = super::paths::write_atomic(&path, serde_json::json!({ "key": key, "verdict": v }).to_string().as_bytes());
+                    // A mixed verdict is this invocation's alone: the next one checks again.
+                    if !matches!(v, Verdict::Mixed { .. }) {
+                        let _ = super::paths::write_atomic(&path, serde_json::json!({ "key": key, "verdict": v }).to_string().as_bytes());
+                    }
                     (Ok(v), "checked".to_string())
                 }
                 Err(why) => (Err(why.clone()), format!("unchecked: {why}")),
@@ -68,6 +71,21 @@ pub fn clock() -> &'static Clock {
         };
         Clock { unit: unit(verdict), how }
     })
+}
+
+/// A CPU busy with other work fits fewer steps (a read preempted inside its bracket), and a mixed
+/// verdict refuses every `cpu.*` metric for the rest of the boot: on adais, under other builds, one CPU
+/// fit 941 of 994 steps (under 95%) once. So a mixed verdict is checked again, 50 ms apart, three
+/// checks in all, and never kept for the boot (`clock`).
+fn check_again_if_mixed() -> Result<Verdict, String> {
+    let mut v = check();
+    for _ in 0..2 {
+        if matches!(v, Ok(Verdict::Mixed { .. })) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            v = check();
+        }
+    }
+    v
 }
 
 /// What `host::tsc` reads for a verdict (Err: the check could not run).

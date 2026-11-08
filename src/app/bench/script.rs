@@ -357,6 +357,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 }
                 refuse_not_on_this_os(s, &mut values, &mut refused);
                 super::block::untimed_state(s, &measured.iter().map(|r| &r.6).collect::<Vec<_>>(), &mut values, &mut refused);
+                let unread: Vec<String> = declared_metrics(s).into_iter().filter(|m| script_unread(m) && !values.contains_key(*m) && !refused.contains_key(*m)).cloned().collect();
+                for m in unread {
+                    let r = script_unread_refusal(&m);
+                    refused.insert(m, r);
+                }
                 base += runs.len();
                 Ok(Block {
                     variant: v.role.to_string(),
