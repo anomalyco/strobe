@@ -552,11 +552,22 @@ fn follow_installed() {
         return;
     }
     let name = |n: &str| if cfg!(windows) { format!("{n}.exe") } else { n.to_string() };
+    // The build id is read out of the whole executable (16 MB): again only when the file changed since
+    // it read as this build, not each minute (that read was nearly all of an idle daemon's CPU and IO).
+    let mut same: Option<(std::path::PathBuf, u64, Option<std::time::SystemTime>)> = None;
     loop {
         std::thread::sleep(Duration::from_secs(60));
         let daemon = if dir.join(name("strobew")).is_file() { dir.join(name("strobew")) } else { dir.join(name("strobe")) };
+        let stamp = std::fs::metadata(&daemon).ok().map(|m| (daemon.clone(), m.len(), m.modified().ok()));
+        if stamp.is_some() && stamp == same {
+            continue;
+        }
         let Some(installed) = file_build(&daemon) else { continue };
-        if installed == build_id() || super::up::daemon_benching() {
+        if installed == build_id() {
+            same = stamp;
+            continue;
+        }
+        if super::up::daemon_benching() {
             continue;
         }
         if super::up::spawn_detached(&dir.join(name("strobe")), &["up", "--skip", "deep,mcp,calibrate"]).is_ok() {

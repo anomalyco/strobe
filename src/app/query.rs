@@ -154,6 +154,10 @@ pub fn run(args: &Args) -> Result<Output> {
             }
         ))),
         "frames" => frames(&trace, meta, top),
+        "threads" if !trace.exists() => Err(Error::usage(format!(
+            "this recording kept no thread counters (no trace, no threads.json){}",
+            if dir.join("deep.json.gz").is_file() { format!(": a native stack capture answers strobe query {} hotspots --by package", rec.id) } else { String::new() }
+        ))),
         "threads" => threads(&trace, top),
         "gpu" if !trace.exists() => native_gpu(&dir, meta),
         "gpu" => gpu(&trace, top),

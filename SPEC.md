@@ -7919,6 +7919,19 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   desktop's mouse scroll: 579 ms); Firefox `card-open` `cpu.work` 751 ms, its `scroll-home` refused.
   The live site on adais (20 Hz): `card-open` and `scroll-home` (9.4 s) pass in Chromium, `card-open` in
   Firefox. Not checked: a headed phone (refused `DisplayTooSmall`), so no touch `interaction.*` value yet.
+- strobe measuring itself (2026-11-08, adais, locked; `scripts/dev/self.bench.ts`, its commands as a
+  `cli()` target, each variant a folder holding a strobe executable): `status --fast` 2,036 → 556 ms
+  (8 pairs, −73%; Windows' refused loopback connect to adb waited its 2 s timeout, now 200 ms as
+  usbmuxd's, and the data size statted all 19,000 recordings' and experiments' files, now from the
+  listing); `--help` 17 ms; `query hotspots` of a 929 MB attribution recording 82 ms; `query summary`
+  of it 12–16 s, all trace_processor loading the 950 MB trace (peak 2.5 GB) for the per-run table, every
+  call (not cached yet). The daemon idle: 0.02% of a core, 3 MB private, nearly all of it its once-a-minute
+  read of its own 16 MB executable for a build id, now read again only when the file changed. `ctx.root`
+  and the harness line are plain paths (a canonical `\\?\` root broke `${ctx.root}/tool.exe`, os error
+  123). An A/B of 0.19.0 and main on `query hotspots` read `faster (small)` −1.6% [−2.8%, −0.1%];
+  alternating plain timings (60 pairs ×3 sessions) read −0.5% to −1.1%: same direction, inside the
+  interval. Open: the command's `cpu.work` read 80 ms under a bench where its own cycle counter read
+  68–71 ms in plain launches (stamped environment or not).
 
 ## 25. Continuous benchmarking (`track`, `history`)
 
