@@ -162,8 +162,10 @@ pub fn adb_exe() -> Option<PathBuf> {
 
 impl Conn {
     fn open(port: u16, timeout: Option<Duration>, ctx: &str) -> Result<Conn> {
+        // Windows retries a refused loopback connect for about 2 s (every `status` waited that long
+        // with no adb server); a listening server answers at once.
         let open = || -> std::io::Result<TcpStream> {
-            let s = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_secs(2))?;
+            let s = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(200))?;
             s.set_nodelay(true)?;
             s.set_read_timeout(timeout)?;
             s.set_write_timeout(Some(DEFAULT_TIMEOUT))?;

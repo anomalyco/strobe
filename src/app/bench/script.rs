@@ -226,7 +226,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     };
     let t = Duration::from_secs(600);
     let result = (|| -> Result<Launch> {
-        let root_text = root.display().to_string();
+        let root_text = host::paths::plain(&root);
         ctx.runner.call("block", json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": root_text }), t, &serve)?;
         let lapped = Instant::now();
         let setup = ctx.runner.call("setup", json!({}), t, &serve);

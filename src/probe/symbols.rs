@@ -116,21 +116,12 @@ pub fn store_maps_with(page: &WebPage, scripts: &BTreeSet<String>, ranges: Range
         // map's is its script's. Without Windows' verbatim prefix (`\\?\`, `\\?\UNC\`), which a canonical
         // root carries: files show as a person types them.
         let at = if fetched.url.starts_with("data:") { url.as_str() } else { fetched.url.as_str() };
-        let map_dir = served.zip(url_path(at)).map(|(root, p)| root.join(p.trim_start_matches('/'))).and_then(|p| p.parent().map(|d| plain_path(&d.display().to_string())));
+        let map_dir = served.zip(url_path(at)).map(|(root, p)| root.join(p.trim_start_matches('/'))).and_then(|p| p.parent().map(crate::host::paths::plain));
         index.insert(url.clone(), json!({ "map": file, "map_url": fetched.url, "map_dir": map_dir, "scopes": scopes }));
     }
     let n = index.len();
     crate::store::write_json(&maps.join("index.json"), &Value::Object(index))?;
     Ok(n)
-}
-
-/// A Windows path without its verbatim prefix: `\\?\C:\x` → `C:\x`, `\\?\UNC\host\share` → `\\host\share`.
-fn plain_path(p: &str) -> String {
-    match p.strip_prefix(r"\\?\") {
-        Some(r) if r.get(..4).is_some_and(|u| u.eq_ignore_ascii_case(r"UNC\")) => format!(r"\\{}", &r[4..]),
-        Some(r) if r.as_bytes().get(1) == Some(&b':') => r.to_string(),
-        _ => p.to_string(),
-    }
 }
 
 /// Whether the page itself was a file (its history, where the engine keeps one for strobe, else its

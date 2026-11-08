@@ -555,14 +555,16 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
     // The page's renderer: the one whose V8 heap matches the page's (other renderers serve workers or
     // extensions). Only it was snapshotted, so only its OS readings are inflated after a snapshot.
     let js_total = c["js_heap_total_bytes"].as_f64().unwrap_or(f64::NAN);
-    // Firefox's census names the page's content process itself.
+    let js_used = c["js_heap_bytes"].as_f64().unwrap_or(0.0);
+    // Firefox's census names the page's content process itself. Otherwise the renderer whose V8 is
+    // nearest the page's heap among those whose V8 can hold the heap the page used (taken after a GC,
+    // just before the dump, so 10% under it still can): a page's renderer's V8 also holds code and
+    // its other isolates, often twice its heap, which a small renderer's 1 MB V8 is nearer to.
     let page_pid = c["page_pid"].as_u64().map(|p| p.to_string()).or_else(|| {
-        procs
-            .iter()
-            .filter(|p| p["type"] == "renderer")
-            .filter_map(|p| Some((p["pid"].to_string(), (layers(&p["pid"].to_string()).get("v8")? - js_total).abs())))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|x| x.0)
+        let renderers: Vec<(String, f64)> = procs.iter().filter(|p| p["type"] == "renderer").filter_map(|p| Some((p["pid"].to_string(), *layers(&p["pid"].to_string()).get("v8")?))).collect();
+        let holds: Vec<&(String, f64)> = renderers.iter().filter(|r| r.1 >= 0.9 * js_used).collect();
+        let pool = if holds.is_empty() { renderers.iter().collect() } else { holds };
+        pool.into_iter().min_by(|a, b| (a.1 - js_total).abs().total_cmp(&(b.1 - js_total).abs())).map(|x| x.0.clone())
     });
     // A utility process by its service (`network.mojom.NetworkService` → network); the tracing service
     // runs because strobe traces, so it is strobe's, not the target's (rule 2).
@@ -648,11 +650,15 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
         _ => {
             text += "  process               pid      private  working set    allocators  unexplained\n";
             let mut rows = Vec::new();
+            let mut over = false;
             for p in &procs {
                 let pid = p["pid"].to_string();
                 let private = p["private_bytes"].as_f64().unwrap_or(f64::NAN);
                 let tracked: f64 = layers(&pid).iter().filter(|(k, _)| k.as_str() != "shared_memory").map(|(_, v)| v).sum();
                 let has = alloc[&pid].is_object();
+                // Allocators over the OS's private bytes leave no estimate: never a negative size.
+                let unexplained = (has && private.is_finite() && private >= tracked).then_some(private - tracked);
+                over |= has && private.is_finite() && private < tracked;
                 let ty = p["kind"].as_str().unwrap_or("other");
                 let flag = if inflated && page_pid.as_deref() == Some(pid.as_str()) { " *" } else { "" };
                 text += &format!(
@@ -662,7 +668,7 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
                     mb(private),
                     mb(p["working_set_bytes"].as_f64().unwrap_or(f64::NAN)),
                     if has { mb(tracked) } else { "—".into() },
-                    if has { mb(private - tracked) } else { "—".into() }
+                    unexplained.map_or_else(|| "—".into(), mb)
                 );
                 rows.push(json!({
                     "pid": p["pid"],
@@ -673,7 +679,7 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
                     "private_bytes": if private.is_finite() { json!(private) } else { Value::Null },
                     "working_set_bytes": p["working_set_bytes"],
                     "allocator_bytes": if has { json!(tracked) } else { Value::Null },
-                    "unexplained_bytes": if has && private.is_finite() { json!(private - tracked) } else { Value::Null },
+                    "unexplained_bytes": unexplained,
                     "layers": layers(&pid),
                 }));
             }
@@ -705,6 +711,9 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
             }
             if inflated && page_pid.is_some() {
                 text += "* read after a heap snapshot of this process, which raises its memory (CensusContaminated)\n";
+            }
+            if over {
+                text += "unexplained — where the allocators count more than the OS's private bytes (memory the OS charges elsewhere, such as shared or mapped): no estimate\n";
             }
             json!({ "census": label, "processes": rows, "page": { "js_heap_bytes": c["js_heap_bytes"], "js_heap_total_bytes": c["js_heap_total_bytes"], "dom": c["dom"] }, "os_after_snapshot": inflated })
         }

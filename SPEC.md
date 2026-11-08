@@ -1386,7 +1386,10 @@ an interval for its share. Native time stays `(program)` unless `deep` resolves 
 
 **Interval kept** (`probe::cpu::Sampling`): a sampler need not keep the interval asked of it, so
 strobe reports the one it kept: the median gap between consecutive samples of the page's main thread
-in the attribution block (V8: the page's `timeDeltas`, never an app's main process's `cpu-main`;
+by time (the gap half the sampled time lies in gaps up to; a regular sampler's plain median, while
+by count a burst of extra samples decided it: a Windows V8 profile asked 200 µs held 915,000 gaps of
+5 µs, 11% of its time, beside 60,000 of 0.3–1 ms, 78%, and read 0.01 ms where its time was sampled
+every 0.53 ms) in the attribution block (V8: the page's `timeDeltas`, never an app's main process's `cpu-main`;
 Firefox: its main threads' samples inside the measured runs), gaps over 50 ms left out (the thread was
 not sampled then: a runtime that skips ticks while idle, a paused process). Every attribution
 recording of a page keeps it in `meta.json` (`sampling`: `asked_us`, `median_us`, `gaps`; a Firefox
@@ -3119,7 +3122,7 @@ them by. Output goes to the experiment's `cli.log`.
     exit, both clocks read together at each end, plus the processes it started from the job's clock-tick times (sampled
     at the timer interrupt, 15.6 ms a tick). A run whose commands started any process (a shell around
     the program, a `.cmd`, a child) gets `cpu.work` only when that part is 64 ticks (1 s) a run or
-    more, said once per experiment as a share of `cpu.work` (`TickSampledCpu`); below, `cpu.work` and
+    more, said once per series as its share of `cpu.work` (`TickSampledCpu`); below, `cpu.work` and
     `cpu.app.total` are refused (`NotOnThisOs`: one tick more or less, or work under a tick that reads
     0, is several percent of the run), and `run.duration` still compares. Without a job of its own
     (strobe's own job refused a nested one) nothing counts the processes it started, so refused too.
@@ -5485,7 +5488,7 @@ means the metric is not printed and the refusal says why (rule 1), never 0.
 | native stacks (§13.4) | ETW sampled profile through the helper, 200 µs | in-process `perf_event_open`: per-thread `cpu-clock` at 1 ms (on-CPU samples), user registers and 16 KB of user stack per sample unwound with the modules' DWARF CFI (`framehop`), kernel frames from the kernel's callchain when allowed; threads that start later are found every 50 ms. Needs `perf_event_paranoid` ≤ 2 (Debian ships 3) or CAP_PERFMON | `/usr/bin/sample` per process at 1 ms (task suspension, every thread's user stack; samples whose leaf is a system call trap are dropped and counted; untimed: they cover the whole capture), at most 16 processes, the root first; a process it may not examine (a system XPC service) or past the 16 is listed with why (`Unsampled`, §10.2) |
 | symbols (§12.2) | PDBs (local, Microsoft's server, `symbols.servers`) | DWARF of the module, its build-id file under `/usr/lib/debug`, or `.gnu_debuglink`; symbol tables (sized); `/proc/kallsyms` | DWARF of a dSYM beside the module or in strobe's cache, made with `dsymutil` from the objects a build left (a failed `dsymutil` leaves a `missing` marker for a day, as a PDB server's miss does); else the names and `file:line` `sample` printed |
 | adapter per window | D3DKMT + DXGI | — | — |
-| IO (`io.read`, `io.write`) | `NtQuerySystemInformation` transfer counts (every byte read and written, cached or not) | `/proc/<pid>/io` `rchar`/`wchar` (the same) | disk bytes only (`ri_diskio_bytesread`/`written`): macOS counts no cached IO per process |
+| IO (`io.read`, `io.write`) | `NtQuerySystemInformation` transfer counts (every byte read and written through read and write calls, cached or not; a file mapped into memory and read through its pages counts nothing: `trace_processor` loading a 950 MB trace by mapping read 0 bytes by this count) | `/proc/<pid>/io` `rchar`/`wchar` (the same, mapped files left out alike) | disk bytes only (`ri_diskio_bytesread`/`written`): macOS counts no cached IO per process |
 | energy, instructions, idle wakes (7.5) | refused: nothing per process an unprivileged process can read | instructions: per-thread perf counting events (user mode), in counter blocks; energy and idle wakes refused | `proc_pid_rusage(RUSAGE_INFO_V6)`: `ri_energy_nj` (Apple silicon), `ri_instructions`, `ri_pkg_idle_wkups` |
 | thread origin (`app`, `driver`, `os`; 7.4) | the Win32 start address's module | the first module down from the top of the thread's stack (`process_vm_readv`) | per process only: its executable; an XPC service in the target's set (`.xpc` bundle) is `app` wherever macOS keeps it (a web view's web content process does the app's work), the Metal shader compiler service `driver` |
 | accessibility tree (§13.7) | UI Automation (COM) | AT-SPI over strobe's own D-Bus client: the registry's app roots by connection pid, a level per round trip | the AX API (`AXUIElementCopyMultipleAttributeValues`, one call per element; `AXObserver`), Accessibility permission |

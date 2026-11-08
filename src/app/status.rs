@@ -326,12 +326,9 @@ fn native_drive() -> (bool, String) {
     }
 }
 
+/// Bytes under a folder, from what the listing gave (the entry's type and size; no file opened per
+/// entry: thousands of recordings' files made a path stat each the larger part of `status --fast`).
 fn dir_size(p: &std::path::Path) -> u64 {
     let Ok(rd) = std::fs::read_dir(p) else { return 0 };
-    rd.flatten()
-        .map(|e| {
-            let path = e.path();
-            if path.is_dir() { dir_size(&path) } else { e.metadata().map(|m| m.len()).unwrap_or(0) }
-        })
-        .sum()
+    rd.flatten().map(|e| if e.file_type().is_ok_and(|t| t.is_dir()) { dir_size(&e.path()) } else { e.metadata().map(|m| m.len()).unwrap_or(0) }).sum()
 }

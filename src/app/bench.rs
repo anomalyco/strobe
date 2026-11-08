@@ -5589,7 +5589,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             }
         };
         let t = cases.iter().map(Series::hook_timeout).max().unwrap_or_default();
-        let mut block = json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": url, "root": v.root, "engine": engine });
+        let mut block = json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": url, "root": v.root.as_deref().map(host::paths::plain), "engine": engine });
         if let (Some(b), Some(a)) = (block.as_object_mut(), hook_app.as_object()) {
             b.extend(a.clone());
         }
@@ -8732,7 +8732,7 @@ fn overlay_harness(v: &Variant, root: &Path, h: &Harness) -> Result<()> {
         }
     }
     if copied > 0 {
-        progress(format!("  harness {}: {copied} file(s) from {}", v.role, h.from.display()));
+        progress(format!("  harness {}: {copied} file(s) from {}", v.role, host::paths::plain(&h.from)));
     }
     if !kept.is_empty() {
         progress(format!("  harness {}: kept its own {}", v.role, kept.join(", ")));

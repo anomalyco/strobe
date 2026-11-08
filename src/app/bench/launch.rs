@@ -138,7 +138,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         None => None,
     };
     let env = app.as_ref().zip(prepared.as_ref()).map(|(a, h)| h.environment(a));
-    let root = v.root.as_ref().map(|r| r.display().to_string());
+    let root = v.root.as_deref().map(host::paths::plain);
     let exe = app.as_ref().map(|a| a.exe.display().to_string());
     // A page's `prepare` mocks its API under the URL strobe opens (`ctx.url`), as in a run case.
     let url = if web { variant_url(v, &target)? } else { String::new() };

@@ -408,7 +408,7 @@ fn runs(
     let last = || output.as_ref().map(|rx| lines.borrow_mut().last(Some(rx)));
     ctx.runner.call(
         "block",
-        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root, "home": home.dir, "env": env, "exe": app.exe }),
+        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": home.dir, "env": env, "exe": app.exe }),
         t,
         &serve,
     )?;
@@ -1579,7 +1579,12 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     let home = if warm { ctx.homes.entry(key).or_insert_with(isolate::new_home).clone() } else { isolate::new_home() };
     let prepared = isolate::prepare_home(&app, seed_dir(ctx, s, &target).as_deref(), Some(home.clone()))?;
     let env = prepared.environment(&app);
-    ctx.runner.call("block", json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root, "home": home, "env": env, "exe": app.exe }), t, &no_page)?;
+    ctx.runner.call(
+        "block",
+        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": home, "env": env, "exe": app.exe }),
+        t,
+        &no_page,
+    )?;
     if spec["before"] == true {
         ctx.runner
             .call("before", json!({ "case": s.case }), Duration::from_secs(900), &no_page)

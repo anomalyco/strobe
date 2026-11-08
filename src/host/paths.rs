@@ -49,6 +49,17 @@ pub fn sdk() -> PathBuf {
     sub("sdk")
 }
 
+/// A path as a person types it: on Windows without the verbatim prefix a canonical path carries
+/// (`\\?\C:\x` → `C:\x`, `\\?\UNC\host\share` → `\\host\share`), which takes no `/` and no `..`.
+pub fn plain(p: &Path) -> String {
+    let s = p.display().to_string();
+    match s.strip_prefix(r"\\?\") {
+        Some(r) if r.get(..4).is_some_and(|u| u.eq_ignore_ascii_case(r"UNC\")) => format!(r"\\{}", &r[4..]),
+        Some(r) if r.as_bytes().get(1) == Some(&b':') => r.to_string(),
+        _ => s,
+    }
+}
+
 /// Creates `dir` (its parents as the umask says) and makes it the user's alone on Linux and macOS:
 /// created `0700`, and an existing one (an older strobe made it with the umask's mode) that others
 /// may read is set to `0700` when it is seen.

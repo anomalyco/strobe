@@ -281,7 +281,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     };
     // The runner's call outlasts the command's own deadline, so the command's timeout is the one said.
     let t = s.run_timeout() + Duration::from_secs(10);
-    let root_text = root.display().to_string();
+    let root_text = host::paths::plain(&root);
     ctx.runner.call("block", json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": root_text }), t, &serve)?;
     let mut lapped = Instant::now();
     ctx.runner.call("setup", json!({}), s.hook_timeout(), &serve).map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup"))?;
@@ -355,13 +355,15 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     let cpu_ok = |r: &[Ran]| cpu(r).filter(|_| !few_ticks);
     put("cpu.work", per(&cpu_ok), &|| Refusal { summary: format!("cpu.work: {}", cpu_why().summary), ..cpu_why() });
     put("cpu.app.total", per(&|r| cpu_ok(r).map(|c| 100.0 * c / wall(r).max(1e-9))), &|| Refusal { summary: format!("cpu.app.total: {}", cpu_why().summary), ..cpu_why() });
-    if started && !few_ticks && !ctx.warnings.iter().any(|w| w.id == "TickSampledCpu") {
+    // Once per series: each series' share is its own, and one said for another series leaves this
+    // one's cpu.work reading as exact.
+    let label = format!("{}: ", s.label());
+    if started && !few_ticks && !ctx.warnings.iter().any(|w| w.id == "TickSampledCpu" && w.text.starts_with(&label)) {
         let share = ticks_ms.iter().sum::<f64>() / measured.iter().filter_map(|r| cpu(&r.0)).sum::<f64>().max(1e-9);
         ctx.warnings.push(validity::warn(
             "TickSampledCpu",
             format!(
-                "{}: {:.0}% of cpu.work is the processes the command started, which Windows counts in 15.6 ms clock ticks (sampled, not exact); the command's own process is exact",
-                s.label(),
+                "{label}{:.0}% of cpu.work is the processes the command started, which Windows counts in 15.6 ms clock ticks (sampled, not exact); the command's own process is exact",
                 share * 100.0
             ),
         ));

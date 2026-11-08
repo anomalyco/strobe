@@ -55,17 +55,29 @@ pub struct Sampling {
 }
 
 impl Sampling {
-    /// The median of `gaps` (µs, each between two consecutive samples; those over 50 ms are no
-    /// interval and left out); None without one.
+    /// The median of `gaps` by time (µs, each between two consecutive samples; those over 50 ms are
+    /// no interval and left out): the gap half the sampled time lies in gaps up to, which a regular
+    /// sampler's plain median equals. By count, bursts of extra samples decide it: a V8 profile on
+    /// Windows asked 200 µs held 915,000 gaps of 5 µs (11% of its time) beside 60,000 of 0.3-1 ms
+    /// (78%), and read `sampled every 0.01 ms` where its time was sampled every 0.53 ms. None without
+    /// a gap.
     pub fn of(asked_us: f64, mut gaps: Vec<f64>) -> Option<Sampling> {
         gaps.retain(|g| *g > 0.0 && *g <= MAX_GAP_US);
         if gaps.is_empty() {
             return None;
         }
         gaps.sort_by(f64::total_cmp);
-        let n = gaps.len();
-        let median_us = if n % 2 == 1 { gaps[n / 2] } else { (gaps[n / 2 - 1] + gaps[n / 2]) / 2.0 };
-        Some(Sampling { asked_us, median_us, gaps: n as u64 })
+        let half = gaps.iter().sum::<f64>() / 2.0;
+        let mut acc = 0.0;
+        let median_us = gaps
+            .iter()
+            .find(|g| {
+                acc += **g;
+                acc >= half
+            })
+            .copied()
+            .unwrap_or(gaps[gaps.len() - 1]);
+        Some(Sampling { asked_us, median_us, gaps: gaps.len() as u64 })
     }
 
     /// Coarser than asked: by more than half the interval asked (timer slack is a few per cent).

@@ -1139,7 +1139,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::Compared,
-        about: "bytes the target's processes read per run (files, devices, pipes)",
+        about: "bytes the target's processes read per run through read calls (files, devices, pipes); a file mapped into memory and read through its pages is not counted (Windows, Linux), and macOS counts disk bytes only",
     },
     MetricDef {
         name: "io.write",
