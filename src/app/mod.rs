@@ -87,8 +87,12 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     if args.command == "config" {
         return config::run(args);
     }
-    // A strobe killed mid-run left the user on its power plan: put theirs back first.
-    crate::host::power::restore_stale();
+    // A strobe killed mid-run left the user on its power plan: put theirs back first. Not from a
+    // command that only reads strobe's own files: a bench runs those as its commands, and they would
+    // read the bench's journal on every launch; the next command that measures puts it back.
+    if !matches!(args.command.as_str(), "query" | "report" | "history" | "plan" | "status") {
+        crate::host::power::restore_stale();
+    }
     // And the CPU sets of processes it moved off a timed block's CPUs (`--reserve-cpus`).
     crate::host::reserve::restore_stale();
     // And a phone's stay-awake setting and tunnels (free when no journal is there).

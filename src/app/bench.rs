@@ -6225,7 +6225,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             c["os_after_snapshot"] = json!(true);
                             let done = runs.len() - f;
                             if done == 2 * n {
-                                c["allocators"] = probe::census::allocators(cb()?, &dir.join("memdump-s2.pftrace")).unwrap_or_else(|e| json!({ "error": e.message }));
+                                probe::census::add_allocators(&mut c, cb()?, cp()?, &dir.join("memdump-s2.pftrace"));
                             }
                             census.push(c);
                             if done == n {
@@ -6265,7 +6265,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             census.push(probe::gecko::census(b, &page, &dir.join("memory-s0.json.gz"), "after warmup, before the leak run's runs (S0)")?);
                         } else if let Some(dir) = &mem_dir {
                             let mut c = probe::census::take(cb()?, cp()?);
-                            c["allocators"] = probe::census::allocators(cb()?, &dir.join("memdump-s0.pftrace")).unwrap_or_else(|e| json!({ "error": e.message }));
+                            probe::census::add_allocators(&mut c, cb()?, cp()?, &dir.join("memdump-s0.pftrace"));
                             census.push(c);
                             probe::heap::snapshot(cp()?, &dir.join("heap-s0.heapsnapshot.gz"))?;
                         }
@@ -6467,7 +6467,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             if set == Set::Attribution && firefox.is_none() {
                 // Memory by process and layer after the runs (`query memory`), before the snapshot raises it.
                 let mut c = probe::census::take(cb()?, cp()?);
-                c["allocators"] = probe::census::allocators(cb()?, &dir.join("memdump-0.pftrace")).unwrap_or_else(|e| json!({ "error": e.message }));
+                probe::census::add_allocators(&mut c, cb()?, cp()?, &dir.join("memdump-0.pftrace"));
                 census.push(c);
                 // The live objects after the runs (post-GC), once no trace subscription copies every
                 // snapshot chunk (SPEC §8.6).

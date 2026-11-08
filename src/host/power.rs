@@ -78,8 +78,10 @@ impl Drop for Power {
 /// Puts back a plan a strobe that is no longer running switched away from (killed mid-run).
 pub fn restore_stale() {
     let Some(v) = std::fs::read_to_string(journal()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };
+    // One process's name, not the system's process tree: every strobe command a bench runs reads this
+    // journal while the bench holds it, and the tree walk (all processes and threads) was 4-5 ms of each.
     let pid = v["pid"].as_u64().unwrap_or(0) as u32;
-    let alive = pid != 0 && super::process_tree(pid).first().is_some_and(|p| p.name.to_lowercase().starts_with("strobe"));
+    let alive = pid != 0 && (pid == std::process::id() || super::exe_of(pid).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase())).is_some_and(|n| n.starts_with("strobe")));
     if alive {
         return;
     }

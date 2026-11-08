@@ -1139,7 +1139,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::Compared,
-        about: "bytes the target's processes read per run through read calls (files, devices, pipes); a file mapped into memory and read through its pages is not counted (Windows, Linux), and macOS counts disk bytes only",
+        about: "bytes the target's processes read per run through read calls (files, devices, pipes); not counted: a file mapped into memory and read through its pages (Windows, Linux) and, on Windows, console input; macOS counts disk bytes only",
     },
     MetricDef {
         name: "io.write",
@@ -1149,7 +1149,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::Compared,
-        about: "bytes the target's processes wrote per run (files, devices, pipes)",
+        about: "bytes the target's processes wrote per run through write calls (files, devices, pipes); not counted: a file mapped into memory and written through its pages (Windows, Linux) and, on Windows, console output; macOS counts disk bytes only",
     },
     MetricDef {
         name: "js.heap.retained",

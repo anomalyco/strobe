@@ -1059,7 +1059,9 @@ What strobe reads from a native app (§13.7), per run:
   inside the app's processes count too, and a handoff between two of its threads counts twice. From
   two `NtQuerySystemInformation(SystemProcessInformation)` snapshots around the run, a thread or
   process born in the run counting from zero; one that exits in the run takes its last wakes with it,
-  so the count is a lower bound then), `io.read` and `io.write` (bytes, the same snapshots),
+  so the count is a lower bound then), `io.read` and `io.write` (bytes through read and write
+  calls, the same snapshots; a file mapped into memory and read or written through its pages and
+  console IO are not counted),
   `gpu.process.3d` (3D engine time summed over every adapter the processes used: one that draws on
   one GPU and computes on another uses both), `gpu.vram` (dedicated), `gpu.shared` (GPU memory in
   system memory: all of an integrated GPU's), `memory.app.private` (Windows: the commit charge, which
@@ -1699,7 +1701,14 @@ detailed memory-infra dump through a short trace of its own, read as effective s
 top-level allocators are layers, their children allocators; the `tracing` allocator (the dump's own
 trace buffers) is left out. Taken at each point of a memory recording, after every run of a leak
 run (with a dump at S0 and S2 only) and once at the end of every attribution block (before its
-heap snapshot). GPU and page (images, canvases) layers are not built.
+heap snapshot). GPU and page (images, canvases) layers are not built. The page's renderer is the
+process that made a `performance.mark` the page makes inside the dump's trace (`blink.user_timing`),
+kept as the census's `page_pid`; `query memory` labels it `renderer (page)` and puts the
+CensusContaminated `*` on it. A census from before that mark names it only when sizes leave one
+choice (the only renderer, or the only one whose V8 layer holds 90% of the page's used heap);
+otherwise the view says the page's renderer is not known, never the nearest by size (which named a
+1 MB V8 beside the page's 21 MB one). Allocators over a process's OS private bytes leave its
+`unexplained` empty (`—`), never negative.
 
 **Heap snapshots** (attribution only):
 
@@ -2099,7 +2108,7 @@ flowchart LR
 | Control | Windows | Linux | macOS |
 |---|---|---|---|
 | pin the target's process tree (`--pin`; `auto` below) to a CCD or CPU list | process affinity, inherited by children | `sched_setaffinity` | not available: recorded as unpinned |
-| power plan: the fastest the device offers for every bench and timed recording (`--power high`, the default), the user's own back after it, also after a crash or kill; `--power keep` opts out; on battery the plan is kept. Either way the context notes say so; a bench's progress says when it switched the plan (not when the plan was already the fastest), and a timed `record` says it in its result (a lone progress line on stderr read like an error) | the active vendor's High performance scheme (AMD Ryzen Balanced → AMD Ryzen High Performance), else Windows' High performance, else Ultimate performance, else on a Balanced-only device Windows 11's Best performance power mode (`powercfg /setactive`, powrprof `PowerSetActiveOverlayScheme`); the scheme and power mode to restore are journaled in `<state>/power.json` first, and any strobe that starts restores a journal whose strobe is gone | the `performance` cpufreq governor on every policy, journaled and restored the same way; it needs root, so an unprivileged strobe keeps the governor and says why | nothing to switch: the env line shows Low Power Mode and a thermal state above nominal |
+| power plan: the fastest the device offers for every bench and timed recording (`--power high`, the default), the user's own back after it, also after a crash or kill; `--power keep` opts out; on battery the plan is kept. Either way the context notes say so; a bench's progress says when it switched the plan (not when the plan was already the fastest), and a timed `record` says it in its result (a lone progress line on stderr read like an error) | the active vendor's High performance scheme (AMD Ryzen Balanced → AMD Ryzen High Performance), else Windows' High performance, else Ultimate performance, else on a Balanced-only device Windows 11's Best performance power mode (`powercfg /setactive`, powrprof `PowerSetActiveOverlayScheme`); the scheme and power mode to restore are journaled in `<state>/power.json` first, and any strobe that starts restores a journal whose strobe is gone (gone: that one pid is no longer a strobe executable; a command that only reads strobe's files, `query`, `report`, `history`, `plan`, `status`, leaves the journal to the next one that measures, since a bench runs those as its commands) | the `performance` cpufreq governor on every policy, journaled and restored the same way; it needs root, so an unprivileged strobe keeps the governor and says why | nothing to switch: the env line shows Low Power Mode and a thermal state above nominal |
 | keep this user's other processes off the target's CPUs during each timed block (`--reserve-cpus`, below) | process default CPU sets, swept every 200 ms, journaled | each thread's affinity (`sched_setaffinity`, no root), swept every 200 ms, journaled | not available: no CPU affinity |
 | background load per core, before and during | PDH | `/proc/stat` | `host_processor_info` |
 | window visible and unoccluded, every block | `IsIconic`, `IsWindowVisible`, DWM cloak, `document.visibilityState` | X11 map state, `_NET_WM_STATE_HIDDEN`, coverage by windows above it; `visibilityState` | `kCGWindowIsOnscreen`, coverage by other apps' windows in front; `visibilityState` |
@@ -3140,7 +3149,9 @@ them by. Output goes to the experiment's `cli.log`.
   - `io.read`, `io.write`: Linux the zombie's `/proc/<pid>/io` (`rchar`, `wchar`: its own and its
     reaped children's, before strobe reaps it); Windows the job's transfer counts; macOS the process's
     disk bytes (`ri_diskio_*`), refused (`NotOnThisOs`) for a command that started children, whose
-    disk bytes macOS keeps nowhere.
+    disk bytes macOS keeps nowhere. Linux and Windows count bytes through read and write calls: a file
+    the command maps into memory and reads through its pages counts nothing (trace_processor loading a
+    950 MB trace read 0 bytes by Windows' count), nor does Windows console IO (a console's reads and writes go to its host, not through the transfer counts).
   - `metric.<name>`: each `strobe:metric <name>=<value> [lower|higher]` line the command printed
     (stdout or stderr, at a line's start), summed per run (unit `value`). The command's own number,
     not strobe's: lower is better unless its lines say `higher` (a rate, a score), and the comparison
@@ -5488,7 +5499,7 @@ means the metric is not printed and the refusal says why (rule 1), never 0.
 | native stacks (§13.4) | ETW sampled profile through the helper, 200 µs | in-process `perf_event_open`: per-thread `cpu-clock` at 1 ms (on-CPU samples), user registers and 16 KB of user stack per sample unwound with the modules' DWARF CFI (`framehop`), kernel frames from the kernel's callchain when allowed; threads that start later are found every 50 ms. Needs `perf_event_paranoid` ≤ 2 (Debian ships 3) or CAP_PERFMON | `/usr/bin/sample` per process at 1 ms (task suspension, every thread's user stack; samples whose leaf is a system call trap are dropped and counted; untimed: they cover the whole capture), at most 16 processes, the root first; a process it may not examine (a system XPC service) or past the 16 is listed with why (`Unsampled`, §10.2) |
 | symbols (§12.2) | PDBs (local, Microsoft's server, `symbols.servers`) | DWARF of the module, its build-id file under `/usr/lib/debug`, or `.gnu_debuglink`; symbol tables (sized); `/proc/kallsyms` | DWARF of a dSYM beside the module or in strobe's cache, made with `dsymutil` from the objects a build left (a failed `dsymutil` leaves a `missing` marker for a day, as a PDB server's miss does); else the names and `file:line` `sample` printed |
 | adapter per window | D3DKMT + DXGI | — | — |
-| IO (`io.read`, `io.write`) | `NtQuerySystemInformation` transfer counts (every byte read and written through read and write calls, cached or not; a file mapped into memory and read through its pages counts nothing: `trace_processor` loading a 950 MB trace by mapping read 0 bytes by this count) | `/proc/<pid>/io` `rchar`/`wchar` (the same, mapped files left out alike) | disk bytes only (`ri_diskio_bytesread`/`written`): macOS counts no cached IO per process |
+| IO (`io.read`, `io.write`) | `NtQuerySystemInformation` transfer counts (every byte read and written through read and write calls, cached or not; a file mapped into memory and read through its pages counts nothing: `trace_processor` loading a 950 MB trace by mapping read 0 bytes by this count; console IO counts nothing either) | `/proc/<pid>/io` `rchar`/`wchar` (the same, mapped files left out alike) | disk bytes only (`ri_diskio_bytesread`/`written`): macOS counts no cached IO per process |
 | energy, instructions, idle wakes (7.5) | refused: nothing per process an unprivileged process can read | instructions: per-thread perf counting events (user mode), in counter blocks; energy and idle wakes refused | `proc_pid_rusage(RUSAGE_INFO_V6)`: `ri_energy_nj` (Apple silicon), `ri_instructions`, `ri_pkg_idle_wkups` |
 | thread origin (`app`, `driver`, `os`; 7.4) | the Win32 start address's module | the first module down from the top of the thread's stack (`process_vm_readv`) | per process only: its executable; an XPC service in the target's set (`.xpc` bundle) is `app` wherever macOS keeps it (a web view's web content process does the app's work), the Metal shader compiler service `driver` |
 | accessibility tree (§13.7) | UI Automation (COM) | AT-SPI over strobe's own D-Bus client: the registry's app roots by connection pid, a level per round trip | the AX API (`AXUIElementCopyMultipleAttributeValues`, one call per element; `AXObserver`), Accessibility permission |
@@ -7930,8 +7941,13 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   and the harness line are plain paths (a canonical `\\?\` root broke `${ctx.root}/tool.exe`, os error
   123). An A/B of 0.19.0 and main on `query hotspots` read `faster (small)` −1.6% [−2.8%, −0.1%];
   alternating plain timings (60 pairs ×3 sessions) read −0.5% to −1.1%: same direction, inside the
-  interval. Open: the command's `cpu.work` read 80 ms under a bench where its own cycle counter read
-  68–71 ms in plain launches (stamped environment or not).
+  interval. The command's `cpu.work` read 75–80 ms under a bench where its own cycle counter read
+  68–71 ms in plain launches: not an overcount (the counter is the child's alone) but work the
+  command did there: each strobe command read the bench's power journal and walked every process and
+  thread to see whether its one pid lived (about 5 ms). With one pid's name read, and no journal read
+  by `query`, `report`, `history`, `plan` or `status`: 75.4 → 70.6 ms under a bench (12 pairs, −6.2%),
+  and the plain launch's own counter 70.7 ms. Still in `run.duration`: strobe's job and affinity
+  plumbing around each launch.
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

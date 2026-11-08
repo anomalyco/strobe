@@ -319,7 +319,7 @@ pub fn text(meta: &Value) -> String {
     }
     if get("cpu.wakes").is_finite() {
         s += &format!("wakes    {} context switches of its threads\n", fmt::value(get("cpu.wakes"), "/s"));
-        s += &format!("io       read {} · written {}\n", fmt::bytes(get("io.read")), fmt::bytes(get("io.write")));
+        s += &super::record::io_line(meta);
     }
     s += &fmt::counters(get);
     if get("ui.cpu").is_finite() {

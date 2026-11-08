@@ -47,26 +47,57 @@ pub fn take(browser: &Browser, page: &Page) -> Value {
 /// memory-infra dump of every process, through a short trace of its own written to `path`. Sizes are
 /// effective sizes, with the dump's ownership edges resolved, so allocators that overlap (cc, skia and
 /// gpu inside malloc, discardable or shared memory) never count the same bytes twice. Per pid:
-/// `layers` (top-level allocators) and `allocators` (their children, largest first).
-pub fn allocators(browser: &Browser, path: &Path) -> Result<Value> {
-    let tracing = trace::start_categories(&browser.cdp, &["disabled-by-default-memory-infra"], 64_000)?;
+/// `layers` (top-level allocators) and `allocators` (their children, largest first), into the census's
+/// `allocators`; and its `page_pid`, the page's renderer: a mark the page makes in the dump's trace
+/// names its process, so `query memory` never guesses it from sizes.
+pub fn add_allocators(c: &mut Value, browser: &Browser, page: &Page, path: &Path) {
+    match dump(browser, page, path) {
+        Ok((allocators, pid)) => {
+            c["allocators"] = allocators;
+            if let Some(pid) = pid {
+                c["page_pid"] = json!(pid);
+            }
+        }
+        Err(e) => c["allocators"] = json!({ "error": e.message }),
+    }
+}
+
+fn dump(browser: &Browser, page: &Page, path: &Path) -> Result<(Value, Option<u64>)> {
+    // The mark goes into the dump's own trace from the page's main thread: its process is the page's.
+    let mark = format!("strobe:census:{}", crate::store::new_id("m"));
+    let tracing = trace::start_categories(&browser.cdp, &["disabled-by-default-memory-infra", "blink.user_timing"], 64_000)?;
+    let _ = page.send("Runtime.evaluate", json!({ "expression": format!("performance.mark({mark:?}), performance.clearMarks({mark:?}), true") }));
     let dumped = browser.cdp.send_timeout("Tracing.requestMemoryDump", json!({ "deterministic": true, "levelOfDetail": "detailed" }), None, Duration::from_secs(60));
     tracing.stop(path)?;
     if !dumped?["success"].as_bool().unwrap_or(false) {
         return Err(Error::msg("Chromium did not complete the memory dump"));
     }
+    // One pass over the trace: the dump's nodes, and the mark's process as a row of its own (`PAGE`).
+    const PAGE: &str = "(strobe: page mark)";
     let table = engine::query(
         path,
-        "select p.pid, n.path, n.size, n.effective_size
+        &format!(
+            "select p.pid, n.path, n.size, n.effective_size
            from memory_snapshot_node n
            join process_memory_snapshot s on n.process_snapshot_id = s.id
            join process p using(upid)
-          where p.pid is not null",
+          where p.pid is not null
+         union all
+         select distinct p.pid, '{PAGE}', null, null
+           from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid) join process p using(upid)
+          where s.name = '{mark}' and p.pid is not null"
+        ),
     )?;
+    let marked: Vec<u64> = table.rows.iter().filter(|r| r.get(1).cloned().flatten().as_deref() == Some(PAGE)).filter_map(|r| r.first().cloned().flatten()?.parse().ok()).collect();
+    // Exactly one process made the mark, or the census names none.
+    let page_pid = match marked.as_slice() {
+        [p] => Some(*p),
+        _ => None,
+    };
     /// Per pid: top-level allocators (layers) by effective size, and their children as (path, size, effective).
     type Dump = (BTreeMap<String, f64>, Vec<(String, f64, f64)>);
     let mut by_pid: BTreeMap<String, Dump> = BTreeMap::new();
-    for r in &table.rows {
+    for r in table.rows.iter().filter(|r| r.get(1).cloned().flatten().as_deref() != Some(PAGE)) {
         let cell = |i: usize| r.get(i).cloned().flatten().unwrap_or_default();
         let (pid, node) = (cell(0), cell(1));
         let (size, effective) = (cell(2).parse::<f64>().unwrap_or(0.0), cell(3).parse::<f64>().unwrap_or(0.0));
@@ -88,5 +119,5 @@ pub fn allocators(browser: &Browser, path: &Path) -> Result<Value> {
             (pid, json!({ "layers": layers, "allocators": children }))
         })
         .collect();
-    Ok(Value::Object(out))
+    Ok((Value::Object(out), page_pid))
 }

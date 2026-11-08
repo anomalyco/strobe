@@ -1127,7 +1127,7 @@ fn memory(page: &chromium::Page, browser: &chromium::Browser, dir: &std::path::P
         // OS memory of the snapshotted process is inflated after its first snapshot (CensusContaminated).
         c["private_bytes"] = if i == 0 { json!(browser.processes().iter().map(|p| p.private_bytes).sum::<u64>()) } else { Value::Null };
         c["os_after_snapshot"] = json!(i > 0);
-        c["allocators"] = probe::census::allocators(browser, &dir.join(format!("memdump-{i}.pftrace"))).unwrap_or_else(|e| json!({ "error": e.message }));
+        probe::census::add_allocators(&mut c, browser, page, &dir.join(format!("memdump-{i}.pftrace")));
         census.push(c);
         probe::heap::snapshot(page, &dir.join(format!("{file}.heapsnapshot.gz")))?;
     }
@@ -1482,7 +1482,7 @@ fn native_summary(meta: &Value) -> String {
         s += &format!("wakes    {} context switches of its threads\n", fmt::value(get("cpu.wakes"), "/s"));
     }
     if get("io.read").is_finite() {
-        s += &format!("io       read {} · written {}\n", fmt::bytes(get("io.read")), fmt::bytes(get("io.write")));
+        s += &io_line(meta);
     }
     s += &fmt::counters(get);
     s += &memory_lines(meta);
@@ -1524,6 +1524,24 @@ pub fn launch_line(v: &Value) -> String {
 
 /// A native target's GPU use and memory: what the GPU's statistics say and what holds the processes'
 /// memory (`memory.app.host` beside `memory.app.private`).
+/// `io read … · written …`, and what those counts leave out when the recording's processes map data
+/// files (`memory.json`'s last reading): `io.*` counts read and write calls, never a mapped file's pages.
+pub fn io_line(meta: &Value) -> String {
+    let get = |k: &str| meta["values"].get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
+    let mut s = format!("io       read {} · written {}\n", fmt::bytes(get("io.read")), fmt::bytes(get("io.write")));
+    let mapped = meta["id"]
+        .as_str()
+        .and_then(|id| store::resolve(id).ok())
+        .and_then(|d| store::read_json(&d.join("memory.json")).ok())
+        .and_then(|m| m["readings"].as_array().and_then(|r| r.last().cloned()))
+        .and_then(|r| r["processes"].as_array().map(|ps| ps.iter().filter_map(|p| p["files"].as_f64()).sum::<f64>()))
+        .filter(|f| *f > 0.0);
+    if let Some(f) = mapped {
+        s += &format!("         (read and write calls only: the processes also map {} of data files, whose pages are in neither count)\n", fmt::bytes(f));
+    }
+    s
+}
+
 pub fn memory_lines(meta: &Value) -> String {
     let v = &meta["values"];
     let get = |k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);

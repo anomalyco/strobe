@@ -139,7 +139,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     };
     let env = app.as_ref().zip(prepared.as_ref()).map(|(a, h)| h.environment(a));
     let root = v.root.as_deref().map(host::paths::plain);
-    let exe = app.as_ref().map(|a| a.exe.display().to_string());
+    let exe = app.as_ref().map(|a| host::paths::plain(&a.exe));
     // A page's `prepare` mocks its API under the URL strobe opens (`ctx.url`), as in a run case.
     let url = if web { variant_url(v, &target)? } else { String::new() };
     let engine = engine_of(&target);
@@ -150,7 +150,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     }
     ctx.runner.call(
         "block",
-        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": url, "root": root, "home": home, "env": env, "exe": exe, "engine": engine }),
+        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": url, "root": root, "home": home.as_deref().map(host::paths::plain), "env": env, "exe": exe, "engine": engine }),
         t,
         &no_page,
     )?;

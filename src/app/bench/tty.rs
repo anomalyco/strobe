@@ -277,7 +277,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let stop = isolate::end_on_stop(Some(&home));
     let env = environment(&home, &spec);
     let t = s.hook_timeout();
-    let block_args = json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": home.dir, "env": env, "exe": program(&spec.run) });
+    let block_args = json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": host::paths::plain(&home.dir), "env": env, "exe": program(&spec.run) });
     if let Err(e) = ctx.runner.call("block", block_args, t, launch::no_page) {
         drop(stop);
         isolate::end_launch(None, Some(&home.dir), true);
@@ -719,7 +719,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
     let result = (|| -> Result<Block> {
         ctx.runner.call(
             "block",
-            json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": home.dir, "env": env, "exe": program(&tspec.run) }),
+            json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": host::paths::plain(&home.dir), "env": env, "exe": program(&tspec.run) }),
             t,
             launch::no_page,
         )?;

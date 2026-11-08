@@ -408,7 +408,7 @@ fn runs(
     let last = || output.as_ref().map(|rx| lines.borrow_mut().last(Some(rx)));
     ctx.runner.call(
         "block",
-        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": home.dir, "env": env, "exe": app.exe }),
+        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": host::paths::plain(&home.dir), "env": env, "exe": host::paths::plain(&app.exe) }),
         t,
         &serve,
     )?;
@@ -1581,7 +1581,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     let env = prepared.environment(&app);
     ctx.runner.call(
         "block",
-        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": home, "env": env, "exe": app.exe }),
+        json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": v.root.as_deref().map(host::paths::plain), "home": host::paths::plain(&home), "env": env, "exe": host::paths::plain(&app.exe) }),
         t,
         &no_page,
     )?;
