@@ -81,7 +81,28 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         })
         .collect();
 
-    let clock_note = raw_device.clock_note.as_deref().or_else(|| meta["logs"]["clock_note"].as_str());
+    let dev_clock_note = raw_device.clock_note.as_deref().or_else(|| meta["logs"]["device_clock_note"].as_str());
+    let crash_clock_note = meta["logs"]["crash_clock_note"].as_str();
+    let mut clock_notes: Vec<String> = Vec::new();
+    let mut push_note = |n: &str| {
+        if !n.is_empty() && !clock_notes.iter().any(|x| x == n) {
+            clock_notes.push(n.to_string());
+        }
+    };
+    if want_device && let Some(n) = dev_clock_note {
+        push_note(n);
+    }
+    if want_crash && let Some(n) = crash_clock_note {
+        push_note(n);
+    }
+    if source.is_none() {
+        for n in meta["logs"]["clock_notes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            push_note(n);
+        }
+        if let Some(n) = meta["logs"]["clock_note"].as_str() {
+            push_note(n);
+        }
+    }
     let cap_note = if raw_device.dropped > 0 { format!(" (+{} dropped at cap)", raw_device.dropped) } else { String::new() };
     let mut text = format!(
         "log · {id} · {} crashes/jetsams · {} console · {}{cap_note} Safari/WebKit device logs{}\n",
@@ -90,14 +111,14 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         dev_entries.len(),
         if reveal { " · revealed" } else { " · secrets scrubbed (--reveal shows raw)" }
     );
-    if let Some(note) = clock_note {
+    for note in &clock_notes {
         text += &format!("! {note}\n");
     }
 
     if want_crash && (!crashes.is_empty() || source == Some("crash")) {
         text += &format!("crashes ({})\n", crashes.len());
         if crashes.is_empty() {
-            text += if clock_note.is_some() { "  none\n" } else { "  none in [t0, t1 + 5s]\n" };
+            text += if crash_clock_note.is_some() { "  skipped (phone wall clock unavailable)\n" } else { "  none in [t0 − 2s, t1 + 5s]\n" };
         }
         for c in crashes.iter().take(top) {
             text += &format!("  ! {:<7} {}\n", c["kind"].as_str().unwrap_or("crash"), c["summary"].as_str().unwrap_or(""));
@@ -151,7 +172,8 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         "recording": id,
         "source": source,
         "revealed": reveal,
-        "clock_note": clock_note,
+        "clock_notes": clock_notes,
+        "crash_clock_note": if want_crash { json!(crash_clock_note) } else { Value::Null },
         "crashes": if want_crash { Value::Array(crashes) } else { Value::Null },
         "console": if want_console { Value::Array(console) } else { Value::Null },
         "device": if want_device {
@@ -159,7 +181,7 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
                 "relay": raw_device.source,
                 "dropped": raw_device.dropped,
                 "observer_dropped": raw_device.observer_dropped,
-                "clock_note": raw_device.clock_note,
+                "clock_note": dev_clock_note,
                 "entries": dev_entries,
             })
         } else {

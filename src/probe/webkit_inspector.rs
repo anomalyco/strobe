@@ -139,29 +139,34 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
 
     let start_mark = format!("strobe:{token}:run:0:start");
     let end_mark = format!("strobe:{token}:run:0:end");
+    let swaps_before = session.target_swaps();
     let pre_mark_ns = crate::host::now_ns();
     collect_console_events(&pre_events, pre_mark_ns, &mut console);
-    let page_t0_ms = session
-        .eval(&format!("(() => {{ const t = performance.now(); try {{ performance.mark({start_mark:?}); performance.clearMarks({start_mark:?}) }} catch {{}} return t }})()"), Duration::from_secs(3))
+    let parse_doc_mark = |v: Value| -> Option<(f64, f64)> {
+        let arr = v.as_array()?;
+        let origin = arr.first()?.as_f64().filter(|x| x.is_finite())?;
+        let mark_ms = arr.get(1)?.as_f64().filter(|x| x.is_finite())?;
+        Some((origin, mark_ms))
+    };
+    let start_doc = session
+        .eval(
+            &format!("(() => {{ const m = performance.mark({start_mark:?}); const t = m && Number.isFinite(m.startTime) ? m.startTime : performance.now(); performance.clearMarks({start_mark:?}); return [performance.timeOrigin, t] }})()"),
+            Duration::from_secs(3),
+        )
         .ok()
-        .and_then(|v| v.as_f64())
-        .filter(|t| t.is_finite());
-    let host_t0 = crate::host::now_ns();
-    let start_rtt_ns = host_t0.saturating_sub(pre_mark_ns);
-    // Subtract one mark round trip (inbound half of start_mark + outbound half of end_mark) so the
-    // page-side window between the two marks lands on `for_ms` instead of `for_ms + RTT`.
-    let pump_ns = (u128::from(for_ms) * 1_000_000).saturating_sub(u128::from(start_rtt_ns.min(for_ms.saturating_mul(500_000)))) as u64;
+        .and_then(parse_doc_mark);
+    let post_start_ns = crate::host::now_ns();
+    let anchor_t0 = pre_mark_ns.saturating_add(post_start_ns.saturating_sub(pre_mark_ns) / 2);
 
-    session.pump_for(Duration::from_nanos(pump_ns))?;
+    session.pump_for(Duration::from_millis(for_ms))?;
 
-    let host_t1 = crate::host::now_ns();
-    let page_t1_ms = session
-        .eval(&format!("(() => {{ const t = performance.now(); try {{ performance.mark({end_mark:?}); performance.clearMarks({end_mark:?}) }} catch {{}} return t }})()"), Duration::from_secs(3))
+    let end_doc = session
+        .eval(
+            &format!("(() => {{ const m = performance.mark({end_mark:?}); const t = m && Number.isFinite(m.startTime) ? m.startTime : performance.now(); performance.clearMarks({end_mark:?}); return [performance.timeOrigin, t] }})()"),
+            Duration::from_secs(3),
+        )
         .ok()
-        .and_then(|v| v.as_f64())
-        .filter(|t| t.is_finite());
-    let anchor_t0 = pre_mark_ns.saturating_add(start_rtt_ns / 2);
-    let pump_elapsed_ns = host_t1.saturating_sub(host_t0);
+        .and_then(parse_doc_mark);
 
     on_progress("stopping WebKit Timeline and ScriptProfiler");
     let _ = session.call("ScriptProfiler.stopTracking", Value::Null, Duration::from_secs(15));
@@ -170,6 +175,19 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
         let _ = session.call("Memory.stopTracking", Value::Null, Duration::from_secs(5));
     }
 
+    let check_same_target = |s: &Session| -> Result<()> {
+        if s.target_swaps() != swaps_before {
+            Err(Error::refused(
+                "RunIncomplete",
+                "the Safari tab swapped WebContent processes during the recording (cross-site navigation or crash)",
+                "keep the Safari tab on one page without navigating during strobe record wir:",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    check_same_target(session)?;
+
     // Drain until ScriptProfiler.trackingComplete arrives (up to 3 s).
     let mut events = session.drain_events();
     let wait_complete = std::time::Instant::now() + Duration::from_secs(3);
@@ -177,18 +195,25 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
         session.pump_for(Duration::from_millis(80))?;
         events.extend(session.drain_events());
     }
+    check_same_target(session)?;
     collect_console_events(&events, anchor_t0, &mut console);
 
-    // Read in-page Navigation, Paint, Resource, User Timing (`performance.measure` spans inside
-    // `[page_t0_ms, page_t1_ms]`) and DOM count, then clear our two marks so the user's tab stays clean.
-    let t0_js = page_t0_ms.map_or_else(|| "null".to_string(), |v| format!("{v:.6}"));
-    let t1_js = page_t1_ms.map_or_else(|| "null".to_string(), |v| format!("{v:.6}"));
+    // Same-document check: compute User Timing `measures` / `span.<name>` only when start, end and
+    // post-stop read all share the exact same `performance.timeOrigin` and `t1 >= t0`.
+    let same_doc_window = match (start_doc, end_doc) {
+        (Some((o0, t0)), Some((o1, t1))) if (o0 - o1).abs() < 1e-3 && t1 >= t0 => Some((o0, t0, t1)),
+        _ => None,
+    };
+    let origin_js = same_doc_window.map_or_else(|| "null".to_string(), |(o, _, _)| format!("{o:?}"));
+    let t0_js = same_doc_window.map_or_else(|| "null".to_string(), |(_, a, _)| format!("{a:?}"));
+    let t1_js = same_doc_window.map_or_else(|| "null".to_string(), |(_, _, b)| format!("{b:?}"));
     let perf_js = format!(
         r#"(() => {{
-  const t0 = {t0_js}, t1 = {t1_js}
+  const wantOrigin = {origin_js}, t0 = {t0_js}, t1 = {t1_js}
+  const sameDoc = wantOrigin !== null && t0 !== null && t1 !== null && Math.abs(performance.timeOrigin - wantOrigin) < 1e-3
   const nav = performance.getEntriesByType?.("navigation")?.[0]
   const paints = (performance.getEntriesByType?.("paint") ?? []).map((p) => ({{ name: p.name, start_ms: p.startTime }}))
-  const measures = (t0 !== null && t1 !== null ? (performance.getEntriesByType?.("measure") ?? []) : [])
+  const measures = (sameDoc ? (performance.getEntriesByType?.("measure") ?? []) : [])
     .filter((m) => {{
       if (String(m.name).startsWith("strobe:")) return false
       const s = m.startTime, d = m.duration
@@ -211,6 +236,7 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
   const dom = document.getElementsByTagName("*").length
   try {{ performance.clearMarks({start:?}); performance.clearMarks({end:?}) }} catch {{}}
   return JSON.stringify({{
+    same_doc: sameDoc,
     dom,
     nav: nav ? {{
       type: nav.type,
@@ -230,6 +256,7 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
         end = end_mark,
     );
     let page_perf: Value = session.eval(&perf_js, Duration::from_secs(5)).ok().and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok())).unwrap_or(Value::Null);
+    check_same_target(session)?;
 
     on_progress("taking a WebKit heap snapshot");
     let _ = session.call("Runtime.releaseObjectGroup", json!({ "objectGroup": "console" }), Duration::from_secs(2));
@@ -239,9 +266,11 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
     {
         heap_self_bytes = Some(convert_webkit_heap(snap_str, &dir.join("heap-0.heapsnapshot.gz"))?);
     }
+    check_same_target(session)?;
 
     // Convert Timeline + ScriptProfiler + GC + Memory + Network.
-    let converted = convert_events(&events, token, &start_mark, &end_mark, anchor_t0, pump_elapsed_ns, (page_t0_ms, page_t1_ms), &page_perf, heap_self_bytes, session.page.app_pid, dir)?;
+    let doc_span_ms = same_doc_window.filter(|_| page_perf["same_doc"] == true).map(|(_, a, b)| b - a);
+    let converted = convert_events(&events, token, &start_mark, &end_mark, anchor_t0, doc_span_ms, &page_perf, heap_self_bytes, session.page.app_pid, dir)?;
 
     // Fetch source maps for profiled scripts through Page.getResourceTree + Network.loadResource.
     let mapped_scripts = if !converted.scripts.is_empty() {
@@ -363,6 +392,40 @@ fn find_mark_sw(record: &Value, want: &str) -> Option<f64> {
     None
 }
 
+fn contains_strobe_mark(rec: &Value) -> bool {
+    if rec["type"].as_str() == Some("TimeStamp") && rec["data"]["message"].as_str().is_some_and(|m| m.starts_with("strobe:")) {
+        return true;
+    }
+    rec["children"].as_array().is_some_and(|kids| kids.iter().any(contains_strobe_mark))
+}
+
+fn is_mark_eval_record(rec: &Value, sw0: f64, sw_end: f64) -> bool {
+    if rec["type"].as_str() != Some("EvaluateScript") || !rec["data"]["url"].as_str().is_none_or(str::is_empty) {
+        return false;
+    }
+    if contains_strobe_mark(rec) {
+        return true;
+    }
+    if let Some(s) = rec["startTime"].as_f64() {
+        let e = rec["endTime"].as_f64().unwrap_or(s).max(s);
+        return (s <= sw0 && sw0 <= e) || (s <= sw_end && sw_end <= e);
+    }
+    false
+}
+
+fn collect_mark_eval_ranges(rec: &Value, sw0: f64, sw_end: f64, out: &mut Vec<(f64, f64)>) {
+    if is_mark_eval_record(rec, sw0, sw_end) {
+        if let Some(s) = rec["startTime"].as_f64() {
+            let e = rec["endTime"].as_f64().unwrap_or(s).max(s);
+            out.push((s, e));
+        }
+        return;
+    }
+    for kid in rec["children"].as_array().into_iter().flatten() {
+        collect_mark_eval_ranges(kid, sw0, sw_end, out);
+    }
+}
+
 /// Encodes a WebKit `Console.StackTrace` (`callFrames` with 1-based `lineNumber` and `columnNumber`)
 /// into the `stackTrace[i].field\x1fval\x1e` format `query::layout` symbolizes.
 fn encode_webkit_stack(st: &Value, scripts: &mut BTreeSet<String>) -> Option<String> {
@@ -405,6 +468,7 @@ fn walk_timeline(
     rec: &Value,
     parent_stack: Option<&Value>,
     to_host_ns: &dyn Fn(f64) -> u64,
+    (sw0, sw_end): (f64, f64),
     win_key: &str,
     t0: u64,
     t1: u64,
@@ -418,9 +482,7 @@ fn walk_timeline(
     let mut count = 1usize;
     let ty = rec["type"].as_str().unwrap_or("");
     // Skip strobe's own `EvaluateScript` wrapper around `performance.mark("strobe:…")` (rule 2).
-    if ty == "EvaluateScript"
-        && rec["children"].as_array().is_some_and(|kids| kids.iter().any(|k| k["type"].as_str() == Some("TimeStamp") && k["data"]["message"].as_str().is_some_and(|m| m.starts_with("strobe:"))))
-    {
+    if is_mark_eval_record(rec, sw0, sw_end) {
         return 0;
     }
     let own_stack = rec.get("stackTrace").filter(|s| s.is_object()).or(parent_stack);
@@ -469,7 +531,7 @@ fn walk_timeline(
     }
     for kid in rec["children"].as_array().into_iter().flatten() {
         let next_depth = if ty == "RenderingFrame" { depth } else { depth + 1 };
-        count += walk_timeline(kid, own_stack, to_host_ns, win_key, t0, t1, scripts, layout_rows, phase_rows, busy_spans, slices, next_depth);
+        count += walk_timeline(kid, own_stack, to_host_ns, (sw0, sw_end), win_key, t0, t1, scripts, layout_rows, phase_rows, busy_spans, slices, next_depth);
     }
     count
 }
@@ -481,49 +543,66 @@ fn convert_events(
     start_mark: &str,
     end_mark: &str,
     anchor_t0: u64,
-    pump_elapsed_ns: u64,
-    page_window_ms: (Option<f64>, Option<f64>),
+    doc_span_ms: Option<f64>,
     page_perf: &Value,
     heap_self_bytes: Option<u64>,
     app_pid: Option<u32>,
     dir: &Path,
 ) -> Result<ConvertedEvents> {
-    // Establish WebKit's executionStopwatch window `[sw0, sw_end]` from the page's own marks so
-    // `run.duration`, `main.work` and `main.busy` never include USB `Runtime.evaluate` round trips.
+    // Establish WebKit's executionStopwatch window `[sw0, sw_end]` strictly from both page marks on
+    // the same target (rule 1: never fabricate a window from host time, 0.0, or recordingStarted).
     let mut mark_sw0 = None;
     let mut mark_sw1 = None;
-    let mut started_sw = None;
     for ev in events {
-        match ev.method.as_str() {
-            "Timeline.eventRecorded" => {
-                let rec = &ev.params["record"];
-                if mark_sw0.is_none() {
-                    mark_sw0 = find_mark_sw(rec, start_mark);
-                }
-                if mark_sw1.is_none() {
-                    mark_sw1 = find_mark_sw(rec, end_mark);
-                }
+        if ev.method == "Timeline.eventRecorded" {
+            let rec = &ev.params["record"];
+            if mark_sw0.is_none() {
+                mark_sw0 = find_mark_sw(rec, start_mark);
             }
-            "Timeline.recordingStarted" => {
-                started_sw = started_sw.or_else(|| ev.params["startTime"].as_f64());
+            if mark_sw1.is_none() {
+                mark_sw1 = find_mark_sw(rec, end_mark);
             }
-            "ScriptProfiler.trackingStart" => {
-                started_sw = started_sw.or_else(|| ev.params["timestamp"].as_f64());
-            }
-            _ => {}
         }
     }
-    let page_span_s = match page_window_ms {
-        (Some(a), Some(b)) if b >= a => Some((b - a) / 1e3),
-        _ => None,
+    let (Some(sw0), Some(sw_end)) = (mark_sw0, mark_sw1) else {
+        return Err(Error::refused(
+            "RunIncomplete",
+            "WebKit Timeline did not record both start and end marks on one page clock",
+            "keep the Safari tab open in the foreground without reloading during strobe record wir:",
+        ));
     };
-    let sw0 = mark_sw0.or(started_sw).unwrap_or(0.0);
-    let sw_end = match (mark_sw0, mark_sw1) {
-        (Some(m0), Some(m1)) if m1 >= m0 => m1,
-        _ => sw0 + page_span_s.unwrap_or(pump_elapsed_ns as f64 / 1e9),
-    };
+    if !sw0.is_finite() || !sw_end.is_finite() || sw_end <= sw0 {
+        return Err(Error::refused(
+            "RunIncomplete",
+            "WebKit Timeline recorded invalid start/end mark timestamps",
+            "keep the Safari tab open in the foreground without reloading during strobe record wir:",
+        ));
+    }
+
+    // Collect stopwatch ranges of strobe's own start/end mark evaluations (recursive Timeline
+    // `EvaluateScript` search + `ScriptProfiler` `API` turns spanning `sw0`/`sw_end`, rule 2).
+    let mut mark_eval_ranges: Vec<(f64, f64)> = Vec::new();
+    for ev in events {
+        if ev.method == "Timeline.eventRecorded" {
+            collect_mark_eval_ranges(&ev.params["record"], sw0, sw_end, &mut mark_eval_ranges);
+        }
+    }
+    let mut excluded_turns = mark_eval_ranges.clone();
+    for ev in events {
+        if ev.method == "ScriptProfiler.trackingUpdate"
+            && let (Some(s), Some(e)) = (ev.params["event"]["startTime"].as_f64(), ev.params["event"]["endTime"].as_f64())
+        {
+            let e = e.max(s);
+            let overlaps_eval = mark_eval_ranges.iter().any(|&(ms, me)| if ms < me { e > ms && s < me } else { s <= ms && ms <= e });
+            let is_api_mark = ev.params["event"]["type"].as_str().is_none_or(|t| t == "API") && ((s <= sw0 && sw0 <= e) || (s <= sw_end && sw_end <= e));
+            if overlaps_eval || is_api_mark {
+                excluded_turns.push((s, e));
+            }
+        }
+    }
+
     let t0 = anchor_t0;
-    let t1 = t0.saturating_add(((sw_end - sw0).max(0.0) * 1e9).round() as u64);
+    let t1 = t0.saturating_add(((sw_end - sw0) * 1e9).round() as u64);
     let to_host_ns = |sw: f64| -> u64 {
         let delta_ns = ((sw - sw0) * 1e9).round();
         if delta_ns >= 0.0 { t0.saturating_add(delta_ns as u64) } else { t0.saturating_sub((-delta_ns) as u64) }
@@ -550,11 +629,15 @@ fn convert_events(
         let p = &ev.params;
         match ev.method.as_str() {
             "Timeline.eventRecorded" => {
-                timeline_records += walk_timeline(&p["record"], None, &to_host_ns, &win_key, t0, t1, &mut scripts, &mut layout_rows, &mut phase_rows, &mut busy_spans, &mut slices, 0);
+                timeline_records += walk_timeline(&p["record"], None, &to_host_ns, (sw0, sw_end), &win_key, t0, t1, &mut scripts, &mut layout_rows, &mut phase_rows, &mut busy_spans, &mut slices, 0);
             }
             "ScriptProfiler.trackingUpdate" => {
                 if let (Some(s), Some(e)) = (p["event"]["startTime"].as_f64(), p["event"]["endTime"].as_f64()) {
                     let e = e.max(s);
+                    let is_excluded = excluded_turns.iter().any(|&(xs, xe)| if xs < xe { e > xs && s < xe } else { s <= xs && xs <= e });
+                    if is_excluded {
+                        continue;
+                    }
                     script_turns.push((s, e));
                     let a = to_host_ns(s);
                     let b = to_host_ns(e);
@@ -681,37 +764,9 @@ fn convert_events(
             }
             "Network.responseReceived" => {
                 let Some(rid) = p["requestId"].as_str() else { continue };
+                let Some(e) = net_map.get_mut(rid) else { continue };
                 let resp = &p["response"];
                 let at_ms = p["timestamp"].as_f64().map(|ts| ((ts - sw0) * 1e3).max(0.0));
-                if !net_map.contains_key(rid) && p["timestamp"].as_f64().is_some_and(|ts| ts < sw0 || ts > sw_end) {
-                    continue;
-                }
-                let e = net_map.entry(rid.to_string()).or_insert_with(|| {
-                    net_order.push(rid.to_string());
-                    NetworkEntry {
-                        request_id: rid.to_string(),
-                        url: resp["url"].as_str().unwrap_or("").to_string(),
-                        method: "GET".into(),
-                        resource_type: p["type"].as_str().unwrap_or("Other").to_string(),
-                        status: None,
-                        mime_type: None,
-                        source: None,
-                        protocol: None,
-                        priority: None,
-                        start_ms: at_ms.unwrap_or(0.0),
-                        response_ms: None,
-                        end_ms: None,
-                        duration_ms: None,
-                        dns_ms: None,
-                        connect_ms: None,
-                        tls_ms: None,
-                        ttfb_ms: None,
-                        encoded_bytes: 0,
-                        decoded_bytes: 0,
-                        error: None,
-                        canceled: false,
-                    }
-                });
                 if let Some(t) = p["type"].as_str() {
                     e.resource_type = t.to_string();
                 }
@@ -787,8 +842,8 @@ fn convert_events(
         }
     }
 
-    // Build `cpu-0.cpuprofile` from `ScriptProfiler` samples inside `[sw0, sw_end]`.
-    let (js_samples, sampling) = build_cpu_profile(&stack_traces, &script_turns, (sw0, sw_end), (t0, t1), &mut scripts, dir)?;
+    // Build `cpu-0.cpuprofile` from `ScriptProfiler` samples inside `[sw0, sw_end]`, excluding strobe's own mark eval turns.
+    let (js_samples, sampling) = build_cpu_profile(&stack_traces, &script_turns, &excluded_turns, (sw0, sw_end), (t0, t1), &mut scripts, dir)?;
 
     // Merge overlapping main-thread busy intervals so neither `main.work` nor `main.tasks.long` double-counts.
     busy_spans.sort_by_key(|s| (s.0, s.1));
@@ -823,7 +878,7 @@ fn convert_events(
     sort_part_rows(&mut gc_rows, 4, 2);
     sort_part_rows(&mut phase_rows, 0, 2);
 
-    let dur_ms = ((sw_end - sw0).max(0.0) * 1e3).max(1e-3);
+    let dur_ms = (sw_end - sw0) * 1e3;
     let main_work_ms = merged_busy_ns as f64 / 1e6;
     let mut values = BTreeMap::new();
     values.insert("run.duration".into(), dur_ms);
@@ -859,11 +914,12 @@ fn convert_events(
         values.insert("js.heap.used".into(), js_b / (1024.0 * 1024.0));
     }
 
-    // Add user-timing `performance.measure` spans (`span.<name>`) inside `[page_t0_ms, page_t1_ms]`:
-    // merge overlapping stretches of the same name and sum disjoint repeats (matching `metrics::BlockData::span_per_run`).
+    // Add user-timing `performance.measure` spans (`span.<name>`) only when start, end and read all
+    // shared one document (`performance.timeOrigin` matched and `t1 >= t0`): merge overlapping stretches
+    // of the same name and sum disjoint repeats (matching `metrics::BlockData::span_per_run`).
     let raw_spans = page_perf["measures"].as_array().cloned().unwrap_or_default();
     let mut spans = Vec::new();
-    if let Some(span_win_ms) = page_span_s.map(|s| s * 1e3) {
+    if let Some(span_win_ms) = doc_span_ms {
         let mut by_name: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
         for sp in &raw_spans {
             let (Some(name), Some(start_ms), Some(ms)) = (sp["name"].as_str(), sp["start_ms"].as_f64(), sp["duration_ms"].as_f64()) else { continue };
@@ -944,8 +1000,20 @@ fn convert_events(
     Ok(ConvertedEvents { values, sampling, census, scripts, source_map_hints, network_requests, network_bytes, pre_attach_resources: pre_attach_count, timeline_records, js_samples })
 }
 
-fn build_cpu_profile(stack_traces: &[Value], turns: &[(f64, f64)], (sw0, sw_end): (f64, f64), (t0, t1): (u64, u64), scripts: &mut BTreeSet<String>, dir: &Path) -> Result<(u64, Option<Sampling>)> {
-    let mut ordered: Vec<(f64, &Value)> = stack_traces.iter().filter_map(|st| Some((st["timestamp"].as_f64()?, st))).filter(|(ts, _)| *ts >= sw0 && *ts < sw_end).collect();
+fn build_cpu_profile(
+    stack_traces: &[Value],
+    turns: &[(f64, f64)],
+    excluded_turns: &[(f64, f64)],
+    (sw0, sw_end): (f64, f64),
+    (t0, t1): (u64, u64),
+    scripts: &mut BTreeSet<String>,
+    dir: &Path,
+) -> Result<(u64, Option<Sampling>)> {
+    let mut ordered: Vec<(f64, &Value)> = stack_traces
+        .iter()
+        .filter_map(|st| Some((st["timestamp"].as_f64()?, st)))
+        .filter(|(ts, _)| *ts >= sw0 && *ts < sw_end && !excluded_turns.iter().any(|&(xs, xe)| *ts >= xs && *ts <= xe))
+        .collect();
     ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut nodes: Vec<Value> = vec![json!({

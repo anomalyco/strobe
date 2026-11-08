@@ -1664,7 +1664,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
         session.close();
         let dev_logs = log_stream.stop();
         let (crashes, crash_clock_note) = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, elapsed_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
-        let clock_note = crash_clock_note.or_else(|| dev_logs.clock_note.clone());
+        let clock_notes = merge_clock_notes(dev_logs.clock_note.as_deref(), crash_clock_note.as_deref());
         let redacted_crashes = redact_crashes(&crashes);
         let mem = mem_res.map_err(|e| attach_crash_detail(e, &crashes))?;
         let (values, census, leaks, console) = (mem.values, mem.census, mem.leaks, mem.console);
@@ -1689,7 +1689,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "refused": refused,
             "census": census,
             "leaks": { "count": leaks["count"], "self_size": leaks["self_size"], "retained_size": leaks["retained_size"], "classes_total": leaks["classes_total"] },
-            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "device_dropped": dev_logs.dropped, "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len(), "clock_note": clock_note },
+            "logs": { "console": console.len(), "device": dev_logs.entries.len(), "device_dropped": dev_logs.dropped, "observer_dropped": dev_logs.observer_dropped, "device_source": dev_logs.source, "crashes": crashes.len(), "device_clock_note": dev_logs.clock_note, "crash_clock_note": crash_clock_note, "clock_notes": clock_notes },
             "crashes": redacted_crashes,
             "timing": "perturbed",
             "created": now_iso(),
@@ -1710,7 +1710,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
 
     let dev_logs = log_stream.stop();
     let (crashes, crash_clock_note) = collect_crashes(&usb_dev, &allowlist, wall0_s, wall1_s, elapsed_s, Some(std::time::Instant::now() + Duration::from_secs(4)));
-    let clock_note = crash_clock_note.or_else(|| dev_logs.clock_note.clone());
+    let clock_notes = merge_clock_notes(dev_logs.clock_note.as_deref(), crash_clock_note.as_deref());
     let redacted_crashes = redact_crashes(&crashes);
     let cap = cap_res.map_err(|e| attach_crash_detail(e, &crashes))?;
 
@@ -1746,7 +1746,9 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             "observer_dropped": dev_logs.observer_dropped,
             "device_source": dev_logs.source,
             "crashes": crashes.len(),
-            "clock_note": clock_note,
+            "device_clock_note": dev_logs.clock_note,
+            "crash_clock_note": crash_clock_note,
+            "clock_notes": clock_notes,
         },
         "network": {
             "requests": cap.network_requests,
@@ -1761,6 +1763,16 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     store::write_json(&dir.join("meta.json"), &meta)?;
     draft.keep();
     Ok(Output::new(summary_text(&meta), meta))
+}
+
+fn merge_clock_notes(device_note: Option<&str>, crash_note: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for n in [device_note, crash_note].into_iter().flatten() {
+        if !n.is_empty() && !out.iter().any(|x| x == n) {
+            out.push(n.to_string());
+        }
+    }
+    out
 }
 
 fn wir_phone_meta(session: &crate::target::wir::Session, handle: &str, screen: &Value) -> Value {
@@ -1868,7 +1880,11 @@ fn wir_summary(meta: &Value) -> String {
     let obs_note = if obs > 0 { format!(" ({obs} inspector IPC lines dropped)") } else { String::new() };
     let crashes = meta["crashes"].as_array().map_or(0, Vec::len);
     s += &format!("logs     {con} console ({con_err} errors) · {dev}{cap_note} Safari/WebKit device logs{obs_note} · {crashes} crashes/jetsams\n");
-    if let Some(note) = meta["logs"]["clock_note"].as_str() {
+    if let Some(notes) = meta["logs"]["clock_notes"].as_array() {
+        for note in notes.iter().filter_map(Value::as_str) {
+            s += &format!("! Clock  {note}\n");
+        }
+    } else if let Some(note) = meta["logs"]["clock_note"].as_str() {
         s += &format!("! Clock  {note}\n");
     }
     for c in meta["crashes"].as_array().into_iter().flatten() {

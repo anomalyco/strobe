@@ -444,6 +444,7 @@ pub struct Session {
     conn_id: String,
     sender_id: String,
     target_id: Option<String>,
+    target_swaps: u64,
     direct_mode: bool,
     next_outer_id: u64,
     next_inner_id: u64,
@@ -549,6 +550,7 @@ impl Session {
             conn_id,
             sender_id,
             target_id: None,
+            target_swaps: 0,
             direct_mode,
             next_outer_id: 1,
             next_inner_id: 1,
@@ -580,6 +582,11 @@ impl Session {
 
     pub fn stopped(&self) -> bool {
         (self.stop)()
+    }
+
+    /// Number of `WebContent` page-target swaps or destructions since attach.
+    pub fn target_swaps(&self) -> u64 {
+        self.target_swaps
     }
 
     pub fn usb_device(&self) -> &Device {
@@ -892,12 +899,16 @@ impl Session {
                         self.next_outer_id += 1;
                     }
                     if ty == "page" && (!provisional || self.target_id.is_none()) {
+                        if self.target_id.as_deref().is_some_and(|prev| prev != tid) {
+                            self.target_swaps += 1;
+                        }
                         self.target_id = Some(tid.to_string());
                     }
                 }
             }
             Some("Target.didCommitProvisionalTarget") => {
                 if let Some(new_id) = payload["params"]["newTargetId"].as_str() {
+                    self.target_swaps += 1;
                     self.target_id = Some(new_id.to_string());
                 }
             }
@@ -905,6 +916,7 @@ impl Session {
                 if let Some(gone) = payload["params"]["targetId"].as_str()
                     && self.target_id.as_deref() == Some(gone)
                 {
+                    self.target_swaps += 1;
                     self.target_id = None;
                 }
             }

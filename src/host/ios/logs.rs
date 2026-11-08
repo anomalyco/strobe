@@ -573,10 +573,13 @@ pub struct CrashReport {
 /// Flushes staged crash reports (`crashreportmover`), then reads `.ips` reports in
 /// `[window_start_s - 2s, window_end_s + 5s]` over read-only AFC and filters them in memory through
 /// `allow` so personal apps' crashes and Jetsam rows never touch disk. Never falls back to host
-/// wall time: when the phone's `TimeIntervalSince1970` is unavailable at start, end and here, skips
-/// `st_mtime` filtering and returns a diagnostic `clock_note`.
+/// wall time and never counts old crashes: when the phone's `TimeIntervalSince1970` is unavailable
+/// everywhere, skips `.ips` collection completely and returns a diagnostic `clock_note`.
 pub fn collect_crashes(dev: &Device, allow: &Allowlist, wall0_s: Option<f64>, wall1_s: Option<f64>, elapsed_s: f64, deadline: Option<Instant>) -> (Vec<CrashReport>, Option<String>) {
-    let Ok(mut l) = session_for(dev, deadline) else { return (Vec::new(), None) };
+    let no_clock_msg = || "phone wall clock unavailable (TimeIntervalSince1970 failed): crash/jetsam .ips check skipped so older device reports are not counted".to_string();
+    let Ok(mut l) = session_for(dev, deadline) else {
+        return (Vec::new(), (wall0_s.is_none() && wall1_s.is_none()).then(no_clock_msg));
+    };
     let w1 = wall1_s.or_else(|| super::wall_clock_s(&mut l));
     let span_s = elapsed_s.max(0.0);
     let bounds_ns = match (wall0_s, w1) {
@@ -585,13 +588,15 @@ pub fn collect_crashes(dev: &Device, allow: &Allowlist, wall0_s: Option<f64>, wa
         (None, Some(b)) => Some(((((b - span_s - 2.0).max(0.0)) * 1e9) as u64, ((b + 5.0).max(0.0) * 1e9) as u64)),
         (None, None) => None,
     };
-    let clock_note = bounds_ns.is_none().then(|| "phone wall clock unavailable (TimeIntervalSince1970 failed): crash/jetsam .ips wall-clock window filter was skipped".into());
+    let Some((lo_ns, hi_ns)) = bounds_ns else {
+        return (Vec::new(), Some(no_clock_msg()));
+    };
     if let Ok(mut mover) = l.start_service("com.apple.crashreportmover") {
         mover.set_deadline(Some(Instant::now() + Duration::from_millis(1500)));
         let mut ping = [0u8; 5];
         let _ = mover.read(&mut ping);
     }
-    let Ok(mut svc) = l.start_service("com.apple.crashreportcopymobile") else { return (Vec::new(), clock_note) };
+    let Ok(mut svc) = l.start_service("com.apple.crashreportcopymobile") else { return (Vec::new(), None) };
     svc.set_deadline(deadline.or_else(|| Some(Instant::now() + Duration::from_secs(4))));
     let mut afc = ReadOnlyAfc::new(svc);
     let mut reports = Vec::new();
@@ -610,11 +615,11 @@ pub fn collect_crashes(dev: &Device, allow: &Allowlist, wall0_s: Option<f64>, wa
             if size == 0 || size > MAX_CRASH_BYTES {
                 continue;
             }
-            if let Some((lo_ns, hi_ns)) = bounds_ns {
-                let mtime = info.get("st_mtime").or_else(|| info.get("st_birthtime")).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                if mtime < lo_ns || mtime > hi_ns {
-                    continue;
-                }
+            let Some(mtime) = info.get("st_mtime").or_else(|| info.get("st_birthtime")).and_then(|s| s.parse::<u64>().ok()).filter(|&t| t > 0) else {
+                continue;
+            };
+            if mtime < lo_ns || mtime > hi_ns {
+                continue;
             }
             let Ok(raw) = afc.read_file(&path, MAX_CRASH_BYTES) else { continue };
             if let Ok(text) = std::str::from_utf8(&raw) {
@@ -622,7 +627,7 @@ pub fn collect_crashes(dev: &Device, allow: &Allowlist, wall0_s: Option<f64>, wa
             }
         }
     }
-    (reports, clock_note)
+    (reports, None)
 }
 
 fn parse_ips(text: &str, filename: &str, allow: &Allowlist) -> Vec<CrashReport> {
