@@ -13,8 +13,8 @@ pub fn value(v: f64, unit: &str) -> String {
     } else {
         crate::fmt::digits_for(v, 2, 4)
     };
-    // A value that rounds to zero prints without a sign (not −0.00%).
-    let v = if (v * 10f64.powi(digits as i32)).round() == 0.0 { 0.0 } else { v };
+    // A value that rounds to zero prints as 0 at two decimals, without a sign (not −0.00%, not 0.0000).
+    let (v, digits) = if (v * 10f64.powi(digits as i32)).round() == 0.0 { (0.0, digits.min(2)) } else { (v, digits) };
     match unit {
         "ms" => format!("{v:.digits$} ms"),
         "%" => format!("{v:.digits$}%"),
@@ -56,8 +56,9 @@ pub use crate::fmt::{bound, bytes, pct, pct_ci, pct_vs, pct_with};
 
 pub fn signed(v: f64, unit: &str) -> String {
     let body = value(v.abs(), unit);
-    // One that shows as zero has no sign (`0 MB`, not `−0 MB`).
-    if body == value(0.0, unit) {
+    // One that shows as zero at the decimals it printed with has no sign (`0.00 MB`, not `−0.0000 MB`
+    // or `−0 Hz`): every digit it shows is 0.
+    if body.chars().filter(char::is_ascii_digit).all(|d| d == '0') {
         body
     } else if v < 0.0 {
         format!("−{body}")

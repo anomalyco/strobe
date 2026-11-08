@@ -485,22 +485,30 @@ impl Comparison {
 }
 
 /// The direction a comparison as result.json keeps it counted as better: its own `better` (a
-/// `metric.<name>` whose command's lines said `higher` is better higher, whatever the catalog says),
-/// or, in files from before that field, the catalog's.
+/// `metric.<name>` whose command's lines said `higher` is better higher, whatever the catalog says);
+/// in files from before that field, what its `verdict_kind` and interval say together (`better` with
+/// an interval below 0 is lower-is-better, above 0 higher-is-better; `worse` the other way round);
+/// else the catalog's.
 pub fn better_in(c: &serde_json::Value) -> Better {
     match c["better"].as_str() {
-        Some("higher") => Better::Higher,
-        Some("lower") => Better::Lower,
-        _ => crate::model::metric(c["metric"].as_str().unwrap_or("")).map(|m| m.better).unwrap_or(Better::Lower),
+        Some("higher") => return Better::Higher,
+        Some("lower") => return Better::Lower,
+        _ => {}
     }
+    let (lo, hi) = (c["lo"].as_f64().unwrap_or(f64::NAN), c["hi"].as_f64().unwrap_or(f64::NAN));
+    let kind = c.get("verdict_kind").and_then(|k| serde_json::from_value::<VerdictKind>(k.clone()).ok());
+    if matches!(kind, Some(VerdictKind::Better | VerdictKind::Worse)) && c["noworse"].is_null() && (hi < 0.0 || lo > 0.0) {
+        return if (kind == Some(VerdictKind::Better)) == (hi < 0.0) { Better::Lower } else { Better::Higher };
+    }
+    crate::model::metric(c["metric"].as_str().unwrap_or("")).map(|m| m.better).unwrap_or(Better::Lower)
 }
 
-/// The definition a comparison as result.json was made under: a `metric.<name>` better higher is
-/// `METRIC_HIGHER`, every other the catalog's (`model::metric`).
+/// The definition a comparison as result.json was made under: a `metric.<name>` better higher
+/// (`better_in`) is `METRIC_HIGHER`, every other the catalog's (`model::metric`).
 pub fn def_in(c: &serde_json::Value) -> Option<&'static MetricDef> {
     let name = c["metric"].as_str().unwrap_or("");
     let def = crate::model::metric(name);
-    if name.starts_with("metric.") && c["better"] == "higher" { Some(&crate::model::METRIC_HIGHER) } else { def }
+    if name.starts_with("metric.") && better_in(c) == Better::Higher { Some(&crate::model::METRIC_HIGHER) } else { def }
 }
 
 /// The words for comparison `c`'s better and worse directions (`faster`, `slower`): its own `words`, else
