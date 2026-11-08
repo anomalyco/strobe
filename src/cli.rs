@@ -41,6 +41,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("channel", Value, "up"),
     ("style", Switch, "record bench"),
     ("native", Switch, "record query"),
+    ("windowless", Switch, "record"),
     ("app", Value, "record look"),
     ("home", Value, "record look"),
     ("os-frames", Switch, "record"),
@@ -105,6 +106,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("badge-url", Switch, "report"),
     ("scoreboard", Switch, "report"),
     ("no-browser", Switch, "open"),
+    ("no-server", Switch, "open"),
     // track.
     ("ref", Value, "track"),
     ("range", Value, "track"),
@@ -149,6 +151,11 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("log", Value, "helper"),
     ("sid", Value, "helper"),
 ];
+
+/// Flags whose value is a comma-separated list: given twice, the lists add up (`--filter a --filter b`
+/// is `--filter a,b`). Any other flag given twice with another value is a usage error, never the last
+/// one silently.
+const LISTS: &[&str] = &["filter", "target", "metrics", "params", "noworse", "skip"];
 
 /// How `--name` takes its value, when strobe has such a flag.
 pub fn kind(name: &str) -> Option<Kind> {
@@ -220,6 +227,27 @@ pub fn unknown_flag(name: &str) -> Error {
     }
 }
 
+/// A flag's value from the command line: a list flag given again adds to its list (`LISTS`); another
+/// flag given again must say the same.
+fn given(flags: &mut HashMap<String, String>, name: &str, value: &str) -> Result<()> {
+    match flags.get_mut(name) {
+        None => {
+            flags.insert(name.to_string(), value.to_string());
+        }
+        Some(was) if LISTS.contains(&name) => {
+            if !value.trim().is_empty() {
+                *was = if was.trim().is_empty() { value.to_string() } else { format!("{was},{value}") };
+            }
+        }
+        Some(was) if was == value => {}
+        Some(was) => {
+            let shown = |v: &str| if v.is_empty() { format!("--{name}") } else { format!("--{name} {v}") };
+            return Err(Error::usage(format!("--{name} is given twice ({} and {}): give it once", shown(was), shown(value))));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Args {
     pub command: String,
@@ -260,11 +288,15 @@ impl Args {
             if let Some((key, value)) = name.split_once('=') {
                 match (kind(key).ok_or_else(|| unknown_flag(key))?, value) {
                     // `--check=false` is the switch off, not on.
-                    (Switch, "true") => flags.insert(key.to_string(), "true".to_string()),
-                    (Switch | Optional, "false") => flags.remove(key),
+                    (Switch, "true") => {
+                        flags.insert(key.to_string(), "true".to_string());
+                    }
+                    (Switch | Optional, "false") => {
+                        flags.remove(key);
+                    }
                     (Switch, _) => return Err(Error::usage(format!("--{key} is a switch: --{key}, --{key}=true or --{key}=false, not --{key}={value}"))),
-                    (Optional, "true") => flags.insert(key.to_string(), String::new()),
-                    _ => flags.insert(key.to_string(), value.to_string()),
+                    (Optional, "true") => given(&mut flags, key, "")?,
+                    _ => given(&mut flags, key, value)?,
                 };
                 continue;
             }
@@ -274,13 +306,13 @@ impl Args {
                     continue;
                 }
                 Optional => {
-                    flags.insert(name, String::new());
+                    given(&mut flags, &name, "")?;
                     continue;
                 }
                 Value | Number => {}
             }
             let value = iter.next().ok_or_else(|| Error::usage(format!("--{name} needs a value")))?;
-            flags.insert(name, value);
+            given(&mut flags, &name, &value)?;
         }
         let command = if pos.is_empty() { String::new() } else { pos.remove(0) };
         Ok(Args { command, pos, flags })
@@ -355,7 +387,8 @@ Use
   status                          environment, validity preflight, recent recordings and experiments
   record <target> [--for 10s] [--probes timing|attribution|memory] [--headless] [--emulate mobile|touch] [--served <dir>] [--style]
                                   record a target; prints a handle (rec_…); exe:<path> --native for a native app
-                                  (a native app: --gpu-cache warm|cold, its GPU shader caches from earlier recordings of it)
+                                  (a native app: --gpu-cache warm|cold, its GPU shader caches from earlier recordings of it;
+                                  --windowless: it shows no window (a tray app, a service), as native(…, { window: false }))
                                   (--video: also film it, timing perturbed: the window's screen, or a headless page's renderer)
                                   (--mobile[=<serial>]: the page in Chrome on an Android phone over adb, its own screen
                                   and touch; timed: no emulator, no adb over Wi-Fi, no hot, saving or low phone)
@@ -387,7 +420,7 @@ Use
         [--unlock-wait 2h]             (a series that needs a presenting window waits at most that long for an unlock, or on macOS for nobody to use the Mac)
         [--seed <n>]                   (ctx.seed and ctx.random(): replay a seeded workload; without it strobe draws one
                                         and prints it)
-        --filter: case names, comma-separated; exact unless a name holds * (a glob)
+        --filter: case names, comma-separated (or --filter given again); exact unless a name holds * (a glob)
         --base <target>[=<variant>] --head <target>[=<variant>]: two targets of the file compared (two
                                   implementations of one app); target:<name> when a folder or ref has that name
                                   run an experiment; a verdict per series
@@ -412,9 +445,10 @@ Use
                                   exp_…: summary progress insights, and those views as each series' base..head;
                                   memory: --by process|layer|allocator --at <i>;
                                   threads --timeline: each thread's CPU per second from the launch, exited ones too)
-  report experiment|recording <handle> [--format html|md|pr] [--out <path>] [--open]
+  report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
                                   write a self-contained HTML (or markdown) report; pr: an experiment's tables for a PR body
-                                  (md and pr print the markdown; the file's path goes to stderr)
+                                  (md and pr print the markdown; the file's path goes to stderr; the view follows from the
+                                  handle; a path to a result.json or meta.json is read as it is, nothing written beside it)
   report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
                                   put the block in PR n's body, with the result card and badges attached through gh
   report experiment <exp> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto] [--badge-url]
@@ -422,10 +456,11 @@ Use
                                   the result as an image: card 1200×630 (decided wins large, else what happened), badge one
                                   line; SVG follows the reader's colour scheme (auto); --badge-url prints a shields.io URL;
                                   --scoreboard: an implementation comparison's journeys (vs <base> | better in 4/5 · 1 gap)
-  open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser]
+  open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
                                   the recording in the Perfetto UI (local): one trace with the Chrome trace, CPU profiles
                                   and native stacks as flame graphs, runs, phases, inputs, presents, threads, memory
-                                  (--no-browser: print the URL instead of opening it)
+                                  (--no-browser: print the URL instead of opening it; --no-server: build and check the
+                                  trace and print what it holds, no UI and no server)
   track <file.bench.ts> [--ref <rev> | --range a..b [--every N]] [--filter …] [--blocks 6] [--no-confirm]
         [--alert-command '<cmd>'] [--alert-webhook <url>] [--alert regressions|all]
                                   a point per series per commit in this device's history; change points are confirmed
@@ -475,5 +510,6 @@ Targets   https://… · a local page.html (or file:page.html) · app:<id> (a st
           · cdp:<port> · cdp:ws://… · file:<trace> (import) · pid:<n> · proc:<name> · tty:<command> (look)
 Variants  a directory · a git ref (git:<ref>) · app:<id> · exe:<path> · url:<href> · cmd:<line> (a cli() target's command)
 Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells that count stderr lines as a failure)
+          (-q: no progress lines and no summary; a command that makes a recording or experiment prints its handle)
 Exit codes: 0 ok · 1 error · 2 usage · 3 needs a human · 4 refused (invalid) · 5 inconclusive · 124 timeout · 255 unreachable
 ";

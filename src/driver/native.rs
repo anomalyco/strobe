@@ -554,6 +554,9 @@ mod imp {
             match u.as_str() {
                 Some("idle") => self.idle(after, t, presents).map(|_| ()),
                 Some("frame") => self.frame(after, t, presents).map(|_| ()),
+                Some("animations") => {
+                    Err(Error::usage("until: \"animations\" waits for a page's running animations (document.getAnimations()); a native app has none to list: \"idle\" waits for it to hold still"))
+                }
                 _ => {
                     self.find(&parse_sel(u)?, opts["window"].as_str(), t)?;
                     self.shown(after.max(self.a11y.changes().last_ns), presents)

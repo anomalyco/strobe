@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// Why a native app's window recorded on a locked Windows session has no frames or GPU use.
+const LOCKED_DRAWN: &str = "the session was locked while strobe recorded: nothing the window drew reached a display, and GPU use for a screen nobody sees describes none";
+
 /// `record --bench <file.bench.ts>#<case>`: one bench case on this checkout (or `--head <variant>`), recorded with
 /// the attribution probes (CPU and allocation profiles, forced layouts, GC, the GPU process's work, a heap
 /// snapshot). The case drives the page, so a flow behind a click or a key records as easily as a URL. It is a
@@ -26,6 +29,9 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
     }
     if args.get("emulate").is_some() {
         return Err(Error::usage("--emulate is for a page's record; with --bench the bench target decides what its page emulates"));
+    }
+    if args.has("windowless") {
+        return Err(Error::usage("--windowless is for a native app's record; with --bench the bench target decides (native(…, { window: false }))"));
     }
     let mut b = Args::parse(vec!["bench".into(), file.into(), "--head".into(), args.get("head").unwrap_or(".").into(), "--check".into(), "--why".into(), "always".into()])?;
     b.set("filter", case);
@@ -138,6 +144,9 @@ pub fn run(args: &Args) -> Result<Output> {
     };
     // An engine this OS cannot run refuses before anything changes (the power plan below).
     let emulation = parse_emulation(args)?;
+    if args.has("windowless") && !target.starts_with("app:") && !target.starts_with("exe:") {
+        return Err(Error::usage(format!("--windowless launches a native app that shows no window (app:<id> of kind native, exe:<path> --native), not {target}")));
+    }
     if args.has("mobile") {
         mobile_usage(args, &target)?;
     } else if !is_wir {
@@ -203,6 +212,9 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     }
     if args.has("wayland") {
         return Err(Error::usage(format!("--wayland runs a native app (app:<id> of kind native, exe:<path> --native) on a Wayland compositor strobe starts, not {target}")));
+    }
+    if args.has("windowless") {
+        return Err(Error::usage(format!("--windowless records a native app that shows no window (app:<id> of kind native, exe:<path> --native), not {target}")));
     }
     if args.get("probes") == Some("waits") {
         return Err(Error::usage(format!("--probes waits takes a native capture's off-CPU waits: a native app (app:<id> of kind native, exe:<path> --native) or pid:<n>, not {target}")));
@@ -784,6 +796,16 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
     if set == Set::Memory {
         return Err(Error::usage("--probes memory follows a JS heap; a native app has none"));
     }
+    // `--windowless`: an app that shows no window (a tray app, a service), as a bench file's
+    // `native(…, { window: false })` or a profile's `window: false`.
+    let mut windowless_app;
+    let app = if args.has("windowless") && !app.windowless {
+        windowless_app = app.clone();
+        windowless_app.windowless = true;
+        &windowless_app
+    } else {
+        app
+    };
     if app.windowless && args.has("video") {
         return Err(Error::refused("NotForTarget", format!("--video films a window, and {target} has none (window: false)"), "record an app that opens a window"));
     }
@@ -844,7 +866,13 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             n.raise();
             n.check_visible()?;
             if host::session_locked() && !headless {
-                return Err(validity::locked());
+                // Windows keeps drawing an app's window while the session is locked (its own rendering and
+                // the compositor's copy): what needs no display is recorded, and what reached the
+                // display refused (SessionLocked), as a bench's --check of a native case does.
+                if !cfg!(windows) {
+                    return Err(validity::locked());
+                }
+                progress("the session is locked: CPU, memory, IO and GPU memory are recorded; frames and GPU use are refused (SessionLocked)");
             }
         }
         let awake = host::Awake::start();
@@ -903,12 +931,15 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let presents = presents.map(|r| r.and_then(|c| c.stop()));
         let stacks = stacks.map(|r| r.and_then(|c| c.stop()));
         let session_locked = awake.locks() > 0 || host::session_locked();
-        if session_locked && !windowless && !headless {
+        // Windows: frames and GPU use of a window on a locked session describe no screen (refused below).
+        let locked_window = session_locked && !windowless && !headless;
+        if locked_window && !cfg!(windows) {
             return Err(validity::locked());
         }
         if !windowless {
             n.check_visible()?;
         }
+        let presents = if locked_window { Some(Err(Error::msg(format!("SessionLocked: {LOCKED_DRAWN}")))) } else { presents };
         let mut frame_values = BTreeMap::new();
         let unpaced = match &presents {
             Some(Ok(p)) => {
@@ -1011,6 +1042,10 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             }
         }
         super::outside::wakes_refused(&span, &mut refused);
+        // GPU use for a screen nobody sees describes no screen; GPU memory stays (bench's `session_state`).
+        if locked_window && values.remove("gpu.process.3d").is_some() {
+            refused.insert("gpu.process.3d".into(), json!(format!("SessionLocked: {LOCKED_DRAWN}")));
+        }
         let mut meta = json!({
             "id": id, "kind": "record", "native": true, "target": target, "exe": app.exe, "probes": set, "duration_ms": for_ms, "env": host::env(), "values": values, "refused": refused, "os": os,
             "window": n.window, "ui_thread": ui_tid, "created": now_iso(), "valid": true, "os_frames": os_frames, "session_locked": session_locked,
@@ -1463,6 +1498,8 @@ fn context_lines(meta: &Value) -> String {
     if let Some(why) = meta["unattributed"].as_str() {
         s += &format!("! Unattributed  {why}: cpu, memory, wakes and GPU cover the app's own processes only\n");
     }
+    // A deep capture of a process: what it cost the target.
+    s += &super::outside::cost_lines(&meta["capture_cost"]);
     s
 }
 
@@ -1516,8 +1553,11 @@ fn summary_body(meta: &Value) -> String {
     }
     if meta["probes"] == "deep" {
         let id = meta["id"].as_str().unwrap_or("");
+        // Both shares, as `query hotspots` says them: a leaf in a named system library resolves while
+        // its callers in an unsymbolized binary do not. A recording from before the all-frame share has none.
+        let all = meta["native"]["resolved_frame_share"].as_f64().map(|s| format!(", {:.1}% of all frames", 100.0 * s)).unwrap_or_default();
         return format!(
-            "{id} · {} · deep · {} native samples · {:.1}% resolved\nnext     strobe query {id} hotspots · strobe query {id} hotspots --by package\n",
+            "{id} · {} · deep · {} native samples · resolved: {:.1}% of leaf frames{all}\nnext     strobe query {id} hotspots · strobe query {id} hotspots --by package\n",
             meta["target"].as_str().unwrap_or(""),
             meta["samples"],
             100.0 * meta["native"]["resolved_share"].as_f64().unwrap_or(0.0)
@@ -1653,6 +1693,11 @@ fn native_summary(meta: &Value) -> String {
             fmt::value(get("frames.interval.p95"), "ms"),
             fmt::value(get("frames.dropped"), "count")
         );
+    } else if let Some(why) = meta["os_frames"]["refused"].as_str() {
+        s += &format!("frames   refused: {why}\n");
+    }
+    if meta["session_locked"] == true && meta["window"].is_object() {
+        s += "session  locked: an app on a locked screen may draw and work less; its CPU, memory and IO compare only with recordings taken locked\n";
     }
     if let Some(line) = background_line(meta) {
         s += &line;

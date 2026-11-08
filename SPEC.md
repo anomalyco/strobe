@@ -8776,6 +8776,65 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   `state` (pass, fail, refused, gap) and the `refusal` behind a failed or refused one. A single-target
   `track` point whose bench ended early is logged failed, so the next track runs that commit again.
   The harness is never copied into a folder inside itself (a bench run from its own folder).
+- **Bench file checks, flags, reports and records (2026-11-09)**: the runner refuses a key strobe does not
+  read in `bench({ … })`, a target (by its kind, what its constructor takes), a case or a launch (usage,
+  exit 2, every problem in one message), naming the nearest key or where it belongs: a case's `setup` was
+  ignored without a word, and is the file's. Every consumer bench file loaded with the target keys checked
+  too (17 of one app, 6 of a native app, 3 games, all `describe`d unchanged); three
+  of strobe's own dev files had a case `setup` that never ran (`fixture`, `known/tty`, `type`), now the
+  file's. `describe` sends `caseOrder`, so cases run and print in the file's order (the cases map is
+  sorted). A `web()` target whose `url` function returns an absolute address (a server its `prepare`
+  started) needs no `serve`; a path it returns with nothing served is a usage error. `page.eval` refuses a
+  string ("takes a function"); a `--check --headless` of such a file with four cases named out of
+  alphabetical order ran them in file order, its url function's page loaded, and only the case whose reset
+  passed `eval` a string failed, on adais and vps; a `native(path)` or `webview(path)` that does not
+  exist beside a strobe.json `build`, for a folder or git variant, is a usage error naming the profile
+  form. Flags: `--filter`, `--target`, `--params`, `--metrics`, `--noworse` and `--skip` given twice add
+  up (`--filter a --filter b` is `a,b`); any other flag given twice with another value is a usage error
+  (the last one used to win silently). `--params` takes `all` and `k=v` only (another token is a usage
+  error, as a key the file has no parameter of, or a value not among the key's): values named for one key
+  add up, each crossed with the other keys' (`n=1,n=3` runs both; it once ran `n=3` alone). `--noworse` is a list of `metric=margin`, a bare margin the primary's; one metric given two
+  margins is a usage error. `-q` turns progress off and stdout holds only the handles a command made
+  (`rec_…`, `exp_…`); a command that made one and did not succeed writes why on stderr (what halted it,
+  else its `FAIL` lines), keeping its exit code (vps: a check with one failing case printed `exp_…` on
+  stdout, its `FAIL` lines on stderr, exit 1). A bare `--for 2000` was already refused (a unit is
+  required). `report <exp_…|rec_…|ser_…>` takes the view from the handle; a result.json or meta.json path
+  is read as it is, its markdown printed and nothing written beside it (HTML and cards go to strobe's run
+  folder), and it keeps the rerun ledger it holds (this machine's index is not its history).
+  `report --format md` of a comparison renders its text again from result.json (`bench::render`), with
+  today's digits and the rerun ledger as of now, and says so when another strobe measured it (`measured
+  by strobe 0.20.0; this text drawn again by strobe 0.22.0`): over 60 comparisons on adais it differs
+  from the stored text only there (column widths, digits, `speed not checked` where an old result keeps
+  no speed ratio, the ledger line, `others 96.1%`). The `--filter` line lists cases in the file's order. The
+  text's `others 95%` reads the secondaries' achieved level (96.1% at 8 pairs, as the PR block says).
+  report.html no longer replaces an undecided estimate of 1% or more with `~0%` when the medians print
+  alike. A `--check` experiment's report already said `Check passed`/`Check failed` (checked on
+  exp_cdab16). `open <rec> --no-server` builds and checks the trace and starts no UI or server.
+  `record app:<id>|exe:<path> --native --windowless` records a native app with no window (a windowless
+  profile's 20 ms every 100 ms read 19.8% of a core); a windowed native record on a locked Windows
+  session records CPU, memory and IO, and refuses frames and `gpu.process.3d` (`SessionLocked`), with a
+  `session locked` line (a Windows system app on locked adais); other OSes refuse it as before. `record
+  pid: --probes deep|waits|stacks-unprivileged` keeps `capture_cost` in its meta (`query <rec> summary`
+  and the report print it): the tree's context switches a second and CPU over the capture and over
+  200–500 ms right after it (the capture starts at once), and `CaptureCost` when the rate during it was
+  lower by more than a quarter: on vps a process handing a token between two threads switched 73,141/s
+  during a `deep` capture and 107,285/s after it (−32%), 63,013/s and 148,144/s with `waits` (−57%); on
+  adais (strobe's own sampler, suspending threads) the rate rose and nothing was said. `until:
+  "animations"` (pages, every engine) waits until no animation that ends is running in the document or a
+  shadow root strobe found (each one's `getAnimations()`), looked at again a frame after each set
+  finished, and with none at first once more two frames later (a transition a handler starts on the next
+  frame); endless ones are not waited for. On vps a click starting a 400 ms CSS animation resolved after
+  436 ms, one whose handler started a 400 ms transition on the next frame after 446 and 448 ms (before
+  the second look: 420 ms cold, then 1.1 ms), a 400 ms Web Animation in a shadow root after 431 ms (3.4 ms
+  before shadow roots were looked at). Native and terminal drivers refuse it (usage). A page's address in navigation errors and a failed step's `page:`
+  line is cut to 80 characters and its length (a 4 KB `data:` page). Already on main and checked: the
+  per-metric `SoftwareGpu` of `record <page> --headless` (vps, no GPU: a page spinning 5 ms every 50 ms
+  recorded `main.busy` 10.2%, frames refused `Headless`, nothing refused `SoftwareGpu`), ffmpeg builds
+  without the rawvideo demuxer skipped (`probe/video/ffmpeg.rs`), heading detection by HeadingLevel, ARIA
+  role or localized control type (`a11y/uia.rs`). Not checked: a WebView2 page's headings through UI
+  Automation (on locked adais a Chromium window in a native target exposed only its title elements, no
+  document). A deep recording's summary gives both resolved shares (`resolved: X% of leaf frames, Y% of
+  all frames`), as `query hotspots` does.
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

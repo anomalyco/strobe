@@ -20,13 +20,14 @@ export default bench({
     "ready-0": tty([bin, "ready", "0", "READY"], { cols: 80, rows: 24 }),
     "ready-300": tty([bin, "ready", "300", "READY"], { cols: 80, rows: 24 }),
   },
+  // Every run case (launch cases run no setup) starts once the program says it is ready.
+  setup: ({ page }: any) => page.waitFor("text=ready"),
   cases: {
     keys: {
       targets: ["keys"],
       primary: "tty.latency.p50",
       metrics: ["tty.updates", "tty.frames", "tty.bytes", "tty.cells", "tty.settle.p50", "tty.frame.p50", "run.duration", ...io],
       resetCheck: false,
-      setup: ({ page }: any) => page.waitFor("text=ready"),
       run: async ({ page }: any) => {
         for (let i = 0; i < 10; i++) await page.press("x")
       },
@@ -37,7 +38,6 @@ export default bench({
       primary: "tty.latency.p50",
       metrics: ["tty.updates", "tty.frames", "tty.bytes", "tty.cells", "cpu.work"],
       resetCheck: false,
-      setup: ({ page }: any) => page.waitFor("text=ready"),
       run: ({ page }: any) => page.press("x"),
     },
     // The same key waited for (until: "frame"): the frame lands inside the run.
@@ -46,7 +46,6 @@ export default bench({
       primary: "tty.latency.p50",
       metrics: ["tty.updates", "tty.frames", "tty.bytes", "tty.cells", "cpu.work"],
       resetCheck: false,
-      setup: ({ page }: any) => page.waitFor("text=ready"),
       run: ({ page }: any) => page.press("x", { until: "frame" }),
     },
     // Five keys timed, then five inside ctx.untimed: only the timed five count (tty.updates 5, tty.bytes 310,
@@ -56,7 +55,6 @@ export default bench({
       primary: "tty.latency.p50",
       metrics: ["tty.updates", "tty.bytes", "io.read", "io.write", "cpu.wakes"],
       resetCheck: false,
-      setup: ({ page }: any) => page.waitFor("text=ready"),
       run: async ({ page, untimed }: any) => {
         for (let i = 0; i < 5; i++) await page.press("x", { until: "frame" })
         await untimed(async () => {

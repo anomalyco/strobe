@@ -80,11 +80,13 @@ export interface ClickOptions extends Options {
 
 /**
  * When an input call resolves: `"idle"` (no DOM change or long frame for 300 ms; a terminal's grid still for 300 ms),
- * `"frame"` (after next paint), a visible element, an image showing ({@link ImageLocator}), `{ pixels }`
- * ({@link PixelWait}), or `{ state }`: the app wrote that state to its event stream after the input (`tty()`
- * targets, see {@link AppEvent}).
+ * `"frame"` (after next paint), `"animations"` (pages: no CSS animation, transition or Web Animation that ends is
+ * running in the document or its shadow roots, looked at again a frame later when none runs at first, so one the
+ * step starts on the next frame counts; an endless one such as a spinner is not waited for), a visible element, an
+ * image showing ({@link ImageLocator}), `{ pixels }` ({@link PixelWait}), or `{ state }`: the app wrote that state to
+ * its event stream after the input (`tty()` targets, see {@link AppEvent}).
  */
-export type Until = "idle" | "frame" | Selector | ImageLocator | { pixels: PixelWait } | { state: string }
+export type Until = "idle" | "frame" | "animations" | Selector | ImageLocator | { pixels: PixelWait } | { state: string }
 
 /**
  * A line an app appends to the path in its `STROBE_EVENTS` (tty targets get it): strobe stamps each on its host clock
@@ -266,7 +268,7 @@ export interface Page {
   /** Resolves when nothing in the DOM changed and no frame ran long for 300 ms. */
   idle(opts?: { timeout?: number }): Promise<void>
   wait(ms: number): Promise<void>
-  /** Runs `fn` in the page. Only in `prepare`, `setup` and `reset`: it costs main-thread time. */
+  /** Runs `fn` in the page, called with `args` (a function, not an expression string as Playwright's `evaluate` takes). Only in `prepare`, `setup` and `reset`: it costs main-thread time. */
   eval<A extends unknown[], T>(fn: (...args: A) => T, ...args: A): Promise<Awaited<T>>
 }
 
@@ -583,7 +585,11 @@ export interface FirstPageContext<P, K = any> extends Seeded {
   params: P
 }
 
-/** The first page a block opens: a path, or a function of what `prepare` returned. */
+/**
+ * The first page a block opens: a path on the variant's server (strobe.json `serve`), or a function of what
+ * `prepare` returned. A function may return an absolute address (a server `prepare` started on a port it
+ * picked: `(ctx) => ctx.prepared.url`), and then nothing needs to be served.
+ */
 export type FirstPage<P, K = any> = string | ((ctx: FirstPageContext<P, K>) => string | Promise<string>)
 
 /** A page target's hooks. `K` types their `ctx.setupKey`: `web<Params, Key>({ … })` (a target is made before the bench). */
@@ -941,8 +947,9 @@ export function cli<P = any>(run?: string, opts: Omit<CliOptions, "run"> & Side 
  * A native app (no browser engine): by its profile in strobe.json `apps` (`kind: "native"`), or an executable path.
  * Each block launches it in a fresh isolated home and measures it from outside: CPU in cycles, thread wakes
  * (`cpu.wakes`), the UI thread (`ui.cpu`), IO, GPU, memory, what reached the screen (`frames.*`, `interaction.*`), and
- * for launch cases its window. `page` drives it through its accessibility tree. A directory or git-ref variant runs
- * strobe.json's `build` and launches its `output`.
+ * for launch cases its window. `page` drives it through its accessibility tree. A directory or git-ref variant of a
+ * profile runs strobe.json's `build` and launches its `output`; a path names a fixed executable, which no build
+ * makes or replaces.
  */
 export function native<P = any>(appOrPath: string, opts: NativeOptions & Side = {}): Target<P> {
   const path = /[\\/]|\.exe$/i.test(appOrPath)
@@ -1003,6 +1010,11 @@ export function fixture(command: string, opts: Omit<Fixture, "command"> = {}): F
   return { command, ...opts }
 }
 
+/**
+ * A bench file's default export. Cases run in the order the file gives them. strobe refuses a key it does not read
+ * (in the file's options, a target, a case or a launch), naming the nearest one or where it belongs (a case's `setup` is the
+ * file's), rather than ignore it.
+ */
 export function bench<const Params extends Record<string, ParamValues> = {}, K = undefined>(spec: Bench<Params, K>): Bench<Params, K> {
   return spec
 }

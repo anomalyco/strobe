@@ -131,19 +131,32 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let locked = |awake: &host::Awake| awake.locks() > 0 || host::session_locked();
     if deep {
         let waits = args.get("probes") == Some("waits");
+        // What the capture costs the target (rule 2): its threads' context switches and CPU over the
+        // capture, then just after it (the capture starts at once: no wait before it). Sampling stacks
+        // (and taking waits, at every switch) slows a busy target: a rate lower during the capture than
+        // after it says the stacks describe a slower process than the one recorded.
+        let tree = || host::process_set(root, None).iter().map(|p| p.pid).collect::<Vec<u32>>();
         // The tree's CPU around the capture, for what share of it the samples cover (unknown when a
         // process of it ended inside: a pid: target has no job or cgroup that keeps its CPU).
         let set = || super::record::read_set(&host::process_set(root, None), None);
         let (c0, w0) = (set(), host::now_ns());
         let cap = StackCapture::start_with(crate::probe::stacks::Targets::new(root, None), args.get("probes") == Some("stacks-unprivileged"), waits)?;
         progress(format!("sampling native stacks of {name} ({root}) for {}", fmt::ms_duration(for_ms)));
+        let a = wakes::Snapshot::take(&tree());
         std::thread::sleep(Duration::from_millis(for_ms));
+        let during = wakes::span(&a, &wakes::Snapshot::take(&tree()));
         let d = cap.stop()?;
         let (c1, w1) = (set(), host::now_ns());
         let set_cpu_ms = match (super::record::set_used(&c0, &c1), c0.2, c1.2) {
             (Some(used), Some(a), Some(b)) if b > a => Some(used as f64 / (b - a) as f64 * (w1 - w0) as f64 / 1e6),
             _ => None,
         };
+        let after = {
+            let a = wakes::Snapshot::take(&tree());
+            std::thread::sleep(Duration::from_millis(for_ms.clamp(200, 500)));
+            wakes::span(&a, &wakes::Snapshot::take(&tree()))
+        };
+        let cost = capture_cost(&during, &after, d.waits.is_some());
         // Waits asked for and not taken refuse the recording, saying why (SPEC §11.1).
         if waits && d.waits.is_none() {
             return Err(d.waits_refused.clone().unwrap_or_else(|| crate::probe::stacks::no_waits("no waits were taken", "try again")).into());
@@ -157,14 +170,16 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
             "env": host::env(), "values": {}, "native": facts, "samples": d.samples.len(), "events_lost": d.events_lost, "pids": d.pids,
             "timing": "perturbed", "created": super::record::now_iso(), "valid": true, "suspend": d.suspend,
             "waits": d.waits.as_ref().map(|w| w.waits.len()), "set_cpu_ms": set_cpu_ms,
+            "capture_cost": cost,
         });
         store::write_json(&dir.join("meta.json"), &meta)?;
         let top = super::query::native_hotspots(&dir, "function", 8, None, None).map(|o| o.text).unwrap_or_default();
         draft.keep();
         let text = format!(
-            "{id} · {target} ({name}) · {} · deep{}\n{top}next     strobe query {id} hotspots --by package · strobe query {id} hotspots --thread <name>{} · strobe report recording {id} --open\n",
+            "{id} · {target} ({name}) · {} · deep{}\n{top}{}next     strobe query {id} hotspots --by package · strobe query {id} hotspots --thread <name>{} · strobe report recording {id} --open\n",
             fmt::ms_duration(for_ms),
             if d.waits.is_some() { " with off-CPU waits" } else { "" },
+            cost_lines(&meta["capture_cost"]),
             if d.waits.is_some() { format!(" · strobe query {id} waits") } else { String::new() }
         );
         return Ok(Output::new(text, meta));
@@ -303,6 +318,43 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     store::write_json(&dir.join("meta.json"), &meta)?;
     draft.keep();
     Ok(Output::new(super::record::summary_text(&meta), meta))
+}
+
+/// A deep capture's cost to the target (`capture_cost` in its meta): its tree's context switches a
+/// second and CPU (% of a core) over the capture and just after it. A rate lower during the capture by
+/// more than a quarter says the capture slowed the target (perf's or the helper's work at each switch
+/// and sample).
+fn capture_cost(during: &wakes::Span, after: &wakes::Span, waits: bool) -> Value {
+    let cpu = |s: &wakes::Span| s.threads.iter().map(|t| t.cpu_ms).sum::<Option<f64>>().filter(|_| s.ms > 0.0).map(|c| 100.0 * c / s.ms);
+    let rate = |s: &wakes::Span| Some(s.wakes_per_s()).filter(|x| x.is_finite());
+    let side = |s: &wakes::Span| json!({ "ms": s.ms, "switches_per_s": rate(s), "cpu_pct": cpu(s) });
+    let fell = rate(after).zip(rate(during)).filter(|(a, d)| *a >= 100.0 && *d < 0.75 * a).map(|(a, d)| 100.0 * (1.0 - d / a));
+    json!({ "during": side(during), "after": side(after), "waits": waits, "switches_fell_pct": fell })
+}
+
+/// `capture_cost`'s lines: `cost`, and `! CaptureCost` when the rate fell.
+pub fn cost_lines(c: &Value) -> String {
+    if !c.is_object() {
+        return String::new();
+    }
+    let shown = |s: &Value| {
+        format!(
+            "{} context switches, {} of a core",
+            s["switches_per_s"].as_f64().map_or("?".to_string(), |r| fmt::value(r, "/s")),
+            s["cpu_pct"].as_f64().map_or("?".to_string(), |p| fmt::value(p, "%"))
+        )
+    };
+    let mut text =
+        format!("cost     the tree during the capture: {} · after it ({}): {}\n", shown(&c["during"]), fmt::ms_duration(c["after"]["ms"].as_f64().unwrap_or(0.0) as u64), shown(&c["after"]));
+    if let Some(pct) = c["switches_fell_pct"].as_f64() {
+        let waits = c["waits"] == true;
+        text += &format!(
+            "! CaptureCost  the target switched {pct:.0}% less often a second during the capture than just after it: the capture slows a switch-heavy process (unless its own work changed then), and its stacks{} describe that slower process{}\n",
+            if waits { " and waits" } else { "" },
+            if waits { " (waits cost the target at every switch: --probes deep takes none)" } else { "" }
+        );
+    }
+    text
 }
 
 pub fn text(meta: &Value) -> String {

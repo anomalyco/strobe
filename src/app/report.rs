@@ -8,15 +8,58 @@ use crate::store;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// The report view a handle names when the command line names none (`report exp_…`): a tracked series
+/// or a bench file's history, an experiment, or a recording; a JSON file by what it holds.
+pub fn view_of(handle: &str) -> &'static str {
+    if handle.starts_with("ser_") || handle.ends_with(".bench.ts") {
+        return "history";
+    }
+    let path = std::path::Path::new(handle);
+    if path.is_file() {
+        return if store::read_json(path).is_ok_and(|v| v["series"].is_array()) { "experiment" } else { "recording" };
+    }
+    if store::resolve(handle).is_ok_and(|d| store::is_experiment(&d)) { "experiment" } else { "recording" }
+}
+
 pub fn run(args: &Args) -> Result<Output> {
-    let view = args.pos.first().ok_or_else(|| Error::usage("report <view> <handle…>: views experiment, recording"))?;
+    let first = args.pos.first().ok_or_else(|| {
+        Error::usage("report [experiment|recording|history] <handle>: an experiment (exp_…), a recording (rec_…), a tracked series (ser_…), or the path of a result.json or meta.json")
+    })?;
+    // `report exp_…`: the view follows from the handle, as MCP's does.
+    if !matches!(first.as_str(), "experiment" | "recording" | "history") {
+        let mut a = args.clone();
+        a.pos.insert(0, view_of(first).to_string());
+        return run(&a);
+    }
+    let view = first;
     if view == "history" {
         return super::history::report(args);
     }
-    let handle = args.pos.get(1).ok_or_else(|| Error::usage("report needs a handle"))?;
-    let dir = store::resolve(handle)?;
-    let experiment = store::is_experiment(&dir);
-    let mut data: Value = if experiment { store::read_json(&dir.join("result.json"))? } else { store::read_json(&dir.join("meta.json"))? };
+    let handle = args.pos.get(1).ok_or_else(|| Error::usage(format!("report {view} needs a handle: strobe report {view} <exp_…|rec_…|path/to/result.json>")))?;
+    // A result.json or meta.json named by its path (an edited copy, a hand-written fixture) is read as it
+    // is: nothing is written beside it, and what a report writes goes to strobe's own run folder.
+    let file = std::path::Path::new(handle).is_file().then(|| std::path::PathBuf::from(handle));
+    let (dir, mut data, experiment) = match &file {
+        Some(f) => {
+            let data = store::read_json(f)?;
+            let experiment = data["series"].is_array();
+            (f.parent().map(std::path::Path::to_path_buf).unwrap_or_default(), data, experiment)
+        }
+        None => {
+            let dir = store::resolve(handle)?;
+            let experiment = store::is_experiment(&dir);
+            let data = store::read_json(&dir.join(if experiment { "result.json" } else { "meta.json" }))?;
+            (dir, data, experiment)
+        }
+    };
+    let scratch = match &file {
+        Some(_) => {
+            let d = crate::host::paths::run().join("reports").join(data["id"].as_str().filter(|i| !i.is_empty()).unwrap_or("file"));
+            std::fs::create_dir_all(&d)?;
+            d
+        }
+        None => dir.clone(),
+    };
     // `bench --blocks`: one build's values, nothing compared: the experiment report, its PR block, card
     // and badge are all about a comparison, so none of them is drawn for it.
     let compares = data["series"].as_array().is_none_or(|a| a.iter().any(|s| s["kind"] != "blocks"));
@@ -38,11 +81,12 @@ pub fn run(args: &Args) -> Result<Output> {
         if !experiment {
             return Err(Error::usage(format!("--format {format} draws an experiment's result: give an exp_… handle")));
         }
-        return super::card::report(args, &dir, &data, format);
+        return super::card::report(args, &scratch, &data, format);
     }
     if experiment {
-        // The rerun ledger as of now: experiments on the same variants since this one ran count too.
-        if data["identity"].is_object() {
+        // The rerun ledger as of now: experiments on the same variants since this one ran count too. A
+        // result read from its path keeps the ledger it holds: this machine's index is not its history.
+        if data["identity"].is_object() && file.is_none() {
             data["ledger"] = store::ledger::for_experiment(data["id"].as_str().unwrap_or(""), data["created"].as_str().unwrap_or(""), &data["identity"]);
         }
         if let Some(i) = attach_series(&mut data) {
@@ -91,8 +135,10 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let out = match args.get("out") {
         Some(p) => std::path::PathBuf::from(p),
-        None => dir.join(format!("report-{view}{}", if format == "pr" { ".pr.md".to_string() } else { format!(".{format}") })),
+        None => scratch.join(format!("report-{view}{}", if format == "pr" { ".pr.md".to_string() } else { format!(".{format}") })),
     };
+    // Markdown of a file named by its path goes to stdout alone, unless --out says where to write it.
+    let write = file.is_none() || args.get("out").is_some() || !matches!(format, "md" | "pr");
     if args.get("update-pr").is_some() && format != "pr" {
         return Err(Error::usage("--update-pr replaces an experiment's block in a pull request body: add --format pr"));
     }
@@ -102,7 +148,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let mut plain = None;
     if args.get("update-pr").is_some() && !args.has("no-card") {
         plain = Some(super::pr::block(&data));
-        let (card, files) = super::card::for_pr(&data, &dir)?;
+        let (card, files) = super::card::for_pr(&data, &scratch)?;
         data["card"] = card;
         images = files;
     }
@@ -114,14 +160,16 @@ pub fn run(args: &Args) -> Result<Output> {
         "pr" => super::pr::block(&data),
         _ => html(view, &data),
     };
-    write_whole(&out, body.as_bytes())?;
+    if write {
+        write_whole(&out, body.as_bytes())?;
+    }
     // The block between its markers in a pull request's body, the author's text around it untouched.
     if let Some(n) = args.get("update-pr") {
         // Only images the block names: gh appends any other attachment to the end of the body.
         let attach: Vec<std::path::PathBuf> = images.into_iter().filter(|p| p.file_name().and_then(|f| f.to_str()).is_some_and(|f| body.contains(&format!("./{f}")))).collect();
         let id = data["id"].as_str().unwrap_or(handle);
         let done = super::pr::update_pr(n, args.get("repo"), id, &body, args.has("force"), &attach, plain.as_deref())?;
-        let path = out.display().to_string();
+        let path = if write { out.display().to_string() } else { "no file (--out writes one)".to_string() };
         let how = match done.images {
             0 => "as text".to_string(),
             k => format!("with {k} image{}", if k == 1 { "" } else { "s" }),
@@ -133,17 +181,17 @@ pub fn run(args: &Args) -> Result<Output> {
         };
         return Ok(Output::new(text, json!({ "path": path, "bytes": body.len(), "pr": done.url, "images": done.images, "unchanged": done.unchanged, "seen": done.seen })));
     }
-    if args.has("open") {
+    if args.has("open") && write {
         open(&out.display().to_string());
     }
     let path = out.display().to_string();
     let size = super::fmt::bytes(body.len() as f64);
     // Markdown is for pasting: it goes to stdout, and the file's path to stderr.
     if format == "pr" || format == "md" {
-        if !args.json() {
+        if !args.json() && !args.has("quiet") && write {
             eprintln!("strobe: wrote {path} · {size}");
         }
-        return Ok(Output::new(body.clone(), json!({ "path": path, "bytes": body.len(), "markdown": body })));
+        return Ok(Output::new(body.clone(), json!({ "path": write.then_some(path), "bytes": body.len(), "markdown": body })));
     }
     Ok(Output::new(format!("{path} · {size}\n"), json!({ "path": path, "bytes": body.len() })))
 }
@@ -538,7 +586,19 @@ pub fn html(view: &str, data: &Value) -> String {
 }
 
 pub fn markdown(data: &Value) -> String {
-    let text = data["text"].as_str().map(str::to_string).unwrap_or_else(|| super::record::summary_text(data));
+    // A comparison's text is drawn again from its result, as its PR block and HTML are: today's digits
+    // and rendering, and the rerun ledger as of now (`run` refreshed it). Other results keep the text
+    // they printed (a check, a recording).
+    let text = if data["kind"] == "experiment" && data["series"].is_array() {
+        let mut t = super::bench::render(data);
+        // Another strobe measured it: its numbers are that strobe's, the words this one's.
+        if let Some(v) = data["env"]["strobe"].as_str().filter(|v| *v != env!("CARGO_PKG_VERSION")) {
+            t += &format!("\nmeasured by strobe {v}; this text drawn again by strobe {}\n", env!("CARGO_PKG_VERSION"));
+        }
+        t
+    } else {
+        data["text"].as_str().map(str::to_string).unwrap_or_else(|| super::record::summary_text(data))
+    };
     format!("```\n{}\n```\n", text.trim_end())
 }
 

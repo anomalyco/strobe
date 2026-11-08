@@ -6357,9 +6357,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // A batch's prepare that read what differs per case is said whether or not it went on to fail.
             batch::launch_hook_case(ctx)?;
             let r = r.map_err(|e| crate::runner::incomplete("prepare", "prepare", e, "", "fix the target's prepare in the bench file"))?;
-            if let Some(u) = r.get("url").and_then(Value::as_str) {
-                first = join_url(origin(&url), u);
-            }
+            first = first_page(&url, r.get("url").and_then(Value::as_str))?;
         }
         lap("prepare");
         prepared.set(true);
@@ -7572,7 +7570,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     ctx.warnings.push(validity::warn(
                         "HeadlessFrame",
                         format!(
-                            "{}: the frame after each headless run did {} of style and layout ({deferred_n:.0} layouts) its last step left: main.work ({}) counts it, {} {} not; pass {{ until: \"frame\" }} to that step, or {{ until: [selector, \"frame\"] }} to one that waits for an element, to time it",
+                            "{}: the frame after each headless run did {} of style and layout ({deferred_n:.0} layouts) its last step left: main.work ({}) counts it, {} {} not; pass {{ until: \"frame\" }} to that step, or {{ until: [selector, \"frame\"] }} to one that waits for an element, to time it ({{ until: [selector, \"animations\", \"frame\"] }} when the step starts a CSS animation or transition)",
                             s.label(),
                             fmt::value(deferred_ms, "ms"),
                             fmt::value(work_ms, "ms"),
@@ -8072,7 +8070,7 @@ fn power_keep(args: &Args) -> Result<bool> {
 /// What the page showed when a step failed: its URL and a screenshot saved with the experiment.
 fn snapshot(page: &Page, exp: &str, step: &str) -> String {
     let quick = Duration::from_secs(5);
-    let url = page.eval_timeout("location.href", quick).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "unresponsive".into());
+    let url = page.eval_timeout("location.href", quick).ok().and_then(|v| v.as_str().map(crate::target::web::short_url)).unwrap_or_else(|| "unresponsive".into());
     let shot = page.screenshot(quick).ok();
     let path = store::experiment_dir(exp).ok().map(|d| d.join(format!("failed-{step}-{}.png", store::new_id("shot").trim_start_matches("shot_"))));
     let anchor = anchor_shot(exp, step);
@@ -8289,6 +8287,8 @@ fn variant_url(v: &Variant, target: &Value) -> Result<String> {
     }
     match kind {
         "url" => Ok(target["href"].as_str().unwrap_or("about:blank").to_string()),
+        // A `url` function with nothing served names its own address after `prepare` (`first_page`).
+        "web" if v.base_url.is_none() && target["urlFunction"] == true => Ok(String::new()),
         "web" => {
             let base = v.base_url.clone().ok_or_else(|| Error::msg(format!("{}: no server for this variant (set serve in strobe.json)", v.role)))?;
             Ok(join_url(&base, target["url"].as_str().unwrap_or("/")))
@@ -8301,6 +8301,21 @@ fn variant_url(v: &Variant, target: &Value) -> Result<String> {
 fn origin(url: &str) -> &str {
     let start = url.find("://").map(|i| i + 3).unwrap_or(0);
     url[start..].find('/').map(|i| &url[..start + i]).unwrap_or(url)
+}
+
+/// The first page a target's `url` function named (`prepare` returns it): against the variant's server
+/// (`url`, the block's address before it), or with nothing served (`url` empty) an address of its own,
+/// such as a server `prepare` started on a port it picked.
+fn first_page(url: &str, named: Option<&str>) -> Result<String> {
+    match named {
+        Some(n) if !url.is_empty() => Ok(join_url(origin(url), n)),
+        Some(n) if ["http://", "https://", "file:"].iter().any(|p| n.starts_with(p)) => Ok(n.to_string()),
+        Some(n) => Err(Error::usage(format!(
+            "the target's url function returned {n:?}, a path, and strobe.json serves nothing it could be a path of: return an absolute address (the server prepare started), or set serve in strobe.json"
+        ))),
+        None if url.is_empty() => Err(Error::usage("the target's url function returned no address")),
+        None => Ok(url.to_string()),
+    }
 }
 
 fn join_url(base: &str, path: &str) -> String {
@@ -8473,11 +8488,15 @@ fn side_gap(c: &Value, target: &str) -> Option<(String, Option<String>)> {
 fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Option<&str>, pair: Option<(&str, &str)>) -> Result<Vec<Series>> {
     let filter = args.get("filter");
     let only_target = only.or(args.get("target"));
-    let fixed: BTreeMap<String, String> =
-        args.get("params").map(|p| p.split(',').filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))).collect()).unwrap_or_default();
     // `--params all`: every value, the `more` ones too.
-    let all = args.get("params").is_some_and(|p| p.split(',').any(|x| x.trim() == "all"));
+    let (all, fixed) = params_flag(args.get("params"))?;
     let params = describe["params"].as_object().cloned().unwrap_or_default();
+    if let Some(k) = fixed.keys().find(|k| !params.contains_key(*k)) {
+        return Err(Error::usage(format!(
+            "--params {k}: the bench file has no parameter {k} (it has {})",
+            if params.is_empty() { "none".to_string() } else { params.keys().cloned().collect::<Vec<_>>().join(", ") }
+        )));
+    }
     let mut combos: Vec<BTreeMap<String, Value>> = vec![BTreeMap::new()];
     for (k, values) in &params {
         // `{ run, more }`: `run` by default; `more` with `--params all`, or when `--params k=v` names one.
@@ -8492,12 +8511,10 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
             }
             v => v.as_array().cloned().unwrap_or_default(),
         };
-        let values: Vec<Value> = values.into_iter().filter(|v| fixed.get(k).is_none_or(|f| value_text(v) == *f)).collect();
-        if values.is_empty()
-            && let Some(f) = fixed.get(k)
-        {
-            return Err(Error::usage(format!("--params {k}={f}: not one of {k}'s values")));
+        if let Some(f) = fixed.get(k).and_then(|f| f.iter().find(|f| !values.iter().any(|v| value_text(v) == **f))) {
+            return Err(Error::usage(format!("--params {k}={f}: not one of {k}'s values ({})", values.iter().map(value_text).collect::<Vec<_>>().join(", "))));
         }
+        let values: Vec<Value> = values.into_iter().filter(|v| fixed.get(k).is_none_or(|f| f.contains(&value_text(v)))).collect();
         combos = combos
             .into_iter()
             .flat_map(|c| {
@@ -8522,7 +8539,9 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
         None if WebEngine::ALL.iter().any(|e| e.name() == engine(t)) => "page",
         None => engine(t),
     };
-    for (case, c) in describe["cases"].as_object().cloned().unwrap_or_default() {
+    // The bench file's own order (`caseOrder`), not the cases map's (sorted).
+    let cases = describe["cases"].as_object().cloned().unwrap_or_default();
+    for (case, c) in case_order(describe).into_iter().filter_map(|n| cases.get(&n).cloned().map(|c| (n, c))) {
         if filter.is_some_and(|f| !case_matches(f, &case)) {
             continue;
         }
@@ -8618,6 +8637,24 @@ fn case_metrics(list: &Value, primary: &str) -> Vec<String> {
     out
 }
 
+/// `--params`: `all` (every parameter's `more` values too) and `k=v` pairs. Values named for one key add
+/// up (`files=10,files=100`, or `--params` given twice, runs both, each crossed with the other keys'
+/// values, as `--filter` adds cases); any other token is a usage error.
+fn params_flag(flag: Option<&str>) -> Result<(bool, BTreeMap<String, std::collections::BTreeSet<String>>)> {
+    let mut all = false;
+    let mut fixed: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for t in flag.unwrap_or("").split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        match t.split_once('=') {
+            _ if t == "all" => all = true,
+            Some((k, v)) if !k.trim().is_empty() => {
+                fixed.entry(k.trim().to_string()).or_default().insert(v.trim().to_string());
+            }
+            _ => return Err(Error::usage(format!("--params {t}: give k=v (a parameter and one of its values), or all"))),
+        }
+    }
+    Ok((all, fixed))
+}
+
 /// Non-inferiority margins as fractions by metric, from `"2%"` or `2` (the primary's), or
 /// `"main.work=2%,cpu.wakes=5%"`, or `{ "main.work": "2%" }`.
 fn margins(v: &Value, primary: &str) -> std::result::Result<BTreeMap<String, f64>, String> {
@@ -8640,10 +8677,18 @@ fn margins(v: &Value, primary: &str) -> std::result::Result<BTreeMap<String, f64
                 out.insert(k.clone(), pct(x)?);
             }
         }
-        Value::String(s) if s.contains('=') => {
-            for part in s.split(',').filter(|p| !p.trim().is_empty()) {
-                let (k, x) = part.split_once('=').ok_or_else(|| format!("{part}: use metric=margin"))?;
-                out.insert(k.trim().to_string(), pct(&json!(x.trim()))?);
+        // A list (`--noworse` given twice adds to it): `metric=margin`, or a bare margin, the primary's.
+        Value::String(s) => {
+            let mut given: BTreeMap<&str, &str> = BTreeMap::new();
+            for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                let (k, x) = part.split_once('=').map_or((primary, part), |(k, x)| (k.trim(), x.trim()));
+                let m = pct(&json!(x))?;
+                if let Some(was) = out.insert(k.to_string(), m)
+                    && was != m
+                {
+                    return Err(format!("{k} has two margins ({} and {x}): give it one", given.get(k).copied().unwrap_or("?")));
+                }
+                given.insert(k, x);
             }
         }
         other => {
@@ -9593,6 +9638,15 @@ fn value_text(v: &Value) -> String {
     v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())
 }
 
+/// The bench file's case names in its own order (`caseOrder`; the cases map is sorted), else the map's.
+fn case_order(describe: &Value) -> Vec<String> {
+    let cases = describe["cases"].as_object();
+    match describe["caseOrder"].as_array() {
+        Some(a) => a.iter().filter_map(Value::as_str).filter(|c| cases.is_some_and(|o| o.contains_key(*c))).map(str::to_string).collect(),
+        None => cases.map(|o| o.keys().cloned().collect()).unwrap_or_default(),
+    }
+}
+
 /// `--filter`: comma-separated case names, each exact unless it holds `*` (a glob over the whole name).
 fn case_matches(filter: &str, case: &str) -> bool {
     filter.split(',').map(str::trim).filter(|f| !f.is_empty()).any(|f| glob(f, case))
@@ -9601,7 +9655,7 @@ fn case_matches(filter: &str, case: &str) -> bool {
 /// Which cases `--filter` picked and which it left out, before anything builds. Cases left out
 /// that start with an exact filter are named with the glob that would take them too.
 fn filter_report(describe: &Value, filter: &str) -> (String, Option<Error>) {
-    let cases: Vec<String> = describe["cases"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    let cases = case_order(describe);
     let (picked, left): (Vec<&String>, Vec<&String>) = cases.iter().partition(|c| case_matches(filter, c));
     let list = |v: &[&String]| v.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
     let near: Vec<&String> = left.iter().copied().filter(|c| filter.split(',').map(str::trim).any(|f| !f.contains('*') && !f.is_empty() && c.starts_with(f))).collect();
@@ -9943,12 +9997,23 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
     // when the build writes to one shared place (`{cache}`). Without a `build`, both run the profile's
     // or the target's executable.
     if is_native(target) || target["kind"] == "webview" {
-        // `native(path)` and `webview(path)` name a fixed executable: no build replaces it.
-        if !matches!(v.kind, Kind::Dir | Kind::Git(_)) || v.exe.is_some() || target["path"].is_string() {
+        if !matches!(v.kind, Kind::Dir | Kind::Git(_)) || v.exe.is_some() {
             return Ok(());
         }
         let build = config.get("build").map(crate::target::isolate::build_for_os).unwrap_or(Value::Null);
         let build = &build;
+        // `native(path)` and `webview(path)` name a fixed executable: no build replaces it. One that is not
+        // there, beside a build that would make the app, is a profile's job.
+        if let Some(path) = target["path"].as_str() {
+            if build["command"].is_string() && !Path::new(path).is_file() {
+                let kind = target["kind"].as_str().unwrap_or("native");
+                return Err(Error::usage(format!(
+                    "{path} does not exist: {kind}(path) names a fixed executable, which strobe.json's build never makes or replaces; for a {} variant built by that build, name the app profile instead: {kind}(\"<id>\") (strobe.json apps), whose build output each variant runs",
+                    if matches!(v.kind, Kind::Git(_)) { "git" } else { "folder" }
+                )));
+            }
+            return Ok(());
+        }
         if !build["command"].is_string() {
             return Ok(());
         }
@@ -9977,7 +10042,13 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
     if let Some(build) = config.get("build").filter(|b| b.is_object()) {
         build_variant(v.role, &root, &crate::target::isolate::build_for_os(build), None)?;
     }
-    let serve = config.get("serve").filter(|s| s.is_object()).ok_or_else(|| Error::usage("web targets need \"serve\" in strobe.json (a command with {port})"))?;
+    // A `url` function may name a page of its own (a server `prepare` started): nothing to serve then.
+    let Some(serve) = config.get("serve").filter(|s| s.is_object()) else {
+        if target["urlFunction"] == true {
+            return Ok(());
+        }
+        return Err(Error::usage("web targets need \"serve\" in strobe.json (a command with {port}), or a url function that returns an absolute address: web({ url: (ctx) => ctx.prepared.url })"));
+    };
     let port = free_port()?;
     let cmd = serve["command"].as_str().unwrap_or("").replace("{port}", &port.to_string());
     let cwd = root.join(serve["cwd"].as_str().unwrap_or("."));
@@ -10404,7 +10475,7 @@ fn aa_text(s: &Value) -> String {
     )
 }
 
-fn render(r: &Value) -> String {
+pub(crate) fn render(r: &Value) -> String {
     let aa = r["plan"]["aa"] == true;
     let mut out = String::new();
     let file = r["file"].as_str().map(|f| Path::new(f).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).unwrap_or_default();
@@ -10574,7 +10645,20 @@ fn render(r: &Value) -> String {
         let alpha = r["plan"]["alpha"].as_f64().unwrap_or(0.05);
         let looks: Vec<String> = r["plan"]["looks"].as_array().map(|a| a.iter().map(|l| l.to_string()).collect()).unwrap_or_default();
         if looks.len() > 1 {
-            out += &format!("  primary: {:.1}% intervals at planned looks ({} pairs), 95% overall (Pocock); others 95%\n", 100.0 * (1.0 - alpha), looks.join(", "));
+            // The secondaries' level as their intervals reached it (a signed-rank interval over n pairs has
+            // the coverage n allows, 96.1% at n = 8), as the PR block prints it.
+            let others = s["secondaries"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|c| c["exact"] != true && stats::kind_of(c) != VerdictKind::Refused)
+                .find_map(|c| c["confidence"].as_f64())
+                .filter(|x| *x > 0.0);
+            let others = others.map_or("95%".to_string(), |x| {
+                let p = 100.0 * x;
+                if (p - p.round()).abs() < 0.05 { format!("{p:.0}%") } else { format!("{p:.1}%") }
+            });
+            out += &format!("  primary: {:.1}% intervals at planned looks ({} pairs), 95% overall (Pocock); others {others}\n", 100.0 * (1.0 - alpha), looks.join(", "));
         }
         if s["primary"]["noworse"].is_number() {
             out += "  no worse: the primary's interval against its margin, not 0: \"no worse\" once its worse end is inside it, \"worse\" once its better end is beyond it; each one-sided, 2.5% overall\n";

@@ -18,9 +18,92 @@ const write = (message: object) => void socket.write(JSON.stringify(message) + "
 const file = path.resolve(process.argv[2] ?? "")
 const spec = (await import(pathToFileURL(file).href)).default
 if (!spec || typeof spec !== "object" || !spec.cases) throw new Error(`${file} must default-export bench({ targets, cases })`)
-for (const [name, c] of Object.entries(spec.cases) as [string, any][])
-  if (typeof c.run !== "function" && !(c.run && typeof c.run === "object") && !c.launch) throw new Error(`case ${name} needs run(ctx), run: { <target>: (ctx) => … }, or launch: { until }`)
-if (spec.setupKey !== undefined && typeof spec.setupKey !== "function") throw new Error(`setupKey must be a function of { case, target, params }, not ${typeof spec.setupKey}`)
+
+// The keys strobe reads, so a misspelt or misplaced one is an error, not a setting silently ignored
+// (a case's `setup` once let a held key type into the address bar for two runs).
+const KEYS: Record<string, string[]> = {
+  bench: ["targets", "params", "fixture", "setupKey", "setup", "reset", "teardown", "cases"],
+  case: ["primary", "metrics", "targets", "unsupported", "hero", "noworse", "expect", "gpuCache", "resetCheck", "resetPixels", "run", "reset", "timeout", "launch"],
+  launch: ["until", "milestones", "profile", "before", "inspect", "screen", "timeout"],
+}
+// A target's keys by kind (what `web()`, `native()` and the rest take, and `Side`'s).
+const SIDE = ["kind", "name", "cwd", "ui"]
+const PAGE = ["viewport", "scale", "engine", "headless", "emulate", "motion", "resetPixels", "prepare", "teardown", "expect"]
+const APP = ["home", "viewport", "gpuCache", "expect", "args", "env", "files", "motion"]
+const TARGET_KEYS: Record<string, string[]> = {
+  web: [...SIDE, "url", ...PAGE],
+  url: [...SIDE, "href", ...PAGE],
+  app: [...SIDE, "id", ...APP],
+  exe: [...SIDE, "path", "app", ...APP],
+  command: [...SIDE, "run", "env", "unset", "attach", "timeout", "build", "viewport", "motion"],
+  script: [...SIDE, "entry", "runtime", "env", "build"],
+  cli: [...SIDE, "run", "env", "build"],
+  native: [...SIDE, "app", "path", "home", "viewport", "args", "env", "files", "unset", "display", "gpuCache", "window", "expect", "resetPixels", "output", "motion"],
+  webview: [...SIDE, "app", "path", "home", "viewport", "gpuCache", "expect", "motion"],
+  tty: [...SIDE, "run", "cwd", "cols", "rows", "home", "files", "env", "unset", "build", "ignore"],
+}
+for (const [kind, keys] of Object.entries(TARGET_KEYS)) KEYS[`target ${kind}`] = keys
+// Where a key that belongs elsewhere goes.
+const MOVED: Record<string, Record<string, string>> = {
+  case: {
+    setup: "setup is the bench file's (bench({ setup }), once per block for every case): a case's own state goes at the start of its run, in its reset, or in the target's prepare",
+    teardown: "teardown is the bench file's (bench({ teardown })) or a target's",
+    params: "params are the bench file's (bench({ params }))",
+    until: "until is a launch's (launch: { until }) or a call's ({ until } on page.click and the like)",
+  },
+  bench: { run: "run is a case's (cases: { name: { run } })", primary: "primary is a case's", metrics: "metrics are a case's", launch: "launch is a case's" },
+}
+
+function distance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0]
+    row[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      const cur = row[j]
+      row[j] = Math.min(prev + (a[i - 1].toLowerCase() === b[j - 1].toLowerCase() ? 0 : 1), row[j - 1] + 1, cur + 1)
+      prev = cur
+    }
+  }
+  return row[b.length]
+}
+
+// Unknown keys of `obj` (what `where` names), with the nearest known one or where the key belongs.
+function unknownKeys(obj: any, kind: string, where: string): string[] {
+  if (!obj || typeof obj !== "object") return []
+  return Object.keys(obj)
+    .filter((k) => !KEYS[kind].includes(k))
+    .map((k) => {
+      const moved = MOVED[kind]?.[k]
+      if (moved) return `${where} has ${k}: ${moved}`
+      const near = KEYS[kind].map((n) => [distance(k, n), n] as const).filter(([d]) => d <= 1 + Math.floor(k.length / 4)).sort((a, b) => a[0] - b[0])[0]
+      return `${where} has no key ${k}${near ? ` (did you mean ${near[1]}?)` : ""}; it takes ${KEYS[kind].join(", ")}`
+    })
+}
+
+// The bench file's shape, checked when strobe asks what it holds (`describe`): an error there is the file's (usage).
+function validate() {
+  const problems = unknownKeys(spec, "bench", "bench({ … })")
+  for (const [name, t] of Object.entries(spec.targets ?? {}) as [string, any][]) {
+    if (!t || typeof t !== "object" || !TARGET_KEYS[t.kind]) {
+      problems.push(`target ${JSON.stringify(name)} is no target: make it with ${Object.keys(TARGET_KEYS).map((k) => `${k}(…)`).join(", ")}`)
+      continue
+    }
+    // A key the constructor set to undefined (an option not given) is no key of the file's.
+    problems.push(...unknownKeys(Object.fromEntries(Object.entries(t).filter(([, v]) => v !== undefined)), `target ${t.kind}`, `target ${JSON.stringify(name)} (${t.kind})`))
+  }
+  for (const [name, c] of Object.entries(spec.cases) as [string, any][]) {
+    if (!c || typeof c !== "object") {
+      problems.push(`case ${name} is ${c === null ? "null" : typeof c}, not { primary, run } or { launch }`)
+      continue
+    }
+    problems.push(...unknownKeys(c, "case", `case ${JSON.stringify(name)}`))
+    if (c.launch && typeof c.launch === "object") problems.push(...unknownKeys(c.launch, "launch", `case ${JSON.stringify(name)}'s launch`))
+    if (typeof c.run !== "function" && !(c.run && typeof c.run === "object") && !c.launch) problems.push(`case ${name} needs run(ctx), run: { <target>: (ctx) => … }, or launch: { until }`)
+  }
+  if (spec.setupKey !== undefined && typeof spec.setupKey !== "function") problems.push(`setupKey must be a function of { case, target, params }, not ${typeof spec.setupKey}`)
+  if (problems.length) throw new Error(problems.join("\n"))
+}
 
 // A target's adapter (`ui`): `@name` in a selector is its entry there, and `ctx.ui.<name>` its
 // selector or its step bound to the hook's context (SPEC §9.10).
@@ -173,7 +256,12 @@ const page = {
   waitFor: (selector: unknown, o = {}) => driver("waitFor", alias(selector), opts(o)),
   idle: (o = {}) => driver("idle", o),
   wait: (ms: number) => driver("wait", ms),
-  eval: (fn: Function, ...args: unknown[]) => driver("eval", fn.toString(), ...args),
+  // A string is no function: Playwright's evaluate takes an expression, strobe's eval a function it calls
+  // with `args` (a string would be called, "(...) is not a function").
+  eval: (fn: Function, ...args: unknown[]) => {
+    if (typeof fn !== "function") return Promise.reject(new Error(`page.eval takes a function, not a ${typeof fn}: page.eval(() => ${typeof fn === "string" && fn.length <= 60 ? fn : "…"}) runs it in the page`))
+    return driver("eval", fn.toString(), ...args)
+  },
 }
 
 const state: {
@@ -419,6 +507,7 @@ function plain(value: any): any {
 }
 
 function describe() {
+  validate()
   const targets = Object.fromEntries(
     Object.entries(spec.targets ?? {}).map(([name, t]: [string, any]) => [
       name,
@@ -427,6 +516,8 @@ function describe() {
         ...plain(t),
         expect: expectOf(plain(t.expect)),
         url: typeof t.url === "function" ? "/" : t.url,
+        // A `url` function names the first page after `prepare`: an absolute address needs nothing served.
+        ...(typeof t.url === "function" ? { urlFunction: true } : {}),
         prepare: !!t.prepare || typeof t.url === "function",
         teardown: !!t.teardown,
         ui: Object.fromEntries(Object.entries(t.ui ?? {}).map(([k, v]) => [k, typeof v === "function" ? { step: true } : v])),
@@ -466,7 +557,8 @@ function describe() {
       },
     ]),
   )
-  return { file, targets, params: spec.params ?? {}, cases, setup: !!spec.setup, setupKey: typeof spec.setupKey === "function", teardown: !!spec.teardown, fixture: spec.fixture && plain(spec.fixture) }
+  // `cases` reaches strobe as a JSON object, whose keys it holds sorted: `caseOrder` is the file's order.
+  return { file, targets, params: spec.params ?? {}, cases, caseOrder: Object.keys(spec.cases), setup: !!spec.setup, setupKey: typeof spec.setupKey === "function", teardown: !!spec.teardown, fixture: spec.fixture && plain(spec.fixture) }
 }
 
 // Playwright, when it is installed next to the bench file: a prepare that uses only ctx.addInitScript and

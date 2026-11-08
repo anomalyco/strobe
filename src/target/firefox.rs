@@ -488,7 +488,7 @@ impl Page {
     pub fn navigate(&self, url: &str, timeout: Duration) -> Result<()> {
         self.bidi.send_timeout("browsingContext.navigate", json!({ "context": self.context, "url": url, "wait": "complete" }), timeout).map_err(|e| match e.code {
             124 => e,
-            _ => Error::unreachable(format!("navigate {url}: {}", e.message)),
+            _ => Error::unreachable(format!("navigate {}: {}", super::web::short_url(url), e.message)),
         })?;
         Ok(())
     }

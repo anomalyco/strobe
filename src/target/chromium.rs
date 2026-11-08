@@ -711,7 +711,7 @@ impl Page {
         let rx = self.cdp.events();
         let r = self.send("Page.navigate", json!({ "url": url }))?;
         if let Some(err) = r.get("errorText").and_then(Value::as_str).filter(|e| !e.is_empty()) {
-            return Err(Error::unreachable(format!("navigate {url}: {err}")));
+            return Err(Error::unreachable(format!("navigate {}: {err}", super::web::short_url(url))));
         }
         wait_event(&rx, "Page.loadEventFired", Some(&self.session), timeout)?;
         Ok(())

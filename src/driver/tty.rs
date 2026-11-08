@@ -432,6 +432,7 @@ impl<'a> Driver<'a> {
         match u.as_str() {
             Some("idle") => self.idle(after, t),
             Some("frame") => self.tty.first_change(after, Instant::now() + t).map(|_| ()).ok_or_else(|| Error::timeout(format!("until: \"frame\": the grid did not change in {} s", t.as_secs()))),
+            Some("animations") => Err(Error::usage("until: \"animations\" waits for a page's running animations; a terminal has none: \"idle\" waits for the grid to hold still")),
             _ => self.locate(u, t).map(|_| ()),
         }
     }

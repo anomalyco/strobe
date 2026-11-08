@@ -533,6 +533,29 @@ pub(crate) const HELPER: &str = r#"window.__strobe ??= (() => {
     }, timeout)
     kick()
   })
+  // `until: "animations"`: until no animation that ends is running (CSS animations and transitions, Web
+  // Animations), in the document and every shadow root strobe found (`getAnimations()` of each: a document's
+  // leaves its shadow trees out), looked at again a frame after each set finished, since one may start the
+  // next. With none at first it looks once more a frame later: a transition the step's change starts begins
+  // at the next frame's style update. An endless one (a spinner) is never waited for.
+  s.animations = (timeout) => new Promise((resolve, reject) => {
+    const deadline = performance.now() + timeout
+    const ending = () => [...new Set([document, ...roots].flatMap((r) => r.getAnimations?.() ?? []))].filter((a) => a.playState === "running" && Number.isFinite(a.effect?.getComputedTiming?.().endTime ?? Infinity))
+    const label = (a) => (a.animationName || a.transitionProperty || a.id || "an animation") + " on " + name(a.effect?.target)
+    const next = (f) => document.hidden ? setTimeout(f, 16) : raf(f)
+    let first = true
+    const look = () => {
+      const running = ending()
+      // Two frames: the next frame's style update has run when the second one's callbacks do.
+      if (!running.length && first) { first = false; return next(() => next(look)) }
+      first = false
+      if (!running.length) return resolve(true)
+      const left = deadline - performance.now()
+      if (left <= 0) return reject(new Error("animations still running after " + timeout + " ms: " + running.slice(0, 3).map(label).join("; ")))
+      Promise.race([Promise.allSettled(running.map((a) => a.finished)), new Promise((r) => setTimeout(r, left))]).then(() => next(look))
+    }
+    look()
+  })
   // What a run starts from that its input acts on (`ResetIncomplete`): the value of every visible, enabled and
   // writable text field, search box, combo box, spin button, slider and editing host (a password by its length),
   // and the state of every check box, radio button and switch, by its id, name or label (else its role), in the
@@ -836,7 +859,7 @@ pub(crate) fn each_until<T>(opts: &Value, timeout: Duration, mut one: impl FnMut
     };
     if list.is_empty() || list.iter().any(|u| u.is_array() || u.is_null()) {
         return Err(Error::usage(format!(
-            "until: {}: a list is the waits to run in order, at least one, each what until takes alone (\"idle\", \"frame\", a selector, an image, {{ pixels }}, {{ state }})",
+            "until: {}: a list is the waits to run in order, at least one, each what until takes alone (\"idle\", \"frame\", \"animations\", a selector, an image, {{ pixels }}, {{ state }})",
             Value::Array(list.clone())
         )));
     }
@@ -1194,14 +1217,16 @@ impl Driver {
         self.saw(&at);
         let Some(base) = self.base.borrow().clone() else {
             return Err(Error::usage(format!(
-                "page.goto({to:?}): a relative address on {at} (location.href), which has none to resolve it against, and strobe has seen no address of the page's own yet"
+                "page.goto({to:?}): a relative address on {} (location.href), which has none to resolve it against, and strobe has seen no address of the page's own yet",
+                crate::target::web::short_url(&at)
             ))
             .hint("give goto an absolute URL: page.goto(new URL(path, ctx.url).href), where ctx.url is the address strobe opened"));
         };
         let v = self.page.eval(&format!("(() => {{ try {{ return new URL({}, {}).href }} catch {{ return null }} }})()", json!(to), json!(base)))?;
-        v.as_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::usage(format!("page.goto({to:?}): no address relative to {base} (the page is at {at})")).hint("give goto an absolute URL: page.goto(new URL(path, ctx.url).href)"))
+        v.as_str().map(str::to_string).ok_or_else(|| {
+            Error::usage(format!("page.goto({to:?}): no address relative to {base} (the page is at {})", crate::target::web::short_url(&at)))
+                .hint("give goto an absolute URL: page.goto(new URL(path, ctx.url).href)")
+        })
     }
 
     /// The reads of the page since the last call, and the page's time in them (ms, its main thread's
@@ -1878,6 +1903,7 @@ impl Driver {
             None | Some(Value::Null) => Ok(Value::Bool(true)),
             Some(Value::String(u)) if u == "idle" => self.wait(&format!("__strobe.idle(300, {})", t.as_millis()), t),
             Some(Value::String(u)) if u == "frame" => self.call("__strobe.frame()"),
+            Some(Value::String(u)) if u == "animations" => self.wait(&format!("__strobe.animations({})", t.as_millis()), t),
             Some(u) => self.wait_for(&Self::sel(u)?, t),
         }
     }

@@ -38,6 +38,8 @@ export default bench({
     firefox: url(`data:text/html,${encodeURIComponent(page)}`, { viewport, engine: "firefox" }),
     webkit: url(`data:text/html,${encodeURIComponent(page)}`, { viewport, engine: "webkit" }),
   },
+  // `caret` measures a focused field: it is focused once, before the runs.
+  setup: ({ page, target, case: name }) => (name === "caret" ? page.click(target === "cocoa" ? "field" : "#field") : undefined),
   cases: {
     // Nine keys, each a sample when the field was at rest before it.
     type: {
@@ -57,7 +59,6 @@ export default bench({
     caret: {
       primary: "frames.presented.count",
       metrics: ["run.duration"],
-      setup: ({ page, target }) => page.click(target === "cocoa" ? "field" : "#field"),
       run: ({ page }) => page.wait(3000),
     },
   },

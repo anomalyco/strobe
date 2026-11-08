@@ -36,6 +36,17 @@ impl From<chromium::Page> for WebPage {
     }
 }
 
+/// A page's address as messages show it: a long one (a `data:` page holds the whole document, several
+/// KB) cut to its first 80 characters and its length, so the refusal around it stays readable.
+pub fn short_url(url: &str) -> String {
+    const KEEP: usize = 80;
+    if url.chars().count() <= KEEP + 40 {
+        return url.to_string();
+    }
+    let head: String = url.chars().take(KEEP).collect();
+    format!("{head}… ({} characters)", url.chars().count())
+}
+
 /// Why a page of `engine` cannot run here at all, known before anything builds: WebKit on Windows has
 /// no browser a person runs (Safari is macOS only, Playwright's WebKit build is a test shell), and
 /// Safari has no headless mode; a headed page on Linux with no display has no window to open.

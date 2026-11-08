@@ -3341,7 +3341,7 @@ function coherentDeltaStr(c, u) {
   const raw = fmtDelta(c.estimate, c, u);
   if (!finite(c.base) || !finite(c.head) || !finite(c.estimate)) return raw;
   if (c.decided || c.lo > 0 || c.hi < 0) return raw;
-  if (fmtVal(c.base, u) === fmtVal(c.head, u) && Math.abs(c.estimate) >= 0.01) return "~0%";
+  // Medians that print alike say nothing of the paired estimate: an undecided +1.4% stays +1.4%, never "~0%".
   if (c.head !== c.base && Math.sign(c.head - c.base) !== Math.sign(c.estimate) && Math.abs(c.estimate) >= 0.005) return "noisy";
   return raw;
 }

@@ -58,6 +58,7 @@ const TOOLS: &[Tool] = &[
             ),
             ("native", "exe:<path> is a native app (no browser engine): recorded from outside: CPU, thread wakes, IO, GPU, memory, the UI thread's CPU and what reached the screen"),
             ("app", "exe:<path>: the strobe.json app profile it borrows"),
+            ("windowless", "a native app that shows no window (a tray app, a service): no window waited for or placed, nothing on screen measured, as native(…, { window: false })"),
             ("headless", "draw off screen: attribution data stays meaningful, frame metrics do not"),
             ("wayland", "Linux: a native app (or with bench, the file's native targets) on a headless Wayland compositor strobe starts (sway); frames and input latency refused (Headless)"),
             (
@@ -189,7 +190,13 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "report",
         description: "Write a self-contained HTML (or markdown) report from a recording or experiment and return its path, to show in the Review pane.",
-        args: &[("handle", "rec_…, exp_… or ser_… (a tracked series); a .bench.ts file for its tracked history"), ("view", "experiment, recording or history (default from the handle)")],
+        args: &[
+            (
+                "handle",
+                "rec_…, exp_… or ser_… (a tracked series); a .bench.ts file for its tracked history; or the absolute path of a result.json or meta.json (read as it is, nothing written beside it)",
+            ),
+            ("view", "experiment, recording or history (default from the handle)"),
+        ],
         flags: &[
             ("format", "html (default), md, pr (an experiment's pull request block), card (its result as a 1200×630 PNG) or badge (an SVG badge)"),
             ("out", "where to write it"),
@@ -333,16 +340,8 @@ fn to_args(name: &str, input: &Value) -> Result<(Vec<String>, u64, Option<String
         }
         "report" => {
             let h = get("handle").ok_or_else(|| Error::usage("report needs handle"))?;
-            let view = get("view").unwrap_or_else(|| {
-                // A tracked series, or a bench file's tracked history (a port's card and badge).
-                if h.starts_with("ser_") || h.ends_with(".bench.ts") {
-                    "history".into()
-                } else if store::resolve(&h).is_ok_and(|d| store::is_experiment(&d)) {
-                    "experiment".into()
-                } else {
-                    "recording".into()
-                }
-            });
+            // A tracked series or a bench file's history, an experiment, a recording, or a result's file.
+            let view = get("view").unwrap_or_else(|| super::report::view_of(&h).into());
             a.push(view);
             a.push(h);
         }

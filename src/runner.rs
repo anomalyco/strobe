@@ -393,8 +393,13 @@ impl Runner {
         std::mem::replace(&mut *log, ActionLog { seed, ..ActionLog::default() })
     }
 
+    /// What the bench file holds. Its shape failing the runner's checks (a key strobe does not read, a
+    /// case without a run) is the file's error: usage, exit 2.
     pub fn describe(&mut self) -> Result<Describe> {
-        self.call("describe", json!({}), Duration::from_secs(60), |_, _| Err(Error::msg("no driver during describe")))
+        self.call("describe", json!({}), Duration::from_secs(60), |_, _| Err(Error::msg("no driver during describe"))).map_err(|e| match e.message.strip_prefix("describe: ") {
+            Some(why) if e.refusal.is_none() => Error::usage(why.to_string()),
+            _ => e,
+        })
     }
 
     /// Asks the runner to exit (its `close` hooks have run), up to 3 s, then ends its group.

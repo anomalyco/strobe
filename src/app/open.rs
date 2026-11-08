@@ -12,8 +12,15 @@ use std::path::{Path, PathBuf};
 
 pub fn run(args: &Args) -> Result<Output> {
     let handle = args.pos.first().ok_or_else(|| Error::usage("open <rec_…|exp_…[/head|base|<block>|<case>]>: a recording or an experiment's block in the Perfetto UI"))?;
+    if args.has("no-server") && args.has("no-browser") {
+        return Err(Error::usage("--no-server opens nothing, so --no-browser says nothing more: give one"));
+    }
     let (dir, id) = recording(handle)?;
     let p = prepare(&dir, &id)?;
+    // A scripted check of what the trace holds: built and read by trace_processor, which then ends.
+    if args.has("no-server") {
+        return Ok(Output::new(p.text, p.json));
+    }
     let mut text = p.text;
     let mut out = p.json;
     let browse = !args.has("no-browser");

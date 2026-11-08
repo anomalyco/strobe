@@ -278,8 +278,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                     _ => (Value::Null, Value::Null),
                 };
                 let r = ctx.runner.call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &init)?;
-                let base = variant_url(v, &target)?;
-                r.get("url").and_then(Value::as_str).map(|u| join_url(origin(&base), u)).unwrap_or(base)
+                super::first_page(&variant_url(v, &target)?, r.get("url").and_then(Value::as_str))?
             } else {
                 variant_url(v, &target)?
             };

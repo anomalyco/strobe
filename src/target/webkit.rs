@@ -760,7 +760,7 @@ impl Page {
     pub fn navigate(&self, url: &str, timeout: Duration) -> Result<()> {
         self.session.send("POST", "/url", Some(&json!({ "url": url })), timeout).map_err(|e| match e.code {
             124 => e,
-            _ => Error::unreachable(format!("navigate {url}: {}", e.message)),
+            _ => Error::unreachable(format!("navigate {}: {}", super::web::short_url(url), e.message)),
         })?;
         self.install(Duration::from_secs(30))
     }

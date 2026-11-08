@@ -844,3 +844,18 @@ Never put hand-measured timings, single recordings or `--check` smoke numbers in
 - A caller with no self time of its own sinks below the rows: read `callers by total time` under them, or `--sort total`.
 - `query <rec> summary` of a large recording is slow once, then cached beside it.
 - A `--batch` recording pools its cases: `--case <name>` keeps one case's runs (summary, frames, threads, gpu, layout, style, gc, actions).
+
+### Command line and bench file checks
+
+- A bench file key strobe does not read (in the file's options, a target, a case or a launch) is an error (exit 2), with the nearest key or where it belongs: a case's `setup` is the file's (`bench({ setup })`).
+- Cases run in the file's order. `page.eval` takes a function, not an expression string.
+- A `web()` target whose `url` function returns an absolute address (a server its `prepare` started) needs no `serve` in strobe.json.
+- `--filter`, `--target`, `--params`, `--metrics` and `--noworse` given twice add up; any other flag given twice with another value is an error.
+  - `--params n=1,n=3` runs both values (crossed with other keys'); a token that is not `k=v` or `all` is an error.
+  - `--noworse 2%,cpu.wakes=5%`: a bare margin is the primary's; two margins for one metric are an error.
+- `-q`: stdout holds only the handle (`rec_…`, `exp_…`); a run that failed says why on stderr and keeps its exit code.
+- `strobe report exp_…` (the view from the handle); `strobe report ./result.json --format pr` reads a result file as it is and writes nothing beside it.
+- `strobe open <rec> --no-server` builds and checks the trace, prints what it holds, and starts nothing.
+- `record app:<id>|exe:<path> --native --windowless`: a native app with no window. A windowed native record on a locked Windows session records CPU, memory and IO, and refuses frames and GPU use (`SessionLocked`).
+- `record pid:<n> --probes deep|waits` prints `cost` (also in `query <rec> summary`): the tree's context switches and CPU during the capture and just after it; `CaptureCost` warns when the rate was lower during it by more than a quarter.
+- `until: "animations"` (pages) waits until no CSS animation, transition or Web Animation that ends is running (shadow roots too, and one started on the next frame); `[selector, "animations", "frame"]` times a step that starts one.

@@ -67,16 +67,59 @@ pub fn main() -> i32 {
         Ok(out) => {
             if args.json() {
                 println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default());
-            } else if !args.has("quiet") || out.code != 0 {
+            } else if !args.has("quiet") {
                 print!("{}", out.text);
                 if !out.text.ends_with('\n') {
                     println!();
+                }
+            } else {
+                // Quiet: stdout is only the handles (a script reads them to query the run); a command that
+                // did not succeed says why on stderr.
+                let made = handles(&out.json);
+                for h in &made {
+                    println!("{h}");
+                }
+                if out.code != 0 {
+                    let why = if made.is_empty() { out.text.trim_end().to_string() } else { failure_summary(&out) };
+                    if !why.is_empty() {
+                        eprintln!("{why}");
+                    }
                 }
             }
             out.code
         }
         Err(e) => fail(&e, args.json()),
     }
+}
+
+/// The recordings and experiments a command made: its `id` (`rec_…`, `exp_…`), or `record --bench`'s
+/// recordings.
+fn handles(out: &Value) -> Vec<String> {
+    let made = |v: &Value| v.as_str().filter(|s| s.starts_with("rec_") || s.starts_with("exp_")).map(str::to_string);
+    let mut out_ids: Vec<String> = made(&out["id"]).into_iter().collect();
+    out_ids.extend(out["recordings"].as_array().into_iter().flatten().filter_map(|r| made(&r["recording"])));
+    out_ids
+}
+
+/// Why a command that made a recording or experiment exited non-zero, for `-q`'s stderr: what halted
+/// it, else its failed cases (a `FAIL` line and the indented lines under it), else its last line.
+fn failure_summary(out: &Output) -> String {
+    if let Some(why) = out.json["stopped"]["why"].as_str() {
+        return format!("strobe: {why}");
+    }
+    let mut failed = Vec::new();
+    let mut taking = false;
+    for l in out.text.lines() {
+        if l.starts_with("FAIL") {
+            taking = true;
+        } else if !l.starts_with(' ') {
+            taking = false;
+        }
+        if taking {
+            failed.push(l);
+        }
+    }
+    if failed.is_empty() { out.text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string() } else { failed.join("\n") }
 }
 
 pub fn dispatch(args: &Args) -> Result<Output> {
@@ -228,6 +271,8 @@ static PROGRESS: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 fn progress_mode(args: &Args) -> Result<()> {
     let mode = match args.get("progress").map(str::to_string).or_else(|| std::env::var("STROBE_PROGRESS").ok()).as_deref() {
+        // `-q`: no progress either, unless `--progress` asks for it.
+        _ if args.has("quiet") && args.get("progress").is_none() => "off",
         None | Some("stderr") => "stderr",
         // Never into `--json` output: one document on stdout.
         Some("stdout") if args.json() => "off",
