@@ -8305,6 +8305,17 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   stopped, leaked, run as blocks or refused is not compared in a family; a no-worse primary's
   repeated p is tested against its margin; `--resume` keeps the look that decided; a series'
   primary keeps `primary_pairs`; warm-up blocks before pair 0 for every series (§9.1).
+- **Surfaces audit (2026-11-08, cleanup/audit-surfaces)**: one result, every output, checked
+  against result.json by `scripts/dev/surfaces.ts` (`--all`: the text, `--format md|pr|card|badge`,
+  report.html rendered by a headless Chromium, schema/result.v1.json; 1,353 experiments on adais,
+  0 mismatches). Fixed: a higher-is-better `metric.<name>` read as a regression on the PR block,
+  card, badge and report.html (older results too, from the blocks' lines or the verdict); a passed
+  no-worse verdict read "Inconclusive" and "Confirmed worse" in report.html; its hero counted head's
+  wins as the pairs a regression trailed in (0 of 8 for 8 of 8); ties counted as worse pairs (8 of 8
+  for 5 of 8); a leak run's heading read `— more … per minute`; counted-apart cpu.instructions
+  counted 0 of 0 pairs; refused metrics labelled "sparse" or shown with numbers; report.html rounded
+  exact ties away from zero and printed bytes, rates and points otherwise than the text; the
+  primary's tallies and plots read the pairs past its look (`primary_pairs`).
 
 ## 25. Continuous benchmarking (`track`, `history`)
 
