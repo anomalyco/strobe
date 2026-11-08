@@ -2397,7 +2397,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     // went away, with one line, rather than failing each case after it.
     if r.is_err()
         && !stop_requested()
-        && let Some(gone) = crate::host::adb::lost()
+        && let Some(gone) = phone_lost(ctx)
     {
         return Err(gone);
     }
@@ -4819,7 +4819,17 @@ fn block_on_screen(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exec
 /// case it ran. Whatever runs a block again (a launch that failed and passes, a lock, a hidden window,
 /// busy CPUs) runs the whole launch again.
 fn launch_on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) -> Result<Launch> {
-    as_sides(ctx, cases, v, |ctx, cases| on_screen(ctx, cases, v, pair, x))
+    let r = as_sides(ctx, cases, v, |ctx, cases| on_screen(ctx, cases, v, pair, x));
+    // A failure on a phone that went away is that phone's error (255), in every mode: the bench ends at it.
+    match phone_lost(ctx) {
+        Some(gone) if !stop_requested() && failure_of(&r).is_some() => Err(gone),
+        _ => r,
+    }
+}
+
+/// The error `--mobile`'s phone was lost with (`adb::Device::lost`), once it went away.
+fn phone_lost(ctx: &Ctx) -> Option<Error> {
+    ctx.phone.as_ref().and_then(|p| p.device.lost())
 }
 
 /// What one launch did: a block per case it ran, in order (one case, or a chunk of them with `--check
@@ -5221,6 +5231,9 @@ fn retry_launch(ctx: &mut Ctx, s: &Series, v: &Variant, failed: Option<&Error>, 
     let Some(e) = failed else { return Ok(false) };
     if stop_requested() {
         return Err(stop_error());
+    }
+    if let Some(gone) = phone_lost(ctx) {
+        return Err(gone);
     }
     if *retries >= LAUNCH_RETRIES || !transient(e) {
         return Ok(false);

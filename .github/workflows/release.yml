@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           for f in strobe.exe strobew.exe; do
-            if grep -aqi 'vcruntime140\.dll' "target/release/$f"; then echo "::error::$f imports the Visual C++ runtime"; exit 1; fi
+            if grep -aqiE 'vcruntime140|api-ms-win-crt-' "target/release/$f"; then echo "::error::$f imports the Visual C++ runtime or the dynamic UCRT"; exit 1; fi
           done
       - name: Collect
         shell: bash

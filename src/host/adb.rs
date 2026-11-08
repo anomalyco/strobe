@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long a request may take before it fails.
@@ -36,17 +36,6 @@ const PACKET_CAP: usize = 1 << 20;
 const SYNC_CHUNK: usize = 64 * 1024;
 /// How long a device's shell has to run `true` after a command timed out, before the device counts as lost.
 const ANSWER: Duration = Duration::from_secs(5);
-
-/// The devices this strobe picked (`Adb::pick`), each with the error it was lost with: the server no longer
-/// had it (unplugged, an emulator that died) or its shell stopped answering. A lost device's requests fail
-/// at once with that error, so a run stops at the first (`lost`) instead of waiting out each request's
-/// timeout. Picking it again starts afresh.
-static WATCHED: Mutex<Vec<(String, Option<Error>)>> = Mutex::new(Vec::new());
-
-/// The device this strobe picked and then lost, as the error its requests now fail with (exit 255).
-pub fn lost() -> Option<Error> {
-    WATCHED.lock().unwrap_or_else(|e| e.into_inner()).iter().find_map(|(_, e)| e.clone())
-}
 
 /// The adb server strobe talks to.
 #[derive(Clone, Copy, Debug)]
@@ -131,6 +120,11 @@ pub struct Stat {
 pub struct Device {
     adb: Adb,
     pub serial: String,
+    /// A device a run picked (`Adb::pick`, shared by its clones): the error it was lost with, once the
+    /// server no longer had it (unplugged, an emulator that died) or its shell stopped answering. Its
+    /// requests then fail at once with that error, so the run stops at the first (`lost`) instead of
+    /// waiting out each request's timeout. None for a device used without picking it.
+    lost: Option<Arc<Mutex<Option<Error>>>>,
 }
 
 /// A forward (host to device) or reverse (device to host) that lasts while this value does. Each is
@@ -379,12 +373,7 @@ impl Adb {
         };
         let why = state_text(&one.state);
         match one.state {
-            State::Device => {
-                let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
-                watched.retain(|(s, _)| *s != one.serial);
-                watched.push((one.serial.clone(), None));
-                Ok(self.device(&one.serial))
-            }
+            State::Device => Ok(Device { lost: Some(Arc::default()), ..self.device(&one.serial) }),
             State::Unauthorized => Err(Error::new(3, format!("{} is unauthorized", one.serial)).hint("unlock the phone and accept the \"Allow USB debugging?\" prompt")),
             State::NoPermissions => Err(Error::new(3, format!("{} is {why}", one.serial)).hint("the OS refused the USB device: add a udev rule for it, then reconnect")),
             _ => Err(Error::unreachable(format!("{} is {why}", one.serial)).hint("reconnect it, or wait until it finishes booting")),
@@ -393,7 +382,7 @@ impl Adb {
 
     /// A device by serial, without checking it is attached.
     pub fn device(&self, serial: &str) -> Device {
-        Device { adb: *self, serial: serial.to_string() }
+        Device { adb: *self, serial: serial.to_string(), lost: None }
     }
 }
 
@@ -485,7 +474,7 @@ fn parse_list(text: &str, serial: Option<&str>) -> Vec<(String, String)> {
 impl Device {
     /// A connection switched to this device, ready for one service.
     fn transport(&self, timeout: Option<Duration>, what: &str) -> Result<Conn> {
-        if let Some(e) = self.lost_error() {
+        if let Some(e) = self.lost() {
             return Err(e);
         }
         let mut c = Conn::open(self.adb.port, timeout, &format!("{}: {what}", self.serial))?;
@@ -501,31 +490,31 @@ impl Device {
         }
     }
 
-    /// The error this device's requests fail with since it was lost (`WATCHED`).
-    fn lost_error(&self) -> Option<Error> {
-        WATCHED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| *s == self.serial).and_then(|(_, e)| e.clone())
+    /// The error this picked device's requests fail with since it was lost (exit 255), if it was.
+    pub fn lost(&self) -> Option<Error> {
+        self.lost.as_ref().and_then(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
     /// The error for this device gone, `why` being what showed it; kept as lost when it is a picked one.
     fn lose(&self, why: &str) -> Error {
         let e = Error::unreachable(format!("{} went away: {why}", self.serial))
             .hint("reconnect it, or restart the emulator, until `adb devices` lists it as `device`; `strobe bench --resume <exp>` then runs the cases a bench did not reach");
-        let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, lost)) = watched.iter_mut().find(|(s, _)| *s == self.serial) {
-            lost.get_or_insert_with(|| e.clone());
+        match &self.lost {
+            Some(l) => l.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(e).clone(),
+            None => e,
         }
-        e
     }
 
-    /// `e`, a request that failed, unless it timed out on a device whose shell does not run `true` within
-    /// `ANSWER` either: then the device is lost (an emulator that hung), not slow at one command.
-    fn timed_out(&self, e: Error) -> Error {
-        if e.code != 124 || self.lost_error().is_some() {
+    /// `e`, a request that failed, unless it timed out (124) or lost its connection (255) on a picked device
+    /// whose shell does not run `true` within `ANSWER` either: then the device is lost (an emulator that
+    /// hung or died mid-command), not slow at one command.
+    fn lost_or(&self, e: Error) -> Error {
+        if !matches!(e.code, 124 | 255) || self.lost.is_none() || self.lost().is_some() {
             return e;
         }
         match self.run_shell("true", ANSWER) {
             Ok(_) => e,
-            Err(_) => self.lost_error().unwrap_or_else(|| self.lose(&format!("its shell stopped answering ({})", e.message))),
+            Err(_) => self.lose(&format!("its shell stopped answering ({})", e.message)),
         }
     }
 
@@ -555,9 +544,9 @@ impl Device {
 
     /// `shell` that fails once `timeout` has passed. Its stdin is closed at once: a command that
     /// reads it sees its end. Its stdout and stderr hold at most 16 MiB each. A device that stopped
-    /// answering altogether is lost (`timed_out`).
+    /// answering altogether is lost (`lost_or`).
     pub fn shell_for(&self, cmd: &str, timeout: Duration) -> Result<ShellOutput> {
-        self.run_shell(cmd, timeout).map_err(|e| self.timed_out(e))
+        self.run_shell(cmd, timeout).map_err(|e| self.lost_or(e))
     }
 
     fn run_shell(&self, cmd: &str, timeout: Duration) -> Result<ShellOutput> {
@@ -598,9 +587,22 @@ impl Device {
     /// Forwards host `local` to device `remote` (`tcp:<port>`, `tcp:0` for a free port,
     /// `localabstract:<name>`, `localfilesystem:<path>`, …) until the tunnel is dropped.
     pub fn forward(&self, local: &str, remote: &str) -> Result<Tunnel> {
+        if let Some(e) = self.lost() {
+            return Err(e);
+        }
         let mut c = self.adb.conn(&format!("{}: forward {local} to {remote}", self.serial))?;
-        // On the host: one OKAY for the connection, one for the forward, then the port of `tcp:0`.
-        c.request(&format!("host-serial:{}:forward:{local};{remote}", self.serial))?;
+        // On the host: one OKAY for the connection, one for the forward, then the port of `tcp:0`. A first
+        // FAIL is the server's when it no longer has the device (`device '…' not found`, `device offline`),
+        // or the listener's (`cannot bind listener: …`).
+        c.send(&format!("host-serial:{}:forward:{local};{remote}", self.serial))?;
+        match &c.read_n(4)?[..] {
+            b"OKAY" => {}
+            b"FAIL" => {
+                let why = c.read_string()?;
+                return Err(if why.starts_with("device") { self.lose(&why) } else { Error::msg(format!("{}: {why}", c.ctx)) });
+            }
+            other => return Err(Error::msg(format!("{}: unexpected reply {:?}", c.ctx, String::from_utf8_lossy(other)))),
+        }
         c.status()?;
         let listen = if local == "tcp:0" { format!("tcp:{}", c.read_string()?.trim()) } else { local.to_string() };
         Ok(Tunnel::journaled(self, false, listen, remote))

@@ -182,11 +182,12 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
     let log_from = ctx.runner.log_len();
     let r = launch_on_screen(ctx, &cases, &variants[0], 0, &Exec { video: film, ..Exec::untimed(true, None) });
     let wall_ms = started.elapsed().as_secs_f64() * 1e3;
-    // A stop, an unlock wait that ran out, or a question the batch cannot answer ends the bench.
+    // A stop, an unlock wait that ran out, a question the batch cannot answer, or a phone that went away
+    // (its error, 255) ends the bench.
     if let Err(e) = &r
-        && (matches!(e.code, 2 | 124 | 130) || stop_requested())
+        && (matches!(e.code, 2 | 124 | 130) || stop_requested() || phone_lost(ctx).is_some())
     {
-        return Err(if e.code == 124 || e.code == 2 { e.clone() } else { stop_error() });
+        return Err(if e.code == 124 || e.code == 2 || (e.code == 255 && !stop_requested()) { e.clone() } else { stop_error() });
     }
     // The case ran a launch of its own because its key's launch hook read what differs per case.
     if alone {

@@ -104,8 +104,9 @@ export default bench({
         const y = await page.eval(() => scrollY)
         count("scrolled", Math.round(y))
         // 600, give or take the lead-in (601 at 20 Hz, 617 at 60 Hz) and the touch slop, and no fling past it. An
-        // emulated phone gives up little to the slop; a phone's Chrome (`--mobile`) keeps the first ~40-50 px of
-        // the finger's travel (552-561 px on an emulator's Chrome).
+        // emulated phone gives up little to the slop; a phone's Chrome (`--mobile`) scrolled 552-561 px on an
+        // emulator: Android's touch slop (8 dp) and Chrome's top bar (56 dp), which hides as the page scrolls
+        // and takes that much of the swipe, come off the travel. The tolerance stays here, in the fixture.
         if (y < 540 || y > 630) throw new Error(`the page scrolled ${y}px, not ~600: ${(await seen(page)).join(" ")}`)
       },
       reset,

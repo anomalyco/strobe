@@ -184,7 +184,7 @@ impl Drop for Launch {
     /// comes back anyway is known as strobe's and closed by the next launch.
     fn drop(&mut self) {
         // A phone that went away keeps its journal as it is: the next launch there closes the tab it names.
-        if adb::lost().is_some() {
+        if self.device.lost().is_some() {
             return;
         }
         if let Some(u) =
@@ -202,7 +202,7 @@ impl Drop for Launch {
             std::thread::sleep(Duration::from_millis(100));
         }
         std::thread::sleep(Duration::from_millis(500));
-        // Within 10 s: a phone that stopped answering is lost here (`adb::lost`), and the run ends at it.
+        // Within 10 s: a phone that stopped answering is lost here (`Device::lost`), and the run ends at it.
         let _ = self.device.shell_for(&format!("am force-stop {}", self.package), Duration::from_secs(10));
         self.write_journal(true);
     }
@@ -468,7 +468,8 @@ enum Socket {
 fn devtools(d: &Device, package: &str, wait: Duration) -> Result<Socket> {
     let until = Instant::now() + wait;
     loop {
-        let open = d.shell(&format!("grep -q '@{SOCKET}$' /proc/net/unix")).is_ok_and(|o| o.ok());
+        // A phone that went away fails here, at once, rather than read as a socket that never opened.
+        let open = d.shell(&format!("grep -q '@{SOCKET}$' /proc/net/unix"))?.ok();
         if open {
             let fwd = d.forward("tcp:0", &format!("localabstract:{SOCKET}"))?;
             let port = fwd.port().unwrap_or(0);
