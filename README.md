@@ -6,10 +6,10 @@ One tool for web, Electron and native apps on Windows, macOS and Linux. It measu
 
 ```ts
 // perf/scroll.bench.ts
-import { bench, url } from "@hona/strobe"
+import { bench, web } from "@hona/strobe"
 
 export default bench({
-  targets: { app: url("http://localhost:3000") },
+  targets: { app: web() }, // each variant's build, served as strobe.json's build and serve say
   cases: {
     scroll: {
       primary: "main.work",
@@ -44,5 +44,7 @@ strobe open rec_3f9a                                            # the whole reco
 ```
 
 `app:desktop` is a profile in your repo's `strobe.json`: how to build and launch the app in a throwaway home, so benches never touch your real data. `strobe status` says what your machine can measure and which permission is missing.
+
+Packages for Windows (x64, Arm64), macOS (Apple silicon, Intel) and Linux (x64, arm64).
 
 Design: [SPEC.md](SPEC.md)

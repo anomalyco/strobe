@@ -200,6 +200,7 @@ pub fn help(command: &str) -> String {
     }
     out += &format!("{row}\n");
     out += "Global    --json  -q  -h  -V  --progress stderr|stdout|off\n";
+    out += "Schema    result.json and --json: schema/result.v1.json (node_modules/@hona/strobe/schema/)\n";
     out
 }
 
@@ -384,9 +385,11 @@ pub const HELP: &str = "strobe — measure and explain performance
 Usage: strobe <command> [flags]
 
 Use
-  status                          environment, validity preflight, recent recordings and experiments
+  status [--fast] [--calibrate]   environment, validity preflight, recent recordings and experiments
   record <target> [--for 10s] [--probes timing|attribution|memory] [--headless] [--emulate mobile|touch] [--served <dir>] [--style]
                                   record a target; prints a handle (rec_…); exe:<path> --native for a native app
+                                  (--engine firefox|webkit: a page in that engine, from outside; --wayland: a native app
+                                  on strobe's headless Wayland compositor, Linux)
                                   (a native app: --gpu-cache warm|cold, its GPU shader caches from earlier recordings of it;
                                   --windowless: it shows no window (a tray app, a service), as native(…, { window: false }))
                                   (--video: also film it, timing perturbed: the window's screen, or a headless page's renderer)
@@ -483,7 +486,8 @@ Use
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
                                   console messages and uncaught errors, and a screenshot (exit 124 when it never loads);
                                   tty: the program on strobe's own terminal in an isolated home: its grid, the modes it set
-  top [--target <pid>] [--once]   live per-core load by CCD, processes with CPU, GPU, VRAM
+  top [--target <pid>] [--once] [--interval 1s] [--limit N] [--sort cpu|gpu|vram|mem]
+                                  live per-core load by CCD, processes with CPU, GPU, VRAM
   run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] -- <command> [args…]
                                   run your own harness as a bench block runs: the bench slot, the fastest power plan,
                                   pinned to the target's CPUs with other processes kept off them (--pin as for bench);
@@ -491,7 +495,8 @@ Use
   run --base \"<command>\" --head \"<command>\" [--aa] [--check] [--primary cpu.work] [--metrics metric.<name>,…] [--pairs auto|N]
       [--runs 5] [--noworse 2%] [--pin …] [--reserve-cpus auto|on|off] [--power high|keep] [--require-verdict]
                                   a paired A/B of two commands, as a bench (verdicts, report, PR block): each run starts the
-                                  command and waits for its exit; cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.*, and
+                                  command in the folder strobe runs in (a bench's cli() target: the variant's root) and waits
+                                  for its exit; cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.*, and
                                   metric.<name> from `strobe:metric <name>=<value>` lines it prints (--aa --head: an A/A)
 
 Setup
@@ -508,8 +513,14 @@ Setup
 
 Targets   https://… · a local page.html (or file:page.html) · app:<id> (a strobe.json profile, Electron or native) · exe:<path> [--app <id> | --native]
           · cdp:<port> · cdp:ws://… · file:<trace> (import) · pid:<n> · proc:<name> · tty:<command> (look)
+          · wir:[<selector>] (an open Safari tab on a USB-cabled iPhone: look, record)
 Variants  a directory · a git ref (git:<ref>) · app:<id> · exe:<path> · url:<href> · cmd:<line> (a cli() target's command)
 Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells that count stderr lines as a failure)
           (-q: no progress lines and no summary; a command that makes a recording or experiment prints its handle)
-Exit codes: 0 ok · 1 error · 2 usage · 3 needs a human · 4 refused (invalid) · 5 inconclusive · 124 timeout · 255 unreachable
+          (--filter, --target, --params, --metrics, --noworse, --skip given twice add up; any other flag
+          given twice with another value is a usage error)
+Schema    result.json and --json: schema/result.v1.json (node_modules/@hona/strobe/schema/); strobe.json:
+          schema/strobe.v1.json
+Units     KB, MB and GB are binary: 2^10, 2^20 and 2^30 bytes
+Exit codes: 0 ok · 1 error · 2 usage · 3 needs a human · 4 refused (invalid) · 5 inconclusive · 124 timeout · 130 stopped · 255 unreachable
 ";

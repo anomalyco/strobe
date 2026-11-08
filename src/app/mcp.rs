@@ -67,7 +67,7 @@ const TOOLS: &[Tool] = &[
             ),
             (
                 "engine",
-                "a page's browser engine: chromium (default) or firefox (CPU, GPU, memory and OS frames, no trace; probes attribution runs Firefox's own profiler and about:memory; probes memory refuses)",
+                "a page's browser engine: chromium (default), firefox (CPU, GPU, memory and OS frames, no trace; probes attribution runs Firefox's own profiler and about:memory; probes memory refuses) or webkit (Safari headed on macOS, WPE headless on Linux; no attribution or memory probes)",
             ),
             (
                 "mobile",
@@ -111,7 +111,7 @@ const TOOLS: &[Tool] = &[
                 "with check: up to N run cases per launch (one prepare and setup), each held to the launch's start after its reset; a failing or dirty case ends its launch and the next case gets a fresh one",
             ),
             ("headless", "page targets in a headless browser (check and timed blocks): no display needed, runs through a locked session; frame, input-latency and GPU-use metrics refused (Headless)"),
-            ("engine", "page targets' browser engine: chromium or firefox; the file's targets of that engine, else every page target in it"),
+            ("engine", "page targets' browser engine: chromium, firefox or webkit; the file's targets of that engine, else every page target in it"),
             ("wayland", "Linux: the file's native targets on a headless Wayland compositor strobe starts per launch (sway): no display needed; frame and input-latency metrics refused (Headless)"),
             (
                 "mobile",
