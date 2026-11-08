@@ -826,9 +826,14 @@ engines and VRAM, the focused target's frames when attached. Same samplers as th
   trailing commas) as `mcp.strobe`, and cut or given `"oauth": false` in place; a `"strobe"`
   anywhere else is left alone.
 
-### 5.11 `strobe daemon` / `strobe mcp` / `strobe helper` (hidden)
+### 5.11 `strobe daemon` / `strobe mcp` / `strobe helper` / `strobe stats` (hidden)
 
-`daemon`: §16. `mcp`: the MCP server on stdio, for debugging. `helper`: §13.4.
+`daemon`: §16. `mcp`: the MCP server on stdio, for debugging. `helper`: §13.4. `stats`: known-answer
+checks of §9.3 without a bench: one JSON request a line on stdin (`{"op": "wilcoxon", "d": […]}`,
+`hl`, `theil_sen`, `compare` with `metric`, `pairs`, `bound` and `noworse`, `repeated_p`,
+`pairs_needed`, `pairs_for`, `family_min_pairs`, `pct`, `value`), one JSON answer a line on stdout,
+with the same code a bench runs; it reads and writes nothing else. `scripts/dev/stats-check.ts`
+feeds it synthetic pairs and checks the answers against brute force.
 
 ### 5.12 `strobe look`
 

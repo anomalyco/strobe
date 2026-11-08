@@ -17,6 +17,7 @@ pub mod query;
 pub mod record;
 pub mod report;
 pub mod run;
+pub mod statcheck;
 pub mod status;
 pub mod top;
 pub mod track;
@@ -86,6 +87,9 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     // Strictly read-only: it puts nothing back and makes no state folder.
     if args.command == "config" {
         return config::run(args);
+    }
+    if args.command == "stats" {
+        return statcheck::run(args);
     }
     // A strobe killed mid-run left the user on its power plan: put theirs back first. Not from a
     // command that only reads strobe's own files: a bench runs those as its commands, and they would
