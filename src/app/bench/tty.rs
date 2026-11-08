@@ -265,6 +265,9 @@ struct Run {
     end_mb: Option<f64>,
     /// A process of the program's set ended in a timed part: its CPU there went with it.
     cpu_lost: bool,
+    /// strobe's terminal reader's CPU over the run's timed parts and the cycle clock over them (both in
+    /// `host::tsc` units).
+    reader: (u64, u64),
 }
 
 /// One launch of a terminal program for its cases (one, or a chunk with `--check --batch`).
@@ -311,9 +314,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let cost = SelfCost::new(ctx.runner.pid());
     let lines = RefCell::new(launch::Lines::default());
     let watches = RefCell::new(EventWatches::default());
-    // The program's CPU at each edge of the run's untimed stretches, and the console host's.
+    // The program's CPU at each edge of the run's untimed stretches, the console host's, and strobe's
+    // terminal reader's with the cycle clock.
     let edges: RefCell<Vec<(super::super::record::Cycles, BTreeMap<u32, u64>)>> = RefCell::new(Vec::new());
     let host_edges: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+    let reader_edges: RefCell<Vec<(u64, Option<u64>)>> = RefCell::new(Vec::new());
     let pixels = x.pixels.clone();
     let home_dir = home.dir.clone();
     let serve = |op: &str, a: &Value| -> Result<Value> {
@@ -338,6 +343,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 }
                 edges.borrow_mut().push((cycles(pid, &set_home).0, ended(pid, &set_home)));
                 host_edges.borrow_mut().push(host_cycles(&tty));
+                reader_edges.borrow_mut().push((tty.reader_cycles(), host::tsc()));
                 if !start {
                     cost.resume();
                 }
@@ -376,7 +382,6 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let mut runs: Vec<Run> = Vec::new();
                 let mut warmup = super::block::Warmup::new(s, x);
                 let rt = s.run_timeout() + Duration::from_secs(10);
-                let (mut reader, mut span) = (0u64, 0u64);
                 while warmup.more(runs.len()) {
                     // Every run starts where the first did (`resetCheck`): the grid, less `ignore`.
                     let screen = fingerprint(&tty, &ignore);
@@ -395,6 +400,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     edges.borrow_mut().clear();
                     host_edges.borrow_mut().clear();
                     let ended0 = ended(pid, &set_home);
+                    reader_edges.borrow_mut().clear();
                     let c0 = cycles(pid, &set_home);
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
@@ -444,10 +450,16 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let ups: Vec<term::Update> = tty.updates(t0, t1).into_iter().filter(|u| in_timed(u.commit_ns)).collect();
                     let bytes: u64 = tty.bytes(t0, t1).saturating_sub(timed.untimed.iter().map(|g| tty.bytes(g.0, g.1.saturating_sub(1))).sum());
                     let end_mb = warmup.may_end(runs.len()).then(|| host::process_set(pid, Some(&set_home)).iter().map(|p| p.private_bytes).sum::<u64>() as f64 / (1024.0 * 1024.0));
-                    if warmup.measures(runs.len()) || warmup.first().is_none() {
-                        reader += r1.saturating_sub(r0);
-                        span += c1.1.zip(c0.1).map_or(0, |(b, a)| b.saturating_sub(a));
+                    // strobe's terminal reader over the run's timed parts (its readings at the same edges),
+                    // with the cycle clock's span over them.
+                    let mut re = reader_edges.take();
+                    if re.len() % 2 == 1 {
+                        re.push((r1, c1.1));
                     }
+                    let mut rs = vec![(r0, c0.1)];
+                    rs.extend(re);
+                    rs.push((r1, c1.1));
+                    let reader = rs.chunks(2).filter_map(|p| Some((p.get(1)?.0.saturating_sub(p[0].0), p.get(1)?.1?.checked_sub(p[0].1?)?))).fold((0u64, 0u64), |a, p| (a.0 + p.0, a.1 + p.1));
                     // The program's own counts and metrics from its event stream, by when they arrived.
                     let (ev_counts, app) = event_values(&events.between(t0, t1), &timed);
                     let mut counts = hooks.counts();
@@ -469,6 +481,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         timed,
                         end_mb,
                         cpu_lost,
+                        reader,
                     });
                     driver.release_all()?;
                     if s.reset {
@@ -484,6 +497,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let first = warmup.first().unwrap_or(0);
                 let local = first..warmup.measured().end.clamp(first, runs.len());
                 let (strobe_pct, runner_pct) = cost.share(base + local.start..base + local.end);
+                // Over the measured runs' timed parts only: what the reader did in warmup or an untimed
+                // stretch stamped nothing the block keeps.
+                let (reader, span) = runs[local.clone()].iter().fold((0u64, 0u64), |a, r| (a.0 + r.reader.0, a.1 + r.reader.1));
                 let terminal_pct = (span > 0).then(|| 100.0 * reader as f64 / span as f64);
                 let mut steps = steps.clone();
                 steps.push(("runs".into(), lapped.elapsed().as_secs_f64() * 1e3));

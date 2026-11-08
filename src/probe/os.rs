@@ -161,7 +161,8 @@ pub struct Probe {
     nvml: Option<gpu::Nvml>,
     pub adapters: Vec<Adapter>,
     pub engines: Vec<String>,
-    pub nominal_mhz: Option<f64>,
+    /// Each logical CPU's nominal (base) frequency, by its index (`Samples::nominal_mhz`).
+    pub nominal_mhz: Vec<Option<f64>>,
     /// With `all`: PIDs that had a GPU context at the last tick (sorted).
     pub present: Vec<u32>,
     /// `all` asked for, without the every-process engine counters (Linux, macOS): `tick` reads its `pids` instead.
@@ -185,7 +186,7 @@ impl Probe {
         let wide = all;
         let all = if all { gpu::Engines::open() } else { None };
         let every = wide && all.is_none() && cfg!(not(windows));
-        let mut p = Probe { cpus: Cpus::open(), all, kmt, nvml, adapters, engines, nominal_mhz: None, present: Vec::new(), every, last_vram: Vec::new(), last_ns: 0, slow_ns: 0 };
+        let mut p = Probe { cpus: Cpus::open(), all, kmt, nvml, adapters, engines, nominal_mhz: Vec::new(), present: Vec::new(), every, last_vram: Vec::new(), last_ns: 0, slow_ns: 0 };
         p.tick(pids);
         p
     }
@@ -301,8 +302,9 @@ impl Cpus {
         busy
     }
 
-    /// Collects the PDH counters; the reading covers the `dt` since the last collection.
-    fn freq(&mut self, dt: u64, nominal: &mut Option<f64>) -> Option<Freq> {
+    /// Collects the PDH counters; the reading covers the `dt` since the last collection. Each CPU's
+    /// nominal frequency goes in `nominal` at its index: a hybrid CPU's cores differ.
+    fn freq(&mut self, dt: u64, nominal: &mut Vec<Option<f64>>) -> Option<Freq> {
         #[cfg(target_os = "linux")]
         if self.pdh.is_none() {
             return linux_freq(dt, nominal);
@@ -314,36 +316,45 @@ impl Cpus {
         for (counter, out) in [(p.perf, &mut f.perf), (p.util, &mut f.util)] {
             p.q.each(counter, flags, |n, v| {
                 if let Some(i) = cpu_index(n) {
-                    if out.len() <= i {
-                        out.resize(i + 1, 0.0);
-                    }
-                    out[i] = v as f32;
+                    set_at(out, i, v as f32, f32::NAN);
                 }
             });
         }
         p.q.each(p.freq, flags, |n, v| {
-            if cpu_index(n).is_some() && v > 0.0 {
-                *nominal = Some(v);
+            if let Some(i) = cpu_index(n).filter(|_| v > 0.0) {
+                set_at(nominal, i, Some(v), None);
             }
         });
         (dt > 0).then_some(f)
     }
 }
 
-/// Linux: each CPU's average frequency over the last interval the kernel measured
-/// (`cpuinfo_avg_freq`, from the APERF/MPERF counters, kernel 6.13+) against its base frequency. Older
-/// kernels only give an instantaneous `scaling_cur_freq`, which is not an average: no reading then.
+/// Linux: each online CPU's average frequency over the last interval the kernel measured
+/// (`cpuinfo_avg_freq`, from the APERF/MPERF counters, kernel 6.13+) against its own base frequency,
+/// at its CPU number (an offline CPU, or one strobe may not run on, keeps its place). Older kernels
+/// only give an instantaneous `scaling_cur_freq`, which is not an average: no reading then.
 #[cfg(target_os = "linux")]
-fn linux_freq(dt: u64, nominal: &mut Option<f64>) -> Option<Freq> {
+fn linux_freq(dt: u64, nominal: &mut Vec<Option<f64>>) -> Option<Freq> {
     let read = |cpu: usize, f: &str| std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/{f}")).ok().and_then(|s| s.trim().parse::<f64>().ok());
-    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let mut f = Freq { dt_ns: dt, ..Freq::default() };
-    for cpu in 0..n {
-        let (avg, base) = (read(cpu, "cpuinfo_avg_freq")?, read(cpu, "base_frequency").or_else(|| read(cpu, "cpuinfo_max_freq"))?);
-        *nominal = Some(base / 1000.0);
-        f.perf.push((100.0 * avg / base) as f32);
+    let mut any = false;
+    for cpu in host::linux::online_cpus() {
+        // One CPU that cannot say now (`EAGAIN` from a core deep in an idle state) is a hole in this
+        // reading, not the end of every CPU's.
+        let (Some(avg), Some(base)) = (read(cpu, "cpuinfo_avg_freq"), read(cpu, "base_frequency").or_else(|| read(cpu, "cpuinfo_max_freq"))) else { continue };
+        set_at(nominal, cpu, Some(base / 1000.0), None);
+        set_at(&mut f.perf, cpu, (100.0 * avg / base) as f32, f32::NAN);
+        any = true;
     }
-    (dt > 0).then_some(f)
+    (dt > 0 && any).then_some(f)
+}
+
+/// Puts `v` at index `i`, growing `out` with `hole` (a CPU without a reading: NaN, None) as needed.
+fn set_at<T: Clone>(out: &mut Vec<T>, i: usize, v: T, hole: T) {
+    if out.len() <= i {
+        out.resize(i + 1, hole);
+    }
+    out[i] = v;
 }
 
 /// `0,12` → 12 (group * 64 + number); `_Total` and `0,_Total` → None.
@@ -440,7 +451,7 @@ fn run(root: u32, home: Option<std::path::PathBuf>, interval: Duration, stop: mp
         tree_refresh_ms: (root != 0).then_some(refresh.as_secs_f64() * 1e3),
         root,
         interval_ms: interval.as_millis() as u64,
-        nominal_mhz: probe.nominal_mhz,
+        nominal_mhz: std::mem::take(&mut probe.nominal_mhz),
         gpu_available: probe.gpu_available(),
         gpu_unreadable: probe.gpu_unreadable().to_vec(),
         devices: probe.devices().to_vec(),
@@ -456,8 +467,9 @@ pub struct Samples {
     /// Root PID of the tracked process set; 0 = none (CPUs, devices and strobe itself only).
     pub root: u32,
     pub interval_ms: u64,
-    /// Nominal (base) CPU frequency; a CPU's MHz is `nominal_mhz * perf / 100`.
-    pub nominal_mhz: Option<f64>,
+    /// Each logical CPU's nominal (base) frequency, by its index (None: unread); a CPU's MHz is its
+    /// `nominal_mhz * perf / 100`. A hybrid CPU's kinds of core have their own.
+    pub nominal_mhz: Vec<Option<f64>>,
     /// False when no per-process GPU source opened (then GPU fields are None, not 0).
     pub gpu_available: bool,
     /// Tree PIDs whose GPU statistics could not be opened: GPU sums exclude them.
@@ -553,7 +565,8 @@ fn add(acc: &mut Vec<(f64, f64)>, values: &[f32], w: f64) {
     if acc.len() < values.len() {
         acc.resize(values.len(), (0.0, 0.0));
     }
-    for (a, &v) in acc.iter_mut().zip(values) {
+    // A CPU without a reading (NaN) adds nothing to its average.
+    for (a, &v) in acc.iter_mut().zip(values).filter(|(_, v)| v.is_finite()) {
         a.0 += w * v as f64;
         a.1 += w;
     }
@@ -620,7 +633,13 @@ impl Samples {
         s.covered_ms = total / 1e6;
         let avg = |acc: &Vec<(f64, f64)>, i: usize| acc.get(i).filter(|a| a.1 > 0.0).map(|a| a.0 / a.1);
         s.cores = (0..busy.len().max(perf.len()))
-            .map(|i| CoreAvg { cpu: i as u32, busy_pct: avg(&busy, i), util_pct: avg(&util, i), perf_pct: avg(&perf, i), mhz: self.nominal_mhz.zip(avg(&perf, i)).map(|(n, p)| n * p / 100.0) })
+            .map(|i| CoreAvg {
+                cpu: i as u32,
+                busy_pct: avg(&busy, i),
+                util_pct: avg(&util, i),
+                perf_pct: avg(&perf, i),
+                mhz: self.nominal_mhz.get(i).copied().flatten().zip(avg(&perf, i)).map(|(n, p)| n * p / 100.0),
+            })
             .collect();
         let adapter_name = |i: u16| self.adapters.get(i as usize).map(|a| a.name.clone()).unwrap_or_else(|| format!("adapter {i}"));
         let mut by_adapter: BTreeMap<u16, (f64, BTreeMap<String, f64>)> = BTreeMap::new();

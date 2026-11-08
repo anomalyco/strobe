@@ -351,10 +351,21 @@ pub struct ProcInfo {
 pub struct ThreadInfo {
     pub pid: u32,
     pub tid: u32,
-    /// Context switches so far: each time the thread was switched in to run (it wraps at 2^32).
-    pub switches: u32,
+    /// When the thread (macOS: the process, for its row) started, in the OS's own unit: with `pid`
+    /// and `tid`, which thread this is, as the OS hands a reused id to a new thread.
+    pub born: u64,
+    /// Context switches so far: each time the thread was switched in to run (`switches_since`). None
+    /// where the OS stopped counting (macOS holds a process's count at 2^31 - 1).
+    pub switches: Option<u64>,
     /// Kernel + user time, in ns, in clock ticks.
     pub cpu_ns: u64,
+}
+
+/// The context switches between two counts of one thread (the same `born`). Windows counts them in
+/// 32 bits, which wrap (a thread cannot switch 2^32 times between two snapshots); elsewhere the
+/// count is 64-bit.
+pub fn switches_since(earlier: u64, now: u64) -> u64 {
+    if cfg!(windows) { u64::from((now as u32).wrapping_sub(earlier as u32)) } else { now.saturating_sub(earlier) }
 }
 
 /// The threads of `pids` (sorted) and each process's IO bytes so far (pid, read, written), from one

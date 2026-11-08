@@ -273,11 +273,12 @@ impl Top {
     }
 
     fn cores(&self, tick: &Tick) -> (Vec<CoreRow>, Vec<GroupRow>) {
-        let mhz = |perf: Option<f64>| self.probe.nominal_mhz.zip(perf).map(|(n, p)| n * p / 100.0);
-        let pick = |v: Option<&Vec<f32>>, i: usize| v.and_then(|v| v.get(i)).map(|&x| x as f64);
+        // Each CPU's MHz from its own nominal frequency (a hybrid CPU's cores differ).
+        let mhz = |i: usize, perf: Option<f64>| self.probe.nominal_mhz.get(i).copied().flatten().zip(perf).map(|(n, p)| n * p / 100.0);
+        let pick = |v: Option<&Vec<f32>>, i: usize| v.and_then(|v| v.get(i)).map(|&x| x as f64).filter(|x| x.is_finite());
         let (perf, util) = (self.freq.as_ref().map(|f| &f.perf), self.freq.as_ref().map(|f| &f.util));
         let cores: Vec<CoreRow> =
-            tick.busy.iter().enumerate().map(|(i, &b)| CoreRow { cpu: i, busy_pct: b as f64, util_pct: pick(util, i), perf_pct: pick(perf, i), mhz: mhz(pick(perf, i)) }).collect();
+            tick.busy.iter().enumerate().map(|(i, &b)| CoreRow { cpu: i, busy_pct: b as f64, util_pct: pick(util, i), perf_pct: pick(perf, i), mhz: mhz(i, pick(perf, i)) }).collect();
         let vcache = self.topo.vcache().map(|g| g.mask);
         let mut groups: Vec<GroupRow> = self
             .topo
@@ -302,7 +303,7 @@ impl Top {
             let n = g.cpus.len() as f64;
             g.busy_pct = Some(g.cpus.iter().map(|&c| cores[c].busy_pct).sum::<f64>() / n);
             g.perf_pct = g.cpus.iter().map(|&c| cores[c].perf_pct).sum::<Option<f64>>().map(|s| s / n);
-            g.mhz = mhz(g.perf_pct);
+            g.mhz = g.cpus.iter().map(|&c| cores[c].mhz).sum::<Option<f64>>().map(|s| s / n);
         }
         (cores, groups)
     }

@@ -638,15 +638,18 @@ pub fn convert(raw: &Path, token: &str, runs: &[(String, u64, u64)], untimed: &[
                     break;
                 }
                 let next = times[i + 1..].iter().flatten().next().copied().unwrap_or(a + interval_ns);
-                let w = next.min(a + MAX_GAP_NS).min(*t1) - a.max(*t0);
+                // Its weight inside the run and outside the run's untimed stretches: a sample there, or
+                // the part of its weight there, is none of the run's.
+                let (from, to) = (a.max(*t0), next.min(a + MAX_GAP_NS).min(*t1));
+                let w = (to - from) - untimed.iter().map(|&(x, y)| ((y as i64).min(to) - (x as i64).max(from)).max(0)).sum::<i64>();
                 if w <= 0 {
                     continue;
                 }
                 let stack = t.samples.get(i, "stack").as_u64().map(|s| s as usize);
                 ids.push(sample_node(t, stack, idle, &mut p) as u64 + 1);
                 weights.push(w);
-                begin = begin.or(Some(a.max(*t0)));
-                if a >= *t0 {
+                begin = begin.or(Some(from));
+                if a >= *t0 && !untimed.iter().any(|&(x, y)| a >= x as i64 && a < y as i64) {
                     in_runs += 1;
                 }
             }
@@ -706,39 +709,58 @@ pub fn convert(raw: &Path, token: &str, runs: &[(String, u64, u64)], untimed: &[
             })
             .collect();
         for s in &spans {
-            let Some(w) = window_of(s.t0) else { continue };
+            // The run whose timed time the marker overlaps, and its part there: one that runs past the
+            // run's end, or into or out of an untimed stretch, counts only that part (an instant, where
+            // it is).
+            let Some((w, dur)) = windows.iter().enumerate().find_map(|(w, &(_, t0, t1))| {
+                let (from, to) = (s.t0.max(t0), s.t1.min(t1));
+                let part = (to - from) - untimed.iter().map(|&(x, y)| ((y as i64).min(to) - (x as i64).max(from)).max(0)).sum::<i64>();
+                if part > 0 { Some((w, part)) } else { (s.t1 <= s.t0 && window_of(s.t0) == Some(w)).then_some((w, 0)) }
+            }) else {
+                continue;
+            };
             let k = &windows[w].0;
-            let dur = (s.t1 - s.t0).max(0);
+            let at = s.t0.max(windows[w].1);
             let tid = t.tid.to_string();
+            // A collection counts in the run it began in, as a trace's do (a major one's slices are its
+            // time). A minor one begun before the run or in an untimed stretch keeps its timed part as
+            // time (a slice of no collection).
+            if matches!(s.name, "GCMajor" | "GCMinor") && window_of(s.t0) != Some(w) {
+                if s.name == "GCMinor" {
+                    gc.push(vec![cell(k), cell("GCSlice"), cell(ns(at)), cell(ns(dur)), cell(&tid), cell(1), None]);
+                }
+                continue;
+            }
             match s.name {
                 "Styles" => {
                     let forced = flushes.iter().filter(|f| f.0 <= s.t0 && s.t0 < f.1).find_map(|f| f.2.clone());
-                    layout.push(vec![cell(k), cell("UpdateLayoutTree"), cell(ns(s.t0)), cell(ns(dur)), cell(&tid), forced]);
-                    phases.push(vec![cell(k), cell("UpdateLayoutTree"), cell(ns(s.t0)), cell(ns(dur)), cell(s.data["elementsStyled"].as_u64().unwrap_or(0))]);
+                    layout.push(vec![cell(k), cell("UpdateLayoutTree"), cell(ns(at)), cell(ns(dur)), cell(&tid), forced]);
+                    phases.push(vec![cell(k), cell("UpdateLayoutTree"), cell(ns(at)), cell(ns(dur)), cell(s.data["elementsStyled"].as_u64().unwrap_or(0))]);
                 }
                 n if n.starts_with("Reflow") => {
                     let frames = marker_stack(s.data).map(|st| t.js_frames(st)).unwrap_or_default();
                     for f in &frames {
                         scripts.insert(f.0.clone());
                     }
-                    layout.push(vec![cell(k), cell("Layout"), cell(ns(s.t0)), cell(ns(dur)), cell(&tid), encode(&frames)]);
-                    phases.push(vec![cell(k), cell("Layout"), cell(ns(s.t0)), cell(ns(dur)), cell(0)]);
+                    layout.push(vec![cell(k), cell("Layout"), cell(ns(at)), cell(ns(dur)), cell(&tid), encode(&frames)]);
+                    phases.push(vec![cell(k), cell("Layout"), cell(ns(at)), cell(ns(dur)), cell(0)]);
                 }
-                "DisplayList" => phases.push(vec![cell(k), cell("Paint"), cell(ns(s.t0)), cell(ns(dur)), cell(0)]),
+                "DisplayList" => phases.push(vec![cell(k), cell("Paint"), cell(ns(at)), cell(ns(dur)), cell(0)]),
                 "GCMinor" => {
                     let n = &s.data["nursery"];
                     let freed = n["bytes_used"].as_f64().zip(n["bytes_tenured"].as_f64()).map(|(u, k)| (u - k).max(0.0));
-                    gc.push(vec![cell(k), cell("MinorGC"), cell(ns(s.t0)), cell(ns(dur)), cell(&tid), cell(1), freed.map(|f| f.to_string())]);
+                    gc.push(vec![cell(k), cell("MinorGC"), cell(ns(at)), cell(ns(dur)), cell(&tid), cell(1), freed.map(|f| f.to_string())]);
                 }
                 // A major collection runs in slices with the page between them: the slices are its pauses,
                 // the collection itself is counted once with no time of its own.
                 "GCMajor" => {
                     let tm = &s.data["timings"];
                     let freed = tm["allocated_bytes"].as_f64().zip(tm["post_heap_size"].as_f64()).map(|(a, p)| (a - p).max(0.0));
-                    gc.push(vec![cell(k), cell("MajorGC"), cell(ns(s.t0)), cell(0), cell(&tid), cell(1), freed.map(|f| f.to_string())]);
+                    gc.push(vec![cell(k), cell("MajorGC"), cell(ns(at)), cell(0), cell(&tid), cell(1), freed.map(|f| f.to_string())]);
                 }
-                "GCSlice" => gc.push(vec![cell(k), cell("GCSlice"), cell(ns(s.t0)), cell(ns(dur)), cell(&tid), cell(1), None]),
-                "LongTask" => {
+                "GCSlice" => gc.push(vec![cell(k), cell("GCSlice"), cell(ns(at)), cell(ns(dur)), cell(&tid), cell(1), None]),
+                // As a trace's long tasks: over 50 ms of the run's timed time.
+                "LongTask" if dur > crate::metrics::LONG_TASK_NS => {
                     long_tasks += 1;
                     long_max = long_max.max(dur);
                 }

@@ -228,7 +228,7 @@ fn parse(text: &str, pid: u32, t0: u64, deep: &mut Deep, index: &mut HashMap<Vec
             // (`Thread_282960: worker`) or the queue it runs (`DispatchQueue_1: com.apple.main-thread  (serial)`).
             let (id, label) = l.name.split_once(|c: char| c == ':' || c.is_whitespace()).unwrap_or((&l.name, ""));
             let id = id.trim_start_matches("Thread_").parse::<u64>().unwrap_or(0);
-            tid = id as u32;
+            tid = crate::host::macos::short_tid(id);
             // The first name a thread got stays: a later tree of it may name only a queue it ran.
             if !deep.threads.contains_key(&tid)
                 && let Some(name) = thread_name(pid, id, label)

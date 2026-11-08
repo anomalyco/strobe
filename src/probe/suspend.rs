@@ -49,6 +49,12 @@ impl Capture {
         if targets.pids().is_empty() {
             return Err(Error::msg(format!("process {} is not running", targets.root)));
         }
+        // Each sample stands for 2 ms of its thread's cycles: without the cycle clock as time there is
+        // no 2 ms to count (a rate of 0 sampled every thread that was listed as busy at every tick).
+        if let Some(why) = host::cycles_refused() {
+            return Err(Error::msg(format!("strobe's own stack sampler weighs each sample by its thread's CPU cycles, and {why}"))
+                .hint("install the deep helper (strobe up), whose kernel sampler needs no cycle clock"));
+        }
         let (stop, rx) = mpsc::channel();
         let thread = std::thread::Builder::new().name("strobe-stacks".into()).spawn(move || run(&targets, rx)).map_err(|e| Error::msg(format!("the stack sampler thread: {e}")))?;
         Ok(Capture { stop, thread: Some(thread) })
@@ -122,6 +128,9 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     }
     let hz = tsc_hz();
+    if !(hz.is_finite() && hz > 0.0) {
+        return Err(Error::msg("strobe's own stack sampler could not measure the cycle clock's rate, so it cannot tell 2 ms of a thread's CPU"));
+    }
     let per_sample = hz * INTERVAL_US as f64 / 1e6;
     let timer = unsafe { CreateWaitableTimerExW(std::ptr::null(), std::ptr::null(), 0x2, 0x1F0003) };
     let mut processes: HashMap<u32, Process> = HashMap::new();
@@ -560,10 +569,10 @@ fn finish(regs: &mut [u64; 17], mut r: [u64; 17], mem: &dyn Fn(u64) -> Option<u6
     true
 }
 
-/// The time stamp counter's rate (cycles per second), measured over 20 ms.
+/// The time stamp counter's rate (cycles per second), measured over 20 ms; 0 without one.
 fn tsc_hz() -> f64 {
-    let (c0, t0) = (host::tsc().unwrap_or(0), host::now_ns());
+    let (Some(c0), t0) = (host::tsc(), host::now_ns()) else { return 0.0 };
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let (c1, t1) = (host::tsc().unwrap_or(0), host::now_ns());
+    let (Some(c1), t1) = (host::tsc(), host::now_ns()) else { return 0.0 };
     (c1.saturating_sub(c0)) as f64 / ((t1 - t0) as f64 / 1e9)
 }

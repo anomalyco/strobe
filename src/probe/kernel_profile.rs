@@ -1,6 +1,7 @@
 //! Native CPU samples from the kernel's sampled profile (attribution blocks only, SPEC rule 3): a
-//! system logger session with the profile interrupt at 5 kHz (200 µs, as for JavaScript, §8.3),
-//! a stack walk on every sample, image loads (with the rundown of images already loaded), and
+//! system logger session with the profile interrupt asked at 5 kHz (200 µs, as for JavaScript, §8.3;
+//! the interval the system took is read back, and is what each sample weighs), a stack walk on every
+//! sample, image loads (with the rundown of images already loaded), and
 //! process starts so a child of the target counts from its first sample.
 //!
 //! Needs SeSystemProfilePrivilege, which only administrators hold, so it runs in the helper (§13.4).
@@ -36,28 +37,34 @@ const DEFAULT_100NS: u32 = 10_000;
 /// the profile interval goes back all the same: fields drop in order, the session before the interval.
 pub struct Capture {
     running: Running<Deep>,
-    _raised: Raised,
+    raised: Raised,
     t0: u64,
 }
 
-/// The system-wide sampled-profile interval, raised for a capture and put back when this drops.
-struct Raised(u32);
+/// The system-wide sampled-profile interval, raised for a capture and put back when this drops: the
+/// one before, and the one the system took (read back: the HAL may hold the profile timer to a rate
+/// of its own instead of the one asked, and every sample weighs it).
+struct Raised {
+    old: u32,
+    set: u32,
+}
 
 impl Raised {
     fn to(v: u32) -> Result<Raised> {
         let old = interval().unwrap_or(DEFAULT_100NS);
         set_interval(v)?;
-        Ok(Raised(old))
+        let set = interval().ok_or_else(|| Error::msg("the profile interval could not be read back after it was set, so the samples' weight is unknown"))?;
+        Ok(Raised { old, set })
     }
 }
 
-/// Puts the interval back only while it is still strobe's and no other strobe samples at it (that
-/// capture's weights assume 200 µs; it puts it back when it ends). An interval read while another
-/// strobe had raised it goes back to Windows' own.
+/// Puts the interval back only while it is still the one strobe set and no other strobe samples at
+/// it (that capture's weights assume it; it puts it back when it ends). An interval read while
+/// another strobe had raised it goes back to Windows' own.
 impl Drop for Raised {
     fn drop(&mut self) {
-        if interval() == Some(INTERVAL_100NS) && !etw::sessions().iter().any(|n| n.starts_with("strobe-stacks-")) {
-            let _ = set_interval(if self.0 == INTERVAL_100NS { DEFAULT_100NS } else { self.0 });
+        if interval() == Some(self.set) && !etw::sessions().iter().any(|n| n.starts_with("strobe-stacks-")) {
+            let _ = set_interval(if self.old == INTERVAL_100NS || self.old == self.set { DEFAULT_100NS } else { self.old });
         }
     }
 }
@@ -99,15 +106,26 @@ impl Capture {
             Ok(())
         };
         let running = Running::start(cfg, setup, move || Sampler::new(pids, waits))?;
-        Ok(Capture { running, _raised: raised, t0 })
+        Ok(Capture { running, raised, t0 })
     }
 
     pub fn stop(self) -> Result<Deep> {
         let t1 = crate::host::now_ns();
-        let Capture { running, _raised: raised, t0 } = self;
+        // The interval the samples came at: the one the system took, unless something changed it since.
+        let now = interval();
+        let Capture { running, raised, t0 } = self;
+        let set = raised.set;
         let result = running.stop();
         drop(raised);
         let (mut deep, stats) = result?;
+        if now != Some(set) {
+            return Err(Error::msg(format!(
+                "the system's sampled-profile interval changed during the capture ({} µs set, {} at its end): another profiler set it, so the samples' weight is unknown",
+                set as f64 / 10.0,
+                now.map_or("unreadable".to_string(), |v| format!("{} µs", v as f64 / 10.0))
+            )));
+        }
+        deep.interval_us = set as f64 / 10.0;
         deep.t0_ns = t0;
         deep.t1_ns = t1;
         deep.events_lost = stats.events_lost + stats.buffers_lost;
@@ -436,6 +454,7 @@ impl Handler for Sampler {
         let mut pids: Vec<u32> = self.pids.into_iter().collect();
         pids.sort_unstable();
         let waits = self.waits_on.then(|| pair_waits(self.sched, self.switch_walks, self.ready_walks, modules.clone(), self.freq));
+        // The interval the system took is set by `Capture::stop`.
         Deep { interval_us: INTERVAL_100NS as f64 / 10.0, modules, stacks, samples, pids, waits, ..Deep::default() }
     }
 }

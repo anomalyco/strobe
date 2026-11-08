@@ -1058,9 +1058,11 @@ a number of its own. A declared `phase.<name>` that no measured run entered is r
 On a locked session it is an offscreen metric, like `run.duration`.
 
 `span.<name>` is the app's own spans: the page's `performance.measure(name)` calls (pages and
-Electron apps) that start and end inside the run, as the time they cover per run (ms, timed, lower
-is better): overlapping measures of one name count once, as nested GC slices do for `main.gc`, and a
-run that measured none reads 0. A 0 ms measure counts as measured (a measure is an async slice; a
+Electron apps) that overlap the run, as the time they cover inside it per run (ms, timed, lower is
+better): a measure that ends after the run's end mark, or began before its start, counts up to that
+edge (it used to be dropped, so a measure that ended 1 µs late read 0 or `NoSpan`); overlapping
+measures of one name count once, as nested GC slices do for `main.gc`, and a run that measured none
+reads 0. A 0 ms measure counts as measured (a measure is an async slice; a
 mark is an instant on its thread's own track). The browser timestamps them (`blink.user_timing`,
 already in the lean trace set, so declaring one costs nothing), so the bench file still cannot
 invent a number. A declared span that no measured run's page measured is refused (`NoSpan`), as is
@@ -1079,7 +1081,11 @@ What strobe reads from a native app (§13.7), per run:
   inside the app's processes count too, and a handoff between two of its threads counts twice. From
   two `NtQuerySystemInformation(SystemProcessInformation)` snapshots around the run, a thread or
   process born in the run counting from zero; one that exits in the run takes its last wakes with it,
-  so the count is a lower bound then), `io.read` and `io.write` (bytes through read and write
+  so the count is a lower bound then. A thread is its id and its start (Windows' create time, Linux's
+  `stat` start, a macOS process's start): a thread under a reused id is another thread, from zero,
+  and Windows' 32-bit count wraps rather than reading as a reset (which billed a thread's whole
+  lifetime of CPU to one run). macOS holds a process's count at 2^31 − 1: past it `cpu.wakes` is
+  refused `NoCounter`, never 0/s), `io.read` and `io.write` (bytes through read and write
   calls, the same snapshots; a file mapped into memory and read or written through its pages and
   console IO are not counted),
   `gpu.process.3d` (3D engine time summed over every adapter the processes used: one that draws on
@@ -1399,6 +1405,13 @@ from 4.0 s to under 1 s per block. Renderer main-thread busy then comes from
 0.06 pp on every block checked). `--trace full` keeps the full set; `record` and attribution blocks
 always trace full.
 
+A trace whose buffer filled (200 MB; 1 GB for attribution and memory sets; Chromium's
+`Tracing.tracingComplete` says `dataLossOccurred`) is written and then refused `RunIncomplete`:
+Chromium drops what comes after, so the later runs' frames, tasks and marks are missing and every
+count from it would be short. It used to warn on stderr and keep the recording valid (a 20 s
+`record` of a page writing 20,000 user timing marks a frame lost its end mark: valid, with no
+`main.*` and no refusal).
+
 ### 8.2 Overhead
 
 Every experiment measures its timing overhead: one empty-probe block per variant (the case with
@@ -1618,7 +1631,9 @@ counter reads 0, not "unknown".
 
 **GPU compiles** (`gpu.compile`): the time the browser's GPU process spends creating pipelines
 (`DeviceBase::APICreate*Pipeline*`) and compiling shaders (`*Compile*`), per run, on any of its
-threads, outermost slices only so a compile inside a pipeline counts once. It reads the Dawn trace
+threads, outermost slices only so a compile inside a pipeline counts once, each cut to the run's
+timed time (the GPU process compiles on its own threads, across the run's end or an untimed
+stretch's edge: only the part inside counts, never the whole slice). It reads the Dawn trace
 category, on only for a series that declares it. A pipeline whose shaders come from the cache
 still costs its creation. The page's own threads never show this: a game's first frame once froze
 4.4 s here while its main thread was idle. `strobe query <rec> gpu` lists the GPU process's work by
@@ -1651,16 +1666,22 @@ string never takes part: `net.requests{/api/session/*/message}`. Firefox: WebDri
 context, the same rules; never Resource Timing's `transferSize` (zero across origins). WebKit: WebDriver
 Classic reports no requests, so `net.*` is refused `EngineUnsupported`.
 
-**Garbage collection** (`main.gc`): the summed duration of V8's top-level `V8.GC_*` slices on the
-renderer main thread in the run's span (a GC slice inside another counts once), the pauses a frame
-waits through. Concurrent marking on helper threads is not in it. An allocation fix shows here and in
+**Garbage collection** (`main.gc`): the time V8's `V8.GC_*` slices on the renderer main thread
+cover in the run's timed time (a GC slice inside another counts once, directly or under a slice of
+another name: the union of their spans, not their sum), the pauses a frame waits through. A slice
+across an edge counts its part inside (on the main thread none can be: strobe's marks are tasks
+there, as are the pauses). The one main-thread task that does cross an edge is strobe's own: the
+`Runtime.evaluate` task that writes the run's start (or end) mark begins before it and ends after,
+so its part after `t0` (before `t1`), a fraction of a millisecond, counts in `main.busy`. Concurrent marking on helper threads is not in it. An allocation fix shows here and in
 `main.work`; the attribution view `query <rec> gc` names the phases.
 
 **Layout shift** (`layout.shift`): the sum of `LayoutShift` scores in the run's span, from the
 trace's `loading` category. Shifts right after input count: a run starts with its input, and a
 tab that jumps after a click is what the metric is for. Attribution blocks of such a series keep
 the five largest shifts with the elements they moved (named over `DOM.describeNode` while the
-page is open), shown by `query <rec> shifts` and in the bench's why lines.
+page is open), shown by `query <rec> shifts` and in the bench's why lines: the shifts the metric
+sums, with its score (weighted for a frame's shift, as it is) and none from an untimed stretch (they
+once listed one there beside a `layout.shift` of 0).
 
 ### 8.5 OS and GPU sampling
 
@@ -1760,7 +1781,21 @@ otherwise the view says the page's renderer is not known, never the nearest by s
 middle and the end, a post-GC census (JS heap, DOM nodes; OS private bytes at the start only,
 since a snapshot inflates its process) and then a snapshot (S0, S1, S2). `query <rec> leaks` lists
 objects allocated between S0 and S1 that are alive in S2, by class, with retainer paths;
-`js.heap.growth` and `dom.nodes.growth` are per minute. `query <rec> heap` reads S2.
+`js.heap.growth` and `dom.nodes.growth` are per minute over windows where strobe never stopped the
+page: each half's wait, from a baseline read after the snapshot before it (one macrotask first, so
+what queued during the snapshot runs before it: `Runtime.evaluate` of `new Promise(r =>
+setTimeout(r, 0))`, then a forced collection, the heap and the DOM nodes) to the next census's
+reading (stamped just before its forced collection), before that census's dump and snapshot:
+((C1 − B0) + (C2 − B1)) over the two windows' time (`growth_ms`, each in `growth_windows`). A
+snapshot freezes the page for seconds, and a page driven by time (a timer that runs its missed ticks,
+a socket's queued messages, a step scaled by elapsed time) makes up for it afterwards, so a span
+holding a snapshot is wrong either way: per wall minute it read 3× low (snapshots of a large heap
+twice the recording's length), and per minute less the freeze high (+6% to +10% on adais, up to +200%
+when the snapshots outlast `--for`). On `wir:` the rate is still over the span between the first and
+last snapshot, less the middle `Heap.snapshot` call: WebKit gives the heap only through a snapshot, so
+there is no reading outside one to start a window from. Under 2 s of that time (`--for` under 2 s)
+both rates are refused `RunIncomplete` and the summary shows none (a rate per minute would stretch
+it over 30 times: `wir:` at `--for 0s` once printed +976,562 MB a minute). `query <rec> heap` reads S2.
 
 **Leaks** (`strobe bench <file> --head <variant> --probes memory --repeat <N>`, built; `--base` is
 optional and gets its own leak run, nothing is paired), in one block with no trace:
@@ -1870,7 +1905,7 @@ series gets `video.mixed` and a `Video` warning):
 | kind | source | works |
 |---|---|---|
 | `screen` | the OS's composited copy of the window: Windows.Graphics.Capture (Windows 10 1903+; no cursor, no border on 11) into the GPU's video processor (scale, NV12) and Media Foundation's H.264 encoder (the GPU's when it has one, else software); a ScreenCaptureKit stream of the window alone (`initWithDesktopIndependentWindow:`, 4:2:0) into AVAssetWriter H.264 (macOS 13+); the X server's copy of the window (`GetImage`) at 30 fps into ffmpeg (Linux X11) | headed targets with a window: native apps, headed pages, Electron and webview apps |
-| `renderer` | a Chromium page's own compositor frames: DevTools `Page.startScreencast` (JPEG, at most 1280 px), each at its swap time (`metadata.timestamp`, wall clock mapped to the host clock through the offset read at the start), in a Matroska stream of millisecond times into ffmpeg at a constant 30 fps (as Playwright's `recordVideo` feeds its ffmpeg) | Chromium, Electron, WebView2 over CDP; headless and on a locked session. Not proof that a frame reached a display |
+| `renderer` | a Chromium page's own compositor frames: DevTools `Page.startScreencast` (JPEG, at most 1280 px), each at its swap time (`metadata.timestamp`, the page's wall clock, a phone's own for a phone's page, mapped to the host clock through the page's `performance.timeOrigin + performance.now()` read over DevTools at the start, the closest of five round trips; half that round trip adds to the video's precision; when that is 5 ms or more from the page's `Date.now()` (its monotonic part stopped while the device slept since the page loaded), `Date.now()` instead, and its millisecond adds too), in a Matroska stream of millisecond times into ffmpeg at a constant 30 fps (as Playwright's `recordVideo` feeds its ffmpeg) | Chromium, Electron, WebView2 over CDP; headless and on a locked session. Not proof that a frame reached a display |
 
 A headless page films its renderer; a headed one films the screen, and falls back to its renderer
 (saying why in `note`) when the OS capture cannot start. Refused (`record` exits 4; a bench says it
@@ -2654,15 +2689,18 @@ CPU.
   parts only (OS presents: per part; Chromium's trace: each stretch is a window
   `untimed:<run>.<n>` from marks at its edges, which `metrics::read` takes out of its run and its
   phases, leaving a marker vsync of its own in their place, so no interval spans the stretch and no
-  dropped vsync before it reads as one the page wanted no update for; tasks, GC, compiles and the
-  page's spans keep their parts outside it, and `main.busy` is over the timed time). A run whose last
+  dropped vsync before it reads as one the page wanted no update for; GC, compiles and the page's
+  spans keep their parts outside it, a task its time outside it (one task still: a task of 80 ms with
+  40 of them in a stretch is a 40 ms task, never two pieces, so `main.tasks.long` counts a task the
+  run itself waited through for over 50 ms), and `main.busy` is over the timed time). A run whose last
   step was a stretch ends without waiting for the page's next frame, which would be the stretch's.
 - **Inputs:** one sent in a stretch (a click's release or its press) is no `interaction.*` or
   `scroll.latency.*` sample, and a drag begun there is no `input.*`. An input just before a stretch
   still is: its frame may come during the stretch (a click, then the wait for it to settle).
-- **Attribution:** native stacks and off-CPU waits, Firefox's profile and the trace views of `query`
-  (style, layout, threads) leave the stretches out. A Chromium attribution block's V8 CPU profile
-  is one per document and holds them.
+- **Attribution:** native stacks and off-CPU waits, Firefox's profile (its samples' weights and its
+  markers: a sample or marker across an edge keeps only its timed part) and the trace views of
+  `query` (style, layout, threads, and `gc`, whose helper threads' slices are cut at the edges) leave
+  the stretches out. A Chromium attribution block's V8 CPU profile is one per document and holds them.
 - **Refused** (`Untimed`): run totals strobe has no reading of at each edge, in a block whose
   measured runs used a stretch: `gpu.process.3d` (sampled over a window), `energy.cpu`,
   `cpu.instructions`, `cpu.idle_wakes` (the OS's counters), `net.*` and `canvas.*` (kept by the page
@@ -4439,7 +4477,7 @@ As built (`query <rec> insights`, `query <exp> insights`):
 |---|---|---|
 | `forced-layout` | forced layout + style ≥ 5 ms or ≥ 5% of `main.work` per run (warn from 10%) | counts and ms per run, the top call site with its stack |
 | `gc-pressure` | main-thread GC ≥ 10 ms or ≥ 5% of `main.work` per run | GC ms, collections, the top 3 allocation sites per run |
-| `long-tasks` | renderer main-thread tasks over 50 ms in the runs | count, the longest |
+| `long-tasks` | renderer main-thread tasks over 50 ms in the runs, as `main.tasks.long` counts them (a task's time inside the run and outside its untimed stretches, one task however a stretch cuts it) | count, the longest |
 | `work-while-idle` | a `record` with no input that presents ≥ 1 frame/s or keeps the main thread ≥ 5% busy | frames/s, busy share |
 | `detached-dom` | the heap snapshot holds detached DOM nodes | count, retained size, the largest's retainer path |
 | `wakes-while-idle` | a native app's `record` (no input) whose threads wake ≥ 50/s (warn from 200/s) | wakes per second, the three threads that wake most |
@@ -4505,7 +4543,11 @@ protobuf written by hand (no generated code, no C):
   Windows, which V8's profile timestamps share), Chrome's clock snapshots map it; times strobe read
   from the Chrome trace by SQL go back on its own clock. A trace without a Chrome trace gets one
   identity clock snapshot. Checked on adais: the profile's start, the trace's marks and the slices
-  line up on QPC.
+  line up on QPC. On macOS Chrome's snapshots pin both BOOTTIME and MONOTONIC to `mach_absolute_time`
+  (Perfetto's `CaptureClockSnapshots` on Apple and Windows), strobe's own clock there, so they line
+  up too. A phone's Chrome trace (`--mobile`) is on the phone's clocks, which nothing in it maps to
+  this computer's: strobe's own tracks (its inputs, threads, memory, its own process) are left out of
+  it, with a note, rather than drawn at the phone's uptime.
 
 Before anything opens it, trace_processor reads the file back: samples per source (a short count is
 printed as a warning), frames with names and source files, tracks, and its error stats.
@@ -5485,15 +5527,19 @@ As built (Windows):
   installed helper. `up` replaces the installed copy when its build id is not this build's (it copies
   the windowless `strobew` beside it only when that is this build too, else this executable), and
   `status` says when it is another build's.
-- **Native stacks**: a system logger session with the profile source at 200 µs (5 kHz), a stack
-  walk on every sample, image loads with the rundown of loaded images, and process starts, so
+- **Native stacks**: a system logger session with the profile source asked at 200 µs (5 kHz) and
+  read back after it is set: the HAL may hold the profile timer to a rate of its own, and each sample
+  weighs the interval the system took (it was taken as 200 µs, so a HAL that held 500 µs read 2.5×
+  low), and one that changed by the capture's end (another profiler set it) refuses the capture; a
+  stack walk on every sample, image loads with the rundown of loaded images, and process starts, so
   children of the target count from their first sample. Samples of other processes are dropped as
   they arrive; kernel and user parts of a stack merge by timestamp and thread. The user's strobe adds
   thread names (`GetThreadDescription`) and module lists the rundown missed. Recordings keep
   `deep.json.gz` (modules, unique stacks, samples), symbolized on read (§12.2).
 - **The system-wide interval** goes back when the capture stops or is dropped (on any error), after
-  its session stopped, and only while it is still strobe's 200 µs and no other strobe session
-  samples at it (that capture's samples count 200 µs each); one read while another strobe had raised
+  its session stopped, and only while it is still the interval strobe set (the one read back, which
+  a capture on a HAL that holds its own rate never put back while it compared with 200 µs) and no
+  other strobe session samples at it (that capture's samples weigh it); one read while another strobe had raised
   it goes back to Windows' own 1 ms. Sessions are named `strobe-<kind>-<pid>-<start time>`. A helper
   that dies while sampling (strobe aborts on a panic, or `up` ends the task) leaves its session and
   the raised interval: each session start first stops sessions whose process is gone (its pid runs
@@ -5511,7 +5557,9 @@ As built (Windows):
   --probes stacks-unprivileged` asks for it even with the helper. Every 100 ms it lists the tree's
   threads and which of them ran (one system snapshot); every 2 ms (a high-resolution waitable timer,
   no change to the system's timer resolution) it reads those threads' cycle counters, and a thread
-  that used another 2 ms of CPU since its last sample is sampled: `SuspendThread`, `GetThreadContext`
+  that used another 2 ms of CPU since its last sample is sampled (2 ms by the cycle clock's rate: on
+  a machine whose cycles are no time, `cycles_refused`, the sampler refuses to start, where a rate of
+  0 once made every listed thread a sample each tick, an idle app 100% busy): `SuspendThread`, `GetThreadContext`
   (control and integer registers; it returns once the suspend landed), one `ReadProcessMemory` of up
   to 64 KB of stack from RSP to the TEB's stack base, `ResumeThread`. Unwinding happens after the
   resume, on that copy: x64 unwind data (the exception directory's `RUNTIME_FUNCTION`s and their
@@ -5554,8 +5602,8 @@ means the metric is not printed and the refusal says why (rule 1), never 0.
 | process CPU (`cpu.work`, `cpu.app.total`) | `QueryProcessCycleTime` over the cycle clock (below): the performance counter times the kernel's cycle factor from Windows 11 24H2, else the TSC on x64 (process times move in 15.6 ms ticks: an idle 5 s run read 0, 0.31% or 0.62% and nothing between) | the process's CPU clock (`clock_gettime` on `MAKE_PROCESS_CPUCLOCK(pid, CPUCLOCK_SCHED)`): ns, every thread live or exited, no permission needed; `/proc/<pid>/stat` only for names and parents | `proc_pid_rusage` user + system time (Mach time, charged at every context switch); this user's processes |
 | process memory (`memory.app.private`) | private commit (`PagefileUsage`) | `smaps_rollup` private clean + dirty + swap (`statm` resident − shared for `top`'s every process); `memory.app.pss`: its `Pss` summed over the set, each shared page split between the processes that map it (refused `NotOnThisOs` elsewhere) | physical footprint (`ri_phys_footprint`, Activity Monitor's Memory: dirty private, compressed, GPU allocations) |
 | memory by what holds it (`memory.app.host`, `query memory`, §8.6) | `VirtualQueryEx` walk of committed regions (type, protection, `GetMappedFileName`), `PROCESS_MEMORY_COUNTERS_EX2` | `/proc/<pid>/smaps` | refused: another process's regions need its task port (debuggers only) |
-| threads (`cpu.wakes`, `query threads`) | `NtQuerySystemInformation`: context switches per thread; names by `GetThreadDescription`, CPU by `QueryThreadCycleTime` | `/proc/<pid>/task/<tid>/schedstat`: times switched in to run (the same count) and exact CPU ns; names from `comm` | per process only: `proc_taskinfo.pti_csw` (live and exited threads; one `(whole process)` row). Per thread: CPU and names (`PROC_PIDTHREADID64INFO`: any same-user process, no permission; `task_threads` would need `task_for_pid`, which is root's), no wakes: no public per-thread switch count exists (`thread_info`, `PROC_PIDTHREADINFO` and `PROC_PIDTHREADCOUNTS` carry CPU time, scheduling state, cycles and energy; `getrusage` switches are the caller's own); the kernel's scheduler trace (kdebug through `ktrace`) has them for root only, not built |
-| per-core load, frequency | busy: idle cycles against the cycle clock each tick (PDH at 100 ms is clock-tick noise); frequency (`% Processor Performance`) and utility: PDH Processor Information once a second | busy: `/proc/stat` idle + iowait (10 ms ticks, unbiased over a run); frequency: `cpuinfo_avg_freq` (APERF/MPERF average, kernel 6.13+) against the base frequency, else none (an instantaneous `scaling_cur_freq` is not an average) | busy: `host_processor_info` ticks (10 ms); frequency: none (IOReport's P-state residency is not built) |
+| threads (`cpu.wakes`, `query threads`) | `NtQuerySystemInformation`: context switches per thread (32-bit, wrapping), each thread's create time to tell a reused id; names by `GetThreadDescription`, CPU by `QueryThreadCycleTime` | `/proc/<pid>/task/<tid>/schedstat`: times switched in to run (the same count, 64-bit) and exact CPU ns, the thread's start from its `stat` (a thread whose files go while they are read is left out, as one that exited); names from `comm` | per process only: `proc_taskinfo.pti_csw` (live and exited threads; one `(whole process)` row; the kernel holds it at 2^31 − 1, past which the wakes are unknown, `NoCounter`). Thread ids are 64-bit: a view's `tid` folds both halves into 32 bits, never 0 (the process row's). Per thread: CPU and names (`PROC_PIDTHREADID64INFO`: any same-user process, no permission; `task_threads` would need `task_for_pid`, which is root's), no wakes: no public per-thread switch count exists (`thread_info`, `PROC_PIDTHREADINFO` and `PROC_PIDTHREADCOUNTS` carry CPU time, scheduling state, cycles and energy; `getrusage` switches are the caller's own); the kernel's scheduler trace (kdebug through `ktrace`) has them for root only, not built |
+| per-core load, frequency | busy: idle cycles against the cycle clock each tick (PDH at 100 ms is clock-tick noise); frequency (`% Processor Performance`) and utility: PDH Processor Information once a second, MHz from each CPU's own `Processor Frequency` (a hybrid CPU's kinds of core differ; one value for all once came from whichever core PDH listed last) | busy: `/proc/stat` idle + iowait (10 ms ticks, unbiased over a run); frequency: `cpuinfo_avg_freq` (APERF/MPERF average, kernel 6.13+) of every online CPU at its own number, against its own base frequency (not CPUs 0 to n − 1 of the n strobe may run on, which under `taskset` read another CPU's); a CPU that cannot answer at a reading (`EAGAIN` from one deep in an idle state) is a hole in it, not the end of every CPU's; else none (an instantaneous `scaling_cur_freq` is not an average) | busy: `host_processor_info` ticks (10 ms); frequency: none (IOReport's P-state residency is not built) |
 | topology, pinning | `GetLogicalProcessorInformationEx` (L3 per CCD); process affinity | sysfs cache (`index*/level` 3, `shared_cpu_list`); `sched_setaffinity` on every thread of strobe, inherited by children | no L3 groups (Apple Silicon); P and E cores named in the CPU line (`hw.perflevel*`); no affinity API: unpinned |
 | GPU engines per process (`gpu.process.3d`) | D3DKMT process statistics for the tree's pids (matches PDH GPU Engine, whose ~860 instances cost 0.5 ms per read) | DRM client statistics (`/proc/<pid>/fdinfo` of each `/dev/dri` file: `drm-engine-*` busy ns, engines mapped to Windows' types: gfx/render → 3D); a process with a GPU device open but no statistics (NVIDIA's proprietary driver, virtual GPUs) is unreadable, not 0 | IORegistry: each GPU client (`IOAccelerator` child) has its creator pid and `AppUsage.accumulatedGPUTime`; no permission. One engine: 3D |
 | VRAM per process (`gpu.vram`) | D3DKMT committed bytes in dedicated and shared segments (PDH `Dedicated Usage` also counts allocations opened from other processes) | DRM `drm-resident-*` (else `drm-total-*`, `drm-memory-*`): vram/local dedicated, gtt/system shared | refused: unified memory, a process's GPU allocations are in its footprint |
@@ -6329,7 +6377,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | off-CPU waits (`--probes waits`, attribution only, §11.1) | none in timing blocks: per context switch in the target (Linux about 7 µs on top of `deep` in a VM), so only a capture that asks takes them |
 | Firefox's profiler (attribution only, §8.3) | the browser's own samplers, in the target's processes: on Windows 1 ms through Firefox 160, where any shorter interval makes every process's sampler busy-wait a core (bug 1349801; 10.2 cores for a page's Firefox 159 on adais at 200 µs or 500 µs, 0.3-0.4 cores at 1 ms, 0.25 with no profiler), and 500 µs from Firefox 161, whose sampler waits on a high-resolution timer (bug 2082760; Nightly 162: 0.65 cores at 500 µs, 0.3 with no profiler); 200 µs on macOS and Linux (air 0.3-0.6 cores and vps 0.1-0.5 at any interval, no profiler alike) |
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
-| `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output); over it warns `OverheadBudget`, over 2% refuses `tty.latency.*`. Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
+| `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% refuses `tty.latency.*`. Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
 | Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
@@ -7971,6 +8019,38 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   - The OS sampler (§8.5) read 0.57-0.65% of a core against its 0.5% budget: the set's re-read
     reading every browser process's `smaps_rollup` it never used, and a scan of every browser file
     descriptor each second for DRM files on a display-only device. Now 0.31-0.40%.
+- **Clocks, timebases and units (audit, 2026-11-08)**: numbers that mixed clocks, units or spans and
+  were shown valid. Known-answer pages in `scripts/dev/clocks/`; checked headless on adais (session
+  locked) against 0.19.0, whose code there matched the audited commit:
+  - Heap and DOM growth (§8.6): `grow.html` keeps 100 KiB and one element on each tick of a 100 ms
+    timer (58.6 MiB and 600 nodes a minute) beside 1.5 M small objects, so each snapshot takes seconds.
+    `record --for 6s --probes memory` read 20.8 MiB and 211 nodes a minute (per wall minute of a
+    20.5 s census span, 14 s of it strobe's snapshots), `--for 20s` 36.1 MiB and 368. Taking the
+    freezes out of that span instead read +6% to +10%: after each freeze Chromium ran the timer's
+    missed ticks back to back. Now, over the stop-free windows: `--for 6s` 600 / 58.5 and 620 / 60.5
+    (each 3.0 s window held 30 or 31 ticks: one tick is 3.3% there), `--for 20s` 606 / 59.2 and 603 /
+    59.2 (100 or 101 ticks a 10 s window).
+  - A full trace buffer (§8.1): `flood.html` (20,000 marks a frame) under `record --for 20s` gave a
+    valid recording with a warning on stderr, no end mark and so no `main.*`; now exit 4,
+    `RunIncomplete`.
+  - Thread wakes (§7.4, §13.6): counts are 64-bit with each thread's start, so a reused id or
+    Windows' wrapping 32-bit count is no reset (a reset had billed a thread's lifetime CPU to a run,
+    and the timeline read a reused id's smaller count as 4.29 billion wakes); macOS's held count is
+    `NoCounter`, not 0/s. `churn.ts` (462 short-lived threads in 15 s) found no id reused within its
+    process on adais: argued from the code, not reproduced.
+  - Slices across an edge (§7.3, §8.4, §9.6): GPU compiles, spans and GC are cut to the run's timed
+    time (main-thread tasks and GC cannot cross strobe's marks, which are tasks on that thread);
+    `main.gc` is the union of nested GC slices; a task across an untimed edge stays one task. Firefox
+    samples and markers in untimed stretches leave its runs; `query gc` cuts helper threads' slices;
+    `query shifts` lists only the shifts `layout.shift` sums, with its weighted score.
+  - Other clocks: a phone page's screencast frames are placed by the page's own clock read over
+    DevTools (§8.8); a phone's Chrome trace keeps out strobe's host-clock tracks (§11.4; desktop macOS
+    was already one clock: Perfetto pins BOOTTIME and MONOTONIC to `mach_absolute_time`); per-CPU
+    nominal MHz and Linux frequency by CPU number (§13.6); strobe's own stack sampler refuses without
+    a cycle clock and the helper's reads back the profile interval the HAL took (§13.4; adais's HAL
+    lists its timer source at 1221-1,000,000 in 100 ns units, so 200 µs holds there; not checked
+    elsewhere, the helper is not installed on adais); a terminal's reader is judged over timed parts
+    of measured runs (§19).
 - **Touch on an emulated phone (2026-11-07, `driver::touch`, 9.6)**: the driver sends a phone touches,
   where every pointer call on one had been refused `EngineUnsupported`. Checked headless on adais
   (Windows, session locked, Chromium 20 Hz frames) and vps (Linux, 60 Hz) with `scripts/dev/touch.bench.ts`:

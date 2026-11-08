@@ -301,6 +301,8 @@ pub fn record_attribution(session: &mut Session, dir: &Path, token: &str, for_ms
 
 pub struct MemoryCapture {
     pub values: BTreeMap<String, f64>,
+    /// Metric → refusal line, for the growth rates of a recording too short to give one.
+    pub refused: BTreeMap<String, String>,
     pub census: Vec<Value>,
     pub leaks: Value,
     pub console: Vec<ConsoleEntry>,
@@ -315,6 +317,9 @@ pub fn record_memory(session: &mut Session, dir: &Path, for_ms: u64, on_progress
     let started = std::time::Instant::now();
     let mut census = Vec::new();
     let mut console = Vec::new();
+    // When each snapshot's call began and ended: the page stops while WebKit takes one and runs while
+    // strobe converts it, so the growth rates are per minute of the page's own time between S0 and S2.
+    let mut snapped: Vec<(std::time::Instant, std::time::Instant)> = Vec::new();
 
     for (i, name) in ["heap-s0", "heap-s1", "heap-0"].iter().enumerate() {
         if i > 0 {
@@ -322,7 +327,9 @@ pub fn record_memory(session: &mut Session, dir: &Path, for_ms: u64, on_progress
         }
         on_progress(&format!("taking heap snapshot {} of 3", i + 1));
         let dom_nodes = session.eval("document.getElementsByTagName('*').length", Duration::from_secs(5)).ok().and_then(|v| v.as_u64()).unwrap_or(0);
+        let asked = std::time::Instant::now();
         let snap_res = session.call("Heap.snapshot", Value::Null, Duration::from_secs(30))?;
+        snapped.push((asked, std::time::Instant::now()));
         let snap_str = snap_res["snapshotData"].as_str().ok_or_else(|| Error::msg("Heap.snapshot returned no snapshotData"))?;
         let self_bytes = convert_webkit_heap(snap_str, &dir.join(format!("{name}.heapsnapshot.gz")))?;
         census.push(json!({
@@ -350,15 +357,26 @@ pub fn record_memory(session: &mut Session, dir: &Path, for_ms: u64, on_progress
     store::write_json(&dir.join("leaks.json"), &leaks)?;
 
     let at = |i: usize, k: &str| census[i][k].as_f64().unwrap_or(f64::NAN);
-    let minutes = ((at(2, "at_ms") - at(0, "at_ms")) / 60_000.0).max(1e-6);
+    let ran = snapped[2].0.saturating_duration_since(snapped[0].1).saturating_sub(snapped[1].1 - snapped[1].0);
+    let minutes = ran.as_secs_f64() / 60.0;
     let mut values = BTreeMap::new();
+    let mut refused = BTreeMap::new();
     values.insert("js.heap.used".into(), at(2, "js_heap_bytes") / (1024.0 * 1024.0));
-    values.insert("js.heap.growth".into(), (at(2, "js_heap_bytes") - at(0, "js_heap_bytes")) / (1024.0 * 1024.0) / minutes);
     values.insert("dom.nodes".into(), at(2, "dom_nodes"));
-    values.insert("dom.nodes.growth".into(), (at(2, "dom_nodes") - at(0, "dom_nodes")) / minutes);
+    match crate::probe::census::growth_refusal(ran) {
+        None => {
+            values.insert("js.heap.growth".into(), (at(2, "js_heap_bytes") - at(0, "js_heap_bytes")) / (1024.0 * 1024.0) / minutes);
+            values.insert("dom.nodes.growth".into(), (at(2, "dom_nodes") - at(0, "dom_nodes")) / minutes);
+        }
+        Some(r) => {
+            for m in ["js.heap.growth", "dom.nodes.growth"] {
+                refused.insert(m.to_string(), crate::model::Refusal { summary: format!("{m}: {}", r.summary), ..r.clone() }.message());
+            }
+        }
+    }
     values.insert("leak.suspects.retained".into(), leaks["retained_size"].as_f64().unwrap_or(0.0) / (1024.0 * 1024.0));
     values.retain(|_, v| v.is_finite());
-    Ok(MemoryCapture { values, census, leaks, console })
+    Ok(MemoryCapture { values, refused, census, leaks, console })
 }
 
 struct ConvertedEvents {

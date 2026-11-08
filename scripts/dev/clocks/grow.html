@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>known growth</title>
+<!-- Known answer for js.heap.growth and dom.nodes.growth (`record <this page> --probes memory`):
+     every 100 ms its timer keeps one more array of 12,800 doubles (100 KiB of backing store, plus a
+     16-byte header) and one more element, so the page grows about 0.977 MiB and 10 nodes a second
+     (58.6 MiB and 600 nodes a minute) while it runs undisturbed.
+     A large heap of small objects kept from the start makes each heap snapshot take seconds, in which
+     the page does not run, and after which Chromium runs the timer's missed ticks back to back: a rate
+     over a span holding a snapshot reads low per wall minute and high per minute less the snapshot.
+     strobe's windows hold no snapshot. -->
+<body>
+<script>
+  const base = [];
+  for (let i = 0; i < 1500000; i++) base.push({ i, s: "o" + (i % 97) });
+  const kept = [];
+  let n = 0;
+  setInterval(() => {
+    n++;
+    kept.push(new Array(12800).fill(n + 0.5));
+    document.body.appendChild(document.createElement("div"));
+  }, 100);
+  window.__known = { base, kept };
+</script>
+</body>

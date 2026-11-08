@@ -79,6 +79,14 @@ pub fn os_refusals(has: &dyn Fn(&str) -> bool, gpu: Option<&[u32]>) -> serde_jso
     out
 }
 
+/// `cpu.wakes` refused (`NoCounter`) in a recording's refusals when the OS stopped counting a
+/// process's switches (`Span::uncounted`): never left out unsaid, never 0/s.
+pub fn wakes_refused(span: &wakes::Span, refused: &mut serde_json::Map<String, Value>) {
+    if let Some(why) = &span.uncounted {
+        refused.insert("cpu.wakes".into(), json!(Refusal::new(ValidatorId::NoCounter, format!("cpu.wakes: {why}")).message()));
+    }
+}
+
 /// `pid:<n>`, or `proc:<name>`: the one process of that name whose parent is not of that name.
 pub fn resolve(target: &str) -> Result<u32> {
     if let Some(p) = target.strip_prefix("pid:") {
@@ -196,7 +204,9 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         values.insert("cpu.work".into(), used / (b - a) as f64 * ms);
     }
     if !span.threads.is_empty() {
-        values.insert("cpu.wakes".into(), span.wakes_per_s());
+        if span.uncounted.is_none() {
+            values.insert("cpu.wakes".into(), span.wakes_per_s());
+        }
         values.insert("io.read".into(), span.io_read as f64);
         values.insert("io.write".into(), span.io_write as f64);
     }
@@ -207,8 +217,8 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         if let Some(c) = t.cpu_ms {
             values.insert("ui.cpu".into(), c);
         }
-        if not_on_this_os("ui.wakes").is_none() {
-            values.insert("ui.wakes".into(), t.switches as f64 / (ms / 1e3));
+        if let Some(n) = t.switches.filter(|_| not_on_this_os("ui.wakes").is_none()) {
+            values.insert("ui.wakes".into(), n as f64 / (ms / 1e3));
         }
     }
     let names: BTreeMap<u32, String> = span.threads.iter().filter_map(|t| Some((t.tid, host::thread_name(t.tid)?))).collect();
@@ -220,7 +230,7 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     store::write_json(&dir.join("threads.json"), &json!(wakes::by_thread(spans, &names, &wakes::modules(spans))))?;
     store::write_json(
         &dir.join("runs.json"),
-        &json!([{ "run": "run:0", "ms": ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
+        &json!([{ "run": "run:0", "ms": ms, "switches": span.uncounted.is_none().then_some(span.switches), "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
     )?;
     // What holds the tree's memory, read after the window.
     values.insert("memory.app.private".into(), tree.iter().map(|p| p.private_bytes).sum::<u64>() as f64 / (1024.0 * 1024.0));
@@ -274,6 +284,7 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
             os_refused.insert(m.into(), json!(super::record::cpu_lost(m, 1, 1, "the process tree").message()));
         }
     }
+    wakes_refused(&span, &mut os_refused);
     let meta = json!({
         "id": id, "kind": "record", "target": target, "pid": root, "process": name, "probes": "timing", "token": "", "duration_ms": for_ms,
         "env": host::env(), "values": values, "refused": os_refused, "os": os, "presents": session, "presents_refused": refused, "session_locked": session_locked, "ui_thread": ui_tid,
@@ -327,6 +338,9 @@ pub fn text(meta: &Value) -> String {
     }
     if get("cpu.wakes").is_finite() {
         s += &format!("wakes    {} context switches of its threads\n", fmt::value(get("cpu.wakes"), "/s"));
+    }
+    // Its own line: a refused `cpu.wakes` (`NoCounter`) leaves the IO it read shown.
+    if get("io.read").is_finite() {
         s += &super::record::io_line(meta);
     }
     s += &fmt::counters(get);

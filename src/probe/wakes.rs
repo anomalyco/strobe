@@ -9,13 +9,17 @@ use crate::model::{Refusal, ValidatorId};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// A thread at a snapshot: when it started (`host::ThreadInfo::born`), its context switches and its
+/// cycles.
+type Counts = (u64, Option<u64>, Option<u64>);
+
 /// One moment of the tree.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     at_ns: u64,
     tsc: Option<u64>,
-    /// (pid, tid) → (context switches, cycles).
-    threads: BTreeMap<(u32, u32), (u32, Option<u64>)>,
+    /// (pid, tid) → its counts.
+    threads: BTreeMap<(u32, u32), Counts>,
     /// pid → (read, written) bytes.
     io: BTreeMap<u32, (u64, u64)>,
     counters: Counters,
@@ -38,7 +42,7 @@ impl Snapshot {
         Snapshot {
             at_ns: host::now_ns(),
             tsc: host::tsc(),
-            threads: threads.into_iter().map(|t| ((t.pid, t.tid), (t.switches, host::thread_cycles_of(t.tid)))).collect(),
+            threads: threads.into_iter().map(|t| ((t.pid, t.tid), (t.born, t.switches, host::thread_cycles_of(t.tid)))).collect(),
             io: io.into_iter().map(|(p, r, w)| (p, (r, w))).collect(),
             counters: Counters::take(listed_us, &sorted, perf),
         }
@@ -64,20 +68,25 @@ pub struct Span {
     pub threads: Vec<ThreadSpan>,
     #[serde(skip)]
     pub counted: Counted,
+    /// Why `switches` misses some of the span's: a count the OS stopped keeping. `wakes_per_s` is
+    /// then unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncounted: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ThreadSpan {
     pub pid: u32,
     pub tid: u32,
-    pub switches: u64,
+    /// None where the OS stopped counting them (`Span::uncounted`).
+    pub switches: Option<u64>,
     /// CPU time from the thread's cycle counter over the span; None where it could not be read.
     pub cpu_ms: Option<f64>,
 }
 
 impl Span {
     pub fn wakes_per_s(&self) -> f64 {
-        if self.ms > 0.0 { self.switches as f64 / (self.ms / 1e3) } else { f64::NAN }
+        if self.ms > 0.0 && self.uncounted.is_none() { self.switches as f64 / (self.ms / 1e3) } else { f64::NAN }
     }
 
     /// A run's timed parts (`ctx.untimed` left out between them) as one span: each part is `span` of
@@ -92,10 +101,11 @@ impl Span {
             out.switches += p.switches;
             out.io_read += p.io_read;
             out.io_write += p.io_write;
+            out.uncounted = out.uncounted.or(p.uncounted);
             for t in p.threads {
                 match by.get_mut(&(t.pid, t.tid)) {
                     Some(s) => {
-                        s.switches += t.switches;
+                        s.switches = s.switches.zip(t.switches).map(|(a, b)| a + b);
                         s.cpu_ms = s.cpu_ms.zip(t.cpu_ms).map(|(a, b)| a + b);
                     }
                     None => {
@@ -119,11 +129,21 @@ pub fn span(a: &Snapshot, b: &Snapshot) -> Span {
         _ => None,
     };
     let mut out = Span { ms, counted: counted(&a.counters, &b.counters), ..Span::default() };
-    for (&(pid, tid), &(switches, cycles)) in &b.threads {
-        // A count below the earlier one is another thread under a reused id, born in between: from zero.
-        let (s0, c0) = a.threads.get(&(pid, tid)).copied().filter(|&(s0, c0)| s0 <= switches && c0.zip(cycles).is_none_or(|(c0, c)| c0 <= c)).unwrap_or((0, Some(0)));
-        let n = (switches - s0) as u64;
-        out.switches += n;
+    for (&(pid, tid), &(born, switches, cycles)) in &b.threads {
+        // The same thread as at `a` (the same start: the OS hands a reused id to a new thread), else one
+        // born in between, which counts from zero. Where a start is unknown, a count below the earlier
+        // one is the new thread.
+        let same = |&(b0, s0, c0): &Counts| {
+            if born != 0 && b0 != 0 { b0 == born } else { s0.zip(switches).is_none_or(|(s0, s)| s0 <= s) && c0.zip(cycles).is_none_or(|(c0, c)| c0 <= c) }
+        };
+        let (s0, c0) = a.threads.get(&(pid, tid)).filter(|x| same(x)).map_or((Some(0), Some(0)), |&(_, s0, c0)| (s0, c0));
+        let n = switches.zip(s0).map(|(s, s0)| host::switches_since(s0, s));
+        match n {
+            Some(n) => out.switches += n,
+            None => {
+                out.uncounted.get_or_insert_with(|| format!("process {pid} passed 2^31 - 1 context switches, where macOS stops counting them, so its wakes are unknown"));
+            }
+        }
         let cpu_ms = match (cycles, c0, per_ms) {
             (Some(c), Some(c0), Some(r)) => Some(c.saturating_sub(c0) as f64 / r),
             _ => None,
@@ -190,13 +210,13 @@ impl Timeline {
                 // One system snapshot a tick, its threads' context switches and CPU time (no handle per
                 // thread: the cycle counters cost more than the snapshot). Which processes: read again
                 // every few ticks (finding what runs from a home opens every process).
-                type Threads = BTreeMap<(u32, u32), (u32, u64)>;
+                type Threads = BTreeMap<(u32, u32), (u64, Option<u64>, u64)>;
                 let read = |set: &[u32]| -> (u64, Threads) {
                     let mut sorted = set.to_vec();
                     sorted.sort_unstable();
                     sorted.dedup();
                     let at = host::now_ns();
-                    (at, host::threads(&sorted).0.into_iter().map(|t| ((t.pid, t.tid), (t.switches, t.cpu_ns))).collect())
+                    (at, host::threads(&sorted).0.into_iter().map(|t| ((t.pid, t.tid), (t.born, t.switches, t.cpu_ns))).collect())
                 };
                 let mut set = pids();
                 let (t0, mut prev) = read(&set);
@@ -231,10 +251,16 @@ impl Timeline {
                     }
                     let (at, now) = read(&set);
                     let index = seen(&mut out, at, &now);
-                    for (key, &(switches, cpu_ns)) in &now {
-                        // A thread born in the tick counts from zero.
-                        let (s0, c0) = prev.get(key).copied().unwrap_or((0, 0));
-                        let (wakes, cpu) = (switches.wrapping_sub(s0), cpu_ns.saturating_sub(c0) as f64 / 1e6);
+                    for (key, &(born, switches, cpu_ns)) in &now {
+                        // A thread born in the tick (new, or under a reused id) counts from zero; a count the
+                        // OS stopped keeping adds no wakes.
+                        // Where a start is unknown (0), a count below the earlier one is the new thread.
+                        let same = |p: &&(u64, Option<u64>, u64)| {
+                            if born != 0 && p.0 != 0 { p.0 == born } else { p.1.zip(switches).is_none_or(|(s0, s)| s0 <= s) && p.2 <= cpu_ns }
+                        };
+                        let (s0, c0) = prev.get(key).filter(same).map_or((Some(0), 0), |p| (p.1, p.2));
+                        let wakes = switches.zip(s0).map_or(0, |(s, s0)| host::switches_since(s0, s)).min(u64::from(u32::MAX)) as u32;
+                        let cpu = cpu_ns.saturating_sub(c0) as f64 / 1e6;
                         if wakes > 0 || cpu > 0.0 {
                             out.cells.push((tick, index[key], cpu as f32, wakes));
                         }
@@ -298,11 +324,11 @@ pub fn modules(spans: &[Span]) -> BTreeMap<u32, String> {
 /// `origin`.
 pub fn by_thread(spans: &[Span], names: &BTreeMap<u32, String>, modules: &BTreeMap<u32, String>) -> Vec<serde_json::Value> {
     let total_ms: f64 = spans.iter().map(|s| s.ms).sum();
-    let mut acc: BTreeMap<(u32, u32), (u64, f64, bool)> = BTreeMap::new();
+    let mut acc: BTreeMap<(u32, u32), (Option<u64>, f64, bool)> = BTreeMap::new();
     for s in spans {
         for t in &s.threads {
-            let e = acc.entry((t.pid, t.tid)).or_insert((0, 0.0, true));
-            e.0 += t.switches;
+            let e = acc.entry((t.pid, t.tid)).or_insert((Some(0), 0.0, true));
+            e.0 = e.0.zip(t.switches).map(|(a, b)| a + b);
             match t.cpu_ms {
                 Some(c) => e.1 += c,
                 None => e.2 = false,
@@ -319,12 +345,13 @@ pub fn by_thread(spans: &[Span], names: &BTreeMap<u32, String>, modules: &BTreeM
             // An XPC service in the target's set runs for the app (its web content, its own services)
             // whatever folder macOS keeps it in; the Metal shader compiler works for the GPU driver.
             let xpc = exe.as_ref().filter(|e| e.contains(".xpc/")).map(|e| if e.contains("MTLCompilerService") { "driver" } else { "app" });
-            // macOS counts wakes per process (the tid 0 row): its threads' own wakes are unknown, not 0.
-            let unknown = cfg!(target_os = "macos") && tid != 0;
+            // macOS counts wakes per process (the tid 0 row): its threads' own wakes are unknown, not 0,
+            // as is a count the OS stopped keeping.
+            let n = n.filter(|_| !(cfg!(target_os = "macos") && tid != 0));
             serde_json::json!({
-                "pid": pid, "tid": tid, "name": names.get(&tid), "switches": if unknown { None } else { Some(n) },
+                "pid": pid, "tid": tid, "name": names.get(&tid), "switches": n,
                 "module": module.map(|m| m.rsplit(['\\', '/']).next().unwrap_or(m)), "origin": xpc.or(module.map(|m| origin(m))),
-                "wakes_per_s": if unknown { None } else if total_ms > 0.0 { Some(n as f64 / (total_ms / 1e3)) } else { Some(f64::NAN) },
+                "wakes_per_s": n.map(|n| if total_ms > 0.0 { n as f64 / (total_ms / 1e3) } else { f64::NAN }),
                 "cpu_ms_per_run": if known { Some(cpu / runs) } else { None },
             })
         })

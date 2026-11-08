@@ -933,7 +933,7 @@ fn runs(
                 let ui = |r: &Run| r.span.threads.iter().find(|t| t.tid == tid).cloned();
                 extra.insert("ui.cpu".into(), per_run(&|r| ui(r).and_then(|t| t.cpu_ms).unwrap_or(f64::NAN)));
                 if super::super::outside::not_on_this_os("ui.wakes").is_none() {
-                    extra.insert("ui.wakes".into(), per_run(&|r| ui(r).map_or(f64::NAN, |t| if r.span.ms > 0.0 { t.switches as f64 / (r.span.ms / 1e3) } else { f64::NAN })));
+                    extra.insert("ui.wakes".into(), per_run(&|r| ui(r).and_then(|t| t.switches).map_or(f64::NAN, |n| if r.span.ms > 0.0 { n as f64 / (r.span.ms / 1e3) } else { f64::NAN })));
                 }
             }
             let gpu_3d: BTreeMap<String, f64> = gpu_runs.iter().enumerate().filter_map(|(j, g)| Some((key(j), g.gpu_3d_pct?))).collect();
@@ -1153,6 +1153,11 @@ fn runs(
                 }
             }
             let have = Have { ui_thread: ui_tid.is_some(), windowless, gpu: (!super::super::outside::gpu_read(&samples)).then(|| samples.gpu_unreadable.clone()), pinned: !pinned.is_empty() };
+            if let Some(why) = measured.iter().find_map(|r| r.span.uncounted.clone()) {
+                for m in declared_metrics(s).into_iter().filter(|m| *m == "cpu.wakes") {
+                    refused.entry(m.clone()).or_insert_with(|| Refusal::new(ValidatorId::NoCounter, format!("cpu.wakes: {why}")));
+                }
+            }
             for m in declared_metrics(s).into_iter() {
                 if values.contains_key(m) || refused.contains_key(m) {
                     continue;
@@ -1237,7 +1242,7 @@ fn runs(
         store::write_json(&dir.join("threads.json"), &json!(wakes::by_thread(&spans, &names, &wakes::modules(&spans))))?;
         let run_rows: Vec<Value> = all
             .iter()
-            .map(|(key, r)| json!({ "run": key, "ms": r.ms, "cpu_ms": r.cpu, "switches": r.span.switches, "wakes_per_s": r.span.wakes_per_s(), "io_read": r.span.io_read, "io_write": r.span.io_write, "counts": r.counts, "elements": r.elements }))
+            .map(|(key, r)| json!({ "run": key, "ms": r.ms, "cpu_ms": r.cpu, "switches": r.span.uncounted.is_none().then_some(r.span.switches), "wakes_per_s": r.span.wakes_per_s(), "io_read": r.span.io_read, "io_write": r.span.io_write, "counts": r.counts, "elements": r.elements }))
             .collect();
         store::write_json(&dir.join("runs.json"), &json!(run_rows))?;
         let per: serde_json::Map<String, Value> =
@@ -2002,10 +2007,13 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 store::write_json(&dir.join("threads.json"), &json!(wakes::by_thread(spans, &names, &wakes::modules(spans))))?;
                 store::write_json(
                     &dir.join("runs.json"),
-                    &json!([{ "run": "launch", "ms": span.ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
+                    &json!([{ "run": "launch", "ms": span.ms, "switches": span.uncounted.is_none().then_some(span.switches), "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
                 )?;
                 if !span.threads.is_empty() {
-                    meta_values["cpu.wakes"] = json!(span.wakes_per_s());
+                    // No wakes where the OS stopped counting them (`uncounted`): left out, never null.
+                    if span.uncounted.is_none() {
+                        meta_values["cpu.wakes"] = json!(span.wakes_per_s());
+                    }
                     meta_values["io.read"] = json!(span.io_read);
                     meta_values["io.write"] = json!(span.io_write);
                 }

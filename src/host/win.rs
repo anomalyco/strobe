@@ -1337,7 +1337,13 @@ pub fn threads(pids: &[u32]) -> (Vec<super::ThreadInfo>, Vec<(u32, u64, u64)>) {
         }
         io.push((pid, p.read_bytes.max(0) as u64, p.write_bytes.max(0) as u64));
         for t in threads {
-            out.push(super::ThreadInfo { pid, tid: t.thread as u32, switches: t.switches, cpu_ns: (t.kernel.max(0) as u64 + t.user.max(0) as u64) * 100 });
+            out.push(super::ThreadInfo {
+                pid,
+                tid: t.thread as u32,
+                born: t.create.max(0) as u64,
+                switches: Some(u64::from(t.switches)),
+                cpu_ns: (t.kernel.max(0) as u64 + t.user.max(0) as u64) * 100,
+            });
         }
     });
     (out, io)

@@ -674,6 +674,15 @@ fn thread_info(pid: u32, tid: u64) -> Option<libc::proc_threadinfo> {
 /// those that exited, so samplers that run at once (in the daemon) keep each other's threads.
 static THREADS: Mutex<Option<HashMap<u32, (u32, u64)>>> = Mutex::new(None);
 
+/// A 64-bit thread id as the 32-bit `tid` strobe's views key threads by: both halves folded, never
+/// 0 (the process row's).
+pub fn short_tid(id: u64) -> u32 {
+    match (id ^ (id >> 32)) as u32 {
+        0 => u32::MAX,
+        t => t,
+    }
+}
+
 /// Per process: one row with its context switches (`tid` 0, the only wake count macOS gives), then
 /// every thread with its CPU time and no wakes (`switches` 0). IO is disk bytes (`ri_diskio_*`):
 /// macOS counts no cached reads or writes per process.
@@ -685,11 +694,13 @@ pub fn threads(pids: &[u32]) -> (Vec<ThreadInfo>, Vec<(u32, u64, u64)>) {
             io.push((pid, r, w));
         }
         let Some(task) = task_info(pid) else { continue };
-        out.push(ThreadInfo { pid, tid: 0, switches: task.pti_csw as u32, cpu_ns: 0 });
+        // The kernel holds the count at INT32_MAX once it gets there (`fill_taskprocinfo`): unknown, not 0 wakes.
+        let switches = (task.pti_csw >= 0 && task.pti_csw < i32::MAX).then_some(task.pti_csw as u64);
+        out.push(ThreadInfo { pid, tid: 0, born: bsd(pid).map_or(0, |b| b.start), switches, cpu_ns: 0 });
         for id in thread_ids(pid) {
             let Some(t) = thread_info(pid, id) else { continue };
-            map.insert(id as u32, (pid, id));
-            out.push(ThreadInfo { pid, tid: id as u32, switches: 0, cpu_ns: t.pth_user_time + t.pth_system_time });
+            map.insert(short_tid(id), (pid, id));
+            out.push(ThreadInfo { pid, tid: short_tid(id), born: id, switches: Some(0), cpu_ns: t.pth_user_time + t.pth_system_time });
         }
     }
     {
@@ -1522,8 +1533,8 @@ pub fn window_at(pids: &[u32], x: f64, y: f64) -> Option<u32> {
 /// The process's main thread (the lowest thread id: ids only grow), where AppKit runs the UI.
 pub fn main_thread(pid: u32) -> Option<u32> {
     let id = thread_ids(pid).into_iter().min()?;
-    THREADS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(id as u32, (pid, id));
-    Some(id as u32)
+    THREADS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(short_tid(id), (pid, id));
+    Some(short_tid(id))
 }
 
 /// A window's pixels at the display's resolution (`CGWindowListCreateImage`, Screen Recording), as RGBA.

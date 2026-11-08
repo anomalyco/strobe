@@ -1,7 +1,7 @@
 //! Browser-wide Chromium tracing into a Perfetto proto file.
 
 use super::Set;
-use crate::model::{Error, Result};
+use crate::model::{Error, Refusal, Result, ValidatorId};
 use crate::target::cdp::{Cdp, wait_event};
 use base64::Engine;
 use serde_json::{Value, json};
@@ -64,13 +64,13 @@ pub fn start_categories(cdp: &Arc<Cdp>, categories: &[&str], buffer_kb: u64) -> 
 }
 
 impl Tracing {
-    /// Stops tracing and streams the trace into `path`; returns its size.
+    /// Stops tracing and streams the trace into `path`; returns its size. A trace whose buffer filled
+    /// is written, then refused (`RunIncomplete`): Chromium drops what came after, so its frames,
+    /// tasks and marks of the later runs are missing, and every count from it would be short.
     pub fn stop(self, path: &Path) -> Result<u64> {
         self.cdp.send("Tracing.end", json!({}), None)?;
         let done = wait_event(&self.events, "Tracing.tracingComplete", None, Duration::from_secs(120))?;
-        if done.get("dataLossOccurred").and_then(Value::as_bool) == Some(true) {
-            eprintln!("strobe: warning: the trace buffer overflowed; the recording is incomplete");
-        }
+        let lost = done.get("dataLossOccurred").and_then(Value::as_bool) == Some(true);
         let stream = done["stream"].as_str().ok_or_else(|| Error::msg("tracing: no stream"))?;
         let mut file = std::io::BufWriter::new(crate::store::create(path)?);
         let mut total = 0u64;
@@ -90,6 +90,14 @@ impl Tracing {
         }
         let _ = self.cdp.send("IO.close", json!({ "handle": stream }), None);
         file.into_inner().map_err(|e| e.into_error())?.commit()?;
+        if lost {
+            return Err(Refusal::new(
+                ValidatorId::RunIncomplete,
+                format!("the browser's trace buffer filled ({} MB written): Chromium dropped the events after that, so the trace lacks part of the runs", total / (1024 * 1024)),
+            )
+            .fix("record fewer or shorter runs (--runs, --for), or fewer probes, so the trace buffer holds them")
+            .into());
+        }
         Ok(total)
     }
 }

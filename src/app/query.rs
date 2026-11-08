@@ -3,6 +3,7 @@
 mod actions;
 mod diff;
 mod rec;
+pub(crate) use rec::windows_sql;
 mod waits;
 mod wir;
 
@@ -1887,20 +1888,44 @@ pub fn gc(rec: &Rec) -> Result<Output> {
         freed: f64,
     }
     let mut runs: BTreeMap<String, Run> = measured.iter().map(|k| (k.clone(), Run::default())).collect();
-    // Union of GC intervals per thread: GC phases nest inside their collection.
-    let mut covered: BTreeMap<String, i64> = BTreeMap::new();
-    for row in rows.iter().filter(|r| r.get(1).is_some_and(Option::is_some)) {
+    // Each run's span and untimed stretches (a trace's `(run)` and `(untimed)` rows; a Firefox profile's
+    // rows come cut to them already): a slice counts only its time inside the run and outside them, and
+    // a collection only where it began there.
+    let num = |row: &[Option<String>], i: usize| row.get(i).cloned().flatten().and_then(|c| c.parse::<f64>().ok()).unwrap_or(0.0) as i64;
+    type Cut = ((i64, i64), Vec<(i64, i64)>);
+    let mut cut: BTreeMap<String, Cut> = BTreeMap::new();
+    for row in rows.iter().filter(|r| r.get(4).is_none_or(Option::is_none)) {
+        let (k, a) = (row.first().cloned().flatten().unwrap_or_default(), num(row, 2));
+        let b = a + num(row, 3);
+        match row.get(1).cloned().flatten().as_deref() {
+            Some("(run)") => cut.entry(k).or_insert(((i64::MIN, i64::MAX), Vec::new())).0 = (a, b),
+            Some("(untimed)") => cut.entry(k).or_insert(((i64::MIN, i64::MAX), Vec::new())).1.push((a, b)),
+            _ => {}
+        }
+    }
+    let timed = |k: &str, a: i64, b: i64| -> i64 {
+        let Some(((t0, t1), gaps)) = cut.get(k) else { return (b - a).max(0) };
+        let (a, b) = (a.max(*t0), b.min(*t1));
+        (b - a).max(0) - gaps.iter().map(|&(x, y)| (y.min(b) - x.max(a)).max(0)).sum::<i64>()
+    };
+    let began = |k: &str, ts: i64| cut.get(k).is_none_or(|((t0, t1), gaps)| ts >= *t0 && ts < *t1 && !gaps.iter().any(|&(x, y)| ts >= x && ts < y));
+    // Union of GC intervals per run and thread: GC phases nest inside their collection, and a slice
+    // across two runs is a row in each.
+    let mut covered: BTreeMap<(String, String), i64> = BTreeMap::new();
+    for row in rows.iter().filter(|r| r.get(4).is_some_and(Option::is_some)) {
         let cell = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();
         let Some(run) = runs.get_mut(&cell(0)) else { continue };
         let (ts, dur) = (cell(2).parse::<i64>().unwrap_or(0), cell(3).parse::<i64>().unwrap_or(0));
-        match cell(1).as_str() {
-            "MinorGC" => run.minor += 1,
-            "MajorGC" => run.major += 1,
-            _ => {}
+        if began(&cell(0), ts) {
+            match cell(1).as_str() {
+                "MinorGC" => run.minor += 1,
+                "MajorGC" => run.major += 1,
+                _ => {}
+            }
+            run.freed += cell(6).parse::<f64>().unwrap_or(0.0).max(0.0);
         }
-        run.freed += cell(6).parse::<f64>().unwrap_or(0.0).max(0.0);
-        let end = covered.entry(cell(4)).or_insert(i64::MIN);
-        let new = ((ts + dur) - ts.max(*end)).max(0) as f64 / 1e6;
+        let end = covered.entry((cell(0), cell(4))).or_insert(i64::MIN);
+        let new = timed(&cell(0), ts.max(*end), ts + dur) as f64 / 1e6;
         *end = (*end).max(ts + dur);
         if cell(5) == "1" {
             run.main_ms += new;

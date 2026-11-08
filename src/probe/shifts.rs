@@ -11,24 +11,22 @@ use std::path::Path;
 
 /// The `top` largest shifts in the block's measured runs (from run `first`): score, run, time into
 /// the run and moved elements (largest move first) with their rects before and after (CSS px,
-/// `[x, y, w, h]`).
+/// `[x, y, w, h]`). The shifts and scores `layout.shift` sums (`metrics::read`): weighted as it is (a
+/// frame's shift by its share of the page), none in the runs' untimed stretches; shifts right after
+/// input count, as they do there.
 pub fn largest(trace: &Path, token: &str, page: &Page, first: usize, top: usize) -> Result<Value> {
+    // The run windows as the trace views read them (each with every renderer the page was in, `_wp`).
     let sql = format!(
         r#"
-create perfetto table _m as
-  select s.name, s.ts, t.upid from slice s
-  join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  where s.name glob 'strobe:{token}:*';
-create perfetto table _w as
-  select substr(a.name, 1, length(a.name) - 6) as k, a.ts as t0, b.ts as t1, a.upid as upid
-  from _m a join _m b on b.name = substr(a.name, 1, length(a.name) - 6) || ':end'
-  where a.name glob '*:start' and a.name not glob '*:phase:*' and a.name not glob '*:untimed:*';
-select s.id, w.k, (s.ts - w.t0) / 1e6, extract_arg(s.arg_set_id, 'debug.data.score'), a.key, a.display_value
+{windows}
+select s.id, w.k, (s.ts - w.t0) / 1e6,
+  coalesce(extract_arg(s.arg_set_id, 'debug.data.weighted_score_delta'), extract_arg(s.arg_set_id, 'debug.data.score')), a.key, a.display_value
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   join args a on a.arg_set_id = s.arg_set_id and a.key glob 'debug.data.impacted_nodes*'
-  where s.name = 'LayoutShift';
-"#
+  where s.name = 'LayoutShift' and not exists (select 1 from _u u where s.ts >= u.t0 and s.ts < u.t1);
+"#,
+        windows = crate::app::query::windows_sql(token, None)
     );
     let table = engine::query(trace, &sql)?;
     // id → (run, at ms, score, node index → (node id, old rect, new rect))

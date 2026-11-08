@@ -537,20 +537,31 @@ select w.k, s.name, s.ts, s.dur, t.tid,
   join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where s.name in ('Layout', 'UpdateLayoutTree') and t.name = 'CrRendererMain'"
             }
+            // Every GC slice that overlaps a run (a helper thread's runs across the run's edges), with
+            // each run's span and untimed stretches (`(run)` and `(untimed)` rows, no thread) to cut them to.
             Part::Gc => {
                 "select k, null, null, null, null, null, null from _w
+union all
+select k, '(run)', t0, t1 - t0, null, null, null from _w
+union all
+select w.k, '(untimed)', u.t0, u.t1 - u.t0, null, null, null from _u u join _w w on u.t0 >= w.t0 and u.t0 < w.t1
 union all
 select w.k, s.name, s.ts, s.dur, t.tid, t.name = 'CrRendererMain' as main,
   extract_arg(s.arg_set_id, 'debug.usedHeapSizeBefore') - extract_arg(s.arg_set_id, 'debug.usedHeapSizeAfter') as freed
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.dur >= 0 and s.ts < w.t1 and s.ts + s.dur > w.t0
   where s.name in ('MinorGC', 'MajorGC') or s.name glob 'V8.GC*' or s.name glob 'BlinkGC*'"
             }
+            // As `main.tasks.long` counts them: a task's time inside the run and outside its untimed
+            // stretches, one task however a stretch cuts it, long over 50 ms.
             Part::LongTasks => {
-                "select count(*), max(s.dur)
+                "select count(*), max(d) from (
+select min(s.ts + s.dur, w.t1) - max(s.ts, w.t0)
+    - coalesce((select sum(max(0, min(s.ts + s.dur, w.t1, u.t1) - max(s.ts, w.t0, u.t0))) from _u u where u.t0 < min(s.ts + s.dur, w.t1) and u.t1 > max(s.ts, w.t0)), 0) as d
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
- where s.name = 'RunTask' and s.depth = 0 and t.name = 'CrRendererMain' and s.dur > 50000000"
+  join _wp w on t.upid = w.upid and s.dur >= 0 and s.ts < w.t1 and s.ts + s.dur > w.t0
+ where s.name = 'RunTask' and s.depth = 0 and t.name = 'CrRendererMain'
+) where d > 50000000"
             }
             Part::Style => {
                 "select k, null, null, null, null, null, null, null, null from _w

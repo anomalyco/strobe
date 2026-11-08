@@ -4,9 +4,10 @@
 //! headed and on a locked session, since it reads the renderer's compositor rather than the screen.
 //!
 //! Each frame goes to ffmpeg in a Matroska stream at its own millisecond time (as Playwright's
-//! `recordVideo` does), which writes a constant 30 frames a second. The swap times are mapped to the
-//! host clock through the offset between the two clocks read at the start, so runs and inputs line
-//! up with media time.
+//! `recordVideo` does), which writes a constant 30 frames a second. The swap times are on the page's
+//! wall clock (a phone's own, for a phone's page): they are mapped to the host clock through the
+//! page's time read over DevTools at the start (`page_offset`), so runs and inputs line up with media
+//! time.
 
 use super::ffmpeg::{self, Ffmpeg, mkv};
 use super::{Kind, Video};
@@ -28,9 +29,33 @@ pub struct Capture {
     end: Arc<Mutex<u64>>,
 }
 
-/// Wall-clock nanoseconds since the Unix epoch.
-fn wall_ns() -> i128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i128)
+/// The host clock minus the page's wall clock, which its swap times are on, and the error bound (ns):
+/// the page's own time read between two host readings, from the closest of five round trips, at their
+/// middle. On a phone the page's wall clock is the phone's, which may be off this computer's by
+/// seconds; on this computer it is the same clock. The page's time is `performance.timeOrigin +
+/// performance.now()` (sub-millisecond), unless it is 5 ms or more from `Date.now()`: its monotonic
+/// part stops while the device sleeps, so after a sleep since the page loaded only `Date.now()` is the
+/// wall clock, to within its millisecond, which widens the bound.
+fn page_offset(cdp: &Cdp, session: &str) -> Result<(i128, u64)> {
+    let mut best: Option<(i128, u64)> = None;
+    for _ in 0..5 {
+        let h0 = crate::host::now_ns();
+        let r = cdp.send("Runtime.evaluate", json!({ "expression": "[Date.now(), performance.timeOrigin + performance.now()]", "returnByValue": true }), Some(session));
+        let h1 = crate::host::now_ns();
+        let Some((date_ms, fine_ms)) = r.ok().and_then(|r| Some((r["result"]["value"][0].as_f64()?, r["result"]["value"][1].as_f64()?))) else { continue };
+        let (page_ms, resolution) = if (date_ms - fine_ms).abs() >= 5.0 { (date_ms, 1_000_000) } else { (fine_ms, 0) };
+        let half = (h1 - h0) / 2;
+        let bound = half + resolution;
+        if best.is_none_or(|b| bound < b.1) {
+            best = Some(((h0 + half) as i128 - (page_ms * 1e6) as i128, bound));
+        }
+    }
+    best.ok_or_else(|| {
+        super::refused(
+            "the page's clock could not be read (Runtime.evaluate), so its screencast frames' times cannot be placed on strobe's",
+            "record a headed window instead (the OS's screen capture)",
+        )
+    })
 }
 
 /// A JPEG's size from its first start-of-frame marker.
@@ -56,9 +81,9 @@ impl Capture {
         let exe = ffmpeg::find()?;
         let encoder = ffmpeg::encoder(&exe)?;
         let events = cdp.events();
-        // Host clock minus wall clock, read together: a frame's swap time plus this is host time.
-        let (h0, w0) = (crate::host::now_ns() as i128, wall_ns());
-        let offset = h0 - w0;
+        // A frame's swap time (the page's wall clock) plus this is host time.
+        let (offset, skew_ns) = page_offset(&cdp, session)?;
+        let h0 = crate::host::now_ns() as i128;
         let max = super::MAX_EDGE;
         cdp.send("Page.startScreencast", json!({ "format": "jpeg", "quality": 85, "maxWidth": max, "maxHeight": max, "everyNthFrame": 1 }), Some(session))
             .map_err(|e| super::refused(format!("the page refused DevTools' screencast: {}", e.message), "record a headed window instead (the OS's screen capture)"))?;
@@ -67,7 +92,7 @@ impl Capture {
         let (c, s, st, en, base) = (cdp.clone(), session.to_string(), stop.clone(), end.clone(), base.to_path_buf());
         let thread = std::thread::Builder::new()
             .name("strobe-screencast".into())
-            .spawn(move || run(&c, &s, events, (h0 as u64, offset), &st, &en, &exe, encoder, &base))
+            .spawn(move || run(&c, &s, events, (h0 as u64, offset, skew_ns), &st, &en, &exe, encoder, &base))
             .map_err(|e| Error::msg(format!("start the screencast thread: {e}")))?;
         Ok(Capture { cdp, session: session.to_string(), stop, thread: Some(thread), end })
     }
@@ -92,12 +117,13 @@ impl Drop for Capture {
 
 #[allow(clippy::too_many_arguments)]
 /// `t0` is the host clock when the capture started (media time 0); the first frame stands from there
-/// until the next, as the page looked when the screencast began.
+/// until the next, as the page looked when the screencast began. `offset` maps a swap time to the
+/// host clock to within `skew_ns`.
 fn run(
     cdp: &Cdp,
     session: &str,
     events: std::sync::mpsc::Receiver<Value>,
-    (t0, offset): (u64, i128),
+    (t0, offset, skew_ns): (u64, i128, u64),
     stop: &AtomicBool,
     end: &Mutex<u64>,
     exe: &Path,
@@ -185,7 +211,8 @@ fn run(
         cpu_ms: cpu.ms(),
         setup_cpu_ms: None,
         encoder_cpu_ms,
-        // A frame lands on the 30 fps grid: up to half a frame from its swap time.
-        precision_ms: 1000.0 / ffmpeg::FPS as f64 / 2.0,
+        // A frame lands on the 30 fps grid: up to half a frame from its swap time, which is placed on
+        // the host clock to within the page clock's read.
+        precision_ms: 1000.0 / ffmpeg::FPS as f64 / 2.0 + skew_ns as f64 / 1e6,
     })
 }

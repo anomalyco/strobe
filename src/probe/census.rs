@@ -8,13 +8,44 @@ use crate::target::chromium::{Browser, Page};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The page's live JS heap (after a forced GC, so garbage does not count) and DOM counters, and every
 /// target process's OS memory with its Chromium process type. Take it before a heap snapshot of the
 /// same process: serializing a snapshot raises that process's memory.
 pub fn take(browser: &Browser, page: &Page) -> Value {
+    take_at(browser, page).0
+}
+
+/// The least undisturbed time `js.heap.growth` and `dom.nodes.growth` are measured over: under it a
+/// rate per minute would stretch what the page did more than 30 times.
+pub const MIN_GROWTH: Duration = Duration::from_secs(2);
+
+/// Why the growth rates of a recording whose page ran `ran` undisturbed are refused, if they are.
+pub fn growth_refusal(ran: Duration) -> Option<crate::model::Refusal> {
+    (ran < MIN_GROWTH).then(|| {
+        crate::model::Refusal::new(
+            crate::model::ValidatorId::RunIncomplete,
+            format!("the page ran {:.2} s undisturbed between strobe's snapshots, under {} s: a rate per minute would stretch that more than 30 times", ran.as_secs_f64(), MIN_GROWTH.as_secs()),
+        )
+        .fix("record with --for 2s or longer: the page's undisturbed time is the recording's length")
+    })
+}
+
+/// The page's live JS heap (bytes, after a forced GC) and DOM nodes, and the moment after they were
+/// read (the page runs again from there): a census's page part alone, a growth window's start.
+pub fn page_reading(page: &Page) -> (Option<f64>, Option<f64>, Instant) {
+    let _ = page.send("HeapProfiler.collectGarbage", json!({}));
+    let heap = page.send("Runtime.getHeapUsage", json!({})).ok().and_then(|h| h["usedSize"].as_f64());
+    let nodes = page.send("Memory.getDOMCounters", json!({})).ok().and_then(|d| d["nodes"].as_f64());
+    (heap, nodes, Instant::now())
+}
+
+/// [`take`], with the moment its page readings stand for: just before its forced collection, which
+/// stops the page until they are read, so a growth window ends there.
+pub fn take_at(browser: &Browser, page: &Page) -> (Value, Instant) {
     let _ = page.send("HeapProfiler.enable", json!({}));
+    let read = Instant::now();
     let _ = page.send("HeapProfiler.collectGarbage", json!({}));
     let heap = page.send("Runtime.getHeapUsage", json!({})).unwrap_or(Value::Null);
     let dom = page.send("Memory.getDOMCounters", json!({})).unwrap_or(Value::Null);
@@ -35,12 +66,13 @@ pub fn take(browser: &Browser, page: &Page) -> Value {
             .collect();
         Value::Array(list)
     };
-    json!({
+    let v = json!({
         "at_ns": host::now_ns(),
         "js_heap_bytes": heap["usedSize"], "js_heap_total_bytes": heap["totalSize"],
         "dom": { "documents": dom["documents"], "nodes": dom["nodes"], "listeners": dom["jsEventListeners"] },
         "processes": processes,
-    })
+    });
+    (v, read)
 }
 
 /// Chromium's own accounting by allocator (the census's "Chromium allocators" layer): a detailed

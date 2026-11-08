@@ -114,13 +114,23 @@ pub fn build(dir: &Path, out: &Path) -> Result<Built> {
         b.describe_threads(&threads);
     }
     b.web_runs(&page);
-    b.native_runs(dir);
-    b.actions(dir);
-    b.timeline(dir, &threads);
-    b.presents(dir, &meta);
-    b.memory(dir);
+    // A phone's Chrome trace is on the phone's clocks, which its clock snapshots map; strobe's own
+    // times are this computer's monotonic clock, which nothing in that trace maps: drawn as MONOTONIC
+    // they would land at the phone's uptime instead (any distance from the page's events).
+    let host_clock = !(b.built.chrome && meta["phone"].is_object());
+    if host_clock {
+        b.native_runs(dir);
+        b.actions(dir);
+        b.timeline(dir, &threads);
+        b.presents(dir, &meta);
+        b.memory(dir);
+    } else {
+        b.built.notes.push("strobe's own tracks (its inputs, threads, memory and its own process) are left out: the trace's clock is the phone's, not this computer's".into());
+    }
     b.webkit(dir);
-    b.strobe_itself(&meta);
+    if host_clock {
+        b.strobe_itself(&meta);
+    }
     // Firefox's profile is drawn whole, its CPU profiles being cut from it.
     if dir.join(crate::probe::gecko::PROFILE).is_file() {
         b.gecko(dir);

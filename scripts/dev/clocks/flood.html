@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>trace flood</title>
+<!-- Overflows a recording's trace buffer (`record <this page> --for 20s`): every frame it writes
+     20,000 user timing marks, which the trace keeps (blink.user_timing), so the 200 MB buffer fills
+     within seconds and Chromium drops the rest of the run. strobe must refuse the recording
+     (RunIncomplete), not report the frames and tasks of the part it kept. -->
+<body>
+<script>
+  let n = 0;
+  function frame() {
+    for (let i = 0; i < 20000; i++) performance.mark("flood-" + (n++ % 1000));
+    performance.clearMarks();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+</script>
+</body>

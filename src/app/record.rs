@@ -960,7 +960,9 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             values.insert("cpu.app.total", 100.0 * cpu / ms);
         }
         if !span.threads.is_empty() {
-            values.insert("cpu.wakes", span.wakes_per_s());
+            if span.uncounted.is_none() {
+                values.insert("cpu.wakes", span.wakes_per_s());
+            }
             values.insert("io.read", span.io_read as f64);
             values.insert("io.write", span.io_write as f64);
         }
@@ -985,8 +987,8 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             if let Some(c) = t.cpu_ms {
                 values.insert("ui.cpu", c);
             }
-            if super::outside::not_on_this_os("ui.wakes").is_none() {
-                values.insert("ui.wakes", t.switches as f64 / (ms / 1e3));
+            if let Some(n) = t.switches.filter(|_| super::outside::not_on_this_os("ui.wakes").is_none()) {
+                values.insert("ui.wakes", n as f64 / (ms / 1e3));
             }
         }
         let names: BTreeMap<u32, String> = span.threads.iter().filter_map(|t| Some((t.tid, host::thread_name(t.tid)?))).collect();
@@ -994,7 +996,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         store::write_json(&dir.join("threads.json"), &json!(wakes::by_thread(spans, &names, &wakes::modules(spans))))?;
         store::write_json(
             &dir.join("runs.json"),
-            &json!([{ "run": "run:0", "ms": ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
+            &json!([{ "run": "run:0", "ms": ms, "switches": span.uncounted.is_none().then_some(span.switches), "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
         )?;
         let debug = host::debug_runtime(&app.exe);
         let mut refused = super::outside::os_refusals(&|m| values.contains_key(m), gpu_missing.as_deref());
@@ -1003,6 +1005,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
                 refused.insert(m.into(), json!(cpu_lost(m, 1, 1, "the app").message()));
             }
         }
+        super::outside::wakes_refused(&span, &mut refused);
         let mut meta = json!({
             "id": id, "kind": "record", "native": true, "target": target, "exe": app.exe, "probes": set, "duration_ms": for_ms, "env": host::env(), "values": values, "refused": refused, "os": os,
             "window": n.window, "ui_thread": ui_tid, "created": now_iso(), "valid": true, "os_frames": os_frames, "session_locked": session_locked,
@@ -1180,11 +1183,27 @@ fn memory(page: &chromium::Page, browser: &chromium::Browser, dir: &std::path::P
     let started = std::time::Instant::now();
     progress(format!("recording {id} for {}: a heap snapshot at the start, middle and end", fmt::ms_duration(for_ms)));
     let mut census = Vec::new();
+    // Growth is measured only where strobe never stopped the page: each half's wait, from a baseline
+    // taken after the snapshot before it to the next census's reading, before that census's dump and
+    // snapshot. A snapshot freezes the page for seconds, and a page whose work is driven by time (a
+    // timer that runs its missed ticks, a socket's queued messages, a step scaled by elapsed time)
+    // makes up for the freeze afterwards: over a span holding a freeze, its growth per minute of wall
+    // time reads low, and per minute less the freeze reads high. So after each snapshot one macrotask
+    // runs first (what queued during the freeze runs before it), then the baseline (heap and nodes
+    // after a forced collection) is read. The leak suspects still compare S0, S1 and S2.
+    let mut base: Option<(Option<f64>, Option<f64>, std::time::Instant)> = None;
+    // (JS heap bytes, DOM nodes, time) the page grew by in each half's window.
+    type Grew = (Option<f64>, Option<f64>, Duration);
+    let mut grew: Vec<Grew> = Vec::new();
     for (i, file) in ["heap-s0", "heap-s1", "heap-0"].iter().enumerate() {
         if i > 0 {
             std::thread::sleep(Duration::from_millis(for_ms / 2));
         }
-        let mut c = probe::census::take(browser, page);
+        let (mut c, read) = probe::census::take_at(browser, page);
+        if let Some((heap, nodes, from)) = base.take() {
+            let delta = |b: Option<f64>, now: Option<f64>| Some(now? - b?);
+            grew.push((delta(heap, c["js_heap_bytes"].as_f64()), delta(nodes, c["dom"]["nodes"].as_f64()), read.saturating_duration_since(from)));
+        }
         c["at_ms"] = json!(started.elapsed().as_millis() as u64);
         c["dom_nodes"] = c["dom"]["nodes"].clone();
         // OS memory of the snapshotted process is inflated after its first snapshot (CensusContaminated).
@@ -1193,7 +1212,14 @@ fn memory(page: &chromium::Page, browser: &chromium::Browser, dir: &std::path::P
         probe::census::add_allocators(&mut c, browser, page, &dir.join(format!("memdump-{i}.pftrace")));
         census.push(c);
         probe::heap::snapshot(page, &dir.join(format!("{file}.heapsnapshot.gz")))?;
+        if i < 2 {
+            page.send("Runtime.evaluate", json!({ "expression": "new Promise(r => setTimeout(r, 0))", "awaitPromise": true }))?;
+            base = Some(probe::census::page_reading(page));
+        }
     }
+    let ran: Duration = grew.iter().map(|g| g.2).sum();
+    let sum = |f: fn(&Grew) -> Option<f64>| grew.iter().map(f).sum::<Option<f64>>().unwrap_or(f64::NAN);
+    let (heap_grew, nodes_grew) = (sum(|g| g.0), sum(|g| g.1));
     progress("finding objects that outlived their half");
     let leaks = crate::heapsnap::leaks(
         &crate::heapsnap::ids(&dir.join("heap-s0.heapsnapshot.gz"))?,
@@ -1204,18 +1230,29 @@ fn memory(page: &chromium::Page, browser: &chromium::Browser, dir: &std::path::P
     );
     store::write_json(&dir.join("leaks.json"), &leaks)?;
     let at = |i: usize, k: &str| census[i][k].as_f64().unwrap_or(f64::NAN);
-    let minutes = (at(2, "at_ms") - at(0, "at_ms")) / 60_000.0;
+    let minutes = ran.as_secs_f64() / 60.0;
     let mut values = BTreeMap::new();
+    let mut refused = serde_json::Map::new();
     values.insert("js.heap.used", at(2, "js_heap_bytes") / (1024.0 * 1024.0));
-    values.insert("js.heap.growth", (at(2, "js_heap_bytes") - at(0, "js_heap_bytes")) / (1024.0 * 1024.0) / minutes);
     values.insert("dom.nodes", at(2, "dom_nodes"));
-    values.insert("dom.nodes.growth", (at(2, "dom_nodes") - at(0, "dom_nodes")) / minutes);
+    match probe::census::growth_refusal(ran) {
+        None => {
+            values.insert("js.heap.growth", heap_grew / (1024.0 * 1024.0) / minutes);
+            values.insert("dom.nodes.growth", nodes_grew / minutes);
+        }
+        Some(r) => {
+            for m in ["js.heap.growth", "dom.nodes.growth"] {
+                refused.insert(m.into(), json!(crate::model::Refusal { summary: format!("{m}: {}", r.summary), ..r.clone() }.message()));
+            }
+        }
+    }
     values.insert("memory.app.private", at(0, "private_bytes") / (1024.0 * 1024.0));
     values.insert("leak.suspects.retained", leaks["retained_size"].as_f64().unwrap_or(0.0) / (1024.0 * 1024.0));
     let values: BTreeMap<&str, f64> = values.into_iter().filter(|(_, v)| v.is_finite()).collect();
     let mut meta = json!({
-        "id": id, "kind": "record", "target": target, "probes": "memory", "token": "", "duration_ms": for_ms,
-        "browser": browser.version, "env": host::env(), "values": values, "census": census,
+        "id": id, "kind": "record", "target": target, "probes": "memory", "token": "", "duration_ms": for_ms, "growth_ms": ran.as_secs_f64() * 1e3,
+        "growth_windows": grew.iter().map(|g| json!({ "ms": g.2.as_secs_f64() * 1e3, "js_heap_bytes": g.0, "dom_nodes": g.1 })).collect::<Vec<_>>(),
+        "browser": browser.version, "env": host::env(), "values": values, "refused": refused, "census": census,
         "leaks": { "count": leaks["count"], "self_size": leaks["self_size"], "retained_size": leaks["retained_size"], "classes_total": leaks["classes_total"] },
         "created": now_iso(), "valid": true,
     });
@@ -1437,17 +1474,19 @@ fn summary_body(meta: &Value) -> String {
     if meta["probes"] == "memory" {
         let id = meta["id"].as_str().unwrap_or("");
         let l = &meta["leaks"];
-        let growth = format!("{}{}", if get("js.heap.growth") < 0.0 { "−" } else { "+" }, fmt::bytes(get("js.heap.growth").abs() * 1048576.0));
+        // A refused rate (`refused` says why) shows nothing per minute, never `+NaN B`.
+        let per_minute = |s: String, m: &str| if get(m).is_finite() { format!(" · {s} per minute") } else { String::new() };
+        let heap = per_minute(format!("{}{}", if get("js.heap.growth") < 0.0 { "−" } else { "+" }, fmt::bytes(get("js.heap.growth").abs() * 1048576.0)), "js.heap.growth");
+        let dom = per_minute(fmt::signed(get("dom.nodes.growth"), "count"), "dom.nodes.growth");
         return format!(
-            "{id} · {} · {} · memory\njs heap  {} after GC · {} per minute\ndom      {} nodes · {} per minute\nsuspects {} objects allocated in the first half and alive at the end · {} retained\nnext     strobe query {id} leaks · strobe query {id} heap\n",
+            "{id} · {} · {} · memory\njs heap  {} after GC{heap}\ndom      {} nodes{dom}\nsuspects {} objects allocated in the first half and alive at the end · {} retained\n{}next     strobe query {id} leaks · strobe query {id} heap\n",
             meta["target"].as_str().unwrap_or(""),
             fmt::ms_duration(meta["duration_ms"].as_u64().unwrap_or(0)),
             fmt::bytes(get("js.heap.used") * 1048576.0),
-            growth,
             fmt::value(get("dom.nodes"), "count"),
-            fmt::signed(get("dom.nodes.growth"), "count"),
             l["count"].as_u64().unwrap_or(0),
             fmt::bytes(l["retained_size"].as_f64().unwrap_or(0.0)),
+            refused_lines(meta),
         );
     }
     if meta["native"] == true {
@@ -1753,6 +1792,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
         wki::write_owner_gz(&dir.join(wki::CRASHES_FILE), &crashes)?;
         let mut refused = wir_refusals();
         refused.remove("js.heap.used");
+        refused.extend(mem.refused.into_iter().map(|(k, v)| (k, json!(v))));
         let meta = json!({
             "id": id,
             "kind": "record",

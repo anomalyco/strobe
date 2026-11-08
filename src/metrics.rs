@@ -194,17 +194,21 @@ pub struct BlockData {
     pub windows: Vec<Window>,
     /// Per window key.
     pub frames: BTreeMap<String, Vec<Frame>>,
+    /// The renderer main thread's tasks per window key: (start, ns inside the window and outside its
+    /// untimed stretches).
     pub tasks: BTreeMap<String, Vec<(i64, i64)>>,
     /// Input events' latencies: (event time, ns, event type).
     pub latencies: BTreeMap<String, Vec<(i64, i64, String)>>,
     /// Layout shifts per window key: (ts, score). Only in traces with the `loading` category.
     pub shifts: BTreeMap<String, Vec<(i64, f64)>>,
-    /// Main-thread GC slices per window key (ts, ns). Only in traces with `disabled-by-default-v8.gc`.
+    /// Main-thread GC slices per window key (ts, ns), cut to the window and its timed parts. Only in
+    /// traces with `disabled-by-default-v8.gc`.
     pub gc: BTreeMap<String, Vec<(i64, i64)>>,
-    /// The GPU process's outermost shader and pipeline compile slices per window key (ts, ns), on any
+    /// The GPU process's outermost shader and pipeline compile slices per window key (ts, ns, cut to the
+    /// window and its timed parts), on any
     /// of its threads. Only in traces with the Dawn categories.
     pub gpu_compile: BTreeMap<String, Vec<(i64, i64)>>,
-    /// The page's own `performance.measure()` spans inside each window: (name, start, ns). Marks are
+    /// The page's own `performance.measure()` spans in each window, cut to it: (name, start, ns). Marks are
     /// instants on the thread's own track; a measure is an async slice, of any length (0 too).
     pub spans: BTreeMap<String, Vec<(String, i64, i64)>>,
     /// Each run window's `ctx.untimed` stretches (trace clock), by the run's key: what `leave_out_untimed`
@@ -214,6 +218,20 @@ pub struct BlockData {
     /// the `SendBeginMainFrameToCommit` stage's breakdown (`main.paint`). Only a report whose main
     /// thread ran carries it, so a FORKED one adds nothing.
     pub paint: BTreeMap<String, Vec<(i64, f64)>>,
+}
+
+/// The time a set of `[a, b)` intervals covers, overlapping ones counted once.
+fn covered(mut v: Vec<(i64, i64)>) -> i64 {
+    v.sort_unstable();
+    let (mut total, mut end) = (0i64, i64::MIN);
+    for (a, b) in v {
+        let a = a.max(end);
+        if b > a {
+            total += b - a;
+        }
+        end = end.max(b);
+    }
+    total
 }
 
 /// `[a, a + d)` without the stretches `gaps` (sorted), as (start, ns) pieces.
@@ -238,8 +256,8 @@ impl BlockData {
     /// Takes the `ctx.untimed` stretches (SPEC §9.6) out of the runs they were in, and out of those
     /// runs' phases: their windows are `…:untimed:<run>.<n>`. Frames begun in one leave, with a frame
     /// that wanted no update in their place (so no interval spans the stretch), as do input latencies
-    /// of events sent in one and layout shifts there; tasks, GC, compiles and the page's spans keep
-    /// only their parts outside them.
+    /// of events sent in one and layout shifts there; GC, compiles and the page's spans keep only their
+    /// parts outside them, and a task its time outside them.
     fn leave_out_untimed(&mut self) {
         for w in self.windows.iter().filter(|w| w.key.contains(":untimed:")) {
             let Some((head, rest)) = w.key.split_once(":untimed:") else { continue };
@@ -281,7 +299,21 @@ impl BlockData {
                 v.retain(|p| !inside(&gaps, p.0));
             }
         }
-        for map in [&mut self.tasks, &mut self.gc, &mut self.gpu_compile] {
+        // A task stays one task: its timed time, at its first timed moment. One that straddles an
+        // untimed edge is as long as its part outside the stretch (`main.tasks.long` counts what the
+        // run itself waited through, and never splits a task into pieces under 50 ms).
+        for (k, v) in self.tasks.iter_mut() {
+            if let Some(gaps) = gaps_of(&self.untimed, k) {
+                *v = v
+                    .iter()
+                    .filter_map(|&(a, d)| {
+                        let parts = outside(a, d, &gaps);
+                        Some((parts.first()?.0, parts.iter().map(|p| p.1).sum()))
+                    })
+                    .collect();
+            }
+        }
+        for map in [&mut self.gc, &mut self.gpu_compile] {
             for (k, v) in map.iter_mut() {
                 if let Some(gaps) = gaps_of(&self.untimed, k) {
                     *v = v.iter().flat_map(|&(a, d)| outside(a, d, &gaps)).collect();
@@ -339,18 +371,6 @@ impl BlockData {
         if runs.iter().all(|w| spans(w).is_empty()) {
             return None;
         }
-        let covered = |mut v: Vec<(i64, i64)>| -> i64 {
-            v.sort_unstable();
-            let (mut total, mut end) = (0i64, i64::MIN);
-            for (a, b) in v {
-                let a = a.max(end);
-                if b > a {
-                    total += b - a;
-                }
-                end = end.max(b);
-            }
-            total
-        };
         Some(runs.iter().map(|w| (w.key.rsplit_once(&format!(":{prefix}:")).map_or(w.key.clone(), |(_, i)| format!("{prefix}:{i}")), covered(spans(w)) as f64 / 1e6)).collect())
     }
 
@@ -368,7 +388,9 @@ impl BlockData {
             .collect()
     }
 
-    /// Main-thread GC time of each run window (ms), 0 for a run without a collection.
+    /// Main-thread GC time of each run window (ms), 0 for a run without a collection: the time its GC
+    /// slices covered, so a GC slice inside another (directly or under a slice of another name) counts
+    /// once.
     pub fn gc_per_run(&self, prefix: &str) -> BTreeMap<String, f64> {
         self.windows
             .iter()
@@ -376,7 +398,7 @@ impl BlockData {
             .map(|w| {
                 (
                     w.key.rsplit_once(&format!(":{prefix}:")).map_or(w.key.clone(), |(_, i)| format!("{prefix}:{i}")),
-                    self.gc.get(&w.key).map_or(0.0, |s| s.iter().map(|x| x.1).sum::<i64>() as f64 / 1e6),
+                    self.gc.get(&w.key).map_or(0.0, |s| covered(s.iter().map(|&(a, d)| (a, a + d)).collect()) as f64 / 1e6),
                 )
             })
             .collect()
@@ -491,6 +513,15 @@ create perfetto table _wp as
 /// work (style, layout, prepaint, paint, …, each in µs).
 const BREAKDOWN: &str = "send_begin_mainframe_to_commit_breakdown";
 
+/// A long task: one the run waited through for more than 50 ms of its timed time.
+pub const LONG_TASK_NS: i64 = 50_000_000;
+
+/// A slice that overlaps the window `w` (a zero-length one inside it): tasks, GC, compiles and spans
+/// keep their part inside, cut at both edges, so a slice that runs past the window's end counts only
+/// up to it and one begun before it counts from its start. A slice the trace never saw end (`dur` -1)
+/// has no length.
+const OVERLAP: &str = "s.dur >= 0 and s.ts < w.t1 and s.ts + max(s.dur, 1) > w.t0";
+
 pub fn read(trace: &Path, token: &str) -> Result<BlockData> {
     let sql = format!(
         r#"
@@ -522,9 +553,9 @@ select 'frame', w.k, s.ts, s.dur,
   left join _st st on st.id = s.id left join _sv sv on sv.id = s.id
   where s.name = 'PipelineReporter'
 union all
-select 'task', w.k, s.ts, s.dur, null, null
+select 'task', w.k, max(s.ts, w.t0), min(s.ts + s.dur, w.t1) - max(s.ts, w.t0), null, null
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and {overlap}
   where s.name = 'RunTask' and s.depth = 0 and t.name = 'CrRendererMain'
 union all
 select 'lat', w.k, s.ts, s.dur, null, extract_arg(s.arg_set_id, 'event_latency.event_type')
@@ -538,22 +569,22 @@ select 'shift', w.k, s.ts, null, null,
   join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where s.name = 'LayoutShift'
 union all
-select 'gc', w.k, s.ts, s.dur, null, null
+select 'gc', w.k, max(s.ts, w.t0), min(s.ts + s.dur, w.t1) - max(s.ts, w.t0), null, null
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and {overlap}
   left join slice p on p.id = s.parent_id
   where s.name glob 'V8.GC_*' and t.name = 'CrRendererMain' and (p.name is null or p.name not glob 'V8.GC_*')
 union all
-select 'gpuc', w.k, s.ts, s.dur, null, null
+select 'gpuc', w.k, max(s.ts, w.t0), min(s.ts + s.dur, w.t1) - max(s.ts, w.t0), null, null
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid) join process pr using(upid)
-  join _w w on s.ts >= w.t0 and s.ts < w.t1
+  join _w w on {overlap}
   where pr.name glob 'GPU*' and s.category glob '*gpu.dawn*' and (s.name glob '*Compile*' or s.name glob '*APICreate*Pipeline*')
     and not exists (select 1 from ancestor_slice(s.id) a where a.name glob '*Compile*' or a.name glob '*APICreate*Pipeline*')
 union all
-select 'span', w.k, s.ts, s.dur, null, s.name
+select 'span', w.k, max(s.ts, w.t0), min(s.ts + s.dur, w.t1) - max(s.ts, w.t0), null, s.name
   from slice s join track tr on s.track_id = tr.id
   left join thread_track tt on tt.id = s.track_id left join thread t on t.utid = tt.utid
-  join _wp w on coalesce(t.upid, extract_arg(tr.dimension_arg_set_id, 'upid')) = w.upid and s.ts >= w.t0 and s.ts + s.dur <= w.t1
+  join _wp w on coalesce(t.upid, extract_arg(tr.dimension_arg_set_id, 'upid')) = w.upid and {overlap}
   where s.category glob '*blink.user_timing*' and s.dur >= 0 and s.name not glob 'strobe:*'
     and not (s.dur = 0 and tr.type = 'thread_track_event')
 union all
@@ -566,6 +597,7 @@ select 'paint', w.k, c.ts, null, null,
 "#,
         windows = windows_sql("1"),
         breakdown = BREAKDOWN,
+        overlap = OVERLAP,
         cpu = sql_list(&STAGES_RENDERER),
         raster = STAGES_RASTER,
         viz_parent = sql_list(&STAGES_VIZ_PARENT),
@@ -740,9 +772,9 @@ pub fn block_values(data: &BlockData, prefix: &str, extra: &BTreeMap<String, BTr
         if !data.tasks.is_empty() {
             let tasks = data.tasks.get(&w.key).map(Vec::as_slice).unwrap_or(&[]);
             let span = (w.t1 - w.t0 - data.untimed_in(w)).max(1) as f64;
-            let busy: f64 = tasks.iter().map(|(ts, dur)| ((*ts + *dur).min(w.t1) - ts).max(0) as f64).sum();
+            let busy: f64 = tasks.iter().map(|t| t.1.max(0) as f64).sum();
             per_run.entry("main.busy").or_default().push(100.0 * busy / span);
-            per_run.entry("main.tasks.long").or_default().push(tasks.iter().filter(|t| t.1 > 50_000_000).count() as f64);
+            per_run.entry("main.tasks.long").or_default().push(tasks.iter().filter(|t| t.1 > LONG_TASK_NS).count() as f64);
         }
         let lat = data.latencies.get(&w.key).map(Vec::as_slice).unwrap_or(&[]);
         let (samples, n_press) = discrete_samples(lat);

@@ -234,15 +234,19 @@ pub fn threads(pids: &[u32]) -> (Vec<ThreadInfo>, Vec<(u32, u64, u64)>) {
         }
         for e in std::fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
             let Some(tid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+            // Its start (clock ticks since boot, `stat` field 22): a tid the kernel hands out again is
+            // another thread. A thread that exits while it is read is left out (as one that exited
+            // before): with no start, its whole counts would read as one interval's.
+            let Some(born) = read(format!("/proc/{pid}/task/{tid}/stat")).and_then(|s| s.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse::<u64>().ok()) else { continue };
             let (cpu_ns, switches) = match schedstat(&format!("/proc/{pid}/task/{tid}/schedstat")) {
                 Some((run, _, n)) => (run, n),
                 None => {
-                    let s = read(format!("/proc/{pid}/task/{tid}/status")).unwrap_or_default();
+                    let Some(s) = read(format!("/proc/{pid}/task/{tid}/status")) else { continue };
                     let n: u64 = s.lines().filter(|l| l.contains("ctxt_switches:")).filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).sum();
                     (0, n)
                 }
             };
-            out.push(ThreadInfo { pid, tid, switches: switches as u32, cpu_ns });
+            out.push(ThreadInfo { pid, tid, born, switches: Some(switches), cpu_ns });
         }
     }
     out.sort_by_key(|t| (t.pid, t.tid));
@@ -314,6 +318,20 @@ pub fn thread_modules(threads: &[(u32, u32)]) -> HashMap<u32, String> {
 
 pub fn thread_name(tid: u32) -> Option<String> {
     read(format!("/proc/{tid}/comm")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// The online CPUs' numbers (`/sys/devices/system/cpu/online`, as `0-3,6`), every CPU this machine
+/// runs, whichever of them this process may use.
+pub fn online_cpus() -> Vec<usize> {
+    let text = read("/sys/devices/system/cpu/online").unwrap_or_default();
+    let mut out = Vec::new();
+    for part in text.trim().split(',').filter(|p| !p.is_empty()) {
+        let (a, b) = part.split_once('-').unwrap_or((part, part));
+        if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+            out.extend(a..=b);
+        }
+    }
+    out
 }
 
 /// Idle time so far per logical CPU in ns (`/proc/stat`: idle + iowait, in 10 ms ticks).
