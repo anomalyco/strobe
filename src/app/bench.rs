@@ -2393,7 +2393,14 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         Ok(b)
     });
     // A stop, an unlock wait that ran out, or a question the check cannot answer ends the bench, as a
-    // batch's launch does: the case is not run (`--resume` runs it), never a failure.
+    // batch's launch does: the case is not run (`--resume` runs it), never a failure. So does a phone that
+    // went away, with one line, rather than failing each case after it.
+    if r.is_err()
+        && !stop_requested()
+        && let Some(gone) = crate::host::adb::lost()
+    {
+        return Err(gone);
+    }
     if let Err(e) = &r
         && (matches!(e.code, 2 | 124 | 130) || stop_requested())
     {

@@ -29,7 +29,7 @@ export default bench({
         await page.press("Backspace", { selector: "field", until: { selector: "echo", text: "echo: ", exact: true } })
       },
     },
-    toggle: { primary: "cpu.work", run: ({ page }) => page.act("check", "toggle", { until: "idle" }) },
+    toggle: { primary: "cpu.work", run: ({ page }) => page.act("check", "toggle", { until: "idle" }), reset: ({ page }) => page.act("check", "toggle", { until: "idle" }) },
     scroll: { primary: "cpu.work", metrics: ["scroll.latency.p95"], run: ({ page }) => page.scroll("scroll", { by: 600 }, { until: "idle" }) },
     wheel: { primary: "cpu.work", run: ({ page }) => page.wheel("scroll", { dy: -300 }, { until: "idle" }) },
     misc: {

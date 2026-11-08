@@ -26,6 +26,7 @@
     "@hona/strobe-darwin-x64": "0.22.0",
     "@hona/strobe-linux-arm64": "0.22.0",
     "@hona/strobe-linux-x64": "0.22.0",
+    "@hona/strobe-win32-arm64": "0.22.0",
     "@hona/strobe-win32-x64": "0.22.0"
   },
   "devDependencies": {

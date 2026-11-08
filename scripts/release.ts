@@ -6,7 +6,7 @@
 //   bun scripts/release.ts --bin <folder> [--publish]
 //
 // <folder> holds one subfolder per platform with its built binaries, as release.yml's build jobs leave
-// them: win32-x64/{strobe.exe,strobew.exe}, darwin-arm64/strobe, darwin-x64/strobe, linux-x64/strobe,
+// them: win32-x64/{strobe.exe,strobew.exe}, win32-arm64/{strobe.exe,strobew.exe}, darwin-arm64/strobe, darwin-x64/strobe, linux-x64/strobe,
 // linux-arm64/strobe. Every platform must be there: a release never ships without one.
 // A version already on npm is skipped, so a rerun after a failure publishes only what is missing.
 // With --publish each package waits until npm serves the ones it depends on (`waitVisible`).
@@ -24,6 +24,7 @@ if (!version) throw new Error("no version in Cargo.toml")
 
 const platforms = [
   { target: "win32-x64", files: ["strobe.exe", "strobew.exe"] },
+  { target: "win32-arm64", files: ["strobe.exe", "strobew.exe"] },
   { target: "darwin-arm64", files: ["strobe"] },
   { target: "darwin-x64", files: ["strobe"] },
   { target: "linux-x64", files: ["strobe"] },
@@ -37,6 +38,24 @@ for (const dir of packages) {
   const refs = { ...pkg.dependencies, ...pkg.optionalDependencies }
   const wrong = [[pkg.name, pkg.version], ...Object.entries(refs).filter(([n]) => n.startsWith("@hona/strobe"))].filter(([, v]) => v !== version)
   if (wrong.length) throw new Error(`${dir}/package.json: ${wrong.map(([n, v]) => `${n} ${v}`).join(", ")}; Cargo.toml says ${version}`)
+}
+
+// @hona/strobe names exactly the platform packages a release publishes: one it names that no release ships
+// fails every install's lockfile, and one it does not name is never installed.
+const names = await Promise.all(platforms.map(async (p) => (await Bun.file(join(root, p.dir, "package.json")).json()).name as string))
+const named = Object.keys((await Bun.file(join(root, "sdk/bench/package.json")).json()).optionalDependencies ?? {})
+const unnamed = names.filter((n) => !named.includes(n))
+const unshipped = named.filter((n) => !names.includes(n))
+if (unnamed.length || unshipped.length)
+  throw new Error(`sdk/bench/package.json's optionalDependencies: ${[...unnamed.map((n) => `${n} missing`), ...unshipped.map((n) => `${n} is no platform this release builds`)].join(", ")}`)
+
+// npm trusts release.yml only for a package that exists (its header): a new platform package is bootstrapped by
+// hand once. Checked before anything is published, so a release never stops halfway on it.
+if (values.publish) {
+  const unknown: string[] = []
+  for (const name of [...names, "@hona/strobe", "@hona/strobe-bench"])
+    if ((await $`npm view ${name} name --prefer-online`.quiet().nothrow()).stdout.toString().trim() !== name) unknown.push(name)
+  if (unknown.length) throw new Error(`not on npm yet: ${unknown.join(", ")}; bootstrap each once as release.yml's header says, then run the release again`)
 }
 
 if (!values.bin) throw new Error("--bin <folder with the built binaries> is required")

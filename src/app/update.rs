@@ -17,6 +17,7 @@ const PACKAGE: &str = "@hona/strobe";
 fn platform() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => Some("win32-x64"),
+        ("windows", "aarch64") => Some("win32-arm64"),
         ("macos", "aarch64") => Some("darwin-arm64"),
         ("macos", "x86_64") => Some("darwin-x64"),
         ("linux", "x86_64") => Some("linux-x64"),

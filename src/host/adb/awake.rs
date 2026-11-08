@@ -339,7 +339,7 @@ impl PhoneSlot {
                         }
                         Err(e) => {
                             let _ = file.unlock();
-                            return Err(e);
+                            return Err(d.timed_out(e));
                         }
                     }
                 }

@@ -1,7 +1,7 @@
 name: Release
 
 # A version tag (v0.2.0) builds strobe for every platform and publishes its npm packages at Cargo.toml's
-# version: @hona/strobe-<platform>-<arch> with the binaries (win32-x64, darwin-arm64, darwin-x64,
+# version: @hona/strobe-<platform>-<arch> with the binaries (win32-x64, win32-arm64, darwin-arm64, darwin-x64,
 # linux-x64, linux-arm64), @hona/strobe (the `strobe` command and the bench SDK) and the @hona/strobe-bench
 # alias. npm trusts this workflow in the npm environment (trusted publishing over OIDC), so a publish needs
 # no npm token and every version gets provenance.
@@ -40,6 +40,36 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: win32-x64
+          path: out
+          retention-days: 1
+
+  # Windows on Arm: native MSVC on an Arm runner, as Check builds it. The C runtime is linked in statically, so
+  # the binaries need no Visual C++ Redistributable (Windows on Arm does not always have one).
+  windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust
+        shell: bash
+        run: rustup toolchain install stable-aarch64-pc-windows-msvc --profile minimal && rustup default stable-aarch64-pc-windows-msvc
+      - name: Build
+        run: cargo build --release --locked
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+      - name: Check no runtime DLL is imported
+        shell: bash
+        run: |
+          for f in strobe.exe strobew.exe; do
+            if grep -aqi 'vcruntime140\.dll' "target/release/$f"; then echo "::error::$f imports the Visual C++ runtime"; exit 1; fi
+          done
+      - name: Collect
+        shell: bash
+        run: mkdir -p out/win32-arm64 && cp target/release/strobe.exe target/release/strobew.exe out/win32-arm64/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: win32-arm64
           path: out
           retention-days: 1
 
@@ -110,7 +140,7 @@ jobs:
 
   # On a v* tag this publishes. Run by hand on a branch, it packs every package without publishing (a dry run).
   publish:
-    needs: [windows-x64, linux, macos]
+    needs: [windows-x64, windows-arm64, linux, macos]
     runs-on: ubuntu-24.04
     # The npm environment takes deployments from v* tags only, and npm trusts only this environment.
     environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'npm' || '' }}

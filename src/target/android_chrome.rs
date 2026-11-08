@@ -183,6 +183,10 @@ impl Drop for Launch {
     /// back at its next start. The journal stays, marked closed, with the tab's last address: one that
     /// comes back anyway is known as strobe's and closed by the next launch.
     fn drop(&mut self) {
+        // A phone that went away keeps its journal as it is: the next launch there closes the tab it names.
+        if adb::lost().is_some() {
+            return;
+        }
         if let Some(u) =
             self.cdp.send_timeout("Target.getTargetInfo", json!({ "targetId": self.tab }), None, Duration::from_secs(2)).ok().and_then(|i| i["targetInfo"]["url"].as_str().map(str::to_string))
         {
@@ -198,7 +202,8 @@ impl Drop for Launch {
             std::thread::sleep(Duration::from_millis(100));
         }
         std::thread::sleep(Duration::from_millis(500));
-        let _ = self.device.sh(&format!("am force-stop {}", self.package));
+        // Within 10 s: a phone that stopped answering is lost here (`adb::lost`), and the run ends at it.
+        let _ = self.device.shell_for(&format!("am force-stop {}", self.package), Duration::from_secs(10));
         self.write_journal(true);
     }
 }

@@ -34,6 +34,19 @@ const SHELL_CAP: usize = 16 << 20;
 const PACKET_CAP: usize = 1 << 20;
 /// adbd's sync data chunks are at most this big.
 const SYNC_CHUNK: usize = 64 * 1024;
+/// How long a device's shell has to run `true` after a command timed out, before the device counts as lost.
+const ANSWER: Duration = Duration::from_secs(5);
+
+/// The devices this strobe picked (`Adb::pick`), each with the error it was lost with: the server no longer
+/// had it (unplugged, an emulator that died) or its shell stopped answering. A lost device's requests fail
+/// at once with that error, so a run stops at the first (`lost`) instead of waiting out each request's
+/// timeout. Picking it again starts afresh.
+static WATCHED: Mutex<Vec<(String, Option<Error>)>> = Mutex::new(Vec::new());
+
+/// The device this strobe picked and then lost, as the error its requests now fail with (exit 255).
+pub fn lost() -> Option<Error> {
+    WATCHED.lock().unwrap_or_else(|e| e.into_inner()).iter().find_map(|(_, e)| e.clone())
+}
 
 /// The adb server strobe talks to.
 #[derive(Clone, Copy, Debug)]
@@ -366,7 +379,12 @@ impl Adb {
         };
         let why = state_text(&one.state);
         match one.state {
-            State::Device => Ok(self.device(&one.serial)),
+            State::Device => {
+                let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+                watched.retain(|(s, _)| *s != one.serial);
+                watched.push((one.serial.clone(), None));
+                Ok(self.device(&one.serial))
+            }
             State::Unauthorized => Err(Error::new(3, format!("{} is unauthorized", one.serial)).hint("unlock the phone and accept the \"Allow USB debugging?\" prompt")),
             State::NoPermissions => Err(Error::new(3, format!("{} is {why}", one.serial)).hint("the OS refused the USB device: add a udev rule for it, then reconnect")),
             _ => Err(Error::unreachable(format!("{} is {why}", one.serial)).hint("reconnect it, or wait until it finishes booting")),
@@ -467,9 +485,48 @@ fn parse_list(text: &str, serial: Option<&str>) -> Vec<(String, String)> {
 impl Device {
     /// A connection switched to this device, ready for one service.
     fn transport(&self, timeout: Option<Duration>, what: &str) -> Result<Conn> {
+        if let Some(e) = self.lost_error() {
+            return Err(e);
+        }
         let mut c = Conn::open(self.adb.port, timeout, &format!("{}: {what}", self.serial))?;
-        c.request(&format!("host:transport:{}", self.serial))?;
-        Ok(c)
+        c.send(&format!("host:transport:{}", self.serial))?;
+        match &c.read_n(4)?[..] {
+            b"OKAY" => Ok(c),
+            // The server no longer has it: `device 'emulator-5554' not found`, `device offline`.
+            b"FAIL" => {
+                let why = c.read_string()?;
+                Err(self.lose(&why))
+            }
+            other => Err(Error::msg(format!("{}: unexpected reply {:?}", c.ctx, String::from_utf8_lossy(other)))),
+        }
+    }
+
+    /// The error this device's requests fail with since it was lost (`WATCHED`).
+    fn lost_error(&self) -> Option<Error> {
+        WATCHED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| *s == self.serial).and_then(|(_, e)| e.clone())
+    }
+
+    /// The error for this device gone, `why` being what showed it; kept as lost when it is a picked one.
+    fn lose(&self, why: &str) -> Error {
+        let e = Error::unreachable(format!("{} went away: {why}", self.serial))
+            .hint("reconnect it, or restart the emulator, until `adb devices` lists it as `device`; `strobe bench --resume <exp>` then runs the cases a bench did not reach");
+        let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, lost)) = watched.iter_mut().find(|(s, _)| *s == self.serial) {
+            lost.get_or_insert_with(|| e.clone());
+        }
+        e
+    }
+
+    /// `e`, a request that failed, unless it timed out on a device whose shell does not run `true` within
+    /// `ANSWER` either: then the device is lost (an emulator that hung), not slow at one command.
+    fn timed_out(&self, e: Error) -> Error {
+        if e.code != 124 || self.lost_error().is_some() {
+            return e;
+        }
+        match self.run_shell("true", ANSWER) {
+            Ok(_) => e,
+            Err(_) => self.lost_error().unwrap_or_else(|| self.lose(&format!("its shell stopped answering ({})", e.message))),
+        }
     }
 
     /// What this device's adbd supports (`shell_v2`, `cmd`, `stat_v2`, …).
@@ -497,8 +554,13 @@ impl Device {
     }
 
     /// `shell` that fails once `timeout` has passed. Its stdin is closed at once: a command that
-    /// reads it sees its end. Its stdout and stderr hold at most 16 MiB each.
+    /// reads it sees its end. Its stdout and stderr hold at most 16 MiB each. A device that stopped
+    /// answering altogether is lost (`timed_out`).
     pub fn shell_for(&self, cmd: &str, timeout: Duration) -> Result<ShellOutput> {
+        self.run_shell(cmd, timeout).map_err(|e| self.timed_out(e))
+    }
+
+    fn run_shell(&self, cmd: &str, timeout: Duration) -> Result<ShellOutput> {
         let deadline = Instant::now() + timeout;
         let mut c = self.open_shell(cmd, timeout)?;
         // Packet: id (0 stdin, 1 stdout, 2 stderr, 3 exit, 4 close stdin), length (u32 LE), data.

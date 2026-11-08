@@ -11,6 +11,9 @@
 //   idle      the program sleeping: the base the memory cases are above
 //   spawner   a child of 100 ms CPU every 200 ms, each ending inside the run: cpu.work about 500 ms (or refused)
 //   ready-0 / ready-300  launch until it prints READY: the two launch.ready differ by 300 ms
+//   tick-0 / tick-4 / tick-8  planted work: one thread waking 50 times a second, spinning 0, 4 or 8 ms of its CPU
+//             each wake: cpu.work o, 200 + o and 400 + o ms, where o is the wakes' own cost (tick-0 reads it), and
+//             cpu.wakes about 50/s on all three. tick-8 over tick-4 is a planted 2x: exactly (400 + o) / (200 + o)
 import { bench, native } from "@hona/strobe"
 import { join } from "node:path"
 
@@ -30,11 +33,15 @@ export default bench({
     spawner: run(["spawner", "100", "100", "600"]),
     "ready-0": run(["ready", "0", "READY"]),
     "ready-300": run(["ready", "300", "READY"]),
+    "tick-0": run(["tick", "50", "0", "600"]),
+    "tick-4": run(["tick", "50", "4", "600"]),
+    "tick-8": run(["tick", "50", "8", "600"]),
   },
   cases: {
     duty: { targets: ["duty"], ...wait("cpu.work") },
     wake: { targets: ["wake"], ...wait("cpu.wakes") },
     spawner: { targets: ["spawner"], ...wait("cpu.work") },
+    tick: { targets: ["tick-0", "tick-4", "tick-8"], ...wait("cpu.work") },
     memory: { targets: ["hold", "shm", "map", "idle"], ...wait("memory.app.private") },
     ready: {
       targets: ["ready-0", "ready-300"],

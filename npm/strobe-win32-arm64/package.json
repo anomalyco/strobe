@@ -1,0 +1,13 @@
+{
+  "name": "@hona/strobe-win32-arm64",
+  "version": "0.22.0",
+  "description": "The strobe binary for Windows on Arm (arm64); installed by @hona/strobe",
+  "files": ["strobe.exe", "strobew.exe"],
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/anomalyco/strobe.git" },
+  "publishConfig": {
+    "access": "public"
+  }
+}

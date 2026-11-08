@@ -1,5 +1,7 @@
 // Dev bench for touch input on an emulated phone (not shipped). Run from the repo root, headless (a phone is):
 //   strobe bench scripts/dev/touch.bench.ts --head . --check --headless [--engine firefox]
+// or in Chrome on an Android phone or emulator:
+//   strobe bench scripts/dev/touch.bench.ts --head . --check --mobile
 // Each case asserts what the page got and counts it (`count.<event>_<pointerType>`): a tap is a touch start, a touch
 // pointer down and up, a touch end and a click, never a mouse pointer; a drag moves the knob; a scroll swipes the
 // page or the list (Chromium; Firefox refuses EngineUnsupported: headless, it does not pan on touch). `hover`,
@@ -56,8 +58,10 @@ export default bench({
       },
       reset,
     },
+    // On a page a person cannot zoom: on a zoomable one a phone's Chrome takes a double tap as a zoom, with no
+    // second click.
     "double tap": {
-      targets: ["phone"],
+      targets: ["fixed"],
       primary: "run.duration",
       metrics,
       run: async ({ page }) => {
@@ -99,8 +103,10 @@ export default bench({
         await page.scroll("#tall", { by: 600 })
         const y = await page.eval(() => scrollY)
         count("scrolled", Math.round(y))
-        // 600, give or take the touch slop and the lead-in (601 at 20 Hz, 617 at 60 Hz), and no fling past it.
-        if (y < 570 || y > 630) throw new Error(`the page scrolled ${y}px, not ~600: ${(await seen(page)).join(" ")}`)
+        // 600, give or take the lead-in (601 at 20 Hz, 617 at 60 Hz) and the touch slop, and no fling past it. An
+        // emulated phone gives up little to the slop; a phone's Chrome (`--mobile`) keeps the first ~40-50 px of
+        // the finger's travel (552-561 px on an emulator's Chrome).
+        if (y < 540 || y > 630) throw new Error(`the page scrolled ${y}px, not ~600: ${(await seen(page)).join(" ")}`)
       },
       reset,
     },

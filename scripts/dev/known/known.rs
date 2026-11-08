@@ -27,6 +27,11 @@
 //                               again for [s] (60) s: (<ms> / (<ms> + <gap_ms>)) of a core, all of it in
 //                               children that end
 //   wake <hz> [s]               long-running: one thread wakes <hz> times a second, for [s] (60) s
+//   tick <hz> <work_ms> [s]     long-running planted work: one thread wakes <hz> times a second on a fixed
+//                               schedule and spins <work_ms> of its CPU on each wake (`spin`), nothing else (no
+//                               allocation, I/O or request), for [s] (60) s. CPU a second: <hz> x <work_ms> ms
+//                               plus the wakes' own cost, which `tick <hz> 0` runs alone; so the true ratio of
+//                               two works at one <hz> is known once that is read
 //   hold <mb> [s]               long-running: <mb> MiB private written once, then idle, for [s] (60) s
 //   tty <bytes> <delay_ms>      terminal app: raw input; on each key, after <delay_ms>, one synchronized
 //                               frame that rewrites row 1 with <bytes> cells (alternating A and B); `q` quits.
@@ -447,6 +452,22 @@ fn main() {
                 thread::sleep(ms(1e3 / hz));
             }
         }
+        "tick" => {
+            let (hz, work, secs) = (arg(&args, 2, 50.0), arg(&args, 3, 5.0), arg(&args, 4, 60.0));
+            let period = ms(1e3 / hz);
+            let start = Instant::now();
+            let mut next = start;
+            while start.elapsed().as_secs_f64() < secs {
+                if work > 0.0 {
+                    spin(work);
+                }
+                // On a fixed schedule, so a second has <hz> wakes whatever each one's work (below the period).
+                next += period;
+                if let Some(d) = next.checked_duration_since(Instant::now()) {
+                    thread::sleep(d);
+                }
+            }
+        }
         "hold" => {
             let mb = arg(&args, 2, 100.0) as usize;
             let mut v = vec![0u8; mb * MIB];
@@ -485,7 +506,7 @@ fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|hold|tty|frames> …");
+            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|hold|tty|frames> …");
             std::process::exit(2);
         }
     }
