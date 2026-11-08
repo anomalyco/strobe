@@ -304,6 +304,7 @@ pub fn launch(phone: &Phone, what: &str, timed: bool, unlock_wait: Duration) -> 
         embedded: false,
         // `navigator.webdriver` false in strobe's tab, as on a desktop launch.
         as_person: true,
+        headless: false,
         phone: Some(Box::new(launch)),
     })
 }

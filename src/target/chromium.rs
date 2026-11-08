@@ -50,6 +50,8 @@ pub struct Browser {
     pub embedded: bool,
     /// A browser `launch` started for pages: each page it opens gets `NOT_AUTOMATED` first.
     pub as_person: bool,
+    /// Launched headless: it opens no window to keep on top.
+    pub headless: bool,
     /// Chrome on an Android phone (`android_chrome::launch`): what strobe holds on the phone for it (its
     /// tab, the DevTools forward, the stay-awake setting, the phone's slot), given back when it closes.
     pub phone: Option<Box<super::android_chrome::Launch>>,
@@ -383,7 +385,7 @@ pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, extra: &[St
     let cdp = Cdp::connect(&ws)?;
     let version = cdp.send("Browser.getVersion", json!({}), None)?.get("product").and_then(Value::as_str).unwrap_or("").to_string();
     let (child, profile) = launching.done();
-    Ok(Browser { cdp, ws, child, pid, profile, fresh: true, exe, version, window: window.clone(), embedded: false, as_person: true, phone: None })
+    Ok(Browser { cdp, ws, child, pid, profile, fresh: true, exe, version, window: window.clone(), embedded: false, as_person: true, headless, phone: None })
 }
 
 /// Attaches to a running endpoint: `cdp:<port>`, `cdp:ws://…` or a bare `ws://…`.
@@ -405,7 +407,21 @@ pub fn attach(endpoint: &str) -> Result<Browser> {
     };
     let cdp = Cdp::connect(&url)?;
     let version = cdp.send("Browser.getVersion", json!({}), None)?.get("product").and_then(Value::as_str).unwrap_or("").to_string();
-    Ok(Browser { cdp, ws: url, child: None, pid: 0, profile: None, fresh: false, exe: PathBuf::new(), version, window: Window::default(), embedded: false, as_person: false, phone: None })
+    Ok(Browser {
+        cdp,
+        ws: url,
+        child: None,
+        pid: 0,
+        profile: None,
+        fresh: false,
+        exe: PathBuf::new(),
+        version,
+        window: Window::default(),
+        embedded: false,
+        as_person: false,
+        headless: false,
+        phone: None,
+    })
 }
 
 /// One GET on a debugging port. Chrome and Node keep the connection open after the reply, even with
@@ -511,8 +527,9 @@ impl Browser {
             page.send("Page.addScriptToEvaluateOnNewDocument", json!({ "source": NOT_AUTOMATED }))?;
             page.eval(&format!("{NOT_AUTOMATED}; true"))?;
         }
-        if self.pid != 0 && cfg!(windows) {
-            // An occluded Chromium window stops rendering: keep ours on top, without taking focus.
+        if self.pid != 0 && cfg!(windows) && !self.headless {
+            // An occluded Chromium window stops rendering: keep ours on top, without taking focus. A
+            // headless browser has none: waiting for one held every headless launch 5 s.
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while host::raise_windows(&self.pids()) == 0 && std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));

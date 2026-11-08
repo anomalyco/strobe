@@ -251,7 +251,22 @@ fn short(m: &str) -> (String, Option<(&'static str, &'static str)>) {
         "js.heap.used" => "JavaScript heap",
         "js.heap.growth" => "heap growth",
         "dom.nodes.growth" => return ("DOM growth".into(), fewer),
+        "js.heap.retained" => "retained JavaScript heap",
         "dom.nodes" => return ("DOM nodes".into(), fewer),
+        "memory.peak" => "peak memory",
+        "memory.app.pss" => "memory (PSS)",
+        "cli.launch" => "launch time",
+        "cpu.pty_host" => "console host CPU",
+        "tty.latency.p50" => "terminal response (p50)",
+        "tty.latency.p95" => "terminal response (p95)",
+        "tty.settle.p50" => "time to settle (p50)",
+        "tty.settle.p95" => "time to settle (p95)",
+        "tty.updates" => return ("screen updates".into(), fewer),
+        "tty.frames" => return ("synchronized frames".into(), fewer),
+        "tty.frame.p50" => "frame time (p50)",
+        "tty.frame.p95" => "frame time (p95)",
+        "tty.bytes" => "terminal output",
+        "tty.cells" => return ("changed cells".into(), fewer),
         _ => "",
     };
     if !known.is_empty() {
@@ -275,6 +290,9 @@ fn short(m: &str) -> (String, Option<(&'static str, &'static str)>) {
         return (rest.to_string(), None);
     }
     let about = model::metric(m).map(|d| d.about).unwrap_or(m);
+    // A scope in front ("cli targets: …", "native apps: …") says where the metric applies, not what it
+    // is: the card had printed "7.1% more cli targets" for a command's peak memory.
+    let about = about.split_once(": ").filter(|(scope, _)| [" targets", " apps", "Windows", "Linux", "macOS"].iter().any(|s| scope.contains(s))).map_or(about, |x| x.1);
     let first = about.split([',', '(', ':']).next().unwrap_or(about).trim().trim_end_matches(" per run");
     (if first.is_empty() { m.to_string() } else { first.to_string() }, None)
 }

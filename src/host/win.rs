@@ -884,35 +884,47 @@ pub fn window_image(hwnd: isize) -> Option<crate::png::Image> {
 /// A debug C runtime the executable imports (`ucrtbased.dll`, `vcruntime140d.dll`, …): a debug build
 /// of a C or C++ app, or of one that links such code. None when it imports none or is unreadable.
 pub fn debug_runtime(exe: &std::path::Path) -> Option<String> {
-    let b = std::fs::read(exe).ok()?;
-    let u16_at = |o: usize| b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
-    let u32_at = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
-    let pe = u32_at(0x3c)? as usize;
-    if b.get(pe..pe + 4)? != b"PE\0\0" {
+    use std::io::{Read, Seek, SeekFrom};
+    // Only the headers and the import table are read: an app's executable can be hundreds of MB (a
+    // whole-file read per block was 110 MB of IO and private memory for a 115 MB executable).
+    let mut f = std::fs::File::open(exe).ok()?;
+    let mut read = |o: usize, n: usize| -> Option<Vec<u8>> {
+        let mut b = vec![0u8; n];
+        f.seek(SeekFrom::Start(o as u64)).ok()?;
+        let got = f.by_ref().take(n as u64).read(&mut b).ok()?;
+        b.truncate(got);
+        Some(b)
+    };
+    let u16_of = |b: &[u8], o: usize| b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
+    let u32_of = |b: &[u8], o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+    let pe = u32_of(&read(0x3c, 4)?, 0)? as usize;
+    let fixed = read(pe, 24)?;
+    if fixed.get(0..4)? != b"PE\0\0" {
         return None;
     }
-    let sections = u16_at(pe + 6)? as usize;
-    let opt = pe + 24;
-    let opt_size = u16_at(pe + 20)? as usize;
+    let sections = u16_of(&fixed, 6)? as usize;
+    let opt_size = u16_of(&fixed, 20)? as usize;
+    // The optional header and the section table after it.
+    let h = read(pe + 24, opt_size + sections * 40)?;
     // The import directory: data directory 1, after the PE32 or PE32+ fixed fields.
-    let dirs = opt + if u16_at(opt)? == 0x20b { 112 } else { 96 };
-    let import_rva = u32_at(dirs + 8)? as usize;
+    let dirs = if u16_of(&h, 0)? == 0x20b { 112 } else { 96 };
+    let import_rva = u32_of(&h, dirs + 8)? as usize;
     let rva = |r: usize| -> Option<usize> {
         (0..sections).find_map(|i| {
-            let s = opt + opt_size + i * 40;
-            let (va, size, raw) = (u32_at(s + 12)? as usize, u32_at(s + 8)?.max(u32_at(s + 16)?) as usize, u32_at(s + 20)? as usize);
+            let s = opt_size + i * 40;
+            let (va, size, raw) = (u32_of(&h, s + 12)? as usize, u32_of(&h, s + 8)?.max(u32_of(&h, s + 16)?) as usize, u32_of(&h, s + 20)? as usize);
             (r >= va && r < va + size).then_some(raw + r - va)
         })
     };
     let mut at = rva(import_rva)?;
     for _ in 0..4096 {
-        let name_rva = u32_at(at + 12)? as usize;
+        let name_rva = u32_of(&read(at + 12, 4)?, 0)? as usize;
         if name_rva == 0 {
             break;
         }
-        let o = rva(name_rva)?;
-        let end = b[o..].iter().position(|c| *c == 0)? + o;
-        let name = String::from_utf8_lossy(&b[o..end]).to_ascii_lowercase();
+        let b = read(rva(name_rva)?, 256)?;
+        let end = b.iter().position(|c| *c == 0)?;
+        let name = String::from_utf8_lossy(&b[..end]).to_ascii_lowercase();
         if name == "ucrtbased.dll" || (name.starts_with("vcruntime") || name.starts_with("msvcp") || name.starts_with("msvcr")) && name.ends_with("d.dll") {
             return Some(name);
         }

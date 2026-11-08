@@ -305,7 +305,7 @@ fn webview2(app: &App, seed: Option<&Path>, window: &Window, cpus: Option<u64>, 
     let fresh = launching.fresh;
     let (child, profile) = launching.done();
     Ok((
-        Browser { cdp, ws, child, pid, profile, fresh, exe: app.exe.clone(), version, window: window.clone(), embedded: true, as_person: false, phone: None },
+        Browser { cdp, ws, child, pid, profile, fresh, exe: app.exe.clone(), version, window: window.clone(), embedded: true, as_person: false, headless: false, phone: None },
         guard,
         Started { epoch_ms: epoch, output, main: None },
     ))

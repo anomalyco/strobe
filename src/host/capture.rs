@@ -224,15 +224,53 @@ mod wgc {
         Error::msg(format!("{what}: {}", e.message()))
     }
 
+    /// The captures' Direct3D device, made once per process: making one is most of opening a capture
+    /// (118 of 126 ms of CPU on adais), which a run that reads pixels can pay.
+    struct Device(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice);
+
+    // SAFETY: as `Shared`'s: the device is free-threaded, its immediate context multithread-protected.
+    unsafe impl Send for Device {}
+
+    static DEVICE: Mutex<Option<Device>> = Mutex::new(None);
+
+    fn shared_device(fresh: bool) -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice)> {
+        let mut d = DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+        let Device(a, b, c) = match d.take() {
+            Some(held) if !fresh => d.insert(held),
+            _ => {
+                let (a, b, c) = device(false)?;
+                d.insert(Device(a, b, c))
+            }
+        };
+        Ok((a.clone(), b.clone(), c.clone()))
+    }
+
     impl Wgc {
+        /// Opens the window's capture. Its CPU on this thread counts as the capture's own (`take_cpu_ms`):
+        /// a run whose first pixel read opened it pays for it.
         pub fn open(hwnd: isize) -> Result<Wgc> {
+            let cpu = crate::probe::video::ThreadCpu::start();
+            let w = Self::start(hwnd)?;
+            w.shared.cpu_ns.fetch_add((cpu.ms().unwrap_or(0.0) * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
+            Ok(w)
+        }
+
+        fn start(hwnd: isize) -> Result<Wgc> {
             unsafe {
                 let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             }
-            let (device, ctx, d3d) = device(false)?;
             let item = item(hwnd)?;
             let size = item.Size().map_err(|e| win(e, "the window's size"))?;
-            let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).map_err(|e| win(e, "the capture's frame pool"))?;
+            let pool_on = |d3d: &IDirect3DDevice| Direct3D11CaptureFramePool::CreateFreeThreaded(d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size);
+            // The shared device, else a new one (it failed: a GPU removed or reset since).
+            let (mut device, mut ctx, mut d3d) = shared_device(false)?;
+            let pool = match pool_on(&d3d) {
+                Ok(p) => p,
+                Err(_) => {
+                    (device, ctx, d3d) = shared_device(true)?;
+                    pool_on(&d3d).map_err(|e| win(e, "the capture's frame pool"))?
+                }
+            };
             let shared = Arc::new(Shared { device, ctx, d3d, latest: Mutex::new(Latest::default()), cv: Condvar::new(), cpu_ns: Default::default() });
             let s = shared.clone();
             pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(move |pool, _| {

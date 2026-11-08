@@ -6276,7 +6276,8 @@ so nothing needs a display: it runs on a locked session and on a server alike (`
   (`isolate::library_check`); the running-copy check of apps is skipped (a terminal program the user
   runs elsewhere never shares the home). Its process set is its tree plus what carries its home's
   stamp (`host::process_set`). When the command names an executable strobe finds (a path, or a name
-  on PATH), a timed block of a debug build refuses `DevBuild`; every block runs the native speed check
+  on PATH), a timed block of a debug build refuses `DevBuild` (read from the executable's headers and
+  import table only, never the whole file); every block runs the native speed check
   first (`Throttled`), and a program at background priority keeps no latency values
   (`BackgroundPriority`).
 - **The grid.** One reader thread per terminal reads the program's output as it comes and feeds a
@@ -6583,13 +6584,13 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | thread timeline (`record`, `--check` and attribution blocks only, §7.4) | ≤ 1% of one core, in its own file (`cpu_ms`) |
 | OS present session (timing blocks that declare frame metrics) | ≤ 0.5% of one core in strobe's consumer, measured per recording (`consumer_cpu_ms`); a bench block over it warns (`OverheadBudget`), over 2% refuses its frame metrics |
 | timing probe overhead | ≤ 1% main-thread time (fails at 2%, §8.2) |
-| reserved-CPU sweep (`--reserve-cpus`, §9.4) | ≤ 5% of one core, on strobe's own CPUs, never the target's (measured per block; Linux on vps 0.16–0.22%) |
+| reserved-CPU sweep (`--reserve-cpus`, §9.4) | ≤ 5% of one core, on strobe's own CPUs, never the target's (measured per block; Linux on vps 0.16–0.22%; Windows on adais 2.5–3.2%: each sweep's system snapshot is 2.55 ms of kernel CPU there, 830 KB of processes and threads) |
 | counters (§7.5) | macOS: one `proc_pid_rusage` per process at each end of a run, nothing in the target; Linux perf events: per context switch in the target (4.4 µs in a VM), so they open only in counter blocks, never in a timing block |
 | off-CPU waits (`--probes waits`, attribution only, §11.1) | none in timing blocks: per context switch in the target (Linux about 7 µs on top of `deep` in a VM), so only a capture that asks takes them |
 | Firefox's profiler (attribution only, §8.3) | the browser's own samplers, in the target's processes: on Windows 1 ms through Firefox 160, where any shorter interval makes every process's sampler busy-wait a core (bug 1349801; 10.2 cores for a page's Firefox 159 on adais at 200 µs or 500 µs, 0.3-0.4 cores at 1 ms, 0.25 with no profiler), and 500 µs from Firefox 161, whose sampler waits on a high-resolution timer (bug 2082760; Nightly 162: 0.65 cores at 500 µs, 0.3 with no profiler); 200 µs on macOS and Linux (air 0.3-0.6 cores and vps 0.1-0.5 at any interval, no profiler alike) |
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
 | `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% refuses `tty.latency.*`. Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
-| Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
+| Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches, opening the window's capture included: a run whose first pixel read opens it pays for it; Windows makes the capture's Direct3D device once per process, 118 of the 126 ms of CPU an open took on adais); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
 
@@ -6615,7 +6616,14 @@ read 40–80% (script) and 7% (native): strobe's own between-run reads, never in
 (M4) the OS sampler's thread read 0.85–1.2% of a core in `--check` blocks, over its 0.5% budget,
 mostly IOKit reads of every GPU client each tick (§8.5); the present consumer read 0.6–1.6% on a native app,
 its time mostly in the IOSurface lock of each changed frame. Every recording also keeps strobe's own
-CPU, GPU and memory per tick (§8.5, `os.strobe`), the rule 2 track.
+CPU, GPU and memory per tick (§8.5, `os.strobe`), the rule 2 track. Checked from outside on adais
+(a separate process reading each process's cycle counter every 2 ms, over the run windows strobe
+counted): `strobe` and `runner` agreed within 0.1–0.4 points on headless Chromium (lean and full
+traces), Firefox, native, script, cli, tty and attribution blocks, `reserve` with its thread's
+cycles. What `strobe` leaves out is other processes: a `--video` check's encoder (ffmpeg, 140 ms in
+two click runs) has no part of its own. A daemon that answers MCP calls during a bench counts that
+work in `strobe` (48% of a core while a client polled `status`; the pinned target's `main.work`
+did not move).
 
 ## 20. SDKs (TypeScript, `sdk/`)
 
@@ -7935,7 +7943,10 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   removed as a released home is: what runs from it ended, URL schemes restored, lent GPU caches
   returned, shared seeds unlinked. Releasing a home (after a block, closing a browser) ends every
   process stamped with it, so a detached child does not outlive its block. Target windows
-  are kept topmost without focus, since an occluded Chromium window stops rendering.
+  are kept topmost without focus, since an occluded Chromium window stops rendering. A headless
+  Chromium has no window: its page is used at once (the wait for a window to raise had held every
+  headless launch 5 s, 50 system snapshots, 37% of a headless block's wall time on adais; `look` of
+  a page 6.7 s → 1.7 s, exp_7b9e04).
 - Typed outcomes, crash-safe store and strict config (2026-11-05): validators are `ValidatorId`
   and refusals `Refusal` values on the error (§10.1); comparisons carry `kind` and `refusal`,
   which bench sets with each verdict it writes. Still to move to the types: `bench`, `pr`, `card`,
@@ -8326,6 +8337,21 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   by `query`, `report`, `history`, `plan` or `status`: 75.4 → 70.6 ms under a bench (12 pairs, −6.2%),
   and the plain launch's own counter 70.7 ms. Still in `run.duration`: strobe's job and affinity
   plumbing around each launch.
+- strobe at work (2026-11-08, adais, locked; an outside sampler of every process's cycle counter every
+  2 ms and a system snapshot every 100 ms, native stacks of a symbols build by `record pid:`): a pixel
+  read that opened the window's capture inside a run (a check's first run, a run reading another
+  window's pixels) cost 120–130 ms of strobe's CPU, nearly all making a Direct3D device, and none of it
+  was in `pixel_pct`: a native app's key check read `pixels 0.32%` while strobe used 33.6% of a core
+  in the 155 ms run, and `OverheadBudget` could not fire. The open counts now and the device is made
+  once per process: `strobe 33.6% · pixels 0.32%` → `strobe 6.9% · pixels 2.7%`, and an image
+  wait's `56.3% · 5.9%` → `14.9% · 11.0%`. A headless Chromium launch waited 5 s for a window to keep
+  on top that it never opens (`attach 5.1s` of a 13.9 s block); `look` of a page 6,728 → 1,708 ms
+  (8 pairs, −75%, exp_7b9e04). `DevBuild` read the whole executable per block (110 MB read and 110 MB
+  more private memory a block for a 115 MB executable): now its headers. Between runs a page block
+  takes 3–5 system snapshots at each run edge (12–15 ms of CPU each side, outside the run windows); a
+  page block's main thread used about 0.6 s of CPU, a timed page block's in-run share was mostly the
+  reserved-CPU sweep (2.8% of the 3.5%). Over an 8-minute, 16-block A/B strobe's private memory
+  stayed 6.6–7.5 MB and a page bench's 27–34 MB: no growth.
 - **Deriving metrics from raw data (audit, 2026-11-08)**, a known-answer page bench
   (`scripts/dev/derive`, headless `--check` on adais, against a build of the commit before): phases
   entered twice or inside themselves (`phase.twice` 305.1 → 153.5 ms for 150 ms; `phase.nested` 328.4 →
