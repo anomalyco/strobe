@@ -169,6 +169,11 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
     // gave threads it never opened.
     let (mut followed_cycles, mut unopened_ns) = (0u64, 0u64);
     let mut never_opened: HashMap<u32, (u64, u64)> = HashMap::new();
+    // Ticks on a 2 ms grid, not 2 ms after each tick's work: a timer that fires late and the work
+    // between waits made the period 2.6 ms on adais, and a busy thread then got one sample per 2.6 ms
+    // of its CPU, each counted as 2 ms (a thread busy the whole capture read as 76% covered).
+    let tick = std::time::Duration::from_micros(INTERVAL_US);
+    let mut due = std::time::Instant::now() + tick;
     loop {
         match rx.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
@@ -295,14 +300,24 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
             });
             samples.push((at, t.pid, *tid, 0u16, at_stack));
         }
-        // Wait out the rest of the interval on a high-resolution timer (no change to the system's
-        // timer resolution), or sleep where there is none.
+        // Wait until the next tick on a high-resolution timer (no change to the system's timer
+        // resolution), or sleep where there is none. A tick missed by more than one interval (a
+        // refresh, a preemption) is not made up: the credit, capped at two samples, carries it.
+        let now = std::time::Instant::now();
+        if now >= due + tick {
+            due = now + tick;
+        }
+        let wait = due.saturating_duration_since(now);
+        due += tick;
+        if wait.is_zero() {
+            continue;
+        }
         if timer.is_null() {
-            std::thread::sleep(std::time::Duration::from_micros(INTERVAL_US));
+            std::thread::sleep(wait);
         } else {
-            let due: i64 = -((INTERVAL_US * 10) as i64);
+            let at: i64 = -((wait.as_nanos() / 100).max(1) as i64);
             unsafe {
-                SetWaitableTimer(timer, &due, 0, None, std::ptr::null(), 0);
+                SetWaitableTimer(timer, &at, 0, None, std::ptr::null(), 0);
                 WaitForSingleObject(timer, 100);
             }
         }
@@ -525,8 +540,11 @@ fn unwind(p: &mut Process, mut regs: [u64; 17], stack: &[u8]) -> Vec<u64> {
         let found = p.modules.iter().position(|m| at >= m.base && at < m.base + m.size);
         let i = match found {
             Some(i) => i,
-            // A module loaded since the list was read: read it again, at most every 200 ms.
-            None if p.read_at.elapsed() > std::time::Duration::from_millis(200) => {
+            // A module loaded since the list was read: read it again, at most every 200 ms. An empty
+            // list (a process opened while the loader had not listed its modules yet, which Windows
+            // then refuses) is read again at once: a short child ended before 200 ms, and every
+            // sample of it stayed a bare address in no module.
+            None if p.modules.is_empty() || p.read_at.elapsed() > std::time::Duration::from_millis(200) => {
                 p.modules = images(p.handle);
                 p.read_at = std::time::Instant::now();
                 match p.modules.iter().position(|m| at >= m.base && at < m.base + m.size) {

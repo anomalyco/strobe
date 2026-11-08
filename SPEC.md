@@ -5903,7 +5903,8 @@ As built (Windows):
   (`probe/suspend.rs`, x64; never in a timing block: only attribution uses stacks), and `record pid:…
   --probes stacks-unprivileged` asks for it even with the helper. Every 100 ms it lists the tree's
   threads and which of them ran (one system snapshot); every 2 ms (a high-resolution waitable timer,
-  no change to the system's timer resolution) it reads those threads' cycle counters, and a thread
+  no change to the system's timer resolution, waking on a fixed 2 ms grid so a late wake and the
+  tick's own work do not lengthen the period) it reads those threads' cycle counters, and a thread
   that used another 2 ms of CPU since its last sample is sampled (2 ms by the cycle clock's rate: on
   a machine whose cycles are no time, `cycles_refused`, the sampler refuses to start, where a rate of
   0 once made every listed thread a sample each tick, an idle app 100% busy): `SuspendThread`, `GetThreadContext`
@@ -5912,7 +5913,9 @@ As built (Windows):
   resume, on that copy: x64 unwind data (the exception directory's `RUNTIME_FUNCTION`s and their
   `UNWIND_INFO`, chained entries, machine frames) read once per module and function from the target's
   memory, an epilog at the innermost frame run forward as `RtlVirtualUnwind` does, a function without
-  unwind data treated as a leaf; it stops outside every module (JIT code) or the copy. Samples go into
+  unwind data treated as a leaf; it stops outside every module (JIT code) or the copy. A process's
+  module list is read again on such a miss at most every 200 ms, and at once while it is empty (opened
+  before its loader listed its modules). Samples go into
   the same `deep.json.gz` as the helper's (each one 2 ms of that thread's CPU, `interval_us` 2000) and
   resolve with the same PDB code. Capped at one sample per thread per 2 ms and 4,000 a second; the
   sampler thread runs at highest priority so it is not preempted between a suspend and its resume.
@@ -8851,6 +8854,26 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   pure spin work with a known wake cost (`tick <hz> 0`); on vps (`native.bench.ts` tick, one noisy
   `--check`) 50 Hz read `cpu.work` 0.93, 201 and 405 ms a second for 0, 4 and 8 ms a wake (truth o,
   200 + o and 400 + o, where tick-0 reads o).
+- **Wave 1 checked live on adais, three fixes (2026-11-09)**: strobe's own Windows stack sampler ticked
+  every 2 ms after the previous tick's work and a late timer, 2.6 ms on adais, so a thread busy all the
+  time got one sample per 2.6 ms of its CPU, each counted as 2 ms: `record pid: --probes
+  stacks-unprivileged` of one spinning thread for 3 s read 1142 samples (2284 ms) of the 2958 ms the
+  sampler saw it use, and `Coverage` warned at 76%. It now wakes on a fixed 2 ms grid: 1415 samples
+  (2830 ms, 95%, no warning). A short child's samples (a parent starting a 150 ms child every 200 ms)
+  had no frame in any module in 275 of 2151 samples (550 ms as `(unknown module)`): the process was
+  opened before its loader listed its modules, Windows refused the list, and it was read again only
+  200 ms later, after the child ended. An empty list is now read again at once: 1 sample of 2668, and
+  coverage 57% → 71% (the rest is each child's life before strobe found it, as the warning says). A
+  bench's `stopped` (check and comparison) keeps the validator of a typed stop (`SessionLocked`,
+  `WindowHidden`): a check's series not run are in no `series` entry, so `stopped.why` was the only
+  place it was said, in words. Checked on locked adais, as owed by the wave: a launch file's
+  `--check --unlock-wait 1s` left the painted cold launch not run (`SessionLocked`), passed the other
+  two, exit 124, and `--resume` kept them; a mixed `--headless --blocks 1` has `refresh_hz` null;
+  `EndedCpu` names `known.exe 421 ms (4 processes)`; `(main)` names only a process's first thread; the
+  first 100 ms are sampled (first sample 27 ms in). A Windows `cli()` `run.duration` of `bun -e 0` is
+  18.5–19.9 ms with strobe 0.22.0 and now alike: strobe's job, completion port, CPU mask and resume
+  cost 0.03 ms (a Rust program spawning the same command, each step added in turn), not the 3.5 ms
+  expected, and the same program's plain `Command::spawn` to exit, from strobe's CPUs, is 17.7 ms.
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

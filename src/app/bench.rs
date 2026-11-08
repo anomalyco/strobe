@@ -2249,7 +2249,7 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         let matrix = journey::matrix(&mut series_out);
         let batched = batching.as_ref().map_or(Value::Null, batch::Batching::summary);
-        let stopped = halted.as_ref().map_or(Value::Null, |h| json!({ "code": h.code, "why": h.message, "not_run": not_run }));
+        let stopped = halted.as_ref().map_or(Value::Null, |h| json!({ "code": h.code, "why": h.message, "validator": h.validator(), "not_run": not_run }));
         let mut out = check_output(&exp, &dir, &file, series_out, ctx.warnings, matrix, args.has("require-parity"), (seed, used_random), batched, (json!(env), stopped))?;
         // A check that stopped (a stop, the user's state disturbed, launches that kept failing) ends with
         // that error's code.
@@ -2317,7 +2317,7 @@ pub fn run(args: &Args) -> Result<Output> {
         // The command line, for the rerun line under a PR table.
         "args": ctx.saved["args"],
         "series": series_out, "warnings": ctx.warnings, "decided": all_decided && halted.is_none(),
-        "stopped": halted.as_ref().map(|h| json!({ "code": h.code, "why": h.message, "not_run": not_run })),
+        "stopped": halted.as_ref().map(|h| json!({ "code": h.code, "why": h.message, "validator": h.validator(), "not_run": not_run })),
     });
     let mut result_json = result_json;
     // The journeys as one family (SPEC §9.3): `scoreboard`, and each primary's `p_repeated` and

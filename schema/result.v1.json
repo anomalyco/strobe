@@ -120,7 +120,12 @@
     "stopped": {
       "type": ["object", "null"],
       "description": "Why the bench (or check) ended early: its exit code (130 for a stop, 124 when --unlock-wait ran out) and what did not run.",
-      "properties": { "code": { "type": "integer" }, "why": { "type": "string" }, "not_run": { "type": "array", "items": { "type": "string" } } }
+      "properties": {
+        "code": { "type": "integer" },
+        "why": { "type": "string" },
+        "validator": { "type": ["string", "null"], "description": "The validator of a typed stop: SessionLocked or WindowHidden when --unlock-wait ran out (a check's series not run are only in not_run)." },
+        "not_run": { "type": "array", "items": { "type": "string" } }
+      }
     },
     "metric": { "type": "string", "description": "bisect: the primary it follows." },
     "range": { "type": "string", "description": "bisect: good..bad as given." },
