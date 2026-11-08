@@ -299,6 +299,34 @@ impl Drop for Owned {
     }
 }
 
+/// Calls `f` with each line of a child's output, decoded lossily, until the pipe closes. A line that is
+/// not UTF-8 (a legacy code page's é, binary output) is a line with replacement characters, never the
+/// end of the reading: `BufRead::lines` stops at it, so the lines after it were lost (a cli command's
+/// later `strobe:metric` lines) and the pipe stopped draining (a chatty app then blocks on it).
+/// A line longer than `LINE_MAX` (output with no newline, a binary stream) is passed on in pieces of
+/// that size, so the reader's memory stays bounded.
+pub fn each_line(r: impl std::io::Read, mut f: impl FnMut(String)) {
+    use std::io::{BufRead, Read};
+    const LINE_MAX: u64 = 1 << 20;
+    let mut r = std::io::BufReader::new(r);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.by_ref().take(LINE_MAX).read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
+                }
+                f(String::from_utf8_lossy(&buf).into_owned());
+            }
+        }
+    }
+}
+
 /// What the OS counted for a command that ran to its exit, with what it started (SPEC §9.6 `cli()`).
 /// Each field is None where this OS does not count it for processes that have ended.
 #[derive(Clone, Debug, Default)]

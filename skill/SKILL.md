@@ -500,6 +500,10 @@ export default bench({
   - On Linux the other work during a short check carries `±N%`: idle time is counted in 10 ms ticks.
 - `Background` (refusing) names the process that kept the target's CPUs busy (an antivirus scanning new files, an update).
   - A bench waits it out (headless pages and windowless apps too) before it refuses.
+  - Other work that leans to one side's blocks (signed-rank p ≤ 0.02, half the pairs a quarter core apart) refuses what it moves: times, `cpu.work` too, `metric.*`, `app.*`, wakes. Work on both sides is flagged and only widens the interval.
+  - `cli()`, `script()` and `tty()` runs read `cpu.foreign` too; cli and script get no speed check (`speed not checked` on the plan line).
+  - Every compared primary refused exits 4.
+- `Throttled` also refuses a block's times (not its CPU time) when a Linux CPU quota (`cpu.max`, a container's `--cpus`) throttled strobe's cgroup during its measured runs.
 
 ### Builds and launches
 

@@ -333,7 +333,11 @@ impl<'a> Doc<'a> {
     fn calm_implementations(&self, base: &str) -> String {
         let outs: Vec<Out> = self.series.iter().filter(|s| !family::not_compared(s)).map(|s| self.primary_out(s)).collect();
         if outs.is_empty() {
-            return "Not compared: every journey is a parity gap".into();
+            return if self.series.iter().all(|s| family::gap(s)) {
+                "Not compared: every journey is a parity gap".into()
+            } else {
+                format!("Not compared: {}", family::not_compared_counts(self.r).join(", "))
+            };
         }
         if outs.iter().all(|o| matches!(o, Out::Same | Out::NoWorse | Out::NoWorseSlower)) {
             return format!("No measurable difference from {}", cell(base));

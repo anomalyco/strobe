@@ -140,7 +140,16 @@ pub(super) fn build(r: &Value) -> Forest {
             false => tile(s, c, String::new()).delta,
         };
         let (tone, value) = if gap {
-            (Tone::Plain, if s["kind"] == "refused" { "not run" } else { "gap" }.to_string())
+            let what = if s["kind"] == "refused" || s["not_run"] == true {
+                "not run"
+            } else if family::gap(s) {
+                "gap"
+            } else if family::refused_at_run(s) {
+                "refused"
+            } else {
+                "not paired"
+            };
+            (Tone::Plain, what.to_string())
         } else {
             match o {
                 Out::Better | Out::Worse if board.alone(i) => (Tone::Plain, change),
@@ -162,6 +171,8 @@ pub(super) fn build(r: &Value) -> Forest {
             .filter(|(a, b, d)| a.is_finite() && b.is_finite() && d.is_finite());
         let note = if s["kind"] == "refused" {
             format!("not run: {}", s["primary"]["refusal"]["validator"].as_str().unwrap_or(""))
+        } else if family::refused_at_run(s) {
+            format!("refused: {}", s["primary"]["refusal"]["validator"].as_str().unwrap_or(""))
         } else if gap {
             let g = &s["gap"];
             match (g["missing"].as_str(), g["reason"].as_str().filter(|x| !x.is_empty())) {

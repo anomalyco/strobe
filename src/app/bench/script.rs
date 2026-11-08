@@ -173,8 +173,9 @@ fn cycles(pid: u32) -> (super::super::record::Cycles, Option<u64>) {
 }
 
 /// One run: wall ms, CPU ms (both without its untimed stretches), its counters, the heap it retained
-/// (MB), its phase marks, what the OS counted for the host's processes, and its span.
-type ScriptRun = (f64, f64, BTreeMap<String, f64>, f64, Vec<(String, u64)>, probe::wakes::Counted, metrics::Timed);
+/// (MB), its phase marks, what the OS counted for the host's processes, its span, and the other work on
+/// the target's CPUs meanwhile (% of one core; SPEC §10.2 `Background`).
+type ScriptRun = (f64, f64, BTreeMap<String, f64>, f64, Vec<(String, u64)>, probe::wakes::Counted, metrics::Timed, Option<f64>);
 
 /// One host process for the cases of one launch: one case, or a chunk of them with `--check --batch`
 /// (SPEC §5.6), each case's runs after the case before it.
@@ -254,6 +255,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let mut ends: Vec<Option<(f64, Option<u64>)>> = Vec::new();
                 // Per run: a process of the host's tree ended in a timed part, its CPU there gone with it.
                 let mut lost: Vec<bool> = Vec::new();
+                // Who else used the CPUs, from two snapshots outside the runs, for a block with other work.
+                let procs0 = ctx.pin.map(|_| (host::now_ns(), host::all_processes()));
                 // Steady once two runs cost the same CPU (SPEC §9.2).
                 let mut warmup = super::block::Warmup::new(s, x);
                 while warmup.more(runs.len()) {
@@ -264,13 +267,21 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     edges.borrow_mut().clear();
                     let ended0 = ended_now();
                     let c0 = cycles(pid);
+                    let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
                     cost.start();
                     let t0 = host::now_ns();
                     ctx.runner.call("run", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw or timed out"))?;
                     let t1 = host::now_ns();
                     cost.end();
+                    // Ended before the tree's snapshot, which takes milliseconds: the tree's CPU below spans it.
+                    let busy = busy.zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
                     let c1 = cycles(pid);
                     let ended1 = ended_now();
+                    // The whole tree's CPU over the run, untimed stretches too, in cycles: the rest of the CPUs'
+                    // busy time is other work. Unknown once a process of the tree ended in the run (its CPU is in
+                    // neither reading).
+                    let gone = c0.0.keys().any(|k| !c1.0.contains_key(k)) || host::ended_between(&ended0, &ended1);
+                    let foreign = busy.filter(|_| !gone).and_then(|b| b.other_cycles(super::super::record::cycles_used(&c0.0, &c1.0)));
                     let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &host::tree_pids(pid), perf.as_ref()));
                     hooks.end();
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
@@ -300,7 +311,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         let tree = host::process_tree(pid);
                         (tree.iter().map(|p| p.private_bytes).sum::<u64>() as f64 / (1024.0 * 1024.0), host::pss_bytes(&tree.iter().map(|p| p.pid).collect::<Vec<_>>()))
                     }));
-                    runs.push((timed.ns() as f64 / 1e6, used, hooks.counts(), retained, hooks.take_marks(), counted, timed));
+                    runs.push((timed.ns() as f64 / 1e6, used, hooks.counts(), retained, hooks.take_marks(), counted, timed, foreign));
                     if s.reset {
                         ctx.runner.call("reset", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset"))?;
                     }
@@ -355,6 +366,19 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         }
                     }
                 }
+                // Other work on the target's CPUs during the runs: kept and flagged (`Background`, SPEC §10.2).
+                let foreign: Vec<f64> = measured.iter().filter_map(|r| r.7).collect();
+                let mut background = Vec::new();
+                if !foreign.is_empty() {
+                    let most = foreign.iter().copied().fold(0.0, f64::max);
+                    values.insert("cpu.foreign".into(), metrics::median(&foreign));
+                    values.insert("cpu.foreign.max".into(), most);
+                    if most >= BACKGROUND_PCT
+                        && let Some(p0) = &procs0
+                    {
+                        background = busiest_others(p0, &(host::now_ns(), host::all_processes()));
+                    }
+                }
                 refuse_not_on_this_os(s, &mut values, &mut refused);
                 super::block::untimed_state(s, &measured.iter().map(|r| &r.6).collect::<Vec<_>>(), &mut values, &mut refused);
                 let unread: Vec<String> = declared_metrics(s).into_iter().filter(|m| script_unread(m) && !values.contains_key(*m) && !refused.contains_key(*m)).cloned().collect();
@@ -376,7 +400,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     frames: Vec::new(),
                     intervals: Vec::new(),
                     steps,
-                    background: Vec::new(),
+                    background,
                     leak: None,
                     refused,
                     locked: false,

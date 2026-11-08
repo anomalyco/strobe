@@ -268,6 +268,8 @@ struct Run {
     /// strobe's terminal reader's CPU over the run's timed parts and the cycle clock over them (both in
     /// `host::tsc` units).
     reader: (u64, u64),
+    /// Other work on the program's CPUs over the run (% of one core; SPEC §10.2 `Background`).
+    foreign: Option<f64>,
 }
 
 /// One launch of a terminal program for its cases (one, or a chunk with `--check --batch`).
@@ -381,6 +383,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
             let r = (|| -> Result<Block> {
                 let mut runs: Vec<Run> = Vec::new();
                 let mut warmup = super::block::Warmup::new(s, x);
+                // Who else used the CPUs, from two snapshots outside the runs, for a block with other work.
+                let procs0 = ctx.pin.map(|_| (host::now_ns(), host::all_processes()));
                 let rt = s.run_timeout() + Duration::from_secs(10);
                 while warmup.more(runs.len()) {
                     // Every run starts where the first did (`resetCheck`): the grid, less `ignore`.
@@ -404,15 +408,22 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let c0 = cycles(pid, &set_home);
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
+                    let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
                     cost.start();
                     let t0 = host::now_ns();
                     let ran = ctx.runner.call("run", json!({ "case": s.case }), rt, serve);
                     let t1 = host::now_ns();
                     cost.end();
+                    // Ended before the process snapshots, which take milliseconds: the program's CPU below spans it.
+                    let busy = busy.zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
                     let r1 = tty.reader_cycles();
                     let h1 = host_cycles(&tty);
                     let c1 = cycles(pid, &set_home);
                     let ended1 = ended(pid, &set_home);
+                    // Other work on the program's CPUs (`cpu.foreign`): their busy time less the program's and the
+                    // console host's cycles; unknown once a process of the program ended in the run.
+                    let gone = c0.0.keys().any(|k| !c1.0.contains_key(k)) || host::ended_between(&ended0, &ended1);
+                    let foreign = busy.filter(|_| !gone).and_then(|b| b.other_cycles(super::super::record::cycles_used(&c0.0, &c1.0) + h1.saturating_sub(h0)));
                     let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()));
                     hooks.end();
                     ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &screen_note(&tty), "the run threw or timed out"))?;
@@ -482,6 +493,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         end_mb,
                         cpu_lost,
                         reader,
+                        foreign,
                     });
                     driver.release_all()?;
                     if s.reset {
@@ -590,6 +602,19 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 if warmup.unsteady() {
                     values.insert("warmup.unsteady".into(), if warmup.grew() { 2.0 } else { 1.0 });
                 }
+                // Other work on the program's CPUs during the runs: kept and flagged (`Background`, SPEC §10.2).
+                let foreign: Vec<f64> = measured.iter().filter_map(|r| r.foreign).collect();
+                let mut background = Vec::new();
+                if !foreign.is_empty() {
+                    let most = foreign.iter().copied().fold(0.0, f64::max);
+                    values.insert("cpu.foreign".into(), metrics::median(&foreign));
+                    values.insert("cpu.foreign.max".into(), most);
+                    if most >= BACKGROUND_PCT
+                        && let Some(p0) = &procs0
+                    {
+                        background = busiest_others(p0, &(host::now_ns(), host::all_processes()));
+                    }
+                }
                 let syncs = tty.sync_timeouts();
                 for m in declared_metrics(s) {
                     if values.contains_key(m) || refused.contains_key(m) || m.starts_with("count.") || m.starts_with("phase.") {
@@ -656,6 +681,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     overhead: Some(Overhead { strobe_pct, runner_pct, terminal_pct, ..Overhead::default() }),
                     process_set: Some(programs(&host::process_set(pid, Some(&set_home)))),
                     speed_ratio: ratio,
+                    background,
                     ..Block::default()
                 })
             })();

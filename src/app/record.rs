@@ -150,7 +150,12 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     // A timed recording runs on the fastest power plan, as a bench does (SPEC §9.4); attribution,
     // deep, memory and attached phone (`wir:`, `--mobile`) recordings do not switch this host's plan.
-    let power = if args.get("probes").unwrap_or("timing") == "timing" && !args.has("mobile") && !is_wir { Some(super::bench::power_quiet(args)?) } else { None };
+    let timed = args.get("probes").unwrap_or("timing") == "timing" && !args.has("mobile") && !is_wir;
+    // A timed recording takes turns with benches for the device's slot (SPEC §10.1 `ConcurrentBench`),
+    // before its power plan: its numbers and a timed block never share the machine. Not a flight
+    // recorder (`--ring`), which runs for as long as the daemon keeps it.
+    let _slot = if timed && !args.has("ring") { Some(super::bench::slot::Registration::new(&store::new_id("rec"), &target).acquire(&format!("strobe record {target}"))?.0) } else { None };
+    let power = if timed { Some(super::bench::power_quiet(args)?) } else { None };
     let mut out = recorded(args, target)?;
     // The user's plan is put back (the guard dropped) before the result says so.
     let switched = power.filter(|p| p.switched()).map(|p| p.used.clone());

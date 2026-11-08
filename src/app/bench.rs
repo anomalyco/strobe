@@ -998,6 +998,54 @@ fn refuse_not_on_this_os(s: &Series, values: &mut BTreeMap<String, f64>, refused
     }
 }
 
+/// Two-sided level of the one-sided `Background` test: at 8 pairs only a unanimous signed-rank
+/// (p 0.0078) or one rank short of it (0.0156) passes.
+const LOPSIDED_P: f64 = 0.02;
+
+/// Other work on the target's CPUs that ran with one side's blocks more than the other's (SPEC §10.2
+/// `Background`): the pairs' differences in `cpu.foreign.max` (head − base) lean one way by an exact
+/// signed-rank test at p ≤ 0.02, and at least half the pairs lie a quarter core or more apart toward
+/// that side. Such work moves that side's numbers by itself (16 spinning threads on the target's CPUs
+/// during head's runs only: an A/A of one command read `cpu.work` +4.6% and `run.duration` +45%), while
+/// work spread over both sides only widens the interval: under symmetric bursts (simulated, 8 pairs)
+/// the test refuses 1–1.6% of series, where "half the pairs, 4 in 5 one way" refused 14–20%. The
+/// compositor's own change between a pair's blocks is taken out first, but only toward 0: a side that
+/// presents more makes the compositor work on the target's CPUs too, which is its own doing, and that
+/// credit never makes a difference larger or turns it around.
+fn lopsided_background(blocks: &[Block], pairs: &[(usize, usize)], names: [&str; 2]) -> Option<Refusal> {
+    let foreign = |b: usize| blocks[b].values.get("cpu.foreign.max").copied();
+    let compositor = |b: usize| blocks[b].screen.as_ref().and_then(|s| s["compositor"]["cpu_pct"].as_f64()).unwrap_or(0.0);
+    let d: Vec<f64> = pairs
+        .iter()
+        .filter_map(|&(a, b)| {
+            let raw = foreign(b)? - foreign(a)?;
+            let credit = compositor(b) - compositor(a);
+            Some(if raw * credit > 0.0 { raw - raw.signum() * credit.abs().min(raw.abs()) } else { raw })
+        })
+        .collect();
+    if d.len() < 2 {
+        return None;
+    }
+    let p = stats::wilcoxon_p(&d);
+    let head = metrics::median(&d) > 0.0;
+    let n = d.iter().filter(|x| if head { **x >= BACKGROUND_PCT } else { **x <= -BACKGROUND_PCT }).count();
+    let side = if head { names[1] } else { names[0] };
+    (p <= LOPSIDED_P && n >= d.len().div_ceil(2)).then(|| {
+        Refusal::new(
+            ValidatorId::Background,
+            format!("other work ran on the target's CPUs during {side}'s blocks more than the other side's: a quarter core or more apart in {n} of {} pairs (signed-rank p {p:.3})", d.len()),
+        )
+        .fix("let that work finish or keep it off the bench's CPUs, then run the bench again")
+    })
+}
+
+/// What other work on the target's CPUs or a CPU quota moves by itself: times and CPU shares
+/// (`time_metric`), the program's own numbers (`metric.*`, `app.*`: a spin's `metric.spin_ms` read
+/// +28% under load, +98% under a quota) and wakes per second of wall time.
+fn load_metric(m: &str) -> bool {
+    time_metric(m) || matches!(m, "cpu.wakes" | "ui.wakes") || m.starts_with("metric.") || m.starts_with("app.") || model::metric(m).is_some_and(|d| d.unit == "value")
+}
+
 /// A metric that perf events disturb: wall and CPU time, CPU shares, frames and input latency.
 fn time_metric(m: &str) -> bool {
     !probe::wakes::COUNTER_METRICS.contains(&m)
@@ -2102,6 +2150,10 @@ pub fn run(args: &Args) -> Result<Output> {
     let refresh = host::refresh_at(ctx.window.x + 20, ctx.window.y + 20);
     let series_out_gaps = series_out.iter().filter(|s| s["kind"] == "gap").count();
     let series_out_refused = series_out.iter().filter(|s| s["kind"] == "refused").count();
+    // Every series compared (not a gap) whose primary ended refused, before it ran or after its pairs
+    // (a one-sided `Background`, a lock state that changed): exit 4 when that is all of them.
+    let compared = series_out.iter().filter(|s| s["kind"] != "gap").count();
+    let primaries_refused = series_out.iter().filter(|s| s["kind"] != "gap" && s["primary"]["verdict_kind"] == "refused").count();
     let result_json = json!({
         "id": exp, "kind": "experiment", "file": file, "created": super::record::now_iso(),
         // A refresh only where some series drew to a display (a headless page has none).
@@ -2165,8 +2217,12 @@ pub fn run(args: &Args) -> Result<Output> {
     if (args.has("require-parity") || args.has("require-verdict")) && series_out_gaps > 0 {
         out.code = 4;
     }
-    // A series refused before it ran is listed and exits 0, as a gap is, unless every series must decide.
-    if args.has("require-verdict") && series_out_refused > 0 {
+    // A series refused (before it ran or after its pairs) is listed and exits 0, as a gap is, unless
+    // every series must decide; when every compared series is refused, nothing was measured: 4.
+    if args.has("require-verdict") && (series_out_refused > 0 || primaries_refused > 0) {
+        out.code = 4;
+    }
+    if compared > 0 && primaries_refused == compared {
         out.code = 4;
     }
     if let Some(h) = &halted {
@@ -3294,6 +3350,27 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     } else if session == "locked" {
         warnings.push(validity::info("SessionLocked", "every block ran on a locked screen (the series needs no presenting window): compare it only with runs that were locked too"));
     }
+    // Other work that ran with one side's timing blocks moves that side's numbers by itself (SPEC §10.2):
+    // what it moves decides nothing. Refused before the gate and Holm, so no such row takes a share of
+    // the family, and the per-block flags no longer say the blocks were kept.
+    if let Some(why) = lopsided_background(tb, tp, names) {
+        if load_metric(&s.primary) && primary.kind != VerdictKind::Refused {
+            if primary_decided {
+                progress(format!("  {}: the verdict at the last look is withdrawn: {}", s.primary, why.summary));
+            }
+            primary.refuse(why.clone());
+            primary_decided = false;
+        }
+        for c in secondaries.iter_mut().chain(descriptive.iter_mut()).filter(|c| load_metric(&c.metric) && c.kind != VerdictKind::Refused) {
+            c.refuse(why.clone());
+        }
+        for w in warnings.iter_mut().filter(|w| w.id == "Background") {
+            if let Some(t) = w.text.strip_suffix("; blocks kept, flagged") {
+                w.text = format!("{t}; the series' times are refused (below)");
+            }
+        }
+        warnings.push(validity::warn("Background", format!("{}: nothing it moves is decided; rerun once that work is done", why.summary)));
+    }
     // Secondaries: gated on the primary and Holm-corrected once every refusal is in, so a primary
     // refused after its blocks leaves every secondary untested.
     let tested = sequential::gate_and_holm(&mut secondaries, primary_decided);
@@ -3642,6 +3719,43 @@ fn tail_refusal(def: &MetricDef, blocks: &[Block]) -> Option<Refusal> {
     let least = blocks.iter().map(|b| b.values.get(count).copied().unwrap_or(0.0) as usize).min().unwrap_or(0);
     (def.min_n > 1 && least < def.min_n).then(|| Refusal::new(ValidatorId::TailTooShort, format!("{least} {what} < {}", def.min_n)))
 }
+
+/// The throttled time a CPU quota held strobe's cgroup over a block's measured runs (each `run` call's,
+/// `Runner::throttled`), or over the whole block for a launch case (it has no runs: its span is the
+/// launch to ready, then the close). None when nothing reads it; 0 when not throttled.
+fn quota_of(s: &Series, b: &Block, runs: &[Option<u64>], whole: Option<u64>, batch: bool) -> Option<u64> {
+    if s.launch.is_object() || runs.is_empty() {
+        return whole;
+    }
+    // A launch of several cases numbers its runs across them: every run of it counts.
+    let measured = if batch { 0..runs.len() } else { b.warmup..(b.warmup + b.run_ms.len()).min(runs.len()) };
+    runs.get(measured)?.iter().copied().sum()
+}
+
+/// `Throttled` (SPEC §10.1) from a CPU quota: Linux's CPU controller stopped strobe's cgroup, which the
+/// target inherits, during the block's measured runs (`host::cgroup_throttled_ns`, `quota_of`), so its
+/// numbers describe a target held below normal speed: a quota of half a CPU read `run.duration` 242 ms
+/// and `metric.spin_ms` 212 for a command that takes 114 ms and prints 107, while the block-start speed
+/// check of a page, one thread, can pass under a quota of two. Timing blocks and checks; what a quota
+/// moves (`load_metric`) is refused, CPU time is not (a quota stops a process, it does not make it use
+/// more).
+fn quota_state(x: &Exec, throttled_ns: Option<u64>, mut b: Block) -> Block {
+    let Some(ns) = throttled_ns.filter(|ns| *ns > 0 && !x.video && matches!(x.set, Set::Lean | Set::Timing)) else { return b };
+    let ms = ns as f64 / 1e6;
+    let held_for = if ms < 1.0 { format!("{ms:.2} ms") } else { format!("{ms:.0} ms") };
+    let why = Refusal::new(ValidatorId::Throttled, format!("a CPU quota throttled strobe's cgroup, the target's, for {held_for} of throttled thread time during the measured runs (cpu.stat)"))
+        .fix("run the bench outside the quota (a container's --cpus, systemd's CPUQuota, cpu.max), or raise it above what strobe and the target use");
+    let held: Vec<String> = b.values.keys().filter(|m| load_metric(m) && !CPU_TIME.contains(&m.as_str())).cloned().collect();
+    for m in held {
+        b.values.remove(&m);
+        b.refused.entry(m).or_insert_with(|| why.clone());
+    }
+    b
+}
+
+/// CPU time read from the processes' and threads' own clocks, which a CPU quota leaves as it is: it
+/// delays the work and adds none. Not `main.*`, task durations on the wall clock, nor CPU shares.
+const CPU_TIME: &[&str] = &["cpu.work", "ui.cpu", "cpu.fixture", "cli.launch"];
 
 /// `TailTooShort` per timed block: a percentile with fewer events than its minimum n in this block has
 /// no value, and is refused when the series declared it, so a primary like that fails the first block
@@ -4813,7 +4927,10 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
     in_slot(ctx, &what, |ctx| {
         let reserve = reserve_for(ctx, x);
         ctx.target_qos = None;
+        let quota = host::cgroup_throttled_ns();
         let launch = any_launch(ctx, cases, v, pair, x);
+        let whole = quota.zip(host::cgroup_throttled_ns()).map(|(a, b)| b.saturating_sub(a));
+        let runs_throttled = ctx.runner.throttled().to_vec();
         let report = reserve.map(host::reserve::Reserve::finish);
         if let Some(report) = &report {
             ctx.reserved.get_or_insert_with(ReserveTotal::default).add(report);
@@ -4828,6 +4945,10 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 .map(|b| phase_state(ctx, s, b))
                 .map(|b| counter_state(s, x, b))
                 .map(|b| tail_state(x, b))
+                .map(|b| {
+                    let ns = quota_of(s, &b, &runs_throttled, whole, cases.len() > 1);
+                    quota_state(x, ns, b)
+                })
                 .inspect(|b| restate_recording(ctx, s, b));
             // A timed or check block that refused its primary refuses the block, as a native one does:
             // pairs of nothing would end `unclear` instead of saying why.
@@ -9776,7 +9897,11 @@ fn render(r: &Value) -> String {
         };
         let reserved = r["plan"]["reserve"]["cpus"].as_u64().map(|c| format!("others kept off CPUs {}", cpu_list(c))).unwrap_or_default();
         let power = format!("power plan {}", env["power_plan"].as_str().filter(|p| !p.is_empty()).unwrap_or("?"));
-        out += &format!("plan   {}\n", fmt::fields([r["plan"]["pin"].as_str().unwrap_or(""), &reserved, &power, &format!("{screen}, unthrottled")]));
+        // Only blocks whose speed check compared with a reference (`speed_ratio`) say their CPUs ran at
+        // speed: a command or a harness gets no check, and a device's first native check sets its reference.
+        let checked = s["blocks"].as_array().is_some_and(|b| !b.is_empty() && b.iter().all(|b| b["speed_ratio"].is_number()));
+        let speed = if checked { "unthrottled" } else { "speed not checked" };
+        out += &format!("plan   {}\n", fmt::fields([r["plan"]["pin"].as_str().unwrap_or(""), &reserved, &power, &format!("{screen}, {speed}")]));
         let cache = &r["plan"]["gpu_cache"];
         if let Some(gpu) = cache[s["label"].as_str().unwrap_or("")].as_str().or(cache[s["target"].as_str().unwrap_or("")].as_str()) {
             out += &format!("gpu    shader caches {gpu}\n");

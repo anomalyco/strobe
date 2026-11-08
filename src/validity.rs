@@ -430,6 +430,68 @@ pub fn wait_quiet(cpus: Option<u64>, max: std::time::Duration) -> (f64, f64) {
     }
 }
 
+/// The target's CPUs' idle counters at a run's start, for the other work on them over the run
+/// (`cpu.foreign`, SPEC §10.2 `Background`) of targets measured without the OS sampler: `cli()` and
+/// `script()`, `tty()`. `stop` ends the span: the target's own CPU must be read over that same span
+/// (a process-tree snapshot after `stop`, not inside it).
+pub struct CpuBusy {
+    idle: Vec<u64>,
+    tsc: u64,
+    at: std::time::Instant,
+}
+
+/// The target's CPUs' busy time over one span (`CpuBusy::stop`).
+pub struct Busy {
+    /// Their busy time, summed, as % of one core.
+    pct: f64,
+    /// What Linux's 10 ms idle ticks can make `pct` off by (0 elsewhere).
+    ticks: f64,
+    /// The span in `host::tsc` units and in ms.
+    span: f64,
+    wall_ms: f64,
+}
+
+impl CpuBusy {
+    pub fn start() -> Option<CpuBusy> {
+        let mut idle = Vec::new();
+        let tsc = host::tsc()?;
+        host::idle_cycles(&mut idle).then(|| CpuBusy { idle, tsc, at: std::time::Instant::now() })
+    }
+
+    /// The busy time of `cpus` since `start`. None when the counters cannot be read. It may be read
+    /// again later for a longer span (a run that ends with a wait for the program's last answer).
+    pub fn stop(&self, cpus: u64) -> Option<Busy> {
+        let mut idle = Vec::new();
+        let ok = host::idle_cycles(&mut idle);
+        let tsc = host::tsc()?;
+        let wall_ms = self.at.elapsed().as_secs_f64() * 1e3;
+        let span = tsc.checked_sub(self.tsc).filter(|s| *s > 0)? as f64;
+        (ok && idle.len() == self.idle.len() && wall_ms > 0.0).then_some(())?;
+        let counted = |c: &usize| *c < 64 && cpus >> c & 1 == 1;
+        let pct: f64 = self.idle.iter().zip(&idle).enumerate().filter(|(c, _)| counted(c)).map(|(_, (a, b))| (100.0 * (1.0 - b.saturating_sub(*a) as f64 / span)).clamp(0.0, 100.0)).sum();
+        let ticks = if cfg!(target_os = "linux") { 100.0 * (0..idle.len()).filter(counted).count() as f64 * host::IDLE_TICK_NS as f64 / 1e6 / wall_ms } else { 0.0 };
+        Some(Busy { pct, ticks, span, wall_ms })
+    }
+}
+
+impl Busy {
+    /// Other work as % of one core: the busy time less the target's own CPU over the span (`own_pct`)
+    /// and less the idle ticks' error, so a short run never reads work that was not there.
+    fn other(&self, own_pct: f64) -> Option<f64> {
+        own_pct.is_finite().then(|| (self.pct - own_pct - self.ticks).max(0.0))
+    }
+
+    /// With the target's CPU in ms (a command's, from the OS's accounting).
+    pub fn other_ms(&self, own_ms: f64) -> Option<f64> {
+        self.other(100.0 * own_ms / self.wall_ms)
+    }
+
+    /// With the target's CPU in `host::tsc` units (process cycles read at the span's two ends).
+    pub fn other_cycles(&self, own: u64) -> Option<f64> {
+        self.other(100.0 * own as f64 / self.span)
+    }
+}
+
 /// The speed check's reference for one CPU mask: the median of the last checks that passed there.
 const KEPT: usize = 20;
 

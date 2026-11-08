@@ -99,6 +99,9 @@ pub struct Runner {
     /// A launch hook (prepare, a `url` function, setup) read what differs per case (`ctx.case`,
     /// `ctx.seed`, `ctx.random()`) since the last `took_case`: the first hook and field.
     read_case: Option<(String, String)>,
+    /// How long a CPU quota throttled strobe's cgroup during each `run` call of the block, in order
+    /// (`host::cgroup_throttled_ns`; None where nothing reads it): `Throttled` over the measured runs.
+    throttled: Vec<Option<u64>>,
 }
 
 /// What the runner reports about a bench file.
@@ -172,6 +175,7 @@ impl Runner {
             phases: Vec::new(),
             batch: false,
             read_case: None,
+            throttled: Vec::new(),
         };
         runner.wait_ready()?;
         Ok(runner)
@@ -201,7 +205,25 @@ impl Runner {
     /// Calls `op` and serves the runner's requests (driver calls, phases) until it answers. The hooks'
     /// actions on the target go into the block's log (`actions`) as they are served: a host clock read
     /// at each end, no call to the target.
-    pub fn call(&mut self, op: &str, args: Value, timeout: Duration, mut serve: impl FnMut(&str, &Value) -> Result<Value>) -> Result<Value> {
+    pub fn call(&mut self, op: &str, args: Value, timeout: Duration, serve: impl FnMut(&str, &Value) -> Result<Value>) -> Result<Value> {
+        if op == "block" {
+            self.throttled.clear();
+        }
+        let run = Hook::of_op(op) == Some(Hook::Run);
+        let quota = if run { host::cgroup_throttled_ns() } else { None };
+        let r = self.exchange(op, args, timeout, serve);
+        if run {
+            self.throttled.push(quota.zip(host::cgroup_throttled_ns()).map(|(a, b)| b.saturating_sub(a)));
+        }
+        r
+    }
+
+    /// How long a CPU quota throttled strobe's cgroup during each `run` call since the block began.
+    pub fn throttled(&self) -> &[Option<u64>] {
+        &self.throttled
+    }
+
+    fn exchange(&mut self, op: &str, args: Value, timeout: Duration, mut serve: impl FnMut(&str, &Value) -> Result<Value>) -> Result<Value> {
         let id = self.next;
         self.next += 1;
         if op == "block" {

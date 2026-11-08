@@ -726,6 +726,21 @@ pub fn idle_cycles(out: &mut Vec<u64>) -> bool {
     }
 }
 
+/// How long a CPU quota has stopped strobe's cgroup and the cgroups above it so far, in ns (Linux's
+/// CPU controller: `cpu.max`, a container's `--cpus`, systemd's `CPUQuota`). What strobe launches
+/// inherits its cgroup, so a rise over a run means the target ran below normal speed (`Throttled`).
+/// 0 with no quota (no file is read then); None on other OSes and when a quota's count is unreadable.
+pub fn cgroup_throttled_ns() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::cgroup_throttled_ns()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// The resolution of Linux's idle counters (`/proc/stat` counts in `USER_HZ` ticks, 100 a second):
 /// a CPU's idle time over a short span is off by up to one.
 pub const IDLE_TICK_NS: u64 = 10_000_000;

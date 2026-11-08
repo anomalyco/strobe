@@ -1063,10 +1063,9 @@ pub fn lines(child: &mut Owned) -> std::sync::mpsc::Receiver<OutputLine> {
     for r in readers {
         let tx = tx.clone();
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            for line in std::io::BufReader::new(r).lines().map_while(std::result::Result::ok) {
+            host::spawn::each_line(r, |line| {
                 let _ = tx.send((epoch_ms(), host::now_ns(), strip_ansi(&line)));
-            }
+            });
         });
     }
     rx

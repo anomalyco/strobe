@@ -175,6 +175,7 @@ impl Registration {
     pub fn acquire(&self, what: &str) -> Result<(Slot, Duration)> {
         let started = Instant::now();
         let file = File::options().create(true).truncate(false).write(true).open(paths::run().join("bench.slot"))?;
+        let mut machine = machine_file();
         let mine = self.queue(what);
         let me = self.0.exp.as_str();
         let mut shown = String::new();
@@ -190,13 +191,29 @@ impl Registration {
                 .ok()
                 .and_then(|t| t.trim().parse::<u32>().ok())
                 .filter(|p| *p != std::process::id() && alive(*p) && !others.iter().any(|b| b["pid"].as_u64() == Some(*p as u64)));
+            let mut elsewhere = false;
             if ahead.is_empty() && old.is_none() && file.try_lock().is_ok() {
-                // And they still read it: while a block runs, one starting refuses `ConcurrentBench`.
-                let _ = std::fs::write(legacy(), std::process::id().to_string());
-                break;
+                // The machine-wide lock second, so a bench waiting for this user's slot holds nothing.
+                // Only another holder waits; a lock that fails otherwise leaves the per-user slot alone.
+                let free = match machine.as_ref().map(File::try_lock) {
+                    None | Some(Ok(())) => true,
+                    Some(Err(std::fs::TryLockError::WouldBlock)) => false,
+                    Some(Err(_)) => {
+                        machine = None;
+                        true
+                    }
+                };
+                if free {
+                    // And they still read it: while a block runs, one starting refuses `ConcurrentBench`.
+                    let _ = std::fs::write(legacy(), std::process::id().to_string());
+                    break;
+                }
+                let _ = file.unlock();
+                elsewhere = true;
             }
             let running = others.iter().find(|b| b["state"] == "running" && b["exp"] != me);
             let why = match (old, running, ahead.len()) {
+                _ if elsewhere => format!("{what}: waiting for a bench of another user or state folder (the machine-wide lock {})", machine_path().map(|p| p.display().to_string()).unwrap_or_default()),
                 (Some(pid), _, _) => format!("{what}: waiting for the bench of an older strobe (pid {pid}) to finish"),
                 (None, Some(r), n) => format!(
                     "{what}: waiting for the bench slot (pid {} runs a block of {}{})",
@@ -232,14 +249,50 @@ impl Registration {
             std::thread::sleep(Duration::from_millis(200));
         }
         self.set("running", what);
-        Ok((Slot { file: Some(file), reg: self.clone() }, started.elapsed()))
+        Ok((Slot { file: Some(file), machine, reg: self.clone() }, started.elapsed()))
     }
 }
 
 /// The held slot; dropping it frees it for the next bench in line.
 pub struct Slot {
     file: Option<File>,
+    /// The machine-wide lock (`machine_file`), when it could be opened.
+    machine: Option<File>,
     reg: Registration,
+}
+
+/// Where the machine-wide lock is: a folder every user may create files in.
+fn machine_path() -> Option<PathBuf> {
+    if cfg!(windows) { std::env::var_os("ProgramData").map(|p| PathBuf::from(p).join("strobe-bench-v1.lock")) } else { Some(PathBuf::from("/tmp/strobe-bench-v1.lock")) }
+}
+
+/// The machine-wide lock beside the per-user slot: benches of other users or state folders (another
+/// `LOCALAPPDATA` or `XDG_DATA_HOME`, root and a user) share no `<state>/run`, and two of them ran blocks
+/// at once (each flagged the other's target as `Background`). A file lock, not a named mutex: it
+/// belongs to the open file, not to the thread that took it (a daemon's bench may drop its slot on
+/// another thread), and the OS releases it when its holder dies. The file is opened read-only when it
+/// exists (another user's file in a sticky /tmp cannot be opened for writing, and
+/// `fs.protected_regular` refuses `O_CREAT` on it; Windows lets any user read and lock it), else
+/// created. None when it cannot be opened: the per-user slot still holds.
+fn machine_file() -> Option<File> {
+    let path = machine_path()?;
+    match File::open(&path) {
+        Ok(f) => Some(f),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match File::options().write(true).create_new(true).open(&path) {
+            Ok(f) => {
+                // A umask of 0077 or 0027 made it the creator's alone, and every other user's open would
+                // fail: readable by all (a chmod is not masked).
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = f.set_permissions(std::fs::Permissions::from_mode(0o644));
+                }
+                Some(f)
+            }
+            Err(_) => File::open(&path).ok(),
+        },
+        Err(_) => None,
+    }
 }
 
 fn legacy() -> PathBuf {
@@ -251,6 +304,9 @@ impl Drop for Slot {
         let _ = std::fs::remove_file(legacy());
         if let Some(f) = self.file.take() {
             let _ = f.unlock();
+        }
+        if let Some(m) = self.machine.take() {
+            let _ = m.unlock();
         }
         self.reg.set("idle", "");
     }

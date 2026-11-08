@@ -28,7 +28,7 @@ fn not_run(s: &Value) -> bool {
 
 /// A series that ran but whose primary was refused at run time (its blocks, a mixed lock state, the
 /// two sides' journeys differing): it compared nothing.
-fn refused_at_run(s: &Value) -> bool {
+pub fn refused_at_run(s: &Value) -> bool {
     !not_run(s) && !gap(s) && stats::kind_of(&s["primary"]) == VerdictKind::Refused
 }
 

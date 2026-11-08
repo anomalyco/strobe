@@ -72,6 +72,47 @@ fn stat(pid: u32) -> Option<Stat> {
     Some(Stat { pid, ppid: num(1) as u32, comm, cpu_ns: (num(11) + num(12)) * 1_000_000_000 / tck(), threads: num(17) as u32, start: num(19), rss: num(21) * page(), gone })
 }
 
+/// The `cpu.stat` files of this process's cgroup and every cgroup above it that has a CPU quota, with
+/// the key of their throttled time and its unit in ns: cgroup v2 `throttled_usec` where `cpu.max` is not
+/// `max`, v1 `throttled_time` where `cpu.cfs_quota_us` is not -1 (the controller's folder is named by
+/// its controllers, `cpu,cpuacct`, else plain `cpu`). Found once: a cgroup without a quota is never
+/// throttled, and strobe reads these around every run, inside its span.
+fn quota_stats() -> &'static [(PathBuf, &'static str, u64)] {
+    static STATS: std::sync::OnceLock<Vec<(PathBuf, &'static str, u64)>> = std::sync::OnceLock::new();
+    STATS.get_or_init(|| {
+        let mut out = Vec::new();
+        for line in read("/proc/self/cgroup").unwrap_or_default().lines() {
+            let mut f = line.splitn(3, ':');
+            let (Some(_), Some(controllers), Some(path)) = (f.next(), f.next(), f.next()) else { continue };
+            let (root, quota, unlimited, key, scale) = if controllers.is_empty() {
+                (PathBuf::from("/sys/fs/cgroup"), "cpu.max", "max", "throttled_usec", 1000)
+            } else if controllers.split(',').any(|c| c == "cpu") {
+                let joined = Path::new("/sys/fs/cgroup").join(controllers);
+                (if joined.is_dir() { joined } else { PathBuf::from("/sys/fs/cgroup/cpu") }, "cpu.cfs_quota_us", "-1", "throttled_time", 1)
+            } else {
+                continue;
+            };
+            let mut dir = root.join(path.trim_start_matches('/'));
+            loop {
+                if read(dir.join(quota)).is_some_and(|q| q.split_whitespace().next().is_some_and(|v| v != unlimited)) {
+                    out.push((dir.join("cpu.stat"), key, scale));
+                }
+                if dir == root || !dir.pop() {
+                    break;
+                }
+            }
+        }
+        out
+    })
+}
+
+/// How long the CPU controller has throttled this process's cgroup and every cgroup above it so far,
+/// in ns (`super::cgroup_throttled_ns`): 0 with no quota anywhere above it; None when a quota's
+/// `cpu.stat` cannot be read.
+pub fn cgroup_throttled_ns() -> Option<u64> {
+    quota_stats().iter().map(|(stat, key, scale)| read(stat).and_then(|t| t.lines().find_map(|l| l.strip_prefix(*key)?.trim().parse::<u64>().ok())).map(|v| v * scale)).sum()
+}
+
 fn pids() -> Vec<u32> {
     std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect()
 }

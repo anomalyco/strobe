@@ -4,7 +4,7 @@
 //! printed. Nothing of strobe's runs in the command; the runner and strobe stay on the other CPUs.
 
 use super::*;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 
 /// A `metric.<name>`'s direction, as the command's lines give it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,9 +133,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
             let lines = lines.clone();
             let reader = std::thread::spawn(move || {
                 let Ok(r) = rx.recv() else { return };
-                for l in BufReader::new(r).lines().map_while(std::result::Result::ok) {
-                    lines.lock().unwrap_or_else(|e| e.into_inner()).push(l);
-                }
+                host::spawn::each_line(r, |l| lines.lock().unwrap_or_else(|e| e.into_inner()).push(l));
             });
             (tx, reader)
         })
@@ -248,6 +246,9 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     let mut steps: Vec<(String, f64)> = Vec::new();
     let hooks = super::block::Hooks::default();
     let ran: RefCell<Vec<Ran>> = RefCell::new(Vec::new());
+    // The CPU of every command of the run, untimed ones too (NaN once one has none): what is not the
+    // target's on its CPUs over the run is other work (`cpu.foreign`).
+    let own_ms: Cell<f64> = Cell::new(0.0);
     let cost = SelfCost::new(ctx.runner.pid());
     let serve = |op: &str, a: &Value| -> Result<Value> {
         match op {
@@ -260,6 +261,9 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
                 let counted = hooks.in_run() && !hooks.untimed_now();
                 let (r, output) = exec(&line, &at, counted.then_some(&cost))?;
                 let code = r.usage.code;
+                if hooks.in_run() {
+                    own_ms.set(own_ms.get() + r.usage.cpu_ns.map_or(f64::NAN, |c| c as f64 / 1e6));
+                }
                 if counted {
                     ran.borrow_mut().push(r);
                 }
@@ -287,26 +291,32 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     ctx.runner.call("setup", json!({}), s.hook_timeout(), &serve).map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup"))?;
     steps.push(("setup".into(), lapped.elapsed().as_secs_f64() * 1e3));
     lapped = Instant::now();
-    /// One run: its commands, its counts, its phase marks and its span.
-    type CliRun = (Vec<Ran>, BTreeMap<String, f64>, Vec<(String, u64)>, metrics::Timed);
+    /// One run: its commands, its counts, its phase marks, its span and the other work on the target's
+    /// CPUs meanwhile (% of one core).
+    type CliRun = (Vec<Ran>, BTreeMap<String, f64>, Vec<(String, u64)>, metrics::Timed, Option<f64>);
     let mut runs: Vec<CliRun> = Vec::new();
     let mut warmup = super::block::Warmup::new(s, x);
     let wall = |r: &[Ran]| -> f64 { r.iter().map(|x| x.wall).sum() };
     let cpu = |r: &[Ran]| sum_of(r, |x| x.usage.cpu_ns.map(|c| c as f64 / 1e6));
+    // Who else used the CPUs, from two snapshots outside the runs, for a block with other work.
+    let procs0 = ctx.pin.map(|_| (host::now_ns(), host::all_processes()));
     while warmup.more(runs.len()) {
         hooks.begin(&format!("run:{}", runs.len()));
+        own_ms.set(0.0);
+        let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
         cost.begin();
         let t0 = host::now_ns();
         let r = ctx.runner.call("run", json!({ "case": s.case }), t, &serve);
         let t1 = host::now_ns();
         cost.end();
+        let foreign = busy.zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus)).and_then(|b| b.other_ms(own_ms.get()));
         hooks.end();
         r.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw, timed out, or a command failed"))?;
         let done = std::mem::take(&mut *ran.borrow_mut());
         if done.is_empty() {
             return Err(Error::refused("RunIncomplete", format!("{} run: it ran no command outside ctx.untimed", s.case), "call ctx.exec() in the case's run"));
         }
-        runs.push((done, hooks.counts(), hooks.take_marks(), metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() }));
+        runs.push((done, hooks.counts(), hooks.take_marks(), metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() }, foreign));
         if s.reset {
             ctx.runner.call("reset", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset"))?;
         }
@@ -405,6 +415,19 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     }
     let mut values = metrics::block_values(&metrics::BlockData::default(), "run", &extra);
     super::untimed_values(&measured.iter().map(|r| &r.3).collect::<Vec<_>>(), &mut values);
+    // Other work on the target's CPUs during the runs: kept and flagged (`Background`, SPEC §10.2).
+    let foreign: Vec<f64> = measured.iter().filter_map(|r| r.4).collect();
+    let mut background = Vec::new();
+    if !foreign.is_empty() {
+        let most = foreign.iter().copied().fold(0.0, f64::max);
+        values.insert("cpu.foreign".into(), metrics::median(&foreign));
+        values.insert("cpu.foreign.max".into(), most);
+        if most >= BACKGROUND_PCT
+            && let Some(p0) = &procs0
+        {
+            background = busiest_others(p0, &(host::now_ns(), host::all_processes()));
+        }
+    }
     if warmup.unsteady() {
         values.insert("warmup.unsteady".into(), if warmup.grew() { 2.0 } else { 1.0 });
     }
@@ -417,7 +440,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         } else {
             Refusal::new(
                 ValidatorId::NotForTarget,
-                format!("{m}: a cli target is measured from outside its commands (cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.*, metric.<name>)"),
+                format!("{m}: a cli target is measured from outside its commands (cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.*, metric.<name>, and cpu.foreign when pinned)"),
             )
         };
         refused.insert(m.clone(), r);
@@ -437,7 +460,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         frames: Vec::new(),
         intervals: Vec::new(),
         steps,
-        background: Vec::new(),
+        background,
         leak: None,
         refused,
         locked: false,
