@@ -2267,7 +2267,10 @@ pub fn run(args: &Args) -> Result<Output> {
             }
         }
         text += &format!("\n{exp}\n");
-        let result = json!({ "id": exp, "kind": "pixels", "file": file, "created": super::record::now_iso(), "plan": { "seed": seed, "used_random": used_random }, "series": series_out, "warnings": ctx.warnings, "text": text });
+        let result = json!({
+            "id": exp, "kind": "pixels", "file": file, "created": super::record::now_iso(), "plan": { "seed": seed, "used_random": used_random }, "series": series_out, "warnings": ctx.warnings, "text": text,
+            "stopped": halted.as_ref().map(|h| json!({ "code": h.code, "why": h.message, "validator": h.validator(), "not_run": not_run })),
+        });
         store::write_json(&dir.join("result.json"), &result)?;
         let mut out = Output::new(text, result);
         if !all_decided {

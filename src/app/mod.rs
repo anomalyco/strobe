@@ -256,7 +256,14 @@ pub fn unless_halted(out: Output) -> Result<Output> {
     match out.code {
         130 => Err(stop_error()),
         124 => {
-            let e = Error::timeout(out.json["stopped"]["why"].as_str().unwrap_or("the bench ended before it finished"));
+            // Typed by the validator whose state the bench waited out, as its result keeps it, so
+            // bisect, track and MCP say which one.
+            let why = out.json["stopped"]["why"].as_str().unwrap_or("the bench ended before it finished");
+            let validator = out.json["stopped"]["validator"].as_str().and_then(crate::model::ValidatorId::from_name);
+            let e = match validator {
+                Some(v) => Error::timeout_refused(crate::model::Refusal::new(v, why.strip_prefix(&format!("{v}: ")).unwrap_or(why))),
+                None => Error::timeout(why),
+            };
             Err(match out.json["id"].as_str() {
                 Some(id) => e.hint(format!("strobe bench --resume {id} goes on")),
                 None => e,

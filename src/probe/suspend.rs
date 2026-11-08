@@ -105,6 +105,8 @@ struct Process {
     modules: Vec<Image>,
     /// When the module list was read (a new module is found on the next miss after 200 ms).
     read_at: std::time::Instant,
+    /// Reads since its opening that found no module (`reread_due`).
+    empty_reads: u8,
     /// Unwind data read so far, by address (None: unreadable).
     unwind: HashMap<u64, Option<Vec<u8>>>,
 }
@@ -112,6 +114,33 @@ struct Process {
 impl Drop for Process {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.handle) };
+    }
+}
+
+/// Reads of an empty module list after the first, 10 ms apart, before the 200 ms wait applies.
+const EMPTY_READS: u8 = 8;
+
+impl Process {
+    /// Whether a frame in no module may read the module list again. A list that came back empty (a
+    /// process opened before its loader listed its modules, which Windows then refuses) is read again
+    /// at the first miss, then every 10 ms up to `EMPTY_READS` times: a short child ends before
+    /// 200 ms, and every sample of it stayed a bare address in no module. Otherwise every 200 ms, for
+    /// a module loaded since.
+    fn reread_due(&self) -> bool {
+        let since = self.read_at.elapsed();
+        match (self.modules.is_empty(), self.empty_reads) {
+            (true, 0) => true,
+            (true, n) if n <= EMPTY_READS => since >= std::time::Duration::from_millis(10),
+            _ => since > std::time::Duration::from_millis(200),
+        }
+    }
+
+    fn reread(&mut self) {
+        self.modules = images(self.handle);
+        self.read_at = std::time::Instant::now();
+        if self.modules.is_empty() {
+            self.empty_reads = self.empty_reads.saturating_add(1);
+        }
     }
 }
 
@@ -217,7 +246,7 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
                     if let Some(exe) = image_name(h) {
                         exes.insert(t.pid, exe);
                     }
-                    e.insert(Process { handle: h, modules: images(h), read_at: std::time::Instant::now(), unwind: HashMap::new() });
+                    e.insert(Process { handle: h, modules: images(h), read_at: std::time::Instant::now(), empty_reads: 0, unwind: HashMap::new() });
                 }
                 let h = unsafe { OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, 0, t.tid) };
                 if h.is_null() {
@@ -301,17 +330,15 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
             samples.push((at, t.pid, *tid, 0u16, at_stack));
         }
         // Wait until the next tick on a high-resolution timer (no change to the system's timer
-        // resolution), or sleep where there is none. A tick missed by more than one interval (a
-        // refresh, a preemption) is not made up: the credit, capped at two samples, carries it.
+        // resolution), or sleep where there is none. A tick whose time already passed (a refresh, a
+        // preemption) is not made up, and the next one is a whole interval away: a thread is never
+        // suspended again moments after its last sample; the credit, capped at two samples, carries it.
         let now = std::time::Instant::now();
-        if now >= due + tick {
+        if now >= due {
             due = now + tick;
         }
-        let wait = due.saturating_duration_since(now);
+        let wait = due - now;
         due += tick;
-        if wait.is_zero() {
-            continue;
-        }
         if timer.is_null() {
             std::thread::sleep(wait);
         } else {
@@ -540,13 +567,9 @@ fn unwind(p: &mut Process, mut regs: [u64; 17], stack: &[u8]) -> Vec<u64> {
         let found = p.modules.iter().position(|m| at >= m.base && at < m.base + m.size);
         let i = match found {
             Some(i) => i,
-            // A module loaded since the list was read: read it again, at most every 200 ms. An empty
-            // list (a process opened while the loader had not listed its modules yet, which Windows
-            // then refuses) is read again at once: a short child ended before 200 ms, and every
-            // sample of it stayed a bare address in no module.
-            None if p.modules.is_empty() || p.read_at.elapsed() > std::time::Duration::from_millis(200) => {
-                p.modules = images(p.handle);
-                p.read_at = std::time::Instant::now();
+            // A module loaded since the list was read, or a list that was empty: read it again.
+            None if p.reread_due() => {
+                p.reread();
                 match p.modules.iter().position(|m| at >= m.base && at < m.base + m.size) {
                     Some(i) => i,
                     None => break,

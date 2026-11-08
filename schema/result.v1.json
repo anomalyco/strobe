@@ -120,10 +120,14 @@
     "stopped": {
       "type": ["object", "null"],
       "description": "Why the bench (or check) ended early: its exit code (130 for a stop, 124 when --unlock-wait ran out) and what did not run.",
+      "required": ["code", "why", "not_run"],
       "properties": {
         "code": { "type": "integer" },
         "why": { "type": "string" },
-        "validator": { "type": ["string", "null"], "description": "The validator of a typed stop: SessionLocked or WindowHidden when --unlock-wait ran out (a check's series not run are only in not_run)." },
+        "validator": {
+          "oneOf": [{ "$ref": "#/definitions/validator" }, { "type": "null" }],
+          "description": "The validator of a typed stop: SessionLocked or WindowHidden when --unlock-wait ran out (exit 124; a check's series not run are only in not_run), or the validator of a refusal that ended the bench part way (exit 4, such as Throttled); null for a stop, a lost device or a failure no validator gave. Absent in older results."
+        },
         "not_run": { "type": "array", "items": { "type": "string" } }
       }
     },
