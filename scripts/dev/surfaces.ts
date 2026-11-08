@@ -61,7 +61,8 @@ function digitsFor(v: number, min: number, max: number): number {
   const a = Math.abs(v)
   if (!Number.isFinite(a) || a === 0) return min
   let d = 0
-  while (d < max && Math.round(a * 10 ** d) < 1) d++
+  while (d <= max && Math.round(a * 10 ** d) < 1) d++
+  if (d > max) d = min
   return Math.min(max, Math.max(min, d))
 }
 

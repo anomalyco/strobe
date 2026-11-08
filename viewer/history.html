@@ -70,7 +70,11 @@ function val(v, unit) {
   // fmt::value's digits: below 10, as many decimals as show the first significant digit (0.003, not 0.00).
   const a = Math.abs(v);
   let d = a >= 100 ? 0 : a >= 10 ? 1 : 2;
-  if (a > 0 && a < 0.01) while (d < 4 && Math.round(a * 10 ** d) < 1) d++;
+  // Dust that no decimal up to 4 shows stays at 2 (fmt::digits_for).
+  if (a > 0 && a < 0.01) {
+    while (d <= 4 && Math.round(a * 10 ** d) < 1) d++;
+    if (d > 4) d = 2;
+  }
   if (unit === "bytes") { const a = Math.abs(v); return a >= 1048576 ? (v / 1048576).toFixed(1) + " MB" : a >= 1024 ? (v / 1024).toFixed(0) + " KB" : v.toFixed(0) + " B"; }
   if (unit === "%") return v.toFixed(d) + "%";
   if (unit === "count") return Number.isInteger(v) ? String(v) : v.toFixed(1);
@@ -82,7 +86,10 @@ const pct = r => {
   if (r == null || !isFinite(r)) return "—";
   const p = Math.abs(r * 100);
   let d = p >= 10 ? 0 : 1;
-  if (p > 0 && p < 0.1) while (d < 3 && Math.round(p * 10 ** d) < 1) d++;
+  if (p > 0 && p < 0.1) {
+    while (d <= 3 && Math.round(p * 10 ** d) < 1) d++;
+    if (d > 3) d = 1;
+  }
   return (Math.round(p * 10 ** d) === 0 ? "" : r < 0 ? "−" : "+") + p.toFixed(d) + "%";
 };
 // What a point is made of and how sure its interval is: `6 blocks · 97%`, a port's `3 pairs · 75%`.

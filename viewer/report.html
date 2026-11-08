@@ -1603,8 +1603,10 @@ function rfix(v, d) {
 function digitsFor(v, min, max) {
   const a = Math.abs(v);
   if (!finite(a) || a === 0) return min;
+  // Dust no decimal up to max shows reads at min (fmt::digits_for), not `0.000`.
   let d = 0;
-  while (d < max && Math.round(a * 10 ** d) < 1) d++;
+  while (d <= max && Math.round(a * 10 ** d) < 1) d++;
+  if (d > max) d = min;
   return Math.min(max, Math.max(min, d));
 }
 
