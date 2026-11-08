@@ -190,9 +190,10 @@ pub(crate) fn look(v: &Value) -> Option<Result<Look>> {
     })())
 }
 
-/// Whether an argument is a pixel locator or wait (for the drivers that have none: a terminal).
+/// Whether an argument is a pixel locator or wait, or a list of waits with one (for the drivers that have none:
+/// a terminal).
 pub(crate) fn is_pixels(v: &Value) -> bool {
-    anchor(v).is_some() || look(v).is_some()
+    anchor(v).is_some() || look(v).is_some() || v.as_array().is_some_and(|l| l.iter().any(|u| anchor(u).is_some() || look(u).is_some()))
 }
 
 /// What can show a target's pixels: its own area's size, a capture of a rect of it, and a wait for what

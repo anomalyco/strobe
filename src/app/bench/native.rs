@@ -1051,9 +1051,15 @@ fn runs(
                             ),
                         ));
                     }
-                    let frames_refused = match overhead {
-                        Some(o) if o > 2.0 => Some(format!("OverheadBudget: the OS present session's consumer used {o:.2}% of a core (budget 0.5%), so the frames it saw describe a disturbed run")),
-                        _ => f.refused.clone().or(spun),
+                    // The consumer over 2%: a timed block's frame metrics are refused; a `--check` keeps them
+                    // (unless refused or unpaced anyway) and says what a timed bench refuses.
+                    let over = overhead.filter(|o| *o > 2.0);
+                    if let Some(o) = over.filter(|_| !x.measures_time() && x.judges_time()) {
+                        super::check_overhead(&mut ctx.warnings, s, &format!("the OS present session's consumer used {o:.2}% of a core (budget 0.5%)"), &frame_metric, None);
+                    }
+                    let frames_refused = match over.filter(|_| x.measures_time()) {
+                        Some(o) => Some(format!("OverheadBudget: the OS present session's consumer used {o:.2}% of a core (budget 0.5%), so the frames it saw describe a disturbed run")),
+                        None => f.refused.clone().or(spun),
                     };
                     match frames_refused {
                         Some(why) => {
@@ -1177,7 +1183,7 @@ fn runs(
             }
             super::block::untimed_state(s, &measured.iter().map(|r| &r.timed).collect::<Vec<_>>(), &mut values, &mut refused);
             if x.judges_time() {
-                super::pixel_overhead(s, pixel_pct, &mut values, &mut refused);
+                super::pixel_overhead(s, pixel_pct, x.measures_time(), &mut ctx.warnings, &mut values, &mut refused);
             }
             for m in refused.keys() {
                 values.remove(m);
@@ -2011,7 +2017,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             values.insert("driver.pixel_reads".into(), k as f64);
             values.insert("driver.pixel_ms".into(), ms);
             if !profile {
-                super::pixel_overhead(s, pixel_pct, &mut values, &mut refused);
+                super::pixel_overhead(s, pixel_pct, !ctx.args.has("check"), &mut ctx.warnings, &mut values, &mut refused);
             }
         }
         if let (false, Some(r)) = (profile, refused.get(&s.primary)) {

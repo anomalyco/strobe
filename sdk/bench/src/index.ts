@@ -103,7 +103,13 @@ export interface AppEvent {
 }
 
 export interface Options {
-  until?: Until
+  /**
+   * When the call resolves ({@link Until}), or a list of waits run in order under the call's one `timeout`, each from
+   * when the one before it ended: `[selector, "frame"]` (the element, then the frame after it: an element wait ends
+   * at the first element it finds, so what the step left for the next frame, such as siblings' layout or effects run
+   * on mount, is timed too) or `[selector, "idle"]`.
+   */
+  until?: Until | Until[]
   /** Milliseconds before the call fails the block. Default 30000. */
   timeout?: number
   /** Native targets: the window (a top-level window or overlay of the app) by its title, or part of it; default the main window first, then the app's other windows. */
@@ -253,9 +259,10 @@ export interface Page {
   /**
    * Resolves when a visible element matches `selector` (holding `text`, if given). Re-checked on every DOM, tree and focus
    * change, so `:focus` works. An image resolves once it shows; `{ pixels }` once the region changed from the call's first
-   * capture, held still or shows an image ({@link PixelWait}).
+   * capture, held still or shows an image ({@link PixelWait}). `until` waits on after that, from when it showed
+   * (`{ until: "frame" }`: the frame after it), within the same `timeout`.
    */
-  waitFor(selector: Element | { pixels: PixelWait }, opts?: { text?: string; exact?: boolean; timeout?: number }): Promise<void>
+  waitFor(selector: Element | { pixels: PixelWait }, opts?: Options & { text?: string; exact?: boolean }): Promise<void>
   /** Resolves when nothing in the DOM changed and no frame ran long for 300 ms. */
   idle(opts?: { timeout?: number }): Promise<void>
   wait(ms: number): Promise<void>

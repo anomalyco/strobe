@@ -1068,9 +1068,20 @@ wall time the counters covered had another run's work counted in it (vps, headle
 2,000 cells' layout spilled into the next read 385%): `main.busy` of that block is refused
 `RunIncomplete`, never printed. When the frame did at least 1.0 ms and 5% of `main.work`
 of style and layout after the run's own reading, or layouts where the run's `layout.count` or
-`main.layout` reads 0, the series warns `HeadlessFrame` with the time (a step that wrote 2,000 cells'
-widths through `page.eval` and read nothing: 7.53 ms left to the frame on adais; the same change
-through a click is laid out inside the run, no warning). A native app's phase marks are strobe's own, stamped on the host clock (the clock of its
+`main.layout` reads 0, and the series declares a metric read before that frame, the series warns
+`HeadlessFrame` with the time and those metrics (a step that wrote 2,000 cells' widths through
+`page.eval` and read nothing: 7.53 ms left to the frame on adais; the same change through a click is
+laid out inside the run, no warning). Read before the frame: `run.duration`, `cpu.*` (the run's edge;
+not `cpu.wakes`, whose threads' switches are read after the frame), and the trace's metrics over the run (`main.paint`, `main.gc`, `layout.shift`, `gpu.compile`; with a
+full trace also `main.busy` and `main.tasks.long`). The counters' metrics hold the frame in every
+trace set (`main.work`, `main.script`, `main.layout`, `main.style`, `layout.count`, `style.count`, and
+a lean block's `main.busy`), so a series that declares only them gets no warning. An element wait
+ends at the first element it finds (and on a late frame, once the frame drew it): the frame after it
+can still hold the step's work (siblings' layout, effects run on mount), so a step that waits for an
+element and whose work the frame finishes passes `{ until: [selector, "frame"] }` (§9.6): the element,
+then the frame after it, inside the run. strobe never adds a frame to element waits by itself: they
+also aim every input, and a headless frame costs 8 to 18 ms on vps and 60 to 165 ms with the display
+off on Windows per wait. A native app's phase marks are strobe's own, stamped on the host clock (the clock of its
 inputs, OS present events and native samples) and kept in the recording's `frames.json`;
 `query <rec> hotspots --phase <name>` ranks the native samples inside that phase (§13.7).
 
@@ -3025,7 +3036,7 @@ click goes there).
 | `down(key, opts?)`, `up(key, opts?)` | one key held across other calls until its `up` (a game's `w`); a held `Shift`, `Control`, `Alt` or `Meta` marks the key events sent while it is down. No auto-repeat: Chromium's input sends none. A mouse button: `Mouse` (left), `MouseRight`, `MouseMiddle`, pressed where the pointer is, or first at `opts.at` (a selector, or `[x, y]` in the viewport or the main window's client area); `move` then drags until `up`. A block that ends with a button held releases it |
 | `snapshot(name)` | the page's pixels as `name`, for `--pixels` (§9.9); nothing outside a pixels block, so timed runs never pay for it |
 | `scroll(selector, { by, speed? }, opts?)` | `Input.synthesizeScrollGesture` over the element (a mouse's); on an emulated phone a finger's swipes (below) |
-| `waitFor(selector, { text?, exact?, timeout? })` | resolves when a visible element matches (the selector grammar below; `text` and `exact` add to it) (containing `text`, or with exactly that trimmed text when `exact`), through one in-page `MutationObserver` plus `focusin`/`focusout` listeners: focus moves without a mutation, so `:focus` selectors resolve too. While a CSS animation or transition runs it also checks once per frame: a fade in from `opacity: 0` makes an element visible on a frame, not on a mutation (a game menu's buttons were seen only at the next unrelated DOM change, 13 ms late on one build and not the other). Frame waits use the browser's own rAF, kept before the page's scripts run, so a page that replaces rAF (a frame pacer) does not set strobe's clock |
+| `waitFor(selector, { text?, exact?, timeout?, until? })` | resolves when a visible element matches (the selector grammar below; `text` and `exact` add to it) (containing `text`, or with exactly that trimmed text when `exact`), through one in-page `MutationObserver` plus `focusin`/`focusout` listeners: focus moves without a mutation, so `:focus` selectors resolve too. While a CSS animation or transition runs it also checks once per frame: a fade in from `opacity: 0` makes an element visible on a frame, not on a mutation (a game menu's buttons were seen only at the next unrelated DOM change, 13 ms late on one build and not the other). Frame waits use the browser's own rAF, kept before the page's scripts run, so a page that replaces rAF (a frame pacer) does not set strobe's clock |
 | `idle(opts?)` | the `"idle"` wait below, on its own |
 | `wait(ms)` | a plain wait |
 | `eval(fn, ...args)` | `Runtime.evaluate`; only in `prepare`, `setup` and `reset` |
@@ -3181,9 +3192,20 @@ or both), how many mutations and long frames, and the top three causes:
 nodes as `tag#id.class` with the attribute or kind that changed, long frames by their longest
 script's invoker and file), `"frame"`
 (two animation frames, the usual "after next paint"), a selector, or `{ selector, text?, exact? }`
-(an element holding that text, as `waitFor`). Every input call records its dispatch time on the
-trace clock, which the `interaction.*` metrics use (input → the presented frame that showed the
-change).
+(an element holding that text, as `waitFor`), or a list of these run in order (`[selector, "frame"]`,
+`[selector, "idle"]`; every target): one deadline, the call's `timeout`, for the list, each wait
+given what is left of it, and each after the first waiting from when the one before it ended (a
+native app's `"frame"` is then the first present after the element showed, not after the input). The
+list's first pixel wait (an image, `{ pixels }`) compares with what the region showed before the
+input, as a lone one does; a later one, with its first capture. An empty list, or a list inside a
+list, is a usage error. `waitFor(selector, opts)` takes `until` too, run once the element shows
+(`{ until: "frame" }`: the frame after it; where strobe gives the page the OS's input, the browser's next
+present after it, as its inputs' `"frame"` is), inside the same `timeout`. The page probe checks an element
+wait after a frame has rendered, and 50 ms after a change only while the page is hidden (it draws no
+frames): a frame later than 50 ms (headless, or the display off) is waited for, so the wait does not
+end before the frame that showed the element and leave that frame's work after the step. Every input
+call records its dispatch time on the trace clock, which the `interaction.*` metrics use (input →
+the presented frame that showed the change).
 
 **Launch cases** (`launch: { until, milestones?, profile?, before?, inspect?, screen?, timeout? }`):
 a case that measures the launch itself, not work inside a launched app. Every block is one cold
@@ -3416,9 +3438,10 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   runs' wall time (its thread's, and Windows.Graphics.Capture's frame events copying each frame) is
   `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns). Past 2% the block's times and rates over
   the runs' wall time (`run.duration`, `frames.*`, `interaction.*`, `scroll.*`, `phase.*`,
-  `cpu.app.total`, wakes per second, `input.*`) leave its values, and the series' declared ones are
-  refused `OverheadBudget` (a `--check` too, so it says before a bench runs what the bench would
-  refuse); totals of the app's own work (`cpu.work`, memory, IO) stay. A native
+  `cpu.app.total`, wakes per second, `input.*`) leave a timed block's values, and the series' declared
+  ones are refused `OverheadBudget`; a `--check` warns `OverheadBudget` instead, naming the declared
+  metrics a timed block would refuse (a check is one untimed run: it says what the bench would refuse,
+  and passes); totals of the app's own work (`cpu.work`, memory, IO) stay. A native
   launch timed to pixels counts its captures over the launch the same way. A window's capture is closed
   before each case's runs (a capture setup opened would copy every frame through them) and opened again
   by the first read a run makes.
@@ -4065,7 +4088,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `Background` (refusing) | the native speed check stayed slow for 2 minutes while other processes kept the target's CPUs busy (an antivirus scanning new files, an update, a build): the message names the busiest. A bench block waits it out first, holding nothing (a minute, then until the CPUs are quiet, and the check again), up to 15 times, about an hour: on a shared machine another agent's build ends. Blocks that run through a locked session (a headless page, a windowless app) wait the same way: they once ended the bench at the first busy check |
 | `BackgroundPriority` | the target runs at background priority, inherited from strobe or its own: macOS `taskpolicy -b` (`PRIO_DARWIN_PROCESS`), Windows' idle priority class, efficiency mode (EcoQoS) or background mode (very low memory priority), Linux `SCHED_IDLE` or nice 19. The OS keeps it on efficiency cores, at low clocks or behind other work: a drag in an Electron app read 83–91% dropped frames under `taskpolicy -b` against 0.4% at normal priority. Refuses frame and input-latency metrics (`frames.*`, `interaction.*`, `scroll.*`, `canvas.*`, `input.*`, `launch.painted`, `launch.settled`): a primary among them refuses the bench before anything builds (strobe's own priority) or at the block (the target's), a secondary shows refused, and `record` prints `frames refused`. CPU, memory and counters stay, with a warning to compare them only with runs at the same priority. Attribution and memory blocks are untimed and keep running. `record pid:` measures a process as its user runs it and is not checked |
 | `PresentsUnmatched` | over 5% of the inputs strobe sent a native app (those after which its accessibility tree changed) showed no frame within a second while the present session lost no events (refuses `interaction.*`, §7.4) |
-| `OverheadBudget` (refusing) | the OS present session's consumer used over 2% of a core (budget 0.5%, §19; over the budget only warns): its frames describe a disturbed run |
+| `OverheadBudget` (refusing) | the OS present session's consumer used over 2% of a core (budget 0.5%, §19; over the budget only warns): a timed block's frames describe a disturbed run (a `--check` keeps them and warns what a timed bench refuses) |
 | `NoDisplayForBudget` | a budget metric is requested without a real display |
 | `TailTooShort` | a percentile lacks its minimum n (refuses that metric only) |
 | `ClockUnsynced` | sources cannot be aligned within 1 ms (§6); a page launch whose own time for `until` falls outside strobe's span from its navigation command to hearing of it, by over 2 ms (9.6) |
@@ -6713,14 +6736,14 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | daemon idle CPU | ≤ 0.1% of one core |
 | samplers while recording | ≤ 0.5% of one core |
 | thread timeline (`record`, `--check` and attribution blocks only, §7.4) | ≤ 1% of one core, in its own file (`cpu_ms`) |
-| OS present session (timing blocks that declare frame metrics) | ≤ 0.5% of one core in strobe's consumer, measured per recording (`consumer_cpu_ms`); a bench block over it warns (`OverheadBudget`), over 2% refuses its frame metrics |
+| OS present session (timing blocks that declare frame metrics) | ≤ 0.5% of one core in strobe's consumer, measured per recording (`consumer_cpu_ms`); a bench block over it warns (`OverheadBudget`), over 2% a timed block's frame metrics are refused (a `--check` keeps them, unless refused or unpaced for their own reason, and warns, naming the declared frame metrics a timed bench refuses; an attribution block neither) |
 | timing probe overhead | ≤ 1% main-thread time (fails at 2%, §8.2) |
 | reserved-CPU sweep (`--reserve-cpus`, §9.4) | ≤ 5% of one core, on strobe's own CPUs, never the target's (measured per block; Linux on vps 0.16–0.22%; Windows on adais 2.5–3.2%: each sweep's system snapshot is 2.55 ms of kernel CPU there, 830 KB of processes and threads) |
 | counters (§7.5) | macOS: one `proc_pid_rusage` per process at each end of a run, nothing in the target; Linux perf events: per context switch in the target (4.4 µs in a VM), so they open only in counter blocks, never in a timing block |
 | off-CPU waits (`--probes waits`, attribution only, §11.1) | none in timing blocks: per context switch in the target (Linux about 7 µs on top of `deep` in a VM), so only a capture that asks takes them |
 | Firefox's profiler (attribution only, §8.3) | the browser's own samplers, in the target's processes: on Windows 1 ms through Firefox 160, where any shorter interval makes every process's sampler busy-wait a core (bug 1349801; 10.2 cores for a page's Firefox 159 on adais at 200 µs or 500 µs, 0.3-0.4 cores at 1 ms, 0.25 with no profiler), and 500 µs from Firefox 161, whose sampler waits on a high-resolution timer (bug 2082760; Nightly 162: 0.65 cores at 500 µs, 0.3 with no profiler); 200 µs on macOS and Linux (air 0.3-0.6 cores and vps 0.1-0.5 at any interval, no profiler alike) |
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
-| `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% refuses `tty.latency.*`. Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
+| `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% a timed block's `tty.latency.*`, `tty.settle.*` and `tty.frame.*` are refused (a `--check` keeps them and warns, naming the declared ones a timed bench refuses; an attribution block neither). Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
 | Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches, opening the window's capture included: a run whose first pixel read opens it pays for it; Windows makes the capture's Direct3D device once per process, 118 of the 126 ms of CPU an open took on adais); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
@@ -6742,13 +6765,26 @@ sampler 0.16% of a core`), a bench per series (the blocks' mean); in a timed blo
 budget above warns `OverheadBudget`, once per series and part. strobe's own process and the runner
 (in a timed or `--check` block, `self_state`): with the target unpinned (`--pin none`, under 4 cores,
 macOS) they share its CPUs, so `strobe` + `runner` over 5% of a core warns `OverheadBudget` and over
-20% refuses the block's wall-time, CPU-share, frame and latency metrics (`OverheadBudget`; the
+20% refuses a timed block's wall-time, CPU-share, frame and latency metrics (`OverheadBudget`; the
 target's CPU time `cpu.*` in ms and exact counters stay); pinned, they run on CPUs of their own, so
 only what strobe used beside its budgeted parts (reserve, sampler, presents, terminal, pixels) plus
 the runner over 10% warns. A `script()` target's runs are mostly strobe relaying `ctx.call` (200
 small calls a run: strobe 91% and the runner 39% of a core on adais): over 10% warns `ObserverCost`
-(batch the calls), over 20% refuses `run.duration` (its `cpu.work` and `js.heap.retained` are the
-script's own). A filmed block (`--video`, never timed) adds `encoder` (the encoder process's CPU
+(batch the calls), over 20% refuses a timed block's `run.duration` (its `cpu.work` and
+`js.heap.retained` are the script's own). A `--check` never refuses for strobe's share: over 20% it
+warns, saying a timed bench refuses those metrics, and passes: a check is one cold run, whose share
+over-reads a warmed block's (on vps, 2 CPUs on 1 core where `--pin auto` keeps nothing apart, a page
+case whose bench file serves its API through `ctx.mock` read strobe 0.3% + runner 20–23% in `--check`,
+which failed, and 15–16% in timed blocks, which passed with the warning). The warning names both
+shares (`strobe 0.30%, runner 21.5%`) and what to do by why the target shared its CPUs: macOS (no CPU
+affinity: prebuild `ctx.mock` responses in setup, move heavy mock servers to `fixture()`, or compare
+`cpu.work`); under 4 cores (`--pin auto` needs 4 to keep one apart: run timed benches on 4 or more
+cores, or pass the `--pin` list that leaves the last core to strobe and the runner, the last CPU on a
+one-core machine, which then shares the target's core, or the same mock and `cpu.work` advice);
+`--pin none` on 4 or more cores (drop it). What the runner does in its
+own process (a `ctx.mock` handler, a `Bun.serve` started in the bench file) is in `runner`: it runs
+on the runner's thread, and telling it apart would need instrumenting the bench file's JS; a heavy
+server belongs in `fixture()`, its own process group, counted in `cpu.fixture`. A filmed block (`--video`, never timed) adds `encoder` (the encoder process's CPU
 over the video's span), with no budget. Measured on adais: a windowless native app's 5 s idle run 0.81%, a headless page's click run
 0.61%; a script target's 30 ms runs 3–6%, which is strobe relaying each `ctx.call` between the
 runner and the script's host inside the run. Counted over the whole run loop instead, the same block
@@ -8636,6 +8672,28 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   part's cycles with the jobs' running processes joining them, a page's edges list the set from the
   snapshot alone, and the holding thread follows a daemon bench's own CPUs. The first run of a
   freshly built executable used about 90 ms more CPU in its own process (302 ms for 210, once).
+- **Frames after element waits, strobe's share in a check (2026-11-09)**: `until` takes a list run in
+  order under one timeout (`[selector, "frame"]`, every driver; `waitFor` takes `until` too), the page
+  probe's element wait checks 50 ms after a change only while the page is hidden, and `HeadlessFrame`
+  warns only when a declared metric missed the frame, naming them (7.3). On adais, headless and display
+  off, an open-source app's tab-switch bench warned `HeadlessFrame` in 4 of 7 cases (3.0–8.3 ms of
+  style and layout, 3–5 layouts, after a click `until` the answer showed); with `[answer, "frame"]` none
+  did, and the switch's `cpu.work` read 381–402 ms where it read 134–144 ms (two `--check`s each;
+  `run.duration` is refused `Throttled` there). Neither raster nor polling: in the recordings the
+  throttled two-frame wait sleeps (the compositor thread 0.47 ms and the renderer's main thread
+  0.10 ms over 140 ms); the 237 ms more is the app's service worker precaching its script assets
+  through `ctx.mock`, about 1.7 cores across the browser's, network and worker threads, over a run
+  140 ms longer. `cpu.*` stays: it is what ran in the run, and the `DisplayOff` note says that slower
+  frames stretch a frame-waited run and what runs beside it. The same app's home load (vps) kept the
+  warning in 1 of 2 checks with `[row, "frame"]` (49.8 ms of style, 0 layouts): the load starts a
+  200 ms CSS reveal animation on its rows,
+  whose frames go on past any one frame, so the warning stands. A `--check` warns `OverheadBudget`
+  instead of refusing (19): on vps the home load and a cursor-moving case passed with the warning
+  (20.1–21.8% and 20.6%) where 0.21.0 failed them (21.6–23.5%). A scratch bench whose runner spins in
+  each run read 37.6% in `--check` (passed, warned) and 35.3–35.8% in timed blocks, whose
+  `run.duration` was refused; on adais with `--pin none`, 42.5% and 41.3% the same way, its fix "drop
+  --pin none". The terminal reader's and the OS present consumer's 2% bars refuse only in timed blocks
+  too: a `--check` over them keeps the stamps and frames and warns.
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

@@ -861,12 +861,22 @@ impl Driver {
             }
             other => return Err(Error::msg(format!("internal: page.{other}() is no OS input"))),
         };
-        // `until: "frame"`: the browser's next frame on the screen from the OS's presents, as a native
-        // app's; anything else as the page waits for it.
-        if o.get("until").and_then(Value::as_str) == Some("frame") && os.frame_after(at, self.timeout(&o))?.is_some() {
-            return Ok(Value::Bool(true));
-        }
-        self.until(&o).map(|_| Value::Bool(true))
+        self.os_until(os, &o, at)?;
+        Ok(Value::Bool(true))
+    }
+
+    /// A call's `until` where strobe gives the page the OS's input: `"frame"` is the browser's next frame on
+    /// the screen after `at` (in a list, after the wait before it) from the OS's presents, as a native app's;
+    /// anything else as the page waits for it.
+    pub(super) fn os_until(&self, os: &OsInput, o: &Value, at: u64) -> Result<()> {
+        crate::driver::each_until(o, self.timeout(o), |u, first| {
+            let since = if first { at } else { crate::host::now_ns() };
+            if u.get("until").and_then(Value::as_str) == Some("frame") && os.frame_after(since, self.timeout(u))?.is_some() {
+                return Ok(());
+            }
+            self.until_one(u).map(drop)
+        })
+        .map(drop)
     }
 
     /// The element's centre (scrolled into view) as a screen point, and the browser window the OS

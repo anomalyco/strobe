@@ -428,8 +428,10 @@ pub(crate) const HELPER: &str = r#"window.__strobe ??= (() => {
   // never resolve), an animation or transition starting or ending, a scroll, a resize. The check runs after the
   // frame has rendered (a task posted from its animation callback), so the boxes it reads are the ones the frame
   // laid out and it forces no layout of the page's own; a page that draws no frames (hidden) is checked 50 ms after
-  // the change instead. While an element it matches is there but hidden and an animation or transition runs, it
-  // checks each frame: a fade in (opacity from 0) shows an element on a frame, not on a mutation.
+  // the change instead (only then: a frame later than 50 ms, a headless clock's or one with the display off, is
+  // waited for, so the wait never ends before that frame and leaves its work for after the step). While an element it matches is
+  // there but hidden and an animation or transition runs, it checks each frame: a fade in (opacity from 0) shows
+  // an element on a frame, not on a mutation.
   s.waitEl = (q, timeout, label) => new Promise((resolve, reject) => {
     const first = timed(q)
     if (first.el) return resolve(first.el)
@@ -440,19 +442,23 @@ pub(crate) const HELPER: &str = r#"window.__strobe ??= (() => {
       queued = false
       caf(frame)
       clearTimeout(late)
+      late = 0
       const r = timed(q)
       if (r.el) { stop(); resolve(r.el) }
       else if (r.near && document.getAnimations().some((a) => a.playState === "running" || a.playState === "pending")) soon()
     }
     port.port1.onmessage = check
+    // A page hidden while a check waits for its frame (a `visibilitychange`) is checked 50 ms on.
     const soon = () => {
-      if (done || queued) return
+      if (done) return
+      if (document.hidden && queued && !late) late = setTimeout(check, 50)
+      if (queued) return
       queued = true
       frame = raf(() => port.port2.postMessage(0))
-      late = setTimeout(check, 50)
+      if (document.hidden) late = setTimeout(check, 50)
     }
     const unwatch = observe(soon, { subtree: true, childList: true, attributes: true, characterData: q.text != null })
-    const events = ["focusin", "focusout", "animationstart", "animationend", "transitionrun", "transitionend", "scroll"]
+    const events = ["focusin", "focusout", "animationstart", "animationend", "transitionrun", "transitionend", "scroll", "visibilitychange"]
     for (const e of events) document.addEventListener(e, soon, true)
     window.addEventListener("resize", soon)
     const stop = () => {
@@ -818,6 +824,55 @@ pub(crate) fn with_text(sel: &Value, o: &Value) -> Value {
     sel
 }
 
+/// Runs a call's `until`: no wait, one, or a list of them in order (`[selector, "frame"]`: the element, then the
+/// frame after it). A list runs under one deadline, the call's timeout from now: `one` gets the call's options with
+/// one wait and what is left of the timeout, and whether it is the first (a later one waits from when the one
+/// before it ended, not from the input). None without a wait.
+pub(crate) fn each_until<T>(opts: &Value, timeout: Duration, mut one: impl FnMut(&Value, bool) -> Result<T>) -> Result<Option<T>> {
+    let list = match opts.get("until") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(l)) => l,
+        Some(_) => return one(opts, true).map(Some),
+    };
+    if list.is_empty() || list.iter().any(|u| u.is_array() || u.is_null()) {
+        return Err(Error::usage(format!(
+            "until: {}: a list is the waits to run in order, at least one, each what until takes alone (\"idle\", \"frame\", a selector, an image, {{ pixels }}, {{ state }})",
+            Value::Array(list.clone())
+        )));
+    }
+    let deadline = Instant::now() + timeout;
+    let mut last = None;
+    for (i, u) in list.iter().enumerate() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(Error::timeout(format!("until: the waits before {u} took the call's whole {} s", timeout.as_secs())));
+        }
+        let mut o = opts.clone();
+        o["until"] = u.clone();
+        o["timeout"] = json!(left.as_millis().max(1) as u64);
+        last = Some(one(&o, i == 0)?);
+    }
+    Ok(last)
+}
+
+/// The pixel wait in a call's `until` (an image, `{ pixels }`; a list's first): what the region showed before the
+/// input is captured for it.
+pub(crate) fn pixel_until(o: &Value) -> Option<Result<pixels::Look>> {
+    match o.get("until")? {
+        Value::Array(l) => l.iter().find_map(pixels::look),
+        u => pixels::look(u),
+    }
+}
+
+/// A `waitFor`'s options for its `until`, run once what it waited for shows: what is left of the call's
+/// timeout. None without an `until`.
+pub(crate) fn until_after(o: &Value, deadline: Instant) -> Option<Value> {
+    o.get("until").filter(|u| !u.is_null())?;
+    let mut o = o.clone();
+    o["timeout"] = json!(deadline.saturating_duration_since(Instant::now()).as_millis().max(1) as u64);
+    Some(o)
+}
+
 /// CDP's modifier bits (Alt 1, Control 2, Meta 4, Shift 8).
 fn cdp_mods(m: Mods) -> i64 {
     m.alt as i64 | (m.ctrl as i64) << 1 | (m.meta as i64) << 2 | (m.shift as i64) << 3
@@ -1022,7 +1077,7 @@ impl Driver {
 
     /// Before a measured input whose `until` waits on pixels: what the region shows now.
     fn before_input(&self, o: &Value) -> Result<()> {
-        let Some(l) = o.get("until").and_then(pixels::look) else { return Ok(()) };
+        let Some(l) = pixel_until(o) else { return Ok(()) };
         let b = self.images.before(&*self.shots()?, &l?)?;
         *self.before.borrow_mut() = Some(b);
         Ok(())
@@ -1634,6 +1689,7 @@ impl Driver {
             },
             "waitFor" => {
                 let o = opts(1);
+                let deadline = Instant::now() + self.timeout(&o);
                 match pixels::look(&sel(0)) {
                     Some(l) => {
                         self.images.wait(&*self.shots()?, &l?, None, self.timeout(&o))?;
@@ -1642,7 +1698,11 @@ impl Driver {
                         self.wait_for(&Self::sel(&with_text(&sel(0), &o))?, self.timeout(&o))?;
                     }
                 }
-                Ok(Value::Bool(true))
+                match (until_after(&o, deadline), self.os.get()) {
+                    (Some(o), Some(os)) => self.os_until(os, &o, crate::host::now_ns()).map(|_| Value::Bool(true)),
+                    (Some(o), None) => self.until(&o),
+                    (None, _) => Ok(Value::Bool(true)),
+                }
             }
             "idle" => {
                 let t = self.timeout(&opts(0));
@@ -1801,6 +1861,11 @@ impl Driver {
     }
 
     fn until(&self, opts: &Value) -> Result<Value> {
+        Ok(each_until(opts, self.timeout(opts), |o, _| self.until_one(o))?.unwrap_or(Value::Bool(true)))
+    }
+
+    /// One wait of a call's `until` (`each_until` runs a list's in turn).
+    fn until_one(&self, opts: &Value) -> Result<Value> {
         let t = self.timeout(opts);
         // An image or pixels: from what the region showed before the input (`before_input`).
         if let Some(l) = opts.get("until").and_then(pixels::look) {

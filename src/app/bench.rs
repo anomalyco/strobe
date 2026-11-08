@@ -42,6 +42,10 @@ mod tty;
 
 pub use shown::shown_line;
 
+/// What a dark display does to a run that waits on frames (`DisplayOff`): its frames come later, so the run
+/// lasts longer and what the page does meanwhile on its own counts for longer.
+const DARK_STRETCH: &str = "; a run that waits on a frame lasts longer then, and CPU the page spends meanwhile on its own (a service worker caching, background fetches) grows with it in cpu.*";
+
 /// Secondaries that get tested (Holm across these only). Fewer tests keep the correction reachable.
 const DEFAULT_SECONDARIES: &[&str] = &["frames.interval.p95", "frames.dropped.pct", "main.busy", "interaction.p95", "cpu.app.total"];
 
@@ -2159,11 +2163,12 @@ pub fn run(args: &Args) -> Result<Output> {
         let dark = series_out.iter().filter(|s| s["screen"]["display"] == "off").count();
         if dark > 0 {
             let text = if dark == ran {
-                "every case ran with the display off (a locked session's display sleeps, and a page's frames and timers slow down): compare their values only with runs whose display was off too"
-                    .to_string()
+                format!(
+                    "every case ran with the display off (a locked session's display sleeps, and a page's frames and timers slow down): compare their values only with runs whose display was off too{DARK_STRETCH}"
+                )
             } else {
                 format!(
-                    "{dark} of {ran} cases ran with the display off and the rest with it on (a locked session's display sleeps, and a page's frames and timers slow down): their values do not compare with each other"
+                    "{dark} of {ran} cases ran with the display off and the rest with it on (a locked session's display sleeps, and a page's frames and timers slow down): their values do not compare with each other{DARK_STRETCH}"
                 )
             };
             ctx.warnings.push(validity::info("DisplayOff", text));
@@ -2980,7 +2985,10 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
         warnings.push(validity::warn("SessionLocked", format!("{locked} of {} blocks ran on a locked screen and the rest unlocked: their values do not compare", blocks.len())));
     }
     if blocks.iter().any(|b| b.display == Some(0)) {
-        warnings.push(validity::info("DisplayOff", "the blocks ran with the display off (a locked session's display sleeps): compare them only with runs whose display was off too"));
+        warnings.push(validity::info(
+            "DisplayOff",
+            format!("the blocks ran with the display off (a locked session's display sleeps): compare them only with runs whose display was off too{DARK_STRETCH}"),
+        ));
     }
     let (shown, screen_warnings) = shown::summarize(&blocks, false);
     warnings.extend(screen_warnings);
@@ -3453,7 +3461,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let dark = pairs.iter().filter(|&&(a, _)| blocks[a].display == Some(0)).count();
     if dark > 0 {
         let text = if dark == pairs.len() {
-            "every block ran with the display off (a locked session's display sleeps): compare it only with runs whose display was off too".to_string()
+            format!("every block ran with the display off (a locked session's display sleeps): compare it only with runs whose display was off too{DARK_STRETCH}")
         } else {
             format!("{dark} of {} pairs ran with the display off and the rest with it on; each pair ran in one state, so the comparison holds, but absolute values mix both", pairs.len())
         };
@@ -3970,7 +3978,9 @@ fn full_trace_warning(ctx: &Ctx, target: &Value) -> Option<Warning> {
 /// Pinned, they run on CPUs of their own: what strobe used beside its budgeted parts (reserve sweep,
 /// samplers, present consumer, terminal reader, pixel reads), with the runner, over 10% warns. A script
 /// target's runs are mostly strobe relaying each `ctx.call`: over 10% warns `ObserverCost`, over 20%
-/// refuses `run.duration` (its `cpu.work` and `js.heap.retained` are the script's own).
+/// refuses `run.duration` (its `cpu.work` and `js.heap.retained` are the script's own). Only a timed
+/// block refuses: a `--check` warns, saying what a timed block would refuse. What the runner does in
+/// its own process (a `ctx.mock` handler, a `Bun.serve` in the bench file) is the runner's share.
 fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut b: Block) -> Block {
     let Some(o) = b.overhead.clone().filter(|_| x.judges_time()) else { return b };
     let Some(strobe) = o.strobe_pct else { return b };
@@ -3978,6 +3988,8 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     let both = strobe + runner;
     let block = format!("{} · {} block", s.label(), side_of(ctx, v));
     let pinned = ctx.pin.is_some();
+    let timed = x.measures_time();
+    let fix = if !pinned && kind != "script" && both > 5.0 { unpinned_fix(ctx) } else { String::new() };
     let mut warn = |id: &str, key: &str, text: String| {
         if ctx.overhead_warned.insert(format!("{}\n{key}", s.label())) {
             ctx.warnings.push(validity::warn(id, text));
@@ -3991,31 +4003,36 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     };
     if kind == "script" {
         if both > 10.0 {
+            let refusing = if both > 20.0 && !timed { " (over 20%: a timed bench refuses run.duration)" } else { "" };
             warn(
                 "ObserverCost",
                 "script relay",
                 format!(
-                    "{block}: strobe relaying ctx.call used {} of a core in the runs (strobe {}, runner {}): run.duration is mostly the relay, not the script; batch the work into fewer calls (one call that loops)",
+                    "{block}: strobe relaying ctx.call used {} of a core in the runs (strobe {}, runner {}){refusing}: run.duration is mostly the relay, not the script; batch the work into fewer calls (one call that loops)",
                     pct_of_core(both),
                     pct_of_core(strobe),
                     pct_of_core(runner)
                 ),
             );
         }
-        if both > 20.0 {
+        if both > 20.0 && timed {
             let why = format!("strobe and the runner used {} of a core relaying ctx.call in the runs (over 20%), so the run's time is mostly strobe's", pct_of_core(both));
             refuse(&mut b, &|m| m == "run.duration", &why, "batch the work into fewer ctx.call (one call that loops), or compare cpu.work");
         }
         return b;
     }
     if !pinned {
-        if both > 5.0 {
-            warn("OverheadBudget", "unpinned self", format!("{block}: strobe and the runner used {} of a core in the runs on the target's own CPUs (unpinned; budget 5%)", pct_of_core(both)));
-        }
+        let used = format!("strobe and the runner used {} of a core in the runs on the target's own CPUs (strobe {}, runner {}; unpinned", pct_of_core(both), pct_of_core(strobe), pct_of_core(runner));
         if both > 20.0 {
-            let why = format!("strobe and the runner used {} of a core in the runs on the target's own CPUs (unpinned; over 20%), so the runs it timed are disturbed", pct_of_core(both));
+            let what = if timed { "its wall-time, CPU-share, frame and latency metrics are refused" } else { "a timed bench refuses this block's wall-time, CPU-share, frame and latency metrics" };
+            warn("OverheadBudget", "unpinned self", format!("{block}: {used}; over 20%): {what}; {fix}"));
+        } else if both > 5.0 {
+            warn("OverheadBudget", "unpinned self", format!("{block}: {used}; budget 5%): {fix}"));
+        }
+        if both > 20.0 && timed {
+            let why = format!("{used}; over 20%), so the runs it timed are disturbed");
             let cpu_time = |m: &str| (m.starts_with("cpu.") || m == "ui.cpu") && model::metric(m).is_some_and(|d| d.unit == "ms");
-            refuse(&mut b, &|m| time_metric(m) && !cpu_time(m), &why, "pin the target (--pin) so strobe runs beside it, or make the runs' calls into strobe fewer");
+            refuse(&mut b, &|m| time_metric(m) && !cpu_time(m), &why, &fix);
         }
         return b;
     }
@@ -4031,9 +4048,42 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     b
 }
 
+/// What to do when strobe and the runner shared the target's CPUs and took too much of them (`self_state`),
+/// by why they were not on CPUs of their own: macOS has no CPU affinity, `--pin none`, or too few cores for
+/// `--pin auto` to keep any apart.
+fn unpinned_fix(ctx: &Ctx) -> String {
+    const MOCKS: &str = "prebuild ctx.mock responses in setup or move heavy mock servers to fixture() (a process group of their own, in cpu.fixture), or compare cpu.work";
+    if cfg!(target_os = "macos") {
+        return format!("macOS has no CPU affinity, so strobe and the runner always share the target's CPUs: {MOCKS}");
+    }
+    let (topo, pin) = (host::topology(), ctx.args.get("pin").unwrap_or("auto"));
+    let all = topo.all();
+    let mut cores: Vec<u64> = if topo.cores.is_empty() { host::bits(all).map(|c| 1u64 << c).collect() } else { topo.cores.iter().map(|c| c.mask).collect() };
+    cores.sort_by_key(|m| m.trailing_zeros());
+    if pin == "none" && cores.len() >= 4 {
+        return format!("drop --pin none: --pin auto runs strobe and the runner on CPUs of their own ({})", topo.auto_pin().reason);
+    }
+    if cores.len() >= 4 {
+        return format!("--pin auto left the target {}: pass --pin with a CPU list so strobe and the runner run beside it, {MOCKS}", ctx.pin_label);
+    }
+    let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    let (n, cpus) = (cores.len(), all.count_ones() as usize);
+    let machine = if cpus == n { plural(n, "core") } else { format!("{} on {}", plural(cpus, "CPU"), plural(n, "core")) };
+    // What strobe and the runner could keep: the last core, or with one core, the last of its CPUs (sharing the core).
+    let kept = match cores.last() {
+        Some(&last) if n >= 2 => Some((last, "")),
+        _ => host::bits(all).last().filter(|_| cpus >= 2).map(|c| (1u64 << c, ", on the target's core")),
+    };
+    let cpu_list = |m: u64| format!("{} {}", if m.count_ones() == 1 { "CPU" } else { "CPUs" }, host::cpu_text(m));
+    let pin_list = kept.map(|(k, same)| format!(", pass --pin {} (leaves {} to strobe and the runner{same})", host::cpu_text(all & !k), cpu_list(k))).unwrap_or_default();
+    format!("this machine has {machine} (--pin auto needs 4 or more cores to keep strobe and the runner apart): run timed benches on 4 or more cores{pin_list}, {MOCKS}")
+}
+
 /// `OverheadBudget` (SPEC §19): strobe's pixel reads in the runs used over 2% of a core, so the runs they
-/// timed are disturbed: the series' timing and latency metrics are refused.
-fn pixel_overhead(s: &Series, pct: Option<f64>, values: &mut BTreeMap<String, f64>, refused: &mut BTreeMap<String, Refusal>) {
+/// timed are disturbed: a timed block's (`refuse`) timing and latency metrics are refused; a `--check`
+/// warns, naming what a timed block would refuse.
+fn pixel_overhead(s: &Series, pct: Option<f64>, refuse: bool, warnings: &mut Vec<Warning>, values: &mut BTreeMap<String, f64>, refused: &mut BTreeMap<String, Refusal>) {
+    const FIX: &str = "find images in setup (page.query({ image })) and aim at the points, or wait on until: \"frame\" or \"idle\" in the runs";
     let Some(p) = pct.filter(|p| *p > 2.0) else { return };
     // Times and rates over the runs' wall time: what strobe's reads stretched or competed with. A total
     // of the app's own work (`cpu.work`, memory, IO) stays.
@@ -4041,16 +4091,28 @@ fn pixel_overhead(s: &Series, pct: Option<f64>, values: &mut BTreeMap<String, f6
         ["frames.", "interaction.", "scroll.", "display.", "phase.", "span.", "launch.", "tty.", "input."].iter().any(|x| m.starts_with(x))
             || matches!(m, "run.duration" | "cpu.app.total" | "cpu.wakes" | "ui.wakes" | "main.busy")
     };
+    let used = format!("strobe's pixel reads in the runs used {} of a core (over 2%; the budget is 0.5%)", pct_of_core(p));
+    if !refuse {
+        check_overhead(warnings, s, &used, &timing, Some(FIX));
+        return;
+    }
     values.retain(|k, _| !timing(k));
     for m in declared_metrics(s).into_iter().filter(|m| timing(m)) {
-        refused.entry(m.clone()).or_insert_with(|| {
-            Refusal::new(
-                ValidatorId::OverheadBudget,
-                format!("{m}: strobe's pixel reads in the runs used {} of a core (over 2%; the budget is 0.5%), so the runs it timed are disturbed", pct_of_core(p)),
-            )
-            .fix("find images in setup (page.query({ image })) and aim at the points, or wait on until: \"frame\" or \"idle\" in the runs")
-        });
+        refused.entry(m.clone()).or_insert_with(|| Refusal::new(ValidatorId::OverheadBudget, format!("{m}: {used}, so the runs it timed are disturbed")).fix(FIX));
     }
+}
+
+/// A `--check`'s word for one of strobe's parts over the 2% a timed block refuses at (`OverheadBudget`, SPEC
+/// §19): the block keeps its values, and one warning per series and part names the declared metrics a timed
+/// bench refuses. `used` says which part and how much (`strobe's terminal reader used 3.1% of a core …`).
+fn check_overhead(warnings: &mut Vec<Warning>, s: &Series, used: &str, hit: &dyn Fn(&str) -> bool, fix: Option<&str>) {
+    let metrics: Vec<&str> = declared_metrics(s).into_iter().map(String::as_str).filter(|m| hit(m)).collect();
+    let part = used.split(" used ").next().unwrap_or(used);
+    if metrics.is_empty() || warnings.iter().any(|w| w.id == "OverheadBudget" && w.text.starts_with(&format!("{}: {part} used ", s.label()))) {
+        return;
+    }
+    let fix = fix.map(|f| format!("; {f}")).unwrap_or_default();
+    warnings.push(validity::warn("OverheadBudget", format!("{}: {used}: a timed bench refuses {}{fix}", s.label(), metrics.join(", "))));
 }
 
 /// `ObserverCost` from a page's attribution recording: its profile's samples in strobe's page driver,
@@ -7319,20 +7381,33 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     extra.insert("main.busy".to_string(), busy);
                 }
                 // A headless run ends at its last step (SPEC 7.3): style and layout that step left for the
-                // next frame falls past its wall time (main.work holds it). Said when it is real work.
+                // next frame falls past its wall time. The Performance domain's counters are read after that
+                // frame (main.work, its parts and counts, and a lean block's main.busy hold it); what is read
+                // at the run's end does not: run.duration, cpu.*, and the trace's metrics over the run.
+                // Said when it is real work and a declared metric missed it.
                 let med = |f: &dyn Fn(&Run) -> f64| metrics::median(&measured.iter().map(f).collect::<Vec<_>>());
                 let (deferred_ms, deferred_n) = (med(&|r| r.deferred.0), med(&|r| r.deferred.1));
                 let (work_ms, layouts, layout_ms) = (med(&|r| r.task), med(&|r| r.parts[3]), med(&|r| r.parts[1]));
                 let real = deferred_ms >= 1.0 && deferred_ms >= 0.05 * work_ms;
                 let only_there = deferred_n > 0.0 && (layouts == 0.0 || layout_ms == 0.0);
-                if deferred_ms.is_finite() && (real || only_there) && !ctx.warnings.iter().any(|w| w.id == "HeadlessFrame" && w.text.starts_with(&s.label())) {
+                let misses = |m: &str| {
+                    // `cpu.wakes` is counted from a reading after the frame.
+                    m == "run.duration"
+                        || (m.starts_with("cpu.") && m != "cpu.wakes")
+                        || matches!(m, "main.paint" | "main.gc" | "layout.shift" | "gpu.compile")
+                        || (set != Set::Lean && matches!(m, "main.busy" | "main.tasks.long"))
+                };
+                let missed: Vec<&str> = declared_metrics(s).into_iter().map(String::as_str).filter(|m| misses(m)).collect();
+                if deferred_ms.is_finite() && (real || only_there) && !missed.is_empty() && !ctx.warnings.iter().any(|w| w.id == "HeadlessFrame" && w.text.starts_with(&s.label())) {
                     ctx.warnings.push(validity::warn(
                         "HeadlessFrame",
                         format!(
-                            "{}: the frame after each headless run did {} of style and layout ({deferred_n:.0} layouts) its last step left: main.work ({}) counts it, run.duration does not; pass {{ until: \"frame\" }} to that step to time it",
+                            "{}: the frame after each headless run did {} of style and layout ({deferred_n:.0} layouts) its last step left: main.work ({}) counts it, {} {} not; pass {{ until: \"frame\" }} to that step, or {{ until: [selector, \"frame\"] }} to one that waits for an element, to time it",
                             s.label(),
                             fmt::value(deferred_ms, "ms"),
                             fmt::value(work_ms, "ms"),
+                            missed.join(", "),
+                            if missed.len() == 1 { "does" } else { "do" },
                         ),
                     ));
                 }
@@ -7360,7 +7435,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     if let Some(p) = presents.take() {
                         let again = (page_cases.len() > 1).then(|| p.clone());
                         let timed: Vec<metrics::Timed> = measured.iter().map(|r| r.timed.clone()).collect();
-                        case_presents = os_frames(ctx, s, v, p, &browser.pids(), &timed, run_inputs_kept.get(range.clone()).unwrap_or_default(), software, &mut values, &mut os_refused);
+                        case_presents = os_frames(ctx, s, v, x, p, &browser.pids(), &timed, run_inputs_kept.get(range.clone()).unwrap_or_default(), software, &mut values, &mut os_refused);
                         presents = again;
                     }
                 }
@@ -7553,9 +7628,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 // timing they shared the runs with is refused.
                 let run_ms_sum: f64 = measured.iter().map(|r| r.ms).sum();
                 let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms_sum.max(1.0));
-                let disturbed = x.judges_time() && pixel_pct.is_some_and(|p| p > 2.0);
+                let disturbed = x.measures_time() && pixel_pct.is_some_and(|p| p > 2.0);
                 if x.judges_time() {
-                    pixel_overhead(s, pixel_pct, &mut values, &mut refused);
+                    pixel_overhead(s, pixel_pct, x.measures_time(), &mut ctx.warnings, &mut values, &mut refused);
                 }
                 // The launch's steps before the runs, the case's warmup and runs, then the launch's after them.
                 let launch_steps = steps.borrow();
@@ -9107,6 +9182,7 @@ fn os_frames(
     ctx: &mut Ctx,
     s: &Series,
     v: &Variant,
+    x: &Exec,
     presents: Result<probe::present::Presents>,
     pids: &[u32],
     timed: &[metrics::Timed],
@@ -9137,9 +9213,15 @@ fn os_frames(
     let refresh = f.values.get("display.hz").map(|hz| 1000.0 / hz);
     let span_ms = p.t1_ns.saturating_sub(p.t0_ns) as f64 / 1e6;
     let overhead = p.consumer_cpu_ms.filter(|_| span_ms > 0.0).map(|c| 100.0 * c / span_ms);
-    let whole = match overhead {
-        Some(o) if o > 2.0 => Some(format!("OverheadBudget: the OS present session's consumer used {o:.2}% of a core (budget 0.5%), so the frames it saw describe a disturbed run")),
-        _ => f.refused.clone().or_else(|| refresh.and_then(|ms| frames::unpaced(&p.presents, pids, timed, ms))),
+    // The consumer over 2%: a timed block's frame metrics are refused; a `--check` keeps them (unless
+    // refused or unpaced anyway) and says what a timed bench refuses.
+    let over = overhead.filter(|o| *o > 2.0);
+    if let Some(o) = over.filter(|_| !x.measures_time() && x.judges_time()) {
+        check_overhead(&mut ctx.warnings, s, &format!("the OS present session's consumer used {o:.2}% of a core (budget 0.5%)"), &frame_metric, None);
+    }
+    let whole = match over.filter(|_| x.measures_time()) {
+        Some(o) => Some(format!("OverheadBudget: the OS present session's consumer used {o:.2}% of a core (budget 0.5%), so the frames it saw describe a disturbed run")),
+        None => f.refused.clone().or_else(|| refresh.and_then(|ms| frames::unpaced(&p.presents, pids, timed, ms))),
     };
     if let Some(why) = whole {
         for m in declared.iter().filter(|m| frame_metric(m)) {

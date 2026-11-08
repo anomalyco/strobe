@@ -64,10 +64,11 @@ function alias(sel: unknown): unknown {
   return rest ? `${entry} ${rest}` : entry
 }
 
-// A call's options with their selectors (`until`, `selector`, `at`) resolved.
+// A call's options with their selectors (`until`, each of an `until` list, `selector`, `at`) resolved.
 const opts = (o: any) => {
   if (!o || typeof o !== "object") return o
   const out = { ...o }
+  if (Array.isArray(out.until)) out.until = out.until.map(alias)
   for (const k of ["until", "selector", "at"]) if (k in out && !Array.isArray(out[k])) out[k] = alias(out[k])
   return out
 }
@@ -99,6 +100,9 @@ function typos(source: string): string[] {
   const out = new Set<string>()
   const at = /(?:\.(?:click|hover|type|scroll|wheel|drag|act|query|waitFor)\(\s*|\b(?:until|selector|at)\s*:\s*)["'`]@([A-Za-z_$][\w$]*)/g
   for (const m of code(source).matchAll(at)) if (!names.has(m[1])) out.add(`@${m[1]}`)
+  // Every entry of an `until` list.
+  for (const list of code(source).matchAll(/\buntil\s*:\s*\[([^\]]*)\]/g))
+    for (const m of list[1].matchAll(/["'`]@([A-Za-z_$][\w$]*)/g)) if (!names.has(m[1])) out.add(`@${m[1]}`)
   return [...out]
 }
 

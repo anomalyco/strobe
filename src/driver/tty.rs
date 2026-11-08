@@ -412,8 +412,13 @@ impl<'a> Driver<'a> {
             .hint(format!("the grid's first rows: {}", rows.iter().map(|r| format!("{:?}", r.trim())).collect::<Vec<_>>().join(", ")))
     }
 
-    /// After an input: `until` a selector shows, the next grid change, or the grid at rest.
+    /// After an input: `until` a selector shows, the next grid change, or the grid at rest; or each of a
+    /// list in turn, a later one from when the one before it ended.
     fn until(&self, opts: &Value, after: u64) -> Result<()> {
+        crate::driver::each_until(opts, timeout(opts), |o, first| self.until_one(o, if first { after } else { host::now_ns() })).map(drop)
+    }
+
+    fn until_one(&self, opts: &Value, after: u64) -> Result<()> {
         let Some(u) = opts.get("until").filter(|u| !u.is_null()) else { return Ok(()) };
         let t = timeout(opts);
         // A state the program announces on its event stream after the input.
@@ -701,7 +706,7 @@ impl<'a> Driver<'a> {
                         .into());
                     }
                 };
-                if cfg!(windows) && o["until"] == "frame" {
+                if cfg!(windows) && (o["until"] == "frame" || o["until"][0] == "frame") {
                     return Err(Refusal::new(
                         ValidatorId::NotOnThisOs,
                         "page.window(resize, { until: \"frame\" }): ConPTY's console host redraws its own buffer at a resize before the program hears of it, so the next change is the host's",
@@ -724,7 +729,11 @@ impl<'a> Driver<'a> {
                 if crate::driver::point(&sel(0)).is_some() {
                     return Err(Error::usage("page.waitFor(point): a cell is always there; wait for text on the grid (\"text=…\")"));
                 }
+                let deadline = Instant::now() + timeout(&o);
                 self.locate(&crate::driver::with_text(&sel(0), &o), timeout(&o))?;
+                if let Some(o) = crate::driver::until_after(&o, deadline) {
+                    self.until(&o, host::now_ns())?;
+                }
             }
             "idle" => self.idle(host::now_ns(), timeout(&opts(0)))?,
             "frame" => {

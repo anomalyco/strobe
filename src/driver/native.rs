@@ -218,7 +218,7 @@ mod imp {
 
         /// Before a measured input whose `until` waits on pixels: what the region shows now.
         fn before_input(&self, opts: &Value, presents: &RefCell<Option<PresentCapture>>) -> Result<()> {
-            let Some(l) = opts.get("until").and_then(pixels::look) else { return Ok(()) };
+            let Some(l) = crate::driver::pixel_until(opts) else { return Ok(()) };
             let l = l?;
             let b = self.pixels.before(&self.source(opts["window"].as_str(), presents)?, &l)?;
             *self.before.borrow_mut() = Some(b);
@@ -534,8 +534,13 @@ mod imp {
             host::refresh_at(x as i32, y as i32).map_or(16, |hz| (1000 / hz.max(1)).max(4) as u64)
         }
 
-        /// Resolves after an input: a selector shows, the next frame reached the screen, or idle.
+        /// Resolves after an input: a selector shows, the next frame reached the screen, or idle; or each of a
+        /// list in turn, a later one from when the one before it ended.
         fn until(&self, opts: &Value, after: u64, presents: &RefCell<Option<PresentCapture>>) -> Result<()> {
+            crate::driver::each_until(opts, timeout(opts), |o, first| self.until_one(o, if first { after } else { host::now_ns() }, presents)).map(drop)
+        }
+
+        fn until_one(&self, opts: &Value, after: u64, presents: &RefCell<Option<PresentCapture>>) -> Result<()> {
             let Some(u) = opts.get("until").filter(|u| !u.is_null()) else { return Ok(()) };
             let t = timeout(opts);
             // An image or pixels: from what the region showed before the input (`before_input`).
@@ -1033,7 +1038,11 @@ mod imp {
         /// thing: the error stays as it was. Read only once the wait has failed, so a click that works
         /// costs no extra read.
         fn moved(&self, e: Error, sel: &Selector, opts: &Value, aimed: [f64; 4]) -> Error {
-            let selector = opts.get("until").filter(|u| !u.is_null()).is_some_and(|u| !matches!(u.as_str(), Some("idle" | "frame")));
+            let shows = |u: &Value| !u.is_null() && !matches!(u.as_str(), Some("idle" | "frame"));
+            let selector = match opts.get("until") {
+                Some(Value::Array(l)) => l.iter().any(shows),
+                u => u.is_some_and(shows),
+            };
             if e.code != 124 || !selector {
                 return e;
             }
@@ -1367,6 +1376,7 @@ mod imp {
                 }
                 "waitFor" => {
                     let o = opts(1);
+                    let deadline = Instant::now() + timeout(&o);
                     match pixels::look(&sel(0)) {
                         Some(l) => {
                             self.pixels.wait(&self.source(o["window"].as_str(), presents)?, &l?, None, timeout(&o))?;
@@ -1374,6 +1384,9 @@ mod imp {
                         None => {
                             self.find(&parse_sel(&crate::driver::with_text(&sel(0), &o))?, o["window"].as_str(), timeout(&o))?;
                         }
+                    }
+                    if let Some(o) = crate::driver::until_after(&o, deadline) {
+                        self.until(&o, host::now_ns(), presents)?;
                     }
                 }
                 "idle" => {

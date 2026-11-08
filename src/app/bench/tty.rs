@@ -730,18 +730,18 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     };
                     refused.insert(m.clone(), r);
                 }
-                // The terminal's reader past its budget makes what it stamps late (rule 2).
-                if terminal_pct.is_some_and(|p| p > 2.0) {
+                // The terminal's reader past its budget makes what it stamps late (rule 2): a timed block's
+                // stamps are refused; a `--check` keeps them and says what a timed bench refuses.
+                if let Some(p) = terminal_pct.filter(|p| *p > 2.0) {
                     let stamped = |k: &str| ["tty.latency.", "tty.settle.", "tty.frame."].iter().any(|p| k.starts_with(p));
-                    for m in values.keys().filter(|k| stamped(k)).cloned().collect::<Vec<_>>() {
-                        values.remove(&m);
-                        refused.insert(
-                            m.clone(),
-                            Refusal::new(
-                                ValidatorId::OverheadBudget,
-                                format!("{m}: strobe's terminal reader used {:.2}% of a core (budget 0.5%), so it stamped the program's output late", terminal_pct.unwrap_or(0.0)),
-                            ),
-                        );
+                    let used = format!("strobe's terminal reader used {p:.2}% of a core (budget 0.5%)");
+                    if x.measures_time() {
+                        for m in values.keys().filter(|k| stamped(k)).cloned().collect::<Vec<_>>() {
+                            values.remove(&m);
+                            refused.insert(m.clone(), Refusal::new(ValidatorId::OverheadBudget, format!("{m}: {used}, so it stamped the program's output late")));
+                        }
+                    } else if x.judges_time() {
+                        super::check_overhead(&mut ctx.warnings, s, &used, &stamped, None);
                     }
                 }
                 refuse_not_on_this_os(s, &mut values, &mut refused);

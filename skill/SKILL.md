@@ -321,10 +321,11 @@ export default bench({
   - Content size in DIP (a page's viewport); `restore` puts back run 1's size: call it in `reset` (later runs must start there: `ResetIncomplete`).
   - `DisplayTooSmall`: does not fit the display; `VariantMismatch`: the app keeps its size; `Headless` on headless pages.
 - `window("close")`, `act` (native).
-- `waitFor`: `{ text, exact }`; `:focus` works.
+- `waitFor`: `{ text, exact, until }`; `:focus` works.
 - `idle`, `wait`.
 - `snapshot(name)`: pixels for `--pixels`; nothing in timed runs.
-- Input calls take `{ until: "idle" | "frame" | selector }`.
+- Input calls take `{ until: "idle" | "frame" | selector }`, or a list run in order under one timeout: `{ until: ["@row", "frame"] }` (the element, then the frame after it).
+- Headless pages: a run ends at its last step and the frame after it is untimed. `HeadlessFrame` says that frame did the step's style and layout, which `main.work` counts and `run.duration` and `cpu.*` do not. An element wait ends at the first match, so a step whose work the next frame finishes passes `{ until: [selector, "frame"] }` (a step with no wait: `{ until: "frame" }`). Style with 0 layouts that stays after it is often a CSS animation the step started (a 200 ms reveal): one frame does not cover it.
 
 ### Selectors
 
@@ -456,7 +457,7 @@ export default bench({
   - After an input, `changed` or an image is its pixel proof: `interaction.*` from the one OS frame between
     the last capture without it and the first with it.
   - Each capture in a run counts (`driver.pixel_reads`, `ObserverCost` past 8); strobe's CPU in them over 2%
-    of a core refuses timing metrics (`--check` says so too). A read took 2 to 3 ms on Windows and X11,
+    of a core refuses a timed bench's timing metrics (`--check` warns, naming them, and passes). A read took 2 to 3 ms on Windows and X11,
     10 ms on the headless Wayland compositor and 20 ms on macOS: a `changed` wait per run stayed under
     the bar on Windows (frames come as events) and went over it on macOS. Headless pages refuse pixel
     reads inside timed runs (`Headless`).
@@ -490,6 +491,11 @@ export default bench({
   - `--reserve-cpus off` opts out, `on` does it for `--check` too.
   - `--pin auto` (the default) picks the target's CPUs: the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its fastest cores; otherwise all but the last 1-2 whole cores, which strobe and the runner get. Fewer than 4 cores, more than 64 CPUs, or macOS: unpinned, and the plan line names the `--pin` list that would pin anyway.
   - A virtual machine with one L3 and 4 or more cores now pins and reserves under `--pin auto`: no explicit CPU list needed.
+  - Unpinned, strobe and the runner share the target's CPUs: over 5% of a core warns `OverheadBudget` (`strobe X%, runner Y%`), over 20% refuses a timed bench's wall-time, frame and latency metrics (`cpu.*` in ms stays). `--check` only warns ("a timed bench refuses …") and passes, as it does for strobe's pixel reads, terminal reader and present consumer over their 2%. The fix it names depends on the machine:
+    - Under 4 cores (a 2-vCPU VM): time on 4 or more cores, or pass the `--pin` list it names (the last core goes to strobe and the runner).
+    - macOS (no affinity) or any machine: prebuild `ctx.mock` responses in setup, move a heavy mock server into `fixture()` (its own process, `cpu.fixture`), or compare `cpu.work`.
+    - `--pin none` on 4 or more cores: drop it.
+    - `ctx.mock` handlers and a `Bun.serve` in the bench file run in the runner: they count as `runner`.
   - Elevated processes stay (named in the `ReservedCpus` note, which goes in the PR footer).
   - macOS has no affinity.
 - Several benches on one device take turns per block: one waiting for an unlock or building holds nothing, so locked-session series of another bench run meanwhile.
