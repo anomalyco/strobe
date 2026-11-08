@@ -1086,7 +1086,8 @@ pub struct SetCpu {
     /// Cycles: each process against its own readings (`cycles_timed`), plus `ended`.
     pub total: u64,
     /// What the processes that ended inside a timed part used there, and those they started and that
-    /// ended (Linux's launch cgroups, `host::EndedMarks::dead_since`), in cycles.
+    /// ended (Linux's launch cgroups, Windows' jobs' processes held from their start,
+    /// `host::EndedMarks::dead_since`), in cycles.
     pub ended: u64,
     /// The processes in a part's first reading and gone at its last (by pid): their share of a role's
     /// CPU (`cpu.renderer`, …) is in `ended`, which is no role's.
@@ -1118,14 +1119,19 @@ pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> Option<SetC
 /// `RunIncomplete` for a CPU metric over a span some process of the set ended in, where what it used
 /// there is not known (`timed_cpu`): its CPU left with it, so the set's CPU is short.
 pub fn cpu_lost(metric: &str, runs: usize, of: usize, what: &str) -> crate::model::Refusal {
+    // Windows reads what an ended process used from strobe's handle to it, held from its start in its
+    // launch's job: one it did not hold is what is lost.
+    let how = if cfg!(windows) { " (one strobe held no handle to: it ran outside its launch's job, it ended before strobe could open it, or strobe did not launch the target)" } else { "" };
     crate::model::Refusal::new(
         crate::model::ValidatorId::RunIncomplete,
-        format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run, and the CPU it used there ended with it, so the CPU of the process set is short"),
+        format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run{how}, and the CPU it used there ended with it, so the CPU of the process set is short"),
     )
     .fix(if cfg!(target_os = "linux") {
-        "let strobe launch the target (its launches' cgroups count what ended: under systemd strobe asks for a scope, so run it in a user session or as root), keep the processes running until the run's end, or compare run.duration"
+        "let strobe launch the target (its launches' cgroups count what ended: under systemd strobe asks for a scope, so run it in a user session or as root), wrap processes the run starts but does not measure in ctx.untimed, keep the processes running until the run's end, or compare run.duration"
+    } else if cfg!(windows) {
+        "let strobe launch the target (its jobs hold each process from its start), wrap processes the run starts but does not measure in ctx.untimed, keep helpers running (warm them up, or end them in the reset), or compare run.duration"
     } else {
-        "keep the processes running until the run's end (warm up what the app starts and ends, or end it in the reset), or compare run.duration"
+        "wrap processes the run starts but does not measure in ctx.untimed, keep the processes running until the run's end (warm up what the app starts and ends, or end it in the reset), or compare run.duration"
     })
 }
 

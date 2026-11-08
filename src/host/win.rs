@@ -60,6 +60,13 @@ pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {
         .collect()
 }
 
+/// The pids of `process_trees`, from the snapshot alone: no process opened, its memory unread.
+pub fn tree_pids_of(roots: &super::PickRoots) -> Vec<u32> {
+    let all = system_processes(false);
+    let roots = roots(&all.iter().map(|p| (p.info.pid, p.info.parent, p.create as u64)).collect::<Vec<_>>());
+    tree_of(&all, &roots).into_iter().map(|i| all[i].info.pid).collect()
+}
+
 /// Indexes into `all` of the trees of `roots` (each root first), each process once, following a child
 /// only when it was created no earlier than its parent: a reused parent pid names an older process.
 fn tree_of(all: &[SysProc], roots: &[u32]) -> Vec<usize> {
@@ -91,8 +98,12 @@ fn tree_of(all: &[SysProc], roots: &[u32]) -> Vec<usize> {
 }
 
 /// One process's CPU cycles (`super::process_cycles`): the cycle count alone, and strobe's own through
-/// its pseudo handle, so a reading at a measured window's edge costs as little as it can.
-pub fn process_cycles(pid: u32) -> Option<u64> {
+/// its pseudo handle, so a reading at a measured window's edge costs as little as it can. Only while
+/// it runs: a process that exited stays openable while anyone holds a handle to it (strobe holds its
+/// jobs' processes, `jobs`), and is read as gone, as on Linux and macOS. With `start`, only the
+/// process created then (`start_time`'s units), on the same handle: a pid another process took is
+/// not read for it.
+pub fn process_cycles(pid: u32, start: Option<u64>) -> Option<u64> {
     let mut cycles = 0u64;
     let ok = unsafe {
         if pid == std::process::id() {
@@ -102,7 +113,10 @@ pub fn process_cycles(pid: u32) -> Option<u64> {
             if h.is_null() {
                 return None;
             }
-            let ok = QueryProcessCycleTime(h, &mut cycles) != 0;
+            let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = (zeroed(), zeroed(), zeroed(), zeroed());
+            let t = |f: &FILETIME| (f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64;
+            let running = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0 && t(&e) == 0 && start.is_none_or(|s| t(&c) == s);
+            let ok = running && QueryProcessCycleTime(h, &mut cycles) != 0;
             CloseHandle(h);
             ok
         }

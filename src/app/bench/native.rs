@@ -1495,7 +1495,7 @@ pub(super) struct Sample {
     /// The launched process was in the set `cycles` summed (a launcher that exited is not).
     pub(super) root: bool,
     /// What the launch's processes that ended used since its spawn, read with `cycles`
-    /// (`host::launch_ended_cpu`; Linux).
+    /// (`host::launch_ended_cpu`; Linux and Windows).
     pub(super) ended: Option<u64>,
 }
 
@@ -1898,8 +1898,9 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         // (`Native::own_cycles`), added only when it was not in the set the ready reading summed (else it
         // is in it already). Windows' job counts the launched process among the ended once it exited; on
         // Unix its unreaped zombie is read too, for the helpers it reaped before it exited. On Linux the
-        // launch's cgroup kept what every ended process used, read with the ready reading
-        // (`host::launch_ended_cpu`): that is added instead, whatever ended.
+        // launch's cgroup kept what every ended process used, on Windows strobe held each process of its
+        // job from its start, read with the ready reading (`host::launch_ended_cpu`): that is added
+        // instead, whatever ended.
         let root_exited = n.exited().is_some();
         let mut pids_now = n.pids();
         if cfg!(unix) && root_exited && !pids_now.contains(&n.pid) {

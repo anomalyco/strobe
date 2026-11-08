@@ -15,6 +15,11 @@
 //   tree <k> <ms> [grand]       k children each `spin <ms>`, waited for; with `grand` each child runs its spin
 //                               in a grandchild it waits for
 //   orphan <ms>                 a child that spins <ms> and outlives its parent by 300 ms (not waited for)
+//   breakaway <ms> [hops] [leave]  a child that spins <ms>, waited for; on Windows started with
+//                               CREATE_BREAKAWAY_FROM_JOB (it asks to leave the job it was started in); with
+//                               hops > 1 the child is `breakaway <ms> <hops - 1>` (each hop breaks away again);
+//                               with `leave` the last spin is not waited for and outlives its parent by 300 ms.
+//                               A hop that cannot start fails (exit code nonzero)
 //   io <write_mb> <read_mb>     writes <write_mb> MiB to a file in 64 KiB writes, reads <read_mb> MiB of it
 //   ready <ms> <text>           prints <text> after <ms>, then idles for 60 s
 //   duty <pct> <threads> [s]    long-running: each thread busy <pct>% of every 100 ms (wall), for [s] (60) s
@@ -342,6 +347,28 @@ fn main() {
             }
             metric("cpu_ms", each * k as f64);
         }
+        "breakaway" => {
+            let (each, hops) = (arg(&args, 2, 100.0), arg(&args, 3, 1.0) as u32);
+            let leave = args.get(4).is_some_and(|a| a == "leave");
+            let mut c = std::process::Command::new(self_exe());
+            match (hops > 1, leave) {
+                (true, _) => c.args(["breakaway", &each.to_string(), &(hops - 1).to_string()]).args(leave.then_some("leave")),
+                // Left running: it outlives this one by 300 ms.
+                (false, true) => c.args(["spin", &(each + 300.0).to_string()]),
+                (false, false) => c.args(["spin", &each.to_string()]),
+            };
+            c.stdout(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0100_0000);
+            }
+            let mut child = c.spawn().unwrap();
+            if hops > 1 || !leave {
+                assert!(child.wait().unwrap().success());
+            }
+            metric("cpu_ms", each);
+        }
         "orphan" => {
             let each = arg(&args, 2, 100.0);
             std::process::Command::new(self_exe())
@@ -458,7 +485,7 @@ fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|orphan|io|ready|duty|wake|hold|tty|frames> …");
+            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|hold|tty|frames> …");
             std::process::exit(2);
         }
     }

@@ -373,7 +373,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         let cpu_ms = per_ms.map_or(f64::NAN, |r| cpu1.saturating_sub(cpu0) as f64 / r);
         // A process that ended before the launch was ready (a launcher that handed over, a helper, a
         // browser process the navigation left) took its CPU with it: the set's cycles then are short,
-        // unless what it used is known (Linux's launch cgroups: `ended`).
+        // unless what it used is known (Linux's launch cgroups, Windows' held job processes: `ended`).
         let launch_lost = ended.is_none() && {
             let procs = browser.processes();
             let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();

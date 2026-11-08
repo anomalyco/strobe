@@ -561,7 +561,8 @@ export default bench({
 - A native app that exits is refused `RunIncomplete` with its exit code and, with `output: true` on the target, its last output lines.
 - A process of the target that ends inside a run takes its CPU counter with it:
   - Linux: strobe's launches run in cgroups of their own, so `cpu.work` keeps what it used (the `EndedCpu` note says how much); needs a systemd user session or root (or a delegated cgroup).
-  - Elsewhere, or a target strobe did not launch: `cpu.work`, `cpu.app.total` and `cpu.<role>` are refused `RunIncomplete`. End such processes in the reset, or put them in `ctx.untimed`.
+  - Windows: strobe holds every process of a launch's job from its start, so `cpu.work` keeps what it used too (a script's `git` per run, a browser helper that ends; `EndedCpu` says how much), and `cli()` reads the processes a command started exactly (no `TickSampledCpu`).
+  - macOS, a target strobe did not launch, or a process strobe could not hold (started outside the launch: by a service, by another app): `cpu.work`, `cpu.app.total` and `cpu.<role>` are refused `RunIncomplete`. Put processes the run starts but does not measure in `ctx.untimed`, end helpers in the reset, or compare `run.duration`.
 - `strobe <command> --help` lists that command's flags.
 - `strobe config` checks the project's strobe.json and every app profile on this OS without a bench, read-only.
 - `strobe record page.html` records a local page.

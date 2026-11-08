@@ -131,8 +131,8 @@ pub(super) fn pids_in(list: &[(u32, u32, u64)], dir: &Path) -> Vec<u32> {
 }
 
 /// A child strobe launched, with everything it starts as one group: on Windows a job object that
-/// holds the child and all it starts but what breaks away (the job allows that, so no app fails for
-/// it), which the OS ends when strobe exits however it exits; on Unix the child's own process group,
+/// holds the child and all it starts, what asks to break away too (`assign`), which the OS ends when
+/// strobe exits however it exits; on Unix the child's own process group,
 /// which what it starts joins unless it makes its own (a daemon's `setsid`).
 ///
 /// The child is never reaped before its group is ended (`exited` reads its status without reaping
@@ -216,6 +216,62 @@ pub fn end_launches() {
 /// target's host).
 #[cfg(windows)]
 static JOBS: std::sync::Mutex<Vec<(u32, Option<String>, isize)>> = std::sync::Mutex::new(Vec::new());
+
+/// A job for a launch (Windows): it ends what it holds when its last handle closes (strobe exiting
+/// however it exits), and its processes are held from their start (`jobs::watch`). It lets nothing
+/// break away: `assign` puts the launch in a job of its own inside it that does. None where Windows
+/// gave none.
+#[cfg(windows)]
+pub fn new_job() -> Option<isize> {
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let j = super::jobs::job_with(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)?;
+    // Unwatched, its readings are incomplete: what ended in it stays unknown, as before.
+    super::jobs::watch(j);
+    Some(j)
+}
+
+/// Puts a launch's root (`process`, created suspended) in its `new_job`, then in a job inside it that
+/// lets a process break away (kept with the launch's job, `jobs::prepare`). A process that asks to
+/// break away (`CREATE_BREAKAWAY_FROM_JOB`) is created, so no app fails for it, and leaves that inner
+/// job alone: Windows moves it up to the first job that does not allow it, the launch's, so nothing
+/// the launch starts runs outside it (on adais a child started that way was in no count of a job that
+/// allowed it, and in the launch's job here); there it gets an inner job of its own (`jobs::take`),
+/// so one it starts may break away too. Holds the root (`jobs::hold`). Ok(false) where the launch
+/// gets no job (the inner one could not be made, or the launch's job refused the root: strobe's own
+/// job refused a nested one); an error where the inner job refused the root once the launch's job took
+/// it (the launch's job would refuse what breaks away, so its caller ends the root).
+#[cfg(windows)]
+pub fn assign(job: isize, process: isize, pid: u32) -> std::io::Result<bool> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, JOB_OBJECT_LIMIT_BREAKAWAY_OK};
+    let Some(inner) = super::jobs::job_with(JOB_OBJECT_LIMIT_BREAKAWAY_OK) else { return Ok(false) };
+    // Known before the root joins: the port's thread gives the root no inner job of its own.
+    let kept = super::jobs::prepare(job, pid, inner);
+    let drop_inner = || {
+        if !kept {
+            unsafe { CloseHandle(inner as _) };
+        }
+    };
+    if unsafe { AssignProcessToJobObject(job as _, process as _) } == 0 {
+        drop_inner();
+        return Ok(false);
+    }
+    if unsafe { AssignProcessToJobObject(inner as _, process as _) } == 0 {
+        let e = std::io::Error::last_os_error();
+        drop_inner();
+        return Err(std::io::Error::other(format!("the launch's job could not take the job inside it that lets a process break away ({e})")));
+    }
+    drop_inner();
+    super::jobs::hold(job, process, pid);
+    Ok(true)
+}
+
+/// Closes a `new_job` (ending what it holds), and the handles held of its processes.
+#[cfg(windows)]
+pub fn close_job(job: isize) {
+    super::jobs::forget(job);
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(job as _) };
+}
 
 /// A launch made outside `spawn_owned` (Windows: a pseudo console's program, started with
 /// `CreateProcessW`): listed so a stop's `end_launches` ends it too, and its job, when it has one,
@@ -312,10 +368,8 @@ impl Owned {
             use windows_sys::Win32::System::JobObjects::TerminateJobObject;
             let mut jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
             jobs.retain(|(_, _, j)| *j != job);
-            unsafe {
-                TerminateJobObject(job as _, 1);
-                windows_sys::Win32::Foundation::CloseHandle(job as _);
-            }
+            unsafe { TerminateJobObject(job as _, 1) };
+            close_job(job);
         }
         #[cfg(unix)]
         unsafe {
@@ -370,15 +424,18 @@ pub struct Usage {
     pub exited: Option<std::time::Instant>,
     /// It ran past its deadline: strobe ended it (and everything it started), and nothing else is read.
     pub timed_out: bool,
-    /// CPU time (user and kernel) of the command and what it started (ns), exact: Unix the kernel's
-    /// per-task runtime, Windows the command's process from its cycle counter plus `ticks_ns`.
+    /// CPU time (user and kernel) of the command and what it started (ns): Unix the kernel's per-task
+    /// runtime, Windows each of its job's processes from its cycle counter (`jobs`), exact, or where a
+    /// process of the job was not held the command's own plus `ticks_ns`.
     pub cpu_ns: Option<u64>,
     /// Why there is no CPU time (Windows: cycles that are not time, or no job to count children in).
     pub cpu_refused: Option<String>,
-    /// Windows: the part of `cpu_ns` the processes the command started took, from the job's clock-tick
-    /// times (sampled at the timer interrupt, 15.6 ms a tick); 0 when it started none.
+    /// Windows, where a process of the job was not held: the part of `cpu_ns` the processes the
+    /// command started took, from the job's clock-tick times (sampled at the timer interrupt, 15.6 ms a
+    /// tick); 0 when it started none or their cycles were read.
     pub ticks_ns: u64,
-    /// Windows: how many processes the command started (its job's count, less the command's own).
+    /// Windows: how many processes the command started whose CPU is `ticks_ns` (its job's count, less
+    /// the command's own); 0 when their cycles were read.
     pub started: u32,
     /// Context switches (voluntary and involuntary) of its threads.
     pub switches: Option<u64>,
@@ -459,8 +516,9 @@ impl Owned {
             unsafe { GetExitCodeProcess(h as _, &mut code) };
             let job = self.group.as_ref().and_then(|g| g.job);
             let mut usage = Usage { code: code as i32, exited: Some(exited), ..Usage::default() };
-            // The child's own CPU from its cycle counter (exact); what it started from the job's
-            // clock-tick accounting, the only count Windows keeps of processes that ended.
+            // The child's own CPU from its cycle counter (exact); what it started from the cycles of
+            // the job's processes strobe held from their start (`jobs`), or where one was not held from
+            // the job's clock-tick accounting.
             let (mut cycles, mut child_100ns) = (0u64, None);
             unsafe {
                 QueryProcessCycleTime(h as _, &mut cycles);
@@ -483,11 +541,19 @@ impl Owned {
                     let ok = unsafe {
                         QueryInformationJobObject(j as _, JobObjectBasicAndIoAccountingInformation, &mut acct as *mut _ as *mut _, std::mem::size_of_val(&acct) as u32, std::ptr::null_mut())
                     } != 0;
-                    if ok {
+                    // Every process of the job held: their cycles (the command's own among them, and one
+                    // still running, which is ended below, as far as it got) over the same rate.
+                    let held = super::jobs::read(&[j]);
+                    let all: u64 = held.ended.values().chain(held.running.values()).sum();
+                    if ok && held.complete && child_ns.is_some() {
+                        usage.cpu_ns = hz.map(|hz| (all as f64 / hz * 1e9) as u64);
+                    } else if ok {
                         let job_100ns = (acct.BasicInfo.TotalUserTime + acct.BasicInfo.TotalKernelTime).max(0) as u64;
                         usage.started = acct.BasicInfo.TotalProcesses.saturating_sub(1);
                         usage.ticks_ns = if acct.BasicInfo.TotalProcesses > 1 { job_100ns.saturating_sub(child_100ns.unwrap_or(0)) * 100 } else { 0 };
                         usage.cpu_ns = child_ns.map(|c| c + usage.ticks_ns);
+                    }
+                    if ok {
                         usage.read_bytes = Some(acct.IoInfo.ReadTransferCount);
                         usage.write_bytes = Some(acct.IoInfo.WriteTransferCount);
                     } else {
@@ -683,7 +749,7 @@ pub fn jobs_ended(roots: &[u32], dir: Option<&Path>) -> Option<u64> {
     // Read under the lock: `Owned::end` closes a job only after taking it out of the list.
     let jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
     let mut out: Option<u64> = None;
-    for (_, _, j) in jobs.iter().filter(|(root, h, _)| (k.is_some() && *h == k) || (h.is_none() && roots.contains(root))) {
+    for (_, _, j) in jobs.iter().filter(|(root, h, _)| of_set(roots, &k, *root, h)) {
         let mut a: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
         let ok = unsafe { QueryInformationJobObject(*j as _, JobObjectBasicAccountingInformation, &mut a as *mut _ as *mut _, std::mem::size_of_val(&a) as u32, std::ptr::null_mut()) } != 0;
         if ok {
@@ -691,6 +757,24 @@ pub fn jobs_ended(roots: &[u32], dir: Option<&Path>) -> Option<u64> {
         }
     }
     out
+}
+
+/// A job listed by its launch's root and folder (`JOBS`) is one of the set's: launched for `dir`, or
+/// for no folder and rooted at one of `roots`.
+#[cfg(windows)]
+fn of_set(roots: &[u32], dir: &Option<String>, root: u32, home: &Option<String>) -> bool {
+    (dir.is_some() && home == dir) || (home.is_none() && roots.contains(&root))
+}
+
+/// The processes of the jobs `jobs_ended` counts, held from their start (`jobs::read`), with what
+/// the ended ones used; None without such a job.
+#[cfg(windows)]
+pub fn jobs_cpu(roots: &[u32], dir: Option<&Path>) -> Option<super::jobs::Reading> {
+    let k = dir.map(home_key);
+    // Read under the lock: `Owned::end` forgets and closes a job only after taking it out of the list.
+    let jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
+    let set: Vec<isize> = jobs.iter().filter(|(root, h, _)| of_set(roots, &k, *root, h)).map(|(_, _, j)| *j).collect();
+    (!set.is_empty()).then(|| super::jobs::read(&set))
 }
 
 /// Spawns `cmd` restricted to the CPUs in `cpus` (None: it inherits strobe's mask, as any child does).
@@ -723,25 +807,12 @@ pub fn spawn_owned(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Optio
 fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&Path>) -> std::io::Result<Owned> {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::{
-            CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        };
-        let job = unsafe {
-            let j = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-            let set = !j.is_null() && SetInformationJobObject(j, JobObjectExtendedLimitInformation, &limits as *const _ as *const _, std::mem::size_of_val(&limits) as u32) != 0;
-            if !set && !j.is_null() {
-                CloseHandle(j);
-            }
-            set.then_some(j as isize)
-        };
+        let job = new_job();
         let (child, assigned, started) = match windows(cmd, cpus, flags, job) {
             Ok(x) => x,
             Err(e) => {
                 if let Some(j) = job {
-                    unsafe { CloseHandle(j as _) };
+                    close_job(j);
                 }
                 return Err(e);
             }
@@ -749,7 +820,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         // strobe's own job may refuse a nested one: the stamp and the tree still find everything.
         let job = match (job, assigned) {
             (Some(j), false) => {
-                unsafe { CloseHandle(j as _) };
+                close_job(j);
                 None
             }
             (j, _) => j,
@@ -934,7 +1005,6 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next};
-    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
     use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, GetProcessAffinityMask, OpenThread, ResumeThread, SetProcessAffinityMask, THREAD_SUSPEND_RESUME};
     let clocks = || (super::tsc(), std::time::Instant::now());
     if cpus.is_none() && job.is_none() {
@@ -944,7 +1014,14 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
     let mut child = cmd.creation_flags(flags | CREATE_SUSPENDED).spawn()?;
     let h = child.as_raw_handle();
     unsafe {
-        let assigned = job.is_some_and(|j| AssignProcessToJobObject(j as _, h) != 0);
+        let assigned = match job.map(|j| assign(j, h as isize, child.id())) {
+            Some(Err(e)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+            a => a.is_some_and(|a| a.unwrap_or(false)),
+        };
         if let Some(mask) = cpus {
             let (mut proc_mask, mut sys_mask) = (0usize, 0usize);
             if GetProcessAffinityMask(h, &mut proc_mask, &mut sys_mask) != 0 {

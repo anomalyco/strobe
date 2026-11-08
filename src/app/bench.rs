@@ -515,13 +515,17 @@ fn note_ended(warnings: &mut Vec<validity::Warning>, s: &Series, runs: &[(f64, b
     warnings.push(validity::info(
         "EndedCpu",
         format!(
-            "{label}processes ended inside {} of {} measured runs; the CPU they used there ({} a run, median of those) is counted from their launch's cgroup, so cpu.work holds it",
+            "{label}processes ended inside {} of {} measured runs; the CPU they used there ({} a run, median of those) is counted from {}, so cpu.work holds it",
             ended.iter().filter(|ms| **ms > 0.0).count(),
             runs.len(),
-            fmt::value(metrics::median(&ended.iter().copied().filter(|ms| *ms > 0.0).collect::<Vec<_>>()), "ms")
+            fmt::value(metrics::median(&ended.iter().copied().filter(|ms| *ms > 0.0).collect::<Vec<_>>()), "ms"),
+            ENDED_FROM
         ),
     ));
 }
+
+/// Where `EndedCpu` reads what ended processes used.
+const ENDED_FROM: &str = if cfg!(windows) { "the handles strobe held to them from their start (their launch's job)" } else { "their launch's cgroup" };
 
 /// `EndedCpu` for a launch, once per series: its `cpu.work` counts what processes of it that ended
 /// before it was ready used (ms; `host::launch_ended_cpu`). Only for a launch whose `cpu.work` stands.
@@ -532,7 +536,7 @@ fn note_ended_launch(warnings: &mut Vec<validity::Warning>, s: &Series, ms: f64)
     }
     warnings.push(validity::info(
         "EndedCpu",
-        format!("{label}processes of the launch ended before it was ready; the CPU they used ({}) is counted from its cgroup, so cpu.work holds it", fmt::value(ms, "ms")),
+        format!("{label}processes of the launch ended before it was ready; the CPU they used ({}) is counted from {ENDED_FROM}, so cpu.work holds it", fmt::value(ms, "ms")),
     ));
 }
 
@@ -5847,15 +5851,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // gives holds them. One that exited reads none, which `record::timed_cpu` sees.
         let fast_read = |ending: bool| -> (super::record::Cycles, Option<u64>) {
             let before = if ending { None } else { host::tsc() };
-            let cycles = walked.borrow().keys().filter_map(|&(pid, start)| Some(((pid, start), host::process_cycles(pid)?))).collect();
+            let cycles = walked.borrow().keys().filter_map(|&(pid, start)| Some(((pid, start), host::process_cycles_at(pid, start)?))).collect();
             (cycles, if ending { host::tsc() } else { before })
         };
-        // The set's processes running now: on Linux listed from the processes' stat lines (no memory
-        // read), those born since the walk known from here on, so the edges read them (a renderer a
-        // cross-site navigation started) and their launch cgroups' members are all in the set
-        // (`EndedMarks::dead_since`); elsewhere the walked ones.
+        // The set's processes running now: on Linux and Windows listed again (Linux from the processes'
+        // stat lines, no memory read), those born since the walk known from here on, so the edges read
+        // them (a renderer a cross-site navigation started) and their launch cgroups' or jobs' members
+        // are all in the set (`EndedMarks::dead_since`); on macOS the walked ones.
         let listed_now = || -> Vec<u32> {
-            if !cfg!(target_os = "linux") {
+            if cfg!(target_os = "macos") {
                 return walked.borrow().keys().map(|k| k.0).collect();
             }
             let pids = browser.live_pids();
@@ -5875,28 +5879,40 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let pids = listed_now();
             let born: Vec<(u32, u64)> = walked.borrow().keys().filter(|k| pids.contains(&k.0) && !cycles.contains_key(k)).copied().collect();
             for (pid, start) in born {
-                if let Some(c) = host::process_cycles(pid) {
+                if let Some(c) = host::process_cycles_at(pid, start) {
                     cycles.insert((pid, start), c);
                 }
             }
             let ended = host::ended_marks(&cycles.keys().map(|k| k.0).collect::<Vec<_>>(), browser.profile().as_deref());
             (cycles, ended)
         };
+        // At a timed part's start, right before the known processes' cycles (`fast_read(false)`): what
+        // tells one that ended, with the processes it saw running known from here on (one born since the
+        // listing, while strobe marked the page or read its counters, is then in the reading).
+        let starting = || -> host::EndedMarks {
+            let ended = host::ended_marks(&listed_now(), browser.profile().as_deref());
+            let mut known = walked.borrow_mut();
+            for k in ended.running() {
+                known.entry(k).or_insert(0);
+            }
+            ended
+        };
         // strobe's own calls into the page at an edge (its reads, marks, counts and the OS input's
         // checks) stay inside the stretch: after the processes' cycles at its start (`fast`, read first),
         // before them at its end (read last), so none of their round trips is the run's CPU. What tells a
-        // process that ended is read after the cycles at a part's end and before them at its start.
+        // process that ended is read after the cycles at a part's end and right before them at its start.
         let reading = |fast: Option<(super::record::Cycles, Option<u64>)>| {
-            let (fast, ended) = match fast {
-                Some((cycles, tsc)) => {
-                    let (cycles, ended) = joined(cycles);
-                    (Some((cycles, tsc)), ended)
-                }
-                None => (None, host::ended_marks(&listed_now(), browser.profile().as_deref())),
-            };
+            let fast = fast.map(|(cycles, tsc)| {
+                let (cycles, ended) = joined(cycles);
+                (cycles, tsc, ended)
+            });
             let (c, carry) = (counters(), *carried.borrow());
             doc_check();
-            let (cycles, tsc) = fast.unwrap_or_else(|| fast_read(false));
+            let (cycles, tsc, ended) = fast.unwrap_or_else(|| {
+                let ended = starting();
+                let (cycles, tsc) = fast_read(false);
+                (cycles, tsc, ended)
+            });
             edges.borrow_mut().push((cycles, tsc, std::array::from_fn(|i| c[i] + carry[i]), ended));
         };
         // The OS input posted on each side of an edge reached the page, counted on its own: input in a
@@ -6459,8 +6475,13 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
             // What tells a process that ended, read right at the run's edges too: read at the walks, it took
             // the marks and counters around the run for the run's. Before the cycle clock here and after it
-            // at the end, so its scan of the system's processes stays out of the cycles' span.
+            // at the end, so its scan of the system's processes stays out of the cycles' span. A process it
+            // saw running that the walk did not (born while strobe marked the page or read its counters)
+            // is read with the walked ones.
             let ended0 = host::ended_marks(&pids0, browser.profile().as_deref());
+            for k in ended0.running() {
+                walked.borrow_mut().entry(k).or_insert(0);
+            }
             cost.start();
             let (at0, tsc0) = fast_read(false);
             let t0 = host::now_ns();
@@ -6513,10 +6534,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let pids1: Vec<u32> = walk1.keys().map(|k| k.0).collect();
             let k1 = probe::wakes::Counters::take(listed, &pids1, perf.as_ref());
             // The known processes as read at `t1`, with those born during the run (a renderer after a
-            // cross-site navigation): on Linux as `t1`'s edge listed them (`joined`; one the walk after it
-            // finds more was born after the run), elsewhere from that walk, counted from zero.
+            // cross-site navigation): on Linux and Windows as `t1`'s edge listed them (`joined`; one the
+            // walk after it finds more was born after the run), on macOS from that walk, counted from zero.
             let mut at1 = fast1;
-            for (k, c) in walk1.iter().filter(|(k, _)| !walk0.contains_key(*k) && !cfg!(target_os = "linux")) {
+            for (k, c) in walk1.iter().filter(|(k, _)| !walk0.contains_key(*k) && cfg!(target_os = "macos")) {
                 at1.insert(*k, *c);
             }
             // The page's scripts' function ranges, before the reset can leave the page.
@@ -7741,6 +7762,8 @@ impl OwnAffinity {
         let Some(m) = mask else { return OwnAffinity(None) };
         if super::in_daemon() {
             host::set_thread_affinity(m);
+            // The thread that holds the launches' processes wakes at high priority: on strobe's CPUs too.
+            host::pin_job_thread(Some(m));
             THREAD_PIN.with(|p| p.set(Some(m)));
             return OwnAffinity(None);
         }
@@ -7753,7 +7776,9 @@ impl Drop for OwnAffinity {
         if let Some(mask) = self.0 {
             host::set_affinity(mask);
         }
-        THREAD_PIN.with(|p| p.set(None));
+        if THREAD_PIN.with(|p| p.take()).is_some() {
+            host::pin_job_thread(None);
+        }
     }
 }
 

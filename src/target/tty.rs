@@ -783,10 +783,7 @@ mod win {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole};
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject,
-    };
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
         CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetProcessAffinityMask,
@@ -924,21 +921,24 @@ mod win {
                     ClosePseudoConsole(hpc);
                     return Err(Error::msg(format!("start {line}: {e}")));
                 }
-                // One job holds the program and what it starts; Windows ends it with strobe.
-                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-                // strobe's own job may refuse a nested one: then the tree and the home's stamp find it.
-                let job = if job.is_null() {
-                    None
-                } else {
-                    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-                    let set = SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits as *const _ as *const _, std::mem::size_of_val(&limits) as u32) != 0;
-                    if set && AssignProcessToJobObject(job, pi.hProcess) != 0 {
-                        Some(job)
-                    } else {
-                        CloseHandle(job);
+                // One job holds the program and what it starts (each process held from its start,
+                // `host::jobs`); Windows ends it with strobe. strobe's own job may refuse a nested one:
+                // then the tree and the home's stamp find it.
+                let job = match host::spawn::new_job().map(|j| (j, host::spawn::assign(j, pi.hProcess as isize, pi.dwProcessId))) {
+                    Some((job, Ok(true))) => Some(job as HANDLE),
+                    Some((job, Ok(false))) => {
+                        host::spawn::close_job(job);
                         None
                     }
+                    // Closing the launch's job ends the program, which has not run yet.
+                    Some((job, Err(e))) => {
+                        host::spawn::close_job(job);
+                        CloseHandle(pi.hThread);
+                        CloseHandle(pi.hProcess);
+                        ClosePseudoConsole(hpc);
+                        return Err(Error::msg(format!("start {line}: {e}")));
+                    }
+                    None => None,
                 };
                 // A stop of strobe ends it with the launches it owns (`spawn::end_launches`).
                 host::spawn::list_launch(pi.dwProcessId, job.map(|j| j as isize), spec.home.as_deref());
@@ -980,7 +980,7 @@ mod win {
             unsafe {
                 if let Some(job) = self.job.take() {
                     TerminateJobObject(job, 1);
-                    CloseHandle(job);
+                    host::spawn::close_job(job as isize);
                 }
                 if let Some(hpc) = self.hpc.take() {
                     ClosePseudoConsole(hpc);
@@ -990,6 +990,12 @@ mod win {
                     self.process = std::ptr::null_mut();
                 }
             }
+        }
+    }
+
+    impl Drop for Proc {
+        fn drop(&mut self) {
+            self.end();
         }
     }
 }

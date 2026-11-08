@@ -1,5 +1,6 @@
 // The script() target of derive.bench.ts (dev only, not shipped): CPU of known size, on the host's own thread
 // or in a child process that ends inside the call.
+import { join } from "node:path"
 
 /** `ms` of wall time busy on this thread. */
 export function spin(ms: number) {
@@ -12,6 +13,16 @@ export function spin(ms: number) {
 /** A child process that spins `ms` and exits before the call returns. */
 export function child(ms: number) {
   return Bun.spawnSync([process.execPath, "-e", `const e = performance.now() + ${ms}; while (performance.now() < e) {}`]).exitCode
+}
+
+/** known's `breakaway`: a child (scripts/dev/known, built first) whose own child spins `ms` and asks to leave the
+ * job it starts in (Windows: CREATE_BREAKAWAY_FROM_JOB), through `hops` such children each asking again; all
+ * end before the call returns. Throws where a hop could not start. */
+export function breakaway(ms: number, hops = 1) {
+  const known = join(import.meta.dir, "..", "known", process.platform === "win32" ? "known.exe" : "known")
+  const code = Bun.spawnSync([known, "breakaway", String(ms), String(hops)]).exitCode
+  if (code !== 0) throw new Error(`known breakaway exited ${code}`)
+  return code
 }
 
 /** A child that starts a grandchild spinning `ms`, says its pid and exits at once: the grandchild is orphaned

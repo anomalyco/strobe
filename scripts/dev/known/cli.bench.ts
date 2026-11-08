@@ -5,7 +5,10 @@
 //   strobe bench scripts/dev/known/cli.bench.ts --head . --check
 //   strobe bench scripts/dev/known/cli.bench.ts --head . --blocks 2 --filter spin-2
 // Truth per run: spin-1 300 ms CPU; spin-2 600 ms CPU over ~300 ms wall (cpu.app.total 200% of one core); sleep
-// 0 CPU over 500 ms; tree 3 × 400 ms in children; grand 2 × 400 ms in grandchildren; twice 2 commands of 150 ms;
+// 0 CPU over 500 ms; tree 3 × 400 ms in children; grand 2 × 400 ms in grandchildren; breakaway 400 ms in a child
+// that asks to leave the job it starts in (Windows: CREATE_BREAKAWAY_FROM_JOB), breakaway-2 the same in a
+// grandchild that asked again from that child; breakaway-left leaves that grandchild running (refused
+// RunIncomplete, and strobe ends it: no known process left after); twice 2 commands of 150 ms;
 // timer 100 wakes a second; alloc 200 MiB touched (alloc-small 4 MiB, under strobe's own resident set); io 40 MiB written, 24 MiB read; orphan leaves a process
 // running (refused RunIncomplete).
 import { bench, cli } from "@hona/strobe"
@@ -28,6 +31,9 @@ export default bench({
     sleep: one("sleep 500", "run.duration"),
     tree: one("tree 3 400", "cpu.work", ["metric.truth_cpu_ms"]),
     grand: one("tree 2 400 grand", "cpu.work", ["metric.truth_cpu_ms"]),
+    breakaway: one("breakaway 400", "cpu.work", ["metric.truth_cpu_ms"]),
+    "breakaway-2": one("breakaway 400 2", "cpu.work", ["metric.truth_cpu_ms"]),
+    "breakaway-left": one("breakaway 200 2 leave", "cpu.work"),
     twice: {
       primary: "cpu.work",
       metrics: [...all, "metric.truth_cpu_ms"],

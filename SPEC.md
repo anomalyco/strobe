@@ -2821,6 +2821,43 @@ CPU.
     a cgroup reading that disagree (a process ended between them, or one the later listing lacks still
     runs in the cgroups: the reading at a part's end follows its cycles with nothing between, the one
     at a run's start comes just before them).
+  - **Windows recovers what they used** from the processes themselves: Windows keeps a process's
+    cycle count (`QueryProcessCycleTime`) while a handle to it is open, after it exited too, and
+    nothing else counts an ended process's CPU exactly (a job's times move in 15.6 ms ticks). Every
+    job strobe makes for a launch (`spawn_owned`, a terminal's program) posts each process that joins
+    it, its nested jobs' too (a runtime's own job for its children), to one completion port
+    (`JOB_OBJECT_MSG_NEW_PROCESS`), and one high-priority thread of strobe's (`host::jobs`) opens
+    each as it is posted: while its creation is still in progress (adais: 26–34 µs after its creation
+    time, where the shortest process, `cmd /c exit`, lives 8 ms), checked to be in the job
+    (`IsProcessInJob`) and keyed by pid and creation time (`start_time`'s), so a pid another process
+    took is never read for it (without `SYNCHRONIZE`, its exit is read from its exit time). The
+    launch's root is held before it first runs; one that broke away to the launch's job gets a job of
+    its own inside it that allows breakaway (§13.2). The thread is kept on strobe's CPUs (in the
+    daemon too, where a bench pins its own thread: a new thread takes the process's CPUs). An ended
+    one's cycles are read once (at its exit's post or the next reading) and its handle closed; a
+    held pid stays openable after its process exits, so a set's cycles are read only from a process
+    created at the set's start time and not exited, on the handle that checked it
+    (`process_cycles_at`). A reading
+    (`EndedMarks`) is complete only when the jobs hold no process strobe does not: every join posted
+    and taken (a reading waits up to 100 ms for the port; Windows does not promise every post, and a
+    job that missed one reads incomplete at once after that), as many held as the job's
+    `TotalProcesses`, and as many held ended as `TotalProcesses − ActiveProcesses`. A part in which
+    something ended adds, for each process of the set at its first reading and gone at its last, its
+    final cycles less its first reading, and for each that was born and ended inside the part (in no
+    reading of it) all its cycles: exact, in the set's own units (`EndedMarks::dead_since`). Nothing
+    breaks away from a launch's job (§13.2). Still unknown, and refused: an incomplete reading (a
+    process that ended and lost its last handle before strobe opened it), no job (a target strobe
+    did not launch, strobe's own job refused a nested one), a process of the set gone that the jobs
+    did not hold ended (it ran outside them: started by a service, by a process strobe did not
+    launch), or a job's running process that is none of the set's at a reading (counted from 0, it
+    would add what it ran before). Pages list the set again at each edge (`listed_now`, as on Linux,
+    from the process snapshot alone), so a renderer born in the run is in the set at its end; at a
+    part's start what tells one that ended is read right before the cycles, and the jobs' processes
+    it saw running join the set read then (one born while strobe marked the page or read its
+    counters). A launch adds every held process that
+    ended since the spawn (`host::launch_ended_cpu`, read with the ready reading, where the set and
+    the jobs' running processes are the same). `cli()` sums every held process's cycles over the
+    command's own clock rate (§9.6, `cpu.work`).
   - **Where strobe makes them**, once per strobe process, at its first launch: under its own cgroup
     when it was handed to it (the cgroup it was handed, its own up through cgroups strobes made, has
     systemd's `user.delegate` mark, or is the cgroup of the unit it runs in and that unit has
@@ -2841,8 +2878,8 @@ CPU.
     launches of strobes that are gone (by pid and start time) beside its own and in their scopes, and
     systemd removes those scopes once empty. Nowhere to make one (no cgroup v2, a non-root user with no
     user manager, a container's read-only cgroup tree): as on other OSes below.
-  - **Elsewhere, refused.** Where what ended is not known (macOS, Windows, Linux without a launch
-    cgroup) a part in which a process ended refuses the set's CPU (`cpu.work`, `cpu.app.total`,
+  - **Elsewhere, refused.** Where what ended is not known (macOS, Linux without a launch cgroup,
+    Windows as above) a part in which a process ended refuses the set's CPU (`cpu.work`, `cpu.app.total`,
     `cpu.process.total`, the browser's `cpu.<role>`; page, native, script and tty runs, launches,
     `record`; `cpu.fixture` has none), `RunIncomplete`, never a short number. A launch counts from its
     spawn, so any ended process refuses its `cpu.work`, but for one: the launched process itself,
@@ -2854,10 +2891,11 @@ CPU.
     ticks of what it reaped.
   - One that ended inside a `ctx.untimed` stretch took nothing of the timed parts: it only leaves the
     run out of `cpu.foreign` where its CPU is not known (the whole span's CPU is short). Checked with
-    `scripts/dev/derive/script.bench.ts`: on adais a 200 ms child that ends in the run refuses
-    `cpu.work`; the same child inside `ctx.untimed` and then 100 ms of the host's own read 100.4 ms. On
-    vps (§24.2) the child read 198–204 ms and a 200 ms orphaned grandchild 207–211 ms; with no user
-    manager (no cgroup) both are refused.
+    `scripts/dev/derive/script.bench.ts`: on adais a 200 ms child that ends in the run read
+    `cpu.work` 209–211 ms (202–204 ms of it ended), where it was refused; a 200 ms grandchild that
+    asked to break away from the job 210 ms; the same child inside `ctx.untimed` and then 100 ms of
+    the host's own 100–101 ms. On vps (§24.2) the child read 198–204 ms and a 200 ms orphaned
+    grandchild 207–211 ms; with no user manager (no cgroup) both are refused.
 - **Documents:** Chromium's Performance counters (`main.work`, `main.script`, `main.layout`,
   `main.style`, `layout.count`, `style.count`, lean `main.busy`) and the page's counter global are the
   document's: a `goto` reads the departing one's first. A run whose page loaded another document
@@ -3404,7 +3442,7 @@ line cannot carry run under `cmd`). `ctx.exec` resolves with the exit code and o
 fails the run (`RunIncomplete`, with the last lines), as does a command that runs past the case's
 `timeout` (strobe ends it and what it started), a command that left processes running 100 ms after
 it exited (strobe ends them; what they did is not counted whole), and a run that ran no command.
-Left-running includes what left the command's group or job (a `setsid` daemon, a job breakaway):
+Left-running includes what left the command's group or ran outside its job (a `setsid` daemon):
 every command carries a stamp of its block (`STROBE_HOME`, `STROBE_OWNER`, §13.2) that strobe finds
 them by. Output goes to the experiment's `cli.log`. Output is read line by line and decoded lossily
 (`host::spawn::each_line`, also every launched app's output): a line that is not UTF-8 (a legacy code
@@ -3417,16 +3455,19 @@ stopped reading at it, so a command that printed `strobe:metric part=1`, a Latin
   - `run.duration`: spawn to exit, summed over the run's commands (not the runner's round trip).
   - `cpu.work` (the default primary) and `cpu.app.total` (`cpu.work` over the commands' wall time).
     Linux and macOS: `wait4`'s rusage of the child, which includes every descendant its tree waited
-    for (exact: the kernel's per-task runtime). Windows: the command's own process from its cycle
-    counter (exact; where cycles are not time, refused `NotOnThisOs` as for script targets, never
-    replaced by clock ticks) over the cycle clock's rate from just before the child first ran to its
-    exit, both clocks read together at each end, plus the processes it started from the job's clock-tick times (sampled
-    at the timer interrupt, 15.6 ms a tick). A run whose commands started any process (a shell around
-    the program, a `.cmd`, a child) gets `cpu.work` only when that part is 64 ticks (1 s) a run or
-    more, said once per series as its share of `cpu.work` (`TickSampledCpu`); below, `cpu.work` and
-    `cpu.app.total` are refused (`NotOnThisOs`: one tick more or less, or work under a tick that reads
-    0, is several percent of the run), and `run.duration` still compares. Without a job of its own
-    (strobe's own job refused a nested one) nothing counts the processes it started, so refused too.
+    for (exact: the kernel's per-task runtime). Windows: every process of the command's job (its own
+    and every one it started, held from its start, §9.6) from its cycle counter (exact; where cycles
+    are not time, refused `NotOnThisOs` as for script targets, never replaced by clock ticks) over
+    the cycle clock's rate from just before the child first ran to its exit, both clocks read together
+    at each end (`known.rs tree 3 400`: 1218 ms, the processes' own cycles 1230 ms; it read 1228 ms
+    from clock ticks before). Where the job holds a process strobe does not (§9.6), the command's own
+    process plus the processes it started from the job's clock-tick times (sampled at the timer
+    interrupt, 15.6 ms a tick): a run whose commands started any process then gets `cpu.work` only
+    when that part is 64 ticks (1 s) a run or more, said once per series as its share of `cpu.work`
+    (`TickSampledCpu`); below, `cpu.work` and `cpu.app.total` are refused (`NotOnThisOs`: one tick
+    more or less, or work under a tick that reads 0, is several percent of the run), and
+    `run.duration` still compares. Without a job of its own (strobe's own job refused a nested one)
+    nothing counts the processes it started, so refused too.
   - `cli.launch`: the CPU of the OS creating each command's process, on strobe's launching thread
     (its cycle counter, read just before and after the spawn), summed per run in ms. Windows does
     most of a process's creation in the launcher (5–7 ms a launch on adais, for any launcher); on
@@ -4064,8 +4105,9 @@ writes it as `Refusal`s). Schema: `schema/result.v1.json`.
 ### 10.2 Analysers (warn in the result)
 
 `MultimodalDistribution` · `HighVariance` · `Underpowered` · `StateDrift` · `Background` ·
-`EndedCpu` (info, once per series: Linux's launch cgroups kept what processes that ended inside runs
-used, or before a launch was ready, and `cpu.work` holds it: how many runs and the median ms, §9.6) ·
+`EndedCpu` (info, once per series: Linux's launch cgroups kept, or Windows' handles held from each
+process's start read, what processes that ended inside runs used, or before a launch was ready, and
+`cpu.work` holds it: how many runs and the median ms, §9.6) ·
 `Throttling` · `HeadlessFrame` (a headless run's last step left its style and layout to the frame after the run, 7.3) · `Drift` (trend across pairs: Spearman |ρ| > 0.6 with tied ranks averaged, over ≥ 8 pairs, on the comparison's own scale: the log ratio moving at least 1% end to end, or for a metric compared by difference (counts, and any metric with a 0 in a pair) the difference moving at least 1% of base's median, so a near-constant difference never trends and a count's trend is not dropped) · `CounterUnstable` (an exact counter that did not hold one value on a side in every paired block, with each side's range: compared like a timed metric, by its noise, not exactly) · `ProbeOverhead` ·
 `Unresolved` (samples without a symbol above 5%) · `PowerPlan` (the user's plan was kept: `--power
 keep`, on battery, or no faster plan to switch to) · `Battery` · `VirtualMachine` · `BackgroundPriority`
@@ -5491,8 +5533,14 @@ Strobe launches any Electron app the same way, with no change to the app:
   holds it, the refusal names that strobe ("in the isolated home of another strobe (pid N)").
   Otherwise the refusal names the running pids and the command that closes them.
 - **Process ownership.** Each launch (an isolated app, a browser, a command target, the bench
-  runner, a script host) starts in a group of its own: a job object on Windows (killed on close,
-  breakaway allowed so no app fails for it), its own process group on Unix. On Windows the child is
+  runner, a script host) starts in a group of its own: a job object on Windows (killed on close, no
+  breakaway; the child also in a job inside it that allows breakaway, so a process that asks for it
+  (`CREATE_BREAKAWAY_FROM_JOB`) is created, no app fails for it, and Windows keeps it in the
+  launch's job, the first up the chain that allows none, where strobe puts it in a job of its own
+  that allows breakaway too, so one it starts that asks again is created as well; each process held
+  from its start, §9.6), its own process group on Unix. Helpers and services a launch detaches with
+  `CREATE_BREAKAWAY_FROM_JOB` end with the launch, as what leaves a launch's process group on Linux
+  ends with its cgroup. On Windows the child is
   created suspended, put in its job and given its CPUs, then resumed (`NtResumeProcess`, microseconds);
   on Linux the CPUs are set between fork and exec. strobe's own affinity never moves for a launch
   (`host::spawn_owned`). A launched target's process set (`host::process_set`) is its tree, every
@@ -8543,6 +8591,37 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   `total_user`), now ns; unchecked on a Mac. The reaper-only fallback the plan weighed (add the reaped
   children's CPU where no cgroup is) is not built: a descendant orphaned to a reaper outside the set
   is in no count, so it would read short.
+- **CPU of processes that end in a run, Windows (2026-11-09)**: each launch's job posts its processes
+  to a completion port and strobe holds each from its start (`host::jobs`, §9.6). A probe on adais
+  opened every process 26–34 µs after its creation time (62 detached `cmd /c exit` and `whoami`
+  children whose parent closed its handle at once, 41 `spawnSync` children, 19 `git` runs of a
+  workspace load: all held, none missed); a process held after it exited is in no process snapshot,
+  so no set lists it. A job that allows breakaway left a `CREATE_BREAKAWAY_FROM_JOB` child in no
+  count (the job counted 1 process, 200 ms of its child's CPU nowhere), which the strict reading alone
+  would have passed short: a launch's job now allows none, and a job inside it does, so the child is
+  created and stays in the launch's job (counted 2, its 200 ms held). Checked with `--check` on adais
+  (locked; noisy single runs): `scripts/dev/derive/script.bench.ts` `child timed` 209–211 ms (was
+  refused), `breakaway` 210 ms, `orphan timed` 16 ms (Bun's job ends the grandchild with its parent:
+  all of it counted), `outlive` 65–66 ms (as `orphan timed`: the grandchild ends with its parent),
+  `child untimed` and `plain` 100–101 ms; `scripts/dev/known/cli.bench.ts` `tree` 1218 ms (the
+  processes' cycles 1230 ms; 1228 ms from clock ticks before, with `TickSampledCpu`), `grand`
+  823–826 ms, `breakaway` 411 ms for 400; `native.bench.ts` `spawner` 502 ms for 500 (470 ms ended);
+  a launcher that starts known's `ready` and exits at once: launch `cpu.work` 8.75 ms (6.21 ms ended),
+  where its own handle had read 8.14 ms; a workspace's `load a location`, which runs `git` six times a load, kept
+  `cpu.work` (252–313 ms, 135–143 ms ended, where the same load's `git` processes held by a probe used
+  137 ms) where 0.21.0 refused every run. Pages: `derive.bench.ts` passed every case; `gaps` and
+  `other site` had a Chromium process end in a run (29–30 ms), counted where it was refused, and
+  `other site`'s cold `cpu.work` read 116–338 ms on 0.21.0 and 128–398 ms here (one cold run each,
+  bimodal on both). `fake-handoff.bench.ts` fails on Windows as before (Bun's job ends the tray app
+  with its launcher). A process that broke away once sat in the launch's job, which allows none, so
+  one it started that asked again failed (`Access is denied`): it now gets a job of its own that
+  allows it (`known.rs breakaway 400 2`: 415–416 ms for 400, the script's `breakaway hop 2` 214 ms;
+  left running, `breakaway 200 2 leave` is refused and ended with the launch, no process of it
+  left). A set's cycles are read only from a running process created at the set's start time (a
+  held pid stays openable after its process exits), what tells one ended is read right before a
+  part's cycles with the jobs' running processes joining them, a page's edges list the set from the
+  snapshot alone, and the holding thread follows a daemon bench's own CPUs. The first run of a
+  freshly built executable used about 90 ms more CPU in its own process (302 ms for 210, once).
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

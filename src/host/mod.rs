@@ -12,6 +12,8 @@ pub mod dbus;
 pub mod git;
 pub mod http;
 pub mod ios;
+#[cfg(windows)]
+pub mod jobs;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -208,7 +210,29 @@ pub struct ProcTimes {
 /// One process's CPU so far in `ProcTimes::cycles` units (`tsc` units: cycles on Windows, CPU ns
 /// elsewhere), read without listing the system's processes: cheap enough at a run's two ends.
 pub fn process_cycles(pid: u32) -> Option<u64> {
-    os::process_cycles(pid)
+    #[cfg(windows)]
+    {
+        win::process_cycles(pid, None)
+    }
+    #[cfg(not(windows))]
+    {
+        os::process_cycles(pid)
+    }
+}
+
+/// `process_cycles` of the process that started at `start` (`start_time`'s units): on Windows read on
+/// the handle that checked it, so a pid another process took since is not read for it (strobe holds
+/// its jobs' processes, so their pids stay openable after they exit); elsewhere `process_cycles`.
+pub fn process_cycles_at(pid: u32, start: u64) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        win::process_cycles(pid, Some(start))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = start;
+        os::process_cycles(pid)
+    }
 }
 
 pub fn process_tree(root: u32) -> Vec<ProcTimes> {
@@ -661,9 +685,9 @@ pub fn all_processes() -> Vec<ProcInfo> {
 pub type CpuByProcess = std::collections::BTreeMap<(u32, u64), u64>;
 
 /// What tells that a process of a set ended between two readings of it, even one neither reading saw
-/// (`ended_since`), and on Linux what the CPU of the ended ones came to (`dead_since`). A process that
-/// ended took the CPU it used since the first reading with it, so a sum of the set's processes' CPU
-/// over the two is short.
+/// (`ended_since`), and on Linux and Windows what the CPU of the ended ones came to (`dead_since`). A
+/// process that ended took the CPU it used since the first reading with it, so a sum of the set's
+/// processes' CPU over the two is short.
 #[derive(Clone, Debug, Default)]
 pub struct EndedMarks {
     /// Per process of the set, by pid and start time: what its ended children left it, which grows at
@@ -677,6 +701,10 @@ pub struct EndedMarks {
     /// Windows: the processes that ended in the jobs strobe launched for the set's home, or rooted at
     /// one of its processes for a launch for no folder (a script's host).
     pub jobs: Option<u64>,
+    /// Windows: the processes of those jobs, each held from its start (`jobs`), with what the ended
+    /// ones used.
+    #[cfg(windows)]
+    pub held: Option<jobs::Reading>,
     /// Linux: the CPU of the set's launch cgroups (`cgroup`), where its launches have them.
     #[cfg(target_os = "linux")]
     pub cgroup: Option<cgroup::Reading>,
@@ -686,27 +714,70 @@ pub struct EndedMarks {
 }
 
 impl EndedMarks {
+    /// The processes the marks saw running in the set's launches, by pid and start time: Windows'
+    /// jobs' (`held`); none elsewhere. A set listed before them lacks one born in between, which
+    /// `dead_since` refuses: its reader adds these to the set it reads next.
+    pub fn running(&self) -> Vec<(u32, u64)> {
+        #[cfg(windows)]
+        {
+            self.held.as_ref().map(|h| h.running.keys().copied().collect()).unwrap_or_default()
+        }
+        #[cfg(not(windows))]
+        {
+            Vec::new()
+        }
+    }
+
     /// A process of the set ended since `earlier`, as far as the marks tell: a count of a process grew
     /// (from 0 for one `earlier` did not see), a child that ended waits to be reaped that did not
-    /// then, or a job counted another.
+    /// then, or a job counted another (or held one more that ended).
     pub fn ended_since(&self, earlier: &EndedMarks) -> bool {
+        #[cfg(windows)]
+        if let Some(b) = &self.held
+            && b.ended.keys().any(|k| earlier.held.as_ref().is_none_or(|a| !a.ended.contains_key(k)))
+        {
+            return true;
+        }
         self.reaped.iter().any(|(k, v)| *v > earlier.reaped.get(k).copied().unwrap_or(0))
             || self.zombies.keys().any(|k| !earlier.zombies.contains_key(k))
             || self.jobs.unwrap_or(0) > earlier.jobs.unwrap_or(0)
     }
 
-    /// The CPU (ns) the set's processes that ended since `earlier` used since then, with the processes
-    /// they started that ended too: Linux's launch cgroups' count over the two readings, less what the
-    /// processes still running in them used. `set_a` and `set_b` are the set's processes' CPU at the
-    /// two readings. None where that is not known: no launch cgroup at either reading (other OSes, a
-    /// target strobe did not launch), one removed in between, or something ended outside them (a
-    /// process of the set that ended or reaped one outside the cgroups, or one that left them running).
-    /// None too where the cgroups and the set's listing disagree: a process in the cgroups that is
+    /// The CPU (the set's cycle units: ns on Linux) the set's processes that ended since `earlier`
+    /// used since then, with the processes they started that ended too. `set_a` and `set_b` are the
+    /// set's processes' CPU at the two readings. Linux: the launch cgroups' count over the two
+    /// readings, less what the processes still running in them used. Windows: each ended process's
+    /// cycles held from its start (`jobs`), less its own at `set_a` (0 for one born since). None where
+    /// that is not known: no launch cgroup or job at either reading (macOS, a target strobe did not
+    /// launch), one removed in between, a job's process strobe did not hold (it ended before strobe
+    /// opened it), or something ended outside them (a process of the set that ended or reaped one
+    /// outside the cgroups or jobs, or one that left them running).
+    /// None too where the cgroups or jobs and the set's listing disagree: a process in them that is
     /// none of the set's at either reading (a grandchild reparented out of the tree the set follows,
     /// one that dropped the launch's stamp: what it used would be taken out of what ended as running
-    /// while the set counts none of it), or one that ended between the listing and the cgroups'
-    /// reading (`skewed`: counted in both).
+    /// while the set counts none of it, or on Windows counted from 0 where it ran before), or one that
+    /// ended between the listing and the cgroups' reading (`skewed`: counted in both).
     pub fn dead_since(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            let (a, b) = (earlier.held.as_ref()?, self.held.as_ref()?);
+            if !a.complete || !b.complete || !a.jobs.is_subset(&b.jobs) {
+                return None;
+            }
+            if a.running.keys().any(|k| !set_a.contains_key(k)) || b.running.keys().any(|k| !set_b.contains_key(k)) {
+                return None;
+            }
+            // In the set at the first reading and gone at the last: ended in a job, from its reading on
+            // (else it left the set running, or ran outside the jobs). One the last reading still
+            // read (its handle held) is in `cycles_used` already.
+            let mut dead = 0u64;
+            for (k, c) in set_a.iter().filter(|(k, _)| !set_b.contains_key(*k)) {
+                dead += b.ended.get(k)?.saturating_sub(*c);
+            }
+            // Born after the first reading (it ran in no reading of it) and ended before the last.
+            dead += b.ended.iter().filter(|(k, _)| !a.ended.contains_key(*k) && !set_a.contains_key(*k) && !set_b.contains_key(*k)).map(|(_, c)| c).sum::<u64>();
+            Some(dead)
+        }
         #[cfg(target_os = "linux")]
         {
             let (a, b) = (earlier.cgroup.as_ref()?, self.cgroup.as_ref()?);
@@ -730,7 +801,7 @@ impl EndedMarks {
             let running: u64 = b.members.iter().map(|(k, c)| c.saturating_sub(a.members.get(k).copied().unwrap_or(0))).sum();
             Some(b.usage_ns.saturating_sub(a.usage_ns).saturating_sub(running))
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = (earlier, set_a, set_b);
             None
@@ -743,6 +814,9 @@ pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> EndedMarks {
     let mut out = EndedMarks::default();
     #[cfg(windows)]
     {
+        // The count after the processes: one that ends between the two moves the count, and the held
+        // reading then lacks it, which `dead_since` refuses rather than miss it.
+        out.held = spawn::jobs_cpu(pids, home);
         out.jobs = spawn::jobs_ended(pids, home);
     }
     #[cfg(target_os = "linux")]
@@ -777,10 +851,11 @@ pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> EndedMarks {
     out
 }
 
-/// Linux: the CPU (ns) that processes of a set's launches used and took with them when they ended,
-/// since the launches started (`cgroup::Reading::ended`): what a launch's CPU from its spawn adds to
-/// its running processes' (read just before). None without launch cgroups, where a process of the set
-/// runs outside them, and on other OSes.
+/// The CPU (the set's cycle units) that processes of a set's launches used and took with them when
+/// they ended, since the launches started: what a launch's CPU from its spawn adds to its running
+/// processes' (read just before). Linux from its launch cgroups (`cgroup::Reading::ended`), Windows
+/// from its jobs' processes held from their start (`jobs`). None without them, where a process of
+/// the set runs outside them (or a job's process was not held), and on macOS.
 pub fn launch_ended_cpu(pids: &[u32], home: Option<&Path>) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -788,7 +863,13 @@ pub fn launch_ended_cpu(pids: &[u32], home: Option<&Path>) -> Option<u64> {
         let same = pids.iter().all(|p| r.members.keys().any(|k| k.0 == *p)) && r.members.keys().all(|k| pids.contains(&k.0));
         same.then(|| r.ended())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        let r = spawn::jobs_cpu(pids, home)?;
+        let same = r.complete && pids.iter().all(|p| r.running.keys().any(|k| k.0 == *p)) && r.running.keys().all(|k| pids.contains(&k.0));
+        same.then(|| r.ended.values().sum())
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = (pids, home);
         None
@@ -962,11 +1043,11 @@ pub fn process_set(root: u32, home: Option<&Path>) -> Vec<ProcTimes> {
 }
 
 /// The pids of `process_set`, sorted, for a reader that needs no more (the OS sampler's re-read of a
-/// target's set). On Linux it reads only the stat lines: `process_set` also reads each process's
-/// `smaps_rollup` for its private memory, which for a browser's dozen processes cost the sampler
-/// about 20 ms a re-read on vps.
+/// target's set, a page's edges). On Linux it reads only the stat lines and on Windows the snapshot:
+/// `process_set` also reads each process's memory (Linux's `smaps_rollup`, which for a browser's
+/// dozen processes cost the sampler about 20 ms a re-read on vps).
 pub fn process_set_pids(root: u32, home: Option<&Path>) -> Vec<u32> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     {
         let roots = |list: &[(u32, u32, u64)]| -> Vec<u32> {
             let more = match home {
@@ -976,11 +1057,11 @@ pub fn process_set_pids(root: u32, home: Option<&Path>) -> Vec<u32> {
             std::iter::once(root).chain(more).filter(|&r| r != 0).collect()
         };
         let me = std::process::id();
-        let mut set: Vec<u32> = linux::tree_pids_of(&roots).into_iter().filter(|&p| p != me || root == me).collect();
+        let mut set: Vec<u32> = os::tree_pids_of(&roots).into_iter().filter(|&p| p != me || root == me).collect();
         set.sort_unstable();
         set
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
         process_set(root, home).into_iter().map(|p| p.pid).collect()
     }
@@ -1197,6 +1278,15 @@ pub fn set_thread_affinity(mask: u64) {
     #[cfg(target_os = "linux")]
     os::set_thread_affinity(mask);
     #[cfg(not(any(windows, target_os = "linux")))]
+    let _ = mask;
+}
+
+/// Keeps the thread that holds the processes of strobe's jobs on `mask`, or back on the process's
+/// CPUs (None): Windows (`jobs::pin`); its own thread elsewhere has none.
+pub fn pin_job_thread(mask: Option<u64>) {
+    #[cfg(windows)]
+    jobs::pin(mask);
+    #[cfg(not(windows))]
     let _ = mask;
 }
 
