@@ -1,6 +1,7 @@
 //! `strobe stats` (hidden, SPEC §5.11): the statistics and number formatting on numbers given on
 //! stdin, one JSON request a line, one JSON answer a line. Known-answer checks of what a bench would
-//! decide from those pairs (`scripts/dev/stats-check.ts`); it reads and writes nothing else.
+//! decide from those pairs (`scripts/dev/stats-check.ts`), and `simulate`: synthetic series through a
+//! bench's own decision code (`scripts/dev/stats-sim.ts`). It reads and writes nothing else.
 
 use super::{Output, fmt};
 use crate::cli::Args;
@@ -8,6 +9,8 @@ use crate::model::{self, Error, Result};
 use crate::stats;
 use serde_json::{Value, json};
 use std::io::BufRead;
+
+mod simulate;
 
 pub fn run(_args: &Args) -> Result<Output> {
     let mut out = String::new();
@@ -65,6 +68,7 @@ fn answer(q: &Value) -> Result<Value> {
             };
             serde_json::to_value(&c)?
         }
+        "simulate" => simulate::run(q)?,
         "pct" => json!({ "text": fmt::pct(q["r"].as_f64().unwrap_or(f64::NAN)) }),
         "value" => json!({ "text": fmt::value(q["v"].as_f64().unwrap_or(f64::NAN), q["unit"].as_str().unwrap_or("value")) }),
         other => return Err(Error::usage(format!("stats: no op {other}"))),

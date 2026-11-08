@@ -27,7 +27,8 @@ pub fn value(v: f64, unit: &str) -> String {
         }
         "bytes" => bytes(v),
         "pp" => format!("{v:.digits$} pp"),
-        "MB" => format!("{v:.0} MB"),
+        // Like every unit: a native app's 0.287 MB heap once printed `0 MB` beside a ±4% interval.
+        "MB" => format!("{v:.digits$} MB"),
         "/s" => format!("{v:.digits$}/s"),
         // A number the target reported in a unit of its own (`metric.<name>`).
         "value" => format!("{v:.digits$}"),

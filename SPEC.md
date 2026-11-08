@@ -2245,11 +2245,10 @@ flowchart LR
   beyond the quartiles, from 5 blocks a side) are listed by the `Outliers` analyser (info); the rank
   test is robust to them.
 - **Digits**: printed precision follows the interval width (`fmt::pct_ci`): an estimate and its
-  interval as percentages share one number of decimals, the interval width's first significant
-  digit or the estimate's usual ones (none from 10%, one from 0.1%, below that its first significant
-  digit), whichever is finer, and an end that would round to 0 keeps its own first digit:
-  `+0.03% [+0.02% … +0.04%]` (once `+0.0% [+0.0% … +0.0%]` for a decided change), `+15.2%
-  [+15.1% … +15.3%]`. A lone percentage never prints a nonzero change as 0.0% (`fmt::pct`); one
+  interval as percentages share the decimals that show the width's first significant digit, and a
+  number that would round to 0 there keeps its own first digit: `+0.03% [+0.02% … +0.04%]` (once
+  `+0.0% [+0.0% … +0.0%]` for a decided change), `+15.2% [+15.1% … +15.3%]`, `+7% [−51% …
+  +116%]`. A lone percentage never prints a nonzero change as 0.0% (`fmt::pct`); one
   printed beside a threshold gets the decimals that tell them apart (`fmt::pct_vs`: `+15.2% > 15%`,
   not `+15% > 15%`); a bound or margin prints as given (`fmt::bound`). A value under 0.01 in its unit
   shows its first significant digit (a layout shift of 0.003, not 0.00).

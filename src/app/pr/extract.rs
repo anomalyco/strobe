@@ -461,9 +461,14 @@ pub(super) fn change_cells(c: &Value, o: Out) -> (String, String) {
     (d, range(c))
 }
 
+/// What a report's "Change" is, in its footers: a comparison's `estimate`, the Hodges–Lehmann estimate
+/// of the pairs' own changes (`stats::hodges_lehmann`), which is not their plain median (on skewed
+/// pairs −0.03% where the median is −0.51%).
+pub(crate) const CHANGE_NOTE: &str = "Change: the pairs' typical change (Hodges–Lehmann: the median of the averages of every two pairs' changes).";
+
 /// The medians' own change when it points the other way from the paired change by more than the
-/// bound: the paired change is the median of the pairs' own changes, so a few blocks far from the
-/// rest (a bimodal side) can put the two on opposite sides of zero.
+/// bound: the paired change is the Hodges–Lehmann estimate of the pairs' own changes, so a few blocks
+/// far from the rest (a bimodal side) can put the two on opposite sides of zero.
 pub(super) fn uneven(c: &Value) -> Option<f64> {
     let (b, h, est) = (f(&c["base"]), f(&c["head"]), f(&c["estimate"]));
     if c["exact"] == true || !(b.is_finite() && h.is_finite() && est.is_finite()) {

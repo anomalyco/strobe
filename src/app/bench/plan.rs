@@ -315,12 +315,11 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
                 None => (GUESS_BLOCK_MS, "a guess: no earlier run of this case here".to_string()),
             },
         };
-        let gpu_warm =
-            matches!(kind, "native" | "app" | "exe" | "webview") && s.launch.is_null() && s.gpu_cache.as_deref().or(target["gpuCache"].as_str()) != Some("cold") && !cfg!(target_os = "macos");
+        // Every timed series discards a first block per side (GPU caches, a launch's first launch, or
+        // the series' slow first blocks): two at least.
         let (warmup_blocks, warmup_ms) = match same.first() {
             Some(p) if p.warmup_blocks > 0.0 => (p.warmup_blocks, p.warmup_ms),
-            _ if gpu_warm || s.launch.is_object() => (2.0, 2.0 * block_ms),
-            _ => (0.0, 0.0),
+            _ => (2.0, 2.0 * block_ms),
         };
         // The expected effect: --effect, else what the latest run of this series measured, else none.
         let (effect, effect_source) = match args.num("effect").ok().flatten() {

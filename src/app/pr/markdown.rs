@@ -180,7 +180,8 @@ impl<'a> Doc<'a> {
     }
 
     /// One series in one line: the metric, the paired change (bold when decided), the medians labelled
-    /// as such (the paired change is the median of the pairs' own changes, not the medians' ratio),
+    /// as such (the paired change is the Hodges–Lehmann estimate of the pairs' own changes, not the
+    /// medians' ratio),
     /// and how sure.
     pub(super) fn sentence(&self, s: &Value) -> String {
         let c = &s["primary"];
@@ -543,14 +544,15 @@ impl<'a> Doc<'a> {
         // A sequential primary's range is read at the look that stopped it: its level holds at that
         // look alone, 95% over all of them (Pocock), as the implementations table says.
         let at = looks_note(self.r, &mains);
+        let change = super::extract::CHANGE_NOTE;
         let foot = if conf_main.is_empty() && conf_rest.is_empty() {
-            "Change: the median of the pairs' own changes.".to_string()
+            change.to_string()
         } else if conf_main.is_empty() {
-            format!("Likely range: {conf_rest} confidence for the metrics after the main one. Change: the median of the pairs' own changes.")
+            format!("Likely range: {conf_rest} confidence for the metrics after the main one. {change}")
         } else if !conf_rest.is_empty() && (conf_rest != conf_main || !at.is_empty()) {
-            format!("Likely range: {conf_main} confidence for the main metric{at}, {conf_rest} for the others. Change: the median of the pairs' own changes.")
+            format!("Likely range: {conf_main} confidence for the main metric{at}, {conf_rest} for the others. {change}")
         } else {
-            format!("Likely range: {conf_main} confidence{at}. Change: the median of the pairs' own changes.")
+            format!("Likely range: {conf_main} confidence{at}. {change}")
         };
         let foot = foot + &self.uneven_note(&odd);
         t + &format!("\n<sub>{foot}</sub>\n\n")

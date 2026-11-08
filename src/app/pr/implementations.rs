@@ -450,7 +450,7 @@ impl<'a> Doc<'a> {
             (false, true) => format!("Likely range: {conf_main} confidence for each main metric{at}. "),
             (false, false) => format!("Likely range: {conf_main} confidence for each main metric{at}, {conf_rest} for the others. "),
         };
-        foot += "Change: the median of the pairs' own changes; an increase of 2× or more as a factor.";
+        foot += &format!("{} An increase of 2× or more as a factor.", super::extract::CHANGE_NOTE);
         for (m, note) in self.care_notes(false) {
             foot += &format!(" {}: {}.", noun(&m), cell(note.trim_end_matches('.')));
         }

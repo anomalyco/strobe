@@ -1,17 +1,31 @@
 //! Formatting shared by modules below `app` (which re-exports it in `app::fmt`).
 
-/// Bytes in binary units: `512 B`, `12 KB`, `3.4 MB`, `1.25 GB` (`—` when non-finite).
+/// Bytes in binary units with three significant digits at most and at least the unit's whole number:
+/// `512 B`, `1.4 KB`, `12 KB`, `3.40 MB`, `34.5 MB`, `1.25 GB` (`—` when non-finite). Whole KB once
+/// printed 1.4 KB as `1 KB`.
 pub fn bytes(v: f64) -> String {
     if !v.is_finite() {
         return "—".into();
     }
     let a = v.abs();
+    let scaled = |div: f64, unit: &str| {
+        let x = v / div;
+        let digits = if x.abs() >= 100.0 {
+            0
+        } else if x.abs() >= 10.0 {
+            1
+        } else {
+            2
+        };
+        format!("{x:.digits$} {unit}")
+    };
     if a >= 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.2} GB", v / (1024.0 * 1024.0 * 1024.0))
+        scaled(1024.0 * 1024.0 * 1024.0, "GB")
     } else if a >= 1024.0 * 1024.0 {
-        format!("{:.1} MB", v / (1024.0 * 1024.0))
+        scaled(1024.0 * 1024.0, "MB")
     } else if a >= 1024.0 {
-        format!("{:.0} KB", v / 1024.0)
+        let x = v / 1024.0;
+        if x.abs() >= 10.0 { format!("{x:.0} KB") } else { format!("{x:.1} KB") }
     } else {
         format!("{v:.0} B")
     }
@@ -71,11 +85,16 @@ pub fn pct(r: f64) -> String {
 }
 
 /// An estimate and its interval as percentages whose precision follows the interval's width (SPEC §9.3
-/// "Digits"): all three at the same decimals, the width's first significant digit or the estimate's
-/// usual ones, whichever is finer; an end that would round to 0 keeps its own first digit, so a decided
-/// interval never prints an end of 0.0%. `+15.2% [+15.1% … +15.3%]`, `+0.03% [+0.02% … +0.04%]`.
+/// "Digits"): all three at the decimals that show the width's first significant digit (a 166-point
+/// interval in whole percent, a 0.8-point one in tenths); a number that would round to 0 there keeps
+/// its own first digit, so a decided interval never prints an end of 0.0%. Without an interval, the
+/// estimate's usual digits (`pct`). `+15.2% [+15.1% … +15.3%]`, `+0.03% [+0.02% … +0.04%]`,
+/// `+7% [−51% … +116%]`.
 pub fn pct_ci(est: f64, lo: f64, hi: f64) -> (String, String, String) {
-    let common = width_digits(lo * 100.0, hi * 100.0, 3).max(pct_default(est * 100.0));
+    if !(lo.is_finite() && hi.is_finite()) || hi == lo {
+        return (pct(est), pct(lo), pct(hi));
+    }
+    let common = width_digits(lo * 100.0, hi * 100.0, 3);
     let own = |x: f64| pct_with(x, common.max(if x == 0.0 { 0 } else { digits_for(x * 100.0, 0, 3) }));
     (own(est), own(lo), own(hi))
 }
