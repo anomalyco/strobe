@@ -259,14 +259,33 @@ pub(super) fn summary_row(rest: &[&Pair], m: &str, ratio: bool, frames: bool, fo
     row + "\n"
 }
 
+/// A range's confidence (`98.4%`), or nothing for a cell with no range: an exact count (its
+/// difference is the answer) or a refused metric.
 pub(super) fn conf(c: &Value) -> String {
     let x = f(&c["confidence"]);
-    if !x.is_finite() || x <= 0.0 {
+    if !x.is_finite() || x <= 0.0 || c["exact"] == true || kind(c) == VerdictKind::Refused {
         return String::new();
     }
     let p = x * 100.0;
     let t = if (p - p.round()).abs() < 0.05 { format!("{:.0}", p) } else { format!("{p:.1}") };
-    if x < 0.945 { format!("{t}% range") } else { format!("{t}%") }
+    format!("{t}%")
+}
+
+/// What the main metrics' ranges cover over the plan's looks: ` (checked at 8, 12, 18, 26, 40 pairs,
+/// 95% over all of them)` only when every main metric with a range reached the per-look level (a
+/// series that stopped before the first look has a [min, max] range of 50–97%, which no sequential
+/// claim covers); ` (one look at N pairs)` for `--pairs N`.
+pub(super) fn looks_note(r: &Value, mains: &[&Value]) -> String {
+    let looks: Vec<String> = r["plan"]["looks"].as_array().into_iter().flatten().map(|x| x.to_string()).collect();
+    let level = 1.0 - r["plan"]["alpha"].as_f64().unwrap_or(0.0158);
+    let ranged: Vec<&&Value> = mains.iter().filter(|c| !conf(c).is_empty()).collect();
+    let reached = !ranged.is_empty() && ranged.iter().all(|c| f(&c["confidence"]) + 1e-9 >= level);
+    match looks.len() {
+        0 => String::new(),
+        1 => format!(" (one look at {} pairs)", looks[0]),
+        _ if reached => format!(" (checked at {} pairs, 95% over all of them)", looks.join(", ")),
+        _ => String::new(),
+    }
 }
 
 // ---------- helpers over the result ----------
@@ -527,6 +546,11 @@ pub(super) fn noun(metric: &str) -> String {
     }
     if let Some(rest) = metric.strip_prefix("count.") {
         return capitalize(&format!("{rest} count per run"));
+    }
+    // A number the command printed or the app reported: its own name, never the family's description,
+    // which every such metric shares (two of them would read the same).
+    if let Some(rest) = metric.strip_prefix("metric.").or_else(|| metric.strip_prefix("app.")) {
+        return rest.to_string();
     }
     let about = model::metric(metric).map(|m| m.about).unwrap_or(metric);
     // The catalog says which targets a metric is for (`native apps: …`); a name does not.

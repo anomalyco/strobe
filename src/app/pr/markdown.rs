@@ -500,6 +500,7 @@ impl<'a> Doc<'a> {
     pub(super) fn metrics(&self) -> String {
         let mut t = String::from("#### Metrics\n\n| Metric | Before | This PR | Change | Likely range | Verdict |\n|:---|---:|---:|---:|---:|:---|\n");
         let (mut conf_main, mut conf_rest) = (String::new(), String::new());
+        let mut mains: Vec<&Value> = Vec::new();
         let mut odd: Vec<(&Value, &Value)> = Vec::new();
         for s in &self.series {
             if s["not_run"] == true || s["kind"] == "leak" {
@@ -529,19 +530,27 @@ impl<'a> Doc<'a> {
                 let name = if i == 0 { format!("{} <sub>main</sub>", cell(&noun(m))) } else { cell(&noun(m)) };
                 let (chg, rng) = change_cells(c, o);
                 t += &format!("{}| {name} | {} | {} | {chg} | {rng} | {} |\n", self.series_cell(s, i), nb(&value(c, "base")), nb(&value(c, "head")), verdict_text(c, o, s, self.aa));
-                if i == 0 && conf_main.is_empty() {
-                    conf_main = conf(c);
-                } else if i == 1 && conf_rest.is_empty() {
+                if i == 0 {
+                    mains.push(c);
+                    if conf_main.is_empty() {
+                        conf_main = conf(c);
+                    }
+                } else if conf_rest.is_empty() {
                     conf_rest = conf(c);
                 }
             }
         }
-        let foot = if conf_main.is_empty() {
+        // A sequential primary's range is read at the look that stopped it: its level holds at that
+        // look alone, 95% over all of them (Pocock), as the implementations table says.
+        let at = looks_note(self.r, &mains);
+        let foot = if conf_main.is_empty() && conf_rest.is_empty() {
             "Change: the median of the pairs' own changes.".to_string()
-        } else if !conf_rest.is_empty() && conf_rest != conf_main {
-            format!("Likely range: {conf_main} confidence for the main metric, {conf_rest} for the others. Change: the median of the pairs' own changes.")
+        } else if conf_main.is_empty() {
+            format!("Likely range: {conf_rest} confidence for the metrics after the main one. Change: the median of the pairs' own changes.")
+        } else if !conf_rest.is_empty() && (conf_rest != conf_main || !at.is_empty()) {
+            format!("Likely range: {conf_main} confidence for the main metric{at}, {conf_rest} for the others. Change: the median of the pairs' own changes.")
         } else {
-            format!("Likely range: {conf_main} confidence. Change: the median of the pairs' own changes.")
+            format!("Likely range: {conf_main} confidence{at}. Change: the median of the pairs' own changes.")
         };
         let foot = foot + &self.uneven_note(&odd);
         t + &format!("\n<sub>{foot}</sub>\n\n")

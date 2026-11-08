@@ -410,6 +410,7 @@ impl<'a> Doc<'a> {
         let (bn, hn) = side_names(self.r);
         let mut t = format!("#### Metrics\n\n| Journey / metric | {} | {} | Change | Likely range | Verdict |\n|:---|---:|---:|---:|---:|:---|\n", cell(&bn), cell(&hn));
         let (mut conf_main, mut conf_rest) = (String::new(), String::new());
+        let mut mains: Vec<&Value> = Vec::new();
         for (si, s) in self.series.iter().enumerate() {
             if family::not_compared(s) || s["not_run"] == true {
                 let why = if family::not_compared(s) { format!("not compared <sub>{}</sub>", gap_text(self, s)) } else { "not run".into() };
@@ -431,22 +432,21 @@ impl<'a> Doc<'a> {
                     verdict += " <sub>not after Holm</sub>";
                 }
                 t += &format!("{}| {name} | {} | {} | {chg} | {rng} | {verdict} |\n", self.series_cell(s, i), nb(&value(c, "base")), nb(&value(c, "head")));
-                if i == 0 && conf_main.is_empty() {
-                    conf_main = conf(c);
-                } else if i > 0 && conf_rest.is_empty() {
+                if i == 0 {
+                    mains.push(c);
+                    if conf_main.is_empty() {
+                        conf_main = conf(c);
+                    }
+                } else if conf_rest.is_empty() {
                     conf_rest = conf(c);
                 }
             }
         }
         // How sure each range is, from the comparisons themselves and the plan's looks.
-        let looks: Vec<String> = self.r["plan"]["looks"].as_array().into_iter().flatten().map(|x| x.to_string()).collect();
-        let at = match looks.len() {
-            0 => String::new(),
-            1 => format!(" (one look at {} pairs)", looks[0]),
-            _ => format!(" (checked at {} pairs, 95% over all of them)", looks.join(", ")),
-        };
+        let at = looks_note(self.r, &mains);
         let mut foot = match (conf_main.is_empty(), conf_rest.is_empty()) {
-            (true, _) => String::new(),
+            (true, true) => String::new(),
+            (true, false) => format!("Likely range: {conf_rest} confidence for the metrics after the main ones. "),
             (false, true) => format!("Likely range: {conf_main} confidence for each main metric{at}. "),
             (false, false) => format!("Likely range: {conf_main} confidence for each main metric{at}, {conf_rest} for the others. "),
         };

@@ -2003,7 +2003,11 @@ flowchart LR
   `--pairs N` below 6 is a smoke run (`FewPairs`).
 - **Gate**: secondary metrics get verdict words only after the primary has a verdict
   (`faster`, `slower` or `same`; `no worse` or `worse` in non-inferiority), with Holm correction
-  across secondaries. Otherwise they show intervals without verdicts.
+  across secondaries. Otherwise they show intervals without verdicts. The primary declared among a
+  case's metrics too (`--primary metric.x --metrics metric.x,…`) stays the primary alone: a case's
+  metrics are read once each and without the primary, so it is never also a secondary (printed twice,
+  at 95% and at its look's level, and one more Holm test), and `plan`'s Holm pairs, `--check`'s
+  declared list and the bench count the same metrics (`--metrics a,a` is `a`).
 - **Non-inferiority** (`--noworse 2%`, or a case's `noworse`): the question "is head at most X%
   worse than base?", which refactors and dependency bumps ask, instead of "did it change?". Let θ
   be the true per-pair difference oriented so that positive is worse, and δ the margin in the same
@@ -4122,7 +4126,13 @@ pull request body, pasted verbatim. Few words, two drawers:
 - **Details** (one drawer, plain `####` headings, one table per kind across series, each series
   opening its rows with a row of its name rather than a column): Metrics (every tested metric:
   before, this PR, change, likely range, verdict in a few words: the metric's word, same,
-  inconclusive, skipped; a refused row names its reason in a few words, `skipped no Screen
+  inconclusive, skipped; its footer gives each range's confidence (none for an exact count or a
+  refused row), and main metrics checked at planned looks say so when every one of their ranges
+  reached the per-look level: `98.4% confidence for the main metric (checked at 8, 12, 18, 26, 40
+  pairs, 95% over all of them)`, since a range read at the look that stopped the series covers 95%
+  over the looks, not its per-look level (simulated A/A with spiky noise: 95.7%); a series stopped
+  before the first look has a [min, max] range of 50–97% and no such claim. A `metric.<name>` or
+  `app.<name>` is named by its own name as written (`loop_ms`), never the family's description; a refused row names its reason in a few words, `skipped no Screen
   Recording`, and the sentence behind it is said once in How it was measured: `Frame and latency
   metrics: not measured (strobe lacks Screen Recording on this Mac)`), Pairs (each pair with its order, then before → this PR for the main metric
   and the longest frame gap, the change, other apps' CPU as `22% → **117%**`; narrow enough for a

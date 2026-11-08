@@ -265,6 +265,11 @@ fn short(m: &str) -> (String, Option<(&'static str, &'static str)>) {
     if let Some(rest) = m.strip_prefix("count.") {
         return (format!("{} count", rest.replace(['-', '_'], " ")), Some(("lower", "higher")));
     }
+    // A number the command printed or the app reported: its own name, not the description every such
+    // metric shares.
+    if let Some(rest) = raw_name(m) {
+        return (rest.to_string(), None);
+    }
     let about = model::metric(m).map(|d| d.about).unwrap_or(m);
     let first = about.split([',', '(', ':']).next().unwrap_or(about).trim().trim_end_matches(" per run");
     (if first.is_empty() { m.to_string() } else { first.to_string() }, None)
@@ -414,6 +419,11 @@ fn title(s: &Value, all: &[&Value]) -> String {
     t
 }
 
+/// The name after `metric.` or `app.`: one the command or the app chose, shown as written.
+fn raw_name(m: &str) -> Option<&str> {
+    m.strip_prefix("metric.").or_else(|| m.strip_prefix("app."))
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|x| x.to_uppercase().chain(c).collect()).unwrap_or_default()
@@ -544,7 +554,12 @@ fn build(r: &Value) -> Card {
 fn calm(series: &[&Value], aa: bool) -> (String, Option<Box<Tile>>) {
     let outs: Vec<(Out, &Value)> = series.iter().map(|s| (primary_out(s, aa), *s)).collect();
     let find = |want: Out| outs.iter().find(|(o, _)| *o == want).map(|(_, s)| *s);
-    let noun = |s: &Value| capitalize(&short(metric(&s["primary"])).0);
+    // A name the command or app chose (`loop_ms`) is printed as it was written, never capitalised.
+    let noun = |s: &Value| {
+        let m = metric(&s["primary"]);
+        let n = short(m).0;
+        if raw_name(m).is_some() { n } else { capitalize(&n) }
+    };
     let with_tile = |s: &Value| {
         let t = tile(s, &s["primary"], String::new());
         if t.dots.is_empty() { None } else { Some(Box::new(t)) }

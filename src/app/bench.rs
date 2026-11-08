@@ -2557,6 +2557,7 @@ fn leak_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Val
 /// time: once runs get shorter or longer (`rate_context`), its move says nothing about the CPU they spent
 /// (a run 84% shorter for 80% less CPU reads +28%), so it is then context.
 fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> {
+    // `s.metrics` holds each declared metric once, never the primary (`case_metrics`).
     let mut names: Vec<String> = s.metrics.clone();
     // A metric with a no-worse margin is declared: it is tested.
     for m in s.noworse.keys() {
@@ -7565,7 +7566,7 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
                     params: p.clone(),
                     primary: primary.clone(),
                     noworse: noworse.clone(),
-                    metrics: c["metrics"].as_array().map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+                    metrics: case_metrics(&c["metrics"], &primary),
                     reset: c["reset"].as_bool().unwrap_or(false),
                     reset_check: c["resetCheck"] != false,
                     reset_pixels: if c["resetPixels"].is_null() { targets[target.as_str()]["resetPixels"].clone() } else { c["resetPixels"].clone() },
@@ -7578,6 +7579,18 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
         }
     }
     Ok(out)
+}
+
+/// A case's declared metrics, each once and without its primary: the primary is tested alone at its
+/// looks, never again as a secondary (`metrics: ["x", "x"]` or `--primary x` with `x` listed too).
+fn case_metrics(list: &Value, primary: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in list.as_array().into_iter().flatten().filter_map(Value::as_str) {
+        if m != primary && !out.iter().any(|o| o == m) {
+            out.push(m.to_string());
+        }
+    }
+    out
 }
 
 /// Non-inferiority margins as fractions by metric, from `"2%"` or `2` (the primary's), or
