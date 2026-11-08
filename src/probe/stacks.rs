@@ -246,10 +246,26 @@ fn fill_from_processes(deep: &mut Deep) {
         }
     }
     let sampled: std::collections::BTreeSet<u32> = deep.samples.iter().map(|s| s.1).collect();
-    for pid in sampled {
+    for &pid in &sampled {
         if !deep.modules.iter().any(|m| m.pid == pid) {
             let found = process_modules(pid);
             deep.modules.extend(found);
+        }
+        // The process's executable while it still runs (one that ended is named from its modules).
+        if !deep.processes.contains_key(&pid)
+            && let Some(n) = crate::host::exe_of(pid).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string()))
+        {
+            deep.processes.insert(pid, n);
+        }
+    }
+    // A process's main thread that names itself nothing: `(main)`, when the process still runs and its
+    // first thread was created with it (within 5 ms). Never another thread in its place.
+    let pids: Vec<u32> = sampled.iter().copied().collect();
+    let (now, _) = crate::host::threads(&pids);
+    for &pid in &pids {
+        let Some(created) = crate::host::start_time(pid) else { continue };
+        if let Some(first) = now.iter().find(|t| t.pid == pid).filter(|t| t.born.abs_diff(created) <= 50_000) {
+            deep.threads.entry(first.tid).or_insert_with(|| "(main)".into());
         }
     }
 }
@@ -298,6 +314,10 @@ pub struct Deep {
     pub samples: Vec<(u64, u32, u32, u16, u32)>,
     pub threads: std::collections::BTreeMap<u32, String>,
     pub pids: Vec<u32>,
+    /// Each sampled process's executable (file name), read while it ran; a process the capture did
+    /// not name is named from its modules or its main thread when read (`symbol::process_name`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub processes: std::collections::BTreeMap<u32, String>,
     pub events_lost: u64,
     /// The samples carry no time (macOS `sample`): each is stamped with the capture's start, and
     /// they cover the whole capture.
@@ -441,6 +461,10 @@ pub struct SuspendStats {
     pub capped: u64,
     /// Threads that could not be opened for sampling (another user's, protected, 32-bit).
     pub unopened: usize,
+    /// The CPU the set's threads used over the capture as the sampler saw them (ms): what its
+    /// samples cover a share of (`query hotspots` coverage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

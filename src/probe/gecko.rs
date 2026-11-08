@@ -200,11 +200,28 @@ fn classify(location: &str) -> Kind {
         _ => (inner, -1, -1),
     };
     let scheme = url.split_once(':').map(|s| s.0).unwrap_or("");
+    // strobe's page probe (a module whose address ends in `#strobe-driver.js`, `driver::install`).
+    let probe = |u: &str| u.strip_suffix(crate::driver::SOURCE_URL).is_some_and(|u| u.ends_with('#'));
+    // Code compiled from a string (`page.html line 1 > eval`, `> Function`): named by what evaluated it,
+    // never as a line of the file that ran the eval. The probe's evaluations are the probe's.
+    if let Some((parent, _)) = url.split_once(" line ").filter(|(_, r)| r.contains("> eval") || r.contains("> Function")) {
+        let name = if name.is_empty() { "(anonymous)" } else { name };
+        return if probe(parent) {
+            Kind::Js { name: name.to_string(), url: crate::driver::SOURCE_URL.to_string(), line: line.max(0), column: column.max(0) }
+        } else {
+            Kind::Label(format!("{name} (evaluated script)"))
+        };
+    }
     // A label may hold a URL (`Reflow http://host/`): a script's URL has no spaces, and without the
     // source index a frame needs its line and column too.
     let address = !url.contains(char::is_whitespace) && (url.contains("://") || url == "self-hosted");
     let js = address && (sourced || line >= 0);
     if !js {
+        // A label about the probe's own code (its timers' `setTimeout handler … (…#strobe-driver.js:12)`):
+        // the probe's work, kept apart from the page's as its frames are.
+        if location.contains(&format!("#{}", crate::driver::SOURCE_URL)) {
+            return Kind::Js { name: name.to_string(), url: crate::driver::SOURCE_URL.to_string(), line: 0, column: 0 };
+        }
         return Kind::Label(without_origins(location));
     }
     let page = matches!(scheme, "http" | "https" | "file" | "blob" | "data") || (url.contains("://") && !matches!(scheme, "chrome" | "resource" | "moz-src" | "moz-extension" | "about" | "jar"));
@@ -219,8 +236,7 @@ fn classify(location: &str) -> Kind {
     }
     // strobe's page probe, which Firefox loads as a module named `…#strobe-driver.js` (`driver::install`):
     // named as Chromium names it, so every view keeps it apart from the page's own scripts.
-    let probe = url.strip_suffix(crate::driver::SOURCE_URL).is_some_and(|u| u.ends_with('#'));
-    Kind::Js { name: name.to_string(), url: if probe { crate::driver::SOURCE_URL.to_string() } else { url.to_string() }, line, column }
+    Kind::Js { name: name.to_string(), url: if probe(url) { crate::driver::SOURCE_URL.to_string() } else { url.to_string() }, line, column }
 }
 
 /// A label with every URL in it cut to its path (`Reflow http://127.0.0.1:51234/app?x` → `Reflow

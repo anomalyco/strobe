@@ -45,8 +45,17 @@ pub struct Native {
     pub samples: u64,
     /// Samples whose innermost frame has a function name.
     pub resolved: u64,
+    /// Frames of the samples (each sample's every address, counted per sample), and those with a
+    /// function name: a leaf in a named system library can resolve while every caller in the app's
+    /// own unsymbolized binary does not.
+    pub frames: u64,
+    pub frames_resolved: u64,
     /// Modules with samples and no symbols (no PDB found), with their sample counts.
     pub unsymbolized: BTreeMap<String, u64>,
+    /// Modules with unnamed frames anywhere in a stack, by the samples that have one.
+    pub unsymbolized_any: BTreeMap<String, u64>,
+    /// Samples per process (pid → its executable, samples).
+    pub processes: BTreeMap<u32, (String, u64)>,
     /// Samples the sampler left out of the stacks, by why (macOS: threads waiting or in the kernel).
     pub dropped: BTreeMap<String, u64>,
     /// The samples carry no time and cover the whole capture (macOS).
@@ -59,35 +68,95 @@ type Named = (u32, u64, String, String, u32);
 /// One resolved address: its frames innermost first (inline frames expanded).
 pub type Resolved = Vec<(String, String, u32, String, bool)>;
 
+/// Which native samples a view reads.
+#[derive(Clone, Copy, Default)]
+pub struct Select<'a> {
+    /// Threads whose name contains it, or whose id it is; `main` also each process's main thread
+    /// (Linux: the thread whose id is the process's).
+    pub thread: Option<&'a str>,
+    /// The process with this id, or those whose executable's name contains it (any case).
+    pub process: Option<&'a str>,
+    /// Samples inside one of these host-clock spans (a phase).
+    pub spans: Option<&'a [(u64, u64)]>,
+}
+
+impl Select<'_> {
+    /// Whether a process (its id and executable) is one this selects.
+    pub fn process_matches(&self, pid: u32, exe: &str) -> bool {
+        self.process.is_none_or(|p| p == pid.to_string() || (!p.is_empty() && exe.to_lowercase().contains(&p.to_lowercase())))
+    }
+}
+
+/// A sampled process's executable: as the capture named it, else its own `.exe` module (Windows),
+/// else its main thread's name (Linux names a process's first thread after it, its id the pid).
+pub fn process_name(deep: &Deep, pid: u32) -> String {
+    if let Some(n) = deep.processes.get(&pid) {
+        return n.clone();
+    }
+    let exe = deep.modules.iter().filter(|m| m.pid == pid).map(|m| m.path.rsplit(['\\', '/']).next().unwrap_or(&m.path)).find(|n| n.to_ascii_lowercase().ends_with(".exe"));
+    exe.map(str::to_string).or_else(|| deep.threads.get(&pid).cloned()).unwrap_or_else(|| "?".into())
+}
+
 /// Symbolizes a recording's native samples (cached beside them in `deep-symbols.json.gz`).
 /// `thread`: keep only threads whose name contains it (or whose id it is); `spans`: only samples
 /// inside one of these host-clock spans (a phase).
 pub fn native(dir: &Path, thread: Option<&str>, spans: Option<&[(u64, u64)]>) -> Result<Option<Native>> {
+    native_of(dir, &Select { thread, spans, process: None })
+}
+
+/// `native` of the samples `select` picks.
+pub fn native_of(dir: &Path, select: &Select) -> Result<Option<Native>> {
     let Some(deep) = read_deep(dir)? else { return Ok(None) };
-    if deep.untimed && spans.is_some() {
+    if deep.untimed && select.spans.is_some() {
         return Err(Error::usage("these native samples carry no times (macOS sample): a phase cannot select them; drop --phase"));
     }
     let resolved = resolve_all(dir, &deep)?;
+    let names: HashMap<u32, String> = deep.samples.iter().map(|s| s.1).collect::<std::collections::BTreeSet<u32>>().into_iter().map(|p| (p, process_name(&deep, p))).collect();
     let mut by_stack: HashMap<(u32, u32), u64> = HashMap::new();
     for s in &deep.samples {
-        if spans.is_some_and(|sp| !sp.iter().any(|(a, b)| s.0 >= *a && s.0 <= *b)) {
+        if select.spans.is_some_and(|sp| !sp.iter().any(|(a, b)| s.0 >= *a && s.0 <= *b)) {
             continue;
         }
-        if let Some(t) = thread {
+        if let Some(t) = select.thread {
             let name = deep.threads.get(&s.2).map(String::as_str).unwrap_or("");
-            if !name.contains(t) && t != s.2.to_string() {
+            // `main` is also a process's main thread where its id is the process's (Linux), which
+            // the OS names after the process.
+            if !name.contains(t) && t != s.2.to_string() && !(t == "main" && s.2 == s.1) {
                 continue;
             }
         }
+        if !select.process_matches(s.1, names.get(&s.1).map(String::as_str).unwrap_or("")) {
+            continue;
+        }
         *by_stack.entry((s.4, s.1)).or_default() += 1;
     }
-    let mut out = Native { weights: Vec::new(), interval_us: deep.interval_us, samples: 0, resolved: 0, unsymbolized: BTreeMap::new(), dropped: deep.dropped.clone(), untimed: deep.untimed };
+    let mut out = Native {
+        weights: Vec::new(),
+        interval_us: deep.interval_us,
+        samples: 0,
+        resolved: 0,
+        frames: 0,
+        frames_resolved: 0,
+        unsymbolized: BTreeMap::new(),
+        unsymbolized_any: BTreeMap::new(),
+        processes: BTreeMap::new(),
+        dropped: deep.dropped.clone(),
+        untimed: deep.untimed,
+    };
     for ((stack, pid), n) in by_stack {
         let Some(addrs) = deep.stacks.get(stack as usize) else { continue };
         let mut frames: Vec<Frame> = Vec::new();
+        let mut unnamed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let (mut all, mut named) = (0u64, 0u64);
         for (i, &a) in addrs.iter().enumerate() {
             let key = addr_key(pid, a, i == 0);
             let Some(r) = resolved.get(&key) else { continue };
+            all += 1;
+            if r.iter().any(|f| f.4) {
+                named += 1;
+            } else if let Some(f) = r.first() {
+                unnamed.insert(f.3.as_str());
+            }
             for (name, file, line, package, ok) in r {
                 if i == 0 && frames.is_empty() {
                     if *ok {
@@ -108,6 +177,12 @@ pub fn native(dir: &Path, thread: Option<&str>, spans: Option<&[(u64, u64)]>) ->
         }
         frames.reverse();
         out.samples += n;
+        out.frames += all * n;
+        out.frames_resolved += named * n;
+        for m in unnamed {
+            *out.unsymbolized_any.entry(m.to_string()).or_default() += n;
+        }
+        out.processes.entry(pid).or_insert_with(|| (names.get(&pid).cloned().unwrap_or_else(|| "?".into()), 0)).1 += n;
         out.weights.push((frames, n as f64 * deep.interval_us, n));
     }
     Ok(Some(out))
@@ -318,10 +393,25 @@ pub fn module_package(path: &str) -> String {
 
 /// Facts about a recording's native samples for its meta and the views.
 pub fn summary(n: &Native) -> Value {
-    let top: Vec<Value> = {
-        let mut v: Vec<(&String, &u64)> = n.unsymbolized.iter().collect();
+    let ranked = |m: &BTreeMap<String, u64>| -> Vec<Value> {
+        let mut v: Vec<(&String, &u64)> = m.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
         v.into_iter().take(10).map(|(m, c)| json!({ "module": m, "samples": c })).collect()
     };
-    json!({ "samples": n.samples, "resolved_samples": n.resolved, "resolved_share": if n.samples > 0 { n.resolved as f64 / n.samples as f64 } else { 0.0 }, "unsymbolized": top, "dropped": n.dropped, "untimed": n.untimed })
+    let mut procs: Vec<(&u32, &(String, u64))> = n.processes.iter().collect();
+    procs.sort_by(|a, b| b.1.1.cmp(&a.1.1).then(a.0.cmp(b.0)));
+    json!({
+        "samples": n.samples, "resolved_samples": n.resolved, "resolved_share": if n.samples > 0 { n.resolved as f64 / n.samples as f64 } else { 0.0 },
+        "frames": n.frames, "resolved_frames": n.frames_resolved, "resolved_frame_share": if n.frames > 0 { n.frames_resolved as f64 / n.frames as f64 } else { 0.0 },
+        "unsymbolized": ranked(&n.unsymbolized), "unsymbolized_any_frame": ranked(&n.unsymbolized_any),
+        // Untimed samples (macOS `sample`) are counts: no ms.
+        "processes": procs.into_iter().map(|(pid, (exe, k))| {
+            let mut p = json!({ "pid": pid, "exe": exe, "samples": k });
+            if !n.untimed {
+                p["sampled_ms"] = json!(*k as f64 * n.interval_us / 1e3);
+            }
+            p
+        }).collect::<Vec<_>>(),
+        "dropped": n.dropped, "untimed": n.untimed,
+    })
 }

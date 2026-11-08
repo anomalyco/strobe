@@ -8694,6 +8694,56 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   `run.duration` was refused; on adais with `--pin none`, 42.5% and 41.3% the same way, its fix "drop
   --pin none". The terminal reader's and the OS present consumer's 2% bars refuse only in timed blocks
   too: a `--check` over them keeps the stamps and frames and warns.
+- **Query accuracy: native trees, totals, cached summaries (2026-11-09)**: native `hotspots` of a
+  capture over several processes (`record pid:` of a tree) says `N samples of P processes` and adds a
+  `by process` split (pid, executable, samples, sampled ms = samples × interval, share of the
+  samples); `--pid <pid|exe>` reads one process (its id, or a part of its executable's name), beside
+  `--thread` and `--phase` (and in `a..b hotspots`). Untimed samples (macOS `sample`'s snapshots)
+  are counts: their rows and processes give samples, never samples × interval as ms. The
+  header gives two resolved shares, of leaf frames and of all frames: a leaf in a named system library
+  (`NtCreateFile`) resolved while every caller in an unsymbolized binary did not: the leaf share alone
+  read 98.9% for a GNU-built strobe whose own frames had no symbols. A rustc-built known-answer
+  spawner reads `3.3% of leaf frames, 39.3% of all frames`. `Unresolved` warns on either share
+  under 95%. Names are read while processes and threads live, so a child that exited before the
+  capture ended keeps both (`Deep::processes`, a new field: the deep helper's protocol hash changes
+  with it, so `strobe up` installs the new helper): strobe's own Windows sampler (`probe::suspend`)
+  names each thread when it opens it and over its first second (`GetThreadDescription` on its own
+  handle) and each process by its image; perf names threads (`comm`) and processes (`/proc/<pid>/exe`)
+  as it follows them, `sample` its processes as it starts, and the helper's capture names the
+  processes still running at its end. A process's main thread is bound once, when strobe first sees
+  the process: its first thread, created within 5 ms of it, and `(main)` when it names itself
+  nothing; a surviving worker never takes its place. `--thread main` also matches a thread whose id is
+  its process's (Linux). A launched Rust program names its main thread `main`. Strobe's own sampler
+  opens every thread at its first look (the capture's first 100 ms were not sampled), re-reads the set
+  from one snapshot every 100 ms and every 20 ms for a second after its processes change, and counts
+  the CPU its threads used over the capture (each followed thread's cycles from its opening, or from 0
+  for one created during the capture; the snapshots' times of threads it could not open): native
+  hotspots of all samples give `cpu_coverage` (JSON) against the tree's cycles around a `record pid:`
+  capture when no process of it ended, else against that count, and warn `Coverage` under 80%. A
+  sample's credit still starts at the thread's opening. `hotspots --sort self|total` (self by default); sorted by self, callers whose time is in what
+  they called and that missed the rows (5% of the total or more, up to 8) follow them as `callers by
+  total time` (`callers` in JSON): the known-answer hot page (hotA 3 × 30 ms, hotB 3 × 10 ms per run)
+  shows hotA 448 ms in its rows and hotB 150 ms among the callers. `query threads` of a `record`
+  (no runs) heads its CPU column `cpu ms` (over the recording), and `by whose threads` adds `unknown
+  (?)`: `known tree 2 5000` on vps read `app 0 · driver 0 · os 0 · unknown (?) 270.8`, the total
+  `271/s`. `query <rec> summary` keeps its per-run style/layout/paint table in `phases-cache.json`
+  (keyed by the build id, the source file's size and time, the run marks' token, `runs` and the
+  measured runs; another build's rows are dropped; a trace that fails to load is not kept): a 950 MB
+  recording's summary took 12-17 s, then 21 ms, its text and JSON byte-identical to 0.22.0's. `--case
+  <case|label|seq>` narrows a `--batch` recording to one case's runs, values and refusals in summary,
+  frames, threads (a trace's), gpu, layout, style, gc and actions (the launch's prepare and setup go
+  with its first case, its teardown with none), says the duration is the launch's, names the other
+  runs in the trace the launch's other cases and warmup, and refuses other views. `query frames` adds `by
+  process`: a trace's vsyncs presented and reported per process (the page's renderers marked), a
+  native recording's frames on screen per pid. `query sql` and the views on it print trace_processor's
+  six-decimal floats without their trailing zeros (`71.000000` → `71`, `1507.640000` → `1507.64`,
+  `-0.000000` → `0`; no digit dropped; a string such as `0.20` is left alone). `query actions` prints
+  each input's hit (role, name, point, scrolled) on its own line and counts its samples by edge with
+  what each means. `query <exp> summary` replaces the text's rerun ledger with the ledger as of now,
+  as `report` does, marked `(as of now)`, in the text and the JSON's `text` alike (86 of 300 adais
+  experiments changed, as `61st of 140`). Firefox profiles: a frame of code compiled from a string (`page.html line 1 > eval`,
+  `> Function`) is `(evaluated script)`, the page probe's own evaluations and its timers' labels are
+  the probe's (`(strobe driver)`).
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

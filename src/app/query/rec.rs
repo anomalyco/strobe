@@ -93,9 +93,9 @@ pub(super) struct NativeStacks {
 }
 
 impl NativeStacks {
-    /// A recording's native samples, all of them, or one thread's or one phase's (uncached).
-    pub(super) fn read(dir: &Path, thread: Option<&str>, spans: Option<&[(u64, u64)]>) -> Result<Option<NativeStacks>> {
-        Ok(crate::symbol::native(dir, thread, spans)?.map(|n| {
+    /// A recording's native samples, all of them, or those `select` picks (uncached).
+    pub(super) fn read(dir: &Path, select: &crate::symbol::Select) -> Result<Option<NativeStacks>> {
+        Ok(crate::symbol::native_of(dir, select)?.map(|n| {
             let facts = crate::symbol::summary(&n);
             NativeStacks { interval_us: n.interval_us, samples: n.samples, resolved: n.resolved, untimed: n.untimed, facts, stacks: Stacks::from_native(n.weights) }
         }))
@@ -149,7 +149,7 @@ impl Rec {
     }
 
     pub(super) fn native(&self) -> Result<Option<&NativeStacks>> {
-        cached(self.native.get_or_init(|| NativeStacks::read(&self.dir, None, None))).map(Option::as_ref)
+        cached(self.native.get_or_init(|| NativeStacks::read(&self.dir, &crate::symbol::Select::default()))).map(Option::as_ref)
     }
 
     pub fn snapshot(&self) -> Result<&crate::heapsnap::Snapshot> {

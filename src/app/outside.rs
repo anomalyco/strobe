@@ -131,10 +131,19 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let locked = |awake: &host::Awake| awake.locks() > 0 || host::session_locked();
     if deep {
         let waits = args.get("probes") == Some("waits");
+        // The tree's CPU around the capture, for what share of it the samples cover (unknown when a
+        // process of it ended inside: a pid: target has no job or cgroup that keeps its CPU).
+        let set = || super::record::read_set(&host::process_set(root, None), None);
+        let (c0, w0) = (set(), host::now_ns());
         let cap = StackCapture::start_with(crate::probe::stacks::Targets::new(root, None), args.get("probes") == Some("stacks-unprivileged"), waits)?;
         progress(format!("sampling native stacks of {name} ({root}) for {}", fmt::ms_duration(for_ms)));
         std::thread::sleep(Duration::from_millis(for_ms));
         let d = cap.stop()?;
+        let (c1, w1) = (set(), host::now_ns());
+        let set_cpu_ms = match (super::record::set_used(&c0, &c1), c0.2, c1.2) {
+            (Some(used), Some(a), Some(b)) if b > a => Some(used as f64 / (b - a) as f64 * (w1 - w0) as f64 / 1e6),
+            _ => None,
+        };
         // Waits asked for and not taken refuse the recording, saying why (SPEC §11.1).
         if waits && d.waits.is_none() {
             return Err(d.waits_refused.clone().unwrap_or_else(|| crate::probe::stacks::no_waits("no waits were taken", "try again")).into());
@@ -143,14 +152,14 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         progress("symbolizing (PDBs: local, then symbol servers)");
         let native = crate::symbol::native(&dir, None, None)?;
         let facts = native.as_ref().map(crate::symbol::summary).unwrap_or(Value::Null);
-        let top = super::query::native_hotspots(&dir, "function", 8, None, None).map(|o| o.text).unwrap_or_default();
         let meta = json!({
             "id": id, "kind": "record", "target": target, "pid": root, "process": name, "probes": "deep", "token": "", "duration_ms": for_ms,
             "env": host::env(), "values": {}, "native": facts, "samples": d.samples.len(), "events_lost": d.events_lost, "pids": d.pids,
             "timing": "perturbed", "created": super::record::now_iso(), "valid": true, "suspend": d.suspend,
-            "waits": d.waits.as_ref().map(|w| w.waits.len()),
+            "waits": d.waits.as_ref().map(|w| w.waits.len()), "set_cpu_ms": set_cpu_ms,
         });
         store::write_json(&dir.join("meta.json"), &meta)?;
+        let top = super::query::native_hotspots(&dir, "function", 8, None, None).map(|o| o.text).unwrap_or_default();
         draft.keep();
         let text = format!(
             "{id} · {target} ({name}) · {} · deep{}\n{top}next     strobe query {id} hotspots --by package · strobe query {id} hotspots --thread <name>{} · strobe report recording {id} --open\n",

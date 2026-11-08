@@ -1067,6 +1067,25 @@ pub fn process_set_pids(root: u32, home: Option<&Path>) -> Vec<u32> {
     }
 }
 
+/// `process_set_pids` (each with its creation time) and every thread of them, from one system
+/// snapshot (Windows): strobe's own stack sampler re-reads both every refresh.
+#[cfg(windows)]
+pub fn process_set_threads(root: u32, home: Option<&Path>) -> (Vec<(u32, u64)>, Vec<ThreadInfo>) {
+    let roots = |list: &[(u32, u32, u64)]| -> Vec<u32> {
+        let more = match home {
+            Some(h) => spawn::pids_in(list, h).into_iter().chain(spawn::group_pids(h)).collect(),
+            None => Vec::new(),
+        };
+        std::iter::once(root).chain(more).filter(|&r| r != 0).collect()
+    };
+    let me = std::process::id();
+    let (mut set, mut threads) = win::tree_threads(&roots);
+    set.retain(|p| p.0 != me || root == me);
+    threads.retain(|t| t.pid != me || root == me);
+    set.sort_unstable();
+    (set, threads)
+}
+
 /// One group of logical CPUs that shares an L3 cache (a CCD on Ryzen).
 #[derive(Clone, Debug, Serialize)]
 pub struct CacheGroup {

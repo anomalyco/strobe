@@ -1359,6 +1359,32 @@ fn each_process(mut f: impl FnMut(&SysProcRaw, &[SysThreadRaw])) -> bool {
     })
 }
 
+/// The trees of the roots `roots` picks and their threads, from one system snapshot: each process
+/// (pid, creation time) and every thread of them.
+pub fn tree_threads(roots: &super::PickRoots) -> (Vec<(u32, u64)>, Vec<super::ThreadInfo>) {
+    let mut all: Vec<SysProc> = Vec::new();
+    let mut by_pid: HashMap<u32, Vec<super::ThreadInfo>> = HashMap::new();
+    each_process(|p, threads| {
+        let pid = p.pid as u32;
+        all.push(SysProc { info: super::ProcInfo { pid, parent: p.parent as u32, ..Default::default() }, create: p.create });
+        let list: Vec<super::ThreadInfo> = threads
+            .iter()
+            .map(|t| super::ThreadInfo {
+                pid,
+                tid: t.thread as u32,
+                born: t.create.max(0) as u64,
+                switches: Some(u64::from(t.switches)),
+                cpu_ns: (t.kernel.max(0) as u64 + t.user.max(0) as u64) * 100,
+            })
+            .collect();
+        by_pid.insert(pid, list);
+    });
+    let roots = roots(&all.iter().map(|p| (p.info.pid, p.info.parent, p.create as u64)).collect::<Vec<_>>());
+    let set: Vec<(u32, u64)> = tree_of(&all, &roots).into_iter().map(|i| (all[i].info.pid, all[i].create.max(0) as u64)).collect();
+    let threads = set.iter().flat_map(|(pid, _)| by_pid.remove(pid).unwrap_or_default()).collect();
+    (set, threads)
+}
+
 /// Every thread of `pids` (sorted) from one system snapshot: context switches so far, and each
 /// process's IO bytes so far (read, written).
 pub fn threads(pids: &[u32]) -> (Vec<super::ThreadInfo>, Vec<(u32, u64, u64)>) {

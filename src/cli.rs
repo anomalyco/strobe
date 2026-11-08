@@ -90,6 +90,8 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("reveal", Switch, "query"),
     ("at", Value, "query"),
     ("thread", Value, "query"),
+    ("pid", Value, "query"),
+    ("case", Value, "query"),
     ("phase", Value, "query"),
     ("timeline", Switch, "query"),
     ("format", Value, "report"),
@@ -139,7 +141,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("once", Switch, "top"),
     ("interval", Value, "top"),
     ("limit", Number, "top"),
-    ("sort", Value, "top"),
+    ("sort", Value, "top query"),
     // up, update, leave, helper.
     ("skip", Value, "up"),
     ("yes", Switch, "leave"),
@@ -400,6 +402,8 @@ Use
   query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash] [--reveal] [--native] [--thread <name>]
                                   views: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory log network insights
                                   actions sql
+                                  (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe> --phase <name>;
+                                  --case <name>: one case of a --batch recording)
                                   (actions: what a bench block's hooks sent the target, in order; --phase; --reveal shows
                                   typed text, act values, ctx.call arguments and ctx.exec lines)
                                   (waits: where threads were off their CPUs and who woke them, from a native capture;

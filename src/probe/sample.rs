@@ -28,6 +28,8 @@ pub struct Capture {
     t0: u64,
     /// Processes of the set not sampled, with why (`Deep::unsampled`).
     unsampled: Vec<(u32, String)>,
+    /// Each sampled process's executable, read while it runs (`Deep::processes`).
+    processes: std::collections::BTreeMap<u32, String>,
 }
 
 /// At most this many processes are sampled (one `sample` each): the target's root first.
@@ -48,6 +50,7 @@ impl Capture {
         pids.sort_by_key(|&p| p != targets.root);
         let unsampled = pids.split_off(pids.len().min(MAX_PROCESSES)).into_iter().map(|p| (p, format!("{}: past the {MAX_PROCESSES} processes sampled", named(p)))).collect();
         let mut runs = Vec::new();
+        let processes = pids.iter().filter_map(|&p| Some((p, crate::host::exe_of(p)?.file_name()?.to_string_lossy().to_string()))).collect();
         for pid in pids {
             let out = crate::host::paths::run().join(format!("sample-{}-{pid}.txt", std::process::id()));
             let said = std::fs::File::create(said_path(&out))?;
@@ -77,12 +80,12 @@ impl Capture {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
-        Ok(Capture { runs, t0: crate::host::now_ns(), unsampled })
+        Ok(Capture { runs, t0: crate::host::now_ns(), unsampled, processes })
     }
 
     pub fn stop(mut self) -> Result<Deep> {
         let t1 = crate::host::now_ns();
-        let mut deep = Deep { interval_us: INTERVAL_US, t0_ns: self.t0, t1_ns: t1, untimed: true, ..Deep::default() };
+        let mut deep = Deep { interval_us: INTERVAL_US, t0_ns: self.t0, t1_ns: t1, untimed: true, processes: std::mem::take(&mut self.processes), ..Deep::default() };
         let mut index: HashMap<Vec<u64>, u32> = HashMap::new();
         let deadline = std::time::Instant::now() + REPORT_WAIT;
         for (_, child, out) in &mut self.runs {

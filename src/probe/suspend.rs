@@ -9,7 +9,8 @@
 //! sample stands for 2 ms of that thread's CPU, as the kernel's sampled profile does for 200 µs.
 //!
 //! Caveats, said in the recording: no kernel frames (the user-mode part only); only threads that
-//! exist at a refresh (every 100 ms) are sampled; a thread that ran and is waiting when sampled shows
+//! exist at a refresh (every 100 ms, 20 ms while the set's processes change; the first opens every
+//! thread) are sampled, each from its opening; a thread that ran and is waiting when sampled shows
 //! where it waits; code without unwind data (a JIT's) ends the stack there; each sample stalls the
 //! thread for the time between suspend and resume (measured per sample and reported), and while it is
 //! stopped it may hold a lock (the loader's, a heap's) another of the app's threads then waits on.
@@ -81,9 +82,16 @@ struct Thread {
     pid: u32,
     handle: HANDLE,
     cycles: u64,
+    /// Its cycles when the capture began counting it: at its opening for a thread that existed
+    /// before the capture, 0 for one created during it (all of its CPU is the capture's). Coverage
+    /// only: sampling credit starts at the opening.
+    base: u64,
     /// CPU since the last sample, in samples' worth.
     credit: f64,
     stack_base: Option<u64>,
+    /// Refreshes left to read a name it has not set yet (a runtime names its main thread after the
+    /// loader, and strobe may open it before).
+    unnamed: u8,
 }
 
 impl Drop for Thread {
@@ -135,6 +143,10 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
     let timer = unsafe { CreateWaitableTimerExW(std::ptr::null(), std::ptr::null(), 0x2, 0x1F0003) };
     let mut processes: HashMap<u32, Process> = HashMap::new();
     let mut threads: HashMap<u32, Thread> = HashMap::new();
+    // Names read while the threads and processes lived: a child that ran and exited during the
+    // capture is gone by its end, and its samples kept no name.
+    let mut names: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut exes: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
     let mut busy: Vec<u32> = Vec::new();
     let mut stalls: Vec<f64> = Vec::new();
     let (mut capped, mut unopened) = (0u64, 0usize);
@@ -144,22 +156,49 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
     let mut last_refresh: Option<(std::time::Instant, HashMap<u32, u64>)> = None;
     let mut second = (std::time::Instant::now(), 0u64);
     let mut stack = vec![0u8; STACK_BYTES];
+    // The capture's start on the clock threads are born by (FILETIME units).
+    let born_t0 = filetime_now();
+    // Each process's main thread, bound once when strobe first sees the process: its first thread,
+    // created with it (within 5 ms). None when that thread is gone by then; a worker is never one.
+    let mut mains: HashMap<u32, Option<u32>> = HashMap::new();
+    // The set's processes at the last refresh: while they change (a tree starting and ending
+    // children), the set is read every 20 ms instead of 100, so a short child is found early.
+    let mut set_pids: Vec<u32> = Vec::new();
+    let mut churn_until = std::time::Instant::now();
+    // Cycles of the threads strobe followed, over the capture (coverage), and the CPU the snapshots
+    // gave threads it never opened.
+    let (mut followed_cycles, mut unopened_ns) = (0u64, 0u64);
+    let mut never_opened: HashMap<u32, (u64, u64)> = HashMap::new();
     loop {
         match rx.try_recv() {
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        // Every 100 ms: the process set's threads, and which of them ran since the last look.
-        if last_refresh.as_ref().is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_millis(100)) {
-            let mut pids = targets.pids();
-            pids.sort_unstable();
-            let (now, _) = host::threads(&pids);
+        // Every 100 ms (20 ms while the set changes): the process set's threads from one snapshot,
+        // and which of them ran since the last look. The first look opens every thread, so the
+        // capture's first 100 ms are sampled too.
+        let every = if std::time::Instant::now() < churn_until { 20 } else { 100 };
+        if last_refresh.as_ref().is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_millis(every)) {
+            let (set, now) = host::process_set_threads(targets.root, targets.home.as_deref());
+            let pids_now: Vec<u32> = set.iter().map(|p| p.0).collect();
+            if last_refresh.is_some() && pids_now != set_pids {
+                churn_until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            }
+            set_pids = pids_now;
+            for (pid, created) in &set {
+                mains.entry(*pid).or_insert_with(|| now.iter().find(|t| t.pid == *pid).filter(|t| t.born.abs_diff(*created) <= 50_000).map(|t| t.tid));
+            }
             let cpu: HashMap<u32, u64> = now.iter().map(|t| (t.tid, t.cpu_ns)).collect();
-            busy = now.iter().filter(|t| last_refresh.as_ref().is_some_and(|(_, before)| before.get(&t.tid).is_none_or(|c| *c < t.cpu_ns))).map(|t| t.tid).collect();
+            busy = now.iter().filter(|t| last_refresh.as_ref().is_none_or(|(_, before)| before.get(&t.tid).is_none_or(|c| *c < t.cpu_ns))).map(|t| t.tid).collect();
             for t in &now {
                 if threads.contains_key(&t.tid) || !busy.contains(&t.tid) {
                     continue;
                 }
+                // A thread strobe cannot open: its CPU from the snapshots, for coverage.
+                let unopenable = |never: &mut HashMap<u32, (u64, u64)>| {
+                    let e = never.entry(t.tid).or_insert((if t.born < born_t0 { t.cpu_ns } else { 0 }, t.cpu_ns));
+                    e.1 = t.cpu_ns;
+                };
                 if let std::collections::hash_map::Entry::Vacant(e) = processes.entry(t.pid) {
                     let h = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, t.pid) };
                     if h.is_null() || wow64(h) {
@@ -167,20 +206,59 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
                             unsafe { CloseHandle(h) };
                         }
                         unopened += 1;
+                        unopenable(&mut never_opened);
                         continue;
+                    }
+                    if let Some(exe) = image_name(h) {
+                        exes.insert(t.pid, exe);
                     }
                     e.insert(Process { handle: h, modules: images(h), read_at: std::time::Instant::now(), unwind: HashMap::new() });
                 }
                 let h = unsafe { OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, 0, t.tid) };
                 if h.is_null() {
                     unopened += 1;
+                    unopenable(&mut never_opened);
                     continue;
                 }
                 let mut cycles = 0;
                 unsafe { QueryThreadCycleTime(h, &mut cycles) };
-                threads.insert(t.tid, Thread { pid: t.pid, handle: h, cycles, credit: 0.0, stack_base: None });
+                // The thread its process started with names itself rarely: `(main)` then.
+                let main = mains.get(&t.pid).copied().flatten() == Some(t.tid);
+                let base = if t.born < born_t0 { cycles } else { 0 };
+                let mut thread = Thread { pid: t.pid, handle: h, cycles, base, credit: 0.0, stack_base: None, unnamed: 10 };
+                match thread.own_name() {
+                    Some(n) => {
+                        names.insert(t.tid, n);
+                        thread.unnamed = 0;
+                    }
+                    None if main => {
+                        names.insert(t.tid, "(main)".into());
+                    }
+                    None => {}
+                }
+                threads.insert(t.tid, thread);
             }
-            threads.retain(|tid, _| cpu.contains_key(tid));
+            // A name set since it was opened, looked for over its first second; a thread that ended
+            // keeps the name it had, and its last cycles count toward coverage.
+            threads.retain(|tid, t| {
+                if t.unnamed > 0 {
+                    t.unnamed -= 1;
+                    if let Some(n) = t.own_name() {
+                        names.insert(*tid, n);
+                        t.unnamed = 0;
+                    }
+                }
+                let live = cpu.contains_key(tid);
+                if !live {
+                    followed_cycles += t.used();
+                }
+                live
+            });
+            for (tid, e) in never_opened.iter_mut() {
+                if let Some(c) = cpu.get(tid) {
+                    e.1 = e.1.max(*c);
+                }
+            }
             last_refresh = Some((std::time::Instant::now(), cpu));
         }
         if second.0.elapsed() >= std::time::Duration::from_secs(1) {
@@ -233,7 +311,14 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
         unsafe { CloseHandle(timer) };
     }
     stalls.sort_by(f64::total_cmp);
+    followed_cycles += threads.values().map(Thread::used).sum::<u64>();
+    unopened_ns += never_opened.values().map(|(from, to)| to.saturating_sub(*from)).sum::<u64>();
+    // The CPU the set's threads used over the capture as strobe saw them: the followed threads'
+    // cycles and the snapshots' times of those it could not open. A thread that began and ended
+    // between two looks is in neither.
+    let cpu_ms = followed_cycles as f64 / hz * 1e3 + unopened_ns as f64 / 1e6;
     let stats = SuspendStats {
+        cpu_ms: Some(cpu_ms),
         samples: samples.len() as u64,
         threads: samples.iter().map(|s| s.2).collect::<std::collections::BTreeSet<u32>>().len(),
         stall_us_mean: if stalls.is_empty() { 0.0 } else { stalls.iter().sum::<f64>() / stalls.len() as f64 },
@@ -248,7 +333,65 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
     }
     let mut pids: Vec<u32> = processes.keys().copied().collect();
     pids.sort_unstable();
-    Ok(Deep { interval_us: INTERVAL_US as f64, t0_ns: t0, t1_ns: host::now_ns(), modules, stacks, samples, pids, suspend: Some(stats), ..Deep::default() })
+    for (tid, t) in &threads {
+        if let Some(n) = t.own_name() {
+            names.insert(*tid, n);
+        }
+    }
+    let sampled: std::collections::BTreeSet<u32> = samples.iter().map(|s| s.2).collect();
+    names.retain(|tid, _| sampled.contains(tid));
+    Ok(Deep { interval_us: INTERVAL_US as f64, t0_ns: t0, t1_ns: host::now_ns(), modules, stacks, samples, threads: names, pids, processes: exes, suspend: Some(stats), ..Deep::default() })
+}
+
+impl Thread {
+    /// Its own name (`SetThreadDescription`), read on the handle strobe holds; None when it has none
+    /// or it can no longer be read.
+    fn own_name(&self) -> Option<String> {
+        use windows_sys::Win32::System::Threading::GetThreadDescription;
+        unsafe {
+            let mut text: *mut u16 = std::ptr::null_mut();
+            if GetThreadDescription(self.handle, &mut text) >= 0 && !text.is_null() {
+                let mut n = 0;
+                while *text.add(n) != 0 {
+                    n += 1;
+                }
+                let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+                windows_sys::Win32::Foundation::LocalFree(text as _);
+                Some(s).filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Its cycles over the capture: from `base` to now (a thread that ended keeps its count while
+    /// the handle is open).
+    fn used(&self) -> u64 {
+        let mut cycles = 0;
+        let now = if unsafe { QueryThreadCycleTime(self.handle, &mut cycles) } != 0 { cycles.max(self.cycles) } else { self.cycles };
+        now.saturating_sub(self.base)
+    }
+}
+
+/// Now on the clock threads and processes are born by (FILETIME units, 100 ns).
+fn filetime_now() -> u64 {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+    let mut f = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    unsafe { GetSystemTimePreciseAsFileTime(&mut f) };
+    (f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64
+}
+
+/// A process's executable, its file name.
+fn image_name(process: HANDLE) -> Option<String> {
+    use windows_sys::Win32::System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW};
+    let mut buf = vec![0u16; 1024];
+    let mut n = buf.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n) } == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buf[..n as usize]);
+    path.rsplit(['\\', '/']).next().map(str::to_string).filter(|s| !s.is_empty())
 }
 
 /// One sample: suspend, registers, the stack from RSP up, resume. (host ns, stall µs, registers,

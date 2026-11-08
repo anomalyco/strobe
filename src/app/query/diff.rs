@@ -59,18 +59,19 @@ fn run_with(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize, plan_runs: Op
     match view {
         "hotspots" | "alloc" | "layout" => {
             let by = if view == "layout" { "function" } else { super::by_arg(args)? };
-            let (thread, phase) = (args.get("thread"), args.get("phase"));
-            if view != "hotspots" && (thread.is_some() || phase.is_some()) {
-                return Err(Error::usage("--thread and --phase select native samples: a..b hotspots takes them"));
+            let pick = super::Pick::of(args);
+            let (thread, phase) = (pick.thread, pick.phase);
+            if view != "hotspots" && pick.any() {
+                return Err(Error::usage("--thread, --pid and --phase select native samples: a..b hotspots takes them"));
             }
             let kind = match view {
                 "alloc" => Kind::Alloc,
                 "layout" => Kind::Layout,
-                _ => Kind::hotspots(a, b, args.has("native") || thread.is_some() || phase.is_some()),
+                _ => Kind::hotspots(a, b, args.has("native") || pick.any()),
             };
-            // A thread or a phase: each side's native samples for that question alone.
-            let filtered = if thread.is_some() || phase.is_some() {
-                let one = |r: &Rec| super::native_filtered(&r.dir, thread, phase)?.ok_or_else(|| Error::usage(format!("{} has no native samples; record with --probes deep", r.id)));
+            // A thread, a process or a phase: each side's native samples for that question alone.
+            let filtered = if pick.any() {
+                let one = |r: &Rec| super::native_filtered(&r.dir, pick)?.ok_or_else(|| Error::usage(format!("{} has no native samples; record with --probes deep", r.id)));
                 Some([one(a)?, one(b)?])
             } else {
                 None
@@ -83,7 +84,7 @@ fn run_with(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize, plan_runs: Op
             });
             let sides = [side(a, kind, plan_runs, over(0))?, side(b, kind, plan_runs, over(1))?];
             let mut d = weighted(sides, kind, by);
-            d.selection = [thread.map(|t| format!("thread {t}")), phase.map(|p| format!("phase {p}"))].into_iter().flatten().collect::<Vec<_>>().join(", ");
+            d.selection = [thread.map(|t| format!("thread {t}")), pick.pid.map(|p| format!("process {p}")), phase.map(|p| format!("phase {p}"))].into_iter().flatten().collect::<Vec<_>>().join(", ");
             Ok(d.output(a, b, top))
         }
         "style" => style(a, b, top),
@@ -834,7 +835,7 @@ fn threads(a: &Rec, b: &Rec, top: usize) -> Result<Output> {
 /// A recording's frames as named values: per run counts and the pooled percentiles.
 fn frame_values(r: &Rec) -> Result<Vec<(&'static str, f64, &'static str)>> {
     if r.dir.join("frames.json").exists() || r.meta["native"] == true {
-        let f = super::native_frames(&r.dir, 10)?.json;
+        let f = super::native_frames(&r.dir, 10, None)?.json;
         let runs: Vec<&Value> = f["runs"].as_array().into_iter().flatten().collect();
         let col = |k: &str| -> Vec<f64> { runs.iter().filter_map(|x| x[k].as_f64()).collect() };
         let mut lat: Vec<f64> = runs.iter().flat_map(|x| x["latencies_ms"].as_array().into_iter().flatten().filter_map(Value::as_f64)).collect();

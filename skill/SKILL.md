@@ -834,3 +834,13 @@ Never put hand-measured timings, single recordings or `--check` smoke numbers in
 - On macOS, a strobe started by a launchd job whose plist sets no `ProcessType` (a remote shell's or agent's daemon) runs with coalesced timers, and so does the app it launches.
 - `TimerCoalescing` warns and `status` shows a `timers` line; compare such runs only with runs started the same way, or run from a terminal.
 - strobe's own daemon starts from a LaunchAgent with `ProcessType Interactive` (`strobe up`; Linux: a systemd user unit), so MCP benches do not have this.
+
+### Reading hotspots and per-run views
+
+- Native hotspots of a process tree pool every process: read the `by process` lines, then `--pid <pid|exe>` for one.
+- `! Coverage` means the samples stand for under 80% of the processes' CPU (short-lived children, threads strobe found late): read shares, not totals.
+- macOS samples are untimed snapshots: rows count samples, never CPU ms.
+- Two resolved shares: leaf frames and all frames. A high leaf share with a low all-frame share means the app's own binary has no symbols.
+- A caller with no self time of its own sinks below the rows: read `callers by total time` under them, or `--sort total`.
+- `query <rec> summary` of a large recording is slow once, then cached beside it.
+- A `--batch` recording pools its cases: `--case <name>` keeps one case's runs (summary, frames, threads, gpu, layout, style, gc, actions).

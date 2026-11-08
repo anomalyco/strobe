@@ -370,13 +370,31 @@ impl Unwind {
     }
 }
 
-/// Opens a sampling event on every thread of the target's process set that has none yet.
-fn follow(targets: &Targets, kernel: bool, rings: &mut Vec<Ring>, opened: &mut HashSet<u32>) -> std::io::Result<()> {
+/// Names read while the target's threads and processes live, so a child that exits before the
+/// capture ends keeps them: threads by tid (`comm`), processes by pid (their executable's name).
+#[derive(Default)]
+struct Names {
+    threads: std::collections::BTreeMap<u32, String>,
+    processes: std::collections::BTreeMap<u32, String>,
+}
+
+/// Opens a sampling event on every thread of the target's process set that has none yet, naming
+/// each new thread and process.
+fn follow(targets: &Targets, kernel: bool, rings: &mut Vec<Ring>, opened: &mut HashSet<u32>, names: &mut Names) -> std::io::Result<()> {
     for pid in targets.pids() {
+        if let std::collections::btree_map::Entry::Vacant(e) = names.processes.entry(pid) {
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+            if let Some(n) = exe.or_else(|| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|c| c.trim_end().to_string())).filter(|n| !n.is_empty()) {
+                e.insert(n);
+            }
+        }
         for e in std::fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
             let Some(tid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
             if !opened.insert(tid) {
                 continue;
+            }
+            if let Ok(c) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/comm")) {
+                names.threads.insert(tid, c.trim_end().to_string());
             }
             // A big buffer first; the unprivileged mlock budget (perf_event_mlock_kb) may only allow small ones.
             match open(tid, kernel, 128).or_else(|_| open(tid, kernel, 16)) {
@@ -414,7 +432,8 @@ impl Capture {
         }
         let mut rings: Vec<Ring> = Vec::new();
         let mut opened: HashSet<u32> = HashSet::new();
-        if let Err(e) = follow(&targets, kernel, &mut rings, &mut opened) {
+        let mut names = Names::default();
+        if let Err(e) = follow(&targets, kernel, &mut rings, &mut opened, &mut names) {
             return Err(Error::msg(format!("perf_event_open: {e}")));
         }
         let state = Arc::new(AtomicU8::new(RUN));
@@ -437,7 +456,7 @@ impl Capture {
                         _ => return Err(Error::msg("the capture was dropped")),
                     };
                     if followed.elapsed().as_millis() >= 50 {
-                        let _ = follow(&targets, kernel, &mut rings, &mut opened);
+                        let _ = follow(&targets, kernel, &mut rings, &mut opened, &mut names);
                         followed = std::time::Instant::now();
                     }
                     let mut poll: Vec<libc::pollfd> = rings.iter().map(|r| libc::pollfd { fd: r.fd, events: libc::POLLIN, revents: 0 }).collect();
@@ -478,12 +497,15 @@ impl Capture {
                 if kernel && deep.stacks.iter().any(|s| s.first().is_some_and(|f| *f >= KERNEL)) {
                     deep.modules.push(Module { pid: 0, base: KERNEL, size: u64::MAX - KERNEL, path: "[kernel.kallsyms]".into() });
                 }
+                // A live thread's name now (one may rename itself after it starts), else the name it
+                // had when strobe followed it.
                 let tids: HashSet<u32> = deep.samples.iter().map(|s| s.2).collect();
                 for tid in tids {
-                    if let Some(n) = crate::host::thread_name(tid) {
+                    if let Some(n) = crate::host::thread_name(tid).or_else(|| names.threads.get(&tid).cloned()) {
                         deep.threads.insert(tid, n);
                     }
                 }
+                deep.processes = names.processes.into_iter().filter(|(p, _)| pids.binary_search(p).is_ok()).collect();
                 deep.pids = pids;
                 Ok(deep)
             })

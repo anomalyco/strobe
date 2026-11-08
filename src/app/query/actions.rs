@@ -6,13 +6,18 @@
 use super::Output;
 use crate::cli::Args;
 use crate::model::{Error, Result};
-use crate::store::{self, actions::ActionLog, actions::ActionRecord, actions::Outcome};
+use crate::store::{self, actions::ActionLog, actions::ActionRecord, actions::Outcome, actions::SampleEdge};
 use serde_json::{Value, json};
 use std::path::Path;
 
-pub fn recording(dir: &Path, args: &Args, top: usize) -> Result<Output> {
-    let log = ActionLog::read(&dir.join(store::actions::FILE))?
+/// `case`: one case of a batch's launch (`--case`), and whether it was the launch's first (its log
+/// then holds the launch's prepare and setup too).
+pub fn recording(dir: &Path, args: &Args, top: usize, case: Option<(&str, bool)>) -> Result<Output> {
+    let mut log = ActionLog::read(&dir.join(store::actions::FILE))?
         .ok_or_else(|| Error::usage("this recording kept no actions: they are kept for bench blocks whose hooks acted on the target (bench recordings from before strobe kept them have none)"))?;
+    if let Some((name, first)) = case {
+        log = log.of_case(name, first);
+    }
     let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let (text, json) = view(&id, &log, args, top);
     Ok(Output::new(text, json))
@@ -94,14 +99,11 @@ fn view(title: &str, log: &ActionLog, args: &Args, top: usize) -> (String, Value
         let run = a.run.map(|r| r.to_string()).unwrap_or_else(|| "-".into());
         let at = (a.t_ns.saturating_sub(t0)) as f64 / 1e6;
         let ms = (a.end_ns.saturating_sub(a.t_ns)) as f64 / 1e6;
-        let mut selector = match &a.selector {
+        let selector = match &a.selector {
             Some(Value::String(s)) => s.clone(),
             Some(o) => o.to_string(),
             None => "-".into(),
         };
-        if let Some(h) = &a.hit {
-            selector += &format!(" → {} {:?}", h.role, h.name);
-        }
         let args_text = if a.args.is_empty() { "-".to_string() } else { a.args.iter().map(Value::to_string).collect::<Vec<_>>().join(", ") };
         let outcome = match &a.outcome {
             Outcome::Ok => "ok".to_string(),
@@ -128,9 +130,25 @@ fn view(title: &str, log: &ActionLog, args: &Args, top: usize) -> (String, Value
             marks += " args cut";
         }
         text += &format!("  {:>5} {:<8} {:>4} {:>9.1} {:>8.1}  {:<8} {:<28} {:<30} {outcome}{marks}\n", a.seq, a.hook.name(), run, at, ms, a.call, clip(&selector, 28), clip(&args_text, 30));
+        // What the aim landed on, whole: the selector column cuts it.
+        if let Some(h) = &a.hit {
+            let point = h.point.map(|p| format!(" at {:.0},{:.0}", p[0], p[1])).unwrap_or_default();
+            text += &format!("        hit {} {:?}{point}{}\n", h.role, h.name, if h.scrolled { " (scrolled into view)" } else { "" });
+        }
     }
     if rows.len() > top {
         text += &format!("  … {} more (--top {} shows all, --json gives each)\n", rows.len() - top, rows.len());
+    }
+    // The latency samples by what decided them, with what each outcome means.
+    let mut edges: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
+    for s in rows.iter().filter_map(|a| a.sample.as_ref()) {
+        *edges.entry(edge_meaning(s.edge)).or_default() += 1;
+    }
+    if !edges.is_empty() {
+        text += "  samples:\n";
+        for (what, n) in &edges {
+            text += &format!("    {n:>5}  {what}\n");
+        }
     }
     if !reveal && rows.iter().any(|a| matches!(a.call.as_str(), "type" | "act" | "call" | "exec")) {
         text += "  typed text, act values, ctx.call arguments and ctx.exec lines redacted (--reveal shows them)\n";
@@ -140,6 +158,18 @@ fn view(title: &str, log: &ActionLog, args: &Args, top: usize) -> (String, Value
     }
     text += "\n";
     (text, json!({ "title": title, "seed": log.seed, "truncated": log.truncated, "actions": rows }))
+}
+
+/// What a sample's edge says about the action, as `query frames` and SPEC §7.4 count them.
+fn edge_meaning(e: SampleEdge) -> &'static str {
+    match e {
+        SampleEdge::Press => "press: a latency, timed from the click's press the app acted on",
+        SampleEdge::Sent => "sent: a latency, timed from when the input went out",
+        SampleEdge::Scroll => "scroll: a latency, from the scroll's first step",
+        SampleEdge::Unchanged => "unchanged: no sample, the app changed no accessibility tree after it",
+        SampleEdge::Busy => "busy: no sample, it came while the app was drawing or still to show an earlier input",
+        SampleEdge::Unmatched => "unmatched: no sample, no frame showed its change in time (or nothing decided it)",
+    }
 }
 
 /// Text the bench typed or handed over, as its length.

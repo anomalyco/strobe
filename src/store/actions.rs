@@ -268,10 +268,11 @@ impl ActionLog {
         }
     }
 
-    /// A batch's log for one case (`case`): its runs' and resets' actions, and with `launch` the
-    /// launch's own (prepare, setup, teardown), which name no case.
+    /// A batch's log for one case (`case`): its runs' and resets' actions, and with `launch` (the
+    /// launch's first case) the launch's own before them (prepare, setup), which name no case. The
+    /// teardown ends the launch after its last case: no one case's.
     pub fn of_case(&self, case: &str, launch: bool) -> ActionLog {
-        let actions = self.actions.iter().filter(|a| a.case.as_deref() == Some(case) || (launch && a.case.is_none())).cloned().collect();
+        let actions = self.actions.iter().filter(|a| a.case.as_deref() == Some(case) || (launch && a.case.is_none() && a.hook != Hook::Teardown)).cloned().collect();
         ActionLog { seed: self.seed, truncated: self.truncated, actions }
     }
 

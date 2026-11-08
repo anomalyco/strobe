@@ -46,9 +46,12 @@ pub fn run(args: &Args) -> Result<Output> {
             let text = format!("{handle} is running\n{}\n", tail.join("\n"));
             return Ok(Output::new(text, json!({ "id": handle, "state": "running", "progress": tail })));
         }
-        let result = store::read_json(&dir.join("result.json"))?;
+        let mut result = store::read_json(&dir.join("result.json"))?;
         return match view {
-            "summary" | "progress" => Ok(Output::new(result["text"].as_str().unwrap_or("").to_string(), result)),
+            "summary" | "progress" => {
+                let text = live_ledger(&mut result);
+                Ok(Output::new(text, result))
+            }
             "insights" => experiment_insights(&result),
             "actions" => actions::experiment(&result, args, top),
             other => {
@@ -134,7 +137,8 @@ pub fn run(args: &Args) -> Result<Output> {
         return Ok(out);
     }
     let dir = store::resolve(handle)?;
-    let rec = Rec::open(&dir);
+    let mut rec = Rec::open(&dir);
+    let case = args.get("case").map(|c| one_case(&mut rec, c, view)).transpose()?;
     let meta = &rec.meta;
     let trace = dir.join("trace.pftrace");
     // A page in Firefox or WebKit: no Chrome trace.
@@ -142,8 +146,11 @@ pub fn run(args: &Args) -> Result<Output> {
     match view {
         "summary" => {
             let mut text = super::record::summary_text(meta);
+            if let Some(c) = &case {
+                text += &format!("case     {}: the values are its runs' ({}); a duration above is the whole launch's\n", meta["label"].as_str().unwrap_or(&c.name), c.runs.join(" "));
+            }
             let mut json = meta.clone();
-            if let Some((t, rows)) = run_phases(&rec) {
+            if let Some((t, rows)) = run_phases_cached(&rec) {
                 text += &t;
                 json["per_run"] = rows;
             }
@@ -167,7 +174,10 @@ pub fn run(args: &Args) -> Result<Output> {
         "gpu" if meta["wir"] == true => {
             Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", format!("strobe query {} memory --by layer", rec.id)))
         }
-        "frames" if dir.join("frames.json").exists() || meta["native"] == true => native_frames(&dir, top),
+        "frames" if dir.join("frames.json").exists() || meta["native"] == true => native_frames(&dir, top, case.as_ref().map(|c| c.runs.as_slice())),
+        "threads" if case.is_some() && (args.has("timeline") || dir.join("threads.json").exists()) => {
+            Err(Error::usage("--case: a native recording's threads count every case of its launch together (threads.json has no per-run rows); its frames take --case"))
+        }
         "threads" if args.has("timeline") => thread_timeline(&dir, top),
         "threads" if dir.join("threads.json").exists() => native_threads(&dir, top),
         // A page in another engine has no trace: threads from Firefox's profile (attribution), frames
@@ -192,12 +202,13 @@ pub fn run(args: &Args) -> Result<Output> {
         "gpu" => gpu(&trace, meta, top),
         "hotspots" | "alloc" => {
             let by = by_arg(args)?;
+            let (pick, sort) = (Pick::of(args), Sort::of(args)?);
             if view == "alloc" {
                 alloc(&rec, by, top)
-            } else if args.has("native") || args.has("thread") || args.has("phase") {
-                native_hotspots_of(&rec, by, top, args.get("thread"), args.get("phase"))
+            } else if args.has("native") || pick.any() {
+                native_hotspots_of(&rec, by, top, pick, sort)
             } else {
-                hotspots_of(&rec, by, top)
+                hotspots_sorted(&rec, by, top, sort)
             }
         }
         "waits" => waits::waits(&dir, by_arg(args)?, top, args.get("thread"), args.get("phase")),
@@ -211,7 +222,7 @@ pub fn run(args: &Args) -> Result<Output> {
         "heap" => heap(&rec, top, args.has("reveal")),
         "leaks" => leaks(&rec, top, args.has("reveal")),
         "insights" => insights(&rec),
-        "actions" => actions::recording(&dir, args, top),
+        "actions" => actions::recording(&dir, args, top, case.as_ref().map(|c| (c.name.as_str(), c.seq == 1))),
         "log" => wir::log(&dir, meta, args, top),
         "network" => wir::network(&dir, meta, args, top),
         "memory" => {
@@ -229,6 +240,70 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory log network insights actions sql"))),
     }
+}
+
+/// An experiment's text with its rerun ledger as of now (SPEC §14.2): the text froze the ledger when
+/// the bench ended, and experiments on the same variants since then count too, as the report's do.
+fn live_ledger(result: &mut Value) -> String {
+    let mut text = result["text"].as_str().unwrap_or("").to_string();
+    if !result["identity"].is_object() {
+        return text;
+    }
+    let was = store::ledger::line(result);
+    result["ledger"] = store::ledger::for_experiment(result["id"].as_str().unwrap_or(""), result["created"].as_str().unwrap_or(""), &result["identity"]);
+    let now = store::ledger::line(result);
+    if was == now {
+        return text;
+    }
+    // Said so: the bench printed the other line when it ended.
+    let line = now.map(|t| format!("ledger  {t} (as of now)\n")).unwrap_or_default();
+    match was.and_then(|w| text.find(&format!("ledger  {w}\n")).map(|at| (at, w.len() + 9))) {
+        Some((at, len)) => text.replace_range(at..at + len, &line),
+        // None before: the line goes where the bench puts it, above the closing `<id> · strobe …` line.
+        None => {
+            let id = result["id"].as_str().unwrap_or("");
+            let at = text.rfind(&format!("{id} · strobe ")).filter(|_| !id.is_empty()).unwrap_or(text.len());
+            text.insert_str(at, &line);
+        }
+    }
+    // The JSON (`--json`, MCP) carries the same text.
+    result["text"] = json!(text);
+    text
+}
+
+/// One case of a `--batch` recording (`--case`): its name, its place in the launch and its runs.
+struct Case {
+    name: String,
+    seq: u64,
+    runs: Vec<String>,
+}
+
+/// The views whose rows come from a recording's runs, so `--case` can keep one case's.
+const CASE_VIEWS: [&str; 8] = ["summary", "frames", "threads", "gpu", "layout", "style", "gc", "actions"];
+
+/// Narrows a batch recording to one case (by its name, its label or its place in the launch): its
+/// measured runs are the only runs every view reads.
+fn one_case(rec: &mut Rec, want: &str, view: &str) -> Result<Case> {
+    let id = rec.id.clone();
+    let cases = rec.meta["batch"].as_array().filter(|a| !a.is_empty()).cloned().ok_or_else(|| Error::usage(format!("--case picks one case of a --batch recording; {id} ran one")))?;
+    if !CASE_VIEWS.contains(&view) {
+        return Err(Error::usage(format!("--case: {view} reads the whole launch; one case's runs are in {}", CASE_VIEWS.join(", "))));
+    }
+    let names = |c: &Value| [c["case"].as_str().unwrap_or("").to_string(), c["label"].as_str().unwrap_or("").to_string(), c["seq"].to_string()];
+    let found = cases.iter().find(|c| names(c).iter().any(|n| n == want)).ok_or_else(|| {
+        let all: Vec<String> = cases.iter().map(|c| format!("{} ({})", c["case"].as_str().unwrap_or("?"), c["seq"])).collect();
+        Error::usage(format!("no case {want:?} in {id}; its cases: {}", all.join(", ")))
+    })?;
+    let runs: Vec<String> = found["runs"].as_array().into_iter().flatten().filter_map(|r| r.as_str().map(str::to_string)).collect();
+    rec.meta["measured"] = json!(runs);
+    rec.meta["runs"] = json!(runs.len());
+    // The case's own values and refusals, as its block gave them (the launch's are every case's).
+    rec.meta["values"] = found["values"].clone();
+    rec.meta["refused"] = found["refused"].clone();
+    rec.meta["label"] = found["label"].clone();
+    rec.meta["query_case"] = found["label"].clone();
+    rec.meta["batch"] = json!([found]);
+    Ok(Case { name: found["case"].as_str().unwrap_or(want).to_string(), seq: found["seq"].as_u64().unwrap_or(0), runs })
 }
 
 fn by_arg(args: &Args) -> Result<&str> {
@@ -869,8 +944,28 @@ fn heap_file(dir: &Path) -> Result<std::path::PathBuf> {
         .ok_or_else(|| Error::usage("this recording has no heap snapshot; bench attribution blocks and record --probes attribution|memory take one"))
 }
 
+/// A float trace_processor printed as `%f`, six decimals (`71.000000`), as it is (`71`, `1507.64`):
+/// only trailing zeros go, so no digit it gave is lost; `-0.000000` is `0`. Any other cell (a string
+/// such as `0.20`) is left as it came.
+fn sql_number(cell: &str) -> &str {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    match cell.strip_prefix('-').unwrap_or(cell).split_once('.') {
+        Some((int, frac)) if digits(int) && frac.len() == 6 && digits(frac) => match cell.trim_end_matches('0').trim_end_matches('.') {
+            "-0" => "0",
+            short => short,
+        },
+        _ => cell,
+    }
+}
+
 fn sql_view(trace: &Path, sql: &str, limit: usize) -> Result<Output> {
-    let t = engine::query(trace, sql)?;
+    let mut t = engine::query(trace, sql)?;
+    for c in t.rows.iter_mut().flatten().flatten() {
+        let short = sql_number(c);
+        if short.len() < c.len() {
+            *c = short.to_string();
+        }
+    }
     let shown = t.rows.len().min(limit);
     let mut text = t.columns.join(" | ") + "\n";
     for r in &t.rows[..shown] {
@@ -942,7 +1037,15 @@ fn frames(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
     all.sort_by_key(|f| std::cmp::Reverse(f.cost));
     let t0 = data.windows.first().map(|w| w.t0).unwrap_or(0);
     let worst_frames: Vec<&metrics::Vsync> = all.iter().take(top.min(10)).collect();
-    let stages = frame_stages(trace, &worst_frames).unwrap_or_default();
+    let (stages, procs) = frame_stages(trace, meta, &worst_frames).unwrap_or_default();
+    // Frames by process: a page's second renderer, or the browser's own UI, presents frames the
+    // page's numbers above leave out.
+    if procs.len() > 1 || procs.iter().any(|p| !p.4) {
+        text += &format!(
+            "by process  {}   (vsyncs presented / reported; * the page's)\n",
+            procs.iter().map(|(name, pid, shown, all, page)| format!("{name} {pid}{}: {shown} / {all}", if *page { "*" } else { "" })).collect::<Vec<_>>().join(" · ")
+        );
+    }
     text += "worst\n";
     let mut worst: Vec<Value> = Vec::new();
     for f in &worst_frames {
@@ -973,39 +1076,62 @@ fn frames(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
     let phase_json: BTreeMap<&String, usize> = phases.iter().map(|(k, v)| (k, v.len())).collect();
     Ok(Output::new(
         text,
-        json!({ "presented": ms.len(), "dropped_pct": dropped, "latency": { "p50": q(0.5), "p95": q(0.95), "p99": q(0.99) }, "values": values, "worst": worst, "phases": phase_json }),
+        json!({
+            "presented": ms.len(), "dropped_pct": dropped, "latency": { "p50": q(0.5), "p95": q(0.95), "p99": q(0.99) }, "values": values, "worst": worst, "phases": phase_json,
+            "processes": procs.iter().map(|(name, pid, shown, all, page)| json!({ "process": name, "pid": pid, "presented": shown, "reported": all, "page": page })).collect::<Vec<_>>(),
+        }),
     ))
 }
 
 /// A frame's report stage by stage (Chromium's `PipelineReporter` children, each with its own children).
 type Stages = Vec<(String, i64, Vec<(String, i64)>)>;
 
-/// The stages of these frames' presented reports, by the report's slice id.
-fn frame_stages(trace: &Path, frames: &[&metrics::Vsync]) -> Result<BTreeMap<i64, Stages>> {
+/// Frames by process over the measured runs: (process, pid, vsyncs it presented, vsyncs it reported,
+/// the page's renderer). The page's frames above are its renderers'; another process's (a second
+/// renderer, the browser's own UI) are here only.
+type ByProcess = Vec<(String, i64, i64, i64, bool)>;
+
+/// The stages of these frames' presented reports, by the report's slice id, and the frames of every
+/// process with frame reports in the measured runs (one load of the trace for both).
+fn frame_stages(trace: &Path, meta: &Value, frames: &[&metrics::Vsync]) -> Result<(BTreeMap<i64, Stages>, ByProcess)> {
     let ids: Vec<String> = frames.iter().filter(|f| f.report >= 0).map(|f| f.report.to_string()).collect();
-    if ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
+    let (pre, _, _) = in_measured_runs(meta);
+    // Without strobe's run marks (an imported trace) the whole trace, and no page.
+    let (runs, page) = if pre.is_empty() { ("", "0") } else { (" join (select distinct t0, t1 from _w) w on s.ts >= w.t0 and s.ts < w.t1", "pr.upid in (select upid from _wp)") };
+    let seq = "extract_arg(s.arg_set_id, 'frame_reporter.frame_source') || ':' || extract_arg(s.arg_set_id, 'frame_reporter.frame_sequence')";
     let sql = format!(
-        "select p.id, c.id, c.name, c.dur, g.name, g.dur from slice p join slice c on c.parent_id = p.id left join slice g on g.parent_id = c.id
-         where p.id in ({}) order by p.id, c.ts, c.id, g.ts",
-        ids.join(",")
+        "{pre}select 'stage', p.id, c.ts, c.id, c.name, c.dur, g.ts, g.name, g.dur from slice p join slice c on c.parent_id = p.id left join slice g on g.parent_id = c.id
+         where {}
+         union all
+         select 'proc', pr.pid, null, null, coalesce(pr.name, '?'),
+           count(distinct case when extract_arg(s.arg_set_id, 'frame_reporter.state') in ('STATE_PRESENTED_ALL', 'STATE_PRESENTED_PARTIAL') then {seq} end),
+           count(distinct {seq}), {page}, null
+         from slice s join track tr on s.track_id = tr.id join process pr on pr.upid = extract_arg(tr.dimension_arg_set_id, 'upid'){runs}
+         where s.name = 'PipelineReporter' group by pr.upid
+         order by 1, 2, 3, 4, 7",
+        if ids.is_empty() { "0".to_string() } else { format!("p.id in ({})", ids.join(",")) },
     );
     let t = engine::query(trace, &sql)?;
     let num = |c: &Option<String>| c.as_deref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) as i64;
     let mut out: BTreeMap<i64, Stages> = BTreeMap::new();
+    let mut procs: ByProcess = Vec::new();
     let mut last_stage: Option<i64> = None;
     for r in &t.rows {
-        let stages = out.entry(num(&r[0])).or_default();
-        if last_stage != Some(num(&r[1])) {
-            stages.push((r[2].clone().unwrap_or_default(), num(&r[3]), Vec::new()));
-            last_stage = Some(num(&r[1]));
+        if r[0].as_deref() == Some("proc") {
+            procs.push((r[4].clone().unwrap_or_default(), num(&r[1]), num(&r[5]), num(&r[6]), num(&r[7]) == 1));
+            continue;
         }
-        if let (Some(kid), Some(last)) = (r[4].clone(), stages.last_mut()) {
-            last.2.push((kid, num(&r[5])));
+        let stages = out.entry(num(&r[1])).or_default();
+        if last_stage != Some(num(&r[3])) {
+            stages.push((r[4].clone().unwrap_or_default(), num(&r[5]), Vec::new()));
+            last_stage = Some(num(&r[3]));
+        }
+        if let (Some(kid), Some(last)) = (r[7].clone(), stages.last_mut()) {
+            last.2.push((kid, num(&r[8])));
         }
     }
-    Ok(out)
+    procs.sort_by(|a, b| b.2.cmp(&a.2).then(a.1.cmp(&b.1)));
+    Ok((out, procs))
 }
 
 /// The GPU process's work by name: its named tasks below the task loop on every thread (WebGPU command
@@ -1089,11 +1215,15 @@ fn native_gpu(dir: &Path, meta: &Value) -> Result<Output> {
 pub fn native_threads(dir: &Path, top: usize) -> Result<Output> {
     let rows = store::read_json(&dir.join("threads.json"))?;
     let mut all = rows.as_array().cloned().unwrap_or_default();
+    let meta = store::read_json(&dir.join("meta.json")).unwrap_or(Value::Null);
+    // A recording of a window (`record`) has no runs: its one span is the whole recording.
+    let whole = meta["kind"] == "record";
+    let (cpu_col, per) = if whole { ("cpu ms", "over the recording") } else { ("cpu ms/run", "per run") };
     // Without per-thread wakes (macOS counts them per process), the busiest threads come first.
     if all.iter().all(|r| r["wakes_per_s"].as_f64().is_none()) {
         all.sort_by(|a, b| b["cpu_ms_per_run"].as_f64().unwrap_or(0.0).total_cmp(&a["cpu_ms_per_run"].as_f64().unwrap_or(0.0)));
     }
-    let mut text = format!("{:>10}  {:>12}  {:>7}  {:>7}  {:<6}  thread (started in)\n", "wakes/s", "cpu ms/run", "pid", "tid", "whose");
+    let mut text = format!("{:>10}  {:>12}  {:>7}  {:>7}  {:<6}  thread (started in)\n", "wakes/s", cpu_col, "pid", "tid", "whose");
     for r in all.iter().take(top) {
         let started = r["module"].as_str().map(|m| format!(" ({m})")).unwrap_or_default();
         text += &format!(
@@ -1109,30 +1239,35 @@ pub fn native_threads(dir: &Path, top: usize) -> Result<Output> {
     if all.len() > top {
         text += &format!("… {} more (--top)\n", all.len() - top);
     }
-    let sum = |o: &str| all.iter().filter(|r| r["origin"] == o).map(|r| r["wakes_per_s"].as_f64().unwrap_or(0.0)).sum::<f64>();
-    if all.iter().any(|r| r["origin"].is_string()) {
-        text += &format!("by whose threads: app {} · driver {} · os {} (wakes/s)\n", fmt::value(sum("app"), "count"), fmt::value(sum("driver"), "count"), fmt::value(sum("os"), "count"));
+    // Every thread's wakes by whose it is, those strobe could not place (`?`: no start module) too, so
+    // the parts add up to the total.
+    let sum = |o: Option<&str>| all.iter().filter(|r| r["origin"].as_str().filter(|s| *s != "?") == o).map(|r| r["wakes_per_s"].as_f64().unwrap_or(0.0)).sum::<f64>();
+    if all.iter().any(|r| r["wakes_per_s"].is_number()) {
+        let unknown = sum(None);
+        text += &format!(
+            "by whose threads: app {} · driver {} · os {}{} (wakes/s)\n",
+            fmt::value(sum(Some("app")), "count"),
+            fmt::value(sum(Some("driver")), "count"),
+            fmt::value(sum(Some("os")), "count"),
+            if unknown > 0.0 { format!(" · unknown (?) {}", fmt::value(unknown, "count")) } else { String::new() }
+        );
     }
     // What the processes spent that no listed thread did: threads that exited during a run (a worker
     // that ran 4 of a run's 6 s once hid that way).
     let runs = store::read_json(&dir.join("runs.json")).unwrap_or(Value::Null);
     let per_run: Vec<f64> = runs.as_array().into_iter().flatten().filter_map(|r| r["cpu_ms"].as_f64()).collect();
-    let meta = store::read_json(&dir.join("meta.json")).unwrap_or(Value::Null);
     // Where cycles are not time, no thread has CPU: say why rather than show blanks.
     let cpu_refused = meta["refused"]["ui.cpu"].as_str().or(meta["refused"]["cpu.work"].as_str()).filter(|r| r.starts_with("NotOnThisOs")).map(str::to_string);
     if let Some(why) = &cpu_refused {
-        text += &format!("cpu ms/run refused: {why}\n");
+        text += &format!("{cpu_col} refused: {why}\n");
     }
     let total = if per_run.is_empty() { meta["values"]["cpu.work"].as_f64().unwrap_or(f64::NAN) } else { metrics::median(&per_run) };
     let listed: f64 = all.iter().filter_map(|r| r["cpu_ms_per_run"].as_f64()).sum();
     let gone = total - listed;
     if gone.is_finite() && gone > (0.05 * total).max(5.0) {
-        text += &format!(
-            "{} per run in threads no longer there at the run's end (they exited during it): the processes spent {} per run, the threads above {}\n",
-            fmt::value(gone, "ms"),
-            fmt::value(total, "ms"),
-            fmt::value(listed, "ms")
-        );
+        let end = if whole { "the recording's end (they exited during it)" } else { "the run's end (they exited during it)" };
+        text +=
+            &format!("{} {per} in threads no longer there at {end}: the processes spent {} {per}, the threads above {}\n", fmt::value(gone, "ms"), fmt::value(total, "ms"), fmt::value(listed, "ms"));
     }
     // Threads that exited before the end, from the timeline (sampled every half second from the launch).
     let mut exited_json = Vec::new();
@@ -1284,7 +1419,7 @@ fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
 
 /// A native recording's frames: per measured run, what reached the screen (OS present events), the
 /// inputs strobe gave the app, and each input's latency to the frame that showed it (SPEC §7.4).
-fn native_frames(dir: &Path, top: usize) -> Result<Output> {
+fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Output> {
     let f = store::read_json(&dir.join("frames.json")).map_err(|_| Error::usage("this native recording has no frames: they come from bench blocks of a native target (--keep, or attribution)"))?;
     let presents: crate::probe::present::Presents = {
         let path = dir.join("presents.json.gz");
@@ -1302,13 +1437,20 @@ fn native_frames(dir: &Path, top: usize) -> Result<Output> {
     let mut text = String::new();
     let mut runs_json = Vec::new();
     let mut slow: Vec<(f64, String, &'static str)> = Vec::new();
-    for (run, r) in f["runs"].as_object().into_iter().flatten() {
+    // Frames on screen by process over the runs: which of the app's processes drew them.
+    let mut by_pid: BTreeMap<u32, usize> = BTreeMap::new();
+    for (run, r) in f["runs"].as_object().into_iter().flatten().filter(|(k, _)| only.is_none_or(|o| o.contains(k))) {
         // The run's span without its untimed stretches (none in a recording from before them).
         let timed = crate::metrics::Timed {
             t0: r["t0_ns"].as_u64().unwrap_or(0),
             t1: r["t1_ns"].as_u64().unwrap_or(0),
             untimed: r["untimed"].as_array().into_iter().flatten().filter_map(|g| Some((g[0].as_u64()?, g[1].as_u64()?))).collect(),
         };
+        for (t0, t1) in timed.segments() {
+            for p in presents.presents.iter().filter(|p| p.state == "displayed" && pids.contains(&p.pid) && p.start_ns >= t0 && p.start_ns < t1) {
+                *by_pid.entry(p.pid).or_default() += 1;
+            }
+        }
         let shown = crate::probe::present::frames::from_timed(&presents.presents, &pids, &timed);
         let mut screens: Vec<(usize, u64)> = shown.shown.iter().map(|s| (s.seg, s.screen_ns)).collect();
         screens.sort_unstable();
@@ -1377,12 +1519,18 @@ fn native_frames(dir: &Path, top: usize) -> Result<Output> {
         }));
     }
     slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if by_pid.len() > 1 {
+        let mut rows: Vec<(&u32, &usize)> = by_pid.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        text += &format!("by process  {}   (frames on screen over the runs above)\n", rows.iter().map(|(pid, n)| format!("pid {pid}: {n}")).collect::<Vec<_>>().join(" · "));
+    }
     text += "slowest inputs (posted to the screen time of the frame that showed them; press: a click the app acted on at its press, timed from it)\n";
     for (ms, run, k) in slow.iter().take(top.min(10)) {
         text += &format!("  {:>9}  {run} {k}\n", fmt::value(*ms, "ms"));
     }
     text += "an input counts when the app changed its accessibility tree after it and was not drawing already or still to show an earlier input (SPEC §7.4)\n";
-    Ok(Output::new(text, json!({ "runs": runs_json, "refresh_ms": refresh })))
+    let processes: Vec<Value> = by_pid.iter().map(|(pid, n)| json!({ "pid": pid, "frames": n })).collect();
+    Ok(Output::new(text, json!({ "runs": runs_json, "refresh_ms": refresh, "processes": processes })))
 }
 /// Busy time by thread from its task loop's tasks. A thread's other tracks hold spans that overlap
 /// its tasks (animation frames, GC sweeping): counting every top-level slice once read 70 s of
@@ -1481,39 +1629,78 @@ pub const COARSE: &str = "coarser than asked: every time is its samples' own gap
 
 /// `hotspots` of an opened recording: its JavaScript profile, else its native samples.
 pub fn hotspots_of(rec: &Rec, by: &str, top: usize) -> Result<Output> {
+    hotspots_sorted(rec, by, top, Sort::Own)
+}
+
+/// The columns' order as the header says it.
+fn columns(sort: Sort) -> &'static str {
+    match sort {
+        Sort::Own => "self time, then total time (with what it called)",
+        Sort::Total => "self time, then total time (with what it called), sorted by total",
+    }
+}
+
+/// `hotspots_of`, its rows in `sort`'s order.
+pub fn hotspots_sorted(rec: &Rec, by: &str, top: usize, sort: Sort) -> Result<Output> {
     let stacks = match rec.cpu() {
         Ok(s) => s,
-        Err(_) if rec.dir.join("deep.json.gz").is_file() => return native_hotspots_of(rec, by, top, None, None),
+        Err(_) if rec.dir.join("deep.json.gz").is_file() => return native_hotspots_of(rec, by, top, Pick::default(), sort),
         Err(e) => return Err(e),
     };
     // The interval the sampler kept, not the one asked: Firefox 160 and older on Windows sample every
     // 2 ms when asked for 1 ms (`probe::gecko::interval_us`).
     let sampling = rec.sampling();
     let at = sampling.map(|s| format!(", {}", s.text())).unwrap_or_default();
-    let mut header = format!("hotspots by {by} · self time, then total time (with what it called) · {{samples}} samples{at}{{mapped}}");
+    let mut header = format!("hotspots by {by} · {} · {{samples}} samples{at}{{mapped}}", columns(sort));
     // Each sample weighs the gap it kept, so the times hold; what a coarser sampler loses is the short.
     if sampling.is_some_and(|s| s.coarse()) {
         header += &format!("\n! {COARSE}");
     }
-    let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), true);
+    let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), Some(sort));
     out.json["interval_us"] = json!(sampling.map(|s| s.median_us));
     out.json["sampling"] = json!(sampling);
-    out.json["total_ms"] = json!(out.json["total"].as_f64().unwrap_or(0.0) / 1000.0);
-    for r in out.json["rows"].as_array_mut().into_iter().flatten() {
-        r["self_ms"] = json!(r["weight"].as_f64().unwrap_or(0.0) / 1000.0);
-        r["total_ms"] = json!(r["inclusive"].as_f64().unwrap_or(0.0) / 1000.0);
-    }
+    ms_columns(&mut out.json);
     Ok(out)
+}
+
+/// `total_ms` beside `total`, `self_ms` and `total_ms` beside each row's and caller's µs.
+fn ms_columns(j: &mut Value) {
+    j["total_ms"] = json!(j["total"].as_f64().unwrap_or(0.0) / 1000.0);
+    for key in ["rows", "callers"] {
+        for r in j[key].as_array_mut().into_iter().flatten() {
+            r["self_ms"] = json!(r["weight"].as_f64().unwrap_or(0.0) / 1000.0);
+            r["total_ms"] = json!(r["inclusive"].as_f64().unwrap_or(0.0) / 1000.0);
+        }
+    }
+}
+
+/// Which native samples `hotspots` reads: one thread's (`--thread`), one process's (`--pid`, its id
+/// or its executable's name), one phase's (`--phase`).
+#[derive(Clone, Copy, Default)]
+pub struct Pick<'a> {
+    pub thread: Option<&'a str>,
+    pub pid: Option<&'a str>,
+    pub phase: Option<&'a str>,
+}
+
+impl<'a> Pick<'a> {
+    pub fn of(args: &'a Args) -> Pick<'a> {
+        Pick { thread: args.get("thread"), pid: args.get("pid"), phase: args.get("phase") }
+    }
+
+    fn any(&self) -> bool {
+        self.thread.is_some() || self.pid.is_some() || self.phase.is_some()
+    }
 }
 
 /// Self time per function, file or package from the recording's native samples (the kernel's
 /// sampled profile, symbolized from PDBs), in the shape of `hotspots`. `thread`: a thread name or id.
 /// `phase`: only samples inside that phase of each measured run (`phase(name, fn)` in the bench file).
 pub fn native_hotspots(dir: &Path, by: &str, top: usize, thread: Option<&str>, phase: Option<&str>) -> Result<Output> {
-    native_hotspots_of(&Rec::open(dir), by, top, thread, phase)
+    native_hotspots_of(&Rec::open(dir), by, top, Pick { thread, phase, pid: None }, Sort::Own)
 }
 
-pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>, phase: Option<&str>) -> Result<Output> {
+pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sort) -> Result<Output> {
     let dir = rec.dir.as_path();
     let missing = || {
         if rec.meta["kind"] == "block" && rec.meta["probes"] != "attribution" {
@@ -1522,43 +1709,116 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>,
             Error::usage("this recording has no native samples; record with --probes deep")
         }
     };
-    // A thread or phase selects samples: symbolized for that question alone; all samples are shared.
+    // A thread, process or phase selects samples: symbolized for that question alone; all samples are shared.
     let filtered;
-    let n: &NativeStacks = if thread.is_some() || phase.is_some() {
-        filtered = native_filtered(dir, thread, phase)?.ok_or_else(missing)?;
+    let n: &NativeStacks = if pick.any() {
+        filtered = native_filtered(dir, pick)?.ok_or_else(missing)?;
         &filtered
     } else {
         rec.native()?.ok_or_else(missing)?
     };
     let share = if n.samples > 0 { 100.0 * n.resolved as f64 / n.samples as f64 } else { 0.0 };
-    let header = format!("native hotspots by {by} · self time, then total time (with what it called) · {{samples}} samples at {} µs · {share:.1}% resolved{{mapped}}", n.interval_us);
     let facts = &n.facts;
-    let mut out = rank(&n.stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), true);
+    // A leaf in a named system library resolves while its callers in an unsymbolized binary do not:
+    // both shares, so a high leaf share never reads as named stacks.
+    let frame_share = 100.0 * facts["resolved_frame_share"].as_f64().unwrap_or(0.0);
+    let processes = facts["processes"].as_array().cloned().unwrap_or_default();
+    let of_procs = if processes.len() > 1 { format!(" of {} processes", processes.len()) } else { String::new() };
+    // Samples that carry no time (macOS `sample`'s snapshots of every thread, running or not) are
+    // counts, never CPU: their rows say samples, not samples × interval as ms.
+    let (header, interval) = if n.untimed {
+        (
+            format!(
+                "native hotspots by {by} · {} · {{samples}} samples{of_procs}, untimed (snapshots of every thread, not CPU time: rows count samples) · resolved: {share:.1}% of leaf frames, {frame_share:.1}% of all frames{{mapped}}",
+                columns(sort)
+            ),
+            n.interval_us.max(1.0),
+        )
+    } else {
+        (
+            format!(
+                "native hotspots by {by} · {} · {{samples}} samples{of_procs} at {} µs (sampled: samples × interval) · resolved: {share:.1}% of leaf frames, {frame_share:.1}% of all frames{{mapped}}",
+                columns(sort),
+                n.interval_us
+            ),
+            n.interval_us,
+        )
+    };
+    let untimed = n.untimed;
+    let show = move |us: f64| if untimed { format!("{:.0} smp", us / interval) } else { fmt::value(us / 1000.0, "ms") };
+    let mut out = rank(&n.stacks, by, top, &header, show, Some(sort));
     out.json["native"] = json!(true);
     out.json["untimed"] = json!(n.untimed);
     out.json["interval_us"] = json!(n.interval_us);
-    out.json["total_ms"] = json!(out.json["total"].as_f64().unwrap_or(0.0) / 1000.0);
     out.json["resolved_samples"] = facts["resolved_samples"].clone();
     out.json["resolved_share"] = facts["resolved_share"].clone();
+    out.json["resolved_frame_share"] = facts["resolved_frame_share"].clone();
     out.json["unsymbolized"] = facts["unsymbolized"].clone();
-    for r in out.json["rows"].as_array_mut().into_iter().flatten() {
-        r["self_ms"] = json!(r["weight"].as_f64().unwrap_or(0.0) / 1000.0);
-        r["total_ms"] = json!(r["inclusive"].as_f64().unwrap_or(0.0) / 1000.0);
+    out.json["unsymbolized_any_frame"] = facts["unsymbolized_any_frame"].clone();
+    out.json["processes"] = json!(processes);
+    if !n.untimed {
+        ms_columns(&mut out.json);
+    }
+    // The rows above pool every sampled process: by process, so a tree's children are not read as its root's.
+    if processes.len() > 1 {
+        let shown = processes.len().min(top.max(8));
+        out.text += &format!(
+            "by process (the rows above pool them; --pid <pid|exe> reads one): samples{}, share of the {} samples\n",
+            if n.untimed { "" } else { ", sampled ms (samples × interval)" },
+            n.samples
+        );
+        for p in processes.iter().take(shown) {
+            let k = p["samples"].as_f64().unwrap_or(0.0);
+            let ms = if n.untimed { String::new() } else { format!("{:>9}  ", fmt::value(p["sampled_ms"].as_f64().unwrap_or(0.0), "ms")) };
+            out.text += &format!("  {k:>7.0}  {ms}{:>5.1}%  {:>7}  {}\n", 100.0 * k / (n.samples.max(1) as f64), p["pid"], p["exe"].as_str().unwrap_or("?"));
+        }
+        if processes.len() > shown {
+            out.text += &format!("  … {} more processes (--json lists every one)\n", processes.len() - shown);
+        }
     }
     let deep: Option<crate::probe::stacks::Deep> =
         std::fs::File::open(dir.join("deep.json.gz")).ok().and_then(|f| serde_json::from_reader(std::io::BufReader::new(flate2::read::GzDecoder::new(f))).ok());
-    if let (0, Some(t), Some(d)) = (n.samples, thread, deep.as_ref())
+    // What share of the processes' CPU the samples stand for: the tree's own cycles around the capture
+    // where strobe read them (`record pid:`), else what strobe's own sampler saw its threads use.
+    // Only over all samples of a timed capture.
+    if !n.untimed && !pick.any() {
+        let set = rec.meta["set_cpu_ms"].as_f64().map(|c| (c, "the processes' cycles around the capture"));
+        let seen = deep.as_ref().and_then(|d| d.suspend.as_ref()?.cpu_ms).map(|c| (c, "the CPU the sampler saw the threads use"));
+        if let Some((cpu, source)) = set.or(seen).filter(|c| c.0 > 0.0) {
+            let sampled = n.samples as f64 * n.interval_us / 1e3;
+            let share = sampled / cpu;
+            out.json["cpu_coverage"] = json!({ "share": share, "sampled_ms": sampled, "cpu_ms": cpu, "source": source });
+            if share < 0.8 {
+                out.text += &format!(
+                    "! Coverage: samples cover {:.0}% of the processes' {:.2} s CPU ({source}): {} sampled; the rest ran where the sampler did not look (a thread's life before strobe found it)\n",
+                    100.0 * share,
+                    cpu / 1e3,
+                    fmt::value(sampled, "ms")
+                );
+            }
+        }
+    }
+    if let (0, true, Some(d)) = (n.samples, pick.thread.is_some() || pick.pid.is_some(), deep.as_ref())
         && !d.samples.is_empty()
     {
-        // The thread matched none of the sampled ones: name those, busiest first.
-        let mut by: BTreeMap<u32, u64> = BTreeMap::new();
-        for s in &d.samples {
-            *by.entry(s.2).or_default() += 1;
+        // The thread or process matched none of the sampled ones: name those, busiest first.
+        let busiest = |processes: bool, name: &dyn Fn(u32) -> String| {
+            let mut by: BTreeMap<u32, u64> = BTreeMap::new();
+            for s in &d.samples {
+                *by.entry(if processes { s.1 } else { s.2 }).or_default() += 1;
+            }
+            let mut list: Vec<(u32, u64)> = by.into_iter().collect();
+            list.sort_by_key(|a| std::cmp::Reverse(a.1));
+            list.iter().take(8).map(|(id, k)| format!("{} ({k})", name(*id))).collect::<Vec<_>>().join(", ")
+        };
+        if let Some(t) = pick.thread {
+            let names = busiest(false, &|tid| d.threads.get(&tid).cloned().unwrap_or_else(|| format!("thread {tid}")));
+            out.text += &format!("! no samples of a thread named or numbered {t:?}{}; the sampled threads (samples): {names}\n", if pick.pid.is_some() { " in that process" } else { "" });
         }
-        let mut list: Vec<(u32, u64)> = by.into_iter().collect();
-        list.sort_by_key(|a| std::cmp::Reverse(a.1));
-        let names: Vec<String> = list.iter().take(8).map(|(tid, k)| format!("{} ({k})", d.threads.get(tid).cloned().unwrap_or_else(|| format!("thread {tid}")))).collect();
-        out.text += &format!("! no samples of a thread named or numbered {t:?}; the sampled threads (samples): {}\n", names.join(", "));
+        if let Some(p) = pick.pid {
+            let names = busiest(true, &|pid| format!("{} {pid}", crate::symbol::process_name(d, pid)));
+            out.text += &format!("! no samples of a process numbered or named {p:?}; the sampled processes (samples): {names}\n");
+        }
     } else if n.samples == 0 {
         // Nothing sampled is not the same as nothing resolved: say what the sampler gave.
         let why = if cfg!(target_os = "macos") {
@@ -1569,10 +1829,16 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>,
             "the kernel's sampled profile held no samples of the app in the measured runs (the deep helper, or the threads never ran)"
         };
         out.text += &format!("! no native samples: {why}\n");
-    } else if share < 95.0 {
-        let missing: Vec<String> = facts["unsymbolized"].as_array().into_iter().flatten().take(3).map(|m| format!("{} ({})", m["module"].as_str().unwrap_or(""), m["samples"])).collect();
+    } else if share < 95.0 || frame_share < 95.0 {
+        let list =
+            |k: &str| -> String { facts[k].as_array().into_iter().flatten().take(3).map(|m| format!("{} ({})", m["module"].as_str().unwrap_or(""), m["samples"])).collect::<Vec<_>>().join(", ") };
         let what = if cfg!(windows) { "no PDB found" } else { "no symbols or DWARF found (a dSYM or an unstripped binary)" };
-        out.text += &format!("! Unresolved: {:.1}% of samples have no symbol ({what}): {}\n", 100.0 - share, missing.join(", "));
+        if share < 95.0 {
+            out.text += &format!("! Unresolved: {:.1}% of samples have no symbol at the leaf ({what}): {}\n", 100.0 - share, list("unsymbolized"));
+        }
+        if frame_share < 95.0 {
+            out.text += &format!("! Unresolved: {:.1}% of all frames have no symbol ({what}); samples with one in: {}\n", 100.0 - frame_share, list("unsymbolized_any_frame"));
+        }
     }
     // Sampled by strobe itself without the helper: how, and what it cost the threads.
     // Processes of the target the sampler gave no stacks of: their CPU is in no row above.
@@ -1588,10 +1854,10 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, thread: Option<&str>,
     Ok(out)
 }
 
-/// One thread's or one phase's native samples (symbolized for that question alone).
-fn native_filtered(dir: &Path, thread: Option<&str>, phase: Option<&str>) -> Result<Option<NativeStacks>> {
-    let spans = phase.map(|p| phase_spans(dir, p)).transpose()?;
-    NativeStacks::read(dir, thread, spans.as_deref())
+/// One thread's, one process's or one phase's native samples (symbolized for that question alone).
+fn native_filtered(dir: &Path, pick: Pick) -> Result<Option<NativeStacks>> {
+    let spans = pick.phase.map(|p| phase_spans(dir, p)).transpose()?;
+    NativeStacks::read(dir, &crate::symbol::Select { thread: pick.thread, process: pick.pid, spans: spans.as_deref() })
 }
 
 /// The host-clock spans of a phase in a native recording's measured runs, from its marks.
@@ -1613,7 +1879,7 @@ fn phase_spans(dir: &Path, phase: &str) -> Result<Vec<(u64, u64)>> {
 /// (attribution only): who allocates, with full stacks, including objects already collected.
 pub fn alloc(rec: &Rec, by: &str, top: usize) -> Result<Output> {
     let header = format!("allocations by {by} · sampled every {} KB on average · {{samples}} samples{{mapped}}", crate::probe::alloc::INTERVAL_BYTES / 1024);
-    let mut out = rank(rec.alloc()?, by, top, &header, fmt::bytes, false);
+    let mut out = rank(rec.alloc()?, by, top, &header, fmt::bytes, None);
     out.json["interval_bytes"] = json!(crate::probe::alloc::INTERVAL_BYTES);
     Ok(out)
 }
@@ -1684,7 +1950,7 @@ fn forced(rec: &Rec) -> Result<&Forced> {
             // Traced, not sampled: each forced layout is counted, with no sampling variance.
             stacks.weights.push(Weight { stack: ids, w: dur as f64 / 1e3, n: 1, var: 0.0 });
         }
-        Ok(Forced { stacks, totals, driver, runs: measured.len(), runs_text: runs_text(measured.len(), &rows), at_start })
+        Ok(Forced { stacks, totals, driver, runs: measured.len(), runs_text: runs_text(&rec.meta, measured.len(), &rows), at_start })
     }))
 }
 
@@ -1703,7 +1969,7 @@ pub fn layout(rec: &Rec, top: usize) -> Result<Output> {
         per_run(f.totals[1][0]),
         per_run(f.totals[1][1]),
     );
-    let mut out = rank(&f.stacks, "function", top, &header, |us| fmt::value(us / 1000.0, "ms"), false);
+    let mut out = rank(&f.stacks, "function", top, &header, |us| fmt::value(us / 1000.0, "ms"), None);
     let summary = |(n, ms): (u64, f64)| json!({ "count": n, "ms": ms, "count_per_run": n as f64 / runs, "ms_per_run": ms / runs });
     out.json["runs"] = json!(f.runs);
     out.json["forced"] = json!({ "layout": summary(f.totals[0][0]), "style": summary(f.totals[0][1]) });
@@ -1749,7 +2015,7 @@ fn invalidation(rec: &Rec) -> Result<Invalidation> {
     let sym = rec.sym.lock().unwrap_or_else(|e| e.into_inner());
     let mut v = Invalidation {
         runs: measured.len(),
-        runs_text: runs_text(measured.len(), &rows),
+        runs_text: runs_text(&rec.meta, measured.len(), &rows),
         recalcs: 0,
         recalc_ms: 0.0,
         elements: 0.0,
@@ -1857,12 +2123,55 @@ pub fn style(rec: &Rec, top: usize) -> Result<Output> {
     ))
 }
 
+/// The recording's per-run table (`run_phases`) kept beside its trace: a recording never changes, and
+/// reading the table loads the whole trace (15 s for a 950 MB one) at every `query <rec> summary`.
+const PHASES_CACHE: &str = "phases-cache.json";
+
+/// `run_phases`, read from the recording's cache when this strobe wrote it for these runs; else
+/// computed and cached. A trace that fails to load is not cached.
+fn run_phases_cached(rec: &Rec) -> Option<(String, Value)> {
+    if !rec.has(Part::Phases) {
+        return None;
+    }
+    let path = rec.dir.join(PHASES_CACHE);
+    // By this build (the table's reading may change between any two), the source it read (its size
+    // and time: an imported or re-read file is another), the run marks' token and the runs it
+    // covers (`--case` picks some).
+    let source = ["trace.pftrace", crate::probe::gecko::READ, crate::probe::webkit_inspector::READ]
+        .iter()
+        .find_map(|f| {
+            let m = std::fs::metadata(rec.dir.join(f)).ok()?;
+            let ns = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+            Some(format!("{f}:{}:{ns}", m.len()))
+        })
+        .unwrap_or_default();
+    let key =
+        format!("{} {source} {} {} {}", env!("STROBE_BUILD_ID"), rec.meta["token"].as_str().unwrap_or(""), rec.meta["runs"], rec::measured_keys(&rec.meta).map(|k| k.join(",")).unwrap_or_default());
+    let mut cache = store::read_json(&path).ok().filter(Value::is_object).unwrap_or_else(|| json!({}));
+    if let Some(hit) = cache.get(&key) {
+        return hit["text"].as_str().map(|t| (t.to_string(), hit["per_run"].clone()));
+    }
+    let got = run_phases(rec).ok()?;
+    // Another build's rows are never read again.
+    if let Some(o) = cache.as_object_mut() {
+        o.retain(|k, _| k.starts_with(env!("STROBE_BUILD_ID")));
+    }
+    cache[key.as_str()] = match &got {
+        Some((t, rows)) => json!({ "text": t, "per_run": rows }),
+        None => json!({ "text": null }),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&cache) {
+        let _ = store::write_atomic(&path, &bytes);
+    }
+    got
+}
+
 /// Per measured run, the renderer main thread's style, layout and paint time and the elements style
 /// recalcs touched, from a trace that has them (timing with `--trace full`, attribution): the numbers
 /// a person would otherwise pull out with SQL over the run marks.
-pub fn run_phases(rec: &Rec) -> Option<(String, Value)> {
+fn run_phases(rec: &Rec) -> Result<Option<(String, Value)>> {
     let meta = &rec.meta;
-    let rows = rec.part(Part::Phases).ok()?;
+    let rows = rec.part(Part::Phases)?;
     let measured = measured_runs(meta, &rows);
     // [style, layout, paint] ms and elements restyled, per run; nested slices of one kind count once.
     let mut per: BTreeMap<String, ([f64; 3], f64)> = measured.iter().map(|k| (k.clone(), ([0.0; 3], 0.0))).collect();
@@ -1889,9 +2198,9 @@ pub fn run_phases(rec: &Rec) -> Option<(String, Value)> {
         any = true;
     }
     if !any {
-        return None;
+        return Ok(None);
     }
-    let mut text = format!("per run  {} · renderer main thread\n         style ms (elements restyled)   layout ms   paint ms\n", runs_text(measured.len(), &rows));
+    let mut text = format!("per run  {} · renderer main thread\n         style ms (elements restyled)   layout ms   paint ms\n", runs_text(meta, measured.len(), &rows));
     let mut out = Vec::new();
     // In run order: `run:10` after `run:9`.
     let mut ordered: Vec<(&String, &([f64; 3], f64))> = per.iter().collect();
@@ -1900,7 +2209,7 @@ pub fn run_phases(rec: &Rec) -> Option<(String, Value)> {
         text += &format!("  {:<6} {:>8.1} ({:>8})          {:>9.1}   {:>8.1}\n", k.rsplit(':').next().map(|i| format!("run {i}")).unwrap_or_default(), ms[0], fmt::value(*el, "count"), ms[1], ms[2]);
         out.push(json!({ "run": k, "style_ms": ms[0], "elements_restyled": el, "layout_ms": ms[1], "paint_ms": ms[2] }));
     }
-    Some((text, json!(out)))
+    Ok(Some((text, json!(out))))
 }
 
 /// Garbage collection in the measured runs: collections, the main-thread pause they cost (incremental
@@ -1985,7 +2294,7 @@ pub fn gc(rec: &Rec) -> Result<Output> {
     };
     let mut text = format!(
         "garbage collection · median of {}\n  collections   {:.0} minor · {:.0} major per run\n  main thread   {} per run (pauses and incremental marking{})\n  helpers       {helpers}\n  freed         {} per run\n",
-        runs_text(runs.len(), &rows),
+        runs_text(&rec.meta, runs.len(), &rows),
         g("minor_per_run"),
         g("major_per_run"),
         fmt::value(g("main_ms_per_run"), "ms"),
@@ -2051,11 +2360,17 @@ fn run_keys(rows: &[Vec<Option<String>>]) -> Vec<(usize, String)> {
     keys
 }
 
-/// `5 measured runs (7 in the trace: 2 warmup before them)`: a trace's run marks include warmup.
-fn runs_text(measured: usize, rows: &[Vec<Option<String>>]) -> String {
+/// `5 measured runs (7 in the trace: 2 warmup before them)`: a trace's run marks include warmup. One
+/// case of a batch (`--case`) says whose runs the others are.
+fn runs_text(meta: &Value, measured: usize, rows: &[Vec<Option<String>>]) -> String {
     let all = run_keys(rows).len();
     let s = if measured == 1 { "" } else { "s" };
-    if all > measured { format!("{measured} measured run{s} ({all} in the trace: {} warmup before)", all - measured) } else { format!("{measured} measured run{s}") }
+    match meta["query_case"].as_str() {
+        Some(case) if all > measured => format!("{measured} measured run{s} of case {case} ({all} in the trace: the launch's other cases and warmup)"),
+        Some(case) => format!("{measured} measured run{s} of case {case}"),
+        None if all > measured => format!("{measured} measured run{s} ({all} in the trace: {} warmup before)", all - measured),
+        None => format!("{measured} measured run{s}"),
+    }
 }
 
 /// A frame of a trace stack: url, 1-based line and column of the call, the function's name, and the
@@ -2136,12 +2451,36 @@ fn row_key(f: &Frame, by: &str, packages: &mut BTreeMap<String, String>) -> Stri
     }
 }
 
+/// How `hotspots` orders its rows (`--sort`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
+    /// By self time: where the time was spent.
+    Own,
+    /// By total time: what the time was spent under, callers included.
+    Total,
+}
+
+impl Sort {
+    pub fn of(args: &Args) -> Result<Sort> {
+        match args.get("sort") {
+            None | Some("self") => Ok(Sort::Own),
+            Some("total") => Ok(Sort::Total),
+            Some(other) => Err(Error::usage(format!("--sort: self or total, not {other}"))),
+        }
+    }
+}
+
+/// Callers listed under rows sorted by self time when they are not among them (`rank`).
+const CALLERS: usize = 8;
+
 /// Ranks weighted stacks (leaf = the frame that spent the time or allocated the bytes) by function, file
 /// or package. Rows keep complete locations; by function, each row keeps its three heaviest full stacks
-/// and the text prints the heaviest in full. `header` may use `{samples}` and `{mapped}`. `with_total`
+/// and the text prints the heaviest in full. `header` may use `{samples}` and `{mapped}`. `total`
 /// (CPU time): each row's total too, every stack its frame is in, once a stack; a function that only
-/// calls is a row by its total, after the rows with time of their own.
-fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) -> String, with_total: bool) -> Output {
+/// calls is a row by its total, after the rows with time of their own (or among them, `Sort::Total`).
+/// Sorted by self time, the heaviest callers by total time that missed the rows follow them.
+fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) -> String, total_by: Option<Sort>) -> Output {
+    let with_total = total_by.is_some();
     type ByStack<'a> = BTreeMap<&'a [u32], (f64, u64)>;
     /// (name, where) → (weight, samples, stacks).
     type Row<'a> = ((String, String), (f64, u64, ByStack<'a>));
@@ -2211,7 +2550,12 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
         rows.entry(k.clone()).or_insert((0.0, 0, ByStack::new()));
     }
     let mut rows: Vec<Row> = rows.into_iter().collect();
-    rows.sort_by(|a, b| b.1.0.total_cmp(&a.1.0).then_with(|| inclusive.get(&b.0).unwrap_or(&0.0).total_cmp(inclusive.get(&a.0).unwrap_or(&0.0))));
+    let incl_of = |k: &(String, String), own: f64| inclusive.get(k).copied().unwrap_or(own);
+    if total_by == Some(Sort::Total) {
+        rows.sort_by(|a, b| incl_of(&b.0, b.1.0).total_cmp(&incl_of(&a.0, a.1.0)).then_with(|| b.1.0.total_cmp(&a.1.0)));
+    } else {
+        rows.sort_by(|a, b| b.1.0.total_cmp(&a.1.0).then_with(|| inclusive.get(&b.0).unwrap_or(&0.0).total_cmp(inclusive.get(&a.0).unwrap_or(&0.0))));
+    }
     let mapped_text = if mapped > 0 { format!(" · {:.0}% of script samples source-mapped", 100.0 * mapped as f64 / scripts.max(1) as f64) } else { String::new() };
     let mut text = header.replace("{samples}", &samples.to_string()).replace("{mapped}", &mapped_text) + "\n";
     let mut json_rows = Vec::new();
@@ -2250,7 +2594,26 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
         }
         json_rows.push(row);
     }
-    Output::new(text, json!({ "by": by, "samples": samples, "script_samples": scripts, "mapped_samples": mapped, "total": total, "rows": json_rows }))
+    // Sorted by self time, a caller whose time is all in what it called (a function that only
+    // calls) ranks under every row with time of its own: the heaviest by total that missed the rows.
+    let mut callers_json = Vec::new();
+    if total_by == Some(Sort::Own) && total > 0.0 {
+        let mut hidden: Vec<(&(String, String), f64, f64)> = rows.iter().skip(top).map(|(k, (w, _, _))| (k, *w, incl_of(k, *w))).filter(|(_, _, incl)| incl / total >= 0.05).collect();
+        hidden.sort_by(|a, b| b.2.total_cmp(&a.2));
+        if !hidden.is_empty() {
+            text += "  callers by total time, not in the rows above (their time is mostly in what they called; --sort total ranks every row by it):\n";
+        }
+        for ((k, detail), own, incl) in hidden.into_iter().take(CALLERS) {
+            text += &format!("  {:>9} {:>5.1}%  self {:>9}  {k}  {detail}\n", show(incl), 100.0 * incl / total, show(own));
+            callers_json.push(json!({ "name": k, "where": detail, "weight": own, "inclusive": incl, "total_share": incl / total }));
+        }
+    }
+    let mut out = json!({ "by": by, "samples": samples, "script_samples": scripts, "mapped_samples": mapped, "total": total, "rows": json_rows });
+    if let Some(s) = total_by {
+        out["sort"] = json!(if s == Sort::Total { "total" } else { "self" });
+        out["callers"] = json!(callers_json);
+    }
+    Output::new(text, out)
 }
 
 fn short_url(url: &str) -> String {
