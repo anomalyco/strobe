@@ -2029,7 +2029,10 @@ flowchart LR
   The counter starts again with every document, so when a run loads a page (`goto`), strobe reads it
   just before the old document goes and adds that part to the run: a load is one run, never a negative one.
   Warmup ends when two consecutive runs do the same work within 5% or within 1 ms (an idle run does
-  about 3 ms, where 5% is noise and warmup once ran 55 s); both count as measured, and
+  about 3 ms, where 5% is noise and warmup once ran 55 s), and a process of the target ended in both
+  or in neither (pages, native and terminal targets): Chromium on Windows starts a utility process for
+  its processor metrics a moment after the first page loads and ends it at once, which a headless
+  launch's first run met and the block's `cpu.*` were refused; both count as measured, and
   the block runs until `--runs` are measured. Runs before are relabelled `warm:<i>` in the trace.
   After 10 unsteady runs strobe measures anyway and warns `NotSteady`, saying which way: work that
   grew run after run (Spearman over 0.5 across the warmup runs and the last 5% over the first;
@@ -7946,7 +7949,8 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   are kept topmost without focus, since an occluded Chromium window stops rendering. A headless
   Chromium has no window: its page is used at once (the wait for a window to raise had held every
   headless launch 5 s, 50 system snapshots, 37% of a headless block's wall time on adais; `look` of
-  a page 6.7 s → 1.7 s, exp_7b9e04).
+  a page 6.7 s → 1.7 s, exp_7b9e04). Those 5 s had also let Chromium's post-startup utility process
+  end before the first run; warmup now waits it out (§9.2).
 - Typed outcomes, crash-safe store and strict config (2026-11-05): validators are `ValidatorId`
   and refusals `Refusal` values on the error (§10.1); comparisons carry `kind` and `refusal`,
   which bench sets with each verdict it writes. Still to move to the types: `bench`, `pr`, `card`,

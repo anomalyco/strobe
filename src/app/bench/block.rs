@@ -99,6 +99,17 @@ impl Warmup {
         true
     }
 
+    /// `after`, where two runs are steady only when a process of the target ended in both or in neither
+    /// (`lost`, per run): a chore the target ran once (a browser's utility process a moment after its
+    /// first page loaded) stays in warmup, where it had refused the block's `cpu.*` instead.
+    pub(super) fn after_lost(&mut self, work: &[f64], lost: &[bool]) -> bool {
+        let i = work.len().wrapping_sub(1);
+        if self.first.is_none() && !self.untimed && (1..MAX_WARMUP).contains(&i) && lost.get(i - 1) != lost.get(i) {
+            return false;
+        }
+        self.after(work)
+    }
+
     /// Never steady because the work grew across the warmup runs, not because it swung (`NotSteady`).
     pub(super) fn grew(&self) -> bool {
         self.growth

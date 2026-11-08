@@ -6667,7 +6667,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             }
                         })
                         .collect();
-                    if warmup.after(&work) && !x.untimed {
+                    if warmup.after_lost(&work, &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>()) && !x.untimed {
                         if let (Some(dir), Some(b)) = (&gecko_dir, firefox) {
                             match probe::gecko::census(b, &page, &dir.join("memory-0.json.gz"), "after warmup, before the profiler started and the measured runs") {
                                 Ok(c) => census.push(c),
