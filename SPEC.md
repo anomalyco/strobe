@@ -2039,14 +2039,16 @@ flowchart LR
   The counter starts again with every document, so when a run loads a page (`goto`), strobe reads it
   just before the old document goes and adds that part to the run: a load is one run, never a negative one.
   Warmup ends when two consecutive runs do the same work within 5% or within 1 ms (an idle run does
-  about 3 ms, where 5% is noise and warmup once ran 55 s), and a process of the target ended in both
-  or in neither (pages, native and terminal targets): Chromium on Windows starts a utility process for
-  its processor metrics a moment after the first page loads and ends it at once, which a headless
-  launch's first run met and the block's `cpu.*` were refused (after 10 runs that never agreed, the
-  runs after the last are measured, never a lost one by the pair rule). A `--check` measures its one
-  run; when a process of the target ended in it, the case's runs start alike (`resetCheck`), and it
-  is no pixels or filmed block, the next run is measured instead, once; both count as measured, and
-  the block runs until `--runs` are measured. Runs before are relabelled `warm:<i>` in the trace.
+  about 3 ms, where 5% is noise and warmup once ran 55 s); both count as measured, and the block runs
+  until `--runs` are measured. Runs before are relabelled `warm:<i>` in the trace. For a page the
+  work is the renderer's task time and, where it was read whole, the browser's process tree's CPU
+  too: Chromium's after-startup chores (its network and storage services' deferred work, about 230
+  ms of CPU just after the first page loads) leave the renderer alone. Two runs agree only when a
+  process of the target ended in both or in neither (pages, native and terminal targets): Chromium
+  on Windows starts a utility process for its processor metrics just after the first load and ends
+  it at once. A `--check` stays one cold run, except that when a process of the target ended in it,
+  the case's runs start alike (`resetCheck`) and it is no pixels or filmed block, the next run is
+  measured instead, once.
   After 10 unsteady runs strobe measures anyway and warns `NotSteady`, saying which way: work that
   grew run after run (Spearman over 0.5 across the warmup runs and the last 5% over the first;
   `warmup.unsteady` 2) is state the runs leave (add a reset, or, with one, fix what it leaves behind:
@@ -7973,11 +7975,10 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   headless launch 5 s, 50 system snapshots, 37% of a headless block's wall time on adais; `look` of
   a page 6.7 s → 1.7 s, exp_7b9e04). Those 5 s had also let Chromium's after-startup chores (its
   network and storage services' deferred work and processor-metrics utility process, about 230 ms
-  of CPU just after the first page loads) pass before the first run. A page block now waits after
-  its setup until the target's CPUs are quiet (`settle`, at most 5 s, pinned targets; 0.2–0.3 s on
-  adais), and warmup waits out a run that lost a process (§9.2): a check's click `cpu.work` read 315
-  ms without the settle and 78.5–79.9 ms with it (84 ms behind the 5 s wait), idle blocks' 8.95 →
-  7.1 ms (7.6 ms).
+  of CPU just after the first page loads) pass before the first run. Warmup now holds a page's
+  browser CPU steady beside its renderer's task time, and waits out a run that lost a process (§9.2);
+  a `--check` stays one cold run, chores included (its click `cpu.work` 315 ms, 84 ms behind the old
+  wait).
 - Typed outcomes, crash-safe store and strict config (2026-11-05): validators are `ValidatorId`
   and refusals `Refusal` values on the error (§10.1); comparisons carry `kind` and `refusal`,
   which bench sets with each verdict it writes. Still to move to the types: `bench`, `pr`, `card`,

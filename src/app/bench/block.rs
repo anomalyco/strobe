@@ -86,8 +86,12 @@ impl Warmup {
     /// process ended in both or in neither: a chore the target ran once (Chromium's processor-metrics
     /// utility process, a moment after its first page loaded) stays in warmup, where it had refused the
     /// block's `cpu.*`. An untimed block whose one run lost a process, and that may run again
-    /// (`retry`), measures the next run instead, once.
-    pub(super) fn after(&mut self, work: &[f64], lost: &[bool]) -> bool {
+    /// (`retry`), measures the next run instead, once. `cpu`, where the work is one process's main
+    /// thread (a page's renderer): the target's whole process tree's CPU per run (NaN where unread or
+    /// short), which must hold steady too: a browser's after-startup chores (Chromium's network and
+    /// storage services' deferred work, about 230 ms of CPU just after its first page loads) leave the
+    /// renderer's task time alone, and made a cold block's first measured run's `cpu.work` 4x.
+    pub(super) fn after(&mut self, work: &[f64], cpu: &[f64], lost: &[bool]) -> bool {
         if self.first.is_some() || work.is_empty() {
             return false;
         }
@@ -96,7 +100,9 @@ impl Warmup {
             self.first = Some(usize::from(i == 0 && self.retry && lost.first() == Some(&true)));
             return true;
         }
-        let steady = i >= 1 && steady(work[i - 1], work[i]) && lost.get(i - 1) == lost.get(i);
+        let tree = |j: usize| cpu.get(j).copied().filter(|c| c.is_finite());
+        let tree_steady = i >= 1 && tree(i - 1).zip(tree(i)).is_none_or(|(a, b)| steady(a, b));
+        let steady = i >= 1 && steady(work[i - 1], work[i]) && tree_steady && lost.get(i - 1) == lost.get(i);
         if !steady && i < MAX_WARMUP {
             return false;
         }

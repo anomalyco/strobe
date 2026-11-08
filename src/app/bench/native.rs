@@ -732,7 +732,7 @@ fn runs(
                 }
                 // Without CPU (cycles that are not time, `host::cycles_refused`), steady by wall time.
                 let lost: Vec<bool> = runs.iter().map(|r| r.cpu_lost).collect();
-                if warmup.after(&runs.iter().map(|r| if r.cpu.is_finite() { r.cpu } else { r.ms }).collect::<Vec<_>>(), &lost) && leak {
+                if warmup.after(&runs.iter().map(|r| if r.cpu.is_finite() { r.cpu } else { r.ms }).collect::<Vec<_>>(), &[], &lost) && leak {
                     readings.push(memory::Reading::take(&n.processes(), "after warmup (before run 1)"));
                 }
             }
@@ -1197,7 +1197,15 @@ fn runs(
                 leak: leak_result,
                 screen: Some(screen.clone()),
                 shown,
-                overhead: Some(Overhead { strobe_pct, runner_pct, sampler_pct, present_pct, pixel_pct, ..Overhead::default() }),
+                overhead: Some(Overhead {
+                    strobe_pct,
+                    runner_pct,
+                    sampler_pct,
+                    present_pct,
+                    pixel_pct,
+                    encoder_pct: stopped.as_ref().and_then(|s| s.as_ref().ok()).and_then(crate::app::video::Stopped::encoder_pct),
+                    ..Overhead::default()
+                }),
                 process_set: Some(programs(&n.processes())),
                 // macOS's window list gives a window's frame, title bar included, not its content area: kept
                 // as the frame (`admit_window` allows a page's side the title bar). As setup began when a

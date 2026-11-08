@@ -932,7 +932,8 @@ impl Exec {
     /// Whether what strobe's own reads did to the block's times is judged (`pixel_overhead`): a timed
     /// block's, and a `--check`'s, which says what the bench would refuse (not a `--pixels` block's).
     fn judges_time(&self) -> bool {
-        self.measures_time() || (self.untimed && self.pixels.is_none())
+        // A filmed block's times are the film's (`perturbed (filmed)`), judged by nothing.
+        self.measures_time() || (self.untimed && self.pixels.is_none() && !self.video)
     }
 }
 
@@ -6199,15 +6200,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         let mut first_case = Some((first_same, first_start));
         lap("setup");
-        // A browser runs its after-startup chores once its first page has loaded (Chromium: the network
-        // and storage services' deferred work, its processor-metrics utility process: about 230 ms of CPU
-        // on adais just after the load), which warmup, deciding on the renderer's task time, does not see.
-        // The runs start once the target's CPUs are quiet, at most 5 s (pinned: an unpinned machine's
-        // CPUs are never all quiet).
-        if ctx.pin.is_some() && on_phone.is_none() {
-            validity::wait_quiet(ctx.pin, Duration::from_secs(5));
-            lap("settle");
-        }
         // `--video` (an untimed block): from before the first run to after the last.
         if x.video {
             // A phone's page is filmed as a headless page's is: its renderer's own frames.
@@ -6770,7 +6762,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             }
                         })
                         .collect();
-                    if warmup.after(&work, &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>()) && !x.untimed {
+                    // The browser's whole CPU must hold steady too (its after-startup chores leave the
+                    // renderer's task time alone).
+                    let tree: Vec<f64> = runs.iter().map(|r| if !r.cpu_lost && r.work.is_finite() { r.work } else { f64::NAN }).collect();
+                    if warmup.after(&work, &tree, &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>()) && !x.untimed {
                         if let (Some(dir), Some(b)) = (&gecko_dir, firefox) {
                             match probe::gecko::census(b, &page, &dir.join("memory-0.json.gz"), "after warmup, before the profiler started and the measured runs") {
                                 Ok(c) => census.push(c),
@@ -7507,7 +7502,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 "timing": match set {
                     _ if x.video => "perturbed",
                     Set::Lean => "clean",
-                    Set::Timing => "full-trace",
+                    // Only where Chromium traced it: a counter block, a page from outside or another engine traced nothing.
+                    Set::Timing if page.cdp().is_some() && !x.counters && !traceless => "full-trace",
+                    Set::Timing => "clean",
                     _ => "perturbed",
                 },
                 "os": samples.window(page_cases[0].1.runs.first().map_or(0, |r| r.t0), page_cases[page_cases.len() - 1].1.runs.last().map_or(0, |r| r.t1)), "video": video,

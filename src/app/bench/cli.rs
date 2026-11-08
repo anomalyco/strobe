@@ -322,7 +322,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         }
         // Without CPU (cycles that are not time), steady by wall time.
         // A command's whole tree is its own (no process of it ends unseen): nothing is lost.
-        warmup.after(&runs.iter().map(|r| cpu(&r.0).unwrap_or_else(|| wall(&r.0))).collect::<Vec<_>>(), &[]);
+        warmup.after(&runs.iter().map(|r| cpu(&r.0).unwrap_or_else(|| wall(&r.0))).collect::<Vec<_>>(), &[], &[]);
     }
     let first = warmup.first().unwrap_or(0);
     let range = first..warmup.measured().end.clamp(first, runs.len());

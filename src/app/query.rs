@@ -105,14 +105,30 @@ pub fn run(args: &Args) -> Result<Output> {
         let (a, b) = (Rec::resolve(a)?, Rec::resolve(b)?);
         let mut out = diff::run(&a, &b, view, args, top)?;
         // A full trace costs the page main-thread time (SPEC §8.1): a lean and a full-trace recording's
-        // times differ by that alone.
-        let full = |r: &Rec| r.meta["timing"] == "full-trace";
-        if full(&a) != full(&b) {
-            let (f, l) = if full(&a) { (&a.id, &b.id) } else { (&b.id, &a.id) };
-            let note = format!("{f} was timed with --trace full and {l} with the lean trace: the full set costs the page main-thread time, so their times do not compare");
+        // times differ by that alone. The level is the trace's probes: a bench block's lean set, or the
+        // full timing set of `--trace full` blocks and `strobe record` of a page.
+        let traced = |r: &Rec| -> Option<bool> {
+            let chromium = r.meta["engine"].as_str().is_none_or(|e| e == "chromium") && r.meta["native"] != true && r.dir.join("trace.pftrace").is_file();
+            match r.meta["probes"].as_str() {
+                Some("lean") if chromium => Some(false),
+                Some("timing") if chromium && r.meta["timing"] != "perturbed" => Some(true),
+                _ => None,
+            }
+        };
+        if let (Some(fa), Some(fb)) = (traced(&a), traced(&b))
+            && fa != fb
+        {
+            let (f, l) = if fa { (&a.id, &b.id) } else { (&b.id, &a.id) };
+            let note = format!("{f} traced the full timing set and {l} the lean one: the full set costs the page main-thread time, so their times do not compare");
             out.text = format!("! ProbeOverhead  {note}\n{}", out.text);
             if let Some(o) = out.json.as_object_mut() {
-                o.insert("warnings".into(), serde_json::json!([{ "id": "ProbeOverhead", "level": "warn", "text": note }]));
+                let w = serde_json::json!({ "id": "ProbeOverhead", "level": "warn", "text": note });
+                match o.get_mut("warnings").and_then(Value::as_array_mut) {
+                    Some(all) => all.push(w),
+                    None => {
+                        o.insert("warnings".into(), serde_json::json!([w]));
+                    }
+                }
             }
         }
         return Ok(out);

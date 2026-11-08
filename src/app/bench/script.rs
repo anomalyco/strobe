@@ -316,7 +316,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         ctx.runner.call("reset", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset"))?;
                     }
                     // Without CPU (cycles that are not time), steady by wall time.
-                    warmup.after(&runs.iter().map(|r| if r.1.is_finite() { r.1 } else { r.0 }).collect::<Vec<_>>(), &lost);
+                    warmup.after(&runs.iter().map(|r| if r.1.is_finite() { r.1 } else { r.0 }).collect::<Vec<_>>(), &[], &lost);
                 }
                 // In a batch the host must outlive the case: one it ended fails the case that did it.
                 if batch && let Some(code) = host.borrow_mut().child.exited() {
