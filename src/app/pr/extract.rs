@@ -27,7 +27,7 @@ pub(super) fn verdict(c: &Value) -> &str {
 
 /// The direction comparison `c` counted as better (a `metric.<name>` may be better higher).
 pub(super) fn better_of(c: &Value) -> Better {
-    super::better_in(c)
+    stats::better_in(c)
 }
 
 /// The words for comparison `c`'s better and worse directions (`faster`, `slower`): the catalog's,
@@ -120,6 +120,10 @@ pub(super) fn abs_unit(unit: &str) -> &str {
 /// The change as a table shows it: relative changes as percentages, others in the metric's unit.
 pub(super) fn delta(c: &Value, x: f64) -> String {
     let unit = unit_of(c["metric"].as_str().unwrap_or(""));
+    // The estimate itself at its interval's digits, as the text prints it (`fmt::pct_ci`).
+    if c["relative"] == true && x.to_bits() == f(&c["estimate"]).to_bits() && f(&c["lo"]).is_finite() && f(&c["hi"]).is_finite() {
+        return fmt::pct_ci(x, f(&c["lo"]), f(&c["hi"])).0;
+    }
     if c["relative"] == true { fmt::pct(x) } else { signed_disp(x, abs_unit(unit)) }
 }
 
@@ -132,7 +136,13 @@ pub(super) fn range(c: &Value) -> String {
     if !lo.is_finite() || !hi.is_finite() {
         return "—".into();
     }
-    let (a, b) = (delta(c, lo), delta(c, hi));
+    // A ratio's ends at the interval's own digits, as the text prints them (`fmt::pct_ci`).
+    let (a, b) = if c["relative"] == true {
+        let (_, a, b) = fmt::pct_ci(f(&c["estimate"]), lo, hi);
+        (a, b)
+    } else {
+        (delta(c, lo), delta(c, hi))
+    };
     if a == b { a.replace(' ', "\u{a0}") } else { format!("{a} to {b}").replace(' ', "\u{a0}") }
 }
 
@@ -741,6 +751,8 @@ pub(super) fn disp(v: f64, unit: &str) -> String {
         "count" | "" => fmt::value(v, "count"),
         // A number the target printed in a unit of its own.
         "value" => sig3(v),
+        // `480.2 M instr` as the text has it, not `480226998 instructions`.
+        "instructions" => fmt::value(v, "instructions"),
         u => format!("{} {u}", sig3(v)),
     }
 }

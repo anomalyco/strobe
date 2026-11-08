@@ -132,7 +132,13 @@ pub(super) fn build(r: &Value) -> Forest {
         let gap = family::not_compared(s);
         let o = primary_out(s, false);
         // Green and red only for a verdict confirmed across the family; one on its own stays grey.
-        let change = if c["relative"] == true { pr::factor_or_pct(f(&c["estimate"])) } else { tile(s, c, String::new()).delta };
+        // The estimate at its interval's digits, as the text prints it; 2× or more a factor.
+        let (est, lo, hi) = (f(&c["estimate"]), f(&c["lo"]), f(&c["hi"]));
+        let change = match c["relative"] == true {
+            true if est < 1.0 && lo.is_finite() && hi.is_finite() => crate::app::fmt::pct_ci(est, lo, hi).0,
+            true => pr::factor_or_pct(est),
+            false => tile(s, c, String::new()).delta,
+        };
         let (tone, value) = if gap {
             (Tone::Plain, if s["kind"] == "refused" { "not run" } else { "gap" }.to_string())
         } else {

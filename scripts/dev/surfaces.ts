@@ -56,10 +56,19 @@ function rfix(v: number, d: number): string {
 }
 const exactTie = (v: number, d: number) => rfix(v, d) !== v.toFixed(d)
 
-// app::fmt::value / pct / signed (the text and the markdown report).
+// fmt::digits_for: decimals that show a number's first significant digit, from `min` to `max`.
+function digitsFor(v: number, min: number, max: number): number {
+  const a = Math.abs(v)
+  if (!Number.isFinite(a) || a === 0) return min
+  let d = 0
+  while (d < max && Math.round(a * 10 ** d) < 1) d++
+  return Math.min(max, Math.max(min, d))
+}
+
+// app::fmt::value / pct / pct_ci / signed (the text and the markdown report).
 function tValue(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
-  const d = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2
+  const d = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4)
   if (Math.round(v * 10 ** d) === 0) v = 0
   switch (unit) {
     case "ms": return `${rfix(v, d)} ms`
@@ -81,12 +90,24 @@ function tBytes(v: number): string {
   const a = Math.abs(v)
   return a >= 1024 ** 3 ? `${rfix(v / 1024 ** 3, 2)} GB` : a >= 1024 ** 2 ? `${rfix(v / 1024 ** 2, 1)} MB` : a >= 1024 ? `${rfix(v / 1024, 0)} KB` : `${rfix(v, 0)} B`
 }
-function tPct(r: number | null): string {
-  if (r == null || !Number.isFinite(r)) return "—"
+function pctWith(r: number, digits: number): string {
   const p = r * 100
-  const body = Math.abs(p) < 10 ? rfix(Math.abs(p), 1) : rfix(Math.abs(p), 0)
-  return `${p < -0.05 ? "−" : p > 0.05 ? "+" : ""}${body}%`
+  const zero = Math.round(Math.abs(p) * 10 ** digits) === 0
+  return `${zero ? "" : p < 0 ? "−" : "+"}${rfix(Math.abs(p), digits)}%`
 }
+const pctDefault = (p: number) => (Math.abs(p) >= 10 ? 0 : digitsFor(p, 1, 3))
+function tPct(r: number | null): string {
+  return r == null || !Number.isFinite(r) ? "—" : pctWith(r, pctDefault(r * 100))
+}
+// An estimate and its interval at the interval's digits.
+function pctCI(est: number, lo: number, hi: number): [string, string, string] {
+  const w = Math.abs(hi * 100 - lo * 100)
+  const width = !Number.isFinite(w) || w === 0 ? 0 : Math.min(3, Math.max(0, -Math.floor(Math.log10(w))))
+  const common = Math.max(width, pctDefault(est * 100))
+  const own = (x: number) => pctWith(x, Math.max(common, x === 0 ? 0 : digitsFor(x * 100, 0, 3)))
+  return [own(est), own(lo), own(hi)]
+}
+const relCI = (c: J): [string, string, string] => ([c.estimate, c.lo, c.hi].every(Number.isFinite) ? pctCI(c.estimate, c.lo, c.hi) : [tPct(c.estimate), tPct(c.lo), tPct(c.hi)])
 function tSigned(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
   const body = tValue(Math.abs(v), unit)
@@ -108,6 +129,7 @@ function pDisp(v: number | null, unit: string): string {
   if (unit === "bytes") return tBytes(v)
   if (unit === "count" || unit === "") return tValue(v, "count")
   if (unit === "value") return sig3(v)
+  if (unit === "instructions") return tValue(v, "instructions")
   return ["ms", "pp", "MB"].includes(unit) ? `${sig3(v)} ${unit}` : ["%", "/s"].includes(unit) ? `${sig3(v)}${unit}` : `${sig3(v)} ${unit}`
 }
 function pSigned(v: number, unit: string): string {
@@ -305,19 +327,32 @@ function checkSurfaces(r: J) {
       for (const { c, role } of rows(s)) {
         const where = `${s.label} ${c.metric}`
         const u = unitOf(c.metric), k = kindOf(s, c), refused = k === "refused"
-        // Text: base, head, Δ, CI and the verdict as result.json has them.
+        // Text (what the bench printed, kept in result.json and shown by `query summary`, so an older
+        // strobe's digits): each number within its own printed rounding of result.json's, the verdict
+        // word for word, and no number on a refused row.
         const row = sec.split("\n").find((l) => new RegExp(`^[★ ] ${c.metric.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s`).test(l))
         if (!row) flagIt("HIGH", `text ${where}`, "no row")
         else {
-          // A refused metric shows no number, whatever an older result still holds.
-          const delta = refused ? "—" : c.relative ? tPct(c.estimate) : tSigned(c.estimate, absUnit(u))
-          const ci = refused ? "—" : c.exact ? "exact" : c.relative ? `${tPct(c.lo)} … ${tPct(c.hi)}` : `${tSigned(c.lo, absUnit(u))} … ${tSigned(c.hi, absUnit(u))}`
-          for (const want of [refused ? "—" : tValue(c.base, u), refused ? "—" : tValue(c.head, u), delta, ci, c.verdict]) if (!row.includes(want)) flagIt(refused ? "CRIT" : "HIGH", `text ${where}`, `row lacks "${want}": ${row.trim()}`)
+          // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
+          const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(c.verdict)[0]
+          const toks = body.match(/—|[−+-]?\d[\d.,]*(?: ?(?:[GMk] instr|instr|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
+          const [tb, th, td] = toks
+          const tci = toks.length >= 5 ? `${toks[3]} … ${toks[4]}` : toks[3]
+          if (!row.includes(c.verdict)) flagIt("CRIT", `text ${where}`, `verdict "${c.verdict}" not in: ${row.trim()}`)
+          if (refused) {
+            if ([tb, th, td, tci].some((x) => /\d/.test(x ?? ""))) flagIt(c.verdict_kind ? "CRIT" : "LOW", `text ${where}`, `refused, yet the row reads ${row.trim()}`)
+          } else {
+            const [lo, hi] = (tci ?? "").split(" … ")
+            const scaleU = c.relative ? "%" : absUnit(u)
+            const checks: [string | undefined, number, string][] = [[tb, c.base, u], [th, c.head, u], [td, c.relative ? c.estimate * 100 : c.estimate, scaleU]]
+            if (!c.exact) checks.push([lo, c.relative ? c.lo * 100 : c.lo, scaleU], [hi, c.relative ? c.hi * 100 : c.hi, scaleU])
+            for (const [tok, v, unit] of checks) if (!agrees(tok, v, unit)) flagIt("CRIT", `text ${where}`, `"${tok}" does not round from ${v} (${unit}): ${row.trim()}`)
+          }
         }
         // PR: tested rows carry the same change and range; a refused one no number.
         if (pr && role !== "descriptive") {
-          const ch = refused ? "—" : c.relative ? tPct(c.estimate) : pSigned(c.estimate, absUnit(u))
-          const rg = refused ? "—" : c.exact ? "exact" : [c.lo, c.hi].every(Number.isFinite) ? (c.relative ? [tPct(c.lo), tPct(c.hi)] : [pSigned(c.lo, absUnit(u)), pSigned(c.hi, absUnit(u))]).filter((x, i, a) => i === 0 || x !== a[0]).join(" to ") : "—"
+          const ch = refused ? "—" : c.relative ? relCI(c)[0] : pSigned(c.estimate, absUnit(u))
+          const rg = refused ? "—" : c.exact ? "exact" : [c.lo, c.hi].every(Number.isFinite) ? (c.relative ? [relCI(c)[1], relCI(c)[2]] : [pSigned(c.lo, absUnit(u)), pSigned(c.hi, absUnit(u))]).filter((x, i, a) => i === 0 || x !== a[0]).join(" to ") : "—"
           // Two implementations read an increase of 2× or more as a factor (`+96% to 2.0×`).
           const sameChange = (x: string) => x === ch || (/×$/.test(x) && Math.abs(parseFloat(x) - (1 + c.estimate)) < 0.06)
           const hit = prRows.find((cells) => (cells.includes(ch) && cells.includes(rg)) || (impl && c.relative && !refused && cells.length >= 6 && sameChange(cells[3]) && /×|%/.test(cells[4])))
@@ -384,13 +419,27 @@ function checkSurfaces(r: J) {
   }
 }
 
+// Whether a printed number (`12.3 ms`, `−4.1%`, `1.2 MB` of bytes, `1.00 s`) rounds from v: within half
+// its last digit, in the metric's unit.
+function agrees(tok: string | undefined, v: number, unit: string): boolean {
+  if (tok == null) return false
+  if (!Number.isFinite(v)) return /^—/.test(tok.trim())
+  const m = /([−+-]?)(\d+(?:\.(\d+))?)\s*([A-Za-z%/]*)/.exec(tok.replace(/,/g, ""))
+  if (!m) return false
+  const sign = m[1] === "−" || m[1] === "-" ? -1 : 1
+  const dec = m[3]?.length ?? 0
+  const scale = { KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[4]] ?? (m[4] === "MB" && unit === "bytes" ? 1024 ** 2 : 1)
+  const x = sign * parseFloat(m[2]) * scale
+  return Math.abs(x - v) <= 0.5 * 10 ** -dec * scale * (1 + 1e-9) + 1e-12
+}
+
 // report.html's fmtVal / fmtDelta (Rust's rounding since cleanup/audit-surfaces).
 function hFmt(v: number | null, u: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
   return tValue(v, u)
 }
 function hDelta(c: J, u: string): string {
-  return c.relative !== false ? tPct(c.estimate) : tSigned(c.estimate, absUnit(u))
+  return c.relative !== false ? relCI(c)[0] : tSigned(c.estimate, absUnit(u))
 }
 
 // ---------- main ----------

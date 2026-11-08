@@ -153,7 +153,7 @@ fn metric(c: &Value) -> &str {
 
 /// Whether comparison `c` counted lower as better (a `metric.<name>` may be better higher).
 fn lower_better(c: &Value) -> bool {
-    super::pr::better_in(c) == Better::Lower
+    stats::better_in(c) == Better::Lower
 }
 
 fn unit_of(m: &str) -> &'static str {
@@ -310,6 +310,8 @@ fn disp(v: f64, unit: &str) -> String {
         "count" | "" => super::fmt::value(v, "count"),
         // A number the target printed in a unit of its own.
         "value" => sig3(v),
+        // `480.2 M instr` as the text has it, not `480226998 instructions`.
+        "instructions" => super::fmt::value(v, "instructions"),
         u => format!("{} {u}", sig3(v)),
     }
 }
@@ -364,10 +366,9 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let improved = (est < 0.0) == lower;
     let word = if improved { good } else { bad };
     let relative = c["relative"] == true;
-    let pct = (est * 100.0).abs();
+    // `fmt::pct`'s digits without its sign: a decided +0.03% is not `0.0%`.
     let amount = match relative {
-        true if pct < 10.0 => format!("{pct:.1}%"),
-        true => format!("{pct:.0}%"),
+        true => super::fmt::pct(est.abs()).trim_start_matches('+').to_string(),
         false => disp(est.abs(), abs_unit(unit_of(m))),
     };
     let sign = if est < 0.0 { "−" } else { "+" };

@@ -24,22 +24,10 @@ use markdown::*;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// The direction comparison `c` counted as better, as every renderer reads it: the comparison's own
-/// `better` (`"lower"`/`"higher"`; a `metric.<name>` whose command's lines said `higher` is better
-/// higher, whatever its catalog family says), else the catalog's.
-pub(crate) fn better_in(c: &Value) -> Better {
-    match c["better"].as_str() {
-        Some("higher") => Better::Higher,
-        Some("lower") => Better::Lower,
-        _ => model::metric(c["metric"].as_str().unwrap_or("")).map(|m| m.better).unwrap_or(Better::Lower),
-    }
-}
-
-/// A bound or margin given as a fraction, as a percentage the way it was asked for: `2%`, `0.3%`,
-/// `1.5%` (never rounded to a whole percent: ±0.3% is not ±0%).
+/// A bound or margin given as a fraction, as a verdict prints it (`2%`, `0.3%`, `1.5%`: never rounded
+/// to another bound).
 pub(crate) fn pct_bound(frac: f64) -> String {
-    let s = format!("{:.2}", frac * 100.0);
-    format!("{}%", s.trim_end_matches('0').trim_end_matches('.'))
+    fmt::bound(frac, true, 0.0, "")
 }
 
 /// What a report calls base and head: an implementation comparison's sides by name (SPEC §9.10),

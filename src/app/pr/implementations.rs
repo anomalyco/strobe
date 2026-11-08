@@ -54,8 +54,8 @@ pub fn claim(c: &Value) -> Claim {
     let pct = (est * 100.0).abs();
     let amount = match (relative, times) {
         (true, true) => format!("{}×", factor(1.0 + est)),
-        (true, false) if pct < 10.0 => format!("{pct:.1}%"),
-        (true, false) => format!("{pct:.0}%"),
+        // `fmt::pct`'s digits without its sign: a decided +0.03% is not `0.0%`.
+        (true, false) => fmt::pct(pct / 100.0).trim_start_matches('+').to_string(),
         (false, _) => disp(est.abs(), abs_unit(unit_of(m))),
     };
     let (good, bad) = words_of(c);
@@ -92,7 +92,9 @@ pub fn range_x(c: &Value) -> String {
     if !lo.is_finite() || !hi.is_finite() {
         return "—".into();
     }
-    let (a, b) = (factor_or_pct(lo), factor_or_pct(hi));
+    // A cut's ends at the interval's digits, as the text prints them (`fmt::pct_ci`); 2× or more a factor.
+    let (_, pa, pb) = fmt::pct_ci(f(&c["estimate"]), lo, hi);
+    let (a, b) = (if lo >= 1.0 { factor_or_pct(lo) } else { pa }, if hi >= 1.0 { factor_or_pct(hi) } else { pb });
     if a == b && lo >= 1.0 && hi > lo {
         return nb(&format!("{:.2}× to {:.2}×", 1.0 + lo, 1.0 + hi));
     }
@@ -100,7 +102,8 @@ pub fn range_x(c: &Value) -> String {
 }
 
 fn change_x(c: &Value) -> String {
-    if c["relative"] == true { factor_or_pct(f(&c["estimate"])) } else { delta(c, f(&c["estimate"])) }
+    // `delta` gives the estimate at its interval's digits; 2× or more a factor.
+    if c["relative"] == true && f(&c["estimate"]) >= 1.0 { factor_or_pct(f(&c["estimate"])) } else { delta(c, f(&c["estimate"])) }
 }
 
 /// The checks `expect.same` read on both implementations, as one sentence: ` Same `@topRow` after

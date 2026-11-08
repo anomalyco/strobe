@@ -265,10 +265,9 @@ impl<'a> Doc<'a> {
         let est = f(&c["estimate"]);
         let (good, bad) = words_of(c);
         let word = if (est < 0.0) == (better_of(c) == Better::Lower) { good } else { bad };
-        let pct = (est * 100.0).abs();
+        // `fmt::pct`'s digits without its sign: a decided +0.03% is not `0.0%`.
         let amount = match c["relative"] == true {
-            true if pct < 10.0 => format!("{pct:.1}%"),
-            true => format!("{pct:.0}%"),
+            true => fmt::pct(est.abs()).trim_start_matches('+').to_string(),
             false => nb(&disp(est.abs(), abs_unit(unit_of(m)))),
         };
         (amount, word, lc(&noun(m)).trim_end_matches(" per run").to_string())
