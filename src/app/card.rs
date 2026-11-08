@@ -151,9 +151,10 @@ fn metric(c: &Value) -> &str {
     c["metric"].as_str().unwrap_or("")
 }
 
-/// Whether comparison `c` counted lower as better (a `metric.<name>` may be better higher).
-fn lower_better(c: &Value) -> bool {
-    stats::better_in(c) == Better::Lower
+/// Whether comparison `c` (of series `s`, where at hand) counted lower as better: a `metric.<name>` may
+/// be better higher, read from older results too (`pr::better`).
+fn lower_better(s: Option<&Value>, c: &Value) -> bool {
+    super::pr::better(s, c) == Better::Lower
 }
 
 fn unit_of(m: &str) -> &'static str {
@@ -175,7 +176,7 @@ fn outcome(c: &Value, aa: bool) -> Out {
         VerdictKind::Worse if c["noworse"].is_number() => Out::Worse,
         VerdictKind::Better | VerdictKind::Worse if !(hi < 0.0 || lo > 0.0) => Out::Unclear,
         VerdictKind::Better | VerdictKind::Worse if aa => Out::AaFalse,
-        VerdictKind::Better | VerdictKind::Worse if (hi < 0.0) == lower_better(c) => Out::Better,
+        VerdictKind::Better | VerdictKind::Worse if (hi < 0.0) == lower_better(None, c) => Out::Better,
         VerdictKind::Better | VerdictKind::Worse => Out::Worse,
     }
 }
@@ -264,10 +265,6 @@ fn short(m: &str) -> (String, Option<(&'static str, &'static str)>) {
     }
     if let Some(rest) = m.strip_prefix("span.") {
         return (format!("time in {rest} spans"), None);
-    }
-    // A command's own number goes by the name its lines gave it.
-    if let Some(rest) = m.strip_prefix("metric.").or_else(|| m.strip_prefix("app.")) {
-        return (rest.to_string(), None);
     }
     if let Some(rest) = m.strip_prefix("count.") {
         return (format!("{} count", rest.replace(['-', '_'], " ")), Some(("lower", "higher")));
@@ -358,7 +355,7 @@ struct Tile {
 fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let m = metric(c);
     let est = f(&c["estimate"]);
-    let lower = lower_better(c);
+    let lower = lower_better(Some(s), c);
     let (noun, words) = short(m);
     let (good, bad) = words.or_else(|| model::metric(m).map(|d| d.words)).unwrap_or(("less", "more"));
     // A `metric.<name>` its lines made better higher turns the catalog's words round.
@@ -366,18 +363,20 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let improved = (est < 0.0) == lower;
     let word = if improved { good } else { bad };
     let relative = c["relative"] == true;
-    // `fmt::pct`'s digits without its sign: a decided +0.03% is not `0.0%`.
-    let amount = match relative {
-        true => super::fmt::pct(est.abs()).trim_start_matches('+').to_string(),
-        false => disp(est.abs(), abs_unit(unit_of(m))),
+    let (lo, hi) = (f(&c["lo"]), f(&c["hi"]));
+    // A ratio's change at its interval's digits (`fmt::pct_ci`, as the text, the PR block and the
+    // forest card print it), so the badge and the alt text say the same; a decided +0.03% is not 0.0%.
+    let delta = match relative {
+        true if lo.is_finite() && hi.is_finite() => super::fmt::pct_ci(est, lo, hi).0,
+        true => super::fmt::pct(est),
+        false => format!("{}{}", if est < 0.0 { "−" } else { "+" }, disp(est.abs(), abs_unit(unit_of(m)))),
     };
-    let sign = if est < 0.0 { "−" } else { "+" };
-    let delta = format!("{sign}{amount}");
+    let amount = delta.trim_start_matches(['+', '−']).to_string();
     let unit = unit_of(m);
     let mut dots = Vec::new();
     // A pair with the same value on both sides is neither better nor worse.
     let (mut won, mut lost, mut n) = (0, 0, 0);
-    for (b, h) in pairs(s) {
+    for (b, h) in pairs(super::pr::blocks_for(s, m)) {
         let (x, y) = (f(&b["values"][m]), f(&h["values"][m]));
         if !x.is_finite() || !y.is_finite() {
             continue;
@@ -410,10 +409,11 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     Tile { amount, words: format!("{word} {noun}"), delta, noun, before: disp(f(&c["base"]), unit), after: disp(f(&c["head"]), unit), tone, dots, band, lower, tally, series }
 }
 
-/// Each pair's two blocks (base, head), in pair order.
-fn pairs(s: &Value) -> Vec<(&Value, &Value)> {
+/// Each pair's two blocks (base, head), in pair order, of the blocks that measured a metric
+/// (`pr::blocks_for`: a counted-apart metric's are the series' `pass`).
+fn pairs(blocks: &Value) -> Vec<(&Value, &Value)> {
     let mut by: BTreeMap<u64, (Option<&Value>, Option<&Value>)> = BTreeMap::new();
-    for b in s["blocks"].as_array().into_iter().flatten() {
+    for b in blocks.as_array().into_iter().flatten() {
         let Some(p) = b["pair"].as_u64().filter(|p| *p < 1_000_000) else { continue };
         let e = by.entry(p).or_default();
         if b["variant"] == "base" {

@@ -379,6 +379,12 @@
         "decided": { "type": "boolean" },
         "session": { "enum": ["unlocked", "locked", "mixed"] },
         "pairs": { "type": "integer" },
+        "primary_pairs": { "type": "integer", "description": "The pairs the primary's comparison is of: the look that decided it, else every pair. Pairs run past a decided look (secondaries' Holm pairs) are in pairs and blocks, not in the primary." },
+        "pass": {
+          "type": ["object", "null"],
+          "description": "A series that counts cpu.instructions apart from its times (Linux perf events never run in a timing block, SPEC 7.5): the other kind's blocks and pairs. counters: whether these are the counter blocks (cpu.instructions is read from them, every other metric from blocks); else they are the timing blocks and blocks hold cpu.instructions. Null otherwise.",
+          "properties": { "counters": { "type": "boolean" }, "blocks": { "type": "array" }, "pairs": { "type": "array" } }
+        },
         "launches": { "type": "integer" },
         "until": {
           "type": ["object", "null"],

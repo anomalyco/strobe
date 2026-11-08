@@ -189,7 +189,7 @@ impl<'a> Doc<'a> {
         let noun = self.noun_in(s, m);
         let o = self.primary_out(s);
         let medians = format!("medians {}", before_after(c));
-        let (w, worse, n) = wins(&pairs(s), c);
+        let (w, worse, n) = wins(s, c);
         let bound = bound_text(c);
         let change = nb(&delta(c, f(&c["estimate"])));
         let margin = c["noworse"].as_f64().map(|x| if c["relative"] == true { super::pct_bound(x) } else { disp(x, abs_unit(unit_of(m))) }).unwrap_or_else(|| bound.clone());
@@ -242,7 +242,7 @@ impl<'a> Doc<'a> {
                 continue;
             }
             let (lo, hi, b) = (f(&c["lo"]), f(&c["hi"]), f(&c["bound"]).abs());
-            let lower = better_of(c) == Better::Lower;
+            let lower = super::better(Some(s), c) == Better::Lower;
             let bound = if b.is_finite() && b > 0.0 { b } else { 0.02 };
             if lo.is_finite() && hi.is_finite() && ((lower && lo > bound) || (!lower && hi < -bound)) {
                 untested.push((size(c), format!("{} {}", lc(&noun(m)), nb(&delta(c, f(&c["estimate"]))))));
@@ -338,7 +338,7 @@ impl<'a> Doc<'a> {
                 continue;
             }
             let worse = |c: &Value| {
-                let (_, worse, n) = wins(&pairs(s), c);
+                let (_, worse, n) = wins(s, c);
                 (worse, n)
             };
             let p = &s["primary"];
@@ -747,7 +747,7 @@ impl<'a> Doc<'a> {
         let which = if last - first + 1 == rest.len() { format!("pairs {first}–{last}") } else { format!("{} other pairs", rest.len()) };
         let owned: Vec<Pair> = rest.iter().map(|p| **p).collect();
         let c = all_rows(s).into_iter().find(|c| c["metric"] == m).unwrap_or(&s["primary"]);
-        let (w, _, n) = wins(&owned, c);
+        let (w, _, n) = wins_in(&owned, s, c);
         let ratio = s["primary"]["relative"] == true;
         let ch = pair_changes(rest, m, ratio);
         let who = if self.multi() { format!(" of {}", self.title(s)) } else { String::new() };
@@ -986,7 +986,7 @@ impl<'a> Doc<'a> {
         // When the main metric moved decidedly, the functions that moved the same way explain it.
         let p = &s["primary"];
         let way = match self.primary_out(s) {
-            Out::Better | Out::Worse if better_of(p) == Better::Lower => f(&p["estimate"]).signum(),
+            Out::Better | Out::Worse if super::better(Some(s), p) == Better::Lower => f(&p["estimate"]).signum(),
             _ => 0.0,
         };
         let along = |x: &Value| way == 0.0 || (f(&x["head_per_run"]) - f(&x["base_per_run"])).signum() == way;

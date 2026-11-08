@@ -248,7 +248,7 @@ impl<'a> Doc<'a> {
             let lines: Vec<String> = regs
                 .iter()
                 .map(|(s, c, confirmed)| {
-                    let (_, worse, n) = wins(&pairs(s), c);
+                    let (_, worse, n) = wins(s, c);
                     let what = if std::ptr::eq(*c, &s["primary"]) { String::new() } else { format!(" ({})", lc(&noun(c["metric"].as_str().unwrap_or("")))) };
                     let label = if *confirmed { "**Regression:**".to_string() } else { format!("**Unconfirmed regression** (this journey alone, not after Holm across {}):", fam.compared) };
                     format!("> {label} {}{what}: {} {} than {} (medians {}, worse in {} of {n} pairs).", cell(&self.title(s)), cell(&hn), claim(c).pr(false), cell(&bn), before_after(c), worse)
@@ -384,7 +384,7 @@ impl<'a> Doc<'a> {
         let c = &s["primary"];
         let m = c["metric"].as_str().unwrap_or("");
         let o = self.primary_out(s);
-        let (w, worse, n) = wins(&pairs(s), c);
+        let (w, worse, n) = wins(s, c);
         let medians = format!("medians {}", before_after(c));
         let thing = ready_noun(s).map(|n| capitalize(&n)).unwrap_or_else(|| self.noun_in(s, m));
         let same = same_line(s);

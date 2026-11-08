@@ -149,7 +149,8 @@ pub fn p_repeated(r: &Value, s: &Value) -> f64 {
         d.iter_mut().for_each(|x| *x -= shift);
     }
     // Which way the verdict says head went, in the differences' scale (+: head higher).
-    let lower = stats::better_in(c) == crate::model::Better::Lower;
+    // Older results keep no `better`: a metric.<name>'s from its blocks' lines (`pr::better`).
+    let lower = crate::app::pr::better(Some(s), c) == crate::model::Better::Lower;
     let way = match stats::kind_of(c) {
         VerdictKind::Better => Some(if lower { -1.0 } else { 1.0 }),
         VerdictKind::Worse => Some(if lower { 1.0 } else { -1.0 }),

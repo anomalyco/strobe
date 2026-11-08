@@ -1560,8 +1560,24 @@ function unitOf(name) {
 }
 
 // A comparison's own direction first: a `metric.<name>` whose command's lines said `higher` is better
-// higher whatever the catalog's family says (result.json `better`).
-const higherBetter = (name, c) => (c?.better ? c.better === "higher" : catalogOf(name)?.better ? catalogOf(name).better === "higher" : name === "frames.presented.count");
+// higher whatever the catalog's family says (result.json `better`). A result from before that field:
+// a metric.<name>'s from its blocks' lines (filled in once, below), then what a better or worse
+// verdict says with its interval's side, then the catalog (as pr::better reads it).
+function higherBetter(name, c) {
+  if (c?.better) return c.better === "higher";
+  if (c && c.noworse == null && (c.verdict_kind === "better" || c.verdict_kind === "worse") && (c.hi < 0 || c.lo > 0)) {
+    const headLower = c.hi < 0;
+    return c.verdict_kind === "better" ? !headLower : headLower;
+  }
+  return catalogOf(name)?.better ? catalogOf(name).better === "higher" : name === "frames.presented.count";
+}
+for (const s of Array.isArray(STROBE?.data?.series) ? STROBE.data.series : []) {
+  for (const c of [s.primary, ...(s.secondaries || []), ...(s.descriptive || [])]) {
+    if (!c?.metric?.startsWith("metric.") || c.better) continue;
+    const dirs = blocksFor(s, c.metric).map((b) => b.directions?.[c.metric]).filter(Boolean);
+    if (dirs.length && dirs.every((d) => d === dirs[0])) c.better = dirs[0];
+  }
+}
 const absUnit = (u) => (u === "%" ? "pp" : u);
 
 // Rust's `{:.d}`, which the text and markdown print with: the nearest decimal, an exact tie to even
@@ -1601,17 +1617,20 @@ function fmtVal(v, u) {
   if (u === "ms") return rfix(v, d) + " ms";
   if (u === "%") return rfix(v, d) + "%";
   if (u === "pp") return rfix(v, d) + " pp";
-  if (u === "MB") return rfix(v, 0) + " MB";
+  // Like every unit (fmt::value): a 0.287 MB heap once printed `0 MB` beside a ±4% interval.
+  if (u === "MB") return rfix(v, d) + " MB";
   if (u === "MB/min") return rfix(v, d) + " MB/min";
   if (u === "count/min") return (Math.abs(v) >= 10 ? Math.round(v).toLocaleString("en-US") : rfix(v, 1)) + " /min";
   if (u === "Hz") return rfix(v, 0) + " Hz";
   if (u === "/s") return rfix(v, d) + "/s";
   if (u === "value") return rfix(v, d);
   if (u === "bytes") {
+    // fmt::bytes: three significant digits at most, the unit's whole number at least.
     const a = Math.abs(v);
-    if (a >= 1024 ** 3) return rfix(v / 1024 ** 3, 2) + " GB";
-    if (a >= 1024 ** 2) return rfix(v / 1024 ** 2, 1) + " MB";
-    if (a >= 1024) return rfix(v / 1024, 0) + " KB";
+    const scaled = (x, unit) => rfix(x, Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2) + " " + unit;
+    if (a >= 1024 ** 3) return scaled(v / 1024 ** 3, "GB");
+    if (a >= 1024 ** 2) return scaled(v / 1024 ** 2, "MB");
+    if (a >= 1024) return rfix(v / 1024, Math.abs(v / 1024) >= 10 ? 0 : 1) + " KB";
     return rfix(v, 0) + " B";
   }
   if (u === "count") return Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : rfix(v, 1);
@@ -1663,9 +1682,9 @@ function fmtPct(r) {
   return finite(r) ? pctWith(r, pctDefault(r * 100)) : "—";
 }
 function pctCI(est, lo, hi) {
+  if (!(finite(lo) && finite(hi)) || hi === lo) return [fmtPct(est), fmtPct(lo), fmtPct(hi)];
   const w = Math.abs(hi * 100 - lo * 100);
-  const width = !finite(w) || w === 0 ? 0 : Math.min(3, Math.max(0, -Math.floor(Math.log10(w))));
-  const common = Math.max(width, pctDefault(est * 100));
+  const common = Math.min(3, Math.max(0, -Math.floor(Math.log10(w))));
   const own = (x) => pctWith(x, Math.max(common, x === 0 ? 0 : digitsFor(x * 100, 0, 3)));
   return [own(est), own(lo), own(hi)];
 }
@@ -1680,7 +1699,7 @@ function fmtSigned(v, u) {
 
 function fmtSignedMatched(vA, vB, u) {
   if (!finite(vA) || !finite(vB)) return "—";
-  const d = u === "MB" || u === "Hz" ? 0 : Math.abs(vA) >= 100 ? 0 : Math.abs(vA) >= 10 ? 1 : 2;
+  const d = u === "Hz" ? 0 : Math.abs(vA) >= 100 ? 0 : Math.abs(vA) >= 10 ? 1 : digitsFor(vA, 2, 4);
   const f = 10 ** d;
   const diff = Math.round(vB * f) / f - Math.round(vA * f) / f;
   const body = Math.abs(diff).toFixed(d) + (u ? " " + u : "");
@@ -2332,8 +2351,10 @@ function shortSeriesOutcome(c, m, u, cl, aa) {
 
 /* ---------- Layer 1: Verdict Hero ---------- */
 function humanHeadline(c, m, u, cl, s, aa) {
+  // The change at its interval's digits without its sign, as the card's large number: a decided
+  // +0.03% is not 0.0%.
   const absPct = c.relative !== false && finite(c.estimate)
-    ? `${(Math.abs(c.estimate) * 100).toFixed(Math.abs(c.estimate) < 0.1 ? 1 : 0)}%`
+    ? fmtDelta(c.estimate, c, u).replace(/^[+−]/, "")
     : fmtVal(Math.abs(c.estimate), absUnit(u));
 
   if (cl.kind === "refused") {
@@ -2367,7 +2388,8 @@ function humanHeadline(c, m, u, cl, s, aa) {
   }
   // "Confirmed" only for a decided shift (tone win or loss): anything else has no verdict to state.
   if (cl.tone !== "win" && cl.tone !== "loss") {
-    return { pill: cl.kind === "desc" ? "Descriptive · not tested" : "No verdict", headline: `${labelOf(m)}: not compared` };
+    // Compared, but no test ran on it: "not compared" would say the pairs never measured it.
+    return { pill: cl.kind === "desc" ? "Descriptive · not tested" : "Not tested", headline: `${labelOf(m)}: ${cl.kind === "desc" ? "shown, never tested" : "not tested"}` };
   }
 
   const isWin = cl.tone === "win";
@@ -3095,7 +3117,7 @@ function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
         h("div", { class: "ruler-box" },
           h("div", { class: "ruler-top" },
             h("span", { class: "ruler-title" }, "Likely change: ", h("b", {}, fmtRange(cl.kind === "refused" ? {} : c, u))),
-            h("span", { class: "ruler-ci-tag" }, `Shaded: ${finite(c.noworse) ? `no worse (${fmtMargin(c, u).replace("≤", higherBetter(m, c) ? "≥−" : "≤+")})` : `${fmtBound(c, u)} equiv`} · ${ciExplain} · p = ${fmtP(c.p)}`)
+            h("span", { class: "ruler-ci-tag" }, `Shaded: ${finite(c.noworse) ? `no worse (${fmtMargin(c, u).replace("≤", higherBetter(m, c) ? "≥−" : "≤+")})` : `${fmtBound(c, u)} equiv`} · ${ciExplain} · p = ${fmtP(cl.kind === "refused" ? NaN : c.p)}`)
           ),
           chartBox(76, (w) => drawEquivalenceRuler(w, cl.kind === "refused" ? { ...c, lo: null, hi: null, estimate: null } : c, m, u, cl, aa))
         )
@@ -4876,7 +4898,8 @@ function renderAllMetricsDisclosure(s, aa) {
     h("summary", {},
       h("span", { class: "chev" }, makeChevSvg()),
       h("span", { class: "sec-title" }, `All ${items.length} measured metrics`),
-      h("span", { class: "sec-sub" }, `${tested.length} hypothesis-tested · ${desc.length} context metrics · click any row to inspect pairs`)
+      // Tested: rows a test ran on (a refused or untested secondary had none).
+      h("span", { class: "sec-sub" }, `${tested.filter((x) => !["untested", "refused"].includes(x.c.verdict_kind) && !/^(—|refused)/.test(x.c.verdict || "")).length} hypothesis-tested · ${desc.length} context metrics · click any row to inspect pairs`)
     ),
     h("div", { class: "forest-wrap" },
       h("div", { class: "forest-row hd" },

@@ -8,6 +8,7 @@
 // the badges. A number that differs between surfaces is printed as CRIT.
 //
 //   bun scripts/dev/surfaces.ts exp_2606af exp_a88c60 [--strobe <exe>] [--no-html]
+//   bun scripts/dev/surfaces.ts --all [--since 2026-11-01]    every surface of every experiment
 //   bun scripts/dev/surfaces.ts --scan [--since 2026-11-01]   result.json checks over every experiment
 //
 // Exit 1 when anything CRIT or HIGH was found.
@@ -54,7 +55,6 @@ function rfix(v: number, d: number): string {
   const body = d ? `${digits.slice(0, -d)}.${digits.slice(-d)}` : digits
   return (v < 0 && q !== 0n ? "-" : "") + body
 }
-const exactTie = (v: number, d: number) => rfix(v, d) !== v.toFixed(d)
 
 // fmt::digits_for: decimals that show a number's first significant digit, from `min` to `max`.
 function digitsFor(v: number, min: number, max: number): number {
@@ -76,7 +76,7 @@ function tValue(v: number | null, unit: string): string {
     case "count": return Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : rfix(v, 1)
     case "bytes": return tBytes(v)
     case "pp": return `${rfix(v, d)} pp`
-    case "MB": return `${rfix(v, 0)} MB`
+    case "MB": return `${rfix(v, d)} MB`
     case "/s": return `${rfix(v, d)}/s`
     case "value": return rfix(v, d)
     case "instructions": {
@@ -88,7 +88,8 @@ function tValue(v: number | null, unit: string): string {
 }
 function tBytes(v: number): string {
   const a = Math.abs(v)
-  return a >= 1024 ** 3 ? `${rfix(v / 1024 ** 3, 2)} GB` : a >= 1024 ** 2 ? `${rfix(v / 1024 ** 2, 1)} MB` : a >= 1024 ? `${rfix(v / 1024, 0)} KB` : `${rfix(v, 0)} B`
+  const scaled = (x: number, unit: string) => `${rfix(x, Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2)} ${unit}`
+  return a >= 1024 ** 3 ? scaled(v / 1024 ** 3, "GB") : a >= 1024 ** 2 ? scaled(v / 1024 ** 2, "MB") : a >= 1024 ? `${rfix(v / 1024, Math.abs(v / 1024) >= 10 ? 0 : 1)} KB` : `${rfix(v, 0)} B`
 }
 function pctWith(r: number, digits: number): string {
   const p = r * 100
@@ -101,9 +102,8 @@ function tPct(r: number | null): string {
 }
 // An estimate and its interval at the interval's digits.
 function pctCI(est: number, lo: number, hi: number): [string, string, string] {
-  const w = Math.abs(hi * 100 - lo * 100)
-  const width = !Number.isFinite(w) || w === 0 ? 0 : Math.min(3, Math.max(0, -Math.floor(Math.log10(w))))
-  const common = Math.max(width, pctDefault(est * 100))
+  if (!(Number.isFinite(lo) && Number.isFinite(hi)) || hi === lo) return [tPct(est), tPct(lo), tPct(hi)]
+  const common = Math.min(3, Math.max(0, -Math.floor(Math.log10(Math.abs(hi * 100 - lo * 100)))))
   const own = (x: number) => pctWith(x, Math.max(common, x === 0 ? 0 : digitsFor(x * 100, 0, 3)))
   return [own(est), own(lo), own(hi)]
 }
@@ -252,10 +252,6 @@ function checkResult(r: J) {
       }
       const n = pairs(s, c.metric).length
       if (Number.isInteger(c.n) && k !== "refused" && n && c.n !== n) flagIt("MED", where, `n ${c.n}, the blocks hold ${n} pairs with both values`)
-      for (const side of ["base", "head"]) {
-        const v = c[side], u = unitOf(c.metric)
-        if (Number.isFinite(v) && (u === "MB" ? exactTie(v, 0) : false)) flagIt("LOW", where, `${side} ${v} MB is an exact tie: Rust prints ${rfix(v, 0)}, toFixed ${v.toFixed(0)}`)
-      }
     }
   }
 }
@@ -309,7 +305,8 @@ function checkSurfaces(r: J) {
   try {
     // `bench --blocks` measured one build: no report of it, by design (only `query`).
     const reportable = (r.series ?? []).some((s: J) => s.kind !== "blocks")
-    const html = reportable ? htmlSurface(id, dir) : undefined
+    // The HTML is checked only where something was compared (a --check's page says passed or failed).
+    const html = reportable && (r.series ?? []).some((s: J) => compared(s)) ? htmlSurface(id, dir) : undefined
     const text = run(["query", id, "summary"]).out
     const md = reportable ? run(["report", "experiment", id, "--format", "md"]).out : text
     const judgedAny = (r.series ?? []).some((s: J) => compared(s))
@@ -359,6 +356,7 @@ function checkSurfaces(r: J) {
           if (!hit) flagIt("HIGH", `pr ${where}`, `no Metrics row with change ${ch} and range ${rg}`)
           else if (refused && hit.slice(1, 3).some((x) => /\d/.test(x))) flagIt("CRIT", `pr ${where}`, `refused, yet the row shows ${hit.join(" | ")}`)
           else if ((k === "better" || k === "worse") && !hit.some((x) => x.startsWith(String(c.verdict).replace(/ \(small\)$/, "")))) flagIt("CRIT", `pr ${where}`, `verdict ${c.verdict} not in its row: ${hit.join(" | ")}`)
+          else if (k === "untested" && !hit.some((x) => x.startsWith("not tested"))) flagIt("HIGH", `pr ${where}`, `untested, yet the row reads ${hit.join(" | ")}`)
         }
         // HTML: the forest row's base, head, paired change, range and outcome, for the series the page
         // opens on (its hero names it: `<label> · Primary: …`).
@@ -379,7 +377,7 @@ function checkSurfaces(r: J) {
           }
           if (i >= 0) {
             const next = lines[i + 1] ?? ""
-            const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested|Inconclusive|Unconfirmed/ : /Inconclusive|Unconfirmed/
+            const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested$/ : /Inconclusive|Unconfirmed/
             if (!want.test(next)) flagIt("CRIT", `html ${where}`, `outcome "${next}" for verdict_kind ${k}`)
           }
         }
@@ -446,11 +444,11 @@ function hDelta(c: J, u: string): string {
 
 const ids = argv.filter((a, i) => !a.startsWith("--") && !["--strobe", "--dir", "--since"].includes(argv[i - 1]))
 const root = join(HOME, "experiments")
-const list = flag("scan")
+const list = flag("scan") || flag("all")
   ? readdirSync(root).filter((d) => existsSync(join(root, d, "result.json")) && (!opt("since") || statSync(join(root, d, "result.json")).mtime >= new Date(opt("since")!)))
   : ids
 if (!list.length) {
-  console.error("usage: bun scripts/dev/surfaces.ts <exp_…> … [--strobe <exe>] [--no-html] | --scan [--since <date>]")
+  console.error("usage: bun scripts/dev/surfaces.ts <exp_…> … [--strobe <exe>] [--no-html] | --all|--scan [--since <date>]")
   process.exit(2)
 }
 if (flag("scan")) {
@@ -463,8 +461,9 @@ if (flag("scan")) {
   }
   rmSync(tmp, { recursive: true, force: true })
 }
-for (const id of list) {
+for (const [i, id] of list.entries()) {
   current = id
+  if (list.length > 1) console.error(`${i + 1}/${list.length} ${id}`)
   const file = existsSync(id) ? id : join(root, id, "result.json")
   let r: J
   try { r = JSON.parse(readFileSync(file, "utf8")) } catch (e) { flagIt("HIGH", "result.json", `unreadable: ${e}`); continue }

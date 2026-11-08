@@ -24,6 +24,49 @@ use markdown::*;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// The blocks that measured `metric` in series `s`: a series that counts cpu.instructions apart from
+/// its times (Linux perf events never run in a timing block, SPEC §7.5) keeps the other kind's blocks
+/// in `pass` (`counters`: whether they are the counter blocks).
+pub(crate) fn blocks_for<'a>(s: &'a Value, metric: &str) -> &'a Value {
+    let pass = &s["pass"];
+    if pass["blocks"].as_array().is_some_and(|b| !b.is_empty()) && (metric == "cpu.instructions") == (pass["counters"] == true) { &pass["blocks"] } else { &s["blocks"] }
+}
+
+/// The direction comparison `c` counted as better, as every report reads it: its own `better`; in a
+/// result from before that field, for a `metric.<name>` the direction its blocks' lines gave (`s`), then
+/// what a better or worse verdict says with its interval's sign; else the catalog's
+/// (`stats::better_in`).
+pub(crate) fn better(s: Option<&Value>, c: &Value) -> Better {
+    if c["better"].is_string() {
+        return stats::better_in(c);
+    }
+    let m = c["metric"].as_str().unwrap_or("");
+    if let Some(s) = s.filter(|_| m.starts_with("metric.")) {
+        let dirs: Vec<&str> = blocks_for(s, m).as_array().into_iter().flatten().filter_map(|b| b["directions"][m].as_str()).collect();
+        match dirs.first() {
+            Some(&"higher") if dirs.iter().all(|d| *d == "higher") => return Better::Higher,
+            Some(&"lower") if dirs.iter().all(|d| *d == "lower") => return Better::Lower,
+            _ => {}
+        }
+    }
+    let (lo, hi) = (c["lo"].as_f64().unwrap_or(f64::NAN), c["hi"].as_f64().unwrap_or(f64::NAN));
+    // A no-worse verdict's interval may cross 0; only a better or worse one has a side.
+    let side = if hi < 0.0 {
+        Some(Better::Lower)
+    } else if lo > 0.0 {
+        Some(Better::Higher)
+    } else {
+        None
+    };
+    let flip = |b: Better| if b == Better::Lower { Better::Higher } else { Better::Lower };
+    // The recorded kind only: guessed from words, `more` would be read with the catalog's directions.
+    match (c["verdict_kind"].as_str(), side) {
+        (Some("better"), Some(b)) if c["noworse"].is_null() => b,
+        (Some("worse"), Some(b)) if c["noworse"].is_null() => flip(b),
+        _ => stats::better_in(c),
+    }
+}
+
 /// A bound or margin given as a fraction, as a verdict prints it (`2%`, `0.3%`, `1.5%`: never rounded
 /// to another bound).
 pub(crate) fn pct_bound(frac: f64) -> String {

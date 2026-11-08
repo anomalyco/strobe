@@ -4389,7 +4389,8 @@ pull request body, pasted verbatim. Few words, two drawers:
 - **Details** (one drawer, plain `####` headings, one table per kind across series, each series
   opening its rows with a row of its name rather than a column): Metrics (every tested metric:
   before, this PR, change, likely range, verdict in a few words: the metric's word, same,
-  inconclusive, skipped; its footer gives each range's confidence (none for an exact count or a
+  inconclusive, not tested (a secondary the gate did not test; the pairs that would test it only
+  once the primary decided), skipped; its footer gives each range's confidence (none for an exact count or a
   refused row), and main metrics checked at planned looks say so when every one of their ranges
   reached the per-look level: `98.4% confidence for the main metric (checked at 8, 12, 18, 26, 40
   pairs, 95% over all of them)`, since a range read at the look that stopped the series covers 95%

@@ -153,7 +153,7 @@ pub(super) fn build(r: &Value) -> Forest {
             }
         };
         // Better always to the left: a metric where higher is better plots its log ratio negated.
-        let way = if lower_better(c) { 1.0 } else { -1.0 };
+        let way = if lower_better(Some(s), c) { 1.0 } else { -1.0 };
         let ci = (!gap && !matches!(o, Out::NotRun | Out::Refused))
             .then(|| {
                 let (a, e, b) = (way * log_of(c, f(&c["lo"])), way * log_of(c, f(&c["estimate"])), way * log_of(c, f(&c["hi"])));

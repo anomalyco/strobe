@@ -25,9 +25,10 @@ pub(super) fn verdict(c: &Value) -> &str {
     c["verdict"].as_str().unwrap_or("")
 }
 
-/// The direction comparison `c` counted as better (a `metric.<name>` may be better higher).
+/// The direction comparison `c` counted as better (a `metric.<name>` may be better higher), from the
+/// comparison alone (`super::better`; with its series where one is at hand).
 pub(super) fn better_of(c: &Value) -> Better {
-    stats::better_in(c)
+    super::better(None, c)
 }
 
 /// The words for comparison `c`'s better and worse directions (`faster`, `slower`): the catalog's,
@@ -209,9 +210,20 @@ pub(super) struct Pair<'a> {
     pub(super) head: &'a Value,
 }
 
+/// The series' pairs of its main blocks.
 pub(super) fn pairs(s: &Value) -> Vec<Pair<'_>> {
+    pairs_in(&s["blocks"])
+}
+
+/// The pairs of the blocks that measured `metric`: a counted-apart metric's are in `pass`
+/// (`super::blocks_for`), where the main blocks hold none and would count 0 of 0.
+pub(super) fn pairs_for<'a>(s: &'a Value, metric: &str) -> Vec<Pair<'a>> {
+    pairs_in(super::blocks_for(s, metric))
+}
+
+fn pairs_in(blocks: &Value) -> Vec<Pair<'_>> {
     let mut by: BTreeMap<u64, Sides> = BTreeMap::new();
-    for (i, b) in s["blocks"].as_array().into_iter().flatten().enumerate() {
+    for (i, b) in blocks.as_array().into_iter().flatten().enumerate() {
         let Some(p) = b["pair"].as_u64().filter(|p| *p < 1_000_000) else { continue };
         let e = by.entry(p).or_default();
         if b["variant"] == "base" {
@@ -227,11 +239,16 @@ pub(super) fn bv(b: &Value, m: &str) -> f64 {
     f(&b["values"][m])
 }
 
-/// Pairs in which head did better and did worse on comparison `c`'s metric, of those with both values:
-/// a pair with the same value on both sides is neither.
-pub(super) fn wins(ps: &[Pair], c: &Value) -> (usize, usize, usize) {
+/// Pairs of series `s` in which head did better and did worse on comparison `c`'s metric, of those
+/// with both values: a pair with the same value on both sides is neither.
+pub(super) fn wins(s: &Value, c: &Value) -> (usize, usize, usize) {
+    wins_in(&pairs_for(s, c["metric"].as_str().unwrap_or("")), s, c)
+}
+
+/// `wins` over some of the series' pairs.
+pub(super) fn wins_in(ps: &[Pair], s: &Value, c: &Value) -> (usize, usize, usize) {
     let metric = c["metric"].as_str().unwrap_or("");
-    let lower = better_of(c) == Better::Lower;
+    let lower = super::better(Some(s), c) == Better::Lower;
     let both: Vec<(f64, f64)> = ps.iter().map(|p| (bv(p.base, metric), bv(p.head, metric))).filter(|(a, b)| a.is_finite() && b.is_finite()).collect();
     let better = both.iter().filter(|(a, b)| if lower { b < a } else { b > a }).count();
     let worse = both.iter().filter(|(a, b)| if lower { b > a } else { b < a }).count();
@@ -633,15 +650,17 @@ pub(super) fn verdict_text(c: &Value, o: Out, s: &Value, aa: bool) -> String {
         }
         Out::Saturated => "at the ceiling".into(),
         Out::Stopped => "stopped".into(),
+        // A secondary the gate did not test (result.json `untested`): no verdict was looked for. The pairs
+        // that would test it only once the primary decided, which is when the gate opens.
         Out::Gated if s["decided"] == true && (f(&c["lo"]) > 0.0 || f(&c["hi"]) < 0.0) => {
             let need = s["holm_pairs"].as_u64().filter(|n| *n > s["pairs"].as_u64().unwrap_or(0));
-            format!("inconclusive{}", sub(&need.map(|n| format!("needs {n} pairs")).unwrap_or_default()))
+            format!("not tested{}", sub(&need.map(|n| format!("needs {n} pairs")).unwrap_or_default()))
         }
         Out::Unclear | Out::Gated => {
             // Only a count past the pairs already run: "~10 pairs" after 12 reads as a contradiction.
             let ran = c["n"].as_u64().or(s["pairs"].as_u64()).unwrap_or(0);
             let need = c["needed_pairs"].as_u64().filter(|n| *n <= 1000 && *n > ran && (o == Out::Unclear || s["decided"] == true)).map(|n| format!("~{n} pairs")).unwrap_or_default();
-            format!("inconclusive{}", sub(&need))
+            format!("{}{}", if o == Out::Gated { "not tested" } else { "inconclusive" }, sub(&need))
         }
         Out::Desc => String::new(),
         Out::NotRun => "not run".into(),
