@@ -149,6 +149,28 @@ pub struct Owned {
     start: Option<u64>,
     #[cfg(windows)]
     started: Started,
+    /// Linux: the most of strobe's resident set the child can carry into its `ru_maxrss` (read just
+    /// before the spawn, `peak_floor`).
+    #[cfg(target_os = "linux")]
+    floor: Option<u64>,
+}
+
+/// Linux: what a child's `ru_maxrss` starts from. The kernel folds the resident high-water mark of the
+/// address space a child had before its exec into its `ru_maxrss` (`exec_mmap`). A child forked (a
+/// `pre_exec` closure makes Rust fork) has a copy of strobe's resident pages, its high-water mark set
+/// to that count: strobe's resident set now, plus slack for what strobe's other threads touch before
+/// the fork and the child before its exec, capped at strobe's own peak. One started with `posix_spawn`
+/// (`CLONE_VM`) has strobe's own address space before its exec: strobe's own peak.
+#[cfg(target_os = "linux")]
+fn peak_floor(forks: bool) -> Option<u64> {
+    let mut me: libc::rusage = unsafe { std::mem::zeroed() };
+    let peak = (unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut me) } == 0).then_some(me.ru_maxrss as u64 * 1024)?;
+    if !forks {
+        return Some(peak);
+    }
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+    let resident = std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok());
+    Some(resident.map_or(peak, |r| (r * page + (1 << 20)).min(peak)))
 }
 
 /// Windows: the cycle clock and the wall clock, read together just before the child first runs.
@@ -351,6 +373,11 @@ pub struct Usage {
     /// The most memory one of its processes held at once (bytes): Unix its peak resident set
     /// (`ru_maxrss`), Windows its peak commit (`PeakProcessMemoryUsed`).
     pub peak_bytes: Option<u64>,
+    /// Linux: `peak_bytes` is no larger than what the child carried from strobe before its exec
+    /// (`peak_floor`): the command's own peak is at most it, not known.
+    pub peak_masked: bool,
+    /// Linux: that floor (bytes).
+    pub peak_floor: Option<u64>,
     pub read_bytes: Option<u64>,
     pub write_bytes: Option<u64>,
     /// Why there are no IO bytes, when there are none.
@@ -567,6 +594,13 @@ impl Owned {
             usage.switches = Some(ru.ru_nvcsw as u64 + ru.ru_nivcsw as u64);
             // Linux counts kilobytes, macOS bytes.
             usage.peak_bytes = Some(if cfg!(target_os = "macos") { ru.ru_maxrss as u64 } else { ru.ru_maxrss as u64 * 1024 });
+            // Linux carries the resident set the child had before its exec (`peak_floor`, read before
+            // the spawn) into its `ru_maxrss`: a peak no larger than it is at most the command's.
+            #[cfg(target_os = "linux")]
+            {
+                usage.peak_floor = self.floor;
+                usage.peak_masked = usage.peak_bytes.zip(self.floor).is_none_or(|(p, f)| p <= f);
+            }
             Ok(usage)
         }
     }
@@ -659,7 +693,7 @@ pub fn spawn_pinned(cmd: &mut Command, cpus: Option<u64>, flags: u32) -> std::io
     #[cfg(not(windows))]
     {
         let _ = flags;
-        pin(cmd, cpus);
+        let _ = pin(cmd, cpus);
         cmd.spawn()
     }
 }
@@ -718,13 +752,16 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         use std::os::unix::process::CommandExt;
         let _ = flags;
         cmd.process_group(0);
-        pin(cmd, cpus);
+        let _forks = pin(cmd, cpus);
         // A target (a launch for a home) whose program is an app bundle's starts as its own
         // responsible process, as a person starts an app, so its XPC services join its process set.
         #[cfg(target_os = "macos")]
         let bundle = home.is_some() && super::macos::own_responsibility(cmd);
         #[cfg(not(target_os = "macos"))]
         let _ = home;
+        // Read just before the spawn: strobe's reader threads' buffers grow after it.
+        #[cfg(target_os = "linux")]
+        let floor = peak_floor(_forks);
         let child = cmd.spawn()?;
         let pgid = child.id();
         // `spawn` returns once the exec is done: whether the disclaim took is known now.
@@ -732,7 +769,14 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         let unattributed = if bundle { super::macos::unattributed(pgid) } else { None };
         #[cfg(not(target_os = "macos"))]
         let unattributed = None;
-        Ok(Owned { child, group: Some(Group { pgid }), unattributed, start: super::start_time(pgid) })
+        Ok(Owned {
+            child,
+            group: Some(Group { pgid }),
+            unattributed,
+            start: super::start_time(pgid),
+            #[cfg(target_os = "linux")]
+            floor,
+        })
     }
 }
 
@@ -744,7 +788,7 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>) -> std::io::Re
     use std::os::unix::process::CommandExt;
     // Held from before the spawn until the launch is listed: a stop in between ends it too.
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    pin(cmd, cpus);
+    let _ = pin(cmd, cpus);
     // Between fork and exec only async-signal-safe calls.
     unsafe {
         cmd.pre_exec(|| {
@@ -754,16 +798,26 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>) -> std::io::Re
             Ok(())
         });
     }
+    #[cfg(target_os = "linux")]
+    let floor = peak_floor(true);
     let child = cmd.spawn()?;
     let pgid = child.id();
     let start = super::start_time(pgid);
     live.push((pgid, start));
-    Ok(Owned { child, group: Some(Group { pgid }), unattributed: None, start })
+    Ok(Owned {
+        child,
+        group: Some(Group { pgid }),
+        unattributed: None,
+        start,
+        #[cfg(target_os = "linux")]
+        floor,
+    })
 }
 
-/// Linux: the CPU mask set between fork and exec. macOS has no CPU affinity.
+/// Linux: the CPU mask set between fork and exec. macOS has no CPU affinity. Whether it added a
+/// `pre_exec` closure (Rust then forks rather than `posix_spawn`s).
 #[cfg(not(windows))]
-fn pin(cmd: &mut Command, cpus: Option<u64>) {
+fn pin(cmd: &mut Command, cpus: Option<u64>) -> bool {
     #[cfg(target_os = "linux")]
     if let Some(mask) = cpus {
         use std::os::unix::process::CommandExt;
@@ -785,10 +839,12 @@ fn pin(cmd: &mut Command, cpus: Option<u64>) {
                     Ok(())
                 });
             }
+            return true;
         }
     }
     #[cfg(target_os = "macos")]
     let _ = (cmd, cpus);
+    false
 }
 
 /// The processes in a job now (`JobObjectBasicProcessIdList`).

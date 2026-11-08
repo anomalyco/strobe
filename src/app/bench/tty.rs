@@ -257,6 +257,12 @@ struct Run {
     marks: Vec<(String, u64)>,
     timed: metrics::Timed,
     counted: probe::wakes::Counted,
+    /// Context switches and IO of the program's processes over the run's timed parts; None when its
+    /// threads could not be read at an end.
+    span: Option<probe::wakes::Span>,
+    /// To when the last input's settle is judged: the run's end, or after an untimed wait for an answer
+    /// already in to hold still.
+    settled: u64,
     updates: usize,
     frames: usize,
     bytes: u64,
@@ -321,6 +327,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let edges: RefCell<Vec<(super::super::record::Cycles, BTreeMap<u32, u64>)>> = RefCell::new(Vec::new());
     let host_edges: RefCell<Vec<u64>> = RefCell::new(Vec::new());
     let reader_edges: RefCell<Vec<(u64, Option<u64>)>> = RefCell::new(Vec::new());
+    // The set's threads and IO at the same edges: switches and IO over the timed parts.
+    let snap_edges: RefCell<Vec<probe::wakes::Snapshot>> = RefCell::new(Vec::new());
     let pixels = x.pixels.clone();
     let home_dir = home.dir.clone();
     let serve = |op: &str, a: &Value| -> Result<Value> {
@@ -346,6 +354,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 edges.borrow_mut().push((cycles(pid, &set_home).0, ended(pid, &set_home)));
                 host_edges.borrow_mut().push(host_cycles(&tty));
                 reader_edges.borrow_mut().push((tty.reader_cycles(), host::tsc()));
+                snap_edges.borrow_mut().push(probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), None));
                 if !start {
                     cost.resume();
                 }
@@ -400,11 +409,12 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         _ => {}
                     }
                     hooks.begin(&format!("run:{}", base + runs.len()));
-                    let k0 = probe::wakes::Counters::take(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref());
+                    let k0 = probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref());
                     edges.borrow_mut().clear();
                     host_edges.borrow_mut().clear();
                     let ended0 = ended(pid, &set_home);
                     reader_edges.borrow_mut().clear();
+                    snap_edges.borrow_mut().clear();
                     let c0 = cycles(pid, &set_home);
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
@@ -412,22 +422,53 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     cost.start();
                     let t0 = host::now_ns();
                     let ran = ctx.runner.call("run", json!({ "case": s.case }), rt, serve);
-                    let t1 = host::now_ns();
+                    // The run's end and its readings: (t1, the CPUs' busy time, reader, console host, cycles, ended
+                    // children, threads and IO). The busy time is stopped before the process snapshots, which take
+                    // milliseconds: the program's CPU below spans it.
+                    let read_end = || {
+                        let t1 = host::now_ns();
+                        let busy = busy.as_ref().zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
+                        let (r1, h1, c1, ended1) = (tty.reader_cycles(), host_cycles(&tty), cycles(pid, &set_home), ended(pid, &set_home));
+                        (t1, busy, r1, h1, c1, ended1, probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()))
+                    };
+                    // A run may return right after its last input (no until), before the program draws its
+                    // answer: the run then ends once the answer came and held still, so its time, CPU,
+                    // output, IO and counts all cover it. One that ended in an untimed stretch keeps its end.
+                    // Asked before the end is read: an answer arriving while it is read is still awaited.
+                    let last = (ran.is_ok() && !hooks.untimed_now() && !hooks.ended_untimed()).then(|| driver.last_input(t0, &hooks.untimed_stretches())).flatten();
+                    let mut end = read_end();
+                    if let Some((sent, false)) = last
+                        && driver.await_answer(sent)
+                    {
+                        end = read_end();
+                    }
                     cost.end();
-                    // Ended before the process snapshots, which take milliseconds: the program's CPU below spans it.
-                    let busy = busy.zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
-                    let r1 = tty.reader_cycles();
-                    let h1 = host_cycles(&tty);
-                    let c1 = cycles(pid, &set_home);
-                    let ended1 = ended(pid, &set_home);
+                    // An answer already in (until: "frame"): an untimed wait for it to hold still, so its
+                    // settle can be judged (latencies read to here, inputs are still the run's).
+                    let settled = match last {
+                        Some((sent, true)) if driver.await_quiet(sent) => host::now_ns(),
+                        _ => end.0,
+                    };
+                    let (t1, busy, r1, h1, c1, ended1, k1) = end;
                     // Other work on the program's CPUs (`cpu.foreign`): their busy time less the program's and the
                     // console host's cycles; unknown once a process of the program ended in the run.
                     let gone = c0.0.keys().any(|k| !c1.0.contains_key(k)) || host::ended_between(&ended0, &ended1);
                     let foreign = busy.filter(|_| !gone).and_then(|b| b.other_cycles(super::super::record::cycles_used(&c0.0, &c1.0) + h1.saturating_sub(h0)));
-                    let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()));
                     hooks.end();
                     ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &screen_note(&tty), "the run threw or timed out"))?;
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
+                    // Switches and IO over the timed parts: the snapshots at the run's ends and its untimed
+                    // edges in pairs (a stretch the run never ended ends with it), each part its own span.
+                    let mut se = snap_edges.take();
+                    if se.len() % 2 == 1 {
+                        se.push(k1.clone());
+                    }
+                    let mut snaps: Vec<&probe::wakes::Snapshot> = vec![&k0];
+                    snaps.extend(se.iter());
+                    snaps.push(&k1);
+                    // None when the set's threads could not be read at an end (the program gone).
+                    let os_span = (!k0.is_empty() && !k1.is_empty()).then(|| probe::wakes::Span::joined(snaps.as_chunks::<2>().0.iter().map(|[a, b]| probe::wakes::span(a, b)).collect()));
+                    let counted = os_span.as_ref().map(|s| s.counted.clone()).unwrap_or_else(|| probe::wakes::span(&k0, &k1).counted);
                     let mut e = edges.take();
                     if e.len() % 2 == 1 {
                         e.push((c1.0.clone(), ended1.clone()));
@@ -485,6 +526,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         counts,
                         marks: hooks.take_marks(),
                         counted,
+                        span: os_span,
+                        settled,
                         updates: ups.len(),
                         frames: ups.iter().filter(|u| u.synced).count(),
                         cells: ups.iter().map(|u| u.cells as u64).sum(),
@@ -533,6 +576,15 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 extra.insert("tty.frames".into(), per(&|r| r.frames as f64));
                 extra.insert("tty.bytes".into(), per(&|r| r.bytes as f64));
                 extra.insert("tty.cells".into(), per(&|r| r.cells as f64));
+                let read = measured.iter().all(|r| r.span.is_some());
+                if read {
+                    let span = |r: &Run, f: fn(&probe::wakes::Span) -> f64| r.span.as_ref().map_or(f64::NAN, f);
+                    if measured.iter().all(|r| r.span.as_ref().is_some_and(|s| s.uncounted.is_none())) {
+                        extra.insert("cpu.wakes".into(), per(&|r| span(r, probe::wakes::Span::wakes_per_s)));
+                    }
+                    extra.insert("io.read".into(), per(&|r| span(r, |s| s.io_read as f64)));
+                    extra.insert("io.write".into(), per(&|r| span(r, |s| s.io_write as f64)));
+                }
                 let hooked: Vec<super::block::Hooked> = measured.iter().map(|r| (&r.counts, r.marks.as_slice(), &r.timed)).collect();
                 extra.extend(super::block::per_run_hooks(s, &key, &hooked));
                 // `app.<name>`: every measured run must have had the event (a run without one is not 0).
@@ -556,14 +608,22 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 extra.extend(counts);
                 let mut values = metrics::block_values(&metrics::BlockData::default(), "run", &extra);
                 let mut refused = uncounted;
+                // Wakes where the OS stopped counting a thread's switches: unknown, never short.
+                if let Some(why) = measured.iter().find_map(|r| r.span.as_ref().and_then(|s| s.uncounted.clone())) {
+                    for m in declared_metrics(s).into_iter().filter(|m| *m == "cpu.wakes") {
+                        refused.entry(m.clone()).or_insert_with(|| Refusal::new(ValidatorId::NoCounter, format!("cpu.wakes: {why}")));
+                    }
+                }
                 if gone > 0 {
                     for m in declared_metrics(s).into_iter().filter(|m| matches!(m.as_str(), "cpu.work" | "cpu.app.total" | "cpu.process.total")) {
                         refused.insert(m.clone(), super::super::record::cpu_lost(m, gone, measured.len(), "the program"));
                     }
                 }
                 // Input latencies, pooled over the measured runs' timed parts.
+                // Each run to when its last input's settle can be judged (`settled`): inputs are still the run's own.
+                let settled: Vec<metrics::Timed> = measured.iter().map(|r| metrics::Timed { t1: r.settled, ..r.timed.clone() }).collect();
+                let lat = drv::latencies(&tty, &driver.inputs(), &settled.iter().collect::<Vec<_>>());
                 let stretches: Vec<&metrics::Timed> = measured.iter().map(|r| &r.timed).collect();
-                let lat = drv::latencies(&tty, &driver.inputs(), &stretches);
                 let mut ms = lat.ms.clone();
                 ms.sort_by(f64::total_cmp);
                 if !ms.is_empty() {
@@ -643,6 +703,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         .fix("wait for the program to settle after the input (until: \"idle\"); a program that never rests never settles"),
                         _ if m.starts_with("tty.frame.") => Refusal::new(ValidatorId::NotForTarget, format!("{m}: the program drew no synchronized frames (?2026){}", if syncs > 0 { format!(", and {syncs} it began never ended within a second") } else { String::new() })),
                         "cpu.pty_host" => Refusal::new(ValidatorId::NotOnThisOs, "cpu.pty_host: on this OS the kernel is the terminal: no host process does its work"),
+                        "cpu.wakes" | "io.read" | "io.write" if !read => Refusal::new(ValidatorId::RunIncomplete, format!("{m}: the program's threads could not be read at a measured run's start or end (its processes gone)")),
                         _ if m.starts_with("app.") => {
                             let bad = events.bad();
                             let r = Refusal::new(ValidatorId::NoMetric, format!("{m}: in {} of {} measured runs the program wrote no {{\"strobe\":\"metric\",\"name\":\"{}\"}} line to $STROBE_EVENTS", measured.iter().filter(|r| !r.app.contains_key(&m["app.".len()..])).count(), measured.len(), &m["app.".len()..]))

@@ -381,8 +381,32 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     put("cpu.wakes", per(&|r| sum_of(r, |x| x.usage.switches.map(|n| n as f64)).map(|n| n / (wall(r) / 1e3).max(1e-9))), &|| {
         Refusal::new(ValidatorId::NotOnThisOs, "cpu.wakes: Windows keeps no context-switch count of a process that has ended (its job counts CPU and IO only)")
     });
-    put("memory.peak", per(&|r| r.iter().map(|x| x.usage.peak_bytes.map(|b| b as f64 / (1024.0 * 1024.0))).try_fold(0.0f64, |m, b| Some(m.max(b?)))), &|| {
-        Refusal::new(ValidatorId::NotOnThisOs, "memory.peak: this OS gave no peak memory for the command's processes")
+    // Linux: a command's peak no larger than what it carried from strobe (`peak_masked`) is only an
+    // upper bound of its own; the run's peak stands when a command's unmasked peak exceeds every one.
+    let peak = |r: &[Ran]| -> Option<f64> {
+        let bytes: Vec<(u64, bool)> = r.iter().map(|x| x.usage.peak_bytes.map(|b| (b, x.usage.peak_masked))).collect::<Option<_>>()?;
+        let open = bytes.iter().filter(|b| !b.1).map(|b| b.0).max();
+        let masked = bytes.iter().filter(|b| b.1).map(|b| b.0).max();
+        match (open, masked) {
+            (_, None) => open,
+            (Some(o), Some(m)) if o > m => Some(o),
+            _ => None,
+        }
+        .map(|b| b as f64 / (1024.0 * 1024.0))
+    };
+    put("memory.peak", per(&peak), &|| {
+        let floor = measured.iter().flat_map(|r| r.0.iter()).filter(|x| x.usage.peak_masked).filter_map(|x| x.usage.peak_floor).max();
+        match floor {
+            Some(f) => Refusal::new(
+                ValidatorId::NotOnThisOs,
+                format!(
+                    "memory.peak: Linux carries the resident set a command had before its exec ({} of strobe's, which it was started from) into its ru_maxrss, and a run's commands peaked no higher, so their own peak is at most that, not known",
+                    crate::fmt::bytes(f as f64)
+                ),
+            )
+            .fix("print the command's own peak (VmHWM in /proc/self/status) as a strobe:metric line, give it work that peaks above that, or measure memory.peak on Windows or macOS"),
+            None => Refusal::new(ValidatorId::NotOnThisOs, "memory.peak: this OS gave no peak memory for the command's processes"),
+        }
     });
     for (m, pick) in [("io.read", true), ("io.write", false)] {
         put(m, per(&|r| sum_of(r, |x| if pick { x.usage.read_bytes } else { x.usage.write_bytes }.map(|b| b as f64))), &|| {

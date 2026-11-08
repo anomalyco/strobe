@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 pub const QUIET: Duration = Duration::from_millis(50);
 /// The longest strobe waits for the grid to hold still before an input, and for a key's change.
 const SETTLE_MAX: Duration = Duration::from_millis(300);
+/// The longest strobe waits after a run for its last input's answer, and for it to hold still: long
+/// enough not to cut off a slow answer's latency (a shorter wait would right-censor its p95).
+const ANSWER_MAX: Duration = Duration::from_secs(1);
 /// How to time a resize on Windows, where ConPTY's host redraws before the program does.
 pub const RESIZE_FIX: &str = "on Windows time a resize with a phase whose until is what only the program's redraw shows (text its new layout puts somewhere new) or its state on STROBE_EVENTS (until: { state }); tty.settle times it when the program redrew after the host; tty.latency measures resizes on Linux and macOS";
 
@@ -324,6 +327,28 @@ impl<'a> Driver<'a> {
     /// Every input so far.
     pub fn inputs(&self) -> Vec<Input> {
         self.inputs.borrow().clone()
+    }
+
+    /// The run's last timed input since `t0` (none sent inside `untimed`) and whether the grid has
+    /// changed since it: a run may return right after its last input (a `press` without `until`),
+    /// before the program draws its answer.
+    pub fn last_input(&self, t0: u64, untimed: &[(u64, u64)]) -> Option<(u64, bool)> {
+        let last = self.inputs.borrow().iter().filter(|i| i.sent_ns >= t0 && !untimed.iter().any(|g| i.sent_ns >= g.0 && i.sent_ns < g.1)).map(|i| i.sent_ns).max()?;
+        let answered = self.tty.updates(last, u64::MAX).iter().any(|u| u.cells > 0 && u.start_ns >= last);
+        Some((last, answered))
+    }
+
+    /// Waits for the answer to the input written at `sent`: its first change, then the grid still for
+    /// `QUIET`, each within `ANSWER_MAX`. False when no answer came or it never held still (an
+    /// animation's changes are no answer).
+    pub fn await_answer(&self, sent: u64) -> bool {
+        self.tty.first_change(sent, Instant::now() + ANSWER_MAX).is_some() && self.tty.quiet(QUIET, sent, Instant::now() + ANSWER_MAX)
+    }
+
+    /// Waits (within `ANSWER_MAX`) for the grid to hold still `QUIET` after the input written at
+    /// `sent`: whether it did.
+    pub fn await_quiet(&self, sent: u64) -> bool {
+        self.tty.quiet(QUIET, sent, Instant::now() + ANSWER_MAX)
     }
 
     /// Lets go of what `down` holds (between runs): modifier keys and a mouse button.

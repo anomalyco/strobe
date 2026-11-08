@@ -294,7 +294,7 @@ pub struct MemoryMap {
     pub pid: u32,
     pub name: String,
     /// What `memory.app.private` reads: the commit charge (Windows), which includes commit held for
-    /// the process's GPU allocations; private resident and swapped pages (Linux), device mappings too.
+    /// the process's GPU allocations; anonymous resident and swapped pages (Linux).
     pub private: u64,
     /// `memory.app.host`: memory the process allocated in its own address space (heap, stacks,
     /// anonymous mappings), without GPU memory mapped into it.

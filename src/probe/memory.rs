@@ -94,7 +94,7 @@ pub fn view(r: &Value, label: &str, by: &str, top: usize, values: &Value) -> (St
     let windows = procs.iter().any(|p| p["unmapped"].is_number());
     if by == "layer" {
         let private = part(r, "private").unwrap_or(f64::NAN);
-        text += &format!("  {:>10}  private: memory.app.private ({})\n", b(private), if windows { "the commit charge" } else { "private resident and swapped pages" });
+        text += &format!("  {:>10}  private: memory.app.private ({})\n", b(private), if windows { "the commit charge" } else { "Linux's anonymous pages, resident and swapped" });
         let mut rows: Vec<(&str, &str, f64)> = PARTS.iter().filter_map(|(k, about)| Some((*k, *about, part(r, k)?))).collect();
         rows.sort_by(|a, b| b.2.total_cmp(&a.2));
         for (_, about, v) in rows.iter().take(top) {
@@ -137,7 +137,7 @@ pub fn view(r: &Value, label: &str, by: &str, top: usize, values: &Value) -> (St
     text += if windows {
         "private is the commit charge (memory.app.private): it includes the commit Windows charges for the processes' GPU allocations, mapped into them (gpu mapped: a GPU driver maps VRAM write-combined) or not (unmapped), which is no host memory; host is committed private regions without write-combined or uncached ones (memory.app.host); shared, files and image are committed views, not resident memory\n"
     } else {
-        "private is private resident and swapped pages (memory.app.private), GPU device mappings included; host is anonymous private pages (memory.app.host); shared, files and image are resident pages\n"
+        "private is Linux's anonymous pages, resident and swapped (memory.app.private), as Windows' commit charge counts private memory: a file's pages and shared memory are not private even where this process alone maps them; host is anonymous private pages outside GPU device mappings (memory.app.host); shared, files and image are resident pages\n"
     };
     (text, json!({ "reading": r, "label": label, "by": by }))
 }

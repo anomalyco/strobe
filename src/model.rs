@@ -909,7 +909,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::Care(CARE_PRIVATE),
-        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; macOS: the physical footprint)",
+        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; Linux: anonymous resident and swapped pages; macOS: the physical footprint)",
     },
     MetricDef {
         name: "memory.app.host",

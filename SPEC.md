@@ -1752,7 +1752,7 @@ from the process's cycles against the TSC); about once a second, and at its last
 time over the span since the last such reading (a per-process GPU reader of its own: on Windows a
 D3DKMT query per engine of every adapter strobe opened, which each tick had cost more than the rest of
 the tick) and its private memory as `memory.app.private` counts a target's (Windows' private commit,
-macOS's physical footprint, Linux's `smaps_rollup` private and swapped pages, 94 µs a read on vps).
+macOS's physical footprint, Linux's `smaps_rollup` anonymous and swapped pages, 94 µs a read on vps).
 Each reading stays on the tick that took it, with the span it covers; a window weights each by its
 overlap. strobe's own process is in no target's set (`host::process_set` leaves it out unless it is
 the root). A recording keeps them under `os.strobe` in `meta.json` (means over the recording, peak
@@ -1862,11 +1862,11 @@ address space, which holds its memory lock for a moment; never inside a timed ru
 
 | Part | Windows (`VirtualQueryEx`, committed regions) | Linux (`/proc/<pid>/smaps`) |
 |---|---|---|
-| `private` (`memory.app.private`) | the commit charge (`PrivateUsage`) | private resident + swapped pages (as `smaps_rollup`) |
+| `private` (`memory.app.private`) | the commit charge (`PrivateUsage`) | anonymous resident + swapped pages (`Anonymous` + `Swap`, as `smaps_rollup`) |
 | `host` (`memory.app.host`) | committed `MEM_PRIVATE` regions, write-combined and uncached ones left out | private pages of anonymous mappings (heap, stacks, `[anon:…]`) |
 | `gpu mapped` | committed regions mapped write-combined or uncached: a GPU driver's CPU view of the memory it allocated for the process (checked: an NVIDIA Vulkan app's VRAM, 727 MB against `gpu.vram` 725 MB) | resident pages of GPU device mappings (`/dev/dri/*`, `/dev/nvidia*`, …) |
 | `unmapped` | commit charge the walk cannot place: charge − private regions − copy-on-write pages of images and views (page tables, commit a driver holds) | — |
-| `shared` | committed views of pagefile-backed sections | resident shared memory (`s` mappings, `/dev/shm`, memfd, SysV) |
+| `shared` | committed views of pagefile-backed sections | resident shared memory (shared anonymous mappings, `/dev/shm`, memfd, SysV); a file mapped shared is in `files` |
 | `files`, `image` | committed views of data files; images (code and their data) | resident pages of other files; of files with an executable mapping |
 | working set | `WorkingSetSize` and `PrivateWorkingSetSize` (Windows 11) | `Rss`; private resident |
 
@@ -3193,7 +3193,10 @@ experiment's `script.log`.
   own checkout: strobe never writes there, and the harness must exist.
 - **Timing:** the host tree's CPU in cycles (`cpu.work`, the primary for compute) and wall clock
   (`run.duration`, the primary for work that waits on children or I/O: CPU of a child that exited
-  during the run is not in the tree any more). Warmup and pairs work as for pages.
+  during the run is not in the tree any more). A run in which a process of the tree ended in a timed
+  part (`host::ended_marks`, `record::lost_in_parts`) refuses `cpu.work` and `cpu.app.total`: a
+  harness that ran a 300 ms child read 6.9 ms (adais) and 2.7 ms (vps) as valid before
+  (`scripts/dev/known/script.bench.ts` case `child`). Warmup and pairs work as for pages.
 - **Memory:** `js.heap.retained` is the heap after a full collection (`Bun.gc(true)`, Node's
   `gc()` under `--expose-gc`) after a run minus before it, read outside the run's span: what each
   run keeps alive. `memory.app.private` is the host tree's private bytes at the end of the last
@@ -3367,6 +3370,16 @@ stopped reading at it, so a command that printed `strobe:metric part=1`, a Latin
     process's are gone.
   - `memory.peak`: the most memory one of its processes held at once (Linux and macOS `ru_maxrss`, a
     resident set; Windows the job's `PeakProcessMemoryUsed`, a commit), the largest over the run.
+    Linux carries the resident high-water mark of the address space a child had before its exec
+    into its `ru_maxrss` (`exec_mmap`): a 4 MiB program read 10 MB on vps, strobe's own resident set.
+    Its true peak cannot be read another way (`VmHWM` is gone before a zombie is read, a cgroup's
+    peak needs delegation). So strobe reads, just before each spawn, what the child can carry
+    (`spawn::peak_floor`): strobe's resident set plus 1 MiB, at most its peak, for a forked child
+    (a `pre_exec` closure: the pinned launch); strobe's peak for a `posix_spawn`ed one, which runs on
+    strobe's address space until its exec. A command whose `ru_maxrss` is no larger is masked: its
+    own peak is at most that. A run's `memory.peak` stands when an unmasked command's peak exceeds
+    every masked one's; else it is refused (`NotOnThisOs`, the floor said, with a fix: print the
+    command's own `VmHWM` as a `strobe:metric` line, larger work, or Windows or macOS).
   - `io.read`, `io.write`: Linux the zombie's `/proc/<pid>/io` (`rchar`, `wchar`: its own and its
     reaped children's, before strobe reaps it); Windows the job's transfer counts; macOS the process's
     disk bytes (`ri_diskio_*`), refused (`NotOnThisOs`) for a command that started children, whose
@@ -5780,7 +5793,7 @@ means the metric is not printed and the refusal says why (rule 1), never 0.
 | Signal | Windows | Linux | macOS |
 |---|---|---|---|
 | process CPU (`cpu.work`, `cpu.app.total`) | `QueryProcessCycleTime` over the cycle clock (below): the performance counter times the kernel's cycle factor from Windows 11 24H2, else the TSC on x64 (process times move in 15.6 ms ticks: an idle 5 s run read 0, 0.31% or 0.62% and nothing between) | the process's CPU clock (`clock_gettime` on `MAKE_PROCESS_CPUCLOCK(pid, CPUCLOCK_SCHED)`): ns, every thread live or exited, no permission needed; `/proc/<pid>/stat` only for names and parents | `proc_pid_rusage` user + system time (Mach time, charged at every context switch); this user's processes |
-| process memory (`memory.app.private`) | private commit (`PagefileUsage`) | `smaps_rollup` private clean + dirty + swap (`statm` resident − shared for `top`'s every process); `memory.app.pss`: its `Pss` summed over the set, each shared page split between the processes that map it (refused `NotOnThisOs` elsewhere) | physical footprint (`ri_phys_footprint`, Activity Monitor's Memory: dirty private, compressed, GPU allocations) |
+| process memory (`memory.app.private`) | private commit (`PagefileUsage`) | `smaps_rollup` `Anonymous` + `Swap`, as Windows' commit charge counts private memory (`statm` resident − shared for `top`'s every process). Not private clean + dirty: they count a file's page cache and shared memory this process alone maps, so one bun process read 12 MB alone and 2 MB once a second bun process mapped the same executable (vps, 2026-11-08), and a read-only 150 MB file mapping read 151 MB "private" where Windows read 1 MB; `memory.app.pss`: its `Pss` summed over the set, each shared page split between the processes that map it (refused `NotOnThisOs` elsewhere) | physical footprint (`ri_phys_footprint`, Activity Monitor's Memory: dirty private, compressed, GPU allocations) |
 | memory by what holds it (`memory.app.host`, `query memory`, §8.6) | `VirtualQueryEx` walk of committed regions (type, protection, `GetMappedFileName`), `PROCESS_MEMORY_COUNTERS_EX2` | `/proc/<pid>/smaps` | refused: another process's regions need its task port (debuggers only) |
 | threads (`cpu.wakes`, `query threads`) | `NtQuerySystemInformation`: context switches per thread (32-bit, wrapping), each thread's create time to tell a reused id; names by `GetThreadDescription`, CPU by `QueryThreadCycleTime` | `/proc/<pid>/task/<tid>/schedstat`: times switched in to run (the same count, 64-bit) and exact CPU ns, the thread's start from its `stat` (a thread whose files go while they are read is left out, as one that exited); names from `comm` | per process only: `proc_taskinfo.pti_csw` (live and exited threads; one `(whole process)` row; the kernel holds it at 2^31 − 1, past which the wakes are unknown, `NoCounter`). Thread ids are 64-bit: a view's `tid` folds both halves into 32 bits, never 0 (the process row's). Per thread: CPU and names (`PROC_PIDTHREADID64INFO`: any same-user process, no permission; `task_threads` would need `task_for_pid`, which is root's), no wakes: no public per-thread switch count exists (`thread_info`, `PROC_PIDTHREADINFO` and `PROC_PIDTHREADCOUNTS` carry CPU time, scheduling state, cycles and energy; `getrusage` switches are the caller's own); the kernel's scheduler trace (kdebug through `ktrace`) has them for root only, not built |
 | per-core load, frequency | busy: idle cycles against the cycle clock each tick (PDH at 100 ms is clock-tick noise); frequency (`% Processor Performance`) and utility: PDH Processor Information once a second, MHz from each CPU's own `Processor Frequency` (a hybrid CPU's kinds of core differ; one value for all once came from whichever core PDH listed last) | busy: `/proc/stat` idle + iowait (10 ms ticks, unbiased over a run); frequency: `cpuinfo_avg_freq` (APERF/MPERF average, kernel 6.13+) of every online CPU at its own number, against its own base frequency (not CPUs 0 to n − 1 of the n strobe may run on, which under `taskset` read another CPU's); a CPU that cannot answer at a reading (`EAGAIN` from one deep in an idle state) is a hole in it, not the end of every CPU's; else none (an instantaneous `scaling_cur_freq` is not an average) | busy: `host_processor_info` ticks (10 ms); frequency: none (IOReport's P-state residency is not built) |
@@ -6304,7 +6317,21 @@ so nothing needs a display: it runs on a locked session and on a server alike (`
   received: on Windows the console host's re-render, not the program's bytes), `tty.cells`; pooled:
   `tty.latency.p50/p95`, `tty.settle.p50/p95`, `tty.frame.p50/p95` (a synchronized frame's begin to end);
   from outside the program's process tree `cpu.work`, `cpu.app.total`, `cpu.wakes`, `memory.app.private`,
-  `io.*`; Windows' console host apart as `cpu.pty_host`, never in `cpu.work`. The reader thread's whole
+  `io.*`; Windows' console host apart as `cpu.pty_host`, never in `cpu.work`. `cpu.wakes` and `io.*` come
+  from snapshots of the set's threads and IO at the run's ends and at each `ctx.untimed` edge, each
+  timed part its own span (`wakes::span`, `Span::joined`, as native runs); a run whose threads could
+  not be read at an end refuses them (`RunIncomplete`), and a thread whose switches the OS stopped
+  counting refuses `cpu.wakes` (`NoCounter`, `Span::uncounted`). A run may return right after its last timed
+  input (a `press` without `until`), before the program draws its answer: then the run's end waits
+  for that answer (its first change, then the grid still 50 ms, each within 1 s), so `run.duration`,
+  `cpu.work`, `io.*`, `cpu.wakes`, `count.*`, `app.*` and its output (`tty.updates`, `tty.frames`,
+  `tty.bytes`, `tty.cells`) all cover one span; no answer within 1 s, or one that never holds still,
+  keeps the run's own end. A run whose last input was answered already (`until: "frame"`) ends at
+  once, and an untimed wait (at most 1 s) for the grid to hold still lets that input's settle be
+  judged. A run that ended in an untimed stretch keeps its end. Before, ten keys each answered 20 ms
+  later by one frame read 9 frames a run and a tenth sample `silent`, and one key alone was refused
+  `NoInput` ("nothing changed"), depending on whether the answer had arrived when the block's values
+  were read. The reader thread's whole
   CPU over the measured runs (its reads' system calls too) is the block's `terminal` overhead (§19:
   0.5%); over 2% what it stamped (`tty.latency.*`, `tty.settle.*`, `tty.frame.*`) is refused
   `OverheadBudget`. In the daemon the reader and the event stream's threads take the bench thread's
@@ -8435,6 +8462,10 @@ strobe track --schedules | --unschedule <sch_…> | --confirm [<ser_…|chg_…>
   only when its points' hooks used it (`plan.used_random`): another seed is then another workload
   and another series; otherwise it changes nothing. A `--seed` given joins the run key (`runs.jsonl`),
   so the derived seed keeps keys from before it.
+- **Metric revision**: a metric whose reading changed meaning on an OS joins the fingerprint with its
+  revision there (`metric_revision`), so its older points are another series: Linux
+  `memory.app.private` 2 (anonymous + swapped pages, §13.6; it counted a file's page cache before).
+  No other series changes.
 - After the points, the detector runs on every series of the file, and each new suspected change
   is confirmed (unless `--no-confirm`), then bisected and alerted.
 

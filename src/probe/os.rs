@@ -114,8 +114,8 @@ impl OwnReader {
 }
 
 /// strobe's own private memory, as `memory.app.private` counts a target's: Windows' private commit,
-/// macOS's physical footprint (what Activity Monitor shows), Linux's pages no other process maps
-/// (resident and swapped).
+/// macOS's physical footprint (what Activity Monitor shows), Linux's anonymous pages (resident and
+/// swapped).
 fn own_private_bytes() -> Option<u64> {
     #[cfg(windows)]
     {
@@ -132,13 +132,7 @@ fn own_private_bytes() -> Option<u64> {
     }
     #[cfg(target_os = "linux")]
     {
-        let text = std::fs::read_to_string("/proc/self/smaps_rollup").ok()?;
-        let kb: u64 = text
-            .lines()
-            .filter(|l| l.starts_with("Private_Clean:") || l.starts_with("Private_Dirty:") || l.starts_with("Swap:"))
-            .filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-            .sum();
-        Some(kb * 1024)
+        Some(host::linux::anonymous_kb(&std::fs::read_to_string("/proc/self/smaps_rollup").ok()?) * 1024)
     }
 }
 

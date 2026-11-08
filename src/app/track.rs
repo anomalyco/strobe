@@ -80,6 +80,20 @@ fn seed_fingerprint(r: &Value, fingerprint: &mut Value) {
     }
 }
 
+/// A metric whose reading on this OS changed meaning carries its revision in the fingerprint, so its
+/// points from before are another series: Linux `memory.app.private` became anonymous + swapped pages
+/// (it was private clean + dirty, which counted a file's page cache). Only such a metric, so every
+/// other series keeps its history.
+fn metric_fingerprint(metric: &str, fingerprint: &mut Value) {
+    let revision = match metric {
+        "memory.app.private" if cfg!(target_os = "linux") => Some(2),
+        _ => None,
+    };
+    if let Some(r) = revision {
+        fingerprint["metric_revision"] = json!(r);
+    }
+}
+
 /// A series' motion in its fingerprint: reduced motion is another workload (the app skips its
 /// animations), and so is a target that follows an OS whose own setting reduces it. Only when either
 /// is so, so every other series keeps its history.
@@ -390,6 +404,7 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         }
         motion_fingerprint(r, s, &mut fingerprint);
         seed_fingerprint(r, &mut fingerprint);
+        metric_fingerprint(&metric, &mut fingerprint);
         let family = json!({ "device": statics["device"], "repo": repo, "file": file_rel, "label": label, "metric": metric });
         let id = history::series_id(&family, &fingerprint);
         if !history::exists(&id) {

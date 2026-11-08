@@ -213,7 +213,9 @@ impl Registration {
             }
             let running = others.iter().find(|b| b["state"] == "running" && b["exp"] != me);
             let why = match (old, running, ahead.len()) {
-                _ if elsewhere => format!("{what}: waiting for a bench of another user or state folder (the machine-wide lock {})", machine_path().map(|p| p.display().to_string()).unwrap_or_default()),
+                _ if elsewhere => {
+                    format!("{what}: waiting for a bench of another user or state folder (the machine-wide lock {})", machine_path().map(|p| p.display().to_string()).unwrap_or_default())
+                }
                 (Some(pid), _, _) => format!("{what}: waiting for the bench of an older strobe (pid {pid}) to finish"),
                 (None, Some(r), n) => format!(
                     "{what}: waiting for the bench slot (pid {} runs a block of {}{})",

@@ -125,18 +125,25 @@ fn name(s: &Stat) -> String {
     exe_of(s.pid).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| s.comm.clone())
 }
 
-/// Private memory: resident and swapped pages no other process maps (`smaps_rollup`).
+/// Private memory: resident and swapped anonymous pages (`smaps_rollup` `Anonymous` and `Swap`), as
+/// Windows' commit charge counts it. Not `Private_Clean`/`Private_Dirty`: they count a file's page cache
+/// and shared memory mapped by this process alone, which another process mapping the same file (a
+/// second copy of the executable) turns into shared without the program changing.
 fn private_bytes(pid: u32) -> u64 {
     let Some(text) = read(format!("/proc/{pid}/smaps_rollup")) else { return 0 };
-    text.lines().filter(|l| l.starts_with("Private_Clean:") || l.starts_with("Private_Dirty:") || l.starts_with("Swap:")).filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).sum::<u64>()
-        * 1024
+    anonymous_kb(&text) * 1024
 }
 
-/// One process's memory by what holds it, from `smaps`: per mapping its resident pages, private ones
-/// (clean, dirty and swapped, as `private_bytes` counts) and what backs it.
+/// `Anonymous` plus `Swap` of a `smaps_rollup` (kB).
+pub fn anonymous_kb(rollup: &str) -> u64 {
+    rollup.lines().filter(|l| l.starts_with("Anonymous:") || l.starts_with("Swap:")).filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).sum()
+}
+
+/// One process's memory by what holds it, from `smaps`: per mapping its resident pages, anonymous ones
+/// and swapped ones (as `private_bytes` counts them), and what backs it.
 pub fn memory_map(pid: u32) -> Option<super::MemoryMap> {
     let text = read(format!("/proc/{pid}/smaps"))?;
-    // (perms, path, resident, private resident, swapped) per mapping.
+    // (perms, path, resident, anonymous resident, swapped) per mapping.
     let mut maps: Vec<(String, String, u64, u64, u64)> = Vec::new();
     for line in text.lines() {
         let mut f = line.split_whitespace();
@@ -149,7 +156,7 @@ pub fn memory_map(pid: u32) -> Option<super::MemoryMap> {
             let kb = f.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 1024;
             match first {
                 "Rss:" => m.2 += kb,
-                "Private_Clean:" | "Private_Dirty:" => m.3 += kb,
+                "Anonymous:" => m.3 += kb,
                 "Swap:" => m.4 += kb,
                 _ => {}
             }
@@ -164,7 +171,10 @@ pub fn memory_map(pid: u32) -> Option<super::MemoryMap> {
         out.private += resident + swap;
         out.working_set += rss;
         private_resident += resident;
-        let shared_mem = perms.ends_with('s') || ["/dev/shm/", "/memfd:", "/SYSV"].iter().any(|d| path.starts_with(d));
+        // Shared memory: shm objects and shared anonymous mappings (`/dev/zero (deleted)`). A file mapped
+        // shared is a file's.
+        let shm = ["/dev/shm/", "/memfd:", "/SYSV", "/dev/zero"].iter().any(|d| path.starts_with(d));
+        let shared_mem = shm || (perms.ends_with('s') && !path.starts_with('/'));
         match () {
             _ if gpu(path) => out.gpu_mapped += rss + swap,
             _ if shared_mem => out.shared += rss + swap,
