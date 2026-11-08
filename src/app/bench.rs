@@ -468,6 +468,15 @@ struct Run {
     pixels: (u64, f64, f64),
     /// What the run left, read after its span and before its reset (`RunEnd`).
     end: RunEnd,
+    /// The page loaded another document in the run that strobe's `goto` did not (a link, a script):
+    /// what the departed document counted (the Performance domain's counters, the page's `count.*`) was
+    /// never read, so `main.work`, `WORK_PARTS` and `count.*` would be short or negative.
+    doc_lost: bool,
+    /// A process of the target's set ended in a timed part of the run: its CPU there went with it
+    /// (`record::lost_in_parts`), so the set's CPU is short.
+    cpu_lost: bool,
+    /// One ended anywhere in the run's span, untimed stretches too: `cpu_whole` is short.
+    whole_lost: bool,
 }
 
 /// The point-in-time state a run left (SPEC §9.6): read once its span closed and before its reset,
@@ -2258,7 +2267,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     } else {
         (Value::Null, Value::Null)
     };
-    let declared: Vec<&String> = std::iter::once(&s.primary).chain(&s.metrics).collect();
+    let declared = declared_metrics(s);
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "check", "until": launch::until_of(&s.launch), "primary": { "metric": s.primary }, "declared": declared,
         "passed": passed, "decided": passed, "error": error, "hint": hint, "values": values, "refused": refused, "session_locked": locked, "headless": headless_of(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
@@ -3094,8 +3103,13 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let mut pass: Option<Pass> = None;
     let mut counters_note: Option<String> = None;
     if split == Counting::Separate && halted.is_none() && !pairs.is_empty() {
-        let other = secondary_names(s, script, false).into_iter().filter(|m| counted_apart(m) != main_counters).count();
-        let k = holm_pairs(other).max(min_pairs).min(pairs.len());
+        // Holm corrects across every tested secondary, both kinds of block's: the pass's must clear its
+        // first step at that family's size, not at the size of its own share of it.
+        // The paired loop's own kind once (a counter loop's blocks also hold the non-time metrics the
+        // timing pass measures), and the pass's kind.
+        let family = tested_names(s, script, &blocks, &pairs, bound).into_iter().filter(|m| counted_apart(m) == main_counters).count()
+            + secondary_names(s, script, false).into_iter().filter(|m| counted_apart(m) != main_counters && model::metric(m).is_some() && !s.per_side(m)).count();
+        let k = holm_pairs(family).max(min_pairs).min(pairs.len());
         counters_note =
             Some(format!("separate blocks: cpu.instructions in counter blocks (perf events), times in timing blocks; {} → {k} pairs", if main_counters { "times" } else { "cpu.instructions" }));
         progress(format!("  {} blocks: {k} pairs (Linux perf events never run in a timing block)", if main_counters { "timing" } else { "counter" }));
@@ -3184,10 +3198,13 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             continue;
         }
         let Some(d) = model::metric(name) else { continue };
+        // From the blocks that measure it, as a secondary: a time from timing blocks, never from a
+        // counter block's perf events.
+        let (blocks, pairs) = source(name);
         if !blocks.iter().all(|b| b.values.get(name).is_some_and(|v| v.is_finite())) {
             continue;
         }
-        let d = match def_in(name, &blocks) {
+        let d = match def_in(name, blocks) {
             Ok(dd) => dd.unwrap_or(d),
             Err(why) => {
                 descriptive.push(refused(name, d, &why));
@@ -3195,7 +3212,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             }
         };
         let pp: Vec<(f64, f64)> = pairs.iter().map(|&(a, b)| (val(&blocks[a], name), val(&blocks[b], name))).collect();
-        let mut c = tail_check(d, &blocks, stats::compare(name, d, &pp, bound, 0.95));
+        let mut c = tail_check(d, blocks, stats::compare(name, d, &pp, bound, 0.95));
         if c.kind != VerdictKind::Refused {
             c.set_verdict(VerdictKind::Descriptive, "·");
         }
@@ -3215,7 +3232,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     warnings.extend(screen_warnings);
     // A number from a locked screen is not comparable with one from an unlocked screen: pairs that
     // ran in both states decide nothing.
-    let (session, locked_pairs, _) = session_of(pairs.iter().map(|&(a, _)| &blocks[a]));
+    // The other kind of block's pairs (`Counting::Separate`) too: their metrics are compared as well.
+    let pass_firsts = pass.iter().flat_map(|(pb, pp)| pp.iter().map(move |&(a, _)| &pb[a]));
+    let (session, locked_pairs, all_pairs) = session_of(pairs.iter().map(|&(a, _)| &blocks[a]).chain(pass_firsts));
     let mut primary = primary;
     let mut primary_decided = primary_decided;
     // A block that refused the primary (its lock state, after the block): refused, as for `--blocks`.
@@ -3233,7 +3252,12 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // Latency samples taken by one rule on both sides, but in numbers too far apart to be the same inputs.
     if s.sides.is_some() {
         let names = (variants[0].name.as_str(), variants[1].name.as_str());
-        for (prefix, why) in journey::latency_skew(&blocks, names) {
+        // In the blocks that measured the latencies: the pass's, when they are its kind.
+        let mut skews = journey::latency_skew(&blocks, names);
+        if let Some((pb, _)) = &pass {
+            skews.extend(journey::latency_skew(pb, names));
+        }
+        for (prefix, why) in skews {
             for c in std::iter::once(&mut primary).chain(secondaries.iter_mut()).chain(descriptive.iter_mut()).filter(|c| c.metric.starts_with(prefix) && c.kind != VerdictKind::Refused) {
                 c.refuse(why.clone());
             }
@@ -3253,13 +3277,13 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         }
     }
     if session == "mixed" {
-        let why = Refusal::new(ValidatorId::SessionLocked, format!("{locked_pairs} of {} pairs ran on a locked screen, the rest unlocked", pairs.len()));
+        let why = Refusal::new(ValidatorId::SessionLocked, format!("{locked_pairs} of {all_pairs} pairs ran on a locked screen, the rest unlocked"));
         primary.refuse(why.clone());
         primary_decided = false;
         for c in secondaries.iter_mut().chain(descriptive.iter_mut()) {
             c.refuse(why.clone());
         }
-        warnings.push(validity::warn("SessionLocked", format!("{locked_pairs} of {} pairs ran on a locked screen and the rest unlocked: nothing is decided; rerun in one state", pairs.len())));
+        warnings.push(validity::warn("SessionLocked", format!("{locked_pairs} of {all_pairs} pairs ran on a locked screen and the rest unlocked: nothing is decided; rerun in one state")));
     } else if session == "locked" {
         warnings.push(validity::info("SessionLocked", "every block ran on a locked screen (the series needs no presenting window): compare it only with runs that were locked too"));
     }
@@ -3593,6 +3617,7 @@ fn tail_of(name: &str) -> (&'static str, &'static str) {
         Some("tty") if name.starts_with("tty.settle.") => ("tty.settle.n", "inputs"),
         Some("tty") => ("tty.frame.n", "synchronized frames"),
         _ if metrics::split_metric(name) => ("frames.split.n", "frames with their stages"),
+        _ if name.starts_with("frames.interval.") => ("frames.interval.n", "gaps between presented frames"),
         _ => ("frames.n", "frames"),
     }
 }
@@ -3738,7 +3763,7 @@ fn pixel_overhead(s: &Series, pct: Option<f64>, values: &mut BTreeMap<String, f6
             || matches!(m, "run.duration" | "cpu.app.total" | "cpu.wakes" | "ui.wakes" | "main.busy")
     };
     values.retain(|k, _| !timing(k));
-    for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| timing(m)) {
+    for m in declared_metrics(s).into_iter().filter(|m| timing(m)) {
         refused.entry(m.clone()).or_insert_with(|| {
             Refusal::new(
                 ValidatorId::OverheadBudget,
@@ -4137,7 +4162,9 @@ impl OtherWork {
 struct Foreign {
     idle: Vec<u64>,
     tsc: Option<u64>,
-    browser: u64,
+    /// The browser's cycles by process: each against its own reading at the end (`record::cycles_used`),
+    /// so one that exited never lowers the others' sum.
+    browser: super::record::Cycles,
     procs: (u64, Vec<host::ProcInfo>),
     steal: validity::Steal,
 }
@@ -4148,7 +4175,7 @@ impl Foreign {
     /// a core of other work).
     fn start(browser: &WebBrowser) -> Foreign {
         let procs = (host::now_ns(), host::all_processes());
-        let cycles = browser.processes().iter().map(|p| p.cycles).sum();
+        let cycles = super::record::per_process(&browser.processes());
         let mut idle = Vec::new();
         let steal = validity::Steal::start();
         host::idle_cycles(&mut idle);
@@ -4166,7 +4193,7 @@ impl Foreign {
         let steal = self.steal.pct(cpus);
         let theirs = browser.processes();
         let now = (host::now_ns(), host::all_processes());
-        let own = theirs.iter().map(|p| p.cycles).sum::<u64>();
+        let own = super::record::cycles_used(&self.browser, &super::record::per_process(&theirs));
         let span = match (self.tsc, tsc) {
             (Some(a), Some(b)) if b > a => Some((b - a) as f64),
             _ => None,
@@ -4199,7 +4226,7 @@ impl Foreign {
         let counted = |c: &usize| cpus.is_none_or(|m| *c < 64 && m >> c & 1 == 1);
         let foreign = span.filter(|_| ok && idle.len() == self.idle.len()).map(|span| {
             let busy: f64 = self.idle.iter().zip(&idle).enumerate().filter(|(c, _)| counted(c)).map(|(_, (a, b))| (100.0 * (1.0 - b.saturating_sub(*a) as f64 / span)).clamp(0.0, 100.0)).sum();
-            (busy - 100.0 * own.saturating_sub(self.browser) as f64 / span).max(0.0)
+            (busy - 100.0 * own as f64 / span).max(0.0)
         });
         // Linux counts idle time in 10 ms ticks (`/proc/stat`): over a check of tens of ms each CPU's
         // reading is off by up to a tick.
@@ -4887,23 +4914,15 @@ fn kind_launch(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Ex
     }
 }
 
-/// `phase.<name>` for one run (ms): the summed spans between its `…:phase:<name>:start` and `:end`
-/// marks on one clock, without the run's untimed stretches inside them; NaN when the run never
-/// entered the phase.
+/// `phase.<name>` for one run (ms): the summed stretches it spent in the phase (`metrics::phase_stretches`:
+/// entered twice, both; entered inside itself, once) on one clock, without the run's untimed stretches
+/// inside them; NaN when the run never entered the phase.
 fn phase_ms(marks: &[(String, u64)], name: &str, run: &metrics::Timed) -> f64 {
-    let (start, end) = (format!(":phase:{name}:start"), format!(":phase:{name}:end"));
-    let mut open: Option<u64> = None;
-    let mut total: Option<u64> = None;
-    for (key, at) in marks {
-        if key.ends_with(&start) {
-            open = Some(*at);
-        } else if key.ends_with(&end)
-            && let Some(from) = open.take()
-        {
-            *total.get_or_insert(0) += at.saturating_sub(from).saturating_sub(run.untimed_in(from, *at));
-        }
+    let stretches = metrics::phase_stretches(marks, name);
+    if stretches.is_empty() {
+        return f64::NAN;
     }
-    total.map_or(f64::NAN, |ns| ns as f64 / 1e6)
+    stretches.iter().map(|&(a, b)| b.saturating_sub(a).saturating_sub(run.untimed_in(a, b))).sum::<u64>() as f64 / 1e6
 }
 
 /// Whether a series can run while the session is locked (SPEC §10.1 `SessionLocked`): nothing it
@@ -5115,7 +5134,7 @@ fn priority_state(ctx: &mut Ctx, s: &Series, x: &Exec, mut b: Block) -> Result<B
     b.frames.clear();
     b.intervals.clear();
     b.phases.clear();
-    for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| foreground_metric(m)) {
+    for m in declared_metrics(s).into_iter().filter(|m| foreground_metric(m)) {
         b.refused.insert(m.clone(), Refusal::new(ValidatorId::BackgroundPriority, format!("the target ran at {why}")));
     }
     if ctx.qos.is_none() && !ctx.warnings.iter().any(|w| w.id == "BackgroundPriority") {
@@ -5155,7 +5174,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     let headless = headless_of(ctx, s);
     // What the cases declared beyond the default probes: counters, network counts, layout shift. One
     // browser runs every case of a launch, so it is set up for what any of them declared.
-    let declared: Vec<&String> = cases.iter().flat_map(|c| std::iter::once(&c.primary).chain(&c.metrics)).collect();
+    let declared: Vec<&String> = cases.iter().flat_map(declared_metrics).collect();
     let counting = declared.iter().any(|m| m.starts_with("count."));
     let nets = declared.iter().any(|m| m.starts_with("net."));
     let shift = declared.iter().any(|m| *m == "layout.shift");
@@ -5314,6 +5333,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         lap("attach");
         let id = store::new_id("rec");
         let token = id.trim_start_matches("rec_").to_string();
+        // Every top-level document marks its start in the trace, in its renderer: a run's windows then
+        // hold each renderer the page was in, one the page reached by itself too (`metrics::windows_sql`).
+        if !traceless || gecko_on {
+            page.add_init_script(&metrics::doc_mark_script(&token))?;
+        }
         let mut driver = Driver::new(page.clone(), token.clone());
         driver.pixels = x.pixels.clone();
         driver.headless = headless;
@@ -5327,6 +5351,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // A phone's page reaches this computer's fixture through the adb server (a reverse): its connections.
         let hooks = block::Hooks::new(ctx, || if on_phone.is_some() { crate::host::adb::server_pids() } else { browser.processes().iter().map(|p| p.pid).collect() });
         // TaskDuration (ms), then WORK_PARTS: cumulative per document (`Performance.enable` comes before the runs).
+        // The document the counters were last read in (its `NavigationStart`), the one strobe expects the
+        // page to be in (the run's first, or the one its last `goto` loaded), and whether the run left one
+        // without strobe's `goto` (`Run::doc_lost`).
+        let nav_at = Cell::new(f64::NAN);
+        let doc_expected: Cell<Option<f64>> = Cell::new(None);
+        let doc_lost = Cell::new(false);
         let counters = || -> [f64; 6] {
             // Chromium's Performance domain; an engine without it has no such counters (NaN, never 0).
             let m = page.cdp().map_or(Value::Null, |p| p.send("Performance.getMetrics", json!({})).unwrap_or(Value::Null));
@@ -5335,7 +5365,20 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             for (i, (_, name, scale)) in WORK_PARTS.iter().enumerate() {
                 out[i + 1] = get(name, *scale);
             }
+            nav_at.set(get("NavigationStart", 1.0));
             out
+        };
+        // After a reading: the page is still in the document strobe expects (else `doc_lost`), and from
+        // now on expects the one it is in.
+        let doc_check = || {
+            let now = nav_at.get();
+            if !now.is_finite() {
+                return;
+            }
+            if doc_expected.get().is_some_and(|e| e != now) {
+                doc_lost.set(true);
+            }
+            doc_expected.set(Some(now));
         };
         // A run that loads a page (`goto`) starts the counters again in the new document: what the
         // departing document did is read just before it goes and carried into the run's totals.
@@ -5425,8 +5468,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let reading = || {
             let procs = browser.processes();
             let tsc = host::tsc();
+            let ended = host::ended_marks(&procs.iter().map(|p| p.pid).collect::<Vec<_>>(), browser.profile().as_deref());
             let (c, carry) = (counters(), *carried.borrow());
-            edges.borrow_mut().push((super::record::per_process(&procs), tsc, std::array::from_fn(|i| c[i] + carry[i])));
+            doc_check();
+            edges.borrow_mut().push((super::record::per_process(&procs), tsc, std::array::from_fn(|i| c[i] + carry[i]), ended));
         };
         // The OS input posted on each side of an edge reached the page, counted on its own: input in a
         // stretch never covers for a timed one lost (or the other way round).
@@ -5508,14 +5553,23 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             Refusal { summary: format!("page.{call}() in a run of a {engine} page measured from outside: {}, and the other side gets the OS's", r.summary), ..r.clone() }.into()
                         );
                     }
-                    if call == "goto" && hooks.in_run() {
+                    let run_goto = call == "goto" && hooks.in_run();
+                    if run_goto {
                         let before = counters();
+                        doc_check();
                         let mut c = carried.borrow_mut();
                         for (sum, v) in c.iter_mut().zip(before) {
                             *sum += v;
                         }
+                        // What the departing document counted in the run: all of it, or inside an untimed
+                        // stretch what it counted before the stretch (the stretch's end takes what the new
+                        // document counted in it out, from zero).
                         if counting {
-                            hooks.add(&page_counts());
+                            if hooks.untimed_now() {
+                                hooks.add(&counted_before.take());
+                            } else {
+                                hooks.add(&page_counts());
+                            }
                         }
                         take_canvas();
                         if changes {
@@ -5535,6 +5589,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     let r = driver.dispatch(call, &args);
                     if profiled_goto && r.is_ok() {
                         same_renderer()?;
+                    }
+                    if run_goto && r.is_ok() {
+                        // The document it loaded is the one strobe expects from now on.
+                        counters();
+                        doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
+                        // A mark in the document it loaded: a page that moved to another renderer keeps
+                        // the run's frames, tasks and inputs there too (`metrics::windows_sql`).
+                        if !traceless || gecko_on {
+                            driver.mark(&format!("{}:goto", hooks.run_key()))?;
+                        }
                     }
                     if let Some(v) = video.borrow().as_ref() {
                         v.note(call, &args, started);
@@ -5911,6 +5975,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 n.borrow_mut().drain(None);
             }
             let c0 = counters();
+            doc_lost.set(false);
+            doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
             driver.drags.borrow_mut().clear();
             driver.inputs.borrow_mut().clear();
             driver.set_pids(browser.pids());
@@ -5945,6 +6011,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let listed = probe::wakes::wall_us();
             let (at0, cyc0, tsc0, _) = read();
             let k0 = probe::wakes::Counters::take(listed, &at0.keys().map(|k| k.0).collect::<Vec<_>>(), perf.as_ref());
+            let ended0 = host::ended_marks(&at0.keys().map(|k| k.0).collect::<Vec<_>>(), browser.profile().as_deref());
             if profile {
                 profile_start()?;
             }
@@ -5973,6 +6040,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
             let (at1, cyc1, tsc1, cpu1) = read();
             let k1 = probe::wakes::Counters::take(probe::wakes::wall_us(), &at1.keys().map(|k| k.0).collect::<Vec<_>>(), perf.as_ref());
+            let ended1 = host::ended_marks(&at1.keys().map(|k| k.0).collect::<Vec<_>>(), browser.profile().as_deref());
             // OS input's log: its inputs for latency, its drags for `input.rate` (those begun untimed left out).
             let sent = driver.os.get().map(|os| os.take_log());
             // The OS's input (from outside) is the video's markers' edges, as the driver's are.
@@ -5983,6 +6051,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             drags.retain(|d| d.first().is_none_or(|t| !timed.untimed_at(*t)));
             let input = crate::driver::input_pacing(&drags);
             let c1 = counters();
+            doc_check();
             if !traceless || gecko_on {
                 driver.mark(&format!("{key}:end"))?;
             }
@@ -5998,7 +6067,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // counters' untimed time is the sum over the stretches (`gap`).
             let carry_end = *carried.borrow();
             let mut e = edges.take();
-            let end: WebEdge = (at1.clone(), tsc1, std::array::from_fn(|i| c1[i] + carry_end[i]));
+            let end: WebEdge = (at1.clone(), tsc1, std::array::from_fn(|i| c1[i] + carry_end[i]), ended1.clone());
             if e.len() % 2 == 1 {
                 e.push(end.clone());
             }
@@ -6013,6 +6082,14 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             cycles_at.extend(e.iter().map(|x| &x.0));
             cycles_at.push(&at1);
             let timed_cycles = |keep: &dyn Fn(u32) -> bool| super::record::cycles_timed(&cycles_at, keep);
+            // A process of the browser ended in a timed part of the run (a renderer a cross-site navigation
+            // left, a utility process): its CPU there went with it. One that ended in an untimed stretch
+            // took nothing of the timed parts, but the whole span's CPU (`cpu_whole`, for cpu.foreign) is short.
+            let mut ended_at: Vec<&BTreeMap<u32, u64>> = vec![&ended0];
+            ended_at.extend(e.iter().map(|x| &x.3));
+            ended_at.push(&ended1);
+            let cpu_lost = super::record::lost_in_parts(&cycles_at, &ended_at);
+            let whole_lost = cpu_lost || super::record::gone(&[&at0, &at1]) > 0 || host::ended_between(&ended0, &ended1);
             if counting {
                 hooks.add(&page_counts());
             }
@@ -6096,19 +6173,44 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 _ => (f64::NAN, f64::NAN),
             };
             let (cpu, cpu_whole) = cpu;
+            // A run whose set's CPU is short has none (runs.json, warmup), and one that left a document
+            // without `goto` no main-thread counts.
+            let cpu = if cpu_lost { f64::NAN } else { cpu };
+            let cpu_whole = if whole_lost { f64::NAN } else { cpu_whole };
+            let doc_gone = doc_lost.get();
             let carry = *carried.borrow();
-            let parts = std::array::from_fn(|i| c1[i + 1] + carry[i + 1] - c0[i + 1] - gap.1[i + 1]);
+            let parts = std::array::from_fn(|i| if doc_gone { f64::NAN } else { c1[i + 1] + carry[i + 1] - c0[i + 1] - gap.1[i + 1] });
             // Cycles only: a process's share needs the exact counter, and a process born during the run
             // (a renderer after a cross-site navigation) counts from zero. A role no process has (a browser
             // that composites in its own process: no GPU process) is absent, never 0.
             let roles = std::array::from_fn(|i| match share(timed_cycles(&|pid| roles.get(&pid) == Some(&i)), gap.0) {
-                Some(pct) if roles.values().any(|&r| r == i) => pct,
+                Some(pct) if roles.values().any(|&r| r == i) && !cpu_lost => pct,
                 _ => f64::NAN,
             });
             let counted = probe::wakes::counted(&k0, &k1);
             let work = cpu * wall / 1e6 / 100.0;
-            let task = c1[0] + carry[0] - c0[0] - gap.1[0];
-            Ok(Run { ms: wall / 1e6, cpu, cpu_whole, task, work, parts, roles, t0, t1, timed, total: began.elapsed().as_secs_f64() * 1e3, input, counted, reads, pixels: shots, end })
+            let task = if doc_gone { f64::NAN } else { c1[0] + carry[0] - c0[0] - gap.1[0] };
+            Ok(Run {
+                ms: wall / 1e6,
+                cpu,
+                cpu_whole,
+                task,
+                work,
+                parts,
+                roles,
+                t0,
+                t1,
+                timed,
+                total: began.elapsed().as_secs_f64() * 1e3,
+                input,
+                counted,
+                reads,
+                pixels: shots,
+                end,
+                doc_lost: doc_lost.get(),
+                cpu_lost,
+                whole_lost,
+            })
         };
         // Warm until two consecutive runs do the same main-thread work (within 5%); both of them count
         // as measured (SPEC §9.2). Wall time says nothing here: a fixed-speed scroll or paced typing
@@ -6244,9 +6346,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     let work: Vec<f64> = runs
                         .iter()
                         .map(|r| {
-                            if !traceless {
+                            // A run that left a document without `goto` has no task time, one whose set lost
+                            // a process no CPU: the next measure stands in.
+                            if !traceless && !r.doc_lost {
                                 r.task
-                            } else if r.work.is_finite() {
+                            } else if !r.cpu_lost && r.work.is_finite() {
                                 r.work
                             } else {
                                 r.ms
@@ -6542,7 +6646,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let first = range.start;
                 let measured = &c.runs[local.clone()];
                 let key = |j: usize| format!("run:{}", first + j);
-                let declared: Vec<&String> = std::iter::once(&s.primary).chain(&s.metrics).collect();
+                let declared = declared_metrics(s);
                 let declares = |m: &str| declared.iter().any(|d| *d == m);
                 let run_ms: Vec<f64> = measured.iter().map(|r| r.ms).collect();
                 let walls: BTreeMap<String, f64> = measured.iter().enumerate().map(|(j, r)| (key(j), r.ms)).collect();
@@ -6557,6 +6661,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     .iter()
                     .zip(measured)
                     .filter(|_| !pinned.is_empty())
+                    // A run whose target's CPU is short would read the rest as other work.
+                    .filter(|(_, r)| !r.whole_lost)
                     .filter_map(|((_, w), r)| {
                         let busy: f64 = w.cores.iter().filter(|c| pinned.contains(&c.cpu)).map(|c| c.busy_pct).collect::<Option<Vec<f64>>>()?.iter().sum();
                         r.cpu_whole.is_finite().then(|| (busy - r.cpu_whole).max(0.0))
@@ -6582,7 +6688,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     extra.insert(format!("count.{name}"), (0..measured.len()).map(|j| (key(j), run_counts.get(first + j).and_then(|c| c.get(name)).copied().unwrap_or(0.0))).collect());
                 }
                 let fixture_cpu: BTreeMap<String, f64> = (0..measured.len()).filter_map(|j| Some((key(j), *run_counts.get(first + j)?.get(block::FIXTURE_CPU)?))).collect();
-                if !fixture_cpu.is_empty() {
+                // None when a run has none (a process of the fixture ended in it), never a median of the others.
+                if !fixture_cpu.is_empty() && fixture_cpu.values().all(|x| x.is_finite()) {
                     extra.insert("cpu.fixture".to_string(), fixture_cpu);
                 }
                 // `phase.<name>`: the run's phase windows from the trace's marks, or (traceless) strobe's own.
@@ -6686,6 +6793,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let mut case_presents = None;
                 if traceless {
                     values.remove("frames.n");
+                    values.remove("frames.interval.n");
                     if let Some(p) = presents.take() {
                         let again = (page_cases.len() > 1).then(|| p.clone());
                         let timed: Vec<metrics::Timed> = measured.iter().map(|r| r.timed.clone()).collect();
@@ -6754,6 +6862,38 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     if let Some(r) = validity::engine_refusal(engine, m).or(phone_side).or(webgpu).or(preload) {
                         values.remove(m);
                         refused.insert(m.clone(), r);
+                    }
+                }
+                // A run in which a process of the browser ended: the set's CPU is short (`Run::cpu_lost`).
+                let gone = measured.iter().filter(|r| r.cpu_lost).count();
+                if gone > 0 {
+                    let cpu = |m: &str| matches!(m, "cpu.app.total" | "cpu.process.total" | "cpu.work") || PROCESS_ROLES.iter().any(|p| p.1 == m);
+                    let names: Vec<String> = declared_metrics(s).into_iter().cloned().chain(values.keys().cloned()).filter(|m| cpu(m)).collect();
+                    for m in names {
+                        values.remove(&m);
+                        if declared_metrics(s).iter().any(|d| **d == m) {
+                            refused.insert(m.clone(), super::record::cpu_lost(&m, gone, measured.len(), "the browser"));
+                        }
+                    }
+                }
+                // A run the page took to another document without strobe's `goto`: what the departed one
+                // counted was never read (`Run::doc_lost`).
+                let lost = measured.iter().filter(|r| r.doc_lost).count();
+                if lost > 0 {
+                    let counter = |m: &str| m == "main.work" || (m == "main.busy" && set == Set::Lean) || m.starts_with("count.") || WORK_PARTS.iter().any(|p| p.0 == m);
+                    let names: Vec<String> = declared_metrics(s).into_iter().cloned().chain(values.keys().cloned()).filter(|m| counter(m)).collect();
+                    for m in names {
+                        values.remove(&m);
+                        if declared_metrics(s).iter().any(|d| **d == m) {
+                            refused.insert(
+                                m.clone(),
+                                Refusal::new(
+                                    ValidatorId::RunIncomplete,
+                                    format!("{m}: in {lost} of {} measured runs the page loaded another document without page.goto (a link, a form, a script), and what the document it left counted went with it unread", measured.len()),
+                                )
+                                .fix("load pages with page.goto in the run, or keep the run on one document"),
+                            );
+                        }
                     }
                 }
                 if c.burst > 0 {
@@ -6872,12 +7012,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 None => None,
             };
             let measured_runs: usize = page_cases.iter().map(|(_, c)| measured_of(c).0.len()).sum();
+            // Which of the trace's runs those are (its marks hold warmup runs, a check's run after its reset,
+            // and in a batch every case's): what `query` reads.
+            let measured_keys: Vec<String> = page_cases.iter().flat_map(|(_, c)| measured_of(c).1.map(|i| format!("run:{i}"))).collect();
             let duration: f64 = blocks.iter().flat_map(|b| &b.run_ms).sum();
             let mut meta = json!({
                 // A `url()` target loads its address whatever the variant: no build of it ran.
                 "id": id, "kind": "block", "experiment": ctx.exp, "seed": ctx.seed, "series": s0.label(), "variant": v.role,
                 "variant_label": if fixed_page { url.clone() } else { v.label.clone() }, "variant_git": if fixed_page { Value::Null } else { variant_git(v) },
-                "target": url, "probes": set, "token": token, "runs": measured_runs, "values": if batch { json!({}) } else { json!(blocks[0].values) }, "duration_ms": duration as u64,
+                "target": url, "probes": set, "token": token, "runs": measured_runs, "measured": measured_keys, "values": if batch { json!({}) } else { json!(blocks[0].values) }, "duration_ms": duration as u64,
                 "created": super::record::now_iso(), "valid": true, "env": host::env(), "browser": browser.version(), "engine": engine, "headless": headless, "input": input, "background": background, "screen": screen,
                 // Rule 3: a block with profilers, a census or a video describes the profiled (filmed) page.
                 "timing": if (set == Set::Timing || set == Set::Lean) && !x.video { "clean" } else { "perturbed" },
@@ -7637,7 +7780,7 @@ type RunInputs = (Vec<probe::present::frames::Sent>, Vec<probe::present::frames:
 
 /// The browser's processes, the cycle clock and the page's counters (with what departed documents
 /// carried) at one edge of a run's untimed stretch.
-type WebEdge = (super::record::Cycles, Option<u64>, [f64; 6]);
+type WebEdge = (super::record::Cycles, Option<u64>, [f64; 6], BTreeMap<u32, u64>);
 
 /// The page engine a target runs in (`web`, `url`; `apply_engines` set it): Chromium unless it says.
 fn engine_of(target: &Value) -> WebEngine {
@@ -8337,7 +8480,7 @@ fn os_frames(
     let overhead = p.consumer_cpu_ms.filter(|_| span_ms > 0.0).map(|c| 100.0 * c / span_ms);
     let whole = match overhead {
         Some(o) if o > 2.0 => Some(format!("OverheadBudget: the OS present session's consumer used {o:.2}% of a core (budget 0.5%), so the frames it saw describe a disturbed run")),
-        _ => f.refused.clone().or_else(|| refresh.and_then(|ms| frames::unpaced(&p.presents, pids, spans, ms))),
+        _ => f.refused.clone().or_else(|| refresh.and_then(|ms| frames::unpaced(&p.presents, pids, timed, ms))),
     };
     if let Some(why) = whole {
         for m in declared.iter().filter(|m| frame_metric(m)) {
@@ -8394,20 +8537,31 @@ fn present_intervals(p: &probe::present::Presents, pids: &[u32], runs: &[metrics
 
 /// Requests a page started per run and the bytes they received, from Network domain events read at run
 /// boundaries. A request belongs to the run it started in; its bytes may arrive after that run ends.
+/// A redirect's hops are requests of their own, each with its URL and its bytes, all of the run the first
+/// one started in.
 struct Net {
     rx: std::sync::mpsc::Receiver<Value>,
     session: String,
-    /// Per run: (request id, URL) of every request it started, redirects included.
-    runs: Vec<Vec<(String, String)>>,
+    /// Per run: (request id, hop, URL) of every request it started, each hop of a redirect one.
+    runs: Vec<Vec<(String, usize, String)>>,
     owner: BTreeMap<String, usize>,
-    /// Bytes on the wire per request: its finished total, else the chunks so far.
-    finished: BTreeMap<String, f64>,
-    chunks: BTreeMap<String, f64>,
+    /// Hops sent so far per request id (CDP's and BiDi's ids stay across a redirect), and responses
+    /// completed so far (BiDi completes each hop).
+    hops: BTreeMap<String, usize>,
+    completed: BTreeMap<String, usize>,
+    /// Bytes on the wire per hop: its finished total, else the chunks so far.
+    finished: BTreeMap<(String, usize), f64>,
+    chunks: BTreeMap<(String, usize), f64>,
 }
 
 impl Net {
     fn new(rx: std::sync::mpsc::Receiver<Value>, session: String) -> Net {
-        Net { rx, session, runs: Vec::new(), owner: BTreeMap::new(), finished: BTreeMap::new(), chunks: BTreeMap::new() }
+        Net { rx, session, runs: Vec::new(), owner: BTreeMap::new(), hops: BTreeMap::new(), completed: BTreeMap::new(), finished: BTreeMap::new(), chunks: BTreeMap::new() }
+    }
+
+    /// The hop of request `id` now being loaded.
+    fn hop(&self, id: &str) -> usize {
+        self.hops.get(id).map_or(0, |n| n.saturating_sub(1))
     }
 
     /// Reads the events so far; requests started now belong to run `current` (none between runs).
@@ -8433,25 +8587,42 @@ impl Net {
         }
         let id = p["requestId"].as_str().or(p["request"]["request"].as_str()).unwrap_or("").to_string();
         match ev["method"].as_str().unwrap_or("") {
-            // BiDi completes each hop of a redirect under the one id, each with its own bytes: summed.
+            // BiDi completes each hop of a redirect under the one id, each with its own bytes.
             "network.responseCompleted" if self.owner.contains_key(&id) => {
-                *self.finished.entry(id).or_default() += p["response"]["bytesReceived"].as_f64().unwrap_or(0.0);
+                let hop = self.completed.get(&id).copied().unwrap_or(0);
+                self.completed.insert(id.clone(), hop + 1);
+                self.finished.insert((id, hop), p["response"]["bytesReceived"].as_f64().unwrap_or(0.0));
             }
             "Network.requestWillBeSent" | "network.beforeRequestSent" => {
                 let url = p["request"]["url"].as_str().unwrap_or("");
-                if let Some(i) = current
-                    && (url.starts_with("http") || url.starts_with("ws"))
-                {
+                // A redirect's next hop: of the run its first hop started in, whenever it comes. CDP gives
+                // the hop it ends (its response's bytes) with it.
+                let run = match self.owner.get(&id) {
+                    Some(&i) => {
+                        if let Some(b) = p["redirectResponse"]["encodedDataLength"].as_f64() {
+                            self.finished.insert((id.clone(), self.hop(&id)), b);
+                        }
+                        Some(i)
+                    }
+                    None => current.filter(|_| url.starts_with("http") || url.starts_with("ws")),
+                };
+                if let Some(i) = run {
+                    let hop = self.hops.get(&id).copied().unwrap_or(0);
+                    self.hops.insert(id.clone(), hop + 1);
                     if self.runs.len() <= i {
                         self.runs.resize(i + 1, Vec::new());
                     }
-                    self.runs[i].push((id.clone(), url.to_string()));
+                    self.runs[i].push((id.clone(), hop, url.to_string()));
                     self.owner.insert(id, i);
                 }
             }
-            "Network.dataReceived" if self.owner.contains_key(&id) => *self.chunks.entry(id).or_default() += p["encodedDataLength"].as_f64().unwrap_or(0.0),
+            "Network.dataReceived" if self.owner.contains_key(&id) => {
+                let hop = self.hop(&id);
+                *self.chunks.entry((id, hop)).or_default() += p["encodedDataLength"].as_f64().unwrap_or(0.0);
+            }
             "Network.loadingFinished" if self.owner.contains_key(&id) => {
-                self.finished.insert(id, p["encodedDataLength"].as_f64().unwrap_or(0.0));
+                let hop = self.hop(&id);
+                self.finished.insert((id, hop), p["encodedDataLength"].as_f64().unwrap_or(0.0));
             }
             _ => {}
         }
@@ -8460,13 +8631,10 @@ impl Net {
     /// `net.requests` or `net.bytes` of run `i`, optionally `{<url glob>}`.
     fn value(&self, metric: &str, i: usize) -> f64 {
         let (base, pattern) = metric.split_once('{').map_or((metric, None), |(b, p)| (b, Some(p.trim_end_matches('}'))));
-        let requests = self.runs.get(i).map(Vec::as_slice).unwrap_or_default().iter().filter(|(_, url)| pattern.is_none_or(|p| url_glob(p, url)));
+        let requests = self.runs.get(i).map(Vec::as_slice).unwrap_or_default().iter().filter(|(_, _, url)| pattern.is_none_or(|p| url_glob(p, url)));
         match base {
-            "net.bytes" => {
-                // A redirected request repeats its id: its bytes count once.
-                let ids: std::collections::BTreeSet<&String> = requests.map(|(id, _)| id).collect();
-                ids.into_iter().map(|id| self.finished.get(id).or(self.chunks.get(id)).copied().unwrap_or(0.0)).sum()
-            }
+            // Each hop's own bytes, once: a glob that matches one hop of a redirect gets that hop's.
+            "net.bytes" => requests.map(|(id, hop, _)| self.finished.get(&(id.clone(), *hop)).or(self.chunks.get(&(id.clone(), *hop))).copied().unwrap_or(0.0)).sum(),
             _ => requests.count() as f64,
         }
     }

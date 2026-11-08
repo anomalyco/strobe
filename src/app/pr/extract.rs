@@ -234,9 +234,10 @@ pub(super) fn show_change(x: f64, ratio: bool, m: &str) -> String {
     if ratio { fmt::pct(x) } else { signed_disp(x, abs_unit(unit_of(m))) }
 }
 
-/// The `q` quantile of sorted values, by the nearest rank.
+/// The `q` quantile of sorted values, interpolated between the two nearest ranks as every percentile
+/// strobe gives (`metrics::percentile`): a median of an even count is the mean of its middle two.
 pub(super) fn quantile(v: &[f64], q: f64) -> Option<f64> {
-    (!v.is_empty()).then(|| v[((v.len() - 1) as f64 * q).round() as usize])
+    (!v.is_empty()).then(|| crate::metrics::percentile(v, q))
 }
 
 /// The Pairs table's row for the pairs a long series does not list: how many, their medians, and

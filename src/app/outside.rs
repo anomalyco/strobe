@@ -162,7 +162,7 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     });
     let via = presents.as_ref().map(|p| p.via()).unwrap_or("");
     let sampler = probe::os::Sampler::start(root, None);
-    let cycles = || super::record::per_process(&set());
+    let cycles = || super::record::read_set(&set(), None);
     // The tree's threads around the window: wakes and CPU per thread, as for a launched native app.
     let snap0 = wakes::Snapshot::take(&pids_now());
     let timeline = wakes::Timeline::start(pids_now);
@@ -185,10 +185,13 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let session_locked = locked(&awake);
     let ms = (t1 - t0) as f64 / 1e6;
     let mut values: BTreeMap<String, f64> = BTreeMap::new();
-    if let (Some(a), Some(b)) = (tsc0, tsc1)
+    // A process of the tree that ended in the window took its CPU there with it: none then.
+    let used = super::record::set_used(&c0, &c1);
+    let lost = used.is_none();
+    if let (Some(a), Some(b), Some(used)) = (tsc0, tsc1, used)
         && b > a
     {
-        let used = super::record::cycles_used(&c0, &c1) as f64;
+        let used = used as f64;
         values.insert("cpu.app.total".into(), 100.0 * used / (b - a) as f64);
         values.insert("cpu.work".into(), used / (b - a) as f64 * ms);
     }
@@ -241,7 +244,7 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         let pids = pids_now();
         let display = display_of(&pids);
         let hz = frames::refresh_ms(&p.vsyncs, t0, t1, display.as_ref()).map(|ms| 1000.0 / ms).or(display.map(|d| d.hz));
-        frames::spin(&p.presents, &pids, &[(t0, t1)], hz)
+        frames::spin(&p.presents, &pids, &[frames::Timed::whole(t0, t1)], hz)
     });
     let mut session = Value::Null;
     let refused = match &presents {
@@ -265,7 +268,12 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         }
         Err(e) => Some(e.message.clone()),
     };
-    let os_refused = os_refusals(&|m| values.contains_key(m), gpu_missing.as_deref());
+    let mut os_refused = os_refusals(&|m| values.contains_key(m), gpu_missing.as_deref());
+    if lost {
+        for m in ["cpu.work", "cpu.app.total"] {
+            os_refused.insert(m.into(), json!(super::record::cpu_lost(m, 1, 1, "the process tree").message()));
+        }
+    }
     let meta = json!({
         "id": id, "kind": "record", "target": target, "pid": root, "process": name, "probes": "timing", "token": "", "duration_ms": for_ms,
         "env": host::env(), "values": values, "refused": os_refused, "os": os, "presents": session, "presents_refused": refused, "session_locked": session_locked, "ui_thread": ui_tid,

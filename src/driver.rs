@@ -2143,6 +2143,6 @@ pub fn input_pacing(drags: &[Vec<u64>]) -> Option<(f64, f64)> {
     }
     let rate = gaps.len() as f64 / (span as f64 / 1e9);
     gaps.sort_by(f64::total_cmp);
-    let p95 = gaps[((gaps.len() as f64 * 0.95).ceil() as usize).clamp(1, gaps.len()) - 1];
-    Some((rate, p95))
+    // Interpolated as every other percentile strobe gives (`metrics::percentile`).
+    Some((rate, crate::metrics::percentile(&gaps, 0.95)))
 }

@@ -184,9 +184,11 @@ pub fn end_launches() {
     }
 }
 
-/// Jobs by the folder their launch was for (Windows), for `group_pids`.
+/// Jobs by their launch's root pid and the folder it was for, when it was for one (Windows): for
+/// `group_pids` (by folder) and `jobs_ended` (by folder, or by root for a launch with none, a script
+/// target's host).
 #[cfg(windows)]
-static JOBS: std::sync::Mutex<Vec<(String, isize)>> = std::sync::Mutex::new(Vec::new());
+static JOBS: std::sync::Mutex<Vec<(u32, Option<String>, isize)>> = std::sync::Mutex::new(Vec::new());
 
 /// A launch made outside `spawn_owned` (Windows: a pseudo console's program, started with
 /// `CreateProcessW`): listed so a stop's `end_launches` ends it too, and its job, when it has one,
@@ -194,8 +196,8 @@ static JOBS: std::sync::Mutex<Vec<(String, isize)>> = std::sync::Mutex::new(Vec:
 #[cfg(windows)]
 pub fn list_launch(pid: u32, job: Option<isize>, home: Option<&Path>) {
     LIVE.lock().unwrap_or_else(|e| e.into_inner()).push((pid, None));
-    if let (Some(j), Some(h)) = (job, home) {
-        JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((home_key(h), j));
+    if let Some(j) = job {
+        JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((pid, home.map(home_key), j));
     }
 }
 
@@ -204,7 +206,7 @@ pub fn list_launch(pid: u32, job: Option<isize>, home: Option<&Path>) {
 pub fn unlist_launch(pid: u32, job: Option<isize>) {
     LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != pid);
     if let Some(j) = job {
-        JOBS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, x)| *x != j);
+        JOBS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, _, x)| *x != j);
     }
 }
 
@@ -236,6 +238,23 @@ impl Owned {
         }
     }
 
+    /// The child's own CPU so far in `super::process_cycles` units, read through what strobe still holds
+    /// of it after it exited: Windows its process handle (`QueryProcessCycleTime` answers for an exited
+    /// process), Unix its unreaped zombie (`exited` keeps it). None when it cannot be read.
+    pub fn own_cycles(&self) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let mut cycles = 0u64;
+            let ok = unsafe { windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime(self.child.as_raw_handle() as _, &mut cycles) } != 0;
+            ok.then_some(cycles)
+        }
+        #[cfg(unix)]
+        {
+            super::process_cycles(self.child.id())
+        }
+    }
+
     /// Takes the launch off the list a stop ends (`end_launches`), so neither a stop nor `end` ends
     /// its tree: for a child that exited and whose leftovers were already read and ended.
     fn unlist(&self) {
@@ -258,7 +277,7 @@ impl Owned {
         if let Some(job) = group.job {
             use windows_sys::Win32::System::JobObjects::TerminateJobObject;
             let mut jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
-            jobs.retain(|(_, j)| *j != job);
+            jobs.retain(|(_, _, j)| *j != job);
             unsafe {
                 TerminateJobObject(job as _, 1);
                 windows_sys::Win32::Foundation::CloseHandle(job as _);
@@ -571,13 +590,33 @@ pub fn group_pids(dir: &Path) -> Vec<u32> {
         let k = home_key(dir);
         // Read under the lock: `Owned::end` closes a job only after taking it out of the list.
         let jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
-        jobs.iter().filter(|(h, _)| *h == k).flat_map(|(_, j)| job_pids(*j)).collect()
+        jobs.iter().filter(|(_, h, _)| h.as_ref() == Some(&k)).flat_map(|(_, _, j)| job_pids(*j)).collect()
     }
     #[cfg(unix)]
     {
         let _ = dir;
         Vec::new()
     }
+}
+
+/// How many processes have ended in the jobs launched for `dir`, or (a launch for no folder, a script
+/// target's host) rooted at one of `roots` (Windows' job accounting counts every process ever assigned,
+/// `TotalProcesses`, beside those still in it); None without such a job.
+#[cfg(windows)]
+pub fn jobs_ended(roots: &[u32], dir: Option<&Path>) -> Option<u64> {
+    use windows_sys::Win32::System::JobObjects::{JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation, QueryInformationJobObject};
+    let k = dir.map(home_key);
+    // Read under the lock: `Owned::end` closes a job only after taking it out of the list.
+    let jobs = JOBS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out: Option<u64> = None;
+    for (_, _, j) in jobs.iter().filter(|(root, h, _)| (k.is_some() && *h == k) || (h.is_none() && roots.contains(root))) {
+        let mut a: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { QueryInformationJobObject(*j as _, JobObjectBasicAccountingInformation, &mut a as *mut _ as *mut _, std::mem::size_of_val(&a) as u32, std::ptr::null_mut()) } != 0;
+        if ok {
+            *out.get_or_insert(0) += a.TotalProcesses.saturating_sub(a.ActiveProcesses) as u64;
+        }
+    }
+    out
 }
 
 /// Spawns `cmd` restricted to the CPUs in `cpus` (None: it inherits strobe's mask, as any child does).
@@ -641,8 +680,8 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
             }
             (j, _) => j,
         };
-        if let (Some(j), Some(h)) = (job, home) {
-            JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((home_key(h), j));
+        if let Some(j) = job {
+            JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((child.id(), home.map(home_key), j));
         }
         Ok(Owned { child, group: Some(Group { job }), unattributed: None, start: None, started })
     }

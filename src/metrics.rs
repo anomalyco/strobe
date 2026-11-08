@@ -305,10 +305,16 @@ impl BlockData {
     /// warmup before it, and a check's run after its reset (`block::Warmup`). A block decides where
     /// warmup ended only after the runs, from the work they did.
     pub fn measured_only(&mut self, measured: std::ops::Range<usize>) {
+        self.measured_where(|i| measured.contains(&i));
+    }
+
+    /// `measured_only` for the runs `measured` takes (by index): a recording's measured runs, which in a
+    /// batch's are each case's own.
+    pub fn measured_where(&mut self, measured: impl Fn(usize) -> bool) {
         let demote = |key: &str| -> String {
             let Some((head, rest)) = key.split_once(":run:") else { return key.to_string() };
             let index = rest.split(':').next().and_then(|i| i.parse::<usize>().ok());
-            if index.is_some_and(|i| !measured.contains(&i)) { format!("{head}:warm:{rest}") } else { key.to_string() }
+            if index.is_some_and(|i| !measured(i)) { format!("{head}:warm:{rest}") } else { key.to_string() }
         };
         for w in &mut self.windows {
             w.key = demote(&w.key);
@@ -386,6 +392,101 @@ impl BlockData {
     }
 }
 
+/// The stretches one run spent in phase `name`, from its `…:phase:<name>:start|end` marks (host or
+/// trace clock): each from an edge that entered the phase while it was not entered to the edge that
+/// left it the last time. A phase entered twice in a row is two stretches; one entered again inside
+/// itself (a recursive or concurrent `phase` of one name) counts its time once, as overlapping spans
+/// do. A start the run never ended (it threw) is no stretch.
+pub fn phase_stretches<T: Copy + Ord>(marks: &[(String, T)], name: &str) -> Vec<(T, T)> {
+    let (start, end) = (format!(":phase:{name}:start"), format!(":phase:{name}:end"));
+    let mut edges: Vec<(T, bool)> = marks
+        .iter()
+        .filter_map(|(k, at)| {
+            if k.ends_with(&start) {
+                Some((*at, true))
+            } else if k.ends_with(&end) {
+                Some((*at, false))
+            } else {
+                None
+            }
+        })
+        .collect();
+    // In time order; marks of one time keep the order they were made in.
+    edges.sort_by_key(|e| e.0);
+    stretches(&edges)
+}
+
+/// Every window of `…:start|end` marks, by key (the name without the edge), paired as
+/// `phase_stretches` pairs a phase's: in time order per key, a key entered again inside itself once.
+pub fn mark_windows<T: Copy + Ord>(marks: &[(String, T)]) -> Vec<(String, T, T)> {
+    let mut keys: Vec<&str> = marks.iter().filter_map(|(k, _)| k.strip_suffix(":start")).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut out = Vec::new();
+    for key in keys {
+        let mut edges: Vec<(T, bool)> =
+            marks.iter().filter_map(|(k, at)| (k.strip_suffix(":start") == Some(key)).then_some((*at, true)).or_else(|| (k.strip_suffix(":end") == Some(key)).then_some((*at, false)))).collect();
+        edges.sort_by_key(|e| e.0);
+        out.extend(stretches(&edges).into_iter().map(|(a, b)| (key.to_string(), a, b)));
+    }
+    out
+}
+
+/// Stretches from edges in time order (true: entering): from an edge entering with none open to the
+/// edge leaving the last one open.
+fn stretches<T: Copy>(edges: &[(T, bool)]) -> Vec<(T, T)> {
+    let (mut depth, mut from, mut out) = (0usize, None, Vec::new());
+    for &(at, enter) in edges {
+        if enter {
+            if depth == 0 {
+                from = Some(at);
+            }
+            depth += 1;
+        } else if depth > 0 {
+            depth -= 1;
+            if depth == 0
+                && let Some(a) = from.take()
+            {
+                out.push((a, at));
+            }
+        }
+    }
+    out
+}
+
+/// The init script that marks each top-level document's start in its renderer (`strobe:<token>:doc`,
+/// cleared at once): an instant no window pairs, which puts that renderer in the windows around it
+/// (`_wp`), so a page that moved to another renderer by itself (a link, a redirect, a script, two hops
+/// between strobe's own marks) keeps its frames, tasks and inputs there.
+pub fn doc_mark_script(token: &str) -> String {
+    format!("if (window === window.top) {{ const n = \"strobe:{token}:doc\"; performance.mark(n); performance.clearMarks(n) }}\n")
+}
+
+/// Pairs the trace's `strobe:<token>:…:start|end` marks into windows `_w` (key, t0, t1, the start's
+/// process) as `phase_stretches` does: in order per key, a key entered again inside itself once. `_wp`
+/// is each window with every process a mark of the block landed in inside it: a page that moved to
+/// another renderer (a cross-site navigation) keeps its frames, tasks and inputs in both. `_m` must
+/// hold the marks (name, ts, upid, id); `keep` is a condition on a window's key `k` (`1`: every one).
+pub fn windows_sql(keep: &str) -> String {
+    format!(
+        "create perfetto table _e as
+  select substr(name, 1, length(name) - 6) as k, ts, id, upid, 1 as d from _m where name glob '*:start'
+  union all
+  select substr(name, 1, length(name) - 4), ts, id, upid, -1 from _m where name glob '*:end';
+create perfetto table _ed as
+  select k, ts, id, upid, d, sum(d) over (partition by k order by ts, id rows unbounded preceding) as depth from _e;
+create perfetto table _w as
+  select * from (
+    select a.k as k, a.ts as t0, b.ts as t1, a.upid as upid
+    from (select k, ts, upid, row_number() over (partition by k order by ts, id) as n from _ed where d = 1 and depth = 1) a
+    join (select k, ts, row_number() over (partition by k order by ts, id) as n from _ed where d = -1 and depth = 0) b
+      on b.k = a.k and b.n = a.n)
+  where {keep};
+create perfetto table _wp as
+  select distinct w.k as k, w.t0 as t0, w.t1 as t1, m.upid as upid from _w w join _m m on m.ts >= w.t0 and m.ts <= w.t1 where m.upid is not null;"
+    )
+}
+
 /// The args of a frame report's `SendBeginMainFrameToCommit` stage that split the main thread's frame
 /// work (style, layout, prepaint, paint, …, each in µs).
 const BREAKDOWN: &str = "send_begin_mainframe_to_commit_breakdown";
@@ -394,13 +495,10 @@ pub fn read(trace: &Path, token: &str) -> Result<BlockData> {
     let sql = format!(
         r#"
 create perfetto table _m as
-  select s.name, s.ts, t.upid from slice s
+  select s.name, s.ts, t.upid, s.id from slice s
   join thread_track tt on s.track_id = tt.id join thread t using(utid)
   where s.name glob 'strobe:{token}:*';
-create perfetto table _w as
-  select substr(a.name, 1, length(a.name) - 6) as k, a.ts as t0, b.ts as t1, a.upid as upid
-  from _m a join _m b on b.name = substr(a.name, 1, length(a.name) - 6) || ':end'
-  where a.name glob '*:start';
+{windows}
 create perfetto table _st as
   select c.parent_id as id,
     sum(case when c.name in ({cpu}) then c.dur else 0 end) as cpu,
@@ -420,29 +518,29 @@ select 'frame', w.k, s.ts, s.dur,
   extract_arg(s.arg_set_id, 'frame_reporter.state') || '|' || coalesce(extract_arg(s.arg_set_id, 'frame_reporter.frame_type'), '')
     || '|' || coalesce(case when st.ncpu > 0 and sv.n > 0 then st.cpu || ':' || (st.raster + sv.gpu) end, '') || '|' || s.id
   from slice s join track tr on s.track_id = tr.id
-  join _w w on extract_arg(tr.dimension_arg_set_id, 'upid') = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on extract_arg(tr.dimension_arg_set_id, 'upid') = w.upid and s.ts >= w.t0 and s.ts < w.t1
   left join _st st on st.id = s.id left join _sv sv on sv.id = s.id
   where s.name = 'PipelineReporter'
 union all
 select 'task', w.k, s.ts, s.dur, null, null
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where s.name = 'RunTask' and s.depth = 0 and t.name = 'CrRendererMain'
 union all
 select 'lat', w.k, s.ts, s.dur, null, extract_arg(s.arg_set_id, 'event_latency.event_type')
   from slice s join track tr on s.track_id = tr.id
-  join _w w on extract_arg(tr.dimension_arg_set_id, 'upid') = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on extract_arg(tr.dimension_arg_set_id, 'upid') = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where s.name = 'EventLatency'
 union all
 select 'shift', w.k, s.ts, null, null,
   coalesce(extract_arg(s.arg_set_id, 'debug.data.weighted_score_delta'), extract_arg(s.arg_set_id, 'debug.data.score'))
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where s.name = 'LayoutShift'
 union all
 select 'gc', w.k, s.ts, s.dur, null, null
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   left join slice p on p.id = s.parent_id
   where s.name glob 'V8.GC_*' and t.name = 'CrRendererMain' and (p.name is null or p.name not glob 'V8.GC_*')
 union all
@@ -455,17 +553,18 @@ union all
 select 'span', w.k, s.ts, s.dur, null, s.name
   from slice s join track tr on s.track_id = tr.id
   left join thread_track tt on tt.id = s.track_id left join thread t on t.utid = tt.utid
-  join _w w on coalesce(t.upid, extract_arg(tr.dimension_arg_set_id, 'upid')) = w.upid and s.ts >= w.t0 and s.ts + s.dur <= w.t1
+  join _wp w on coalesce(t.upid, extract_arg(tr.dimension_arg_set_id, 'upid')) = w.upid and s.ts >= w.t0 and s.ts + s.dur <= w.t1
   where s.category glob '*blink.user_timing*' and s.dur >= 0 and s.name not glob 'strobe:*'
     and not (s.dur = 0 and tr.type = 'thread_track_event')
 union all
 select 'paint', w.k, c.ts, null, null,
   coalesce(extract_arg(c.arg_set_id, '{breakdown}.prepaint_us'), 0) + coalesce(extract_arg(c.arg_set_id, '{breakdown}.paint_us'), 0)
   from slice c join slice s on s.id = c.parent_id join track tr on s.track_id = tr.id
-  join _w w on extract_arg(tr.dimension_arg_set_id, 'upid') = w.upid and c.ts >= w.t0 and c.ts < w.t1
+  join _wp w on extract_arg(tr.dimension_arg_set_id, 'upid') = w.upid and c.ts >= w.t0 and c.ts < w.t1
   where s.name = 'PipelineReporter' and c.name = 'SendBeginMainFrameToCommit'
     and (extract_arg(c.arg_set_id, '{breakdown}.prepaint_us') is not null or extract_arg(c.arg_set_id, '{breakdown}.paint_us') is not null);
 "#,
+        windows = windows_sql("1"),
         breakdown = BREAKDOWN,
         cpu = sql_list(&STAGES_RENDERER),
         raster = STAGES_RASTER,
@@ -663,6 +762,9 @@ pub fn block_values(data: &BlockData, prefix: &str, extra: &BTreeMap<String, BTr
         out.insert("frames.presented.max".into(), *frame_ms.last().unwrap_or(&0.0));
     }
     interval_ms.sort_by(|a, b| a.total_cmp(b));
+    // What `frames.interval.*` is a percentile of (`TailTooShort`): the gaps, not the frames. Isolated
+    // updates (a frame, then nothing wanted) are many frames and no gap.
+    out.insert("frames.interval.n".into(), interval_ms.len() as f64);
     if !interval_ms.is_empty() {
         for (name, p) in [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)] {
             out.insert(format!("frames.interval.{name}"), percentile(&interval_ms, p));
@@ -736,12 +838,14 @@ pub fn split_refusal(metric: &str, values: &BTreeMap<String, f64>) -> crate::mod
     }
 }
 
-/// Frame costs per phase name, pooled over measured runs (for reports).
+/// Frame costs per phase name, pooled over measured runs (for reports). A run that entered a phase
+/// twice has two windows of one key, whose frames are kept under it once.
 pub fn phase_frames(data: &BlockData) -> BTreeMap<String, Vec<f64>> {
     let mut out: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    for w in data.windows.iter().filter(|w| w.key.contains(":phase:") && !w.key.contains(":warm:")) {
-        let name = w.key.rsplit(':').next().unwrap_or("").to_string();
-        let v = vsyncs(data.frames.get(&w.key).map(Vec::as_slice).unwrap_or(&[]));
+    let keys: std::collections::BTreeSet<&String> = data.windows.iter().filter(|w| w.key.contains(":phase:") && !w.key.contains(":warm:")).map(|w| &w.key).collect();
+    for key in keys {
+        let name = key.rsplit(':').next().unwrap_or("").to_string();
+        let v = vsyncs(data.frames.get(key).map(Vec::as_slice).unwrap_or(&[]));
         out.entry(name).or_default().extend(v.iter().filter(|s| matches!(s.outcome, Outcome::Presented | Outcome::Partial)).map(|s| s.cost as f64 / 1e6));
     }
     out

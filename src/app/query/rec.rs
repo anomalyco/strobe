@@ -231,7 +231,7 @@ impl Rec {
         if todo.is_empty() {
             return;
         }
-        match engine::query(&self.dir.join("trace.pftrace"), &batch_sql(self.meta["token"].as_str().unwrap_or(""), &todo)) {
+        match engine::query(&self.dir.join("trace.pftrace"), &batch_sql(self.meta["token"].as_str().unwrap_or(""), measured_keys(&self.meta).as_deref(), &todo)) {
             Ok(table) => {
                 let mut split: BTreeMap<Part, Rows> = todo.iter().map(|p| (*p, Vec::new())).collect();
                 for row in table.rows {
@@ -534,7 +534,7 @@ select w.k, s.name, s.ts, s.dur, t.tid,
   (select group_concat(a.key || char(31) || coalesce(a.display_value, ''), char(30)) from args a
      where a.arg_set_id = s.arg_set_id and a.key glob 'debug.beginData.stackTrace*') as stack
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where s.name in ('Layout', 'UpdateLayoutTree') and t.name = 'CrRendererMain'"
             }
             Part::Gc => {
@@ -543,13 +543,13 @@ union all
 select w.k, s.name, s.ts, s.dur, t.tid, t.name = 'CrRendererMain' as main,
   extract_arg(s.arg_set_id, 'debug.usedHeapSizeBefore') - extract_arg(s.arg_set_id, 'debug.usedHeapSizeAfter') as freed
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where s.name in ('MinorGC', 'MajorGC') or s.name glob 'V8.GC*' or s.name glob 'BlinkGC*'"
             }
             Part::LongTasks => {
                 "select count(*), max(s.dur)
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
  where s.name = 'RunTask' and s.depth = 0 and t.name = 'CrRendererMain' and s.dur > 50000000"
             }
             Part::Style => {
@@ -564,7 +564,7 @@ select w.k, s.name, s.dur,
   (select group_concat(a.display_value, char(30)) from args a where a.arg_set_id = s.arg_set_id and a.key glob 'debug.data.selectors*.selector'),
   (select group_concat(a.key || char(31) || coalesce(a.display_value, ''), char(30)) from args a where a.arg_set_id = s.arg_set_id and a.key glob 'debug.data.stackTrace*')
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where (s.name = 'UpdateLayoutTree' and t.name = 'CrRendererMain') or s.name glob '*InvalidationTracking'"
             }
             Part::Phases => {
@@ -572,7 +572,7 @@ select w.k, s.name, s.dur,
 union all
 select w.k, s.name, s.ts, s.dur, coalesce(extract_arg(s.arg_set_id, 'debug.elementCount'), extract_arg(s.arg_set_id, 'debug.data.elementCount'), 0)
   from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
-  join _w w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
+  join _wp w on t.upid = w.upid and s.ts >= w.t0 and s.ts < w.t1
   where t.name = 'CrRendererMain' and s.name in ('UpdateLayoutTree', 'Layout', 'PrePaint', 'Paint')"
             }
             // Every process's threads in the run windows: task-loop tasks that started inside a run, by
@@ -592,13 +592,24 @@ select w.k, coalesce(p.name, '?'), coalesce(t.name, '?'), sum(s.dur), count(*)
 
 /// One statement for several parts: the run windows once, then each part's rows tagged with its
 /// index and padded to the widest part.
-fn batch_sql(token: &str, parts: &[Part]) -> String {
+fn batch_sql(token: &str, measured: Option<&[String]>, parts: &[Part]) -> String {
     let width = parts.iter().map(|p| p.width()).max().unwrap_or(0);
     let selects: Vec<String> = parts
         .iter()
         .map(|p| format!("select {} as part, *{} from (\n{}\n)", PARTS.iter().position(|x| x == p).unwrap_or(0), ", null".repeat(width - p.width()), p.sql().replace(IN_WINDOW, IN_RUN)))
         .collect();
-    format!("{}\n{};", windows_sql(token), selects.join("\nunion all\n"))
+    format!("{}\n{};", windows_sql(token, measured), selects.join("\nunion all\n"))
+}
+
+/// A recording's measured runs by key (`run:<i>`): a bench block's meta says which (`measured`; a batch's
+/// also per case), as its trace marks warmup runs, a check's run after its reset and every case of a
+/// batch too. None for a recording that does not say (one whose runs were all measured: `record`'s).
+pub(crate) fn measured_keys(meta: &Value) -> Option<Vec<String>> {
+    if let Some(a) = meta["measured"].as_array() {
+        return Some(a.iter().filter_map(|k| k.as_str().map(str::to_string)).collect());
+    }
+    let cases = meta["batch"].as_array()?;
+    Some(cases.iter().flat_map(|c| c["runs"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string))).collect())
 }
 
 /// Orders two rows by one column: numbers as numbers, NULL first, else as text.
@@ -614,19 +625,22 @@ fn cell_cmp(x: &[Option<String>], y: &[Option<String>], i: usize) -> std::cmp::O
 const IN_WINDOW: &str = "s.ts >= w.t0 and s.ts < w.t1";
 const IN_RUN: &str = "s.ts >= w.t0 and s.ts < w.t1 and not exists (select 1 from _u u where s.ts >= u.t0 and s.ts < u.t1)";
 
-/// `_w`: the trace's run windows between `strobe:<token>:…:start|end` marks; `_u`: the runs' untimed
-/// stretches (`ctx.untimed`), whose slices no part counts (`IN_RUN`).
-fn windows_sql(token: &str) -> String {
+/// `_w`: the trace's measured run windows between `strobe:<token>:…:start|end` marks (`measured`, else
+/// every run), and `_wp` each with the renderers the page was in (`metrics::windows_sql`); `_u`: the
+/// runs' untimed stretches (`ctx.untimed`), whose slices no part counts (`IN_RUN`).
+pub(crate) fn windows_sql(token: &str, measured: Option<&[String]>) -> String {
+    let keep = match measured {
+        Some(keys) => format!("k in ({})", keys.iter().map(|k| format!("'strobe:{token}:{}'", k.replace('\'', ""))).collect::<Vec<_>>().join(",")),
+        None => "k glob '*:run:*' and k not glob '*:phase:*'".to_string(),
+    };
     format!(
         "create perfetto table _m as
-  select s.name, s.ts, t.upid from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
+  select s.name, s.ts, t.upid, s.id from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
   where s.name glob 'strobe:{token}:*';
-create perfetto table _w as
-  select substr(a.name, 1, length(a.name) - 6) as k, a.ts as t0, b.ts as t1, a.upid as upid
-  from _m a join _m b on b.name = substr(a.name, 1, length(a.name) - 6) || ':end'
-  where a.name glob '*:start' and a.name not glob '*:phase:*' and a.name not glob '*:untimed:*';
+{}
 create perfetto table _u as
   select a.ts as t0, b.ts as t1 from _m a join _m b on b.name = substr(a.name, 1, length(a.name) - 6) || ':end'
-  where a.name glob '*:untimed:*:start';"
+  where a.name glob '*:untimed:*:start';",
+        crate::metrics::windows_sql(&keep)
     )
 }

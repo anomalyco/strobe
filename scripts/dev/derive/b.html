@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>b</title>
+<style>
+  #box { width: 100px; height: 100px; background: #f90; }
+</style>
+<div id="box" data-run="1"></div>
+<p id="b">b</p>
+<script>
+  fetch("/hold").catch(() => {})
+  // Moves every frame from its load: one presented frame per vsync.
+  let x = 0
+  const step = () => {
+    x = (x + 3) % 300
+    document.getElementById("box").style.transform = `translateX(${x}px)`
+    requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+  // `?next=<url>`: after 300 ms of animation the page goes on by itself (no strobe goto, no strobe mark).
+  const next = new URLSearchParams(location.search).get("next")
+  if (next) setTimeout(() => (location.href = next), 300)
+</script>

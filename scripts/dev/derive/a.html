@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>a</title>
+<style>
+  #box { width: 100px; height: 100px; background: #09f; }
+</style>
+<div id="box"></div>
+<p id="text">a</p>
+<!-- To the other site (localhost is not 127.0.0.1's site): its own renderer under site isolation. -->
+<a id="go" href="#">other site</a>
+<script>
+  // A connection to the fixture held open while the page is (its connection check).
+  fetch("/hold").catch(() => {})
+  document.getElementById("go").href = location.href.replace("127.0.0.1", "localhost").replace("a.html", "b.html")
+  // Moves every frame while #box[data-run] is set: one presented frame per vsync.
+  let x = 0
+  const step = () => {
+    if (document.getElementById("box").dataset.run) {
+      x = (x + 3) % 300
+      document.getElementById("box").style.transform = `translateX(${x}px)`
+    }
+    requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+  // `isolated(n, ms)`: n updates `ms` apart, each one frame and then nothing wanted (no gap between frames).
+  // `pairs(n, ms)`: n updates of two frames in a row, `ms` apart: one gap each.
+  globalThis.isolated = (n, ms) =>
+    new Promise((done) => {
+      let i = 0
+      const one = () => {
+        document.getElementById("text").textContent = `isolated ${i}`
+        if (++i < n) setTimeout(one, ms)
+        else setTimeout(done, ms)
+      }
+      one()
+    })
+  globalThis.pairs = (n, ms) =>
+    new Promise((done) => {
+      let i = 0
+      const one = () => {
+        document.getElementById("text").textContent = `pair ${i} first`
+        requestAnimationFrame(() => requestAnimationFrame(() => (document.getElementById("text").textContent = `pair ${i} second`)))
+        if (++i < n) setTimeout(one, ms)
+        else setTimeout(done, ms)
+      }
+      one()
+    })
+</script>

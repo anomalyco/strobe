@@ -91,6 +91,11 @@ impl Native {
         self.child.as_ref()?.unattributed.clone()
     }
 
+    /// The launched process's own CPU so far (`Owned::own_cycles`), readable after it exited.
+    pub fn own_cycles(&self) -> Option<u64> {
+        self.child.as_ref()?.own_cycles()
+    }
+
     /// The process's exit code, once it has exited (it is not reaped before `close`).
     pub fn exited(&mut self) -> Option<i32> {
         self.child.as_mut()?.exited()

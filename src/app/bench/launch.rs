@@ -231,6 +231,9 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // spawn, or from navigation for a web target whose browser was already up.
         let cpu_now = || -> u64 { browser.processes().iter().map(|p| p.cycles).sum() };
         let mut cpu0 = 0;
+        // A web launch's browser was up before it: each process against its own reading at the navigation
+        // (`record::cycles_used`), and what tells a process of it ended in between.
+        let mut at0: Option<(super::super::record::Cycles, BTreeMap<u32, u64>)> = None;
         // `ctx.mock` on a page whose engine gives the runner no CDP session: through strobe (`mocks`), for
         // the whole launch.
         let mocks = super::mocks::Mocks::default();
@@ -276,7 +279,10 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 variant_url(v, &target)?
             };
             // An attribution launch's page profiler started when the page was attached, before this.
-            cpu0 = cpu_now();
+            let procs = browser.processes();
+            let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+            at0 = Some((super::super::record::per_process(&procs), host::ended_marks(&pids, browser.profile().as_deref())));
+            cpu0 = procs.iter().map(|p| p.cycles).sum();
             // From strobe's send on the host's wall clock, the clock the page's `until` time is on.
             let at = epoch_ms();
             page.start_navigation(&first)?;
@@ -315,7 +321,10 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             }
             None => match watch.ready(timeout) {
                 Ok((at, received, page)) => {
-                    let cycles = cpu_now();
+                    let cycles = match &at0 {
+                        Some((a, _)) => cpu0 + super::super::record::cycles_used(a, &super::super::record::per_process(&browser.processes())),
+                        None => cpu_now(),
+                    };
                     // The page's time is on its own clock (`performance.timeOrigin`, which Firefox coarsens to
                     // 1 ms): it must fall between strobe's start and when strobe heard of it, and the page's
                     // clock must read the host's wall clock now, within a read bracketed on both sides.
@@ -342,6 +351,18 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         let cpu_ms = match (clock.0, host::tsc()) {
             (Some(a), Some(b)) if b > a && cpu1 > 0 => cpu1.saturating_sub(cpu0) as f64 / ((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
             _ => f64::NAN,
+        };
+        // A process that ended before the launch was ready (a launcher that handed over, a helper, a
+        // browser process the navigation left) took its CPU with it: the set's cycles then are short.
+        let launch_lost = {
+            let procs = browser.processes();
+            let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+            let ended = host::ended_marks(&pids, browser.profile().as_deref());
+            match &at0 {
+                Some((a, e0)) => super::super::record::gone(&[a, &super::super::record::per_process(&procs)]) > 0 || host::ended_between(e0, &ended),
+                // An app's launch counts from its spawn, where every count starts at 0.
+                None => !pids.contains(&pid) || ended.values().any(|c| *c > 0),
+            }
         };
         lap("ready", &mut steps);
         if watch.late() {
@@ -415,7 +436,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // Within the clock's slack (checked above): never a negative duration.
         let ready_ms = (ready_at - started_ms).max(0.0);
         values.insert("launch.ready".to_string(), ready_ms);
-        if cpu_ms.is_finite() {
+        if cpu_ms.is_finite() && !launch_lost {
             values.insert("cpu.work".to_string(), cpu_ms);
         }
         for m in &milestones {
@@ -439,7 +460,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 Some(at) => {
                     values.insert(format!("launch.{}", m.name), if m.source == "page" { (at - started_ms).max(0.0) } else { at - started_ms });
                 }
-                None if s.primary == format!("launch.{}", m.name) || s.metrics.iter().any(|x| *x == format!("launch.{}", m.name)) => {
+                None if declared_metrics(s).iter().any(|x| **x == format!("launch.{}", m.name)) => {
                     return Err(Error::refused("RunIncomplete", format!("{} launch: milestone {} never matched in {}", s.case, m.name, m.source), "check the milestone's match and where it looks"));
                 }
                 None => {}
@@ -467,7 +488,10 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             memory(&browser.processes(), &mut values);
         }
         let why_no_pixels = if web { "a page's launch is timed in the page; window pixels are an app, exe or command target's".to_string() } else { no_pixels(screen) };
-        let refused = refusals(s, &values, &why_no_pixels, web);
+        let mut refused = refusals(s, &values, &why_no_pixels, web);
+        if launch_lost && refused.contains_key("cpu.work") {
+            refused.insert("cpu.work".into(), super::super::record::cpu_lost("cpu.work", 1, 1, if web { "the browser" } else { "the app (a launcher that handed over, a helper)" }));
+        }
         if let (false, Some(r)) = (profile, refused.get(&s.primary)) {
             return Err(r.clone().fix("pick a primary a launch case measures").into());
         }
@@ -548,7 +572,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
 /// pixels were not read, when they were not.
 pub(super) fn refusals(s: &Series, values: &BTreeMap<String, f64>, pixels: &str, web: bool) -> BTreeMap<String, Refusal> {
     let mut out = BTreeMap::new();
-    for m in std::iter::once(&s.primary).chain(&s.metrics) {
+    for m in declared_metrics(s) {
         if values.contains_key(m) || out.contains_key(m) {
             continue;
         }
@@ -580,9 +604,9 @@ pub(super) fn warm_page(case: &str) -> Error {
     ))
 }
 
-/// Whether the series declares a metric starting with `prefix` (its primary or a secondary).
+/// Whether the series declares a metric starting with `prefix` (its primary, a secondary or a no-worse one).
 pub(super) fn declares(s: &Series, prefix: &str) -> bool {
-    std::iter::once(&s.primary).chain(&s.metrics).any(|m| m.starts_with(prefix))
+    declared_metrics(s).iter().any(|m| m.starts_with(prefix))
 }
 
 /// Why a launch read none of its window's pixels.

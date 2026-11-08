@@ -107,7 +107,9 @@ pub fn process_cycles(pid: u32) -> Option<u64> {
             ok
         }
     };
-    Some(cycles).filter(|c| ok && *c > 0)
+    // A process that has not run yet (created suspended, or not yet scheduled) has 0 cycles: a reading,
+    // as Linux and macOS give it, not a failure.
+    ok.then_some(cycles)
 }
 
 /// Every process: (pid, parent, creation time), from one system snapshot.

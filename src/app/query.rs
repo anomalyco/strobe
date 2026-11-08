@@ -158,9 +158,9 @@ pub fn run(args: &Args) -> Result<Output> {
             "this recording kept no thread counters (no trace, no threads.json){}",
             if dir.join("deep.json.gz").is_file() { format!(": a native stack capture answers strobe query {} hotspots --by package", rec.id) } else { String::new() }
         ))),
-        "threads" => threads(&trace, top),
+        "threads" => threads(&trace, meta, top),
         "gpu" if !trace.exists() => native_gpu(&dir, meta),
-        "gpu" => gpu(&trace, top),
+        "gpu" => gpu(&trace, meta, top),
         "hotspots" | "alloc" => {
             let by = by_arg(args)?;
             if view == "alloc" {
@@ -857,7 +857,12 @@ fn sql_view(trace: &Path, sql: &str, limit: usize) -> Result<Output> {
 
 fn frames(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
     let token = meta["token"].as_str().unwrap_or("");
-    let data = metrics::read(trace, token)?;
+    let mut data = metrics::read(trace, token)?;
+    // Only the measured runs: a block's trace marks its warmup runs, a check's run after its reset and
+    // every case of a batch too.
+    if let Some(keys) = rec::measured_keys(meta) {
+        data.measured_where(|i| keys.iter().any(|k| *k == format!("run:{i}")));
+    }
     let values = metrics::block_values(&data, "run", &BTreeMap::new());
     let g = |k: &str| values.get(k).copied().unwrap_or(f64::NAN);
     let mut all: Vec<metrics::Vsync> = data
@@ -977,15 +982,18 @@ fn frame_stages(trace: &Path, frames: &[&metrics::Vsync]) -> Result<BTreeMap<i64
 /// The GPU process's work by name: its named tasks below the task loop on every thread (WebGPU command
 /// decoding, shader and pipeline compiles from attribution traces, compositing), heaviest first. A shader
 /// compile that froze a game's first frame for seconds showed here and nowhere in the page's own threads.
-fn gpu(trace: &Path, top: usize) -> Result<Output> {
+fn gpu(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
+    let (pre, runs, said) = in_measured_runs(meta);
     let sql = format!(
-        "select t.name as thread, s.name, count(*) as n, round(sum(s.dur) / 1e6, 1) as total_ms, round(max(s.dur) / 1e6, 1) as max_ms
+        "{pre}select t.name as thread, s.name, count(*) as n, round(sum(s.dur) / 1e6, 1) as total_ms, round(max(s.dur) / 1e6, 1) as max_ms
          from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid) join process p using(upid)
          where p.name glob 'GPU*' and s.dur > 0 and s.depth between 1 and 4
-           and s.name not in ('RunTask', 'ThreadControllerImpl::RunTask', 'ThreadPool_RunTask', 'SequenceManager::DoIdleWork')
+           and s.name not in ('RunTask', 'ThreadControllerImpl::RunTask', 'ThreadPool_RunTask', 'SequenceManager::DoIdleWork'){runs}
          group by 1, 2 order by total_ms desc limit {top}"
     );
-    sql_view(trace, &sql, top)
+    let mut out = sql_view(trace, &sql, top)?;
+    out.text += &said;
+    Ok(out)
 }
 
 /// A recording without a trace (a native app, a process from outside): per adapter the target's
@@ -1352,24 +1360,55 @@ fn native_frames(dir: &Path, top: usize) -> Result<Output> {
 /// "busy" time for one renderer thread in a 14 s trace. Tasks on several tracks of one thread can
 /// still overlap (one thread read 33.8 s of tasks in a shorter trace), so busy time is the union of
 /// its tasks' spans, per thread (its tid), never more than the time they cover.
-fn threads(trace: &Path, top: usize) -> Result<Output> {
+fn threads(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
+    // A lean trace holds no task loop's slices (`toplevel` is not in it): its threads' top-level slices
+    // are the few its categories carry (a 50 ms click task read 0.2 ms, the renderer's main thread
+    // missing), so it has no busy time by thread.
+    if meta["probes"] == "lean" {
+        return Err(Error::usage(
+            "this recording's trace is lean (a timed block's default): it holds no task loop's slices, so it has no busy time by thread; its main-thread time is main.work (strobe query <id> summary), and a block with --trace full, or an attribution block (bench --why always), has threads",
+        ));
+    }
     let tasks = " and s.name in ('RunTask', 'ThreadControllerImpl::RunTask', 'ThreadPool_RunTask')";
+    let (pre, runs, said) = in_measured_runs(meta);
     let sql = |filter: &str| {
         format!(
-            "with x as (select tt.utid, s.ts, s.ts + s.dur as e, s.dur from slice s join thread_track tt on s.track_id = tt.id where s.depth = 0 and s.dur > 0{filter}),
+            "{pre}with x as (select tt.utid, s.ts, s.ts + s.dur as e, s.dur from slice s join thread_track tt on s.track_id = tt.id where s.depth = 0 and s.dur > 0{filter}{runs}),
              o as (select utid, ts, e, dur, max(e) over (partition by utid order by ts, e rows between unbounded preceding and 1 preceding) as before from x)
              select p.name as process, p.pid, t.tid, t.name as thread, count(*) as tasks, round(sum(max(0, e - max(ts, coalesce(before, ts)))) / 1e6, 1) as busy_ms, round(max(dur) / 1e6, 1) as max_ms
              from o join thread t using(utid) left join process p using(upid) group by o.utid order by busy_ms desc limit {top}"
         )
     };
-    let out = sql_view(trace, &sql(tasks), top)?;
-    if out.json["total"].as_u64().unwrap_or(0) > 0 {
-        return Ok(out);
+    let mut out = sql_view(trace, &sql(tasks), top)?;
+    if out.json["total"].as_u64().unwrap_or(0) == 0 {
+        if meta["probes"] == "import" {
+            // An imported trace without a task loop's slices: every top-level slice, said so.
+            out = sql_view(trace, &sql(""), top)?;
+            out.text += "no task-loop slices (RunTask) in this trace: every top-level slice of a thread counted, overlaps once\n";
+        } else {
+            out.text += "no task-loop slices (RunTask) in this trace's measured runs\n";
+        }
     }
-    // A trace without a task loop's slices (an imported one): every top-level slice, said so.
-    let mut out = sql_view(trace, &sql(""), top)?;
-    out.text += "no task-loop slices (RunTask) in this trace: every top-level slice of a thread counted, overlaps once\n";
+    out.text += &said;
     Ok(out)
+}
+
+/// What limits a whole-trace view to a recording's measured runs: the run windows' tables (`rec::windows_sql`)
+/// to put before the query, the condition on a slice `s` (started in a measured run, outside its untimed
+/// stretches) and the line that says so. A trace without strobe's run marks (an imported one) is read
+/// whole.
+fn in_measured_runs(meta: &Value) -> (String, &'static str, String) {
+    let Some(token) = meta["token"].as_str().filter(|t| !t.is_empty()) else { return (String::new(), "", "over the whole trace\n".into()) };
+    let keys = rec::measured_keys(meta);
+    let said = match &keys {
+        Some(k) => format!("the {} measured run{} (warmup runs and anything outside the runs left out)\n", k.len(), if k.len() == 1 { "" } else { "s" }),
+        None => "the recording's runs\n".to_string(),
+    };
+    (
+        format!("{}\n", rec::windows_sql(token, keys.as_deref())),
+        " and exists (select 1 from _w w where s.ts >= w.t0 and s.ts < w.t1) and not exists (select 1 from _u u where s.ts >= u.t0 and s.ts < u.t1)",
+        format!("over {said}"),
+    )
 }
 
 /// A Firefox attribution recording's threads by CPU in its measured runs, every process's, from the
@@ -1530,10 +1569,8 @@ fn phase_spans(dir: &Path, phase: &str) -> Result<Vec<(u64, u64)>> {
     let mut out = Vec::new();
     for r in f["runs"].as_object().into_iter().flatten().map(|(_, r)| r) {
         let marks: Vec<(String, u64)> = r["marks"].as_array().into_iter().flatten().filter_map(|m| Some((m[0].as_str()?.to_string(), m[1].as_u64()?))).collect();
-        let at = |edge: &str| marks.iter().find(|(n, _)| n.ends_with(&format!(":phase:{phase}:{edge}"))).map(|m| m.1);
-        if let (Some(a), Some(b)) = (at("start"), at("end")) {
-            out.push((a, b));
-        }
+        // Every time the run entered it, as `phase.<name>` counts them.
+        out.extend(metrics::phase_stretches(&marks, phase));
     }
     if out.is_empty() {
         return Err(Error::usage(format!("no phase {phase:?} in this recording's runs")));
@@ -1795,7 +1832,7 @@ pub fn style(rec: &Rec, top: usize) -> Result<Output> {
 pub fn run_phases(rec: &Rec) -> Option<(String, Value)> {
     let meta = &rec.meta;
     let rows = rec.part(Part::Phases).ok()?;
-    let measured = if meta["probes"] == "attribution" { measured_runs(meta, &rows) } else { run_keys(&rows).into_iter().map(|k| k.1).collect() };
+    let measured = measured_runs(meta, &rows);
     // [style, layout, paint] ms and elements restyled, per run; nested slices of one kind count once.
     let mut per: BTreeMap<String, ([f64; 3], f64)> = measured.iter().map(|k| (k.clone(), ([0.0; 3], 0.0))).collect();
     let mut end: BTreeMap<String, i64> = BTreeMap::new();
@@ -1942,6 +1979,11 @@ pub(crate) fn no_profile(meta: &Value, what: &str, view: &str) -> Error {
 /// at the steady point).
 fn measured_runs(meta: &Value, rows: &[Vec<Option<String>>]) -> Vec<String> {
     let mut keys = run_keys(rows);
+    // A bench block says which they are (`measured`; a Firefox recording's windows from its profile hold
+    // its warmup runs and a check's run after its reset too).
+    if let Some(m) = rec::measured_keys(meta) {
+        return keys.into_iter().map(|k| k.1).filter(|k| m.iter().any(|x| k == x || k.ends_with(&format!(":{x}")))).collect();
+    }
     let n = meta["runs"].as_u64().map_or(keys.len(), |n| n as usize).min(keys.len());
     keys.split_off(keys.len() - n).into_iter().map(|k| k.1).collect()
 }

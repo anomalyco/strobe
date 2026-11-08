@@ -199,8 +199,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let pid = host.borrow().pid();
     let hooks = super::block::Hooks::new(ctx, move || host::tree_pids(pid));
     let cost = SelfCost::new(ctx.runner.pid());
-    // The host's CPU at each edge of the run's untimed stretches.
-    let edges: RefCell<Vec<super::super::record::Cycles>> = RefCell::new(Vec::new());
+    // The host's CPU at each edge of the run's untimed stretches, with what tells a process of its tree
+    // that ended (`host::ended_marks`).
+    let edges: RefCell<Vec<(super::super::record::Cycles, BTreeMap<u32, u64>)>> = RefCell::new(Vec::new());
+    let ended_now = move || host::ended_marks(&host::tree_pids(pid), None);
     let serve = |op: &str, a: &Value| -> Result<Value> {
         match op {
             "call" => host.borrow_mut().request(json!({ "name": a["name"], "args": a["args"] }), Duration::from_secs(600)),
@@ -213,7 +215,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 if start {
                     cost.pause();
                 }
-                edges.borrow_mut().push(cycles(pid).0);
+                edges.borrow_mut().push((cycles(pid).0, ended_now()));
                 if !start {
                     cost.resume();
                 }
@@ -246,10 +248,12 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
             launch.log_at.push(ctx.runner.log_len());
             let lapped = Instant::now();
             // `js.heap.retained`: the post-GC heap a run leaves behind, read outside its timed span.
-            let heap = std::iter::once(&s.primary).chain(&s.metrics).any(|m| m == "js.heap.retained");
+            let heap = declared_metrics(s).iter().any(|m| *m == "js.heap.retained");
             let r = (|| -> Result<Block> {
                 let mut runs: Vec<ScriptRun> = Vec::new();
                 let mut ends: Vec<Option<(f64, Option<u64>)>> = Vec::new();
+                // Per run: a process of the host's tree ended in a timed part, its CPU there gone with it.
+                let mut lost: Vec<bool> = Vec::new();
                 // Steady once two runs cost the same CPU (SPEC §9.2).
                 let mut warmup = super::block::Warmup::new(s, x);
                 while warmup.more(runs.len()) {
@@ -258,6 +262,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let listed = probe::wakes::wall_us();
                     let k0 = probe::wakes::Counters::take(listed, &host::tree_pids(pid), perf.as_ref());
                     edges.borrow_mut().clear();
+                    let ended0 = ended_now();
                     let c0 = cycles(pid);
                     cost.start();
                     let t0 = host::now_ns();
@@ -265,6 +270,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let t1 = host::now_ns();
                     cost.end();
                     let c1 = cycles(pid);
+                    let ended1 = ended_now();
                     let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &host::tree_pids(pid), perf.as_ref()));
                     hooks.end();
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
@@ -272,12 +278,18 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // the run never ended ends with it), at the cycle clock's rate over the run.
                     let mut e = edges.take();
                     if e.len() % 2 == 1 {
-                        e.push(c1.0.clone());
+                        e.push((c1.0.clone(), ended1.clone()));
                     }
                     let mut at: Vec<&super::super::record::Cycles> = vec![&c0.0];
-                    at.extend(e.iter());
+                    at.extend(e.iter().map(|x| &x.0));
                     at.push(&c1.0);
+                    let mut ended_at: Vec<&BTreeMap<u32, u64>> = vec![&ended0];
+                    ended_at.extend(e.iter().map(|x| &x.1));
+                    ended_at.push(&ended1);
+                    lost.push(super::super::record::lost_in_parts(&at, &ended_at));
+                    // Short CPU is none (warmup falls back to the run's time).
                     let used = match (c0.1, c1.1) {
+                        _ if lost.last() == Some(&true) => f64::NAN,
                         (Some(a), Some(b)) if b > a && c1.0.values().any(|c| *c > 0) => super::super::record::cycles_timed(&at, |_| true) as f64 / (b - a) as f64 * ((t1 - t0) as f64 / 1e6),
                         _ => f64::NAN,
                     };
@@ -333,6 +345,16 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     values.insert("memory.app.pss".into(), b as f64 / (1024.0 * 1024.0));
                 }
                 let mut refused = uncounted;
+                // A process the host started that ended inside a timed part took its CPU with it.
+                let gone = lost[local.clone()].iter().filter(|l| **l).count();
+                if gone > 0 {
+                    for m in ["cpu.work", "cpu.app.total", "cpu.process.total"] {
+                        values.remove(m);
+                        if declared_metrics(s).iter().any(|d| *d == m) {
+                            refused.insert(m.to_string(), super::super::record::cpu_lost(m, gone, measured.len(), "the script host's tree"));
+                        }
+                    }
+                }
                 refuse_not_on_this_os(s, &mut values, &mut refused);
                 super::block::untimed_state(s, &measured.iter().map(|r| &r.6).collect::<Vec<_>>(), &mut values, &mut refused);
                 base += runs.len();

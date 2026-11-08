@@ -118,8 +118,10 @@ pub(super) struct Hooks<'a> {
     /// Phase edges on the host clock, for targets strobe times itself (native, script).
     marks: RefCell<Vec<(String, u64)>>,
     fixture: Option<FixtureHook<'a>>,
-    /// The fixture's CPU at the run's start.
+    /// The fixture's CPU at the run's start, and how many times a process of it had ended by then
+    /// (`fixture::Running::lost`).
     fixture_at: Cell<Option<CpuAt>>,
+    fixture_lost: Cell<u64>,
     /// The run's `ctx.untimed` stretches on the host clock, the one open now (its start, and the
     /// fixture's CPU then), and the fixture's CPU in the closed ones (ms).
     untimed: RefCell<Vec<(u64, u64)>>,
@@ -160,6 +162,7 @@ impl<'a> Hooks<'a> {
         if let Some((f, pids)) = &self.fixture {
             f.check(&pids());
             self.fixture_at.set(Some((f.cpu(), Instant::now())));
+            self.fixture_lost.set(f.lost());
         }
     }
 
@@ -172,6 +175,8 @@ impl<'a> Hooks<'a> {
         self.run.borrow_mut().clear();
         if let (Some((f, pids)), Some((a, at))) = (&self.fixture, self.fixture_at.take()) {
             let ms = super::script::cpu_ms(a, f.cpu(), at.elapsed().as_secs_f64() * 1e3) - self.fixture_untimed.get();
+            // A process of the fixture ended in the run: its CPU there went with it, so none (NaN).
+            let ms = if f.lost() > self.fixture_lost.get() { f64::NAN } else { ms };
             self.counts.borrow_mut().insert(FIXTURE_CPU.into(), ms);
             f.check(&pids());
         }
@@ -234,6 +239,11 @@ impl<'a> Hooks<'a> {
 
     pub(super) fn in_run(&self) -> bool {
         !self.run.borrow().is_empty()
+    }
+
+    /// The run's key (`run:<i>`), empty outside a run.
+    pub(super) fn run_key(&self) -> String {
+        self.run.borrow().clone()
     }
 
     /// `ctx.count(name, n)`; outside a run, or in an untimed stretch, it counts nothing.
@@ -304,8 +314,9 @@ pub(super) type Hooked<'a> = (&'a BTreeMap<String, f64>, &'a [(String, u64)], &'
 /// run's counts and host-clock phase marks (`phase_ms`).
 pub(super) fn per_run_hooks(s: &Series, key: &dyn Fn(usize) -> String, runs: &[Hooked]) -> BTreeMap<String, BTreeMap<String, f64>> {
     let mut extra = BTreeMap::new();
-    // The fixture's CPU per run, whether declared or not: result.json's fixture says it per side.
-    if runs.iter().any(|(c, _, _)| c.contains_key(FIXTURE_CPU)) {
+    // The fixture's CPU per run, whether declared or not: result.json's fixture says it per side. None
+    // when a run has none (a process of the fixture ended in it), never a median of the others.
+    if runs.iter().any(|(c, _, _)| c.contains_key(FIXTURE_CPU)) && runs.iter().all(|(c, _, _)| c.get(FIXTURE_CPU).is_none_or(|x| x.is_finite())) {
         extra.insert("cpu.fixture".to_string(), runs.iter().enumerate().filter_map(|(j, (c, _, _))| Some((key(j), *c.get(FIXTURE_CPU)?))).collect());
     }
     for m in declared_metrics(s) {

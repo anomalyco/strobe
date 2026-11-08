@@ -96,8 +96,9 @@ fn cpu_ms(edges: &[&Cycles], a: &(Cycles, Option<u64>), b: &(Cycles, Option<u64>
     }
 }
 
-/// The app's processes' cycles and threads at one edge of an untimed stretch.
-type Edge = (Cycles, Snapshot);
+/// The app's processes' cycles, threads and what tells one that ended (`host::ended_marks`) at one edge
+/// of an untimed stretch.
+type Edge = (Cycles, Snapshot, BTreeMap<u32, u64>);
 
 /// One measured run.
 struct Run {
@@ -106,6 +107,11 @@ struct Run {
     cpu: f64,
     /// Its whole span's CPU (ms), untimed stretches too: what other work on its CPUs is told apart from.
     cpu_whole: f64,
+    /// A process of the app's set ended in a timed part of the run (a launcher, a helper): its CPU there
+    /// went with it, so `cpu` is short.
+    cpu_lost: bool,
+    /// One ended anywhere in the run's span, untimed stretches too: `cpu_whole` is short.
+    whole_lost: bool,
     span: Span,
     /// Its span on the host clock, with the stretches `ctx.untimed` left out.
     timed: metrics::Timed,
@@ -356,8 +362,9 @@ fn runs(
         }
         let listed = wakes::wall_us();
         let procs = host::process_set(root, Some(&home.dir));
-        let snap = Snapshot::take_since(listed, &procs.iter().map(|p| p.pid).collect::<Vec<_>>(), None);
-        edges.borrow_mut().push((per_process(&procs), snap));
+        let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+        let snap = Snapshot::take_since(listed, &pids, None);
+        edges.borrow_mut().push((per_process(&procs), snap, host::ended_marks(&pids, Some(&home.dir))));
         if !start {
             if let Some(se) = drive.session.get() {
                 se.take_reads();
@@ -617,6 +624,7 @@ fn runs(
                 // The process's CPU goes with it when it exits, so a run it exits in is no run of the app.
                 let running = n.exited().is_none();
                 let snap0 = Snapshot::take_since(listed, &pids, perf.as_ref());
+                let ended0 = host::ended_marks(&pids, Some(&n.home));
                 let c0 = cycles(n);
                 cost.start();
                 let t0 = host::now_ns();
@@ -626,6 +634,7 @@ fn runs(
                 let procs1 = n.processes();
                 let c1 = (per_process(&procs1), host::tsc());
                 let snap1 = Snapshot::take_since(wakes::wall_us(), &procs1.iter().map(|p| p.pid).collect::<Vec<_>>(), perf.as_ref());
+                let ended1 = host::ended_marks(&procs1.iter().map(|p| p.pid).collect::<Vec<_>>(), Some(&n.home));
                 // A launcher that hands over to the app and exits cleanly (code 0) is not the app ending: what
                 // its process set still holds goes on (each process's CPU is its own difference).
                 match n.exited() {
@@ -647,21 +656,29 @@ fn runs(
                 // The readings at the run's start, each untimed stretch's edges and the run's end: each pair a
                 // timed part. A stretch the run never ended (it threw) ends with the run.
                 let mut e = edges.take();
-                let end: Edge = (c1.0.clone(), snap1.clone());
+                let end: Edge = (c1.0.clone(), snap1.clone(), ended1);
                 if e.len() % 2 == 1 {
                     e.push(end.clone());
                 }
                 let mut edge_list: Vec<&Edge> = e.iter().collect();
-                let start: Edge = (c0.0.clone(), snap0.clone());
+                let start: Edge = (c0.0.clone(), snap0.clone(), ended0);
                 edge_list.insert(0, &start);
                 edge_list.push(&end);
                 let cycles_at: Vec<&Cycles> = edge_list.iter().map(|x| &x.0).collect();
                 let parts: Vec<Span> = edge_list.as_chunks::<2>().0.iter().map(|[a, b]| wakes::span(&a.1, &b.1)).collect();
                 let whole_ms = (t1 - t0) as f64 / 1e6;
+                // A process of the app that ended in a timed part took its CPU there with it; one that ended
+                // in an untimed stretch shortens only the whole span's (`cpu_whole`, for cpu.foreign).
+                let ended_at: Vec<&BTreeMap<u32, u64>> = edge_list.iter().map(|x| &x.2).collect();
+                let cpu_lost = super::super::record::lost_in_parts(&cycles_at, &ended_at);
+                let whole_lost = cpu_lost || super::super::record::gone(&[&c0.0, &c1.0]) > 0 || host::ended_between(&start.2, &end.2);
                 runs.push(Run {
+                    cpu_lost,
+                    whole_lost,
                     ms: timed.ns() as f64 / 1e6,
-                    cpu: cpu_ms(&cycles_at, &c0, &c1, whole_ms),
-                    cpu_whole: cpu_ms(&[&c0.0, &c1.0], &c0, &c1, whole_ms),
+                    // Short CPU is none (runs.json, warmup falls back to the run's time).
+                    cpu: if cpu_lost { f64::NAN } else { cpu_ms(&cycles_at, &c0, &c1, whole_ms) },
+                    cpu_whole: if whole_lost { f64::NAN } else { cpu_ms(&[&c0.0, &c1.0], &c0, &c1, whole_ms) },
                     span: Span::joined(parts),
                     timed,
                     counts: hooks.counts(),
@@ -958,7 +975,7 @@ fn runs(
                             "this machine has no GPU render node: the compositor composites in software (pixman) and the app draws in software too, so gpu.* is refused and cpu.work holds the app's own rasterization; compare it only with runs on this setup",
                         ));
                     }
-                    for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| m.starts_with("gpu.")) {
+                    for m in declared_metrics(s).into_iter().filter(|m| m.starts_with("gpu.")) {
                         refused.insert(m.clone(), Refusal::new(ValidatorId::SoftwareGpu, format!("{m}: no GPU render node, so the app and the compositor draw in software")));
                     }
                 }
@@ -968,6 +985,8 @@ fn runs(
                 .iter()
                 .zip(measured)
                 .filter(|_| !pinned.is_empty())
+                // A run whose app's CPU is short would read the rest as other work.
+                .filter(|(_, r)| !r.whole_lost)
                 .filter_map(|(w, r)| {
                     let busy: f64 = w.cores.iter().filter(|c| pinned.contains(&c.cpu)).map(|c| c.busy_pct).collect::<Option<Vec<f64>>>()?.iter().sum();
                     let whole = r.t1.saturating_sub(r.t0) as f64 / 1e6;
@@ -980,7 +999,8 @@ fn runs(
             let mut reactions = frames::Reactions::default();
             match &presents {
                 Some(Ok(p)) => {
-                    // Spin and windows nobody may capture are the app's whole runs; frames and inputs their timed stretches.
+                    // Windows nobody may capture are the app's whole runs; frames, inputs and spin (what the
+                    // frames are taken from) their timed stretches.
                     let spans: Vec<(u64, u64)> = measured.iter().map(|r| (r.t0, r.t1)).collect();
                     let timed: Vec<metrics::Timed> = measured.iter().map(|r| r.timed.clone()).collect();
                     let f = frames::native_values(p, &pids, &timed, display.as_ref());
@@ -1000,11 +1020,11 @@ fn runs(
                     let span_ms = p.t1_ns.saturating_sub(p.t0_ns) as f64 / 1e6;
                     let overhead = p.consumer_cpu_ms.filter(|_| span_ms > 0.0).map(|c| 100.0 * c / span_ms);
                     present_pct = overhead;
-                    let spun = refresh.and_then(|ms| frames::unpaced(&p.presents, &pids, &spans, ms));
+                    let spun = refresh.and_then(|ms| frames::unpaced(&p.presents, &pids, &timed, ms));
                     // A spin the toolkit cannot see (composited while locked, a display asleep): said for
                     // every series, declared frame metrics or not, with the display's own rate when no
                     // vertical blanks came.
-                    if let Some((fps, hz)) = frames::spin(&p.presents, &pids, &spans, refresh.map(|ms| 1000.0 / ms).or_else(|| display.as_ref().map(|d| d.hz)))
+                    if let Some((fps, hz)) = frames::spin(&p.presents, &pids, &timed, refresh.map(|ms| 1000.0 / ms).or_else(|| display.as_ref().map(|d| d.hz)))
                         && !ctx.warnings.iter().any(|w| w.id == "UnpacedSpin")
                     {
                         let state = screen_state(&procs0, &procs1);
@@ -1027,7 +1047,7 @@ fn runs(
                     };
                     match frames_refused {
                         Some(why) => {
-                            for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| frame_metric(m)) {
+                            for m in declared_metrics(s).into_iter().filter(|m| frame_metric(m)) {
                                 refused.insert(m.clone(), line(&why));
                             }
                         }
@@ -1035,7 +1055,7 @@ fn runs(
                             // The OS frames replace block_values' own (a native block has no Chrome
                             // frames, so its frames.n is 0 there).
                             values.extend(f.values);
-                            for m in std::iter::once(&s.primary).chain(&s.metrics) {
+                            for m in declared_metrics(s).into_iter() {
                                 if let Some(w) = f.partial.get(m) {
                                     refused.entry(m.clone()).or_insert_with(|| line(w));
                                 }
@@ -1043,7 +1063,7 @@ fn runs(
                             // Only what the series declares is listed refused; the rest has no value.
                             let mut why = BTreeMap::new();
                             reactions.values(p.events_lost, &mut values, &mut why);
-                            for m in std::iter::once(&s.primary).chain(&s.metrics) {
+                            for m in declared_metrics(s).into_iter() {
                                 if let Some(w) = why.get(m) {
                                     refused.entry(m.clone()).or_insert_with(|| line(w));
                                 }
@@ -1063,7 +1083,7 @@ fn runs(
                 if !ctx.warnings.iter().any(|w| w.id == r.validator.name()) {
                     ctx.warnings.push(validity::info(r.validator.name(), format!("frames refused ({why}); frames.* and interaction.* are missing from every block")));
                 }
-                for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| frame_metric(m)) {
+                for m in declared_metrics(s).into_iter().filter(|m| frame_metric(m)) {
                     refused.entry(m.clone()).or_insert_with(|| Refusal::new(r.validator, format!("{m}: {why}")));
                 }
             }
@@ -1072,7 +1092,7 @@ fn runs(
             let patterns = measured.iter().flat_map(|r| &r.log.inputs).filter(|i| i.kind == "pattern").count();
             let real = measured.iter().flat_map(|r| &r.log.inputs).filter(|i| i.kind == "discrete" || i.kind == "scroll").count();
             if patterns > 0 && real == 0 {
-                for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| m.starts_with("interaction.") || m.starts_with("scroll.latency")) {
+                for m in declared_metrics(s).into_iter().filter(|m| m.starts_with("interaction.") || m.starts_with("scroll.latency")) {
                     refused.insert(
                         m.clone(),
                         Refusal::new(
@@ -1122,8 +1142,18 @@ fn runs(
             }
             // A metric no run gave a number for (an empty per-run map's median) is missing, not a value.
             values.retain(|_, x| x.is_finite());
+            // A run in which a process of the app ended: the set's CPU is short.
+            let gone = measured.iter().filter(|r| r.cpu_lost).count();
+            if gone > 0 {
+                for m in ["cpu.work", "cpu.app.total", "cpu.process.total"] {
+                    values.remove(m);
+                    if declared_metrics(s).iter().any(|d| *d == m) {
+                        refused.insert(m.to_string(), super::super::record::cpu_lost(m, gone, measured.len(), "the app"));
+                    }
+                }
+            }
             let have = Have { ui_thread: ui_tid.is_some(), windowless, gpu: (!super::super::outside::gpu_read(&samples)).then(|| samples.gpu_unreadable.clone()), pinned: !pinned.is_empty() };
-            for m in std::iter::once(&s.primary).chain(&s.metrics) {
+            for m in declared_metrics(s).into_iter() {
                 if values.contains_key(m) || refused.contains_key(m) {
                     continue;
                 }
@@ -1423,6 +1453,12 @@ pub(super) enum Until {
     Milestone(String),
 }
 
+/// The app's process set's cycles now, and whether the launched process is among them.
+fn tree_cycles(n: &Native) -> (u64, bool) {
+    let procs = n.processes();
+    (procs.iter().map(|p| p.cycles).sum(), procs.iter().any(|p| p.pid == n.pid))
+}
+
 /// One look at the launching app: when (epoch ms), whether its window shows, its pixels, and the tree's
 /// CPU cycles.
 pub(super) struct Sample {
@@ -1430,6 +1466,8 @@ pub(super) struct Sample {
     shown: bool,
     px: Option<Vec<u8>>,
     pub(super) cycles: u64,
+    /// The launched process was in the set `cycles` summed (a launcher that exited is not).
+    pub(super) root: bool,
 }
 
 /// `until: { window }` of a launch case: visible, painted or settled (None when it names no window).
@@ -1507,7 +1545,7 @@ pub(super) fn watch(pid: u32, home: &Path, capture: bool, stop: &AtomicBool, tx:
             out.push((at, p.clone()));
         }
         let cycles = set.iter().map(|p| p.cycles).sum();
-        let _ = tx.send(Sample { at, shown, px, cycles });
+        let _ = tx.send(Sample { at, shown, px, cycles, root: pids.contains(&pid) });
         std::thread::sleep(Duration::from_millis(30));
     }
     out
@@ -1549,7 +1587,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         None => Until::Selector(spec["until"].clone()),
     };
     let capture = spec["screen"] != false && !windowless;
-    if windowless && let Some(m) = std::iter::once(&s.primary).chain(&s.metrics).find(|m| *m == "launch.painted" || *m == "launch.settled") {
+    if windowless && let Some(m) = declared_metrics(s).into_iter().find(|m| *m == "launch.painted" || *m == "launch.settled") {
         return Err(Error::usage(format!("{}: {m} reads the window's pixels; this target has window: false", s.case)));
     }
     if !capture && matches!(until, Until::Painted | Until::Settled) {
@@ -1643,7 +1681,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         // (epoch ms, cycles of the tree) when the launch was ready.
         // A launch timed to pixels: its captures (count, wall ms, strobe's CPU ms).
         let pixel_reads: Cell<Option<(u64, f64, f64)>> = Cell::new(None);
-        let ready: (f64, u64) = if let Until::Milestone(name) = &until {
+        // (epoch ms, cycles of the tree, whether the launched process was in it) when the launch was ready.
+        let ready: (f64, u64, bool) = if let Until::Milestone(name) = &until {
             // The first line matching it, from the output as it arrives or the log files under the
             // home (read every 20 ms); its time is when strobe read it, or the line's own `at`.
             let m = milestones.iter().find(|m| &m.name == name).ok_or_else(|| Error::msg("internal: the until milestone"))?;
@@ -1659,7 +1698,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                         super::launch::matching(&home, &m.source).iter().filter_map(|p| std::fs::read_to_string(p).ok()).find_map(|text| text.lines().find_map(|l| when(now, &isolate::strip_ansi(l))));
                 }
                 if let Some(at) = found {
-                    break (at, n.processes().iter().map(|p| p.cycles).sum());
+                    let (cycles, root) = tree_cycles(&n);
+                    break (at, cycles, root);
                 }
                 if let Some(code) = n.exited().filter(|_| n.processes().is_empty()) {
                     let out: Vec<String> = lines.iter().filter(|l| l.2 == "output").map(|l| l.1.clone()).collect();
@@ -1709,7 +1749,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 pixel_reads.set(Some(read));
             }
             if let Some((lacked, had)) = pixel.map_err(|e| Error { message: format!("{} launch: {}", s.case, e.message), ..e })? {
-                let cycles = n.processes().iter().map(|p| p.cycles).sum();
+                let (cycles, root) = tree_cycles(&n);
                 let Some(lacked) = lacked else {
                     return Err(Error::refused(
                         "RunIncomplete",
@@ -1746,12 +1786,12 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                         "time the launch to an image that appears once the app stops animating, or to { window: \"settled\" }",
                     ));
                 }
-                (n.epoch_ms + at(first.next_screen_ns), cycles)
+                (n.epoch_ms + at(first.next_screen_ns), cycles, root)
             } else {
                 let (lo, hi) = session
                     .appeared(sel, deadline.saturating_duration_since(Instant::now()))
                     .map_err(|e| Error::refused("RunIncomplete", format!("{} launch: {}", s.case, e.message), "the until selector never showed"))?;
-                let cycles = n.processes().iter().map(|p| p.cycles).sum();
+                let (cycles, root) = tree_cycles(&n);
                 let Some(lo) = lo else {
                     return Err(Error::refused(
                         "RunIncomplete",
@@ -1769,7 +1809,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 // the span, when every present since the span began is within a refresh of it.
                 let drawn_in_span = late.next_screen_ns == 0 && early.next_screen_ns != 0 && early.next_start_ns <= hi && late.last_start_ns.saturating_sub(early.next_start_ns) <= refresh_ns;
                 if drawn_in_span {
-                    (n.epoch_ms + (early.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles)
+                    (n.epoch_ms + (early.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles, root)
                 } else if late.next_screen_ns == 0 {
                     let at = |ns: u64| (ns as f64 - n.at_ns as f64) / 1e6;
                     let last = if late.last_start_ns == 0 { "it never presented".to_string() } else { format!("its last present started at {:.0} ms", at(late.last_start_ns)) };
@@ -1789,7 +1829,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                         "time the launch to an element that appears after the app stops animating, or to { window: \"settled\" }",
                     ));
                 } else {
-                    (n.epoch_ms + (late.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles)
+                    (n.epoch_ms + (late.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles, root)
                 }
             }
         } else {
@@ -1812,15 +1852,35 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                     return Err(Error::refused("RunIncomplete", format!("{} launch: its window never {} in {} s", s.case, until_text(&until), timeout.as_secs()), "check that the app opens a window"));
                 }
             };
-            (sample.at, sample.cycles)
+            (sample.at, sample.cycles, sample.root)
         };
         lap("ready", &mut steps);
         // An attribution launch's threads from the spawn until ready: wakes and CPU per thread without
         // a trace, read once it is ready (threads that already exited are not in it).
         let launch_span = profile.then(|| wakes::span(&Snapshot::empty(n.at_ns, clock.0), &Snapshot::take(&n.pids())));
         // The tree's cycles at ready (it started at zero) over the time stamp counter's rate.
+        // A process of the launch that ended before it was ready (a launcher that handed over, a helper)
+        // took its CPU with it: the tree's cycles then are short (every count starts at 0 at the spawn).
+        // One exception is read: the launched process itself, ended cleanly with nothing else ended (a
+        // launcher that handed over), whose own CPU strobe still reads through what it holds of it
+        // (`Native::own_cycles`), added only when it was not in the set the ready reading summed (else it
+        // is in it already). Windows' job counts the launched process among the ended once it exited; on
+        // Unix its unreaped zombie is read too, for the helpers it reaped before it exited.
+        let root_exited = n.exited().is_some();
+        let mut pids_now = n.pids();
+        if cfg!(unix) && root_exited && !pids_now.contains(&n.pid) {
+            pids_now.push(n.pid);
+        }
+        let marks = host::ended_marks(&pids_now, Some(&n.home));
+        let others_ended = if cfg!(windows) { marks.values().sum::<u64>() > u64::from(root_exited) } else { marks.values().any(|c| *c > 0) };
+        let launcher = match n.exited() {
+            _ if ready.2 => Some(0),
+            Some(0) if !others_ended => n.own_cycles(),
+            _ => None,
+        };
+        let launch_lost = others_ended || launcher.is_none();
         let cpu_ms = match (clock.0, host::tsc()) {
-            (Some(a), Some(b)) if b > a && ready.1 > 0 => ready.1 as f64 / ((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
+            (Some(a), Some(b)) if b > a && ready.1 > 0 => (ready.1 + launcher.unwrap_or(0)) as f64 / ((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
             _ => f64::NAN,
         };
         let settle = Instant::now() + Duration::from_secs(1);
@@ -1864,7 +1924,10 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         if let Some(f) = &ctx.fixture_running {
             f.check(&procs.iter().map(|p| p.pid).collect::<Vec<_>>());
         }
-        if cpu_ms.is_finite() {
+        let mut lost = BTreeMap::new();
+        if launch_lost && declared_metrics(s).iter().any(|m| *m == "cpu.work") {
+            lost.insert("cpu.work".to_string(), super::super::record::cpu_lost("cpu.work", 1, 1, "the app (a launcher that handed over, a helper)"));
+        } else if cpu_ms.is_finite() && !launch_lost {
             values.insert("cpu.work".to_string(), cpu_ms);
         }
         for m in &milestones {
@@ -1877,7 +1940,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 Some(at) => {
                     values.insert(format!("launch.{}", m.name), at - n.epoch_ms);
                 }
-                None if s.primary == format!("launch.{}", m.name) || s.metrics.iter().any(|x| *x == format!("launch.{}", m.name)) => {
+                None if declared_metrics(s).iter().any(|x| **x == format!("launch.{}", m.name)) => {
                     return Err(Error::refused("RunIncomplete", format!("{} launch: milestone {} never matched in {}", s.case, m.name, m.source), "check the milestone's match and where it looks"));
                 }
                 None => {}
@@ -1893,8 +1956,9 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         }
         let why_no_pixels = if windowless { "the app shows no window (window: false)".to_string() } else { super::launch::no_pixels(capture) };
         let mut refused = super::launch::refusals(s, &values, &why_no_pixels, false);
+        refused.extend(lost);
         if n.headless.is_some() {
-            for m in std::iter::once(&s.primary).chain(&s.metrics).filter(|m| *m == "launch.painted" || *m == "launch.settled") {
+            for m in declared_metrics(s).into_iter().filter(|m| *m == "launch.painted" || *m == "launch.settled") {
                 refused
                     .insert(m.clone(), Refusal::new(ValidatorId::Headless, format!("{m}: the window's pixels come from the headless Wayland compositor strobe runs, which shows them on no display")));
             }

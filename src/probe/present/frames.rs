@@ -112,7 +112,7 @@ pub struct NativeFrames {
 }
 
 /// Metrics that need when a frame was handed over, not only when it was shown.
-const NEED_BEGIN: &[&str] = &["frames.interval.p50", "frames.interval.p95", "frames.interval.p99", "frames.interval.max", "frames.dropped", "frames.dropped.pct"];
+const NEED_BEGIN: &[&str] = &["frames.interval.n", "frames.interval.p50", "frames.interval.p95", "frames.interval.p99", "frames.interval.max", "frames.dropped", "frames.dropped.pct"];
 
 /// Frame metrics of a native app's measured runs (their timed stretches on the host clock) from its
 /// processes' presents. `display` is the target window's display path, for the refresh period.
@@ -219,6 +219,7 @@ pub fn values(runs: &[RunFrames], refresh_ms: Option<f64>) -> BTreeMap<String, f
         dropped_all += missed + run.discarded;
     }
     intervals.sort_by(|a, b| a.total_cmp(b));
+    out.insert("frames.interval.n".into(), intervals.len() as f64);
     if !intervals.is_empty() {
         for (name, p) in [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)] {
             out.insert(format!("frames.interval.{name}"), pct(&intervals, p));
@@ -422,16 +423,32 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
         }
         // A pixel proof: the target's one frame that reached the screen between the last capture that
         // lacked the reaction (or the input, when later) and the first that had it. Two or more there:
-        // which one showed it is unknown; none: the capture saw what no present of the target says.
+        // which one showed it is unknown; none: the capture saw what no present of the target says. As
+        // for any input, the target must have been at rest when it was sent and every earlier input's
+        // reaction on the screen (else `Busy`), and the frame must have begun after the input's first
+        // edge: one already on its way cannot show it.
         if let Some((lacked, had)) = s.pixel {
             let from = s.press.unwrap_or(s.t_ns);
             let kind = usize::from(s.scroll);
             let bump = |x: &mut (usize, usize)| if kind == 1 { x.1 += 1 } else { x.0 += 1 };
             bump(&mut out.tried);
             let shown: Vec<&&Present> = mine.iter().filter(|p| p.state == "displayed" && p.screen_ns > lacked.max(from) && p.screen_ns <= had).collect();
+            let behind = answered.iter().any(|&at| at > from);
+            answered.extend(shown.first().filter(|_| shown.len() == 1).map(|p| p.screen_ns));
             let o = match shown.as_slice() {
+                _ if drawing(from) || behind => {
+                    bump(&mut out.busy);
+                    Outcome::Busy
+                }
+                [p] if p.start_ns <= from => {
+                    bump(&mut out.busy);
+                    Outcome::Busy
+                }
                 [p] => {
-                    let (t, edge) = if s.press.is_some() && p.screen_ns <= s.t_ns { (from, Edge::Press) } else { (s.t_ns, Edge::Sent) };
+                    // A frame begun before the release shows what the press did (the same rule as an
+                    // accessibility tree's `pressed`: by when the frame began, not when it reached the
+                    // screen); one begun after it is the release's.
+                    let (t, edge) = if s.press.is_some() && p.start_ns < s.t_ns { (from, Edge::Press) } else { (s.t_ns, Edge::Sent) };
                     let ms = (p.screen_ns - t) as f64 / 1e6;
                     if s.scroll {
                         out.scroll.push(ms);
@@ -608,29 +625,36 @@ impl Reactions {
     }
 }
 
-/// The fastest rate (presents started per second) of `pids` in any of `runs`; None without presents.
-pub fn present_rate(presents: &[Present], pids: &[u32], runs: &[(u64, u64)]) -> Option<f64> {
-    runs.iter()
-        .filter(|(t0, t1)| t1 > t0)
-        .map(|&(t0, t1)| presents.iter().filter(|p| pids.contains(&p.pid) && p.start_ns >= t0 && p.start_ns < t1).count() as f64 / ((t1 - t0) as f64 / 1e9))
-        .filter(|r| *r > 0.0)
-        .max_by(f64::total_cmp)
+/// Presents of `pids` started in a run's timed stretches, and the stretches' time (ns): what its
+/// frames are taken from, so a spin judged there is the frames' own (an idle untimed stretch would
+/// thin a spin out of the timed part, and one that spun only untimed refuse frames that were paced).
+fn timed_presents(presents: &[Present], pids: &[u32], run: &Timed) -> (usize, u64) {
+    let segs = run.segments();
+    let n = presents.iter().filter(|p| pids.contains(&p.pid) && segs.iter().any(|&(a, b)| p.start_ns >= a && p.start_ns < b)).count();
+    (n, segs.iter().map(|(a, b)| b - a).sum())
+}
+
+/// The fastest rate (presents started per second) of `pids` in the timed stretches of any of `runs`;
+/// None without presents.
+pub fn present_rate(presents: &[Present], pids: &[u32], runs: &[Timed]) -> Option<f64> {
+    runs.iter().map(|r| timed_presents(presents, pids, r)).filter(|(_, ns)| *ns > 0).map(|(n, ns)| n as f64 / (ns as f64 / 1e9)).filter(|r| *r > 0.0).max_by(f64::total_cmp)
 }
 
 /// `UnpacedSpin` as a warning: presents finishing far faster than the display refreshes (1.5 times
 /// its rate), whatever the toolkit believes (composited while the session is locked, a display
 /// asleep), with the rate and the refresh. `hz` from the vertical blanks, else the display's mode.
-pub fn spin(presents: &[Present], pids: &[u32], runs: &[(u64, u64)], hz: Option<f64>) -> Option<(f64, f64)> {
+pub fn spin(presents: &[Present], pids: &[u32], runs: &[Timed], hz: Option<f64>) -> Option<(f64, f64)> {
     let hz = hz.filter(|hz| *hz > 0.0)?;
     present_rate(presents, pids, runs).filter(|fps| *fps > 1.5 * hz).map(|fps| (fps, hz))
 }
 
-/// Runs in which the app presented faster than the display refreshes (more presents started than
-/// refreshes plus ten): a toolkit spinning unpaced, whose frames describe no person's screen.
-pub fn unpaced(presents: &[Present], pids: &[u32], runs: &[(u64, u64)], refresh_ms: f64) -> Option<String> {
-    for &(t0, t1) in runs {
-        let n = presents.iter().filter(|p| pids.contains(&p.pid) && p.start_ns >= t0 && p.start_ns < t1).count();
-        let refreshes = (t1.saturating_sub(t0) as f64 / 1e6 / refresh_ms).ceil() as usize;
+/// Runs in which the app presented faster than the display refreshes in their timed stretches (more
+/// presents started than refreshes plus ten): a toolkit spinning unpaced, whose frames describe no
+/// person's screen.
+pub fn unpaced(presents: &[Present], pids: &[u32], runs: &[Timed], refresh_ms: f64) -> Option<String> {
+    for r in runs {
+        let (n, ns) = timed_presents(presents, pids, r);
+        let refreshes = (ns as f64 / 1e6 / refresh_ms).ceil() as usize;
         if n > refreshes + 10 {
             return Some(format!("UnpacedSpin: the app presented {n} frames in a run of {refreshes} refreshes: it draws without waiting for the display"));
         }

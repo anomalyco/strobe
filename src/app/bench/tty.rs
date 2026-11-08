@@ -233,6 +233,11 @@ fn cycles(pid: u32, home: &Path) -> (super::super::record::Cycles, Option<u64>) 
     (super::super::record::per_process(&host::process_set(pid, Some(home))), host::tsc())
 }
 
+/// What tells a process of the program's set that ended (`host::ended_marks`).
+fn ended(pid: u32, home: &Path) -> BTreeMap<u32, u64> {
+    host::ended_marks(&host::process_set_pids(pid, Some(home)), Some(home))
+}
+
 /// The pseudo-console host's cycles (Windows' conhost: the terminal's work, never the program's).
 fn host_cycles(tty: &Tty) -> u64 {
     tty.host_pids.iter().filter_map(|p| host::process_cycles(*p)).sum()
@@ -258,6 +263,8 @@ struct Run {
     cells: u64,
     /// The program's private memory as the run left it (MB), where it may be the last measured run.
     end_mb: Option<f64>,
+    /// A process of the program's set ended in a timed part: its CPU there went with it.
+    cpu_lost: bool,
 }
 
 /// One launch of a terminal program for its cases (one, or a chunk with `--check --batch`).
@@ -305,7 +312,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let lines = RefCell::new(launch::Lines::default());
     let watches = RefCell::new(EventWatches::default());
     // The program's CPU at each edge of the run's untimed stretches, and the console host's.
-    let edges: RefCell<Vec<super::super::record::Cycles>> = RefCell::new(Vec::new());
+    let edges: RefCell<Vec<(super::super::record::Cycles, BTreeMap<u32, u64>)>> = RefCell::new(Vec::new());
     let host_edges: RefCell<Vec<u64>> = RefCell::new(Vec::new());
     let pixels = x.pixels.clone();
     let home_dir = home.dir.clone();
@@ -329,7 +336,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 if start {
                     cost.pause();
                 }
-                edges.borrow_mut().push(cycles(pid, &set_home).0);
+                edges.borrow_mut().push((cycles(pid, &set_home).0, ended(pid, &set_home)));
                 host_edges.borrow_mut().push(host_cycles(&tty));
                 if !start {
                     cost.resume();
@@ -387,6 +394,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let k0 = probe::wakes::Counters::take(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref());
                     edges.borrow_mut().clear();
                     host_edges.borrow_mut().clear();
+                    let ended0 = ended(pid, &set_home);
                     let c0 = cycles(pid, &set_home);
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
@@ -398,20 +406,27 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let r1 = tty.reader_cycles();
                     let h1 = host_cycles(&tty);
                     let c1 = cycles(pid, &set_home);
+                    let ended1 = ended(pid, &set_home);
                     let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()));
                     hooks.end();
                     ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &screen_note(&tty), "the run threw or timed out"))?;
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
                     let mut e = edges.take();
                     if e.len() % 2 == 1 {
-                        e.push(c1.0.clone());
+                        e.push((c1.0.clone(), ended1.clone()));
                     }
                     let mut at: Vec<&super::super::record::Cycles> = vec![&c0.0];
-                    at.extend(e.iter());
+                    at.extend(e.iter().map(|x| &x.0));
                     at.push(&c1.0);
+                    let mut ended_at: Vec<&BTreeMap<u32, u64>> = vec![&ended0];
+                    ended_at.extend(e.iter().map(|x| &x.1));
+                    ended_at.push(&ended1);
+                    let cpu_lost = super::super::record::lost_in_parts(&at, &ended_at);
                     let wall = (t1 - t0) as f64 / 1e6;
                     let rate = c0.1.zip(c1.1).filter(|(a, b)| b > a).map(|(a, b)| (b - a) as f64 / wall);
+                    // Short CPU is none (warmup falls back to the run's time).
                     let cpu = match rate {
+                        _ if cpu_lost => f64::NAN,
                         Some(r) if c1.0.values().any(|c| *c > 0) => super::super::record::cycles_timed(&at, |_| true) as f64 / r,
                         _ => f64::NAN,
                     };
@@ -453,6 +468,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         bytes,
                         timed,
                         end_mb,
+                        cpu_lost,
                     });
                     driver.release_all()?;
                     if s.reset {
@@ -476,7 +492,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let per = |f: &dyn Fn(&Run) -> f64| -> BTreeMap<String, f64> { measured.iter().enumerate().map(|(j, r)| (key(j), f(r))).filter(|(_, v)| v.is_finite()).collect() };
                 let mut extra: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
                 extra.insert("run.duration".into(), per(&|r| r.ms));
-                if measured.iter().all(|r| r.cpu.is_finite()) {
+                // A process of the program's set that ended in a timed part took its CPU with it: none.
+                let gone = measured.iter().filter(|r| r.cpu_lost).count();
+                if gone == 0 && measured.iter().all(|r| r.cpu.is_finite()) {
                     extra.insert("cpu.work".into(), per(&|r| r.cpu));
                     extra.insert("cpu.app.total".into(), per(&|r| 100.0 * r.cpu / r.ms.max(1e-9)));
                 }
@@ -510,6 +528,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 extra.extend(counts);
                 let mut values = metrics::block_values(&metrics::BlockData::default(), "run", &extra);
                 let mut refused = uncounted;
+                if gone > 0 {
+                    for m in declared_metrics(s).into_iter().filter(|m| matches!(m.as_str(), "cpu.work" | "cpu.app.total" | "cpu.process.total")) {
+                        refused.insert(m.clone(), super::super::record::cpu_lost(m, gone, measured.len(), "the program"));
+                    }
+                }
                 // Input latencies, pooled over the measured runs' timed parts.
                 let stretches: Vec<&metrics::Timed> = measured.iter().map(|r| &r.timed).collect();
                 let lat = drv::latencies(&tty, &driver.inputs(), &stretches);
@@ -763,6 +786,9 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
             })
         };
         let cpu_at_ready = super::super::record::per_process(&host::process_set(tty.pid, Some(&home.dir))).values().sum::<u64>();
+        // A process of the launch that ended before it was ready took its CPU with it (every count starts
+        // at 0 at the spawn).
+        let launch_lost = tty.ended() || ended(tty.pid, &home.dir).values().any(|c| *c > 0);
         let tsc_at_ready = host::tsc();
         let wall_at_ready = lapped.elapsed();
         if !done {
@@ -788,6 +814,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         if let (Some(a), Some(b)) = (clock, tsc_at_ready)
             && b > a
             && cpu_at_ready > 0
+            && !launch_lost
         {
             values.insert("cpu.work".into(), cpu_at_ready as f64 / ((b - a) as f64 / (wall_at_ready.as_secs_f64() * 1e3)));
         }
@@ -809,12 +836,15 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         }
         for m in &marks {
             let k = format!("launch.{}", m.name);
-            if !values.contains_key(&k) && (s.primary == k || s.metrics.contains(&k)) {
+            if !values.contains_key(&k) && declared_metrics(s).contains(&&k) {
                 tty.close();
                 return Err(Error::refused("RunIncomplete", format!("{} launch: milestone {} never matched in {}", s.case, m.name, m.source), "check the milestone's match and where it looks"));
             }
         }
-        let refused = super::launch::refusals(s, &values, "a terminal has no window of its own", false);
+        let mut refused = super::launch::refusals(s, &values, "a terminal has no window of its own", false);
+        if launch_lost && refused.contains_key("cpu.work") {
+            refused.insert("cpu.work".into(), super::super::record::cpu_lost("cpu.work", 1, 1, "the program (a launcher that handed over, a helper)"));
+        }
         if let Some(r) = refused.get(&s.primary) {
             tty.close();
             return Err(r.clone().fix("pick a primary a launch case measures").into());

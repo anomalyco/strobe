@@ -167,10 +167,24 @@ impl Stopped {
         for s in sent.iter().filter(|s| !self.calls.iter().any(|c| s.t_ns + 1_000_000 >= c.start_ns && s.t_ns <= c.end_ns + 1_000_000)) {
             markers.push(json!({ "t_s": at(s.t_ns), "press_s": s.press_ns.map(at), "end_s": Value::Null, "kind": "input", "label": "input", "reaction_s": Value::Null }));
         }
+        // A phase's stretches per run (`metrics::phase_stretches`): one marker each, a phase entered twice
+        // marked twice, one entered inside itself once.
+        let mut phases_done: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
         for (key, t) in marks {
             if let Some(name) = key.split(":phase:").nth(1).and_then(|r| r.strip_suffix(":start")) {
-                let end = marks.iter().find(|(k, _)| k.split(":phase:").nth(1).and_then(|r| r.strip_suffix(":end")) == Some(name) && k.split(":phase:").next() == key.split(":phase:").next());
-                markers.push(json!({ "t_s": at(*t), "press_s": Value::Null, "end_s": end.map(|e| at(e.1)), "kind": "phase", "label": name, "reaction_s": Value::Null }));
+                let run = key.split(":phase:").next().unwrap_or("");
+                if !phases_done.insert((run, name)) {
+                    continue;
+                }
+                let of_run: Vec<(String, u64)> = marks.iter().filter(|(k, _)| k.split(":phase:").next() == Some(run)).cloned().collect();
+                let stretches = crate::metrics::phase_stretches(&of_run, name);
+                for (a, b) in &stretches {
+                    markers.push(json!({ "t_s": at(*a), "press_s": Value::Null, "end_s": at(*b), "kind": "phase", "label": name, "reaction_s": Value::Null }));
+                }
+                // One the run never ended (it threw): its start alone.
+                if stretches.is_empty() {
+                    markers.push(json!({ "t_s": at(*t), "press_s": Value::Null, "end_s": Value::Null, "kind": "phase", "label": name, "reaction_s": Value::Null }));
+                }
             }
             // A batch's case (`case:<i>:<name>:start|end`): one launch filmed for several cases.
             if let Some(case) = key.strip_prefix("case:").and_then(|r| r.strip_suffix(":start")) {

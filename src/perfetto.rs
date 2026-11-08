@@ -485,14 +485,13 @@ impl Builder {
 
     /// A page's runs and phases from strobe's marks in the Chrome trace (its own time).
     fn web_runs(&mut self, page: &PageMarks) {
-        let starts: HashMap<&str, u64> = page.marks.iter().filter_map(|(n, t)| Some((n.strip_suffix(":start")?, *t))).collect();
-        let ends: HashMap<&str, u64> = page.marks.iter().filter_map(|(n, t)| Some((n.strip_suffix(":end")?, *t))).collect();
-        let mut spans: Vec<(&str, u64, u64)> = starts.iter().filter_map(|(k, a)| Some((*k, *a, *ends.get(k)?))).collect();
+        // A phase a run entered twice is two slices (`metrics::mark_windows`).
+        let mut spans = crate::metrics::mark_windows(&page.marks);
         spans.sort_by_key(|s| (s.1, std::cmp::Reverse(s.2)));
         if !spans.is_empty() {
             let track = self.track("runs and phases", 0, None);
             for (key, a, b) in spans {
-                self.slice(track, BOOTTIME, a, b, &span_name(key), &[("mark".into(), Value::String(key.to_string()))]);
+                self.slice(track, BOOTTIME, a, b, &span_name(&key), &[("mark".into(), Value::String(key.clone()))]);
                 self.count("runs and phases");
             }
         }
@@ -526,16 +525,16 @@ impl Builder {
             }
             spans.push((name.clone(), a, b, args));
             let edges: Vec<(String, u64)> = r["marks"].as_array().into_iter().flatten().filter_map(|m| Some((m[0].as_str()?.to_string(), m[1].as_u64()?))).collect();
+            // Phases as `metrics::mark_windows` pairs them; an edge of a key that never closed, or a mark
+            // of no window, an instant.
+            let windows = crate::metrics::mark_windows(&edges);
             for (n, t) in &edges {
-                match n.strip_suffix(":start") {
-                    Some(k) => match edges.iter().find(|(e, _)| e.strip_suffix(":end") == Some(k)) {
-                        Some((_, t1)) => spans.push((k.to_string(), *t, *t1, Vec::new())),
-                        None => marks.push((n.clone(), *t)),
-                    },
-                    None if n.ends_with(":end") && edges.iter().any(|(e, _)| e.strip_suffix(":start") == n.strip_suffix(":end")) => {}
-                    None => marks.push((n.clone(), *t)),
+                let key = n.strip_suffix(":start").or_else(|| n.strip_suffix(":end"));
+                if key.is_none_or(|k| !windows.iter().any(|w| w.0 == k)) {
+                    marks.push((n.clone(), *t));
                 }
             }
+            spans.extend(windows.into_iter().map(|(k, a, b)| (k, a, b, Vec::new())));
             for i in r["inputs"].as_array().into_iter().flatten() {
                 let Some(t) = i["t_ns"].as_u64() else { continue };
                 let mut args = Vec::new();

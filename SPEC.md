@@ -1014,6 +1014,11 @@ counter, `canvas.*` the canvas frame hook (§8.4), `gpu.compile` the trace's Daw
   `STATE_NO_UPDATE_DESIRED` resets Chromium's intervals). `frames.dropped` adds discarded presents.
   Outside-in, a frame the app itself started late looks like rest: only a toolkit's begin times
   tell them apart.
+- **Gaps are their own n**: `frames.interval.*` are percentiles of the gaps, so `TailTooShort`
+  counts the gaps (`frames.interval.n`, every target), not the frames: a page that updates in
+  isolated frames (one frame, then nothing wanted) has many frames and no gap. Checked with
+  `scripts/dev/derive` (`gaps`: 10 isolated updates and 5 pairs, headless): `frames.n` 20,
+  `frames.interval.n` 5; the 20 frames met `frames.interval.p50`'s minimum of 20, its 5 gaps do not.
 - **Quantization**: anything that ends on a presented frame (`run.duration` with an `until`,
   `interaction.*`) moves in whole vsyncs (6.06 ms at 165 Hz): a tab switch measured 40 or 47 ms
   and nothing between. Such a metric is the user's truth but decides slowly; pick `main.work`
@@ -1032,7 +1037,22 @@ inputs, OS present events and native samples) and kept in the recording's `frame
 
 `phase.<name>` is a phase's own wall time per run (ms, timed, lower is better), summed when a run
 enters it more than once: from the trace marks on pages, from strobe's host-clock marks on native
-and script targets. strobe stamps both edges when the runner reports them, so a bench file can time
+and script targets. Each key's edges pair in time order (`metrics::phase_stretches`, and in the
+trace `metrics::windows_sql`): a phase entered twice in a row is two stretches, and one entered
+again inside itself (a recursive or concurrent `phase` of one name) counts its time once, as
+overlapping spans do; `query frames`, `query hotspots --phase`, the video's markers and `strobe open`
+pair them the same way. A trace window holds every renderer process a mark of the block landed in
+inside it (`_wp`): after a cross-site `goto` strobe marks the run in the new document, and every
+top-level document marks its own start (`strobe:<token>:doc`, an init script; no window pairs it),
+so the run's frames, tasks, inputs and spans in each renderer the page was in stay the run's, one it
+reached by itself too. `two hops` (the page goes to a second site and on by itself to a third,
+headless): 17 presented, 3 in the second renderer and 14 in the third by the trace, where the end
+mark alone gave 14 and the start's renderer alone 0. Checked with
+`scripts/dev/derive` (`phases`): 100 ms then 50 ms read `phase.twice` 153.5 ms, where pairing every
+start with every end of one name read 305.1 ms; a phase of 80 ms inside itself read 82.9 ms (328.4 ms
+before). `other site` (300 ms of animation on each side of a `goto` to another site, headless):
+`query frames` 10 presented (6 in the first renderer, 4 in the second, by the trace), where the
+first renderer's 6 alone were the run's before. strobe stamps both edges when the runner reports them, so a bench file can time
 a span inside a run (a command to its reply, a request to the state it waits for) without reporting
 a number of its own. A declared `phase.<name>` that no measured run entered is refused (`NoPhase`).
 On a locked session it is an offscreen metric, like `run.duration`.
@@ -1114,7 +1134,9 @@ What strobe reads from a native app (§13.7), per run:
   `Skip`, `display.hz` from the display's mode) stands. Every native block with a window runs a present session when access allows (page
   waits read it live). `frames.presented.p*` (a frame's begin to its screen time) is refused: only a
   toolkit knows when it began a frame. A run in which the app presented more frames than the display
-  refreshed, plus ten, refuses the frame metrics (`UnpacedSpin`).
+  refreshed, plus ten, refuses the frame metrics (`UnpacedSpin`); counted over the run's timed
+  stretches, where its frames come from (an idle `ctx.untimed` stretch would thin a spin out of the
+  timed part, and a spin only in one would refuse paced frames), as is the `UnpacedSpin` warning's rate.
 - **Interaction latency** (`interaction.p50|p95`, `interaction.n`; `scroll.latency.p50|p95`,
   `scroll.n`), from strobe's own inputs (§13.7) to the presents that showed them:
   - Inputs: a single click (below: its release, or its press when the app acted on the press), a
@@ -1169,7 +1191,12 @@ What strobe reads from a native app (§13.7), per run:
     when the input's `until` waits on them (`{ pixels: { changed } }` or an image, §9.6 "Image anchors"):
     the pixel proof replaces the tree change, and the sample is the one present of the app that reached
     the screen between the last capture without the reaction and the first with it (two or more: busy,
-    no sample; none: unshown). A capture of the compositor's frame (Windows) or of the window server's
+    no sample; none: unshown). As for any input, it counts only with the app at rest when it was sent
+    and every earlier input's frame on the screen, and only a frame begun after the input's first edge
+    (one already on its way cannot show it): else busy. A click's sample is from its press when that
+    frame began before the release (as a tree's `pressed` decides it, by the frame's begin, not its
+    screen time: a press-acting control whose frame began before a 60 ms hold and reached the screen
+    2 ms after the release reads 62 ms, not 2 ms), else from the release. A capture of the compositor's frame (Windows) or of the window server's
     copy of the window (macOS) holds a frame before the display shows it, so the first with the reaction
     counts up to a refresh after it ends: on air a reaction was in a capture that ended 9.8 ms before
     ScreenCaptureKit's displayed frame of it, which a bound at the capture's end left unshown. Without
@@ -1298,10 +1325,14 @@ none and refuses a declared one (`NoCounter`: counters are read around a case's 
   - Counters only (no declared time or frame metric): the paired loop runs on counter blocks; the
     default secondaries' time metrics have no value there.
   - Counters and times: the timing pairs stay clean, then K paired counter blocks follow (base and
-    head alternating, warmed up like any block), K the pairs Holm needs for the secondaries they
-    measure, at least the first look, at most the pairs the series ran. With `cpu.instructions` the
-    primary, it is decided on counter blocks first and K clean timing pairs follow. The result keeps
-    the other blocks under `pass`, and an info line says `Counters  separate blocks: … → K pairs`.
+    head alternating, warmed up like any block), K the pairs Holm's first step needs across every
+    tested secondary (Holm corrects across both kinds together: those the paired loop's blocks have
+    and those the pass measures), at least the first look, at most
+    the pairs the series ran. With `cpu.instructions` the primary, it is decided on counter blocks
+    first and K clean timing pairs follow. The result keeps the other blocks under `pass`, and an info
+    line says `Counters  separate blocks: … → K pairs`. Every comparison, the descriptive ones too,
+    reads the blocks of the kind that measures its metric, and the lock state (`SessionLocked`) and an
+    implementation comparison's latency skew are judged over both kinds' pairs.
   - `--blocks N` runs N blocks of each kind and joins each counter block's counts to its timing
     block; `--check` runs one untimed counter block (beside the untimed block, for a series of both).
   - macOS and Windows have no counter blocks: rusage is free, and Windows refuses.
@@ -1608,7 +1639,12 @@ it, or an origin that is not a secure context: no `GPUCanvasContext` in the page
 **Network** (`net.requests`, `net.bytes`): the Network domain, enabled only for a series that
 declares a `net.*` metric. A request belongs to the run whose span it started in; its bytes on
 the wire (`loadingFinished.encodedDataLength`, else its chunks so far) may arrive after the run
-and still count for it. `data:` and `blob:` requests are not network requests. A glob without
+and still count for it. Each hop of a redirect is a request of its own, with its own URL and bytes
+(CDP: the hop's `redirectResponse.encodedDataLength`; BiDi: each hop's `responseCompleted`), and of
+the run its first hop started in whenever the next comes: a glob matches the hops whose URL it
+matches, never a whole chain by one hop's URL. Checked with `scripts/dev/derive` (`redirect`, a 302
+to 10,000 bytes): `net.requests` 2, `net.bytes{/hop}` 123, `net.bytes{/payload}` 10,130, where
+both globs read the final hop's 10,130 before. `data:` and `blob:` requests are not network requests. A glob without
 `://` matches the URL's path; `*` stays within a path segment, `**` crosses them, and the query
 string never takes part: `net.requests{/api/session/*/message}`. Firefox: WebDriver BiDi's
 `network.beforeRequestSent` and `network.responseCompleted` (`bytesReceived`) of the page's browsing
@@ -2585,8 +2621,34 @@ CPU.
   id reused by another thread counts from zero. Pages' `cpu.*` read each process this way with or
   without stretches (they used to sum the processes, so an exiting renderer lowered the sum).
   `cpu.fixture` is the run's less each stretch's.
+- **Processes that end:** a process of the set that ends inside a run takes the CPU it used there
+  with it, and one that starts and ends between two readings is in neither. Either one in a timed
+  part of a measured run refuses the set's CPU (`cpu.work`, `cpu.app.total`, `cpu.process.total`, the
+  browser's `cpu.<role>`; page, native, script and tty runs, launches, `record`; `cpu.fixture` has
+  none), `RunIncomplete`, never a short number. One that ended inside a `ctx.untimed` stretch took
+  nothing of the timed parts: it only leaves the run out of `cpu.foreign` (the whole span's CPU is
+  short). Seen per timed part (the readings at the run's edges and each stretch's): a process in one
+  reading and gone from the next (`record::gone`), or `host::ended_marks` moving between them
+  (`record::lost_in_parts`): Linux a process's ended children's `cminflt`, `cmajflt`, `cutime` and
+  `cstime` (`/proc/<pid>/stat` fields 11, 13, 16, 17; every exec faults), macOS their CPU time, Windows
+  the ended processes of the jobs strobe launched for the target's home, or rooted at the target's
+  process for a launch with no home (a script's host). A launch counts from its spawn, so any ended
+  process refuses its `cpu.work`, but for one: the launched process itself, ended cleanly with
+  nothing else ended (a launcher that handed over), whose own CPU strobe still reads through its held
+  process handle (Windows) or unreaped zombie (Unix) and adds (native launches). Checked with
+  `scripts/dev/derive/script.bench.ts` on adais: a 200 ms child that ends in the run refuses
+  `cpu.work`; the same child inside `ctx.untimed` and then 100 ms of the host's own read 100.4 ms.
+- **Documents:** Chromium's Performance counters (`main.work`, `main.script`, `main.layout`,
+  `main.style`, `layout.count`, `style.count`, lean `main.busy`) and the page's counter global are the
+  document's: a `goto` reads the departing one's first. A run whose page loaded another document
+  without `goto` (a link, a form, a script; `NavigationStart` moved between strobe's readings)
+  refuses them and `count.*` (`RunIncomplete`): the departed document's counts went unread. Checked
+  with `scripts/dev/derive` (`link`): `main.work` and `main.script` refused (`main.script` read
+  −0.41 ms before).
 - **Counts:** `ctx.count` in a stretch counts nothing, and what the page's counter global counted
-  in one (its reading at each edge) leaves the run's `count.<name>`. An input call in a stretch is no
+  in one (its reading at each edge) leaves the run's `count.<name>`; a `goto` inside a stretch keeps
+  only what the departing document counted before the stretch. Checked with `scripts/dev/derive`
+  (`untimed goto`: 5, then 100, a `goto` and 1000 inside a stretch, then 7): `count.hits` 12. An input call in a stretch is no
   call of the journey (`InputMismatch` counts, §9.10).
 - **Frames:** a frame begun in a stretch is none of the run's, and gaps are taken within the timed
   parts only (OS presents: per part; Chromium's trace: each stretch is a window
@@ -3932,6 +3994,15 @@ session.
 ## 11. Views and reports
 
 ### 11.1 Query views
+
+A trace view (`frames`, `threads`, `gpu`, `layout`, `style`, `gc`, the summary's per-run phases, long
+tasks) reads a recording's measured runs only: a bench block's meta.json lists them (`measured`,
+`run:<i>`; a batch's per case), since its trace also marks warmup runs, a `--check`'s run after its
+reset and, in a `--batch`, every case's runs; a Firefox recording's views read the same list
+against the windows of its profile. A recording without that list (`record`) reads its run
+windows; an imported trace without strobe's marks is read whole, and `threads` and `gpu` say which.
+`threads` needs the task loop's slices: a lean trace (a timed block's default) has none and is refused
+(its main-thread time is `main.work`); only an imported trace without them counts every top-level slice.
 
 | View | Arguments | Returns |
 |---|---|---|
@@ -7948,6 +8019,23 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   by `query`, `report`, `history`, `plan` or `status`: 75.4 → 70.6 ms under a bench (12 pairs, −6.2%),
   and the plain launch's own counter 70.7 ms. Still in `run.duration`: strobe's job and affinity
   plumbing around each launch.
+- **Deriving metrics from raw data (audit, 2026-11-08)**, a known-answer page bench
+  (`scripts/dev/derive`, headless `--check` on adais, against a build of the commit before): phases
+  entered twice or inside themselves (`phase.twice` 305.1 → 153.5 ms for 150 ms; `phase.nested` 328.4 →
+  82.9 ms for 80 ms), frames after a cross-site `goto` (6 → 10 presented, the second renderer's 4 by the
+  trace), a link's navigation (`main.script` −0.41 ms → refused), a `goto` inside `ctx.untimed`
+  (`count.hits` 117 → 12), a redirect (`net.bytes{/hop}` 10,130 → 123 bytes), isolated frames
+  (`frames.interval.n` 5 of 20 frames: `TailTooShort` counts gaps), and the query views on a check's and
+  a batch's recording (measured runs only: `gc`, `layout` and `style` had taken the trace's last six
+  run windows, `run:3` to `warm:8`, two of them unmeasured and the first two cases' runs left out;
+  `threads` read the whole trace, and on a lean trace, which holds no task loop's slices, it counted
+  every top-level slice instead: 0.2 ms of a 50 ms click task, the renderer's main thread missing; it
+  now reads the measured runs and refuses a lean trace). Two hops of the page's own (a second site,
+  then a third) read 17 frames, 3 + 14 by the trace, where the first renderer alone gave 0.
+  Processes that end in a run refuse the set's CPU (§9.6; `scripts/dev/derive/script.bench.ts`: a
+  200 ms child refused, the same child in `ctx.untimed` then 100 ms of the host's own 100.4 ms); the
+  pixel proof's press edge, `UnpacedSpin` over timed stretches and the counter pass's comparisons
+  (§7.5) are code-checked only: they need a presenting window or Linux perf events.
 
 ## 25. Continuous benchmarking (`track`, `history`)
 

@@ -644,6 +644,51 @@ pub fn all_processes() -> Vec<ProcInfo> {
     }
 }
 
+/// Counts that grow when a process of a set ends between two readings of it, even one neither reading
+/// saw (`ended_between`): per process, what its ended children left it (Linux: their CPU ticks and page
+/// faults, `cutime`, `cstime`, `cminflt` and `cmajflt` of `/proc/<pid>/stat`, which every exec moves;
+/// macOS: their CPU time); Windows: the processes that ended in the jobs strobe launched for `home`
+/// (key 0). A process that ended takes the CPU it used since the first reading with it, so a sum of the
+/// set's CPU over the two is short.
+pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> std::collections::BTreeMap<u32, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    #[cfg(windows)]
+    {
+        if let Some(n) = spawn::jobs_ended(pids, home) {
+            out.insert(0, n);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = home;
+        for &pid in pids {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+            // After `(comm)`: state is field 0, ppid 1, …, minflt 7, cminflt 8, majflt 9, cmajflt 10,
+            // utime 11, stime 12, cutime 13, cstime 14 (proc(5)); only the children's.
+            let Some(close) = stat.rfind(')') else { continue };
+            let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+            let sum = [8, 10, 13, 14].iter().filter_map(|&i| rest.get(i)?.parse::<u64>().ok()).fold(0u64, u64::wrapping_add);
+            out.insert(pid, sum);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = home;
+        for &pid in pids {
+            if let Ok(k) = macos::counts(pid) {
+                out.insert(pid, k.child_time);
+            }
+        }
+    }
+    out
+}
+
+/// Whether a process of the set ended between two `ended_marks` readings: a count of a process in both
+/// grew.
+pub fn ended_between(a: &std::collections::BTreeMap<u32, u64>, b: &std::collections::BTreeMap<u32, u64>) -> bool {
+    b.iter().any(|(k, v)| a.get(k).is_some_and(|x| v > x))
+}
+
 /// PIDs of the tree rooted at `root` (root first), from one system snapshot. Children that started
 /// before their parent (a reused parent PID) are not followed.
 pub fn tree_pids(root: u32) -> Vec<u32> {

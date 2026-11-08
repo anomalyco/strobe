@@ -310,6 +310,9 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let dir = draft.dir().to_path_buf();
     let token = id.trim_start_matches("rec_").to_string();
     let driver = Driver::new(page.clone().into(), token.clone());
+    // Every top-level document marks its start in its renderer (`metrics::doc_mark_script`): one the
+    // page moves to in the recording stays the run's.
+    crate::target::web::WebPage::from(page.clone()).add_init_script(&metrics::doc_mark_script(&token))?;
     if set == Set::Memory {
         let meta = memory(&page, &browser, &dir, &id, &target, for_ms, json!({ "input": input, "headless": !on_screen, "emulate": meta_emulate(&emulation) }))?;
         if host_screen && (awake.locks() > 0 || host::session_locked()) {
@@ -338,7 +341,7 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let video = args.has("video").then(|| super::video::Recorder::start(host::main_window(&browser.pids()).filter(|_| host_screen).as_ref(), Some(&page), !host_screen)).transpose()?;
     // CPU in cycles over the time stamp counter, as native targets read it: process times move in
     // clock ticks (15.6 ms on Windows), so an idle page read 0.00% on one run and 0.52% on the next.
-    let cycles = || -> (u64, Option<u64>) { (browser.processes().iter().map(|p| p.cycles).sum(), host::tsc()) };
+    let cycles = || read_set(&browser.processes(), browser.profile.as_deref());
     let cpu0 = cycles();
     let t0 = host::now_ns();
     driver.mark("run:0:start")?;
@@ -389,10 +392,15 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let data = metrics::read(&dir.join("trace.pftrace"), &token)?;
     let mut extra: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     let mut refused = serde_json::Map::new();
-    match (cpu0.1, cpu1.1) {
-        (Some(a), Some(b)) if !attach && b > a && cpu1.0 > 0 => {
-            extra.entry("cpu.app.total".into()).or_default().insert("run:0".into(), 100.0 * cpu1.0.saturating_sub(cpu0.0) as f64 / (b - a) as f64);
-        }
+    match (cpu0.2, cpu1.2) {
+        (Some(a), Some(b)) if !attach && b > a && cpu1.0.values().any(|c| *c > 0) => match set_used(&cpu0, &cpu1) {
+            Some(used) => {
+                extra.entry("cpu.app.total".into()).or_default().insert("run:0".into(), 100.0 * used as f64 / (b - a) as f64);
+            }
+            None => {
+                refused.insert("cpu.app.total".into(), json!(cpu_lost("cpu.app.total", 1, 1, "the browser").message()));
+            }
+        },
         _ if attach => {}
         _ if phone => {
             if let Some(r) = validity::phone_refusal("cpu.app.total") {
@@ -635,7 +643,7 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
             c
         })
     });
-    let cycles = || -> (u64, Option<u64>) { (browser.processes().iter().map(|p| p.cycles).sum(), host::tsc()) };
+    let cycles = || read_set(&browser.processes(), browser.profile().as_deref());
     // Attribution: Firefox's profiler over the recording, which strobe's marks bracket in the page.
     let token = id.trim_start_matches("rec_").to_string();
     let firefox = match &browser {
@@ -650,6 +658,8 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     }
     let profiler = firefox.map(probe::gecko::start).transpose()?;
     if profiler.is_some() {
+        // Every top-level document marks its process too (`metrics::doc_mark_script`).
+        page.add_init_script(&metrics::doc_mark_script(&token))?;
         driver.mark("run:0:start")?;
     }
     // `--video`: the browser's window from the OS (no stock engine but Chromium has a screencast).
@@ -682,12 +692,19 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     let mut values: BTreeMap<String, f64> = BTreeMap::new();
     let mut refused = serde_json::Map::new();
     // Where cycles are not time on this machine (`outside::not_on_this_os`), both CPU metrics are refused.
-    match (cpu0.1, cpu1.1, super::outside::not_on_this_os("cpu.app.total")) {
-        (Some(a), Some(b), None) if b > a && cpu1.0 > 0 => {
-            let share = cpu1.0.saturating_sub(cpu0.0) as f64 / (b - a) as f64;
-            values.insert("cpu.app.total".into(), 100.0 * share);
-            values.insert("cpu.work".into(), share * (t1 - t0) as f64 / 1e6);
-        }
+    match (cpu0.2, cpu1.2, super::outside::not_on_this_os("cpu.app.total")) {
+        (Some(a), Some(b), None) if b > a && cpu1.0.values().any(|c| *c > 0) => match set_used(&cpu0, &cpu1) {
+            Some(used) => {
+                let share = used as f64 / (b - a) as f64;
+                values.insert("cpu.app.total".into(), 100.0 * share);
+                values.insert("cpu.work".into(), share * (t1 - t0) as f64 / 1e6);
+            }
+            None => {
+                for m in ["cpu.app.total", "cpu.work"] {
+                    refused.insert(m.into(), json!(cpu_lost(m, 1, 1, "the browser").message()));
+                }
+            }
+        },
         (_, _, why) => {
             let r = why.unwrap_or_else(|| crate::model::Refusal::new(crate::model::ValidatorId::RunIncomplete, "no CPU of the browser's processes could be read"));
             for m in ["cpu.app.total", "cpu.work"] {
@@ -839,7 +856,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let waits = args.get("probes") == Some("waits");
         let stacks =
             (set == Set::Attribution && crate::probe::stacks::stacks_available()).then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), waits));
-        let cycles = || -> (Cycles, Option<u64>) { (per_process(&n.processes()), host::tsc()) };
+        let cycles = || read_set(&n.processes(), Some(&n.home));
         progress(match &stop {
             Some(re) => format!("recording {id} until the app prints a line matching {re}"),
             None => format!("recording {id} for {}", fmt::ms_duration(for_ms)),
@@ -892,7 +909,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             Some(Ok(p)) => {
                 let display = n.window.as_ref().and_then(|w| host::display_of(w.hwnd));
                 let hz = crate::probe::present::frames::refresh_ms(&p.vsyncs, t0, t1, display.as_ref()).map(|ms| 1000.0 / ms).or(display.map(|d| d.hz));
-                crate::probe::present::frames::spin(&p.presents, &n.pids(), &[(t0, t1)], hz)
+                crate::probe::present::frames::spin(&p.presents, &n.pids(), &[crate::metrics::Timed::whole(t0, t1)], hz)
             }
             _ => None,
         };
@@ -932,10 +949,13 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let ms = (t1 - t0) as f64 / 1e6;
         let mut values: BTreeMap<&str, f64> = BTreeMap::new();
         values.insert("run.duration", ms);
-        if let (Some(a), Some(b)) = (c0.1, c1.1)
+        // A process of the app that ended in the window took its CPU there with it.
+        let used = set_used(&c0, &c1);
+        let lost = used.is_none();
+        if let (Some(a), Some(b), Some(used)) = (c0.2, c1.2, used)
             && c1.0.values().any(|c| *c > 0)
         {
-            let cpu = cycles_used(&c0.0, &c1.0) as f64 / b.saturating_sub(a).max(1) as f64 * ms;
+            let cpu = used as f64 / b.saturating_sub(a).max(1) as f64 * ms;
             values.insert("cpu.work", cpu);
             values.insert("cpu.app.total", 100.0 * cpu / ms);
         }
@@ -977,7 +997,12 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             &json!([{ "run": "run:0", "ms": ms, "switches": span.switches, "wakes_per_s": span.wakes_per_s(), "io_read": span.io_read, "io_write": span.io_write }]),
         )?;
         let debug = host::debug_runtime(&app.exe);
-        let refused = super::outside::os_refusals(&|m| values.contains_key(m), gpu_missing.as_deref());
+        let mut refused = super::outside::os_refusals(&|m| values.contains_key(m), gpu_missing.as_deref());
+        if lost {
+            for m in ["cpu.work", "cpu.app.total"] {
+                refused.insert(m.into(), json!(cpu_lost(m, 1, 1, "the app").message()));
+            }
+        }
         let mut meta = json!({
             "id": id, "kind": "record", "native": true, "target": target, "exe": app.exe, "probes": set, "duration_ms": for_ms, "env": host::env(), "values": values, "refused": refused, "os": os,
             "window": n.window, "ui_thread": ui_tid, "created": now_iso(), "valid": true, "os_frames": os_frames, "session_locked": session_locked,
@@ -1024,6 +1049,44 @@ pub fn cycles_used(a: &Cycles, b: &Cycles) -> u64 {
 /// before it.
 pub fn cycles_timed(edges: &[&Cycles], keep: impl Fn(u32) -> bool) -> u64 {
     edges.as_chunks::<2>().0.iter().map(|[a, b]| b.iter().filter(|(k, _)| keep(k.0)).map(|(k, c)| c.saturating_sub(a.get(k).copied().unwrap_or(0))).sum::<u64>()).sum()
+}
+
+/// A process set's CPU at one moment: each process's cycles, what tells one that ended
+/// (`host::ended_marks`), and the cycle clock.
+pub type SetReading = (Cycles, BTreeMap<u32, u64>, Option<u64>);
+
+pub fn read_set(procs: &[host::ProcTimes], home: Option<&std::path::Path>) -> SetReading {
+    let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+    (per_process(procs), host::ended_marks(&pids, home), host::tsc())
+}
+
+/// Cycles the set used between two readings, each process against its own; None when a process of it
+/// ended in between, taking its CPU there with it.
+pub fn set_used(a: &SetReading, b: &SetReading) -> Option<u64> {
+    (gone(&[&a.0, &b.0]) == 0 && !host::ended_between(&a.1, &b.1)).then(|| cycles_used(&a.0, &b.0))
+}
+
+/// Processes in a timed part's first reading that are gone at its last (`cycles_timed`'s edges, in
+/// pairs): what each used after the first reading went with it.
+pub fn gone(edges: &[&Cycles]) -> usize {
+    edges.as_chunks::<2>().0.iter().map(|[a, b]| a.keys().filter(|k| !b.contains_key(k)).count()).sum()
+}
+
+/// Whether a process of the set ended inside a timed part: `cycles` and `ended` are the readings at a
+/// run's start, at each untimed stretch's edges and at its end (`cycles_timed`'s edges, with their
+/// `host::ended_marks`), in pairs. One that ended inside a stretch took nothing of the timed parts.
+pub fn lost_in_parts(cycles: &[&Cycles], ended: &[&BTreeMap<u32, u64>]) -> bool {
+    cycles.as_chunks::<2>().0.iter().zip(ended.as_chunks::<2>().0).any(|([a, b], [x, y])| gone(&[a, b]) > 0 || host::ended_between(x, y))
+}
+
+/// `RunIncomplete` for a CPU metric over a span some process of the set ended in (`gone`,
+/// `host::ended_between`): its CPU left with it, so the set's CPU is short.
+pub fn cpu_lost(metric: &str, runs: usize, of: usize, what: &str) -> crate::model::Refusal {
+    crate::model::Refusal::new(
+        crate::model::ValidatorId::RunIncomplete,
+        format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run, and the CPU it used there ended with it, so the CPU of the process set is short"),
+    )
+    .fix("keep the processes running until the run's end (warm up what the app starts and ends, or end it in the reset), or compare run.duration")
 }
 
 /// A new recording's id and folder, held as a draft until its meta.json is written: `--id` (a handle

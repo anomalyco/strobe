@@ -144,6 +144,9 @@ impl Spec {
             checked: Cell::new(false),
             own_copy: RefCell::new(None),
             own_port: Cell::new(None),
+            total: Cell::new(0),
+            last: RefCell::new(None),
+            lost: Cell::new(0),
         }))
     }
 
@@ -202,6 +205,12 @@ pub(super) struct Running {
     /// A side's process that served the fixture's port itself: listened on it, or answered a side's
     /// connection to it.
     own_port: Cell<Option<u32>>,
+    /// Its CPU so far as `cpu` adds it up (each process against its own last reading), the last reading
+    /// (by process, and what tells an ended one, `host::ended_marks`), and how many times a process of
+    /// it ended between two readings, taking its CPU there with it.
+    total: Cell<u64>,
+    last: RefCell<Option<(super::super::record::Cycles, BTreeMap<u32, u64>)>>,
+    lost: Cell<u64>,
 }
 
 impl Running {
@@ -244,9 +253,31 @@ impl Running {
     }
 
     /// The fixture's CPU so far: its process set's cycles (its tree and what carries its home's stamp,
-    /// a server it detached included) and the cycle clock.
+    /// a server it detached included), each process against its own last reading (`record::cycles_used`:
+    /// one that ended never lowers the sum), and the cycle clock.
     pub(super) fn cpu(&self) -> (u64, Option<u64>) {
-        (host::process_set(self.pid, Some(&self.home)).iter().map(|p| p.cycles).sum(), host::tsc())
+        let procs = host::process_set(self.pid, Some(&self.home));
+        let now = super::super::record::per_process(&procs);
+        let ended = host::ended_marks(&procs.iter().map(|p| p.pid).collect::<Vec<_>>(), Some(&self.home));
+        let tsc = host::tsc();
+        let mut last = self.last.borrow_mut();
+        match last.as_ref() {
+            Some((a, e)) => {
+                self.total.set(self.total.get() + super::super::record::cycles_used(a, &now));
+                if super::super::record::gone(&[a, &now]) > 0 || host::ended_between(e, &ended) {
+                    self.lost.set(self.lost.get() + 1);
+                }
+            }
+            None => self.total.set(now.values().sum()),
+        }
+        *last = Some((now, ended));
+        (self.total.get(), tsc)
+    }
+
+    /// How many times so far a process of the fixture ended between two readings (`cpu`): a span whose
+    /// count moved is short of what it used there.
+    pub(super) fn lost(&self) -> u64 {
+        self.lost.get()
     }
 
     /// Reads whether a side's processes hold a loopback connection whose other end the fixture's own
