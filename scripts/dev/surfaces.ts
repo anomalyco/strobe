@@ -68,8 +68,11 @@ function digitsFor(v: number, min: number, max: number): number {
 // app::fmt::value / pct / pct_ci / signed (the text and the markdown report).
 function tValue(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
-  const d = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4)
-  if (Math.round(v * 10 ** d) === 0) v = 0
+  let d = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4)
+  if (Math.round(v * 10 ** d) === 0) {
+    v = 0
+    d = Math.min(d, 2)
+  }
   switch (unit) {
     case "ms": return `${rfix(v, d)} ms`
     case "%": return `${rfix(v, d)}%`
@@ -103,7 +106,10 @@ function tPct(r: number | null): string {
 // An estimate and its interval at the interval's digits.
 function pctCI(est: number, lo: number, hi: number): [string, string, string] {
   if (!(Number.isFinite(lo) && Number.isFinite(hi)) || hi === lo) return [tPct(est), tPct(lo), tPct(hi)]
-  const common = Math.min(3, Math.max(0, -Math.floor(Math.log10(Math.abs(hi * 100 - lo * 100)))))
+  // fmt::width_digits: as the Particle Data Group rounds an uncertainty.
+  const w = Math.abs(hi * 100 - lo * 100)
+  const exp = Math.floor(Math.log10(w))
+  const common = Math.min(3, Math.max(0, (w / 10 ** (exp - 2) < 354.5 ? 2 : 1) - 1 - exp))
   const own = (x: number) => pctWith(x, Math.max(common, x === 0 ? 0 : digitsFor(x * 100, 0, 3)))
   return [own(est), own(lo), own(hi)]
 }
@@ -111,7 +117,7 @@ const relCI = (c: J): [string, string, string] => ([c.estimate, c.lo, c.hi].ever
 function tSigned(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
   const body = tValue(Math.abs(v), unit)
-  return body === tValue(0, unit) ? body : v < 0 ? `−${body}` : v > 0 ? `+${body}` : body
+  return !/[1-9]/.test(body) ? body : v < 0 ? `−${body}` : v > 0 ? `+${body}` : body
 }
 
 // pr::extract::sig3 / disp / signed_disp (the PR block and the card).
@@ -193,6 +199,8 @@ function kindOf(s: J, c: J): string {
     : first === "worse" || first === "leaks" ? "worse" : ["same", "underpowered", "saturated", "stopped"].includes(first) ? first
     : first === good ? "better" : first === bad ? "worse" : "unclear"
 }
+// A bisect's `series` is the label it bisects, not a list.
+const seriesOf = (r: J): J[] => (Array.isArray(r.series) ? r.series : [])
 const compared = (s: J) => ["runs", "launch"].includes(s.kind) && s.not_run !== true
 const DECIDED = new Set(["better", "worse", "same", "no_worse"])
 
@@ -304,12 +312,12 @@ function checkSurfaces(r: J) {
   const dir = mkdtempSync(join(tmpdir(), "strobe-surfaces-"))
   try {
     // `bench --blocks` measured one build: no report of it, by design (only `query`).
-    const reportable = (r.series ?? []).some((s: J) => s.kind !== "blocks")
+    const reportable = seriesOf(r).some((s: J) => s.kind !== "blocks")
     // The HTML is checked only where something was compared (a --check's page says passed or failed).
-    const html = reportable && (r.series ?? []).some((s: J) => compared(s)) ? htmlSurface(id, dir) : undefined
+    const html = reportable && seriesOf(r).some((s: J) => compared(s)) ? htmlSurface(id, dir) : undefined
     const text = run(["query", id, "summary"]).out
     const md = reportable ? run(["report", "experiment", id, "--format", "md"]).out : text
-    const judgedAny = (r.series ?? []).some((s: J) => compared(s))
+    const judgedAny = seriesOf(r).some((s: J) => compared(s))
     const pr = judgedAny ? run(["report", "experiment", id, "--format", "pr"]).out : ""
     const card = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "card", "--json", "--out", join(dir, "card.svg")]).out || "{}") : {}
     const badge = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "badge", "--json", "--out", join(dir, "badge.svg")]).out || "{}") : {}
@@ -318,17 +326,25 @@ function checkSurfaces(r: J) {
     const sections = text.split(/^(?=strobe bench )/m)
     const prRows = pr.split("\n").filter((l) => l.startsWith("|")).map((l) => l.split(/(?<!\\)\|/).slice(1, -1).map(strip))
     const impl = r.comparison === "implementations"
-    for (const s of r.series ?? []) {
+    // An A/A: a better or worse verdict between identical builds is a false positive on every surface.
+    const aa = r.plan?.aa === true
+    for (const s of seriesOf(r)) {
       if (!compared(s)) continue
       const sec = sections.find((x) => x.split("\n")[0].includes(`· ${s.label}`)) ?? ""
+      // A stored text that never printed this series (a result rewritten after its bench printed).
+      if (!sec) flagIt("MED", `text ${s.label}`, "the stored text has no section for this series")
       for (const { c, role } of rows(s)) {
         const where = `${s.label} ${c.metric}`
         const u = unitOf(c.metric), k = kindOf(s, c), refused = k === "refused"
         // Text (what the bench printed, kept in result.json and shown by `query summary`, so an older
         // strobe's digits): each number within its own printed rounding of result.json's, the verdict
         // word for word, and no number on a refused row.
-        const row = sec.split("\n").find((l) => new RegExp(`^[★ ] ${c.metric.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s`).test(l))
-        if (!row) flagIt("HIGH", `text ${where}`, "no row")
+        // The primary's row is starred; a secondary of the same name (results from before the primary
+        // was kept out of its secondaries) is the unstarred one.
+        const row = sec.split("\n").find((l) => new RegExp(`^${role === "primary" ? "★" : " "} ${c.metric.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s`).test(l))
+        if (!row) {
+          if (sec) flagIt("HIGH", `text ${where}`, "no row")
+        }
         else {
           // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
           const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(c.verdict)[0]
@@ -347,16 +363,19 @@ function checkSurfaces(r: J) {
           }
         }
         // PR: tested rows carry the same change and range; a refused one no number.
-        if (pr && role !== "descriptive") {
+        // (A secondary of the primary's own name, in results from before it was kept out, is not shown.)
+        if (pr && role !== "descriptive" && !(role === "secondary" && c.metric === s.primary?.metric)) {
           const ch = refused ? "—" : c.relative ? relCI(c)[0] : pSigned(c.estimate, absUnit(u))
           const rg = refused ? "—" : c.exact ? "exact" : [c.lo, c.hi].every(Number.isFinite) ? (c.relative ? [relCI(c)[1], relCI(c)[2]] : [pSigned(c.lo, absUnit(u)), pSigned(c.hi, absUnit(u))]).filter((x, i, a) => i === 0 || x !== a[0]).join(" to ") : "—"
           // Two implementations read an increase of 2× or more as a factor (`+96% to 2.0×`).
           const sameChange = (x: string) => x === ch || (/×$/.test(x) && Math.abs(parseFloat(x) - (1 + c.estimate)) < 0.06)
-          const hit = prRows.find((cells) => (cells.includes(ch) && cells.includes(rg)) || (impl && c.relative && !refused && cells.length >= 6 && sameChange(cells[3]) && /×|%/.test(cells[4])))
-          if (!hit) flagIt("HIGH", `pr ${where}`, `no Metrics row with change ${ch} and range ${rg}`)
-          else if (refused && hit.slice(1, 3).some((x) => /\d/.test(x))) flagIt("CRIT", `pr ${where}`, `refused, yet the row shows ${hit.join(" | ")}`)
-          else if ((k === "better" || k === "worse") && !hit.some((x) => x.startsWith(String(c.verdict).replace(/ \(small\)$/, "")))) flagIt("CRIT", `pr ${where}`, `verdict ${c.verdict} not in its row: ${hit.join(" | ")}`)
-          else if (k === "untested" && !hit.some((x) => x.startsWith("not tested"))) flagIt("HIGH", `pr ${where}`, `untested, yet the row reads ${hit.join(" | ")}`)
+          // Every row with these numbers (two metrics can share them): the verdict must be on one of them.
+          const hits = prRows.filter((cells) => (cells.includes(ch) && cells.includes(rg)) || (impl && c.relative && !refused && cells.length >= 6 && sameChange(cells[3]) && /×|%/.test(cells[4])))
+          const word = aa && (k === "better" || k === "worse") ? "false positive" : String(c.verdict).replace(/ \(small\)$/, "")
+          if (!hits.length) flagIt("HIGH", `pr ${where}`, `no Metrics row with change ${ch} and range ${rg}`)
+          else if (refused && hits.every((h) => h.slice(1, 3).some((x) => /\d/.test(x)))) flagIt("CRIT", `pr ${where}`, `refused, yet the row shows ${hits[0].join(" | ")}`)
+          else if ((k === "better" || k === "worse") && !hits.some((h) => h.some((x) => x.startsWith(word)))) flagIt("CRIT", `pr ${where}`, `verdict ${word} not in its row: ${hits[0].join(" | ")}`)
+          else if (k === "untested" && !hits.some((h) => h.some((x) => x.startsWith("not tested")))) flagIt("HIGH", `pr ${where}`, `untested, yet the row reads ${hits[0].join(" | ")}`)
         }
         // HTML: the forest row's base, head, paired change, range and outcome, for the series the page
         // opens on (its hero names it: `<label> · Primary: …`).
@@ -384,10 +403,10 @@ function checkSurfaces(r: J) {
       }
       // The primary's tally and direction on the proof line, the HTML hero, the card and the badge.
       const p = s.primary, k = p?.metric ? kindOf(s, p) : undefined
-      if (k === "better" || k === "worse") {
+      if ((k === "better" || k === "worse") && !aa) {
         const t = tally(s, p), word = k === "better" ? "better" : "worse", count = k === "better" ? t.better : t.worse
         if (pr && !impl && !pr.includes(`${word} in ${count} of ${t.n} pairs`)) flagIt("CRIT", `pr ${s.label}`, `proof line lacks "${word} in ${count} of ${t.n} pairs"`)
-        if (card.alt && !impl && (r.series ?? []).filter(compared).length === 1 && !card.alt.includes(`${word} in ${count} of ${t.n} pairs`)) flagIt("CRIT", `card ${s.label}`, `alt "${card.alt}" lacks "${word} in ${count} of ${t.n} pairs"`)
+        if (card.alt && !impl && seriesOf(r).filter(compared).length === 1 && !card.alt.includes(`${word} in ${count} of ${t.n} pairs`)) flagIt("CRIT", `card ${s.label}`, `alt "${card.alt}" lacks "${word} in ${count} of ${t.n} pairs"`)
         const hero = !html?.text.includes(`${s.label} · Primary:`) ? null : html.text.match(/(outperformed|trailed) .*? in (?:all )?(\d+) of (\d+)/)
         if (hero && (hero[1] === "outperformed") !== (k === "better")) flagIt("CRIT", `html ${s.label}`, `hero says ${hero[1]} for a ${k} verdict`)
         if (hero && +hero[2] !== count) flagIt("CRIT", `html ${s.label}`, `hero counts ${hero[2]} of ${hero[3]} pairs, the blocks ${count} of ${t.n}`)
@@ -396,7 +415,7 @@ function checkSurfaces(r: J) {
       // A journey decided on its own but not after Holm is grey by design.
       if (b && !(impl && p?.holm_decided === false && (k === "better" || k === "worse"))) {
         const colour = /-([0-9a-f]{6})\?/.exec(b.url ?? "")?.[1]
-        const want = k === "better" ? "1a7f37" : k === "worse" && !r.args?.flags?.aa ? "cf222e" : "6e7781"
+        const want = aa ? "6e7781" : k === "better" ? "1a7f37" : k === "worse" ? "cf222e" : "6e7781"
         if (colour && colour !== want) flagIt("CRIT", `badge ${s.label}`, `colour ${colour} (${b.value}) for verdict_kind ${k}`)
         if (k === "refused" && /\d/.test(b.value)) flagIt("CRIT", `badge ${s.label}`, `refused, yet the badge reads ${b.value}`)
         if ((k === "better" || k === "worse") && /^[+−-]/.test(b.value) && (b.value.startsWith("+") !== p.estimate > 0)) flagIt("CRIT", `badge ${s.label}`, `sign of ${b.value} against estimate ${p.estimate}`)
@@ -467,8 +486,13 @@ for (const [i, id] of list.entries()) {
   const file = existsSync(id) ? id : join(root, id, "result.json")
   let r: J
   try { r = JSON.parse(readFileSync(file, "utf8")) } catch (e) { flagIt("HIGH", "result.json", `unreadable: ${e}`); continue }
-  if (!flag("scan")) checkSurfaces(r)
-  checkResult(r)
+  // One odd result never stops the run: the checker's own failure is reported as one.
+  try {
+    if (!flag("scan")) checkSurfaces(r)
+    checkResult(r)
+  } catch (e) {
+    flagIt("HIGH", "checker", `failed on this result: ${e}`)
+  }
 }
 const order: Sev[] = ["CRIT", "HIGH", "MED", "LOW"]
 found.sort((a, b) => order.indexOf(a.sev) - order.indexOf(b.sev) || a.exp.localeCompare(b.exp))
