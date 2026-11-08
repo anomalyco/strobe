@@ -15,8 +15,9 @@ pub(crate) const FUTILITY_FROM: usize = 12;
 pub(crate) const LOOKS: [usize; 5] = [8, 12, 18, 26, 40];
 
 /// Pocock's constant nominal level for 5 looks at 5% overall, two-sided: each look's interval is
-/// 98.4%. Looking after every pair at 95% called A/A runs different 10% of the time (simulated, and
-/// once on adais); five Pocock looks keep it at 1.5–3.7% and still catch a 3% effect by pair 8–9.
+/// 98.4%. Looking after every pair at 95% called A/A runs different 10.9% of the time (simulated
+/// near the bound, `scripts/dev/stats-sim.ts`, and once on adais); five Pocock looks keep it at
+/// 1.6–4.2% and still catch a 3% effect by pair 8–9.
 pub(crate) const POCOCK_ALPHA: f64 = 0.0158;
 
 /// A series' design: its looks and their level, its bound or margin, and its journeys' family.

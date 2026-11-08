@@ -833,9 +833,15 @@ engines and VRAM, the focused target's frames when attached. Same samplers as th
 `daemon`: §16. `mcp`: the MCP server on stdio, for debugging. `helper`: §13.4. `stats`: known-answer
 checks of §9.3 without a bench: one JSON request a line on stdin (`{"op": "wilcoxon", "d": […]}`,
 `hl`, `theil_sen`, `compare` with `metric`, `pairs`, `bound` and `noworse`, `repeated_p`,
-`pairs_needed`, `pairs_for`, `family_min_pairs`, `pct`, `value`), one JSON answer a line on stdout,
-with the same code a bench runs; it reads and writes nothing else. `scripts/dev/stats-check.ts`
-feeds it synthetic pairs and checks the answers against brute force.
+`pairs_needed`, `pairs_for`, `family_min_pairs`, `median_interval`, `pct`, `pct_ci`, `pct_vs`,
+`bound`, `value`), one JSON answer a line on stdout, with the same code a bench runs; it reads and
+writes nothing else. `scripts/dev/stats-check.ts` feeds it synthetic pairs and checks the answers
+against brute force. `simulate` (`trials`, `seed`, `effect` or `effects` with `journeys`, `noise`
+`{kind: normal|t3|spike, sigma, p}` per block, `pairs`, `bound`, `noworse`, `first`, `discard`,
+`order`, `secondaries`, `looks` with `confidence`) runs synthetic series through the bench's own
+decision code (`bench::sequential`: looks, futility, run-on, closing verdict, gate and Holm; a
+family through `family::Board`) and counts verdicts, coverage and family claims; its counts depend
+only on the seed. `scripts/dev/stats-sim.ts` runs the rows §9 quotes.
 
 ### 5.12 `strobe look`
 
@@ -2027,13 +2033,25 @@ flowchart LR
   DOM, listeners, caches); work that only swung (`warmup.unsteady` 1) is jitter (pin the CPUs, quiet
   the machine, more work per run). Attribution blocks profile the measured runs after the steady
   point, each run whole and only the run (below).
+- **Warm-up blocks**: before pair 0 every timed series discards one block per side: GPU shader
+  caches' (`gpuCache`, up to 3), a launch case's first launch, and for every other run or command
+  case one block, since a series' first block ran slow, always on base (pair 0 goes base first):
+  ln(head / base) at pair 0 averaged −3.4% over 100 A/A experiments of a 1.7 ms command on a VM
+  (about 5 standard errors; every later pair within ±1.5%) and −0.3% on a desktop, from the power
+  plan just switched and the CPUs just cleared. The rank test shrugs off one pair, but the error no
+  longer split evenly: simulated with a +3.4% first block at σ 6%, false `faster` 2.53% against
+  `slower` 1.45% (1.75% and 1.71% with the blocks discarded), and a `--noworse 0%` A/A's `no worse`
+  3.9% with a +30% first block (2.1% discarded). The series keeps what they read (`warmup_values`).
 - **Pinning** (`--pin auto` by default, §9.4) may narrow the target to fewer CPUs than the machine
   has; results from before that rule are not comparable on such machines.
 - **Stop rule** (`--pairs auto`): verdicts only at planned looks, after pairs 8, 12, 18, 26 and
   40, each with a 98.42% interval (Pocock's constant level for 5 looks, 5% overall). Looking after
-  every pair at 95% inflates false positives: simulated A/A runs came out "different" 10.4% of the
-  time when the noise is near the bound, and one did on adais (scroll, +0.7% [+0.1 … +3.7] at
-  pair 7). Five Pocock looks keep it at 1.5–3.7% and still decide a 3% effect by pair 8–9. At a
+  every pair at 95% inflates false positives: simulated A/A runs came out "different" 10.9% of the
+  time when the noise is near the bound (a pair's difference σ 2%; 4.0% at σ 1%), and one did on adais (scroll, +0.7% [+0.1 … +3.7] at
+  pair 7). Five Pocock looks keep it at 1.6–4.2% (each side 0.7–2.2%; normal, t₃ and spiky noise,
+  12,000 series a row) and still decide a 3% effect by pair 8–9. These rows, and every other
+  simulation this section quotes, run through the bench's own decision code (`bench::sequential`)
+  with `bun scripts/dev/stats-sim.ts <strobe>` (the hidden `strobe stats` `simulate`, §5.11). At a
   look: stop when the primary has a verdict; from 12 pairs, stop as `underpowered` when the pairs
   needed exceed 40, or at `--max-time`: the experiment's deadline, and from the first look each
   series' own share of it, the time left when the series began divided among the series still to
@@ -2181,12 +2199,15 @@ flowchart LR
     `d − δ` (θ = δ), which is two one-sided tests at 2.5% each; it joins the other secondaries' two-sided
     p-values in one Holm family at 5%, and keeps its verdict when Holm rejects and its 95% interval
     clears the margin. Exact counters compare their exact difference with the margin, outside Holm.
-  - **Checked** (simulation of the real code, 4,000 sequential series per row, normal and t₃
-    differences, σ 1% and 3%): at the boundary θ = δ each claim came out 2.2–2.8% (nominal 2.5%;
-    standard error 0.25%), for lower- and higher-is-better metrics, and in an A/A with margin 0%
-    (the boundary again). At θ = 0, σ 3%, margin 2%: `no worse` in 94% of series after 22 pairs on
-    average, where two-sided equivalence (±2%) said `same` in 87% after 29; with t₃ tails 77% against
-    53%. A true +5% with margin 2% was `worse` in 97–100%. `--aa --noworse 0%` on a device is the A/A
+  - **Checked** (`scripts/dev/stats-sim.ts --only noworse`: 4,000 sequential series per row through
+    `bench::sequential`, normal and t₃ differences, σ of a pair's difference 1% and 3%): at the
+    boundary θ = δ each claim came out 1.7–2.7% (nominal 2.5%; standard error 0.25%), for lower- and
+    higher-is-better metrics, and in an A/A with margin 0% (the boundary again: 1.8% and 2.2%). At
+    θ = 0, σ 3%, margin 2%: `no worse` in 73% of series after 16 pairs on average, where two-sided
+    equivalence (±2%) said `same` in 58% after 23 (the rest `underpowered`, the futility stop); with
+    t₃ tails 90% against 88%. A true +5% with margin 2% was `worse` in 94% (σ 3%) and 100% (σ 1%).
+    The figures this bullet quoted before (94% against 87%, t₃ 77% against 53%, 97–100%) came from
+    a harness outside the repository and are not reproduced. `--aa --noworse 0%` on a device is the A/A
     for this mode: each claim must stay near 2.5%.
 - **Families of journeys** (an implementation comparison, `comparison: "implementations"`): each
   journey keeps its own sequential verdict; `--filter` never changes one. The scoreboard ("better in
@@ -2219,15 +2240,16 @@ flowchart LR
     better or worse at an earlier look runs on to it, like `holm_pairs` for secondaries.
   - **No worse in all** (`--noworse X%` on every journey): an intersection–union claim, every compared
     journey `no worse` at its own 2.5% one-sided, with no multiplicity correction (Berger 1982).
-  - **Checked** (simulation of the real `stats.rs`, 2,000 families per row, normal and t₃ log-ratio
-    differences, σ 1% and 3%, looks 8–40 at 98.42%, runs on to family_min_pairs): A/A families of 3,
-    5, 8 and 10 journeys counted any journey `better` in 0.25–1.4% and any `worse` in 0.25–2.0%
-    (each FWER ≤ 5%; per journey without Holm the same families showed a win in 2.2–22%); one
-    journey exactly at a 5% margin and the rest at 0 or at the margin: "no worse in all" 1.9–2.7%
-    (nominal 2.5%, standard error 0.35%); every journey truly −30% (σ 3%): all M counted in 100% of
-    families for M = 3, 5, 7, 10 when they run on to family_min_pairs, in 0% when they stop at 8
-    pairs; three true −20% journeys among eight: 3.00 of 3 counted, a null counted better or worse
-    in 2.4% of families. Mirror (the same draws with the sides swapped, six journeys: two −20%, two
+  - **Checked** (`scripts/dev/stats-sim.ts --only family`: 2,000 families per row, each journey
+    through `bench::sequential` and the family through `family::Board`, as a result.json reads;
+    normal and t₃ log-ratio differences, σ of a pair's difference 1% and 3%, looks 8–40 at 98.42%,
+    runs on to family_min_pairs): A/A families of 3, 5, 8 and 10 journeys counted any journey
+    `better` in 0.25–1.75% and any `worse` in 0.2–1.55% (each FWER ≤ 5%); one journey exactly at a
+    5% margin and the rest at 0: "no worse in all" 1.6% (nominal ≤ 2.5%); every journey truly −30%
+    (σ 3%): all M counted in 100% of families for M = 3, 5, 7, 10 (they run on to family_min_pairs,
+    9–11 pairs); three true −20% journeys among eight: all three counted, a null counted better in
+    1.3% and worse in 0.9% of families. The figures quoted here before (a harness outside the
+    repository: 0.25–1.4%, 0.25–2.0%, 1.9–2.7%, 2.4%) agree within their noise. Mirror (the same draws with the sides swapped, six journeys: two −20%, two
     +20%, two 0): `better` and `worse` swapped in every one of 500 families; in 14 a null journey
     read `same` on one side and `unclear` on the other, because the ±2% bound is set on the ratio
     (ln 0.98 to ln 1.02 is not symmetric), which stops one side's series at an earlier look.
