@@ -104,8 +104,8 @@ fn looks(r: &Value) -> Vec<usize> {
 /// ratios, else differences), from its timed blocks. Every pair with both values counts: one with a
 /// value of 0 or less (taken after the look that decided, whose pairs were all positive) turns the
 /// whole series to differences, as `stats::compare` would, rather than being dropped. Returns the
-/// differences and whether they are log ratios.
-fn primary_diffs(s: &Value) -> (Vec<f64>, bool) {
+/// differences, whether they are log ratios, and base's and head's medians.
+fn primary_diffs(s: &Value) -> (Vec<f64>, bool, f64, f64) {
     let m = s["primary"]["metric"].as_str().unwrap_or("");
     let mut by: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
     for b in s["blocks"].as_array().into_iter().flatten() {
@@ -120,14 +120,17 @@ fn primary_diffs(s: &Value) -> (Vec<f64>, bool) {
     }
     let pairs: Vec<(f64, f64)> = by.into_values().filter(|(a, b)| a.is_finite() && b.is_finite()).collect();
     let relative = s["primary"]["relative"] == true && pairs.iter().all(|(a, b)| *a > 0.0 && *b > 0.0);
-    (pairs.into_iter().map(|(a, b)| if relative { (b / a).ln() } else { b - a }).collect(), relative)
+    let median = |head: bool| crate::metrics::median(&pairs.iter().map(|p| if head { p.1 } else { p.0 }).collect::<Vec<_>>());
+    let (base, head) = (median(false), median(true));
+    (pairs.into_iter().map(|(a, b)| if relative { (b / a).ln() } else { b - a }).collect(), relative, base, head)
 }
 
 /// A series' repeated p: as the bench stored it, else from its blocks and the plan's looks. A stable
 /// counter compared exactly has no noise: decided, its p is 0. A primary in non-inferiority is tested
 /// against its margin (`stats::margin_shift`), as its verdict was; and a better or worse verdict whose
-/// pairs now lean the other way (the pairs run on past its look) has p 1: Holm never confirms a
-/// direction its data no longer show.
+/// pairs now lean the other way (the pairs run on past its look, by their Hodges–Lehmann estimate, as
+/// the interval reads them: a majority a little one way can sit beside a long tail the other) has
+/// p 1: Holm never confirms a direction its data no longer show.
 pub fn p_repeated(r: &Value, s: &Value) -> f64 {
     let c = &s["primary"];
     if let Some(p) = c["p_repeated"].as_f64() {
@@ -136,12 +139,12 @@ pub fn p_repeated(r: &Value, s: &Value) -> f64 {
     if c["exact"] == true {
         return if stats::kind_of(c).decided() { 0.0 } else { 1.0 };
     }
-    let (mut d, relative) = primary_diffs(s);
+    let (mut d, relative, base, head) = primary_diffs(s);
     let def = stats::def_in(c);
-    // The margin as the comparison kept it: a fraction for ratios, the unit otherwise.
-    if let (Some(m), Some(def)) = (c["noworse"].as_f64(), def)
-        && relative == (c["relative"] == true)
-    {
+    // The margin as the comparison kept it (a fraction for ratios, the unit otherwise), in the scale
+    // of these differences: a pair with a 0 run on past the look turns a ratio's margin into units.
+    if let (Some(m), Some(def)) = (c["noworse"].as_f64(), def) {
+        let m = if relative || c["relative"] != true { m } else { stats::in_unit(def, m, base, head) };
         let shift = stats::margin_shift(def, relative, m);
         d.iter_mut().for_each(|x| *x -= shift);
     }
@@ -152,7 +155,7 @@ pub fn p_repeated(r: &Value, s: &Value) -> f64 {
         VerdictKind::Worse => Some(if lower { 1.0 } else { -1.0 }),
         _ => None,
     };
-    let lean = crate::metrics::median(&d);
+    let lean = stats::hodges_lehmann(&d, 0.5).0;
     if way.is_some_and(|w: f64| lean.is_finite() && lean != 0.0 && lean.signum() != w) {
         return 1.0;
     }

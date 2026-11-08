@@ -2646,17 +2646,24 @@ fn checkpoint(ctx: &mut Ctx, label: &str, entry: Value) {
 /// wall time and each side's primary value in them (`warmup_values`); a stop sets `halted`.
 fn warm_gpu(ctx: &mut Ctx, s: &Series, variants: &[Variant], halted: &mut Option<Error>) -> Result<(usize, f64, Value)> {
     let (mut blocks, mut ms, mut values) = (0usize, 0.0f64, json!({}));
+    // A warm-up block runs as the timed blocks after it will: the same trace set, the same kind of
+    // counting (SPEC §7.5).
+    let split = counting(s);
+    let main_counters = split == Counting::Only || (split == Counting::Separate && counted_apart(&s.primary));
+    let exec = Exec::timed(timed_set(ctx), ctx.runs, false).counting(main_counters);
+    // A `--pairs N` smoke run below the pairs any verdict needs decides nothing: no block for it.
+    let smoke = ctx.args.get("pairs").and_then(|p| p.parse::<usize>().ok()).is_some_and(|n| n < stats::min_pairs(0.95));
     for v in variants.iter() {
         // Each side's own target (an implementation comparison's two warm separately).
         let warming = as_side(ctx, s, v, |ctx, s| {
             let t = ctx.describe["targets"][&s.target].clone();
             gpu_warming(ctx, s, &t)
         })?;
-        let settling = !warming && matches!(ctx.mode, Mode::Compare | Mode::Blocks(_)) && s.launch.is_null();
+        let settling = !warming && !smoke && matches!(ctx.mode, Mode::Compare | Mode::Blocks(_)) && s.launch.is_null();
         if settling && ctx.launched.insert(format!("{}\n{}\nsettle", s.label(), v.role)) {
             progress(format!("  {} warm-up block (discarded): the series' first blocks run slow", v.role));
             let warm_started = Instant::now();
-            match block_on_screen(ctx, s, v, 0, &Exec::timed(Set::Lean, ctx.runs, false)) {
+            match block_on_screen(ctx, s, v, 0, &exec) {
                 Ok(b) => {
                     blocks += 1;
                     ms += warm_started.elapsed().as_secs_f64() * 1e3;
@@ -2681,10 +2688,12 @@ fn warm_gpu(ctx: &mut Ctx, s: &Series, variants: &[Variant], halted: &mut Option
             let before = isolate::gpu_cache_bytes(&store);
             progress(format!("  {} warm-up block {round} (discarded): fills its GPU shader caches", v.role));
             let warm_started = Instant::now();
-            match block_on_screen(ctx, s, v, 0, &Exec::timed(Set::Lean, ctx.runs, false)) {
+            match block_on_screen(ctx, s, v, 0, &exec) {
                 Ok(b) => {
                     blocks += 1;
                     ms += warm_started.elapsed().as_secs_f64() * 1e3;
+                    // The last warm-up block's reading, as a settling block's.
+                    values[v.role] = json!(b.values.get(&s.primary).copied().filter(|x| x.is_finite()));
                     if let Some(dir) = b.recording.as_deref().and_then(|id| store::resolve(id).ok()) {
                         let _ = std::fs::remove_dir_all(dir);
                     }
@@ -3007,12 +3016,12 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         let def = def_in(&s.primary, &blocks)?.unwrap_or(def);
         let verdict_before = driver.decided_at.as_ref().map(|c| c.verdict.clone());
         let (lk, step) = driver.after_pair(&s.primary, def, &primary_pairs, || tested_names(s, script, &blocks, &pairs, bound).len());
-        if let Some(sequential::Look { cmp, look, decided, next, .. }) = &lk {
+        if let Some(sequential::Look { cmp, look, decided, next, likely, .. }) = &lk {
             // Where this series likely ends: at the look its projection reaches, or where it gives up.
             let target = if *decided || design.fixed {
                 if *decided { n } else { max_pairs }
             } else {
-                let need = cmp.needed_pairs.unwrap_or(max_pairs).max(n + 1);
+                let need = likely.unwrap_or(max_pairs).max(n + 1);
                 let at = if need > max_pairs { need.min(FUTILITY_FROM.max(n + 1)) } else { need };
                 design.looks.iter().copied().find(|&l| l >= at).unwrap_or(max_pairs)
             };
@@ -4023,9 +4032,11 @@ fn analyse(s: &Series, def: &MetricDef, blocks: &[Block], pairs: &[(usize, usize
         // A trend smaller than 1% end to end (rounding of a near-constant difference) changes no verdict.
         let base = metrics::median(&pairs.iter().map(|&(a, _)| val(&blocks[a], &s.primary)).filter(|x| x.is_finite()).collect::<Vec<_>>()).abs();
         let range = d.iter().copied().fold(f64::NEG_INFINITY, f64::max) - d.iter().copied().fold(f64::INFINITY, f64::min);
-        // A difference moves at least past a floor, as `stats::compare` floors its bound: 0.5 of the
-        // unit, a whole one for counts (a count that went 0 → 1 once is no trend).
-        let trend = if relative { range >= 0.01 } else { range > (0.01 * base).max(if def.unit == "count" { 1.0 } else { 0.5 }) };
+        // A difference moves at least 1% of base, in the unit as `stats::compare` sets its bound
+        // (`stats::in_unit`: no floor for a score or a duration, which a 0.5 floor once hid), and a
+        // whole count for counts (a count that went 0 → 1 once is no trend).
+        let floor = stats::in_unit(def, 0.01, base, 0.0).max(if def.unit == "count" || def.kind == model::Kind::Exact { 1.0 } else { 0.0 });
+        let trend = if relative { range >= 0.01 } else { range > floor };
         if rho.abs() > 0.6 && trend {
             w.push(validity::warn("Drift", format!("the difference trends across pairs (Spearman {rho:.2}): the machine changed during the run")));
         }

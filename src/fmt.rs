@@ -32,14 +32,15 @@ pub fn bytes(v: f64) -> String {
 }
 
 /// Decimals a number of this size needs to show its first significant digit, at least `min` and at
-/// most `max`: 0.03 needs 2, 0.004 needs 3, 12 needs none. 0 needs `min`.
+/// most `max`: 0.03 needs 2, 0.004 needs 3, 12 needs none. 0, and a value too small to show at `max`
+/// (an interval end of 8.67·10⁻¹⁸ from the Walsh averages' rounding), need `min`: they print as 0.
 pub fn digits_for(v: f64, min: usize, max: usize) -> usize {
     let a = v.abs();
     if !a.is_finite() || a == 0.0 {
         return min;
     }
     // The decimal that shows it, after rounding: 0.096 shows as 0.1 at one decimal.
-    let d = (0..=max).find(|&d| (a * 10f64.powi(d as i32)).round() >= 1.0).unwrap_or(max);
+    let d = (0..=max).find(|&d| (a * 10f64.powi(d as i32)).round() >= 1.0).unwrap_or(min);
     d.clamp(min, max)
 }
 

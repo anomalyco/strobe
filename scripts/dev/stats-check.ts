@@ -164,6 +164,10 @@ if (group("digits")) {
     { op: "pct_ci", est: 0.052, lo: 0.037, hi: 0.067 },
     { op: "pct_ci", est: 0.4, lo: 0.0004, hi: 0.8 },
     { op: "pct_vs", r: 0.152, threshold: 0.15 },
+    // Walsh-average dust at an interval's end prints as 0, not 0.000%.
+    { op: "pct_ci", est: 0.05, lo: 8.67e-18, hi: 0.1 },
+    { op: "value", v: 0.287, unit: "MB" },
+    { op: "value", v: 1e-7, unit: "MB" },
     { op: "bound", fraction: 0.003, relative: true, abs: 0.003, unit: "ms" },
     { op: "bound", fraction: 0.015, relative: true, abs: 0.015, unit: "ms" },
   ]

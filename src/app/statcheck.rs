@@ -13,17 +13,20 @@ use std::io::BufRead;
 mod simulate;
 
 pub fn run(_args: &Args) -> Result<Output> {
-    let mut out = String::new();
+    let (mut out, mut all) = (String::new(), Vec::new());
     for line in std::io::stdin().lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let q: Value = serde_json::from_str(&line)?;
-        out += &answer(&q).unwrap_or_else(|e| json!({ "error": e.message })).to_string();
+        let a = answer(&q).unwrap_or_else(|e| json!({ "error": e.message }));
+        out += &a.to_string();
         out.push('\n');
+        all.push(a);
     }
-    Ok(Output::new(out, Value::Null))
+    // `--json`: the answers as one array, in order.
+    Ok(Output::new(out, Value::Array(all)))
 }
 
 fn nums(v: &Value) -> Vec<f64> {

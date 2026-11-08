@@ -93,7 +93,12 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
             progress(format!("\n{} moved it against an earlier commit: benched against its parent {} to check it did it alone", short(&bad), short(&good)));
             let s = step(args, &id, &root, side, steps.len(), &good, &bad)?;
             if moved(&s) != Some(sign) {
-                not_alone = Some(s.clone());
+                if s["decided"] == true {
+                    not_alone = Some(s.clone());
+                } else {
+                    // No verdict against its parent: not known either way, like any undecided step.
+                    undecided.push((bad.clone(), good.clone()));
+                }
             }
             steps.push(s);
         }
@@ -102,6 +107,13 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
     // Where the move is known to be when no one commit did it: from the `good` the culprit last moved against.
     let moved_from =
         steps.iter().rev().find(|st| st["commit"] == bad.as_str() && direction.is_some_and(|d| moved(st) == Some(d))).and_then(|st| st["good"].as_str()).unwrap_or(&first_good).to_string();
+    // With steps that had no verdict, the move may also hide behind the first of them: the range starts
+    // at whichever `good` is earlier on the line (the first `good` is before every commit).
+    let at = |c: &str| line.iter().position(|v| v["commit"] == c).map_or(-1, |p| p as i64);
+    let from = match undecided.first() {
+        Some((_, g)) if at(g) < at(&moved_from) => g.clone(),
+        _ => moved_from.clone(),
+    };
     // What the bisect found, for code (`track`, `--require-verdict`): the words below are for people.
     let outcome = match (&culprit, undecided.is_empty()) {
         _ if not_alone.is_some() => Outcome::Unclear,
@@ -110,6 +122,20 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
         (Some(_), false) => Outcome::Unclear,
     };
     let verdict = match (&culprit, undecided.is_empty()) {
+        // Not against its parent, but steps without a verdict: where the move is stays open.
+        _ if not_alone.is_some() && !undecided.is_empty() => format!(
+            "unclear: {} {} moved {} against {} but not against its parent {} ({}), and {} step(s) had no verdict ({}), so the move may be anywhere in {}..{}; more pairs (--pairs auto) settle it",
+            short(&bad),
+            subject(&root, &bad),
+            steps[0]["metric"].as_str().unwrap_or(""),
+            short(&moved_from),
+            short(&good),
+            not_alone.as_ref().and_then(|s| s["verdict"].as_str()).unwrap_or(""),
+            undecided.len(),
+            undecided.iter().map(|c| short(&c.0)).collect::<Vec<_>>().join(", "),
+            short(&from),
+            short(&bad)
+        ),
         _ if not_alone.is_some() => format!(
             "unclear: {} {} moved {} against {} but not against its parent {} ({}): no one commit did it; it built up over {}..{} (each step under what one bench resolves), or more pairs settle it",
             short(&bad),
@@ -136,7 +162,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
     // Where the culprit may still be: from the first undecided step's `good` (or the last `good`) to `bad`.
     // No one commit: the range the move built up over.
     let remaining = match &not_alone {
-        Some(_) => Some(json!({ "good": moved_from, "bad": bad })),
+        Some(_) => Some(json!({ "good": from, "bad": bad })),
         None => culprit.as_ref().map(|_| json!({ "good": undecided.first().map_or(&good, |u| &u.1), "bad": bad })),
     };
     // Good against bad, as step 0 found it; a culprit that more pairs must still settle, or no one

@@ -85,6 +85,9 @@ pub(crate) struct Look {
     pub decided: bool,
     /// At a look from `FUTILITY_FROM`, its projection needs more pairs than the last look: give up.
     pub hopeless: bool,
+    /// The likely case's pairs (`FUTILITY_POWER`): where the series likely ends, for its ETA and the
+    /// futility stop. `cmp.needed_pairs` keeps the 80% figure (`PLAN_POWER`) that it prints.
+    pub likely: Option<usize>,
     /// A share primary at its ceiling on both sides at a look without a verdict.
     pub saturated: bool,
     /// The next planned look.
@@ -98,21 +101,21 @@ pub(crate) struct Look {
 pub(crate) fn look(design: &Design, name: &str, def: &MetricDef, pp: &[(f64, f64)]) -> Look {
     let n = pp.len();
     let look = design.looks.contains(&n);
-    let mut cmp = design.compare(name, def, pp);
+    let cmp = design.compare(name, def, pp);
     let decided = look && cmp.decided;
-    if !cmp.decided {
+    let likely = (!cmp.decided).then(|| {
         let d: Vec<f64> = pp.iter().map(|&(a, b)| if cmp.relative { (b / a).ln() } else { b - a }).collect();
-        cmp.needed_pairs = Some(match cmp.noworse {
+        match cmp.noworse {
             Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, cmp.relative, m), design.confidence, stats::FUTILITY_POWER),
             None => stats::pairs_needed(&d, if cmp.relative { (1.0 + design.bound).ln() } else { cmp.bound }, design.confidence, stats::FUTILITY_POWER),
-        });
-    }
-    let hopeless = !design.fixed && look && n >= FUTILITY_FROM && cmp.needed_pairs.is_some_and(|need| need > design.max_pairs());
+        }
+    });
+    let hopeless = !design.fixed && look && n >= FUTILITY_FROM && likely.is_some_and(|need| need > design.max_pairs());
     // A share at its ceiling on both sides (91% vs 92% dropped frames at background priority) moves
     // with nothing the builds do: more pairs only narrow an interval around "same at the ceiling".
     let median = |side: usize| crate::metrics::median(&pp.iter().map(|p| if side == 0 { p.0 } else { p.1 }).collect::<Vec<_>>());
     let saturated = look && !decided && def.unit == "%" && !name.starts_with("cpu.") && median(0) >= 80.0 && median(1) >= 80.0;
-    Look { cmp, look, decided, hopeless, saturated, next: design.looks.iter().find(|&&l| l > n).copied() }
+    Look { cmp, look, decided, hopeless, likely, saturated, next: design.looks.iter().find(|&&l| l > n).copied() }
 }
 
 /// What the series does after a pair (`Driver::after_pair`).
@@ -207,17 +210,16 @@ pub(crate) fn closing(design: &Design, def: &MetricDef, primary: &mut Comparison
     if !matches!(stopped, "more pairs cannot decide it" | "max pairs" | "max time") {
         return None;
     }
+    // The 80% figure (`PLAN_POWER`) the comparison already holds, taken again from every pair (a
+    // primary decided at an earlier look is not closed here).
+    let d: Vec<f64> = pp.iter().map(|&(a, b)| if primary.relative { (b / a).ln() } else { b - a }).collect();
+    let n80 = match primary.noworse {
+        Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, primary.relative, m), design.confidence, stats::PLAN_POWER),
+        None => stats::pairs_needed(&d, if primary.relative { (1.0 + design.bound).ln() } else { primary.bound }, design.confidence, stats::PLAN_POWER),
+    };
+    primary.needed_pairs = (n80 != usize::MAX).then_some(n80);
     Some(match primary.needed_pairs {
-        Some(n) if n != usize::MAX && n > pp.len() => {
-            let d: Vec<f64> = pp.iter().map(|&(a, b)| if primary.relative { (b / a).ln() } else { b - a }).collect();
-            let n80 = match primary.noworse {
-                Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, primary.relative, m), design.confidence, stats::PLAN_POWER),
-                None => stats::pairs_needed(&d, if primary.relative { (1.0 + design.bound).ln() } else { primary.bound }, design.confidence, stats::PLAN_POWER),
-            };
-            let n80 = if n80 == usize::MAX { n } else { n80.max(n) };
-            primary.needed_pairs = Some(n80);
-            (VerdictKind::Underpowered, format!("underpowered: ~{n80} pairs needed (for an 80% chance)"))
-        }
+        Some(n80) if n80 > pp.len() => (VerdictKind::Underpowered, format!("underpowered: ~{n80} pairs needed (for an 80% chance)")),
         _ if stopped == "max pairs" && !design.fixed => (
             VerdictKind::Unclear,
             format!("unclear after {} pairs, the last planned look: the difference sits on the {}", pp.len(), if design.margin.is_some() { "margin" } else { "equivalence bound" }),

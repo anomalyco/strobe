@@ -241,6 +241,8 @@
         "confidence": { "type": ["number", "null"], "description": "The interval's achieved coverage." },
         "p": { "type": ["number", "null"] },
         "bound": { "type": ["number", "null"], "description": "The equivalence bound (or the no-worse margin), in the comparison's scale." },
+        "better": { "enum": ["lower", "higher"], "description": "The direction it counted as better: the metric's, or for a metric.<name> the one its command's lines gave. Absent in older results (readers: stats::better_in)." },
+        "words": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2, "description": "Its words for the better and worse directions (faster, slower; more, less for a metric.<name> better higher)." },
         "verdict": { "type": "string", "description": "In words: faster (small), same (±2%), refused (TailTooShort): …" },
         "verdict_kind": { "$ref": "#/definitions/verdictKind" },
         "decided": { "type": "boolean" },
@@ -255,7 +257,7 @@
       }
     },
     "perSide": {
-      "description": "implementations: a per_side metric's blocks on one side: their median and a Hodges-Lehmann interval over them. Never compared.",
+      "description": "implementations: a per_side metric's blocks on one side: their median and the median's own interval over them (order statistics, stats::median_interval). Never compared.",
       "type": "object",
       "additionalProperties": {
         "type": "object",
@@ -373,8 +375,10 @@
         "bound": { "type": "number" },
         "noworse": { "type": "object", "additionalProperties": { "type": "number" } },
         "holm_pairs": { "type": ["integer", "null"] },
+        "primary_pairs": { "type": "integer", "description": "The pairs the primary's verdict, estimate and interval come from: the look that decided it, fewer than pairs when the series ran on for its secondaries or family. Absent in older results (then pairs)." },
         "warmup_blocks": {},
         "warmup_ms": {},
+        "warmup_values": { "type": ["object", "null"], "additionalProperties": { "type": ["number", "null"] }, "description": "The discarded warm-up blocks' primary value per side (base, head; SPEC 9.1); null for a resumed series." },
         "steps": { "description": "Mean wall time per step of a block, in order." },
         "elapsed_ms": { "type": "number" },
         "waited_ms": { "type": "number" },

@@ -174,6 +174,12 @@ pub fn median_interval(v: &[f64], confidence: f64) -> (f64, f64, f64, f64) {
     s.sort_by(|a, b| a.total_cmp(b));
     let med = if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 };
     let alpha = 1.0 - confidence;
+    // Above 500 values 2ⁿ leaves an f64: the binomial's normal approximation (with continuity).
+    if n > 500 {
+        let z = normal_quantile(1.0 - alpha / 2.0);
+        let r = ((n as f64 + 1.0) / 2.0 - z * (n as f64).sqrt() / 2.0).floor().max(1.0) as usize;
+        return (med, s[r - 1], s[n - r], confidence);
+    }
     // P(B ≤ k) for k = 0, 1, …: the binomial's lower tail, built term by term.
     let total = 2f64.powi(n as i32);
     let (mut term, mut tail, mut r) = (1.0f64, 0.0f64, 0usize);
@@ -474,8 +480,11 @@ impl Comparison {
     /// a refused comparison's values are not a measurement anyone should read.
     pub fn refuse(&mut self, r: Refusal) {
         (self.base, self.head, self.estimate, self.lo, self.hi) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
-        // Nor its p: a refused metric is tested by no one (it never joins a Holm family).
+        // Nor its p, coverage or exactness: a refused metric is tested by no one (it never joins a Holm
+        // family), and a refused exact counter once printed `exact` as its interval.
         self.p = f64::NAN;
+        self.confidence = f64::NAN;
+        self.exact = false;
         self.needed_pairs = None;
         self.verdict = format!("refused ({}): {}", r.validator, r.summary);
         self.kind = VerdictKind::Refused;
@@ -630,12 +639,9 @@ pub fn compare_noworse(name: &str, def: &MetricDef, pairs: &[(f64, f64)], margin
     let decided = kind.decided();
     c.set_verdict(kind, verdict);
     c.decided = decided;
-    c.needed_pairs = (!decided && n >= 2).then(|| {
-        let hw = (c.hi - c.lo) / 2.0;
-        let dist = (margin_abs - w_est).abs();
-        let estimate = if dist <= 0.0 || hw <= 0.0 { usize::MAX } else { ((n as f64) * (hw / dist).powi(2)).ceil() as usize };
-        estimate.max(min_pairs(confidence))
-    });
+    // Pairs for an 80% chance to decide (`PLAN_POWER`, as `plan` and the bench's `underpowered` say
+    // them), projected from a robust spread, not from this interval's half-width.
+    c.needed_pairs = (!decided && n >= 2).then(|| pairs_needed_noworse(&d, shift, confidence, PLAN_POWER)).filter(|&n| n != usize::MAX);
     c
 }
 
@@ -751,14 +757,10 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
         (VerdictKind::Unclear, "unclear".to_string())
     };
     let decided = kind.decided();
-    let needed_pairs = (!decided && n >= 2).then(|| {
-        let hw = (hi - lo) / 2.0;
-        let dist_diff = est.abs();
-        let dist_same = bound_abs - est.abs();
-        let dist = dist_diff.max(dist_same);
-        let estimate = if dist <= 0.0 || hw <= 0.0 { usize::MAX } else { ((n as f64) * (hw / dist).powi(2)).ceil() as usize };
-        estimate.max(min_pairs(confidence))
-    });
+    // Pairs for an 80% chance to decide (`PLAN_POWER`, as `plan` and the bench's `underpowered` say
+    // them), projected from a robust spread of the differences, not from this interval's half-width.
+    // None when nothing projects (a median on the boundary).
+    let needed_pairs = (!decided && n >= 2).then(|| pairs_needed(&d, if relative { (1.0 + bound).ln() } else { bound_abs }, confidence, PLAN_POWER)).filter(|&n| n != usize::MAX);
     Comparison {
         metric: name.to_string(),
         n,

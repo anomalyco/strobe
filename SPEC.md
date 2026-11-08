@@ -2041,7 +2041,10 @@ flowchart LR
   plan just switched and the CPUs just cleared. The rank test shrugs off one pair, but the error no
   longer split evenly: simulated with a +3.4% first block at σ 6%, false `faster` 2.53% against
   `slower` 1.45% (1.75% and 1.71% with the blocks discarded), and a `--noworse 0%` A/A's `no worse`
-  3.9% with a +30% first block (2.1% discarded). The series keeps what they read (`warmup_values`).
+  3.9% with a +30% first block (2.1% discarded). The series keeps what they read (`warmup_values`;
+  for GPU warming, its last block's). A warm-up block runs as the timed blocks do (their trace set
+  and counting). `--blocks N` (a tracked point) gets one too; a `--pairs N` smoke run below 6 pairs
+  (no verdicts) gets none.
   Checked on vps (100 A/A of the same command, 2026-11-08): pair 0 now −0.57% (standard error
   0.67%; −3.38% before), every pair within ±1.3%, and the discarded base block read 3.3% (se 0.9%)
   above pair 0's base: the slow first block is the one thrown away.
@@ -2067,9 +2070,11 @@ flowchart LR
   for any series and so never stopped one), not the interval width: early intervals are [min, max] of few Walsh
   averages, and one odd pair once stopped a series (a tab switch, "~78 pairs needed") that its
   A/A twin decided as `same` at 19. The stop asks for the likely case (an even chance that the
-  interval clears its boundary: give up only when even that needs more than the last look); the
-  pairs an `underpowered` verdict names are for an 80% chance, as `plan`'s are, so the two never
-  differ by the factor (z + z₀.₈)²/z² ≈ 1.8 they once did. `--pairs N` is one look at N at 95%. Secondaries and
+  interval clears its boundary: give up only when even that needs more than the last look, and the
+  ETA aims there); every `needed_pairs` a comparison keeps or prints, the pairs an `underpowered`
+  verdict names among them, is for an 80% chance from the same robust spread, as `plan`'s are, so the
+  two never differ by the factor (z + z₀.₈)²/z² ≈ 1.8 they once did, and a series whose 80% figure
+  exceeds its pairs is `underpowered`, not `unclear`. `--pairs N` is one look at N at 95%. Secondaries and
   descriptive rows use 95% intervals at the final pair. When the primary is decided at a look with
   fewer pairs than the tested secondaries need to clear Holm (2·2⁻ⁿ ≤ 0.05/tests: 9 pairs from 7
   tests), the series runs on to that many pairs for them and keeps the primary's verdict from its
@@ -2208,7 +2213,10 @@ flowchart LR
     higher-is-better metrics, and in an A/A with margin 0% (the boundary again: 1.8% and 2.2%). At
     θ = 0, σ 3%, margin 2%: `no worse` in 73% of series after 16 pairs on average, where two-sided
     equivalence (±2%) said `same` in 58% after 23 (the rest `underpowered`, the futility stop); with
-    t₃ tails 90% against 88%. A true +5% with margin 2% was `worse` in 94% (σ 3%) and 100% (σ 1%).
+    t₃ tails 90% against 88%. (t₃ here is a block's Student t with 3 degrees of freedom scaled to
+    standard deviation σ: the same σ puts most blocks closer together than a normal does, with a few
+    far out, and the rank test and Hodges–Lehmann interval read the bulk, so t₃ rows decide more often
+    than normal rows at the same σ.) A true +5% with margin 2% was `worse` in 94% (σ 3%) and 100% (σ 1%).
     The figures this bullet quoted before (94% against 87%, t₃ 77% against 53%, 97–100%) came from
     a harness outside the repository and are not reproduced. `--aa --noworse 0%` on a device is the A/A
     for this mode: each claim must stay near 2.5%.
@@ -3453,7 +3461,9 @@ to bisect). The midpoint is never `bad` itself. A step that does not move the pr
 resolves (`same (±2%)` per commit, `+6%` over the range), would land on whichever commit tipped
 the sum. So the culprit must also move the primary against its own parent: when no step benched
 that pair, one more step does, and when it does not move there the bisect is `unclear` ("no one
-commit did it"), with `remaining` the range from the `good` it last moved against. Every step is a full experiment of its own
+commit did it"), with `remaining` the range from the `good` it last moved against. With steps that
+had no verdict (that check among them) it claims no such thing: the move may be anywhere from the
+earlier of the first undecided step's `good` and that `good`. Every step is a full experiment of its own
 (`<id>_s<k>`, with the bisect's flags; `--why never` unless given), and the file must narrow to
 one series. A step without a verdict counts as "not moved" and makes the result `unclear`, naming
 the range the culprit may still hide in. `--require-verdict` exits 5 unless the result is `found`
