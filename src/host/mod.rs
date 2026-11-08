@@ -570,6 +570,9 @@ pub struct Placement {
     pub work: [f64; 4],
     pub per_dip: f64,
     pub maximized: bool,
+    /// The frame's part nobody sees, which may lie past the work area (left, top, right, bottom; screen
+    /// units): Windows' invisible resize borders (none on a frameless popup), zero elsewhere.
+    pub unseen: [f64; 4],
 }
 
 /// A window's `Placement` now; None once it is gone.

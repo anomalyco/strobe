@@ -392,7 +392,7 @@ pub fn window_placement(hwnd: isize) -> Option<Placement> {
     let work = c.output()?.map(f64::from);
     let frame = [w.rect.0 as f64, w.rect.1 as f64, w.rect.2 as f64, w.rect.3 as f64];
     let maximized = frame.iter().zip(work).all(|(a, b)| (a - b).abs() <= 1.0);
-    Some(Placement { frame, client: (w.client.0 as f64, w.client.1 as f64), work, per_dip: 1.0, maximized })
+    Some(Placement { frame, client: (w.client.0 as f64, w.client.1 as f64), work, per_dip: 1.0, maximized, unseen: [0.0; 4] })
 }
 
 /// The window's container at `frame`, its content filling it (strobe's compositor draws no borders).

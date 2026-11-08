@@ -1373,7 +1373,7 @@ pub fn window_placement(id: isize) -> Option<super::Placement> {
     let work = work_area((frame[0] + frame[2] / 2.0, frame[1] + frame[3] / 2.0))?.work;
     // Within a point each way, as AX and CoreGraphics may round apart.
     let maximized = frame.iter().zip(work).all(|(a, b)| (a - b).abs() <= 1.0);
-    Some(super::Placement { frame, client: (frame[2], frame[3]), work, per_dip: 1.0, maximized })
+    Some(super::Placement { frame, client: (frame[2], frame[3]), work, per_dip: 1.0, maximized, unseen: [0.0; 4] })
 }
 
 /// Sets the window's frame through its accessibility element (`AXPosition`, `AXSize`, then the

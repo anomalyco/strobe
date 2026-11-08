@@ -1596,13 +1596,40 @@ pub fn restore_protocols(home: &Path) {
 mod macos_library {
     use super::*;
 
-    /// The bundle id (an app bundle's `CFBundleIdentifier`), else the executable's name, which is
-    /// what Cocoa uses for a bare executable's preferences.
+    /// The bundle id (an app bundle's `CFBundleIdentifier`, or a bare executable's own Info.plist
+    /// linked into it), else the executable's name, which is what Cocoa uses for a bare executable's
+    /// preferences; and a bundle's name.
     fn ids(app: &App) -> (String, Option<String>) {
         let bundle = app.exe.ancestors().find(|a| a.extension().is_some_and(|e| e == "app"));
-        let id = bundle.and_then(|b| host::output(Command::new("plutil").args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"]).arg(b.join("Contents/Info.plist"))));
+        let id = match bundle {
+            Some(b) => host::output(Command::new("plutil").args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"]).arg(b.join("Contents/Info.plist"))),
+            None => embedded_id(&app.exe),
+        };
         let name = bundle.and_then(|b| b.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| app.exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
-        (id.clone().unwrap_or_else(|| name.clone()), id.is_some().then_some(name))
+        let bundle_name = (bundle.is_some() && id.is_some()).then(|| name.clone());
+        (id.unwrap_or(name), bundle_name)
+    }
+
+    /// The `CFBundleIdentifier` of the Info.plist a bare executable carries in its `__TEXT,__info_plist`
+    /// section (`-sectcreate`), which CoreFoundation takes as the process's bundle id; any slice of a
+    /// universal binary.
+    fn embedded_id(exe: &Path) -> Option<String> {
+        use object::read::macho::FatArch;
+        use object::{Object, ObjectSection};
+        let data = std::fs::read(exe).ok()?;
+        let from = |bytes: &[u8]| -> Option<String> {
+            let obj = object::File::parse(bytes).ok()?;
+            let plist = obj.section_by_name("__info_plist")?.data().ok()?;
+            let text = String::from_utf8_lossy(plist);
+            let after = &text[text.find("<key>CFBundleIdentifier</key>")? + "<key>CFBundleIdentifier</key>".len()..];
+            let value = after.trim_start().strip_prefix("<string>")?;
+            Some(value[..value.find("</string>")?].trim().to_string()).filter(|s| !s.is_empty())
+        };
+        match object::FileKind::parse(&*data).ok()? {
+            object::FileKind::MachOFat32 => object::read::macho::MachOFatFile32::parse(&*data).ok()?.arches().iter().find_map(|a| from(a.data(&*data).ok()?)),
+            object::FileKind::MachOFat64 => object::read::macho::MachOFatFile64::parse(&*data).ok()?.arches().iter().find_map(|a| from(a.data(&*data).ok()?)),
+            _ => from(&data),
+        }
     }
 
     /// An executable outside any app bundle (a command-line program, a bare build).
@@ -1661,7 +1688,8 @@ mod macos_library {
                     p.display(),
                     if p.try_exists().is_err() { "may exist (macOS would not let strobe look)" } else { "exists" }
                 ),
-                if bare(app) {
+                // A bare executable without an Info.plist of its own goes by its file name.
+                if bare(app) && app.exe.file_name().is_some_and(|n| n.to_string_lossy() == id) {
                     "measure a copy of the program under another file name (macOS keys a bare executable's data by its name)"
                 } else {
                     "measure a build with its own bundle id (or one this account never ran)"

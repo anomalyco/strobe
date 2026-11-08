@@ -1086,7 +1086,14 @@ pub fn window_placement(hwnd: isize) -> Option<super::Placement> {
         let [l, t, rr, b] = invisible_borders(h, &r);
         let shown = [frame[0] + l, frame[1] + t, frame[2] - l - rr, frame[3] - t - b];
         let fills = shown.iter().zip(work).all(|(a, w)| (a - w).abs() <= 1.0);
-        Some(super::Placement { frame, client: ((c.right - c.left) as f64, (c.bottom - c.top) as f64), work, per_dip: GetDpiForWindow(h).max(96) as f64 / 96.0, maximized: IsZoomed(h) != 0 || fills })
+        Some(super::Placement {
+            frame,
+            client: ((c.right - c.left) as f64, (c.bottom - c.top) as f64),
+            work,
+            per_dip: GetDpiForWindow(h).max(96) as f64 / 96.0,
+            maximized: IsZoomed(h) != 0 || fills,
+            unseen: [l, t, rr, b],
+        })
     })
 }
 

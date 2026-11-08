@@ -16,10 +16,6 @@ const NEAR_DIP: f64 = 2.0;
 /// that lie outside it, even maximized.
 const SLACK_DIP: f64 = if cfg!(windows) { 8.0 } else { 1.0 };
 
-/// The part of a frame that lies past the work area unseen (DIP): Windows' invisible resize borders on
-/// the left, right and bottom. Elsewhere `SLACK_DIP` is only a rounding tolerance, never room to offer.
-const OVERHANG_DIP: f64 = if cfg!(windows) { 8.0 } else { 0.0 };
-
 /// The longest strobe waits for the window to take a size and its content to hold still.
 const SETTLE: Duration = Duration::from_secs(1);
 
@@ -195,7 +191,7 @@ impl Sizer {
                 let size = (p0.frame[2] + (w - c0.0) * k, p0.frame[3] + (h - c0.1) * k);
                 let work = p0.work;
                 if size.0 > work[2] + 2.0 * slack || size.1 > work[3] + slack {
-                    return Err(too_small(s, size, (p0.frame[2] - c0.0 * k, p0.frame[3] - c0.1 * k), work, k));
+                    return Err(too_small(s, size, (p0.frame[2] - c0.0 * k, p0.frame[3] - c0.1 * k), &p0));
                 }
                 host::set_window_frame(hwnd, inside(&p0, size))?;
                 Some((w, h))
@@ -242,7 +238,7 @@ impl Sizer {
             let (f, k, work) = (placed.frame, placed.per_dip, placed.work);
             let size = (f[2] + (w.0 - last.0) * k, f[3] + (w.1 - last.1) * k);
             if size.0 > work[2] + 2.0 * SLACK_DIP * k || size.1 > work[3] + SLACK_DIP * k {
-                return Err(too_small(s, size, (f[2] - last.0 * k, f[3] - last.1 * k), work, k));
+                return Err(too_small(s, size, (f[2] - last.0 * k, f[3] - last.1 * k), &placed));
             }
             let from = last;
             host::set_window_frame(hwnd, inside(&placed, size))?;
@@ -252,7 +248,7 @@ impl Sizer {
             Some(w) if !near(last, w) => {
                 let (size, k) = ((placed.frame[2], placed.frame[3]), placed.per_dip);
                 if clamped(&placed) {
-                    return Err(too_small(s, (size.0 + (w.0 - last.0) * k, size.1 + (w.1 - last.1) * k), (size.0 - last.0 * k, size.1 - last.1 * k), placed.work, k));
+                    return Err(too_small(s, (size.0 + (w.0 - last.0) * k, size.1 + (w.1 - last.1) * k), (size.0 - last.0 * k, size.1 - last.1 * k), &placed));
                 }
                 Err(Refusal::new(
                     ValidatorId::VariantMismatch,
@@ -284,11 +280,13 @@ fn inside(p: &Placement, size: (f64, f64)) -> [f64; 4] {
     [x, y, size.0, size.1]
 }
 
-/// `DisplayTooSmall` for a window of `size` (screen units) whose own part is `chrome`.
-fn too_small(s: Sizing, size: (f64, f64), chrome: (f64, f64), work: [f64; 4], k: f64) -> Error {
-    // The largest content whose window fits the work area (only its unseen borders past it); a value a
-    // rounding error short of a whole point at a fractional scale floors to that point.
-    let most = ((work[2] - chrome.0) / k + 2.0 * OVERHANG_DIP + 1e-6, (work[3] - chrome.1) / k + OVERHANG_DIP + 1e-6);
+/// `DisplayTooSmall` for a window of `size` (screen units) whose own part is `chrome`, placed as `p`.
+fn too_small(s: Sizing, size: (f64, f64), chrome: (f64, f64), p: &Placement) -> Error {
+    let (work, k, [l, t, r, b]) = (p.work, p.per_dip, p.unseen);
+    // The largest content whose window fits the work area, only its unseen borders past it (Windows'
+    // invisible resize borders as the window has them; `SLACK_DIP` is a tolerance, never room to offer);
+    // a value a rounding error short of a whole point at a fractional scale floors to that point.
+    let most = (((work[2] - chrome.0 + l + r) / k + 1e-6).max(0.0), ((work[3] - chrome.1 + t + b) / k + 1e-6).max(0.0));
     Refusal::new(
         ValidatorId::DisplayTooSmall,
         format!(

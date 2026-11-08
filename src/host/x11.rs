@@ -253,7 +253,7 @@ pub fn window_placement(id: isize) -> Option<super::Placement> {
     // Without a manager's maximized state (none, or one without it), a frame that fills the work area.
     let fills = frame.iter().zip(work).all(|(a, b)| (a - b).abs() <= 1.0);
     let max = with(|x| Some(if supports_maximized(x) { maximized(x, id as Window) } else { fills })).unwrap_or(fills);
-    Some(super::Placement { frame, client: (w.client.0 as f64, w.client.1 as f64), work, per_dip: s, maximized: max })
+    Some(super::Placement { frame, client: (w.client.0 as f64, w.client.1 as f64), work, per_dip: s, maximized: max, unseen: [0.0; 4] })
 }
 
 /// The frame as the client window's place and size (the frame less `_NET_FRAME_EXTENTS`), through

@@ -538,7 +538,11 @@ stop ends `track` and `bisect` (exit 130). Each invocation keeps its own progres
 then the bench ends as a stop does, with exit 124 and a hint to resume once unlocked (checked on
 adais, locked: exit 124 after `--unlock-wait 10s`). On macOS it caps each wait for nobody to use the
 Mac for a minute (a block whose app lost the front while a person used the Mac) the same way, and
-that wait prints a line a minute with the last input's age. Both keep the experiment's warm GPU cache
+that wait prints a line a minute with the last input's age. Wherever it ends a bench it is a stop,
+never a failure: a `--check` case (batched or not) is not run and `--resume` runs it, a series cut
+mid-pairs reads "stopped after N pairs" (resumable), as do its counter or timing pass and the report's
+stopped line, `--pixels-only` exits 124 too, and the block that met the wait had its recordings
+discarded before it waited. Both keep the experiment's warm GPU cache
 stores for `--resume`, and `track` and `bisect` take a bench that ended either way as that error,
 never as a partial answer (a bisect step without its pairs would otherwise move `good`). `--stop`
 and `--resume` together are a usage error. On Windows and in a
@@ -3676,7 +3680,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `NoCounter` | `energy.cpu`, `cpu.instructions` or `cpu.idle_wakes` where the OS does not count it per process, strobe may not read it, or a run counted only part of the processes (§7.5) |
 | `OutOfView` | a page input's element (a click, hover, drag, scroll, wheel or `down` at it, the click that focuses for `type` or `press`) shows no part in the viewport even scrolled into view: an ancestor clips it away (`overflow: clip`), or what shows is under a pixel. Input aimed there would land beside it; the message names the clipping ancestor (9.6 "Where input aims") |
 | `Covered` | a page input's element shows, but another element is where strobe would aim at every point it tries (its centre, its line boxes, then scrolled to the middle of the viewport, the centre and the centres of its visible part's quarters): a click there would reach that instead, as for a person. The message names the covering element; not transient (an overlay that stays). A native app's covered window is `WindowHidden` (9.6 "Where input aims") |
-| `DisplayTooSmall` | a headed page's declared viewport is larger than this display shows of a page in that browser: its work area (less the menu bar and Dock, the taskbar, panels) less the browser window's own part. Named with the most it can be, the work area and the window's part; checked right after the engine checks, before the first block (and by `strobe plan` from what strobe kept), refusing that series alone, and again when a block fits its window. Not transient: the device, not the variant (9.10 "Declared viewport"); and a `page.window` resize whose content and window part exceed the display's work area, or that the OS clamped to it (the call), whose fix names the largest content whose window fits the work area (on Windows with its invisible borders past the edges; never the point of rounding slack the check allows elsewhere, which had offered 1472 wide on air's 1470) |
+| `DisplayTooSmall` | a headed page's declared viewport is larger than this display shows of a page in that browser: its work area (less the menu bar and Dock, the taskbar, panels) less the browser window's own part. Named with the most it can be, the work area and the window's part; checked right after the engine checks, before the first block (and by `strobe plan` from what strobe kept), refusing that series alone, and again when a block fits its window. Not transient: the device, not the variant (9.10 "Declared viewport"); and a `page.window` resize whose content and window part exceed the display's work area, or that the OS clamped to it (the call), whose fix names the largest content whose window fits the work area, never below 0 (only the window's own invisible resize borders past the edges, as Windows reports them, none on a frameless popup; never the point of rounding slack the check allows elsewhere, which had offered 1472 wide on air's 1470) |
 | `DeviceMismatch` | a page target's page does not see the input devices its target is for (13.1 "Desktop input is checked"): a desktop page target's page, read once loaded and before `setup`, does not match `(hover: hover)`, `(pointer: fine)` or `(any-pointer: fine)`, matches `(any-pointer: coarse)`, has `ontouchstart` or `navigator.maxTouchPoints` above 0 (strobe turns touch off in Chromium and Firefox, so a touch screen passes there). Its own id, not `VariantMismatch` (two sides set up unlike each other, which also refuses sides whose pages saw different input) or `InputMismatch` (two sides got other input calls): it holds for one page alone. The detail lists what the page saw; the fix names the engine's settings (Chromium's `--blink-settings` and `--touch-events`, Firefox's pointer capabilities and touch preferences, none in WebKit). Also a driver call that sends input an emulated phone has no device for (`hover`, `move`, `wheel`, a mouse button's `down`/`up`, a `button` other than `left`, a tap's `modifiers`; 9.6 "Touch on an emulated phone"), refused before anything is sent; a page on a phone (`--mobile`) whose primary pointer is fine or hovers, or that has no touch points or touch event API (`validity::phone_input`: a mouse or trackpad connected to the phone) |
 | `Thermal` | a phone too hot to time (`validity::phone_hot`): PowerManager's thermal status moderate (2) or worse, a thermal headroom of 1.0 or more (`cmd thermalservice headroom`), its battery at 40 °C or more, a forced status (`override-status`), or neither a status nor a battery temperature to read. Read at each timed launch (again once the phone's slot is held) and after a timed block's runs. Transient: a bench waits up to 3 minutes (read every 15 s) holding nothing (the bench slot, the phone's slot and stay-awake setting go back) and runs the block again, 3 times at most; a timed `record --mobile` waits before it launches and refuses when its phone got hot during it. Untimed runs (`--check`, `look`, attribution) take none of it |
 | `PowerSave` | a timed run on a phone with Battery Saver on (`settings global low_power`): it slows the CPU and GPU and defers work |
@@ -5247,13 +5251,15 @@ What one app needs beyond that is its **app profile**, in the consumer's strobe.
   them, and the preferences domain, when the home is released. Anything else refuses `LiveChannel`
   with the folder it found. Sandboxed apps (their container is in the user's Library) are refused.
   A bare executable (no app bundle: a command-line program, a `tty()` target's program, a source
-  build) counts only what a daemon writes under its file name, which no environment reaches:
-  `Preferences/<name>.plist`, `HTTPStorages`, `WebKit`, `Cookies`, `Containers`. Its `Caches`,
+  build) counts only what a daemon writes under its name, which no environment reaches:
+  `Preferences/<name>.plist`, `HTTPStorages`, `WebKit`, `Cookies`, `Containers`. Its name is the
+  `CFBundleIdentifier` of an Info.plist linked into it (`__TEXT,__info_plist`, any slice of a
+  universal binary), which CoreFoundation takes as its bundle id, else its file name. Its `Caches`,
   `Application Support` and saved state are folders the process looks up itself, through `HOME` or
   Cocoa's home, and both are in the isolated home (a bundle's are counted: helpers and services
   launchd starts under its id never get the launch's environment). So bun's own transpiler cache in
   `~/Library/Caches/bun` no longer refuses a program run by `bun`; a refusal for a bare executable
-  says to measure a copy under another file name, since it has no bundle id. An app that reads its
+  says to measure a copy under another file name when it goes by its file name. An app that reads its
   data folder from an environment variable may still name it in the profile's `moved`
   (`"moved": ["~/Library/Application Support/my-app"]`, with `env` pointing it into the home), and
   strobe neither counts nor removes it; the profile's `guard` files there catch a copy that wrote
@@ -7297,6 +7303,22 @@ used 0.6 to 3% of a core, outside `cpu.work`. An A/A of the GTK typing case (8 p
 −0.3% (−4.7 … +6.5%). A strobe killed with SIGKILL mid-run left sway, its session bus and the
 accessibility bus launcher; the next strobe ended them and removed their folder. SIGTERM finished the
 block and left nothing.
+
+Waits that end a bench, bare executables on macOS, the too-small hint (2026-11-08, 10.5, 13.2,
+`DisplayTooSmall`). On air (macOS 27.0.1, AC) a person kept using the Mac through an os-input
+`--check`: each Firefox block waited for a minute without input that never came, one line and then
+silence for 22 minutes with nothing running; that wait now takes `--unlock-wait` and says once a minute
+how long it has waited (on air: eight lines, then exit 124 after `--unlock-wait 8m`). Every `--unlock-wait`
+that ends a bench is a stop: on adais (locked, `--unlock-wait 1s`) an unbatched `--check` whose second
+case needs a presenting window kept the first case, listed the second as not run and exited 124, and
+`--resume` kept the first and ran the second again (124 again); a paired `--aa` run kept its finished
+series and printed "stopped: … kept what finished; not run: …", exit 124 (it had been "failed").
+A series cut by it after some pairs reads "stopped after N pairs" (not reached on a locked machine: a
+lock that arrives between pairs). On air a `tty()` program run by `bun` was refused `LiveChannel` for
+`~/Library/Caches/bun` (bun's own transpiler cache, which it finds through `XDG_CACHE_HOME` and `HOME`):
+a bare executable now counts only what a daemon keeps under its name. Not yet run on air (offline):
+plain `bun` under the fake TUI bench with that cache unchanged, the new hint for a bare executable
+whose preferences file exists, and `too-big` offering 1470 wide; macOS clippy cross-checked from adais.
 
 Not built: times on macOS samples, per-thread wakes on macOS (root only). Not checked on hardware: Linux DRM client statistics (the VM's virtio GPU prints
 none, so it reads unreadable), Linux display refresh, macOS GPU time against a GPU-bound app,

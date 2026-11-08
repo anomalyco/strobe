@@ -1988,7 +1988,7 @@ pub fn run(args: &Args) -> Result<Output> {
         all_decided &= out["decided"].as_bool().unwrap_or(false);
         series_out.push(out);
     }
-    if halted.as_ref().is_some_and(|h| h.code == 130) {
+    if halted.as_ref().is_some_and(|h| matches!(h.code, 130 | 124)) {
         progress(format!("\nstopped: kept {} series; strobe bench --resume {exp} runs the rest", series_out.len()));
     }
     // Nothing finished and nothing to resume: the failure is the answer.
@@ -2077,6 +2077,10 @@ pub fn run(args: &Args) -> Result<Output> {
         let mut out = Output::new(text, result);
         if !all_decided {
             out.code = 1;
+        }
+        // Stopped (a stop, an unlock wait that ran out): that error's code, as a check's and a comparison's.
+        if let Some(h) = &halted {
+            out.code = h.code;
         }
         return Ok(out);
     }
@@ -2184,6 +2188,13 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         }
         Ok(b)
     });
+    // A stop, an unlock wait that ran out, or a question the check cannot answer ends the bench, as a
+    // batch's launch does: the case is not run (`--resume` runs it), never a failure.
+    if let Err(e) = &r
+        && (matches!(e.code, 2 | 124 | 130) || stop_requested())
+    {
+        return Err(if e.code == 124 || e.code == 2 { e.clone() } else { stop_error() });
+    }
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     let log = runner_log(ctx, log_from, None);
     let sent = ctx.runner.take_actions();
@@ -3035,7 +3046,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             return Ok(json!({ "label": s.label(), "case": s.case, "not_run": true, "halt": { "code": h.code, "message": h.message } }));
         }
         if decided_at.is_none() {
-            stopped = if h.code == 130 { "stopped".into() } else { format!("failed: {}", h.message.lines().next().unwrap_or("")) };
+            // An unlock wait that ran out stops the series as a stop does: `--resume` runs the rest.
+            stopped = if matches!(h.code, 130 | 124) { "stopped".into() } else { format!("failed: {}", h.message.lines().next().unwrap_or("")) };
         }
     }
     let def = def_in(&s.primary, &blocks)?.unwrap_or(def);
@@ -3088,7 +3100,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         progress(format!("  {} blocks: {k} pairs (Linux perf events never run in a timing block)", if main_counters { "timing" } else { "counter" }));
         match pass_pairs(ctx, s, variants, !main_counters, k) {
             Ok(p) => pass = Some(p),
-            Err(e) if e.code == 130 || stop_requested() => halted = Some(stop_error()),
+            Err(e) if e.code == 130 || e.code == 124 || stop_requested() => halted = Some(if e.code == 124 { e } else { stop_error() }),
             Err(e) => counters_note = Some(format!("the {} blocks failed: {}", if main_counters { "timing" } else { "counter" }, e.message)),
         }
     }
@@ -4434,7 +4446,8 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let (start, locks, unlocks) = (host::session_locked() && !own_screen, ctx.awake.locks(), ctx.awake.unlocks());
             let display = if own_screen { None } else { host::display_state() };
             let r = slotted(ctx, cases, v, pair, x);
-            if retry_launch(ctx, s, v, failure_of(&r), &mut retries)? {
+            // A launch that runs again (or a stop during its wait) leaves no recordings.
+            if retry_launch(ctx, s, v, failure_of(&r), &mut retries).inspect_err(|_| discard(&r))? {
                 discard(&r);
                 continue;
             }
@@ -4457,15 +4470,17 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // As an on-screen block's below: a headless page runs here, and a busy machine ended its bench.
             if busy_waits < BUSY_WAITS && refused_by(&r) == Some(ValidatorId::Background) {
                 busy_waits += 1;
-                wait_out_background(ctx, s, v, failure_of(&r))?;
                 discard(&r);
+                wait_out_background(ctx, s, v, failure_of(&r))?;
                 continue;
             }
             let end = host::session_locked() && !own_screen;
             let steady = own_screen || (start == end && if start { ctx.awake.unlocks() == unlocks } else { ctx.awake.locks() == locks });
             // The display turned off (or on) during the block: it ran in two machine states.
             let lit = display.is_none_or(|(_, n)| host::display_state().is_some_and(|(_, m)| m == n));
+            // Its recordings go before the wait below, which a stop or `--unlock-wait` may end.
             if steady && lit && !start && refused_by(&r) == Some(ValidatorId::WindowHidden) {
+                discard(&r);
                 hidden_unlocked = true;
                 break;
             }
@@ -4522,7 +4537,7 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         let before = ctx.awake.locks();
         let r = slotted(ctx, cases, v, pair, x);
-        if retry_launch(ctx, s, v, failure_of(&r), &mut retries)? {
+        if retry_launch(ctx, s, v, failure_of(&r), &mut retries).inspect_err(|_| discard(&r))? {
             discard(&r);
             continue;
         }
@@ -4536,6 +4551,8 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // Wait for them to leave it, as for a locked session, holding nothing meanwhile.
         if behind(&r) && host::person_idle_s().is_some_and(|i| i < 60.0) {
             progress(format!("  waiting: someone is using this Mac, and strobe measures the {} app as the active one; it runs the block again once nobody has touched the Mac for a minute", v.role));
+            // Discarded before the wait, which a stop or `--unlock-wait` may end.
+            discard(&r);
             release_machine(ctx);
             ctx.reg.set("waiting", format!("{} {} block: someone is using this Mac (the app must be the active one)", s.label(), v.role));
             let waiting = Instant::now();
@@ -4558,7 +4575,6 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 nap(Duration::from_secs(5))?;
             }
             ctx.waited_ms += waiting.elapsed().as_secs_f64() * 1e3;
-            discard(&r);
             continue;
         }
         // macOS, nobody at the Mac: another app came forward during the block (one that opens a window
@@ -4566,16 +4582,16 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         if hidden_retries < HIDDEN_RETRIES && behind(&r) {
             hidden_retries += 1;
             progress(format!("  another app came in front of the {} app during the block: discarded, it runs again ({hidden_retries} of {HIDDEN_RETRIES})", v.role));
-            nap(Duration::from_secs(5))?;
             discard(&r);
+            nap(Duration::from_secs(5))?;
             continue;
         }
         // Other work (a build, an update) kept the CPUs busy through the speed check: on a shared
         // machine it ends. Wait for it, holding nothing, and run the block again; an hour of it refuses.
         if busy_waits < BUSY_WAITS && refused_by(&r) == Some(ValidatorId::Background) {
             busy_waits += 1;
-            wait_out_background(ctx, s, v, failure_of(&r))?;
             discard(&r);
+            wait_out_background(ctx, s, v, failure_of(&r))?;
             continue;
         }
         if ctx.awake.locks() == before && !host::session_locked() {
@@ -9449,7 +9465,11 @@ fn render(r: &Value) -> String {
         let why = st.get("why").and_then(Value::as_str).unwrap_or("");
         out += &format!(
             "{}{}\n",
-            if st.get("code").and_then(Value::as_i64) == Some(130) { "stopped: kept what finished".to_string() } else { format!("failed: {why}; kept what finished") },
+            match st.get("code").and_then(Value::as_i64) {
+                Some(130) => "stopped: kept what finished".to_string(),
+                Some(124) => format!("stopped: {why}; kept what finished"),
+                _ => format!("failed: {why}; kept what finished"),
+            },
             if not_run.is_empty() { String::new() } else { format!("; not run: {}", not_run.join(", ")) }
         );
         out += &format!("resume  strobe bench --resume {id}\n");
