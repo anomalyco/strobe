@@ -134,6 +134,15 @@ pub struct Stopped {
 }
 
 impl Stopped {
+    /// The encoder's CPU over the video's span, % of one core, where strobe could read it: a process of
+    /// strobe's own that filming adds beside the runs (`overhead.encoder_pct`, no budget: a filmed block
+    /// is never timed).
+    pub fn encoder_pct(&self) -> Option<f64> {
+        let v = &self.video;
+        let span_ms = v.t1_ns.saturating_sub(v.t0_ns) as f64 / 1e6;
+        v.encoder_cpu_ms.filter(|_| span_ms > 0.0).map(|ms| 100.0 * ms / span_ms)
+    }
+
     /// Keeps the video in the recording `dir`: `video.<ext>` and `video.json` with the runs, the
     /// inputs strobe sent and the phase marks on media time. Returns what the recording's meta.json
     /// says of it.

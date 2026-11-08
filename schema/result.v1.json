@@ -41,7 +41,7 @@
     "window": { "type": ["object", "null"], "description": "The window's place and size: x, y, width, height." },
     "refresh_hz": { "type": ["number", "null"], "description": "The display's refresh; null when every series ran headless (no display)." },
     "args": { "type": ["object", "null"], "description": "The command line: command, flags, pos." },
-    "plan": { "type": "object", "description": "pin, runs_per_block, aa, looks, alpha, estimate, reserve, gpu_cache; seed (the experiment's, --seed or drawn) and used_random (a hook read ctx.seed or called ctx.random(): only then is the seed the workload). A check's plan holds only seed and used_random." },
+    "plan": { "type": "object", "description": "pin, runs_per_block, aa, looks, alpha, estimate, reserve, gpu_cache, trace (lean, or full: --trace full); seed (the experiment's, --seed or drawn) and used_random (a hook read ctx.seed or called ctx.random(): only then is the seed the workload). A check's plan holds only seed and used_random." },
     "identity": { "type": ["object", "null"], "description": "What makes two experiments the same comparison (SPEC 14.2)." },
     "ledger": { "type": ["object", "null"], "description": "The other experiments on the same variants (SPEC 14.2)." },
     "comparison": {
@@ -321,7 +321,8 @@
         "present_pct": { "type": "number", "description": "The OS present session's consumer (budget 0.5%)." },
         "reserve_pct": { "type": "number", "description": "The reserved-CPU sweep (budget 5%, on strobe's own CPUs)." },
         "terminal_pct": { "type": "number", "description": "A tty() target's terminal reader: reading, parsing and answering the program's output (budget 0.5%)." },
-        "pixel_pct": { "type": "number", "description": "strobe's pixel reads inside the runs (captures and image matching for image locators and pixel waits), CPU as % of the runs' wall time (budget 0.5%; over 2% refuses timing and latency metrics)." }
+        "pixel_pct": { "type": "number", "description": "strobe's pixel reads inside the runs (captures and image matching for image locators and pixel waits, opening the window's capture and decoding a template included), CPU as % of the runs' wall time (budget 0.5%; over 2% refuses timing and latency metrics)." },
+        "encoder_pct": { "type": "number", "description": "A filmed block's (--video) video encoder process, its CPU over the video's span as % of one core. No budget: a filmed block is never timed." }
       }
     },
     "step": {

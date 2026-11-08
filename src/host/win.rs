@@ -888,11 +888,11 @@ pub fn debug_runtime(exe: &std::path::Path) -> Option<String> {
     // Only the headers and the import table are read: an app's executable can be hundreds of MB (a
     // whole-file read per block was 110 MB of IO and private memory for a 115 MB executable).
     let mut f = std::fs::File::open(exe).ok()?;
+    // Up to `n` bytes at `o` (fewer at the file's end), however many reads that takes.
     let mut read = |o: usize, n: usize| -> Option<Vec<u8>> {
-        let mut b = vec![0u8; n];
+        let mut b = Vec::with_capacity(n);
         f.seek(SeekFrom::Start(o as u64)).ok()?;
-        let got = f.by_ref().take(n as u64).read(&mut b).ok()?;
-        b.truncate(got);
+        f.by_ref().take(n as u64).read_to_end(&mut b).ok()?;
         Some(b)
     };
     let u16_of = |b: &[u8], o: usize| b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
@@ -908,7 +908,14 @@ pub fn debug_runtime(exe: &std::path::Path) -> Option<String> {
     let h = read(pe + 24, opt_size + sections * 40)?;
     // The import directory: data directory 1, after the PE32 or PE32+ fixed fields.
     let dirs = if u16_of(&h, 0)? == 0x20b { 112 } else { 96 };
+    // An optional header without the import directory's entry, or an empty entry: no imports.
+    if opt_size < dirs + 16 {
+        return None;
+    }
     let import_rva = u32_of(&h, dirs + 8)? as usize;
+    if import_rva == 0 {
+        return None;
+    }
     let rva = |r: usize| -> Option<usize> {
         (0..sections).find_map(|i| {
             let s = opt_size + i * 40;

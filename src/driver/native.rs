@@ -119,6 +119,10 @@ mod imp {
         fn with<T>(&self, f: impl FnOnce(&mut Grabber) -> Result<T>) -> Result<T> {
             let mut g = self.s.grabber.borrow_mut();
             if g.as_ref().is_none_or(|g| g.window() != self.win) {
+                // The capture it replaces has CPU of its own not yet taken (its open, its frame events).
+                if let Some(old) = g.take() {
+                    self.s.pixels.bank_cpu(old.take_cpu_ms());
+                }
                 *g = Some(Grabber::open(self.win)?);
             }
             f(g.as_mut().ok_or_else(|| Error::msg("internal: the window's capture"))?)
@@ -207,7 +211,9 @@ mod imp {
         /// Closes the window's capture (after setup, between a batch's cases): a capture setup opened
         /// would otherwise copy every frame through the runs. A run that reads pixels opens it again.
         pub fn close_pixels(&self) {
-            self.grabber.borrow_mut().take();
+            if let Some(g) = self.grabber.borrow_mut().take() {
+                self.pixels.bank_cpu(g.take_cpu_ms());
+            }
         }
 
         /// Before a measured input whose `until` waits on pixels: what the region shows now.

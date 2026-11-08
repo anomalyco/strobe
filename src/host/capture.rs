@@ -39,6 +39,9 @@ pub struct Shot {
 
 pub struct Grabber {
     win: isize,
+    /// strobe's CPU (ms) opening it, not yet taken (`take_cpu_ms`): a run whose read opened it pays for
+    /// it, a Windows.Graphics.Capture open that failed or timed out (then PrintWindow) included.
+    open_ms: std::cell::Cell<f64>,
     #[cfg(windows)]
     os: Option<wgc::Wgc>,
 }
@@ -47,16 +50,19 @@ impl Grabber {
     /// Pixels of `win` from now on: on Windows its capture starts here and waits up to a second for the
     /// window's first frame.
     pub fn open(win: isize) -> Result<Grabber> {
+        let cpu = crate::probe::video::ThreadCpu::start();
         #[cfg(windows)]
-        {
+        let g = {
             if super::window_state(win).is_some_and(|w| w.iconic) {
                 return Err(hidden("the window is minimized, so the compositor draws none of it"));
             }
             // Without Windows.Graphics.Capture (or a frame of the window from it): PrintWindow.
-            Ok(Grabber { win, os: wgc::Wgc::open(win).ok() })
-        }
+            Grabber { win, open_ms: Default::default(), os: wgc::Wgc::open(win).ok() }
+        };
         #[cfg(not(windows))]
-        Ok(Grabber { win })
+        let g = Grabber { win, open_ms: Default::default() };
+        g.open_ms.set(cpu.ms().unwrap_or(0.0));
+        Ok(g)
     }
 
     pub fn window(&self) -> isize {
@@ -150,13 +156,15 @@ impl Grabber {
         None
     }
 
-    /// strobe's CPU (ms) on the capture's own threads since the last call: its frame events copying each
-    /// frame out of the pool (Windows), part of what its reads cost (`overhead.pixel_pct`).
+    /// strobe's CPU (ms) for the capture since the last call, besides its reads: opening it (once), and
+    /// on its own threads its frame events copying each frame out of the pool (Windows), part of what
+    /// its reads cost (`overhead.pixel_pct`). Take it before dropping the capture.
     pub fn take_cpu_ms(&self) -> f64 {
+        let open = self.open_ms.take();
         #[cfg(windows)]
-        return self.os.as_ref().map_or(0.0, |w| w.take_cpu_ms());
+        return open + self.os.as_ref().map_or(0.0, |w| w.take_cpu_ms());
         #[cfg(not(windows))]
-        0.0
+        open
     }
 }
 
@@ -235,8 +243,9 @@ mod wgc {
 
     fn shared_device(fresh: bool) -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice)> {
         let mut d = DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+        // A device whose GPU was removed or reset since (a driver update, a TDR) is made again.
         let Device(a, b, c) = match d.take() {
-            Some(held) if !fresh => d.insert(held),
+            Some(held) if !fresh && unsafe { held.0.GetDeviceRemovedReason() }.is_ok() => d.insert(held),
             _ => {
                 let (a, b, c) = device(false)?;
                 d.insert(Device(a, b, c))
@@ -246,16 +255,8 @@ mod wgc {
     }
 
     impl Wgc {
-        /// Opens the window's capture. Its CPU on this thread counts as the capture's own (`take_cpu_ms`):
-        /// a run whose first pixel read opened it pays for it.
+        /// Opens the window's capture (`Grabber::open` counts its CPU).
         pub fn open(hwnd: isize) -> Result<Wgc> {
-            let cpu = crate::probe::video::ThreadCpu::start();
-            let w = Self::start(hwnd)?;
-            w.shared.cpu_ns.fetch_add((cpu.ms().unwrap_or(0.0) * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
-            Ok(w)
-        }
-
-        fn start(hwnd: isize) -> Result<Wgc> {
             unsafe {
                 let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             }

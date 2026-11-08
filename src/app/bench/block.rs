@@ -28,6 +28,9 @@ pub(super) struct Warmup {
     again: usize,
     /// Unsteady, and the work grew across the runs (`grew`).
     growth: bool,
+    /// An untimed block that may measure its second run when its first lost a process: not a pixels
+    /// block (its snapshots are the first run's) or a filmed one, and a case whose runs start alike.
+    retry: bool,
 }
 
 impl Warmup {
@@ -35,8 +38,9 @@ impl Warmup {
         let measured = if x.set == Set::Memory { 2 * x.runs } else { x.runs };
         // Not a pixels block: its snapshots are the first run's.
         let again = usize::from(x.untimed && s.reset && x.pixels.is_none());
+        let retry = x.untimed && x.pixels.is_none() && !x.video && s.reset_check;
         // A video block films the one run after the steady point: run 0 is cold, never the filmed one.
-        Warmup { first: None, unsteady: false, untimed: x.untimed, keeps_pair: !matches!(x.set, Set::Attribution | Set::Memory) && !x.video, measured, again, growth: false }
+        Warmup { first: None, unsteady: false, untimed: x.untimed, keeps_pair: !matches!(x.set, Set::Attribution | Set::Memory) && !x.video, measured, again, growth: false, retry }
     }
 
     /// Whether another run is due after `ran` runs.
@@ -77,17 +81,22 @@ impl Warmup {
         self.unsteady
     }
 
-    /// After a run, with each run's work so far: true when warmup ended with this run.
-    pub(super) fn after(&mut self, work: &[f64]) -> bool {
+    /// After a run, with each run's work so far and whether a process of the target ended in it (`lost`;
+    /// empty where nothing says): true when warmup ended with this run. Two runs are steady only when a
+    /// process ended in both or in neither: a chore the target ran once (Chromium's processor-metrics
+    /// utility process, a moment after its first page loaded) stays in warmup, where it had refused the
+    /// block's `cpu.*`. An untimed block whose one run lost a process, and that may run again
+    /// (`retry`), measures the next run instead, once.
+    pub(super) fn after(&mut self, work: &[f64], lost: &[bool]) -> bool {
         if self.first.is_some() || work.is_empty() {
             return false;
         }
         let i = work.len() - 1;
         if self.untimed {
-            self.first = Some(0);
+            self.first = Some(usize::from(i == 0 && self.retry && lost.first() == Some(&true)));
             return true;
         }
-        let steady = i >= 1 && steady(work[i - 1], work[i]);
+        let steady = i >= 1 && steady(work[i - 1], work[i]) && lost.get(i - 1) == lost.get(i);
         if !steady && i < MAX_WARMUP {
             return false;
         }
@@ -97,17 +106,6 @@ impl Warmup {
         self.growth = !steady && validity::spearman(work) > 0.5 && work[i] > work[0] * 1.05;
         self.first = Some(if steady && self.keeps_pair { i - 1 } else { i + 1 });
         true
-    }
-
-    /// `after`, where two runs are steady only when a process of the target ended in both or in neither
-    /// (`lost`, per run): a chore the target ran once (a browser's utility process a moment after its
-    /// first page loaded) stays in warmup, where it had refused the block's `cpu.*` instead.
-    pub(super) fn after_lost(&mut self, work: &[f64], lost: &[bool]) -> bool {
-        let i = work.len().wrapping_sub(1);
-        if self.first.is_none() && !self.untimed && (1..MAX_WARMUP).contains(&i) && lost.get(i - 1) != lost.get(i) {
-            return false;
-        }
-        self.after(work)
     }
 
     /// Never steady because the work grew across the warmup runs, not because it swung (`NotSteady`).

@@ -1324,7 +1324,8 @@ fn engine_summary(meta: &Value) -> String {
     }
     s += &refused_lines(meta);
     s += &sampling_line(meta);
-    if meta["timing"] == "perturbed" {
+    // A filmed recording says why in its own line (`summary_text`).
+    if meta["timing"] == "perturbed" && !meta["video"].is_object() {
         s += "timing   perturbed: Firefox's profiler ran during this recording (a sampler in every process walks its threads' stacks), so its CPU and times are not the page's; take them with --probes timing\n";
         s += &format!("next     strobe query {id} hotspots · strobe query {id} layout · strobe query {id} memory · strobe open {id}\n");
     } else {
@@ -1565,8 +1566,11 @@ fn summary_body(meta: &Value) -> String {
     }
     s += &refused_lines(meta);
     s += &sampling_line(meta);
-    if meta["timing"] == "perturbed" {
+    if meta["timing"] == "perturbed" && !meta["video"].is_object() {
         s += "timing   perturbed: profilers ran during this recording, so its times are not the target's; take times with --probes timing\n";
+    }
+    if meta["timing"] == "full-trace" {
+        s += "timing   full trace (--trace full): the browser traced every task of every thread, which costs the page main-thread time; compare it only with full-trace runs\n";
     }
     s += &format!("next     strobe query {} frames · strobe report recording {} --open\n", meta["id"].as_str().unwrap_or(""), meta["id"].as_str().unwrap_or(""));
     s
@@ -1608,7 +1612,7 @@ fn native_summary(meta: &Value) -> String {
         s += &line;
     }
     s += &refused_lines(meta);
-    if meta["timing"] == "perturbed" {
+    if meta["timing"] == "perturbed" && !meta["video"].is_object() {
         s += "timing   perturbed: take times with --probes timing\n";
     }
     s += &if meta["launch"] == true {

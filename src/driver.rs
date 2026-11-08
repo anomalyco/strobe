@@ -1000,7 +1000,9 @@ impl Driver {
     /// Closes the browser window's capture (after setup, between a batch's cases), so none copies frames
     /// through runs that read no pixels.
     pub fn close_pixels(&self) {
-        self.grabber.borrow_mut().take();
+        if let Some(g) = self.grabber.borrow_mut().take() {
+            self.images.bank_cpu(g.take_cpu_ms());
+        }
     }
 
     /// The viewport's metrics a timed pixel read maps onto the window (`WindowShots`): its CSS width and
@@ -1991,6 +1993,10 @@ impl WindowShots<'_> {
         let w = self.d.browser_window()?.hwnd;
         let mut g = self.d.grabber.borrow_mut();
         if g.as_ref().is_none_or(|g| g.window() != w) {
+            // The capture it replaces has CPU of its own not yet taken (its open, its frame events).
+            if let Some(old) = g.take() {
+                self.d.images.bank_cpu(old.take_cpu_ms());
+            }
             *g = Some(crate::host::capture::Grabber::open(w)?);
         }
         f(g.as_mut().ok_or_else(|| Error::msg("internal: the window's capture"))?)

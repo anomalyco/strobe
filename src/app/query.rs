@@ -103,7 +103,19 @@ pub fn run(args: &Args) -> Result<Output> {
     // `a..b`: one view of two recordings, side by side and per run.
     if let Some((a, b)) = handle.split_once("..") {
         let (a, b) = (Rec::resolve(a)?, Rec::resolve(b)?);
-        return diff::run(&a, &b, view, args, top);
+        let mut out = diff::run(&a, &b, view, args, top)?;
+        // A full trace costs the page main-thread time (SPEC §8.1): a lean and a full-trace recording's
+        // times differ by that alone.
+        let full = |r: &Rec| r.meta["timing"] == "full-trace";
+        if full(&a) != full(&b) {
+            let (f, l) = if full(&a) { (&a.id, &b.id) } else { (&b.id, &a.id) };
+            let note = format!("{f} was timed with --trace full and {l} with the lean trace: the full set costs the page main-thread time, so their times do not compare");
+            out.text = format!("! ProbeOverhead  {note}\n{}", out.text);
+            if let Some(o) = out.json.as_object_mut() {
+                o.insert("warnings".into(), serde_json::json!([{ "id": "ProbeOverhead", "level": "warn", "text": note }]));
+            }
+        }
+        return Ok(out);
     }
     let dir = store::resolve(handle)?;
     let rec = Rec::open(&dir);

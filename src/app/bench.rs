@@ -1286,6 +1286,10 @@ struct Overhead {
     /// CPU over the runs' wall time (§19: 0.5%; over 2% refuses timing and latency metrics).
     #[serde(skip_serializing_if = "Option::is_none")]
     pixel_pct: Option<f64>,
+    /// A filmed block's video encoder (a process of strobe's), its CPU over the video's span. No budget:
+    /// a filmed block is never timed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoder_pct: Option<f64>,
 }
 
 impl Overhead {
@@ -1299,6 +1303,7 @@ impl Overhead {
             ("reserve", self.reserve_pct),
             ("terminal", self.terminal_pct),
             ("pixels", self.pixel_pct),
+            ("encoder", self.encoder_pct),
         ]
         .into_iter()
         .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
@@ -1364,12 +1369,17 @@ fn mean_overhead(blocks: &[Block]) -> Option<Overhead> {
         reserve_pct: mean(|o| o.reserve_pct),
         terminal_pct: mean(|o| o.terminal_pct),
         pixel_pct: mean(|o| o.pixel_pct),
+        encoder_pct: mean(|o| o.encoder_pct),
     })
 }
 
 fn pct_of_core(p: f64) -> String {
     if p < 1.0 { format!("{p:.2}%") } else { format!("{p:.1}%") }
 }
+
+/// The fix of a filmed block's `cpu.*` refused because the screencast's own processes ended in the run:
+/// the film's doing, so it fails no check (`slotted`).
+const FILMED_CPU_FIX: &str = "run --check without --video to check cpu.*";
 
 /// One run: its span (TSC units, or ns), strobe's and the runner's CPU in it (the same units).
 type RunCost = (u64, Option<u64>, Option<u64>);
@@ -2161,6 +2171,7 @@ pub fn run(args: &Args) -> Result<Output> {
         "refresh_hz": refresh.filter(|_| series_out.iter().any(|s| s["headless"] != true)),
         "plan": {
             "pin": pin_label, "runs_per_block": ctx.runs, "aa": aa, "reserve": ctx.reserved, "reserve_mode": ctx.reserve, "gpu_cache": ctx.gpu_cache,
+            "trace": if args.get("trace") == Some("full") { "full" } else { "lean" },
             "looks": if args.get("pairs").is_none_or(|p| p == "auto") { LOOKS.to_vec() } else { vec![args.num("pairs")?.unwrap_or(0.0) as usize] },
             "alpha": if args.get("pairs").is_none_or(|p| p == "auto") { POCOCK_ALPHA } else { 0.05 },
             "estimate": estimate,
@@ -2457,7 +2468,7 @@ fn check_output(
         let launch = s["batch_id"].as_u64().map(|id| format!(" · launch {id}.{}", s["batch_seq"])).unwrap_or_default();
         if s["passed"] == true {
             text += &format!(
-                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}\n",
+                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}\n",
                 s["label"].as_str().unwrap_or(""),
                 s["engine"].as_str().filter(|e| *e != "chromium").map(|e| format!(" · {e}")).unwrap_or_default(),
                 // An emulated device's window says what it was (`390×844 @3x · emulated mobile`), and
@@ -2468,7 +2479,9 @@ fn check_output(
                     None => String::new(),
                 },
                 if s["headless"] == true { " · headless" } else { "" },
-                if s["session_locked"] == true { " · session locked" } else { "" }
+                if s["session_locked"] == true { " · session locked" } else { "" },
+                // The film's capture and encoder ran beside the run: its values are not a clean run's.
+                if s["video"]["head"].is_string() { " · perturbed (filmed)" } else { "" }
             );
             if let Some(rec) = s["recording"].as_str() {
                 text += &format!("      rec  {rec} · strobe query {rec} {}\n", if s["target_kind"] == "native" { "threads" } else { "summary" });
@@ -2903,6 +2916,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     analyse(s, def, &blocks, &[], false, ["base", "head"], &mut warnings);
     warnings.extend(observer_reads(&blocks, "head", "head", is_native(&target)));
     warnings.extend(observer_pixels(&blocks, "head", "head"));
+    warnings.extend(full_trace_warning(ctx, &target));
     let (session, locked, _) = session_of(blocks.iter());
     if session == "mixed" {
         warnings.push(validity::warn("SessionLocked", format!("{locked} of {} blocks ran on a locked screen and the rest unlocked: their values do not compare", blocks.len())));
@@ -3339,6 +3353,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             warnings.extend(observer_pixels(&blocks, role, who));
         }
     }
+    warnings.extend(full_trace_warning(ctx, &target));
     if session == "mixed" {
         let why = Refusal::new(ValidatorId::SessionLocked, format!("{locked_pairs} of {all_pairs} pairs ran on a locked screen, the rest unlocked"));
         primary.refuse(why.clone());
@@ -3878,6 +3893,84 @@ fn observer_pixel_sides(blocks: &[Block], names: (&str, &str)) -> Option<Warning
             ),
         )
     })
+}
+
+/// `ProbeOverhead` for a Chromium-family series timed with `--trace full`: the full timeline set
+/// records every task of every thread, which the page pays for in main-thread time (SPEC §8.1).
+fn full_trace_warning(ctx: &Ctx, target: &Value) -> Option<Warning> {
+    (ctx.args.get("trace") == Some("full") && engine(target) == "chromium").then(|| {
+        validity::warn(
+            "ProbeOverhead",
+            "--trace full: its timed blocks traced every task of every thread, which costs the page main-thread time (measured: main.work +0.8% on a click, +35% on an idle page; cpu.work +3.5%): compare its values only with full-trace runs",
+        )
+    })
+}
+
+/// strobe's own share of the runs (SPEC §19), in a block whose times are judged. Unpinned, strobe and the
+/// runner share the target's CPUs: over 5% of a core warns `OverheadBudget`, over 20% refuses the block's
+/// wall-time, CPU-share, frame and latency metrics (the target's CPU time and exact counters stay).
+/// Pinned, they run on CPUs of their own: what strobe used beside its budgeted parts (reserve sweep,
+/// samplers, present consumer, terminal reader, pixel reads), with the runner, over 10% warns. A script
+/// target's runs are mostly strobe relaying each `ctx.call`: over 10% warns `ObserverCost`, over 20%
+/// refuses `run.duration` (its `cpu.work` and `js.heap.retained` are the script's own).
+fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut b: Block) -> Block {
+    let Some(o) = b.overhead.clone().filter(|_| x.judges_time()) else { return b };
+    let Some(strobe) = o.strobe_pct else { return b };
+    let runner = o.runner_pct.unwrap_or(0.0);
+    let both = strobe + runner;
+    let block = format!("{} · {} block", s.label(), side_of(ctx, v));
+    let pinned = ctx.pin.is_some();
+    let mut warn = |id: &str, key: &str, text: String| {
+        if ctx.overhead_warned.insert(format!("{}\n{key}", s.label())) {
+            ctx.warnings.push(validity::warn(id, text));
+        }
+    };
+    let refuse = |b: &mut Block, hit: &dyn Fn(&str) -> bool, why: &str, fix: &str| {
+        b.values.retain(|k, _| !hit(k));
+        for m in declared_metrics(s).into_iter().filter(|m| hit(m)) {
+            b.refused.entry(m.clone()).or_insert_with(|| Refusal::new(ValidatorId::OverheadBudget, format!("{m}: {why}")).fix(fix));
+        }
+    };
+    if kind == "script" {
+        if both > 10.0 {
+            warn(
+                "ObserverCost",
+                "script relay",
+                format!(
+                    "{block}: strobe relaying ctx.call used {} of a core in the runs (strobe {}, runner {}): run.duration is mostly the relay, not the script; batch the work into fewer calls (one call that loops)",
+                    pct_of_core(both),
+                    pct_of_core(strobe),
+                    pct_of_core(runner)
+                ),
+            );
+        }
+        if both > 20.0 {
+            let why = format!("strobe and the runner used {} of a core relaying ctx.call in the runs (over 20%), so the run's time is mostly strobe's", pct_of_core(both));
+            refuse(&mut b, &|m| m == "run.duration", &why, "batch the work into fewer ctx.call (one call that loops), or compare cpu.work");
+        }
+        return b;
+    }
+    if !pinned {
+        if both > 5.0 {
+            warn("OverheadBudget", "unpinned self", format!("{block}: strobe and the runner used {} of a core in the runs on the target's own CPUs (unpinned; budget 5%)", pct_of_core(both)));
+        }
+        if both > 20.0 {
+            let why = format!("strobe and the runner used {} of a core in the runs on the target's own CPUs (unpinned; over 20%), so the runs it timed are disturbed", pct_of_core(both));
+            let cpu_time = |m: &str| (m.starts_with("cpu.") || m == "ui.cpu") && model::metric(m).is_some_and(|d| d.unit == "ms");
+            refuse(&mut b, &|m| time_metric(m) && !cpu_time(m), &why, "pin the target (--pin) so strobe runs beside it, or make the runs' calls into strobe fewer");
+        }
+        return b;
+    }
+    let parts = [o.reserve_pct, o.sampler_pct, o.present_pct, o.terminal_pct, o.pixel_pct].iter().flatten().sum::<f64>();
+    let residual = (strobe - parts).max(0.0) + runner;
+    if residual > 10.0 {
+        warn(
+            "OverheadBudget",
+            "pinned self",
+            format!("{block}: strobe (besides its budgeted parts) and the runner used {} of a core in the runs, on strobe's own CPUs (budget 10%)", pct_of_core(residual)),
+        );
+    }
+    b
 }
 
 /// `OverheadBudget` (SPEC §19): strobe's pixel reads in the runs used over 2% of a core, so the runs they
@@ -4948,19 +5041,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 .map(|b| {
                     let ns = quota_of(s, &b, &runs_throttled, whole, cases.len() > 1);
                     quota_state(x, ns, b)
-                })
-                .inspect(|b| restate_recording(ctx, s, b));
-            // A timed or check block that refused its primary refuses the block, as a native one does:
-            // pairs of nothing would end `unclear` instead of saying why.
-            let r = r.and_then(|b| match b.refused.get(&s.primary).filter(|_| x.set != Set::Attribution && x.set != Set::Memory) {
-                Some(why) => Err(Refusal {
-                    summary: if why.summary.starts_with(&format!("{}:", s.primary)) { why.summary.clone() } else { format!("{}: {}", s.primary, why.summary) },
-                    fix: why.fix.clone().or_else(|| Some("pick a primary this target can measure".into())),
-                    ..why.clone()
-                }
-                .into()),
-                None => Ok(b),
-            });
+                });
             let r = match &report {
                 Some(report) => r.map(|mut b| {
                     b.reserve = Some(json!({ "moved": report.moved_total(), "started": report.started, "failed": report.failed.len(), "restored": report.restored, "overhead_pct": report.overhead_pct, "setup_ms": report.setup_ms }));
@@ -4969,6 +5050,19 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 }),
                 None => r,
             };
+            let kind = ctx.describe["targets"][v.target_of(s)]["kind"].as_str().unwrap_or("").to_string();
+            let r = r.map(|b| self_state(ctx, s, v, x, &kind, b)).inspect(|b| restate_recording(ctx, s, b));
+            // A timed or check block that refused its primary refuses the block, as a native one does:
+            // pairs of nothing would end `unclear` instead of saying why.
+            let r = r.and_then(|b| match b.refused.get(&s.primary).filter(|why| x.set != Set::Attribution && x.set != Set::Memory && why.fix.as_deref() != Some(FILMED_CPU_FIX)) {
+                Some(why) => Err(Refusal {
+                    summary: if why.summary.starts_with(&format!("{}:", s.primary)) { why.summary.clone() } else { format!("{}: {}", s.primary, why.summary) },
+                    fix: why.fix.clone().or_else(|| Some("pick a primary this target can measure".into())),
+                    ..why.clone()
+                }
+                .into()),
+                None => Ok(b),
+            });
             // A part of strobe over its §19 budget in a timed block competes with the app it measures:
             // said once per series and part.
             let over = r.as_ref().ok().and_then(|b| b.overhead.as_ref()).filter(|_| x.measures_time()).map(Overhead::over).unwrap_or_default();
@@ -6105,6 +6199,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         let mut first_case = Some((first_same, first_start));
         lap("setup");
+        // A browser runs its after-startup chores once its first page has loaded (Chromium: the network
+        // and storage services' deferred work, its processor-metrics utility process: about 230 ms of CPU
+        // on adais just after the load), which warmup, deciding on the renderer's task time, does not see.
+        // The runs start once the target's CPUs are quiet, at most 5 s (pinned: an unpinned machine's
+        // CPUs are never all quiet).
+        if ctx.pin.is_some() && on_phone.is_none() {
+            validity::wait_quiet(ctx.pin, Duration::from_secs(5));
+            lap("settle");
+        }
         // `--video` (an untimed block): from before the first run to after the last.
         if x.video {
             // A phone's page is filmed as a headless page's is: its renderer's own frames.
@@ -6667,7 +6770,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             }
                         })
                         .collect();
-                    if warmup.after_lost(&work, &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>()) && !x.untimed {
+                    if warmup.after(&work, &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>()) && !x.untimed {
                         if let (Some(dir), Some(b)) = (&gecko_dir, firefox) {
                             match probe::gecko::census(b, &page, &dir.join("memory-0.json.gz"), "after warmup, before the profiler started and the measured runs") {
                                 Ok(c) => census.push(c),
@@ -7206,7 +7309,13 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     for m in names {
                         values.remove(&m);
                         if declared_metrics(s).iter().any(|d| **d == m) {
-                            refused.insert(m.clone(), super::record::cpu_lost(&m, gone, measured.len(), "the browser"));
+                            let mut r = super::record::cpu_lost(&m, gone, measured.len(), "the browser");
+                            // Filmed: the screencast itself starts and ends processes of the browser in the run.
+                            if x.video {
+                                r.summary += " (the block was filmed: Chromium's screencast starts and ends processes in the run)";
+                                r.fix = Some(FILMED_CPU_FIX.into());
+                            }
+                            refused.insert(m.clone(), r);
                         }
                     }
                 }
@@ -7327,7 +7436,14 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     screen: Some(screen.clone()),
                     reserve: None,
                     shown: Some(shown::Shown { start: c.start.clone(), end }),
-                    overhead: Some(Overhead { strobe_pct, runner_pct, sampler_pct, pixel_pct, ..Overhead::default() }),
+                    overhead: Some(Overhead {
+                        strobe_pct,
+                        runner_pct,
+                        sampler_pct,
+                        pixel_pct,
+                        encoder_pct: stopped.as_ref().and_then(|s| s.as_ref().ok()).and_then(super::video::Stopped::encoder_pct),
+                        ..Overhead::default()
+                    }),
                     process_set: Some(programs(&browser.processes())),
                     fixture_connected: None,
                     client: content,
@@ -7386,8 +7502,14 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 "variant_label": if fixed_page { url.clone() } else { v.label.clone() }, "variant_git": if fixed_page { Value::Null } else { variant_git(v) },
                 "target": url, "probes": set, "token": token, "runs": measured_runs, "measured": measured_keys, "values": if batch { json!({}) } else { json!(blocks[0].values) }, "duration_ms": duration as u64,
                 "created": super::record::now_iso(), "valid": true, "env": host::env(), "browser": browser.version(), "engine": engine, "headless": headless, "input": input, "background": background, "screen": screen,
-                // Rule 3: a block with profilers, a census or a video describes the profiled (filmed) page.
-                "timing": if (set == Set::Timing || set == Set::Lean) && !x.video { "clean" } else { "perturbed" },
+                // Rule 3: a block with profilers, a census or a video describes the profiled (filmed) page;
+                // one that traced the full timeline set (`--trace full`) cost the page its main-thread time.
+                "timing": match set {
+                    _ if x.video => "perturbed",
+                    Set::Lean => "clean",
+                    Set::Timing => "full-trace",
+                    _ => "perturbed",
+                },
                 "os": samples.window(page_cases[0].1.runs.first().map_or(0, |r| r.t0), page_cases[page_cases.len() - 1].1.runs.last().map_or(0, |r| r.t1)), "video": video,
             });
             if batch {
@@ -9738,6 +9860,12 @@ fn self_line(s: &Value) -> String {
 
 /// A `--blocks` series' text: the primary in each block, and the blocks' median with a 95% interval
 /// (Hodges–Lehmann over the blocks; log scale when every value is positive). Nothing is compared.
+/// ` · full trace` on a Chromium-family series' plan line when its timed blocks traced the full set.
+fn full_trace_note(r: &Value, s: &Value) -> &'static str {
+    let traced = !matches!(s["target_kind"].as_str(), Some("native" | "script" | "cli" | "tty")) && s["engine"].as_str().is_none_or(|e| e == "chromium");
+    if r["plan"]["trace"] == "full" && traced { " · full trace" } else { "" }
+}
+
 fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     let metric = s["primary"]["metric"].as_str().unwrap_or("");
     let def = model::metric(metric);
@@ -9753,7 +9881,7 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     if !engine.is_empty() {
         out += &format!("env    {engine}\n");
     }
-    out += &format!("plan   {} · warmup until steady · {} runs per block\n", r["plan"]["pin"].as_str().unwrap_or(""), r["plan"]["runs_per_block"]);
+    out += &format!("plan   {} · warmup until steady · {} runs per block{}\n", r["plan"]["pin"].as_str().unwrap_or(""), r["plan"]["runs_per_block"], full_trace_note(r, s));
     let steps: Vec<(String, f64)> = serde_json::from_value(s["steps"].clone()).unwrap_or_default();
     out += &format!("time   {} · per block {}\n", fmt::ms_duration(s["elapsed_ms"].as_f64().unwrap_or(0.0) as u64), steps_text(&steps));
     out += &self_line(s);
@@ -9901,7 +10029,7 @@ fn render(r: &Value) -> String {
         // speed: a command or a harness gets no check, and a device's first native check sets its reference.
         let checked = s["blocks"].as_array().is_some_and(|b| !b.is_empty() && b.iter().all(|b| b["speed_ratio"].is_number()));
         let speed = if checked { "unthrottled" } else { "speed not checked" };
-        out += &format!("plan   {}\n", fmt::fields([r["plan"]["pin"].as_str().unwrap_or(""), &reserved, &power, &format!("{screen}, {speed}")]));
+        out += &format!("plan   {}{}\n", fmt::fields([r["plan"]["pin"].as_str().unwrap_or(""), &reserved, &power, &format!("{screen}, {speed}")]), full_trace_note(r, &s));
         let cache = &r["plan"]["gpu_cache"];
         if let Some(gpu) = cache[s["label"].as_str().unwrap_or("")].as_str().or(cache[s["target"].as_str().unwrap_or("")].as_str()) {
             out += &format!("gpu    shader caches {gpu}\n");

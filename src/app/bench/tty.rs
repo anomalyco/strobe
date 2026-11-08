@@ -544,7 +544,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                             .call("reset", json!({ "case": s.case }), rt, serve)
                             .map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, &screen_note(&tty), "fix the case's reset"))?;
                     }
-                    warmup.after_lost(&runs.iter().map(|r| if r.cpu.is_finite() { r.cpu } else { r.ms }).collect::<Vec<_>>(), &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>());
+                    warmup.after(&runs.iter().map(|r| if r.cpu.is_finite() { r.cpu } else { r.ms }).collect::<Vec<_>>(), &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>());
                 }
                 if batch && tty.ended() {
                     return Err(super::super::record::exited(tty.exited().unwrap_or(-1), &format!("after {}'s runs", s.case), Some(&last_rows(&tty))));

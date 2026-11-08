@@ -307,11 +307,27 @@ impl Pixels {
 
     /// Runs one read (a capture and what it does with it), counted.
     fn counted<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let r = self.charged(f);
+        let (n, ms, c) = self.reads.get();
+        self.reads.set((n + 1, ms, c));
+        r
+    }
+
+    /// Runs pixel work that is no read of its own (a template's first decode): its wall time and CPU
+    /// count with the reads.
+    fn charged<T>(&self, f: impl FnOnce() -> T) -> T {
         let (at, cpu) = (Instant::now(), crate::probe::video::ThreadCpu::start());
         let r = f();
         let (n, ms, c) = self.reads.get();
-        self.reads.set((n + 1, ms + at.elapsed().as_secs_f64() * 1e3, c + cpu.ms().unwrap_or(0.0)));
+        self.reads.set((n, ms + at.elapsed().as_secs_f64() * 1e3, c + cpu.ms().unwrap_or(0.0)));
         r
+    }
+
+    /// CPU (ms) of a window capture strobe closes or replaces (its open and frame events), kept for the
+    /// next `take_reads`: a run that read two windows pays for both.
+    pub fn bank_cpu(&self, ms: f64) {
+        let (n, w, c) = self.reads.get();
+        self.reads.set((n, w, c + ms));
     }
 
     /// One capture of `look`'s region.
@@ -321,7 +337,7 @@ impl Pixels {
 
     /// The matches of `a` now: in the area's units, best first, and the search.
     fn find(&self, src: &dyn Source, a: &Anchor, size: (f64, f64)) -> Result<(Vec<Aim>, Found, Shot, [f64; 4])> {
-        let t = self.template(a)?;
+        let t = self.charged(|| self.template(a))?;
         let rect = area(a.region, size, src.what())?;
         let (shot, found) = self.counted(|| {
             let shot = src.grab(rect)?;

@@ -1438,7 +1438,12 @@ lean traces measured scroll `main.busy` 12% lower on the same build, and cut tra
 from 4.0 s to under 1 s per block. Renderer main-thread busy then comes from
 `Performance.getMetrics` `TaskDuration` per run (it agreed with the trace's `RunTask` sum within
 0.06 pp on every block checked). `--trace full` keeps the full set; `record` and attribution blocks
-always trace full.
+always trace full. A timed block that traced the full set says so: its recording's `timing` is
+`full-trace` (a lean one's `clean`), the plan line ends `· full trace` (`plan.trace`), a
+Chromium-family series warns `ProbeOverhead` once, and `query a..b` of a lean and a full-trace
+recording warns that their times do not compare. Measured (8 alternating blocks each, headless): on
+adais `main.work` +0.8% on a click and +35% on an idle page, `cpu.work` +3.5%; on vps (unpinned)
++1.2%, +15% and idle `cpu.work` +38%.
 
 A trace whose buffer filled (200 MB; 1 GB for attribution and memory sets; Chromium's
 `Tracing.tracingComplete` says `dataLossOccurred`) is written and then refused `RunIncomplete`:
@@ -1932,7 +1937,12 @@ A video of what the target showed, for a person to watch beside the numbers (`pr
 target's own renderer, so a video is taken only where nothing is timed (rule 3): `record --video`
 (its `timing` is `perturbed`), `bench --check --video` (the check block films its run), and
 `bench --video` on a comparison: every timed pair runs clean first, then one untimed video block per
-variant (warmed, one measured run, kept, in no verdict), each side through the same capture.
+variant (warmed, one measured run, kept, in no verdict), each side through the same capture. A
+filmed `--check` case's line says `· perturbed (filmed)`, its `self` line adds `encoder` (the encoder
+process's CPU over the video's span: ffmpeg's 281 ms over a 2.1 s headless film on adais, 13% of a
+core). Chromium's screencast starts and ends processes of the browser in the run (adais: one living
+~100 ms in a filmed click run), so a filmed block's `cpu.*` can be refused `RunIncomplete`; that
+refusal names the film (`run --check without --video to check cpu.*`) and fails no check.
 
 Two kinds, named in `video.json` (`kind`), never compared side by side when they differ (the
 series gets `video.mixed` and a `Video` warning):
@@ -2032,7 +2042,10 @@ flowchart LR
   about 3 ms, where 5% is noise and warmup once ran 55 s), and a process of the target ended in both
   or in neither (pages, native and terminal targets): Chromium on Windows starts a utility process for
   its processor metrics a moment after the first page loads and ends it at once, which a headless
-  launch's first run met and the block's `cpu.*` were refused; both count as measured, and
+  launch's first run met and the block's `cpu.*` were refused (after 10 runs that never agreed, the
+  runs after the last are measured, never a lost one by the pair rule). A `--check` measures its one
+  run; when a process of the target ended in it, the case's runs start alike (`resetCheck`), and it
+  is no pixels or filmed block, the next run is measured instead, once; both count as measured, and
   the block runs until `--runs` are measured. Runs before are relabelled `warm:<i>` in the trace.
   After 10 unsteady runs strobe measures anyway and warns `NotSteady`, saying which way: work that
   grew run after run (Spearman over 0.5 across the warmup runs and the last 5% over the first;
@@ -6611,8 +6624,17 @@ command's start and is a metric of its own, `cli.launch` (§9.6). A run that cou
 nothing to the share. Each edge reads strobe's own cycles right beside the clock and the runner's beyond
 them, so reading the runner is not in strobe's count. `--check` prints it per case (`self  strobe 0.81% · runner 0.40% ·
 sampler 0.16% of a core`), a bench per series (the blocks' mean); in a timed block a part over its
-budget above warns `OverheadBudget`, once per series and part. strobe's own process has no budget
-yet. Measured on adais: a windowless native app's 5 s idle run 0.81%, a headless page's click run
+budget above warns `OverheadBudget`, once per series and part. strobe's own process and the runner
+(in a timed or `--check` block, `self_state`): with the target unpinned (`--pin none`, under 4 cores,
+macOS) they share its CPUs, so `strobe` + `runner` over 5% of a core warns `OverheadBudget` and over
+20% refuses the block's wall-time, CPU-share, frame and latency metrics (`OverheadBudget`; the
+target's CPU time `cpu.*` in ms and exact counters stay); pinned, they run on CPUs of their own, so
+only what strobe used beside its budgeted parts (reserve, sampler, presents, terminal, pixels) plus
+the runner over 10% warns. A `script()` target's runs are mostly strobe relaying `ctx.call` (200
+small calls a run: strobe 91% and the runner 39% of a core on adais): over 10% warns `ObserverCost`
+(batch the calls), over 20% refuses `run.duration` (its `cpu.work` and `js.heap.retained` are the
+script's own). A filmed block (`--video`, never timed) adds `encoder` (the encoder process's CPU
+over the video's span), with no budget. Measured on adais: a windowless native app's 5 s idle run 0.81%, a headless page's click run
 0.61%; a script target's 30 ms runs 3–6%, which is strobe relaying each `ctx.call` between the
 runner and the script's host inside the run. Counted over the whole run loop instead, the same block
 read 40–80% (script) and 7% (native): strobe's own between-run reads, never inside a run. On air
@@ -7949,8 +7971,13 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   are kept topmost without focus, since an occluded Chromium window stops rendering. A headless
   Chromium has no window: its page is used at once (the wait for a window to raise had held every
   headless launch 5 s, 50 system snapshots, 37% of a headless block's wall time on adais; `look` of
-  a page 6.7 s → 1.7 s, exp_7b9e04). Those 5 s had also let Chromium's post-startup utility process
-  end before the first run; warmup now waits it out (§9.2).
+  a page 6.7 s → 1.7 s, exp_7b9e04). Those 5 s had also let Chromium's after-startup chores (its
+  network and storage services' deferred work and processor-metrics utility process, about 230 ms
+  of CPU just after the first page loads) pass before the first run. A page block now waits after
+  its setup until the target's CPUs are quiet (`settle`, at most 5 s, pinned targets; 0.2–0.3 s on
+  adais), and warmup waits out a run that lost a process (§9.2): a check's click `cpu.work` read 315
+  ms without the settle and 78.5–79.9 ms with it (84 ms behind the 5 s wait), idle blocks' 8.95 →
+  7.1 ms (7.6 ms).
 - Typed outcomes, crash-safe store and strict config (2026-11-05): validators are `ValidatorId`
   and refusals `Refusal` values on the error (§10.1); comparisons carry `kind` and `refusal`,
   which bench sets with each verdict it writes. Still to move to the types: `bench`, `pr`, `card`,

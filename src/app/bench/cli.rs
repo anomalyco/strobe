@@ -321,7 +321,8 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
             ctx.runner.call("reset", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset"))?;
         }
         // Without CPU (cycles that are not time), steady by wall time.
-        warmup.after(&runs.iter().map(|r| cpu(&r.0).unwrap_or_else(|| wall(&r.0))).collect::<Vec<_>>());
+        // A command's whole tree is its own (no process of it ends unseen): nothing is lost.
+        warmup.after(&runs.iter().map(|r| cpu(&r.0).unwrap_or_else(|| wall(&r.0))).collect::<Vec<_>>(), &[]);
     }
     let first = warmup.first().unwrap_or(0);
     let range = first..warmup.measured().end.clamp(first, runs.len());
