@@ -8271,6 +8271,26 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   spin reads 100.1–100.2 ms in Chromium and 99.7–100.8 ms in Firefox. On vps a spin reads 20% under
   (a VM's steal: Linux's process clocks are exact), which is CPU time, as `cpu.*` says. vps agreed
   otherwise: `net.bytes` 111,300, `layout.count` 25, leaks `+7.6`/`+7.7 MB/run`.
+- **Statistics audit (2026-11-08, cleanup/audit-statsfix)**: every number below was reproduced
+  before and after through the binary: `scripts/dev/stats-check.ts` (known answers through the
+  hidden `strobe stats`), `scripts/dev/stats-sim.ts` (series through `bench::sequential`),
+  `scripts/dev/feed.ts` (a `cli()` command that prints known values a block) and
+  `scripts/dev/drift-repo.ts` (a repository that drifts a little a commit). The signed-rank p with
+  ties is exact (p 0.039 → 0.055 for a quantized vector, equal to full enumeration in every vector checked, and to the sign test's binomial p for 60–120 tied pairs),
+  and its normal tail no longer underflows (n 450: 0 → 4.7·10⁻²⁰). Theil–Sen's interval is symmetric
+  (misses 1.8%/2.6% → 1.8%/1.7% of 3,000 series). A layout shift 0 → 0.30 was `jumpier (small)`
+  against a bound of 0.5, now 0.006; bounds print as given (±0.3%, ≤1.5%). A higher-is-better
+  `metric.<name>` keeps `better: higher` (track, plan, ports read it; old series are corrected). A
+  refused secondary sized the Holm family (`metric.quant` p 0.0195 `—` → `more (small)`, a real
+  `strobe run`). A bisect of two commits of +0.5% each convicted the second in 4 of 6 seeds without
+  ever benching it against its parent; the culprit is now benched against its parent (6 more seeds:
+  2 `unclear`, no one commit; 3 a culprit that moved against its own parent; 1 `no change`). The median of a point sat outside its Hodges–Lehmann interval in 134 of
+  400 skewed samples (now the median's own interval, or the HL estimate for a port). Pairs needed
+  with a MAD of 0 read 7, now 17 (50%) and 30 (80%); exact counters need 6 pairs; `CounterUnstable`
+  and `Outliers` are emitted; an A/A text calls a decided direction a false positive; a series
+  stopped, leaked, run as blocks or refused is not compared in a family; a no-worse primary's
+  repeated p is tested against its margin; `--resume` keeps the look that decided; a series'
+  primary keeps `primary_pairs`; warm-up blocks before pair 0 for every series (§9.1).
 
 ## 25. Continuous benchmarking (`track`, `history`)
 
