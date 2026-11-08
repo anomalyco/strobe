@@ -1092,6 +1092,9 @@ pub struct SetCpu {
     /// The processes in a part's first reading and gone at its last (by pid): their share of a role's
     /// CPU (`cpu.renderer`, …) is in `ended`, which is no role's.
     pub gone: std::collections::BTreeSet<u32>,
+    /// `ended` by the ended processes' executable (cycles, processes), where the OS names them
+    /// (Windows' jobs: `EndedCpu`).
+    pub ended_by: BTreeMap<String, (u64, u32)>,
 }
 
 /// The set's CPU over a run's timed parts: `cycles` and `ended` are the readings at the run's start,
@@ -1112,6 +1115,11 @@ pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> Option<SetC
         out.total += dead;
         out.ended += dead;
         out.gone.extend(gone);
+        for (name, (c, n)) in y.dead_by_name(x, a, b) {
+            let e = out.ended_by.entry(name).or_insert((0, 0));
+            e.0 += c;
+            e.1 += n;
+        }
     }
     Some(out)
 }

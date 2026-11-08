@@ -22,7 +22,8 @@ impl Direction {
     }
 }
 
-/// One command run: wall ms (spawn to exit), what the OS counted, the metrics it printed with
+/// One command run: wall ms (spawn to exit; on Windows the process's creation plus its first
+/// instruction to its exit, `Owned::spawn_span`), what the OS counted, the metrics it printed with
 /// their directions (a name printed in both directions is `None`), and its launch's CPU on strobe's
 /// thread (ms, NaN where thread cycles are not time).
 struct Ran {
@@ -158,6 +159,13 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         r => r,
     }
     .map_err(|e| Error::msg(format!("start `{line}`: {e}")))?;
+    // Windows: the OS creating the process and the command's run from its first instruction, as a
+    // person's launch of it; its job, the completion port's registration and its CPUs are strobe's
+    // setup while it was suspended, in neither `run.duration` nor `cli.launch`.
+    let (t0, launch) = match child.spawn_span() {
+        Some((from, before, after, ms)) => (from, super::script::cpu_ms(before, after, ms)),
+        None => (t0, launch),
+    };
     let (out, err) = child.output();
     for (tx, pipe) in pipes.into_iter().zip([out.map(|o| Box::new(o) as Pipe), err.map(|e| Box::new(e) as Pipe)]) {
         if let Some(p) = pipe {

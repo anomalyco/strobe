@@ -44,6 +44,11 @@ impl Error {
     pub fn usage_refused(r: Refusal) -> Self {
         Error { code: 2, message: r.message(), hint: r.fix.clone(), refusal: Some(Box::new(r)) }
     }
+    /// A wait for the machine's state that ran out (exit 124), typed by the validator whose state it
+    /// waited out (`SessionLocked`, `WindowHidden`): what was not run for it is resumable.
+    pub fn timeout_refused(r: Refusal) -> Self {
+        Error { code: 124, message: r.message(), hint: r.fix.clone(), refusal: Some(Box::new(r)) }
+    }
     pub fn unreachable(message: impl Into<String>) -> Self {
         Error::new(255, message)
     }

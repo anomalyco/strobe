@@ -119,7 +119,7 @@
     "warnings": { "type": "array", "items": { "$ref": "#/definitions/warning" } },
     "stopped": {
       "type": ["object", "null"],
-      "description": "Why the bench ended early: its exit code (130 for a stop) and what did not run.",
+      "description": "Why the bench (or check) ended early: its exit code (130 for a stop, 124 when --unlock-wait ran out) and what did not run.",
       "properties": { "code": { "type": "integer" }, "why": { "type": "string" }, "not_run": { "type": "array", "items": { "type": "string" } } }
     },
     "metric": { "type": "string", "description": "bisect: the primary it follows." },
@@ -441,9 +441,15 @@
         },
         "leak": { "type": "object", "description": "A leak series: growth verdicts per variant (js_heap, dom_nodes or native_host, each with verdict and verdict_kind)." },
         "runs_per_half": { "type": "integer" },
-        "halt": { "type": ["object", "null"], "properties": { "code": { "type": "integer" }, "message": { "type": "string" } } },
+        "halt": {
+          "type": ["object", "null"],
+          "description": "Why the series stopped part way or did not run; validator: SessionLocked or WindowHidden when --unlock-wait ran out (the rest of the file ran on, and --resume runs it).",
+          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] } }
+        },
         "not_run": { "type": "boolean" },
         "passed": { "type": "boolean", "description": "check: the case ran." },
+        "state": { "enum": ["pass", "fail", "refused", "gap"], "description": "check: the case's outcome in one field (refused: before it ran; fail: it ran and failed, or its journey differs)." },
+        "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "check: the refusal behind a refused or failed case, when a validator gave one." },
         "declared": { "type": "array", "items": { "type": "string" }, "description": "check: the metrics the case declared." },
         "values": { "type": ["object", "null"], "description": "check: one run's values." },
         "measured_run": { "type": ["integer", "null"], "description": "check: the run values came from, from 0: 1 when a process of the target ended in run 0 and the case has a reset with resetCheck on, so the values are a warm run's from the state the reset left (SPEC 9.1); null when the case failed. Absent in older results (then 0)." },

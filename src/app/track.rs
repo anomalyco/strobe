@@ -331,6 +331,15 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         }
     };
     let r = &out.json;
+    // A bench that ended early (a build that failed) left series out: no point is the commit's yet, and
+    // the next track runs it again.
+    if let Some(why) = r["stopped"]["why"].as_str() {
+        let not_run: Vec<&str> = r["stopped"]["not_run"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let message = format!("{exp} ended early ({why}); not run: {}", not_run.join(", "));
+        let code = r["stopped"]["code"].as_i64().map_or(1, |c| c as i32);
+        history::log_run(&json!({ "at": super::record::now_iso(), "key": key, "commit": commit, "exp": exp, "outcome": "failed", "code": code, "error": message }))?;
+        return Err(Error::new(code, message));
+    }
     let repo = repo_id(root);
     let file_rel = rel(root, file);
     let mut ids = Vec::new();

@@ -40,11 +40,13 @@ const NEW_PROCESS: u32 = 6;
 const EXIT_PROCESS: u32 = 7;
 const ABNORMAL_EXIT_PROCESS: u32 = 8;
 
-/// A process of a job: by pid and creation time, its handle while it runs, its cycles once it ended.
+/// A process of a job: by pid and creation time, its handle while it runs, its cycles and executable's
+/// file name once it ended.
 struct Member {
     key: (u32, u64),
     handle: Option<isize>,
     end: Option<u64>,
+    name: Option<String>,
 }
 
 /// A job strobe watches: its port key, its processes, how many joins the port posted, and whether a
@@ -225,6 +227,19 @@ fn settle(m: &mut Member) {
     }
 }
 
+/// The file name of a process's executable, from a handle to it while it runs: what `EndedCpu` names
+/// an ended process by.
+fn image_name(h: isize) -> Option<String> {
+    use windows_sys::Win32::System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW};
+    let mut buf = [0u16; 1024];
+    let mut n = buf.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(h as _, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n) } == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buf[..n as usize]);
+    path.rsplit(['\\', '/']).next().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 /// The process has exited: signaled, or (a handle without SYNCHRONIZE) an exit time set.
 fn exited(h: isize) -> bool {
     match unsafe { WaitForSingleObject(h as _, 0) } {
@@ -240,7 +255,8 @@ fn add(w: &mut Watched, job: isize, pid: u32, h: isize) -> Option<(u32, u64)> {
     let key = created(h).map(|c| (pid, c));
     match key {
         Some(k) if in_job(h, job) && !w.members.iter().any(|m| m.key == k) => {
-            w.members.push(Member { key: k, handle: Some(h), end: None });
+            // Read now: Windows gives no image name of a process that has exited.
+            w.members.push(Member { key: k, handle: Some(h), end: None, name: image_name(h) });
             Some(k)
         }
         _ => {
@@ -333,6 +349,8 @@ pub struct Reading {
     pub ended: BTreeMap<(u32, u64), u64>,
     /// The processes running in them, by pid and creation time, with their CPU so far.
     pub running: BTreeMap<(u32, u64), u64>,
+    /// The executables' file names of the ended ones, where they could be read.
+    pub names: BTreeMap<(u32, u64), String>,
 }
 
 /// A job's process counts: ever in it, and running now.
@@ -395,6 +413,9 @@ fn snapshot(w: &mut HashMap<isize, Watched>, jobs: &[isize]) -> Result<Reading, 
                 (Some(c), _) => {
                     ended += 1;
                     out.ended.insert(m.key, c);
+                    if let Some(n) = &m.name {
+                        out.names.insert(m.key, n.clone());
+                    }
                 }
                 (None, Some(h)) => {
                     let mut c = 0u64;

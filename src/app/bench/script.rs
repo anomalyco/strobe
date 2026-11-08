@@ -364,7 +364,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // A process the host started that ended inside a timed part took its CPU with it, where what
                 // it used is not known.
                 let gone = lost[local.clone()].iter().filter(|l| l.1).count();
-                super::note_ended(&mut ctx.warnings, s, &lost[local.clone()]);
+                super::note_ended(&mut ctx.warnings, s, &lost[local.clone()], &[]);
                 if gone > 0 {
                     for m in ["cpu.work", "cpu.app.total", "cpu.process.total"] {
                         values.remove(m);

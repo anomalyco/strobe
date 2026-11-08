@@ -103,7 +103,9 @@ pub(crate) fn look(design: &Design, name: &str, def: &MetricDef, pp: &[(f64, f64
     let look = design.looks.contains(&n);
     let cmp = design.compare(name, def, pp);
     let decided = look && cmp.decided;
-    let likely = (!cmp.decided).then(|| {
+    // Between looks an interval that already clears decides nothing: where the series likely ends is
+    // still projected (the next look, when the projection is short).
+    let likely = (!decided).then(|| {
         let d: Vec<f64> = pp.iter().map(|&(a, b)| if cmp.relative { (b / a).ln() } else { b - a }).collect();
         match cmp.noworse {
             Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, cmp.relative, m), design.confidence, stats::FUTILITY_POWER),

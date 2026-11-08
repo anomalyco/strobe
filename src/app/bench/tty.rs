@@ -580,7 +580,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // A process of the program's set that ended in a timed part took its CPU with it, where what it
                 // used there is not known: none.
                 let gone = measured.iter().filter(|r| r.cpu_lost).count();
-                super::note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>());
+                super::note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>(), &[]);
                 if gone == 0 && measured.iter().all(|r| r.cpu.is_finite()) {
                     extra.insert("cpu.work".into(), per(&|r| r.cpu));
                     extra.insert("cpu.app.total".into(), per(&|r| 100.0 * r.cpu / r.ms.max(1e-9)));

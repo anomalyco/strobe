@@ -113,6 +113,8 @@ struct Run {
     whole_lost: bool,
     /// What processes that ended in the run's timed parts used there (ms), in `cpu`.
     ended_ms: f64,
+    /// `ended_ms` by executable (ms, processes), where the OS names them (`record::SetCpu::ended_by`).
+    ended_exes: Vec<(String, f64, u32)>,
     span: Span,
     /// Its span on the host clock, with the stretches `ctx.untimed` left out.
     timed: metrics::Timed,
@@ -684,6 +686,7 @@ fn runs(
                     cpu_lost,
                     whole_lost,
                     ended_ms: timed_cpu.as_ref().map_or(0.0, |c| cpu_ms(c.ended, &c0, &c1, whole_ms)),
+                    ended_exes: timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), cpu_ms(*cy, &c0, &c1, whole_ms), *k)).collect()).unwrap_or_default(),
                     ms: timed.ns() as f64 / 1e6,
                     // Short CPU is none (runs.json, warmup falls back to the run's time).
                     cpu: timed_cpu.as_ref().map_or(f64::NAN, |c| cpu_ms(c.total, &c0, &c1, whole_ms)),
@@ -1168,7 +1171,8 @@ fn runs(
                     }
                 }
             }
-            super::note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>());
+            let exes: Vec<(String, f64, u32)> = measured.iter().filter(|r| !r.cpu_lost).flat_map(|r| r.ended_exes.iter().cloned()).collect();
+            super::note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>(), &exes);
             let have = Have { ui_thread: ui_tid.is_some(), windowless, gpu: (!super::super::outside::gpu_read(&samples)).then(|| samples.gpu_unreadable.clone()), pinned: !pinned.is_empty() };
             if let Some(why) = measured.iter().find_map(|r| r.span.uncounted.clone()) {
                 for m in declared_metrics(s).into_iter().filter(|m| *m == "cpu.wakes") {

@@ -414,7 +414,8 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
 fn builds(series: &[Series], describe: &Value, config: &Value, project: &Path, variants: &[Variant]) -> Vec<Value> {
     let mut out = Vec::new();
     let mut kinds: Vec<&Value> = Vec::new();
-    for s in series {
+    // Only series that run build: a parity gap or a series refused before it ran builds nothing.
+    for s in series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()) {
         let t = &describe["targets"][&s.target];
         if !kinds.iter().any(|k| k["kind"] == t["kind"] && k["build"] == t["build"]) {
             kinds.push(t);

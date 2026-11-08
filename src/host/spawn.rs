@@ -150,6 +150,9 @@ pub struct Owned {
     start: Option<u64>,
     #[cfg(windows)]
     started: Started,
+    /// Windows: the OS creating the process (`CreateProcessW`), apart from strobe's setup of it.
+    #[cfg(windows)]
+    spawned: Spawned,
     /// Linux: the most of strobe's resident set the child can carry into its `ru_maxrss` (read just
     /// before the spawn, `peak_floor`).
     #[cfg(target_os = "linux")]
@@ -183,6 +186,28 @@ fn peak_floor(forks: bool) -> Option<u64> {
 /// life even when it exited before strobe began to wait.
 #[cfg(windows)]
 type Started = (Option<u64>, std::time::Instant);
+
+/// The OS creating a child (Windows' `CreateProcessW`, the `spawn` call alone): the calling thread's
+/// cycles and the cycle clock just before and just after it, and its wall time. What a person's
+/// launch of the command costs too, unlike strobe's job, completion port and CPU mask around it.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+struct Spawned {
+    before: (u64, Option<u64>),
+    after: (u64, Option<u64>),
+    wall: std::time::Duration,
+}
+
+#[cfg(windows)]
+impl Spawned {
+    fn around<T>(f: impl FnOnce() -> T) -> (T, Spawned) {
+        let before = (super::thread_cycles(), super::tsc());
+        let at = std::time::Instant::now();
+        let r = f();
+        let wall = at.elapsed();
+        (r, Spawned { before, after: (super::thread_cycles(), super::tsc()), wall })
+    }
+}
 
 struct Group {
     #[cfg(windows)]
@@ -296,6 +321,24 @@ pub fn unlist_launch(pid: u32, job: Option<isize>) {
 impl Owned {
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Windows: the command's spawn as a person's launch of it would take it, without strobe's job,
+    /// completion port and CPU mask set while it was suspended: when its run began (the moment it
+    /// first ran, less the OS's creation of it, `Spawned`), the calling thread's cycles and the cycle
+    /// clock before and after that creation, and its wall time (ms). None elsewhere, where the spawn
+    /// call is the spawn.
+    #[allow(clippy::type_complexity)]
+    pub fn spawn_span(&self) -> Option<(std::time::Instant, (u64, Option<u64>), (u64, Option<u64>), f64)> {
+        #[cfg(windows)]
+        {
+            let s = self.spawned;
+            Some((self.started.1.checked_sub(s.wall).unwrap_or(self.started.1), s.before, s.after, s.wall.as_secs_f64() * 1e3))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     }
 
     /// The child's output pipes, when it was started with them.
@@ -784,7 +827,7 @@ pub fn jobs_cpu(roots: &[u32], dir: Option<&Path>) -> Option<super::jobs::Readin
 pub fn spawn_pinned(cmd: &mut Command, cpus: Option<u64>, flags: u32) -> std::io::Result<Child> {
     #[cfg(windows)]
     {
-        windows(cmd, cpus, flags, None).map(|(child, _, _)| child)
+        windows(cmd, cpus, flags, None).map(|(child, ..)| child)
     }
     #[cfg(not(windows))]
     {
@@ -808,7 +851,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
     #[cfg(windows)]
     {
         let job = new_job();
-        let (child, assigned, started) = match windows(cmd, cpus, flags, job) {
+        let (child, assigned, started, spawned) = match windows(cmd, cpus, flags, job) {
             Ok(x) => x,
             Err(e) => {
                 if let Some(j) = job {
@@ -828,7 +871,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         if let Some(j) = job {
             JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((child.id(), home.map(home_key), j));
         }
-        Ok(Owned { child, group: Some(Group { job }), unattributed: None, start: None, started })
+        Ok(Owned { child, group: Some(Group { job }), unattributed: None, start: None, started, spawned })
     }
     #[cfg(not(windows))]
     {
@@ -998,9 +1041,10 @@ fn nt_resume() -> Option<unsafe extern "system" fn(*mut std::ffi::c_void) -> i32
 }
 
 /// Created suspended, put in `job` and given the mask, then resumed: its first instruction already
-/// runs there. Returns whether the job took it, and the clocks just before it ran.
+/// runs there. Returns whether the job took it, the clocks just before it ran, and the OS's creation
+/// of it (`Spawned`). A child with neither runs from its creation: its clocks are read right after it.
 #[cfg(windows)]
-fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>) -> std::io::Result<(Child, bool, Started)> {
+fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>) -> std::io::Result<(Child, bool, Started, Spawned)> {
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -1008,10 +1052,11 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
     use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, GetProcessAffinityMask, OpenThread, ResumeThread, SetProcessAffinityMask, THREAD_SUSPEND_RESUME};
     let clocks = || (super::tsc(), std::time::Instant::now());
     if cpus.is_none() && job.is_none() {
-        let started = clocks();
-        return Ok((cmd.creation_flags(flags).spawn()?, false, started));
+        let (child, spawned) = Spawned::around(|| cmd.creation_flags(flags).spawn());
+        return Ok((child?, false, clocks(), spawned));
     }
-    let mut child = cmd.creation_flags(flags | CREATE_SUSPENDED).spawn()?;
+    let (child, spawned) = Spawned::around(|| cmd.creation_flags(flags | CREATE_SUSPENDED).spawn());
+    let mut child = child?;
     let h = child.as_raw_handle();
     unsafe {
         let assigned = match job.map(|j| assign(j, h as isize, child.id())) {
@@ -1058,6 +1103,6 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
             let _ = child.wait();
             return Err(std::io::Error::other("could not resume the child"));
         }
-        Ok((child, assigned, started))
+        Ok((child, assigned, started, spawned))
     }
 }

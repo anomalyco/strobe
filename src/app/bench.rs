@@ -422,7 +422,27 @@ const LAUNCH_RETRIES: u32 = 3;
 fn transient(e: &Error) -> bool {
     // Unreachable (255): no debugging port, a connection that closed. A timeout (124) only from CDP or
     // BiDi: a call with no reply; a hook or a wait that timed out is the bench's own.
-    e.validator().is_none() && (e.code == 255 || (e.code == 124 && (e.message.starts_with("cdp ") || e.message.starts_with("bidi "))))
+    e.validator().is_none() && !bad_address(e) && (e.code == 255 || (e.code == 124 && (e.message.starts_with("cdp ") || e.message.starts_with("bidi "))))
+}
+
+/// A navigation the browser refused for its address (a port it blocks, a scheme or URL it cannot
+/// load, a host that does not resolve): the same every time, so the case fails at once.
+fn bad_address(e: &Error) -> bool {
+    const REFUSED: [&str; 12] = [
+        "ERR_UNSAFE_PORT",
+        "ERR_INVALID_URL",
+        "ERR_UNKNOWN_URL_SCHEME",
+        "ERR_DISALLOWED_URL_SCHEME",
+        "ERR_BLOCKED_BY_CLIENT",
+        "ERR_BLOCKED_BY_ADMINISTRATOR",
+        "ERR_NAME_NOT_RESOLVED",
+        "deniedPortAccess",
+        "NS_ERROR_PORT_ACCESS_NOT_ALLOWED",
+        "NS_ERROR_UNKNOWN_PROTOCOL",
+        "NS_ERROR_MALFORMED_URI",
+        "NS_ERROR_UNKNOWN_HOST",
+    ];
+    e.message.starts_with("navigate ") && (REFUSED.iter().any(|r| e.message.contains(r)) || e.message.contains("invalid argument"))
 }
 
 /// Warmup runs at most, before strobe measures anyway and flags the block (`NotSteady`).
@@ -484,6 +504,8 @@ struct Run {
     role_lost: [bool; 3],
     /// What processes that ended in the run's timed parts used there (ms), in `cpu`.
     ended_ms: f64,
+    /// `ended_ms` by executable (ms, processes), where the OS names them (`record::SetCpu::ended_by`).
+    ended_exes: Vec<(String, f64, u32)>,
 }
 
 /// The point-in-time state a run left (SPEC §9.6): read once its span closed and before its reset,
@@ -509,17 +531,33 @@ fn process_roles(browser: &WebBrowser) -> BTreeMap<u32, usize> {
 }
 
 /// `EndedCpu`, once per series: its measured runs' CPU counts what processes that ended inside them
-/// used there (`record::SetCpu::ended`; per run, ms, and whether the run's CPU was lost anyway).
-fn note_ended(warnings: &mut Vec<validity::Warning>, s: &Series, runs: &[(f64, bool)]) {
+/// used there (`record::SetCpu::ended`; per run, ms, and whether the run's CPU was lost anyway), and
+/// which executables those were (`exes`: ms and processes each, over the measured runs whose CPU stands;
+/// where the OS names them).
+fn note_ended(warnings: &mut Vec<validity::Warning>, s: &Series, runs: &[(f64, bool)], exes: &[(String, f64, u32)]) {
     let ended: Vec<f64> = runs.iter().filter(|r| !r.1 && r.0.is_finite()).map(|r| r.0).collect();
     let label = format!("{}: ", s.label());
     if ended.iter().all(|ms| *ms <= 0.0) || warnings.iter().any(|w| w.id == "EndedCpu" && w.text.starts_with(&label)) {
         return;
     }
+    let mut by: BTreeMap<&str, (f64, u32)> = BTreeMap::new();
+    for (name, ms, n) in exes.iter().filter(|e| e.1.is_finite()) {
+        let e = by.entry(name.as_str()).or_insert((0.0, 0));
+        e.0 += ms;
+        e.1 += n;
+    }
+    let mut by: Vec<(&str, (f64, u32))> = by.into_iter().filter(|e| e.1.0 > 0.0).collect();
+    by.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
+    let named = if by.is_empty() {
+        String::new()
+    } else {
+        let top: Vec<String> = by.iter().take(5).map(|(n, (ms, k))| format!("{n} {} ({k} process{})", fmt::value(*ms, "ms"), if *k == 1 { "" } else { "es" })).collect();
+        format!("; over the measured runs: {}{}", top.join(", "), if by.len() > 5 { format!(" and {} more", by.len() - 5) } else { String::new() })
+    };
     warnings.push(validity::info(
         "EndedCpu",
         format!(
-            "{label}processes ended inside {} of {} measured runs; the CPU they used there ({} a run, median of those) is counted from {}, so cpu.work holds it",
+            "{label}processes ended inside {} of {} measured runs; the CPU they used there ({} a run, median of those) is counted from {}, so cpu.work holds it{named}",
             ended.iter().filter(|ms| **ms > 0.0).count(),
             runs.len(),
             fmt::value(metrics::median(&ended.iter().copied().filter(|ms| *ms > 0.0).collect::<Vec<_>>()), "ms"),
@@ -724,10 +762,13 @@ fn series_windowless(ctx: &Ctx, s: &Series) -> bool {
         Some((b, h)) => vec![b.as_str(), h.as_str()],
         None => vec![s.target.as_str()],
     };
-    names.iter().all(|n| {
-        let t = &ctx.describe["targets"][*n];
-        matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless)
-    })
+    names.iter().all(|n| windowless_target(&ctx.describe["targets"][*n], &ctx.config))
+}
+
+/// A target that opens no window: a script, a command line, a terminal (its grid is strobe's own), or
+/// an app with `window: false` (on the target or its profile).
+fn windowless_target(t: &Value, config: &Value) -> bool {
+    matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, config).ok()).is_some_and(|a| a.windowless)
 }
 
 /// How a note names a side: an implementation's own name in an implementation comparison, else its
@@ -1227,6 +1268,12 @@ struct Ctx<'a> {
     unbatched: Option<(String, String)>,
     /// `--mobile`: the phone whose Chrome runs the file's phone targets (SPEC 13.1 "Chrome on a phone").
     phone: Option<crate::target::android_chrome::Phone>,
+    /// `--unlock-wait` ran out for a series that needs a presenting window while the session stayed
+    /// locked (`locked_out`) or, on macOS, while someone kept using the Mac (`active_out`): that series is
+    /// not run (resumable, `screened_out`), later ones that meet the same state are not run either, at
+    /// once, and the rest of the file runs. Each clears once its state is gone.
+    locked_out: bool,
+    active_out: bool,
 }
 
 /// Every block's reservation, merged for the experiment's context.
@@ -1761,6 +1808,8 @@ pub fn run(args: &Args) -> Result<Output> {
         batch,
         unbatched: None,
         phone: None,
+        locked_out: false,
+        active_out: false,
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
     // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check` or a
@@ -1891,7 +1940,7 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     // Headed runs rely on a calibration that checked frames on a display; a run whose every series is
     // headless (a target's own `headless` too) or windowless accepts a headless one.
-    let headed = series.iter().filter(|s| s.refused.is_none() && s.gap.is_none()).any(|s| !headless_of(&ctx, s) && !series_windowless(&ctx, s));
+    let headed = series.iter().filter(|s| s.refused.is_none() && s.gap.is_none()).any(|s| !headless_series(&ctx, s) && !series_windowless(&ctx, s));
     ctx.warnings.extend(super::up::calibration_warning(!headed));
     preflight(&series, &ctx.describe, &variants, &config, &ctx.projects, ctx.headless)?;
     // A native app's reduced motion is what its profile declares: no page to read it back from.
@@ -1996,6 +2045,9 @@ pub fn run(args: &Args) -> Result<Output> {
     // A stop (Ctrl-C, SIGTERM, `--stop`) or a failure ends the experiment with what it finished: the
     // series done, the pairs of the one running, and the series it never reached.
     let mut halted: Option<Error> = None;
+    // The last series `--unlock-wait` left not run (`screened_out`): the bench then ends as stopped,
+    // with every series that could run done.
+    let mut screened: Option<Error> = None;
     let mut not_run: Vec<String> = Vec::new();
     // Series `--max-time` left no time to start.
     let mut out_of_time: Vec<String> = Vec::new();
@@ -2052,8 +2104,12 @@ pub fn run(args: &Args) -> Result<Output> {
             Mode::Check => match batching.as_mut() {
                 Some(b) => {
                     let r = batch::series(&mut ctx, b, &series, i, &mut variants, &config);
-                    if let Some(e) = b.halt.take() {
-                        halted = Some(e);
+                    // A launch that ended on a wait `--unlock-wait` capped: the cases it did not reach are
+                    // not run, and the rest of the file runs on.
+                    match b.halt.take() {
+                        Some(e) if screened_out(&e) && !stop_requested() => screened = Some(e),
+                        Some(e) => halted = Some(e),
+                        None => {}
                     }
                     r
                 }
@@ -2088,24 +2144,42 @@ pub fn run(args: &Args) -> Result<Output> {
                 series_out.push(refused_series(&ctx, s, &r));
                 continue;
             }
+            // The session stayed locked past `--unlock-wait` and this series needs a presenting window: it
+            // is not run (`--resume` runs it), and the series that need none run on.
+            Err(e) if screened_out(&e) && !stop_requested() => {
+                progress(format!("\n{}  not run: {}", s.label(), e.message));
+                not_run.push(s.label());
+                screened = Some(e);
+                continue;
+            }
             Err(e) => {
                 halted = Some(if e.code == 130 || stop_requested() { stop_error() } else { e });
                 not_run.push(s.label());
                 continue;
             }
         };
+        // A series that stopped part way: what it finished is kept and `--resume` goes on from there.
+        let partial = out.get("halt").is_some_and(Value::is_object);
         if let Some(h) = out.get("halt").filter(|h| h.is_object()) {
-            halted = Some(Error::new(h["code"].as_i64().unwrap_or(1) as i32, h["message"].as_str().unwrap_or("")));
+            let e = halt_error(h);
+            if screened_out(&e) && !stop_requested() {
+                screened = Some(e);
+            } else {
+                halted = Some(e);
+            }
         }
         if out["not_run"] == true {
             not_run.push(s.label());
             continue;
         }
-        if halted.is_none() {
+        if halted.is_none() && !partial {
             checkpoint(&mut ctx, &s.label(), json!({ "done": out }));
         }
         all_decided &= out["decided"].as_bool().unwrap_or(false);
         series_out.push(out);
+    }
+    if halted.is_none() {
+        halted = screened;
     }
     if halted.as_ref().is_some_and(|h| matches!(h.code, 130 | 124)) {
         progress(format!("\nstopped: kept {} series; strobe bench --resume {exp} runs the rest", series_out.len()));
@@ -2175,7 +2249,8 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         let matrix = journey::matrix(&mut series_out);
         let batched = batching.as_ref().map_or(Value::Null, batch::Batching::summary);
-        let mut out = check_output(&exp, &dir, &file, series_out, ctx.warnings, matrix, args.has("require-parity"), (seed, used_random), batched, halted.is_some())?;
+        let stopped = halted.as_ref().map_or(Value::Null, |h| json!({ "code": h.code, "why": h.message, "not_run": not_run }));
+        let mut out = check_output(&exp, &dir, &file, series_out, ctx.warnings, matrix, args.has("require-parity"), (seed, used_random), batched, (json!(env), stopped))?;
         // A check that stopped (a stop, the user's state disturbed, launches that kept failing) ends with
         // that error's code.
         if let Some(h) = &halted {
@@ -2215,7 +2290,7 @@ pub fn run(args: &Args) -> Result<Output> {
         "id": exp, "kind": "experiment", "file": file, "created": super::record::now_iso(),
         // A refresh only where some series drew to a display (a headless page has none).
         "env": env, "browser": ctx.browser_version, "gpu": ctx.gpu, "window": ctx.used.as_ref().unwrap_or(&ctx.window),
-        "refresh_hz": refresh.filter(|_| series_out.iter().any(|s| s["headless"] != true)),
+        "refresh_hz": refresh.filter(|_| series_out.iter().any(|s| s["headless"] != true && s["windowless"] != true && !matches!(s["kind"].as_str(), Some("gap" | "refused")))),
         "plan": {
             "pin": pin_label, "runs_per_block": ctx.runs, "aa": aa, "reserve": ctx.reserved, "reserve_mode": ctx.reserve, "gpu_cache": ctx.gpu_cache,
             "trace": if args.get("trace") == Some("full") { "full" } else { "lean" },
@@ -2359,6 +2434,8 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     // The run the check measured (from 0): a case with a reset measures its second when a process of
     // the target ended in its first (`Warmup::after`), which then is no cold run.
     let measured_run = r.as_ref().map_or(Value::Null, |b| json!(b.warmup));
+    // The validator that failed the case, when one did (`state` and `refusal` in result.json).
+    let failed_by = r.as_ref().err().and_then(|e| e.refusal.as_deref()).map_or(Value::Null, |f| json!(f));
     let (passed, error, hint, values, refused, locked, recording, screen, shown) = match r {
         Ok(b) => {
             let shown = shown::summarize(std::slice::from_ref(&b), false).0;
@@ -2393,7 +2470,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     let declared = declared_metrics(s);
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "check", "until": launch::until_of(&s.launch), "primary": { "metric": s.primary }, "declared": declared,
-        "passed": passed, "decided": passed, "error": error, "hint": hint, "values": values, "refused": refused, "measured_run": measured_run, "session_locked": locked, "headless": headless_of(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
+        "passed": passed, "decided": passed, "error": error, "hint": hint, "refusal": failed_by, "values": values, "refused": refused, "measured_run": measured_run, "session_locked": locked, "headless": headless_series(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
         "recording": recording, "screen": screen, "shown": shown, "overhead": overhead, "untimed": untimed_of(&[(values["untimed.n"].as_f64(), values["untimed.ms"].as_f64())]),
         "video": recording.as_str().filter(|r| film && has_video(r)).map(|r| json!({ "head": r })),
         "log": log, "log_path": ctx.runner.log, "actions": actions,
@@ -2439,20 +2516,38 @@ fn head_attribution(ctx: &mut Ctx, s: &Series, v: &Variant, runs: usize) -> Resu
     }
 }
 
-/// `seeded`: the experiment's seed, and whether a hook used it.
+/// `seeded`: the experiment's seed, and whether a hook used it. `ran`: the machine (`env`) and, for a
+/// check that stopped, why and what it did not run (`stopped`, as an experiment's).
 #[allow(clippy::too_many_arguments)]
 fn check_output(
     exp: &str,
     dir: &Path,
     file: &Path,
-    series: Vec<Value>,
+    mut series: Vec<Value>,
     warnings: Vec<Warning>,
     matrix: Option<String>,
     require_parity: bool,
     seeded: (u32, bool),
     batched: Value,
-    halted: bool,
+    ran: (Value, Value),
 ) -> Result<Output> {
+    let (env, stopped) = ran;
+    let halted = stopped.is_object();
+    // Each case's state in one field, and the refusal behind a refused or failed one at the top.
+    for s in series.iter_mut() {
+        let (state, refusal) = match s["kind"].as_str() {
+            Some("gap") => ("gap", Value::Null),
+            Some("refused") => ("refused", s["primary"]["refusal"].clone()),
+            _ if s["journey_refusal"].is_object() => ("fail", s["journey_refusal"].clone()),
+            _ if s["passed"] == true => ("pass", Value::Null),
+            _ => ("fail", s["refusal"].clone()),
+        };
+        if state != "pass" && s["error"].is_null() && refusal.is_object() {
+            s["error"] = json!(format!("{}: {}", refusal["validator"].as_str().unwrap_or(""), refusal["summary"].as_str().unwrap_or("")));
+        }
+        s["state"] = json!(state);
+        s["refusal"] = refusal;
+    }
     // A gap is listed, not failed; journeys whose sides differ (`journey_refusal`) fail.
     let gaps = series.iter().filter(|s| s["kind"] == "gap").count();
     // Refused before it ran (`check_engines`): listed, not failed, as a gap is; the rest of the file ran.
@@ -2645,8 +2740,8 @@ fn check_output(
     }
     text += &format!("\n{exp}\n");
     let result = json!({
-        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "plan": { "seed": seeded.0, "used_random": seeded.1 },
-        "series": series, "warnings": warnings, "passed": failed == 0 && !halted, "parity": matrix, "batch": batched, "text": text,
+        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "env": env, "plan": { "seed": seeded.0, "used_random": seeded.1 },
+        "series": series, "warnings": warnings, "passed": failed == 0 && !halted, "stopped": stopped, "parity": matrix, "batch": batched, "text": text,
     });
     store::write_json(&dir.join("result.json"), &result)?;
     let mut out = Output::new(text, result);
@@ -2690,7 +2785,7 @@ fn leak_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Val
     let head = &leak["head"][part];
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "leak", "engine": ctx.describe["targets"][&s.target]["engine"],
-        "headless": headless_of(ctx, s),
+        "headless": headless_series(ctx, s),
         "primary": { "metric": metric, "verdict": head["verdict"], "verdict_kind": head["verdict_kind"], "decided": head["decided"] },
         "decided": decided, "leak": leak, "runs_per_half": n, "warnings": [], "blocks": [], "attribution": {},
         "elapsed_ms": series_started.elapsed().as_secs_f64() * 1e3,
@@ -2742,14 +2837,15 @@ fn stable_exact(name: &str, blocks: &[Block], pairs: &[(usize, usize)]) -> bool 
     pairs.iter().all(|&(a, b)| val(&blocks[a], name) == a0 && val(&blocks[b], name) == b0)
 }
 
-/// `ETA ~12.5 min`: the pairs left to `target` at this series' mean pair time so far, plus the planned
-/// time of the series after it; kept in the bench's registration for other benches' plans.
+/// ` · ETA ~12.5 min`: the pairs left to `target` at this series' mean pair time so far, plus the
+/// planned time of the series after it; kept in the bench's registration for other benches' plans.
+/// Nothing when nothing is left (the last series stops at this pair).
 fn eta(ctx: &mut Ctx, s: &Series, blocks: &[Block], pairs: &[(usize, usize)], target: usize) -> String {
     let block = |b: &Block| b.steps.iter().map(|x| x.1).sum::<f64>();
     let pair_ms = pairs.iter().map(|&(a, b)| block(&blocks[a]) + block(&blocks[b])).sum::<f64>() / pairs.len().max(1) as f64;
     let ms = target.saturating_sub(pairs.len()) as f64 * pair_ms + ctx.eta_after.get(&s.label()).copied().unwrap_or(0.0);
     ctx.reg.set_eta(ms);
-    format!("ETA ~{}", fmt::ms_duration(ms as u64))
+    if ms < 1.0 { String::new() } else { format!(" · ETA ~{}", fmt::ms_duration(ms as u64)) }
 }
 
 /// Saves a series' finished blocks and pairs (or its result, once done) in `state.json`, so a bench
@@ -2944,7 +3040,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
         }
     }
     if let Some(h) = halted.as_ref().filter(|_| blocks.is_empty()) {
-        return Ok(json!({ "label": s.label(), "case": s.case, "not_run": true, "halt": { "code": h.code, "message": h.message } }));
+        return Ok(json!({ "label": s.label(), "case": s.case, "not_run": true, "halt": halt_json(h) }));
     }
     // `--why always`: one attribution block of head after its timed blocks, as a `--check`'s
     // (`head_attribution`). Nothing is compared, so `auto` has no difference to explain.
@@ -2996,15 +3092,15 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     let window = series_window(ctx, s, &blocks);
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "target_kind": target["kind"], "params": s.params, "kind": "blocks",
-        "until": launch::until_of(&s.launch),
-        "engine": target["engine"], "headless": headless_of(ctx, s), "input": input_of(&blocks), "browser": series_browser(&blocks),
+        "until": launch::until_of(&s.launch), "declared": declared_metrics(s),
+        "engine": target["engine"], "headless": headless_series(ctx, s), "input": input_of(&blocks), "browser": series_browser(&blocks),
         "primary": primary, "decided": false, "session": session,
         "pairs": 0, "launches": blocks.len(), "stopped": if halted.is_some() { "stopped" } else { "blocks done" },
         "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms, "warmup_values": warmup_values,
         "steps": mean_steps(&blocks), "elapsed_ms": series_started.elapsed().as_secs_f64() * 1e3 - (ctx.waited_ms - waited_before), "waited_ms": ctx.waited_ms - waited_before,
         "overhead": mean_overhead(&blocks), "untimed": untimed_of(&blocks.iter().map(|b| (b.values.get("untimed.n").copied(), b.values.get("untimed.ms").copied())).collect::<Vec<_>>()),
         "blocks": blocks, "warnings": warnings, "attribution": attribution, "attribution_sampling": attribution_sampling, "timing_recordings": timing_recordings, "shown": shown,
-        "halt": halted.map(|h| json!({ "code": h.code, "message": h.message })),
+        "halt": halted.as_ref().map(halt_json),
     });
     series_setup(ctx, s, window, &mut out);
     Ok(out)
@@ -3154,7 +3250,12 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         let (lk, step) = driver.after_pair(&s.primary, def, &primary_pairs, || tested_names(s, script, &blocks, &pairs, bound).len());
         if let Some(sequential::Look { cmp, look, decided, next, likely, .. }) = &lk {
             // Where this series likely ends: at the look its projection reaches, or where it gives up.
-            let target = if *decided || design.fixed {
+            // Decided: it ends here, or runs on to the pairs its secondaries need.
+            let target = if let sequential::Step::RunOn { need, .. } = &step {
+                *need
+            } else if matches!(step, sequential::Step::Stop) {
+                n
+            } else if *decided || design.fixed {
                 if *decided { n } else { max_pairs }
             } else {
                 let need = likely.unwrap_or(max_pairs).max(n + 1);
@@ -3165,7 +3266,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             let side = |i: usize| if ctx.implementations { variants[i].name.clone() } else { variants[i].role.to_string() };
             let (est_t, lo_t, hi_t) = change_ci(cmp.relative, cmp.estimate, cmp.lo, cmp.hi, def.unit);
             progress(format!(
-                "  pair {:>2}  {} {:>10}  {} {:>10}  {}  [{} … {}]  {} · {eta}",
+                "  pair {:>2}  {} {:>10}  {} {:>10}  {}  [{} … {}]  {}{eta}",
                 n,
                 side(0),
                 fmt::value(val(&blocks[idx[0]], &s.primary), def.unit),
@@ -3192,7 +3293,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             }
             sequential::Step::RunOn { need, now: false, .. } => {
                 let eta = eta(ctx, s, &blocks, &pairs, need);
-                progress(format!("  pair {n:>2}  for the secondaries (the primary was decided: {}) · {eta}", verdict_before.unwrap_or_default()));
+                progress(format!("  pair {n:>2}  for the secondaries (the primary was decided: {}){eta}", verdict_before.unwrap_or_default()));
                 // `--max-time` ends the secondaries' pairs too: the primary keeps its verdict.
                 if max_time.is_some_and(|t| started.elapsed() > t) || share.is_some_and(|d| Instant::now() > d) {
                     driver.stopped = "primary decided".into();
@@ -3214,7 +3315,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     }
     if let Some(h) = &halted {
         if pairs.is_empty() {
-            return Ok(json!({ "label": s.label(), "case": s.case, "not_run": true, "halt": { "code": h.code, "message": h.message } }));
+            return Ok(json!({ "label": s.label(), "case": s.case, "not_run": true, "halt": halt_json(h) }));
         }
         if driver.decided_at.is_none() {
             // An unlock wait that ran out stops the series as a stop does: `--resume` runs the rest.
@@ -3619,7 +3720,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         "pixels": pixels,
         "label": s.label(), "case": s.case, "target": s.target, "target_kind": target["kind"], "params": s.params, "kind": if s.launch.is_object() { "launch" } else { "runs" },
         "until": launch::until_of(&s.launch),
-        "engine": target["engine"], "headless": headless_of(ctx, s), "browser": series_browser(&blocks),
+        "engine": target["engine"], "headless": headless_series(ctx, s), "browser": series_browser(&blocks),
         "primary": primary, "decided": primary_decided, "session": session, "secondaries": secondaries, "descriptive": descriptive, "holm_pairs": holm,
         "pairs": pairs.len(), "launches": blocks.len(), "stopped": stopped, "bound": bound, "noworse": s.noworse,
         "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms,
@@ -3627,7 +3728,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         "overhead": mean_overhead(&blocks), "untimed": untimed_of(&blocks.iter().map(|b| (b.values.get("untimed.n").copied(), b.values.get("untimed.ms").copied())).collect::<Vec<_>>()),
         "blocks": blocks, "warnings": warnings, "attribution": recordings, "attribution_sampling": if sampling.is_empty() { Value::Null } else { Value::Object(sampling) }, "timing_recordings": timing_recordings, "shown": shown,
         "pass": pass.map(|(b, p)| json!({ "counters": !main_counters, "blocks": b, "pairs": p })),
-        "halt": halted.map(|h| json!({ "code": h.code, "message": h.message })),
+        "halt": halted.as_ref().map(halt_json),
     });
     out["video"] = if videos.as_object().is_some_and(|o| !o.is_empty()) { videos } else { Value::Null };
     // The pairs the primary's verdict, estimate and interval come from (its look), and what the
@@ -4255,7 +4356,7 @@ fn refused_series(ctx: &Ctx, s: &Series, r: &Refusal) -> Value {
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "refused",
         "targets": { "base": b, "head": h }, "hero": s.hero, "primary": primary, "decided": false, "passed": false, "pairs": 0, "launches": 0,
-        "headless": headless_of(ctx, s), "engine": engine_of(target), "target_kind": target["kind"],
+        "headless": headless_series(ctx, s), "engine": engine_of(target), "target_kind": target["kind"],
         "journey": s.journey(), "side_name": target["name"].as_str().unwrap_or(&s.target),
     });
     // It drew in no window.
@@ -4934,8 +5035,19 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // The display and Chromium's occlusion tracking settle after the display comes back.
             std::thread::sleep(Duration::from_secs(3));
         }
+        // A lock that `--unlock-wait` waited out is over once the session is unlocked: a later lock
+        // waits again.
+        if !host::session_locked() {
+            ctx.locked_out = false;
+        }
         if host::session_locked() {
             let why = needs_screen(ctx, s, x).unwrap_or_else(|| met.into());
+            // An earlier series' wait ran out (`--unlock-wait`) and the session is still locked: this one
+            // is not run either, without waiting again, and the series that need no window run on.
+            if ctx.locked_out {
+                let text = format!("the session is still locked after --unlock-wait ran out, and {} needs a presenting window ({why})", s.label());
+                return Err(waited_out(ctx, Refusal::new(ValidatorId::SessionLocked, text)));
+            }
             progress(format!("  waiting: the session is locked and {} needs a presenting window: {why}; strobe resumes when it is unlocked", s.label()));
             // Nothing held while waiting: the user's power plan, sleep as they set it, and the slot, so
             // other benches run what needs no presenting window meanwhile.
@@ -4944,11 +5056,23 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let waiting = Instant::now();
             // `--unlock-wait`: how long one wait may last before the bench ends with what it finished.
             let limit = ctx.args.get("unlock-wait").map(duration_ms).transpose()?.map(Duration::from_millis);
+            let mut said = Instant::now();
             while host::session_locked() {
                 if let Some(l) = limit.filter(|l| waiting.elapsed() >= *l) {
                     ctx.waited_ms += waiting.elapsed().as_secs_f64() * 1e3;
-                    return Err(Error::timeout(format!("the session stayed locked for {} (--unlock-wait), and the series needs a presenting window ({why})", fmt::ms_duration(l.as_millis() as u64)))
-                        .hint(format!("strobe bench --resume {} once the session is unlocked", ctx.exp)));
+                    let text = format!("the session stayed locked for {} (--unlock-wait), and {} needs a presenting window ({why})", fmt::ms_duration(l.as_millis() as u64), s.label());
+                    ctx.locked_out = true;
+                    return Err(waited_out(ctx, Refusal::new(ValidatorId::SessionLocked, text)));
+                }
+                // A line a minute, so a wait that has no end yet never reads as a hang.
+                if said.elapsed() >= Duration::from_secs(60) {
+                    said = Instant::now();
+                    progress(format!(
+                        "  still waiting {} for an unlock: {} needs a presenting window; {}strobe bench --stop ends it",
+                        fmt::ms_duration(waiting.elapsed().as_millis() as u64),
+                        s.label(),
+                        if limit.is_some() { "" } else { "--unlock-wait caps the wait, " }
+                    ));
                 }
                 nap(Duration::from_secs(2))?;
             }
@@ -4970,10 +5094,18 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         // macOS: someone is using the Mac, so strobe did not take their focus to uncover the window.
         // Wait for them to leave it, as for a locked session, holding nothing meanwhile.
+        // Someone who kept using the Mac past `--unlock-wait` has left it: a later block waits again.
+        if host::person_idle_s().is_none_or(|i| i >= 60.0) {
+            ctx.active_out = false;
+        }
         if behind(&r) && host::person_idle_s().is_some_and(|i| i < 60.0) {
-            progress(format!("  waiting: someone is using this Mac, and strobe measures the {} app as the active one; it runs the block again once nobody has touched the Mac for a minute", v.role));
             // Discarded before the wait, which a stop or `--unlock-wait` may end.
             discard(&r);
+            if ctx.active_out {
+                let r = Refusal::window_hidden(Hidden::NotActive, format!("someone is still using this Mac after --unlock-wait ran out, and the {} app must be the active one", v.role));
+                return Err(waited_out(ctx, r));
+            }
+            progress(format!("  waiting: someone is using this Mac, and strobe measures the {} app as the active one; it runs the block again once nobody has touched the Mac for a minute", v.role));
             release_machine(ctx);
             ctx.reg.set("waiting", format!("{} {} block: someone is using this Mac (the app must be the active one)", s.label(), v.role));
             let waiting = Instant::now();
@@ -4983,8 +5115,9 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             while let Some(idle) = host::person_idle_s().filter(|i| *i < 60.0) {
                 if let Some(l) = limit.filter(|l| waiting.elapsed() >= *l) {
                     ctx.waited_ms += waiting.elapsed().as_secs_f64() * 1e3;
-                    return Err(Error::timeout(format!("someone kept using this Mac for {} (--unlock-wait), and the {} app must be the active one", fmt::ms_duration(l.as_millis() as u64), v.role))
-                        .hint(format!("strobe bench --resume {} once nobody uses the Mac", ctx.exp)));
+                    let text = format!("someone kept using this Mac for {} (--unlock-wait), and the {} app must be the active one", fmt::ms_duration(l.as_millis() as u64), v.role);
+                    ctx.active_out = true;
+                    return Err(waited_out(ctx, Refusal::window_hidden(Hidden::NotActive, text)));
                 }
                 if said.elapsed() >= Duration::from_secs(60) {
                     said = Instant::now();
@@ -5028,6 +5161,35 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         discard(&r);
         progress(format!("  the session locked during a {} block: discarded, it runs again once unlocked", v.role));
+    }
+}
+
+/// `--unlock-wait` ran out (or ran out for an earlier series) for a series that needs a presenting
+/// window: exit 124, typed by the state it waited out (`SessionLocked`, or `WindowHidden` for an app
+/// that must be the active one), resumable. The bench's loop does not run that series and runs the
+/// rest (`screened_out`).
+fn waited_out(ctx: &Ctx, r: Refusal) -> Error {
+    let fix = format!("strobe bench --resume {} once the {} runs what was not run", ctx.exp, if r.validator == ValidatorId::SessionLocked { "session is unlocked" } else { "Mac is free" });
+    Error::timeout_refused(r.fix(fix))
+}
+
+/// A series' `waited_out` error: not its failure; it is not run.
+fn screened_out(e: &Error) -> bool {
+    e.code == 124 && matches!(e.validator(), Some(ValidatorId::SessionLocked | ValidatorId::WindowHidden))
+}
+
+/// A series' `halt` as its result keeps it, with the validator of a typed one (`screened_out`).
+fn halt_json(e: &Error) -> Value {
+    json!({ "code": e.code, "message": e.message, "validator": e.validator() })
+}
+
+/// A `halt_json` read back.
+fn halt_error(h: &Value) -> Error {
+    let e = Error::new(h["code"].as_i64().unwrap_or(1) as i32, h["message"].as_str().unwrap_or(""));
+    match h["validator"].as_str().and_then(ValidatorId::from_name) {
+        // The message is already the refusal's (`Refusal::message`).
+        Some(v) => Error { refusal: Some(Box::new(Refusal::new(v, e.message.split_once(": ").map_or(e.message.as_str(), |(_, rest)| rest)))), ..e },
+        None => e,
     }
 }
 
@@ -6501,10 +6663,13 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             }
             driver.drags.borrow_mut().clear();
             driver.inputs.borrow_mut().clear();
-            driver.set_pids(browser.pids());
+            // One listing of the set (its pids only, no memory read) for everything before the run's
+            // edge that follows it: the driver, the present capture and the OS input.
+            let pids = browser.live_pids();
+            driver.set_pids(pids.clone());
             // The capture follows windows that opened since (the drivers' settles read it without looking).
             if let Some(p) = presents_rc.borrow_mut().as_mut() {
-                p.track(&browser.pids());
+                p.track(&pids);
             }
             if changes {
                 page_changes(&page);
@@ -6521,7 +6686,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             reads_before.set((0, 0.0));
             pixels_before.set((0, 0.0, 0.0));
             if let Some(os) = driver.os.get() {
-                os.set_pids(browser.pids());
+                os.set_pids(pids);
                 os.take_log();
                 os.begin(&page)?;
             }
@@ -6780,6 +6945,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 (Some(c), Some(pct)) => c.ended as f64 * pct / 100.0 * wall / 1e6,
                 _ => 0.0,
             };
+            let ended_exes = match (&timed_cpu, share(1, gap.0)) {
+                (Some(c), Some(pct)) => c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), *cy as f64 * pct / 100.0 * wall / 1e6, *k)).collect(),
+                _ => Vec::new(),
+            };
             let counted = probe::wakes::counted(&k0, &k1);
             let work = cpu * wall / 1e6 / 100.0;
             let task = if doc_gone { f64::NAN } else { c1[0] + carry[0] - c0[0] - gap.1[0] };
@@ -6807,6 +6976,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 counted_ms,
                 role_lost,
                 ended_ms,
+                ended_exes,
             })
         };
         // Warm until two consecutive runs do the same main-thread work (within 5%); both of them count
@@ -7540,7 +7710,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         }
                     }
                 }
-                note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>());
+                let exes: Vec<(String, f64, u32)> = measured.iter().filter(|r| !r.cpu_lost).flat_map(|r| r.ended_exes.iter().cloned()).collect();
+                note_ended(&mut ctx.warnings, s, &measured.iter().map(|r| (r.ended_ms, r.cpu_lost)).collect::<Vec<_>>(), &exes);
                 // A run the page took to another document without strobe's `goto`: what the departed one
                 // counted was never read (`Run::doc_lost`).
                 let lost = measured.iter().filter(|r| r.doc_lost).count();
@@ -8042,12 +8213,9 @@ fn preflight(series: &[Series], describe: &Value, variants: &[Variant], config: 
             let name = v.target_of(s);
             let target = &describe["targets"][name];
             let config = projects.get(name).map_or(config, |(_, c)| c);
-            if headless && !matches!(target["kind"].as_str(), Some("web" | "url")) {
-                return Err(Error::usage(format!(
-                    "{}: --headless runs pages in a headless browser; this target is a {} target, which opens its own window",
-                    s.label(),
-                    target["kind"].as_str().unwrap_or("?")
-                )));
+            // `--headless` runs a file's pages headless and leaves what opens no window as it is.
+            if headless && !matches!(target["kind"].as_str(), Some("web" | "url")) && !windowless_target(target, config) {
+                return Err(headless_window(&s.label(), name, target));
             }
             let apps = profile_of(target).into_iter().chain(if let Kind::App(id) = &v.kind { Some(id.as_str()) } else { None });
             let mut profiles = Vec::new();
@@ -8594,9 +8762,25 @@ fn series_setup(ctx: &Ctx, s: &Series, window: Value, out: &mut Value) {
     }
 }
 
-/// Whether a series' page runs headless: `--headless`, or its target's `headless`.
+/// Whether a series' page runs headless: `--headless`, or its target's `headless`. A target that is
+/// no page (a cli, script or windowless one `--headless` leaves as it is) never does.
 fn headless_of(ctx: &Ctx, s: &Series) -> bool {
-    ctx.headless || ctx.describe["targets"][&s.target]["headless"] == true
+    headless_target(ctx, &s.target)
+}
+
+fn headless_target(ctx: &Ctx, name: &str) -> bool {
+    let t = &ctx.describe["targets"][name];
+    matches!(t["kind"].as_str(), Some("web" | "url")) && (ctx.headless || t["headless"] == true)
+}
+
+/// A whole series (both sides of an implementation comparison) drew to no display: every side is a
+/// headless page or opens no window, and one is a headless page. `headless_of` is one target's.
+fn headless_series(ctx: &Ctx, s: &Series) -> bool {
+    let names: Vec<&str> = match &s.sides {
+        Some((b, h)) => vec![b.as_str(), h.as_str()],
+        None => vec![s.target.as_str()],
+    };
+    names.iter().any(|n| headless_target(ctx, n)) && names.iter().all(|n| headless_target(ctx, n) || windowless_target(&ctx.describe["targets"][*n], &ctx.config))
 }
 
 /// What an app's page (Electron, a webview, a command's browser) sees of its input devices: the
@@ -8902,6 +9086,14 @@ fn on_headless_compositor(t: &Value, config: &Value) -> bool {
     display_of(t, config) == Some(isolate::Display::Wayland)
 }
 
+/// `--headless` with a target that opens its own window: a headless browser draws only pages.
+fn headless_window(label: &str, name: &str, t: &Value) -> Error {
+    Error::usage(format!(
+        "{label}: --headless runs pages in a headless browser and leaves targets with no window (cli, script, terminal, window: false) as they are; {name} is a {} target, which opens its own window (narrow the run with --target or --filter)",
+        t["kind"].as_str().unwrap_or("?")
+    ))
+}
+
 /// `check_engines` for one target of a series: a usage error or whole-run refusal, else the series' own
 /// refusal (its summary without the series' label, which every listing prints beside it).
 fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config: &Value) -> Result<Option<Refusal>> {
@@ -8910,8 +9102,8 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
     if args.get("engine").is_some() && !page {
         return Err(Error::usage(format!("{}: --engine picks a page's browser; {} is a {} target (narrow the run with --target)", s.label(), name, t["kind"].as_str().unwrap_or("?"))));
     }
-    if args.has("headless") && !page {
-        return Err(Error::usage(format!("{}: --headless runs pages in a headless browser; {} is a {} target, which opens its own window", s.label(), name, t["kind"].as_str().unwrap_or("?"))));
+    if args.has("headless") && !page && !windowless_target(t, config) {
+        return Err(headless_window(&s.label(), name, t));
     }
     let reduce = Motion::of(t, name)?;
     // A command's app reaches strobe once it printed its endpoint: what it drew before is not reduced.
@@ -9596,7 +9788,7 @@ struct Harness {
 
 fn harness(file: &Path, project: &Path, config: &Value) -> Harness {
     let dir = file.parent().unwrap_or(Path::new("."));
-    let from = git::toplevel(dir).and_then(|p| std::fs::canonicalize(p).ok()).unwrap_or_else(|| project.to_path_buf());
+    let from = git::toplevel(dir).and_then(|p| std::fs::canonicalize(p).ok()).unwrap_or_else(|| std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf()));
     let rel = |p: &Path| std::fs::canonicalize(p).ok().and_then(|c| c.strip_prefix(&from).ok().map(Path::to_path_buf));
     let mut paths: Vec<PathBuf> = [rel(dir), rel(&project.join("strobe.json"))].into_iter().flatten().filter(|p| !p.as_os_str().is_empty()).collect();
     paths.extend(config["harness"].as_array().into_iter().flatten().filter_map(Value::as_str).map(PathBuf::from));
@@ -9632,6 +9824,11 @@ fn overlay_harness(v: &Variant, root: &Path, h: &Harness) -> Result<()> {
     };
     for p in &h.paths {
         let src = h.from.join(p);
+        // A variant's folder inside that harness folder (`--head .` run from the bench file's own
+        // folder): the copy would land inside what it copies, one more nested copy every run.
+        if root.join(p).starts_with(&src) {
+            continue;
+        }
         if src.is_dir() {
             for f in walk(&src) {
                 copy(&f, &root.join(p).join(f.strip_prefix(&src).unwrap_or(&f)))?;
@@ -10128,6 +10325,31 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     }
     let each = s["blocks"].as_array().into_iter().flatten().map(|b| b["values"][metric].as_f64().filter(|v| v.is_finite()).map_or("—".to_string(), |v| fmt::value(v, unit)));
     out += &format!("  blocks  {}\n", each.collect::<Vec<_>>().join(" · "));
+    // The declared secondaries: each one's median over the blocks, or why a block refused it.
+    let all = s["blocks"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let declared: Vec<&str> = s["declared"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| *m != metric).collect();
+    let width = declared.iter().map(|m| m.len()).max().unwrap_or(0);
+    for m in &declared {
+        let unit = model::metric(m).map_or("", |d| d.unit);
+        let got: Vec<f64> = all.iter().filter_map(|b| b["values"][*m].as_f64()).filter(|v| v.is_finite()).collect();
+        let refused: Vec<&str> = all.iter().filter_map(|b| b["refused"][*m].as_str()).collect();
+        let text = match (refused.first(), got.len()) {
+            (Some(why), _) => format!("refused in {} of {blocks} blocks ({})", refused.len(), why.replacen(&format!(": {m}: "), ": ", 1)),
+            (None, 0) => "no value (nothing in these blocks measured it)".to_string(),
+            (None, 1) => fmt::value(got[0], unit),
+            (None, _) => {
+                let (median, lo, hi, _) = stats::median_interval(&got, 0.95);
+                format!("median {}  [{} … {}]", fmt::value(median, unit), fmt::value(lo, unit), fmt::value(hi, unit))
+            }
+        };
+        out += &format!("  {m:<width$}  {text}\n");
+    }
+    // The timed blocks' kept recordings (the first block's, or every block's with --keep).
+    for r in s["timing_recordings"].as_array().into_iter().flatten() {
+        if let Some(rec) = r["recording"].as_str() {
+            out += &format!("  rec  {rec} (block {}) · strobe query {rec} {}\n", r["pair"].as_u64().map_or(1, |p| p + 1), if s["target_kind"] == "native" { "threads" } else { "summary" });
+        }
+    }
     if s["session"] == "mixed" {
         out += "  ! some blocks ran on a locked screen and the rest unlocked: their values do not compare\n";
     }

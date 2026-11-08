@@ -807,6 +807,37 @@ impl EndedMarks {
             None
         }
     }
+
+    /// What `dead_since` adds up, by the ended processes' executable: their cycles and how many there
+    /// were. Windows, where each was held from its start; empty elsewhere (a launch cgroup counts what
+    /// ended as one sum).
+    pub fn dead_by_name(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> std::collections::BTreeMap<String, (u64, u32)> {
+        #[cfg(windows)]
+        {
+            let mut out: std::collections::BTreeMap<String, (u64, u32)> = std::collections::BTreeMap::new();
+            if let (Some(a), Some(b)) = (earlier.held.as_ref(), self.held.as_ref()) {
+                let mut add = |k: &(u32, u64), c: u64| {
+                    let e = out.entry(b.names.get(k).cloned().unwrap_or_else(|| "(no name)".into())).or_insert((0, 0));
+                    e.0 += c;
+                    e.1 += 1;
+                };
+                for (k, c) in set_a.iter().filter(|(k, _)| !set_b.contains_key(*k)) {
+                    if let Some(e) = b.ended.get(k) {
+                        add(k, e.saturating_sub(*c));
+                    }
+                }
+                for (k, c) in b.ended.iter().filter(|(k, _)| !a.ended.contains_key(*k) && !set_a.contains_key(*k) && !set_b.contains_key(*k)) {
+                    add(k, *c);
+                }
+            }
+            out
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (earlier, set_a, set_b);
+            std::collections::BTreeMap::new()
+        }
+    }
 }
 
 /// A set's `EndedMarks` now: `pids` are its processes, `home` the folder its launches were for.

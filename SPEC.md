@@ -8744,6 +8744,38 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   experiments changed, as `61st of 140`). Firefox profiles: a frame of code compiled from a string (`page.html line 1 > eval`,
   `> Function`) is `(evaluated script)`, the page probe's own evaluations and its timers' labels are
   the probe's (`(strobe driver)`).
+- **Bench execution on a locked session, run edges, check results (2026-11-09)**: when `--unlock-wait`
+  runs out (or someone keeps using the Mac), only the series that needs a presenting window is not
+  run (exit 124 typed `SessionLocked`, or `WindowHidden` for an app that must be the active one;
+  `stopped.not_run`, the series' `halt.validator`; resumable); while that state lasts a later series
+  that needs a window is not run either, at once, and every series that needs none still runs
+  (0.19's outcome; 0.20–0.22 stopped the whole file). A wait for an unlock prints a line a minute. On locked adais an open-source app's launch
+  file with `--check --unlock-wait 1s` ran its windowless tray launch and its log-milestone first
+  frame and left its painted cold launch not run; `--resume` kept the two and left it again.
+  `--headless` makes a file's pages headless and leaves cli, script, terminal and `window: false`
+  targets as they are (a target that opens its own window still refuses it); one file of a command,
+  a script and a page passed `--check --headless` on locked adais and on vps. A navigation the
+  browser refuses for its address (a blocked port, a bad scheme or URL, an unresolved host) fails
+  the case at once instead of running the launch again three times, 30 s apart (a page on port 9:
+  `net::ERR_UNSAFE_PORT` in 0.9 s on vps). Windows `cli()`
+  `run.duration` is the OS creating the process (`CreateProcessW`, as a person's launch pays it and
+  as Unix's fork and exec are in it) plus its first instruction to its exit: strobe's job, the
+  completion port's registration and its CPU mask, set while it was suspended, are in neither it nor
+  `cli.launch`, which brackets the creation alone. The ETA projects where an undecided
+  series ends between looks too (an interval that already clears decides nothing before a look), runs
+  on to the pairs a decided primary still needs, and says nothing when nothing is left (a self
+  bench on vps: pair 7, its interval already inside the bound, said ~15 s to the look at pair 8, where
+  0.22 projected to pair 40 (~12 min on adais), and the deciding look printed no ETA, not ~0 ms). A
+  page run's
+  edge lists its process set once for the driver, the present capture and the OS input (pids only,
+  no memory read), where it read the whole set three times; the walk and the listing at the edge
+  stay. `EndedCpu` names what ended on Windows: each held process's executable, read when it
+  joined its job (Windows gives no image name of an exited process), with its CPU and count. A
+  `--blocks` text lists each declared metric's median and interval over the blocks, or the block's
+  refusal, and the kept recordings; a check's result.json has `env`, `stopped`, and per case a
+  `state` (pass, fail, refused, gap) and the `refusal` behind a failed or refused one. A single-target
+  `track` point whose bench ended early is logged failed, so the next track runs that commit again.
+  The harness is never copied into a folder inside itself (a bench run from its own folder).
 
 ## 25. Continuous benchmarking (`track`, `history`)
 
