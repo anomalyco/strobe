@@ -400,7 +400,7 @@ Use
                                   ScriptProfiler, Heap, Network, Safari/WebKit device logs and crashes (read-only)
   record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--video]
                                   record one bench case (it drives the page: clicks, keys) with the attribution probes
-  record pid:<n>|proc:<name> [--probes timing|deep|stacks-unprivileged] [--for 10s]
+  record pid:<n>|proc:<name> [--probes timing|deep|waits|stacks-unprivileged] [--for 10s]
                                   any process from outside: OS present events (frames), CPU, GPU; deep: native stacks
                                   (--os-frames on a Chromium record adds the OS present events beside its trace)
   bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check | --blocks N] [--filter <cases>] [--pairs auto|N]

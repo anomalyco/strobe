@@ -324,44 +324,50 @@ function checkSurfaces(r: J) {
     const card = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "card", "--json", "--out", join(dir, "card.svg")]).out || "{}") : {}
     const badge = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "badge", "--json", "--out", join(dir, "badge.svg")]).out || "{}") : {}
     if (r.text && r.text.trim() !== text.trim()) flagIt("LOW", "text", "the text bench printed and `query summary` now differ (a later strobe renders it otherwise)")
-    for (const l of text.split("\n").filter((l) => /^[★ ] \S/.test(l))) if (!md.includes(l.trimEnd())) flagIt("HIGH", "md", `a text row is not in --format md: ${l.trim()}`)
-    const sections = text.split(/^(?=strobe bench )/m)
+    // `--format md` of a comparison is drawn again from result.json (`bench::render`: today's digits and
+    // ledger), so it is checked against result.json as the stored text is, row by row; where it prints the
+    // stored text unchanged (a check, a recording, an older strobe) the text's check covers it.
+    const mdBody = md.replace(/^```\n?|\n?```\s*$/g, "")
+    const texts: [string, string][] = [["text", text]]
+    if (reportable && mdBody.trim() !== text.trim()) texts.push(["md", mdBody])
+    const sectionsOf = (t: string) => t.split(/^(?=strobe bench )/m)
     const prRows = pr.split("\n").filter((l) => l.startsWith("|")).map((l) => l.split(/(?<!\\)\|/).slice(1, -1).map(strip))
     const impl = r.comparison === "implementations"
     // An A/A: a better or worse verdict between identical builds is a false positive on every surface.
     const aa = r.plan?.aa === true
     for (const s of seriesOf(r)) {
       if (!compared(s)) continue
-      const sec = sections.find((x) => x.split("\n")[0].includes(`· ${s.label}`)) ?? ""
+      const secs = texts.map(([name, t]) => [name, sectionsOf(t).find((x) => x.split("\n")[0].includes(`· ${s.label}`)) ?? ""] as const)
       // A stored text that never printed this series (a result rewritten after its bench printed).
-      if (!sec) flagIt("MED", `text ${s.label}`, "the stored text has no section for this series")
+      for (const [name, sec] of secs) if (!sec) flagIt("MED", `${name} ${s.label}`, `the ${name === "text" ? "stored text" : "md render"} has no section for this series`)
       for (const { c, role } of rows(s)) {
         const where = `${s.label} ${c.metric}`
         const u = unitOf(c.metric), k = kindOf(s, c), refused = k === "refused"
-        // Text (what the bench printed, kept in result.json and shown by `query summary`, so an older
-        // strobe's digits): each number within its own printed rounding of result.json's, the verdict
-        // word for word, and no number on a refused row.
-        // The primary's row is starred; a secondary of the same name (results from before the primary
-        // was kept out of its secondaries) is the unstarred one.
-        const row = sec.split("\n").find((l) => new RegExp(`^${role === "primary" ? "★" : " "} ${c.metric.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s`).test(l))
-        if (!row) {
-          if (sec) flagIt("HIGH", `text ${where}`, "no row")
-        }
-        else {
-          // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
-          const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(c.verdict)[0]
-          const toks = body.match(/—|[−+-]?\d[\d.,]*(?: ?(?:[GMk] instr|instr|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
-          const [tb, th, td] = toks
-          const tci = toks.length >= 5 ? `${toks[3]} … ${toks[4]}` : toks[3]
-          if (!row.includes(c.verdict)) flagIt("CRIT", `text ${where}`, `verdict "${c.verdict}" not in: ${row.trim()}`)
-          if (refused) {
-            if ([tb, th, td, tci].some((x) => /\d/.test(x ?? ""))) flagIt(c.verdict_kind ? "CRIT" : "LOW", `text ${where}`, `refused, yet the row reads ${row.trim()}`)
+        for (const [name, sec] of secs) {
+          // Text (what the bench printed, kept in result.json and shown by `query summary`, so an older
+          // strobe's digits) and md (drawn again now): each number within its own printed rounding of
+          // result.json's, the verdict word for word, and no number on a refused row.
+          // The primary's row is starred; a secondary of the same name (results from before the primary
+          // was kept out of its secondaries) is the unstarred one.
+          const row = sec.split("\n").find((l) => new RegExp(`^${role === "primary" ? "★" : " "} ${c.metric.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s`).test(l))
+          if (!row) {
+            if (sec) flagIt("HIGH", `${name} ${where}`, "no row")
           } else {
-            const [lo, hi] = (tci ?? "").split(" … ")
-            const scaleU = c.relative ? "%" : absUnit(u)
-            const checks: [string | undefined, number, string][] = [[tb, c.base, u], [th, c.head, u], [td, c.relative ? c.estimate * 100 : c.estimate, scaleU]]
-            if (!c.exact) checks.push([lo, c.relative ? c.lo * 100 : c.lo, scaleU], [hi, c.relative ? c.hi * 100 : c.hi, scaleU])
-            for (const [tok, v, unit] of checks) if (!agrees(tok, v, unit)) flagIt("CRIT", `text ${where}`, `"${tok}" does not round from ${v} (${unit}): ${row.trim()}`)
+            // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
+            const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(c.verdict)[0]
+            const toks = body.match(/—|[−+-]?\d[\d.,]*(?: ?(?:[GMk] instr|instr|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
+            const [tb, th, td] = toks
+            const tci = toks.length >= 5 ? `${toks[3]} … ${toks[4]}` : toks[3]
+            if (!row.includes(c.verdict)) flagIt("CRIT", `${name} ${where}`, `verdict "${c.verdict}" not in: ${row.trim()}`)
+            if (refused) {
+              if ([tb, th, td, tci].some((x) => /\d/.test(x ?? ""))) flagIt(c.verdict_kind ? "CRIT" : "LOW", `${name} ${where}`, `refused, yet the row reads ${row.trim()}`)
+            } else {
+              const [lo, hi] = (tci ?? "").split(" … ")
+              const scaleU = c.relative ? "%" : absUnit(u)
+              const checks: [string | undefined, number, string][] = [[tb, c.base, u], [th, c.head, u], [td, c.relative ? c.estimate * 100 : c.estimate, scaleU]]
+              if (!c.exact) checks.push([lo, c.relative ? c.lo * 100 : c.lo, scaleU], [hi, c.relative ? c.hi * 100 : c.hi, scaleU])
+              for (const [tok, v, unit] of checks) if (!agrees(tok, v, unit)) flagIt("CRIT", `${name} ${where}`, `"${tok}" does not round from ${v} (${unit}): ${row.trim()}`)
+            }
           }
         }
         // PR: tested rows carry the same change and range; a refused one no number.

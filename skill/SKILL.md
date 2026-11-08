@@ -38,8 +38,11 @@ The design and every rule behind this file: SPEC.md.
   - `query <rec> hotspots` (CPU by function, full stacks, source-mapped file:line:column;
     `--by file|package`; `--sort total` for callers; native: `--thread <name>`, `--pid <pid|exe>`,
     `--phase <name>`).
-  - `query <rec> layout` (forced layouts by their call site), `style` (what invalidated style),
-    `alloc` (who allocates), `gc`, `summary` (per run: style, layout, paint ms), `insights`.
+  - `query <rec> layout` (forced layouts by their call site), `style` (what invalidated style:
+    attribution blocks trace it for a series declaring `main.style` or `style.count`, or with
+    `--style`), `alloc` (who allocates), `gc`, `summary` (per run: style, layout, paint ms), `insights`.
+  - A page served from your own folder (`record https://localhost:… --served <dir>`): its source-mapped
+    frames resolve to files on disk.
   - What changed: `query <exp> hotspots` (each series' base..head) or `query <recA>..<recB> hotspots`;
     `~` marks a change inside its sampling interval (one launch a side: not a verdict).
 - `strobe open <rec>` (or `<exp>/head`): the whole recording in a local Perfetto UI. For seeing;
@@ -118,8 +121,11 @@ The design and every rule behind this file: SPEC.md.
 
 ### Phones
 
-- Emulated: `web({ emulate: "mobile" })` (390×844 @3x, touch, headless) or `"touch"`: taps, swipes
-  (`scroll`, Chromium only), `drag`; `hover`, `wheel` and mouse buttons refuse `DeviceMismatch`.
+- Emulated: `web({ emulate: "mobile" })` is a phone (390×844 @3x, touch, headless): `click` is a tap,
+  `drag` a finger, `scroll` swipes (Chromium only); `hover`, `move`, `wheel` and mouse buttons refuse
+  `DeviceMismatch`. Headless, so `frames.*` and `interaction.*` refuse `Headless`: measure
+  `main.work`, `cpu.*` or `run.duration` there, and frames and latency on a real phone (`--mobile`).
+  `"touch"` is a desktop with a touch screen: the mouse stays its primary pointer.
 - A real Android phone: `--mobile` (or `--mobile=<serial>`) runs the file's `emulate: "mobile"`
   targets in Chrome on the phone over adb; `look --mobile`, `record --mobile` too.
   - Give strobe a channel once: install Chrome Canary (or Dev, Beta), open it once, then
@@ -231,8 +237,9 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 ## Targets
 
 - `https://…` or `page.html`: Chromium (`STROBE_BROWSER`, else Chrome/Edge/Chromium, else
-  Playwright's), `--engine firefox` (stock Firefox), `--engine webkit` (Safari headed on macOS,
-  WebKitGTK headed or WPE headless on Linux; never Windows).
+  Playwright's), `--engine firefox` (stock Firefox), `--engine webkit` (Safari headed on macOS;
+  WebKitGTK on Linux, headed, or `--headless` under `xvfb-run`; WPE headless sees a touch device and
+  refuses `DeviceMismatch`; never Windows).
 - `app:<id>`: a strobe.json profile (Electron, `kind: "native"` or `kind: "webview"`), launched in an
   isolated home. `exe:<path>` (`--native` for a native app, `--app <id>` borrows a profile).
 - `cdp:<port>`, `cdp:ws://…`: attach. `pid:<n>`, `proc:<name>`: from outside. `file:<path>`: import
@@ -324,6 +331,8 @@ export default bench({
 - No DOM or tree (a canvas, a game): image anchors, `page.click({ image: "play.png" })`,
   `until: { image }`, `{ pixels: { changed: true } }`; `AnchorNotFound`, `AnchorAmbiguous`. Pixel
   reads cost (`ObserverCost` past 8 a run); find images in setup and click points in runs.
+  `resetPixels: { region, ignore, tolerance }` on a target or case: runs that start from other pixels
+  are `ResetIncomplete`.
 
 ### Case lifecycle
 
@@ -364,7 +373,8 @@ export default bench({
   `strobe look tty:"my-tui" --until text=Ready`. Metrics `tty.latency.*`, `tty.settle.*`,
   `tty.frames`, `tty.bytes`, `cpu.work`; mouse calls need the program's mouse mode
   (`MouseNotEnabled`). Events: the program appends JSON lines to `STROBE_EVENTS`
-  (`{"strobe":"state","name":"done"}` for `until: { state: "done" }`).
+  (`{"strobe":"state","name":"done"}` for `until: { state: "done" }`). Wait in setup for what arrives
+  late (a status line), and leave a clock out of the reset check with `ignore: [[col, row, cols, rows]]`.
 - A directory or git variant runs strobe.json `build` and launches its `output`; `gpuCache: "warm"`
   (the default) keeps each variant's GPU shader caches across launches. A debug build is refused.
 

@@ -67,7 +67,7 @@ const TOOLS: &[Tool] = &[
             ),
             (
                 "engine",
-                "a page's browser engine: chromium (default), firefox (CPU, GPU, memory and OS frames, no trace; probes attribution runs Firefox's own profiler and about:memory; probes memory refuses) or webkit (Safari headed on macOS, WPE headless on Linux; no attribution or memory probes)",
+                "a page's browser engine: chromium (default), firefox (CPU, GPU, memory and OS frames, no trace; probes attribution runs Firefox's own profiler and about:memory; probes memory refuses) or webkit (Safari headed on macOS; WebKitGTK on Linux, headed, or headless under xvfb-run; WPE headless sees a touch device and refuses DeviceMismatch; no attribution or memory probes)",
             ),
             (
                 "mobile",

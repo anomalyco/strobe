@@ -4101,9 +4101,10 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     let pinned = ctx.pin.is_some();
     let timed = x.measures_time();
     let fix = if !pinned && kind != "script" && both > 5.0 { unpinned_fix(ctx) } else { String::new() };
-    let mut warn = |id: &str, key: &str, text: String| {
+    // Once per series and part (`key`).
+    let mut once = |key: &str, w: Warning| {
         if ctx.overhead_warned.insert(format!("{}\n{key}", s.label())) {
-            ctx.warnings.push(validity::warn(id, text));
+            ctx.warnings.push(w);
         }
     };
     let refuse = |b: &mut Block, hit: &dyn Fn(&str) -> bool, why: &str, fix: &str| {
@@ -4115,14 +4116,16 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     if kind == "script" {
         if both > 10.0 {
             let refusing = if both > 20.0 && !timed { " (over 20%: a timed bench refuses run.duration)" } else { "" };
-            warn(
-                "ObserverCost",
+            once(
                 "script relay",
-                format!(
-                    "{block}: strobe relaying ctx.call used {} of a core in the runs (strobe {}, runner {}){refusing}: run.duration is mostly the relay, not the script; batch the work into fewer calls (one call that loops)",
-                    pct_of_core(both),
-                    pct_of_core(strobe),
-                    pct_of_core(runner)
+                validity::warn(
+                    "ObserverCost",
+                    format!(
+                        "{block}: strobe relaying ctx.call used {} of a core in the runs (strobe {}, runner {}){refusing}: run.duration is mostly the relay, not the script; batch the work into fewer calls (one call that loops)",
+                        pct_of_core(both),
+                        pct_of_core(strobe),
+                        pct_of_core(runner)
+                    ),
                 ),
             );
         }
@@ -4136,9 +4139,9 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
         let used = format!("strobe and the runner used {} of a core in the runs on the target's own CPUs (strobe {}, runner {}; unpinned", pct_of_core(both), pct_of_core(strobe), pct_of_core(runner));
         if both > 20.0 {
             let what = if timed { "its wall-time, CPU-share, frame and latency metrics are refused" } else { "a timed bench refuses this block's wall-time, CPU-share, frame and latency metrics" };
-            warn("OverheadBudget", "unpinned self", format!("{block}: {used}; over 20%): {what}; {fix}"));
+            once("unpinned self", validity::warn("OverheadBudget", format!("{block}: {used}; over 20%): {what}; {fix}")));
         } else if both > 5.0 {
-            warn("OverheadBudget", "unpinned self", format!("{block}: {used}; budget 5%): {fix}"));
+            once("unpinned self", validity::warn("OverheadBudget", format!("{block}: {used}; budget 5%): {fix}")));
         }
         if both > 20.0 && timed {
             let why = format!("{used}; over 20%), so the runs it timed are disturbed");
@@ -4150,10 +4153,12 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     let parts = [o.reserve_pct, o.sampler_pct, o.present_pct, o.terminal_pct, o.pixel_pct].iter().flatten().sum::<f64>();
     let residual = (strobe - parts).max(0.0) + runner;
     if residual > 10.0 {
-        warn(
-            "OverheadBudget",
+        once(
             "pinned self",
-            format!("{block}: strobe (besides its budgeted parts) and the runner used {} of a core in the runs, on strobe's own CPUs (budget 10%)", pct_of_core(residual)),
+            validity::warn(
+                "OverheadBudget",
+                format!("{block}: strobe (besides its budgeted parts) and the runner used {} of a core in the runs, on strobe's own CPUs (budget 10%)", pct_of_core(residual)),
+            ),
         );
     }
     b

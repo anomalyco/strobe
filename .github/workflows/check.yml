@@ -57,3 +57,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Generic
         run: bun scripts/generic.ts
+      # SPEC.md and the skill against the code's catalogs (validators, warnings, flags, MCP tools, the SDK's keys).
+      - name: Docs
+        run: bun scripts/doc-check.ts

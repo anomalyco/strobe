@@ -1,4 +1,4 @@
-//! `strobe run -- <command>`: an ad-hoc harness under a bench block's conditions (SPEC §5.5): the
+//! `strobe run -- <command>`: an ad-hoc harness under a bench block's conditions (SPEC §5.13): the
 //! device's bench slot, the fastest power plan, pinned to the target's CPUs with this user's other
 //! processes kept off them. It measures nothing itself: the harness prints its own numbers.
 //!
@@ -72,7 +72,7 @@ pub fn run(args: &Args) -> Result<Output> {
 /// the same harness for the same question.
 fn bench_file(metrics: &[String]) -> String {
     format!(
-        "// Written by `strobe run --base … --head …`: a paired A/B of two commands (SPEC §5.5).\nimport {{ bench, cli }} from \"@hona/strobe\"\n\nexport default bench({{\n  targets: {{ command: cli() }},\n  cases: {{\n    run: {{ primary: \"cpu.work\", metrics: {}, resetCheck: false, run: (ctx) => ctx.exec() }},\n  }},\n}})\n",
+        "// Written by `strobe run --base … --head …`: a paired A/B of two commands (SPEC §5.13).\nimport {{ bench, cli }} from \"@hona/strobe\"\n\nexport default bench({{\n  targets: {{ command: cli() }},\n  cases: {{\n    run: {{ primary: \"cpu.work\", metrics: {}, resetCheck: false, run: (ctx) => ctx.exec() }},\n  }},\n}})\n",
         serde_json::to_string(metrics).unwrap_or_else(|_| "[]".into())
     )
 }
