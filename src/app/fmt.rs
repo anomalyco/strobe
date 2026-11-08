@@ -4,12 +4,14 @@ pub fn value(v: f64, unit: &str) -> String {
     if !v.is_finite() {
         return "—".into();
     }
+    // Below 0.01 as many decimals as show the first significant digit (a layout-shift score of 0.003
+    // is not 0.00), up to four.
     let digits = if v.abs() >= 100.0 {
         0
     } else if v.abs() >= 10.0 {
         1
     } else {
-        2
+        crate::fmt::digits_for(v, 2, 4)
     };
     // A value that rounds to zero prints without a sign (not −0.00%).
     let v = if (v * 10f64.powi(digits as i32)).round() == 0.0 { 0.0 } else { v };
@@ -49,24 +51,7 @@ pub fn counters(get: impl Fn(&str) -> f64) -> String {
     if shown.is_empty() { String::new() } else { format!("counters {}\n", shown.join(" · ")) }
 }
 
-pub use crate::fmt::bytes;
-
-/// A relative change as a signed percentage, e.g. −7.7% or +12%.
-pub fn pct(r: f64) -> String {
-    if !r.is_finite() {
-        return "—".into();
-    }
-    let p = r * 100.0;
-    let body = if p.abs() < 10.0 { format!("{:.1}", p.abs()) } else { format!("{:.0}", p.abs()) };
-    let sign = if p < -0.05 {
-        "−"
-    } else if p > 0.05 {
-        "+"
-    } else {
-        ""
-    };
-    format!("{sign}{body}%")
-}
+pub use crate::fmt::{bound, bytes, pct, pct_ci, pct_vs, pct_with};
 
 pub fn signed(v: f64, unit: &str) -> String {
     let body = value(v.abs(), unit);

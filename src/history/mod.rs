@@ -110,7 +110,14 @@ pub fn exists(id: &str) -> bool {
 
 pub fn load(id: &str) -> Option<Series> {
     let events = read_lines(&path(id));
-    let meta = events.iter().find(|e| e["t"] == "series")?.clone();
+    // A later `series` event corrects fields of the first (later fields win): a metric's direction
+    // that an older strobe wrote wrong.
+    let mut meta = events.iter().find(|e| e["t"] == "series")?.clone();
+    for e in events.iter().filter(|e| e["t"] == "series").skip(1) {
+        for (k, v) in e.as_object().into_iter().flatten() {
+            meta[k] = v.clone();
+        }
+    }
     let mut points: Vec<Value> = events.iter().filter(|e| e["t"] == "point").cloned().collect();
     // Commit order: commits reachable from each (grows along the first-parent line), committer
     // time, then the order they were tracked in.

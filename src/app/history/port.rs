@@ -27,7 +27,8 @@ pub(crate) enum State {
 #[derive(Clone, Debug)]
 pub(crate) struct Cell {
     pub state: State,
-    /// `ln(head / base)`: the median of the pairs and its interval.
+    /// `ln(head / base)`: the pairs' Hodges–Lehmann estimate and its interval (points written before
+    /// 2026-11-08 kept the pairs' median here).
     pub est: f64,
     pub lo: f64,
     pub hi: f64,
@@ -311,7 +312,7 @@ pub(crate) fn confidence_text(c: f64) -> String {
 /// How the cells read, under the matrix and on the card.
 pub(crate) fn method(p: &Port) -> String {
     format!(
-        "each point: ln({} / {}) of {} alternating pairs at one {} commit, median and its {} interval; a word only when that whole interval lies past ±{}; tracked points are evidence, a change is confirmed by an A/B of {} alone",
+        "each point: ln({} / {}) of {} alternating pairs at one {} commit, their Hodges–Lehmann estimate and its {} interval; a word only when that whole interval lies past ±{}; tracked points are evidence, a change is confirmed by an A/B of {} alone",
         p.head,
         p.base,
         p.pairs,

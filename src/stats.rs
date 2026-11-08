@@ -16,7 +16,14 @@ fn signed_rank_counts(n: usize) -> Vec<f64> {
     c
 }
 
-/// Two-sided p-value of the signed-rank test for differences `d` (zeros dropped).
+/// Two-sided p-value of the signed-rank test for differences `d` (zeros dropped). Tied |d| share their
+/// mid-rank, and the null distribution is that of those ranks (quantized metrics tie often: counts,
+/// whole milliseconds): exact up to n = 400 from the distribution of the doubled ranks (whole numbers)
+/// over every sign assignment, built as probabilities (each rank's sign halves them, so no count
+/// outgrows an f64's 53 bits); above, the normal approximation, its variance less the ties'
+/// Σ(t³ − t)/48. The untied distribution with a rounded statistic once gave p 0.039 where the exact
+/// one is 0.055 (`d = [1, 0, 1, 3, 1, 0, 1, 1, −1, 2]`), and a normal tail with 0.5 continuity
+/// correction is too small when every rank ties (a step of 30.5, not 1).
 pub fn wilcoxon_p(d: &[f64]) -> f64 {
     let nz: Vec<f64> = d.iter().copied().filter(|x| *x != 0.0 && x.is_finite()).collect();
     let n = nz.len();
@@ -25,45 +32,47 @@ pub fn wilcoxon_p(d: &[f64]) -> f64 {
     }
     let mut idx: Vec<usize> = (0..n).collect();
     idx.sort_by(|&a, &b| nz[a].abs().total_cmp(&nz[b].abs()));
-    let mut ranks = vec![0.0; n];
+    // Doubled mid-ranks (i + j + 2 for a tie from i to j, 0-based): whole numbers.
+    let mut rank2 = vec![0usize; n];
+    let mut ties = 0.0;
     let mut i = 0;
     while i < n {
         let mut j = i;
         while j + 1 < n && nz[idx[j + 1]].abs() == nz[idx[i]].abs() {
             j += 1;
         }
-        let r = (i + j) as f64 / 2.0 + 1.0;
         for k in i..=j {
-            ranks[idx[k]] = r;
+            rank2[idx[k]] = i + j + 2;
         }
+        let t = (j - i + 1) as f64;
+        ties += t * t * t - t;
         i = j + 1;
     }
-    let t: f64 = (0..n).filter(|&k| nz[k] > 0.0).map(|k| ranks[k]).sum();
-    if n <= 50 {
-        let c = signed_rank_counts(n);
-        let total = 2f64.powi(n as i32);
-        let t_floor = t.floor() as usize;
-        let lower: f64 = c[..=t_floor.min(c.len() - 1)].iter().sum::<f64>() / total;
-        let t_ceil = t.ceil() as usize;
-        let upper: f64 = c[t_ceil.min(c.len() - 1)..].iter().sum::<f64>() / total;
+    let t2: usize = (0..n).filter(|&k| nz[k] > 0.0).map(|k| rank2[k]).sum();
+    if n <= 400 {
+        let max: usize = rank2.iter().sum();
+        let mut c = vec![0.0f64; max + 1];
+        c[0] = 1.0;
+        let mut reach = 0;
+        for &r in &rank2 {
+            reach += r;
+            for s in (0..=reach).rev() {
+                c[s] = 0.5 * (c[s] + if s >= r { c[s - r] } else { 0.0 });
+            }
+        }
+        let lower: f64 = c[..=t2].iter().sum();
+        let upper: f64 = c[t2..].iter().sum();
         return (2.0 * lower.min(upper)).min(1.0);
     }
     let nf = n as f64;
+    let t = t2 as f64 / 2.0;
     let mean = nf * (nf + 1.0) / 4.0;
-    let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0).sqrt();
-    let z = ((t - mean).abs() - 0.5) / sd;
-    (2.0 * (1.0 - normal_cdf(z))).min(1.0)
-}
-
-fn normal_cdf(z: f64) -> f64 {
-    0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2))
-}
-
-fn erf(x: f64) -> f64 {
-    // Abramowitz–Stegun 7.1.26
-    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
-    if x >= 0.0 { y } else { -y }
+    let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0 - ties / 48.0).sqrt();
+    if sd <= 0.0 {
+        return 1.0;
+    }
+    let z = (((t - mean).abs() - 0.5) / sd).max(0.0);
+    two_tail(z).min(1.0)
 }
 
 pub(crate) fn normal_quantile(p: f64) -> f64 {
@@ -100,9 +109,11 @@ pub fn theil_sen(ys: &[f64], confidence: f64) -> Option<(f64, f64, f64)> {
     let median = if m % 2 == 1 { slopes[m / 2] } else { (slopes[m / 2 - 1] + slopes[m / 2]) / 2.0 };
     let z = normal_quantile(1.0 - (1.0 - confidence) / 2.0);
     let c = z * ((n * (n - 1) * (2 * n + 5)) as f64 / 18.0).sqrt();
-    let lo = (((m as f64 - c) / 2.0).floor().max(0.0) as usize).min(m - 1);
+    // Sen's interval is the M1-th to the (M2 + 1)-th smallest slope (1-based), M1 = (m − C)/2 and
+    // M2 = (m + C)/2, rounded outward: 0-based ⌊M1⌋ − 1 and ⌈M2⌉, which sum to m − 1 (symmetric).
+    let lo = (((m as f64 - c) / 2.0).floor() - 1.0).max(0.0) as usize;
     let hi = ((((m as f64 + c) / 2.0).ceil()) as usize).min(m - 1);
-    Some((median, slopes[lo], slopes[hi]))
+    Some((median, slopes[lo.min(m - 1)], slopes[hi]))
 }
 
 /// Hodges–Lehmann estimate and its distribution-free interval (Walsh averages) at `confidence`.
@@ -149,6 +160,39 @@ pub fn hodges_lehmann(d: &[f64], confidence: f64) -> (f64, f64, f64, f64) {
     (est, walsh[lo_i.min(hi_i)], walsh[hi_i.max(lo_i)], achieved)
 }
 
+/// The median of `v` and its distribution-free interval (order statistics, the sign test's) at
+/// `confidence`: `[x(r), x(n+1−r)]` (1-based, sorted) with r the largest where P(B ≤ r − 1) ≤ α/2 for
+/// B ~ Binomial(n, ½), covering 1 − 2·P(B ≤ r − 1). The median always lies inside it, which a
+/// Hodges–Lehmann interval of the same values does not promise. Below 6 values (at 95%) no r reaches
+/// the level: `[min, max]`, covering 1 − 2^(1−n). Returns (median, lo, hi, achieved).
+pub fn median_interval(v: &[f64], confidence: f64) -> (f64, f64, f64, f64) {
+    let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    let n = s.len();
+    if n == 0 {
+        return (f64::NAN, f64::NAN, f64::NAN, 0.0);
+    }
+    s.sort_by(|a, b| a.total_cmp(b));
+    let med = if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 };
+    let alpha = 1.0 - confidence;
+    // P(B ≤ k) for k = 0, 1, …: the binomial's lower tail, built term by term.
+    let total = 2f64.powi(n as i32);
+    let (mut term, mut tail, mut r) = (1.0f64, 0.0f64, 0usize);
+    for k in 0..n.div_ceil(2) {
+        if k > 0 {
+            term = term * (n - k + 1) as f64 / k as f64;
+        }
+        if (tail + term) / total > alpha / 2.0 {
+            break;
+        }
+        tail += term;
+        r = k + 1;
+    }
+    if r == 0 {
+        return (med, s[0], s[n - 1], 1.0 - 2.0 / total);
+    }
+    (med, s[r - 1], s[n - r], 1.0 - 2.0 * tail / total)
+}
+
 /// Holm step-down: which of `p` are rejected at `alpha`.
 pub fn holm(p: &[f64], alpha: f64) -> Vec<bool> {
     let mut idx: Vec<usize> = (0..p.len()).collect();
@@ -176,8 +220,8 @@ fn erfc(x: f64) -> f64 {
     if x >= 0.0 { r } else { 2.0 - r }
 }
 
-/// P(|N(0, 1)| ≥ z).
-fn two_tail(z: f64) -> f64 {
+/// P(|N(0, 1)| ≥ z), from the tail itself: `2·(1 − Φ(z))` loses every digit once Φ(z) rounds to 1.
+pub(crate) fn two_tail(z: f64) -> f64 {
     erfc(z / std::f64::consts::SQRT_2)
 }
 
@@ -392,6 +436,12 @@ pub struct Comparison {
     pub confidence: f64,
     pub p: f64,
     pub bound: f64,
+    /// The direction this comparison counted as better: the metric's, or for a `metric.<name>` the one
+    /// its command's lines gave. Readers take it from here (`better_in`), not from the catalog.
+    pub better: Better,
+    /// The words for the better and worse directions it used (`faster`, `slower`; `more`, `less` for a
+    /// `metric.<name>` better higher), as `words_in` reads them.
+    pub words: (&'static str, &'static str),
     /// What it decided, in words for people (`faster (small)`, `refused (TailTooShort): …`).
     /// `set_verdict` and `refuse` change it together with `kind` and `refusal`.
     pub verdict: String,
@@ -424,10 +474,47 @@ impl Comparison {
     /// a refused comparison's values are not a measurement anyone should read.
     pub fn refuse(&mut self, r: Refusal) {
         (self.base, self.head, self.estimate, self.lo, self.hi) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+        // Nor its p: a refused metric is tested by no one (it never joins a Holm family).
+        self.p = f64::NAN;
+        self.needed_pairs = None;
         self.verdict = format!("refused ({}): {}", r.validator, r.summary);
         self.kind = VerdictKind::Refused;
         self.decided = false;
         self.refusal = Some(r);
+    }
+}
+
+/// The direction a comparison as result.json keeps it counted as better: its own `better` (a
+/// `metric.<name>` whose command's lines said `higher` is better higher, whatever the catalog says),
+/// or, in files from before that field, the catalog's.
+pub fn better_in(c: &serde_json::Value) -> Better {
+    match c["better"].as_str() {
+        Some("higher") => Better::Higher,
+        Some("lower") => Better::Lower,
+        _ => crate::model::metric(c["metric"].as_str().unwrap_or("")).map(|m| m.better).unwrap_or(Better::Lower),
+    }
+}
+
+/// The definition a comparison as result.json was made under: a `metric.<name>` better higher is
+/// `METRIC_HIGHER`, every other the catalog's (`model::metric`).
+pub fn def_in(c: &serde_json::Value) -> Option<&'static MetricDef> {
+    let name = c["metric"].as_str().unwrap_or("");
+    let def = crate::model::metric(name);
+    if name.starts_with("metric.") && c["better"] == "higher" { Some(&crate::model::METRIC_HIGHER) } else { def }
+}
+
+/// The words for comparison `c`'s better and worse directions (`faster`, `slower`): its own `words`, else
+/// its definition's (`def_in`), else `less`/`more` turned by `better_in`.
+pub fn words_in(c: &serde_json::Value) -> (String, String) {
+    if let Some([a, b]) = c["words"].as_array().map(Vec::as_slice)
+        && let (Some(a), Some(b)) = (a.as_str(), b.as_str())
+    {
+        return (a.to_string(), b.to_string());
+    }
+    match def_in(c) {
+        Some(d) => (d.words.0.to_string(), d.words.1.to_string()),
+        None if better_in(c) == Better::Higher => ("more".into(), "less".into()),
+        None => ("less".into(), "more".into()),
     }
 }
 
@@ -458,9 +545,7 @@ pub fn verdict_kind(verdict: &str, def: Option<&MetricDef>) -> VerdictKind {
 /// What a comparison as result.json keeps it decided: its `verdict_kind`, or, in files from before
 /// that field, what its words say.
 pub fn kind_of(c: &serde_json::Value) -> VerdictKind {
-    c.get("verdict_kind")
-        .and_then(|k| serde_json::from_value(k.clone()).ok())
-        .unwrap_or_else(|| verdict_kind(c["verdict"].as_str().unwrap_or(""), crate::model::metric(c["metric"].as_str().unwrap_or(""))))
+    c.get("verdict_kind").and_then(|k| serde_json::from_value(k.clone()).ok()).unwrap_or_else(|| verdict_kind(c["verdict"].as_str().unwrap_or(""), def_in(c)))
 }
 
 /// The refusal a `refused (<validator>): <why>` verdict names, for result.json files from before
@@ -497,8 +582,8 @@ pub fn margin_shift(def: &MetricDef, relative: bool, margin_abs: f64) -> f64 {
 pub fn compare_noworse(name: &str, def: &MetricDef, pairs: &[(f64, f64)], margin: f64, confidence: f64) -> Comparison {
     let mut c = compare(name, def, pairs, margin, confidence);
     let (_, d, relative) = diffs(def, pairs);
-    let margin_abs = if relative { margin } else { (margin * c.base.abs()).max(0.5) };
-    let label = fmt_bound(margin, relative, margin_abs);
+    let margin_abs = if relative { margin } else { in_unit(def, margin, c.base, c.head) };
+    let label = fmt_bound(def, margin, relative, margin_abs);
     let good_low = def.better == Better::Lower;
     c.noworse = Some(margin_abs);
     c.bound = margin_abs;
@@ -548,18 +633,16 @@ pub fn compare_noworse(name: &str, def: &MetricDef, pairs: &[(f64, f64)], margin
 
 /// `pairs_needed` for a non-inferiority comparison: the distance that decides is the one from the
 /// differences' median to the margin (`shift`, in the differences' scale), either way.
-pub fn pairs_needed_noworse(d: &[f64], shift: f64, confidence: f64) -> usize {
+pub fn pairs_needed_noworse(d: &[f64], shift: f64, confidence: f64, power: f64) -> usize {
     let v: Vec<f64> = d.iter().copied().filter(|x| x.is_finite()).collect();
     if v.len() < 2 {
         return usize::MAX;
     }
     let dist = (crate::metrics::median(&v) - shift).abs();
-    let sigma = robust_sd(&v);
     if dist <= 0.0 {
         return usize::MAX;
     }
-    let z = normal_quantile(1.0 - (1.0 - confidence) / 2.0);
-    (((z * sigma / dist).powi(2) / 0.955).ceil() as usize).max(min_pairs(confidence))
+    pairs_for(spread(&v), dist, confidence, power).ceil() as usize
 }
 
 /// A robust standard deviation: 1.4826 × the median absolute deviation from the median.
@@ -568,15 +651,29 @@ pub fn robust_sd(v: &[f64]) -> f64 {
     1.4826 * crate::metrics::median(&v.iter().map(|x| (x - med).abs()).collect::<Vec<_>>())
 }
 
+/// The spread a projection of pairs uses: `robust_sd`, or where over half the differences are one
+/// value (a count or a quantized time: its MAD is 0) the mean absolute deviation from the median
+/// × √(π/2) (the normal's σ): a MAD of 0 once projected 7 pairs for any series, so a series whose
+/// other half spread wide never stopped as underpowered.
+pub fn spread(v: &[f64]) -> f64 {
+    let r = robust_sd(v);
+    if r > 0.0 || v.is_empty() {
+        return r;
+    }
+    let med = crate::metrics::median(v);
+    1.2533 * v.iter().map(|x| (x - med).abs()).sum::<f64>() / v.len() as f64
+}
+
 /// Planning (SPEC §9.1 `plan`): pairs for a `power` chance that an interval at `confidence` clears a
 /// boundary `dist` away from the true difference, for per-pair differences with spread `sigma` (same
-/// scale). Normal approximation with the Hodges–Lehmann efficiency 0.955; at least 6 pairs.
+/// scale). Normal approximation with the Hodges–Lehmann efficiency 0.955; at least the pairs whose
+/// interval can reach `confidence` at all (`min_pairs`: 6 at 95%, 7 at a Pocock look's 98.42%).
 pub fn pairs_for(sigma: f64, dist: f64, confidence: f64, power: f64) -> f64 {
     if dist <= 0.0 || !sigma.is_finite() {
         return f64::INFINITY;
     }
     let z = normal_quantile(1.0 - (1.0 - confidence) / 2.0) + normal_quantile(power);
-    ((z * sigma / dist).powi(2) / 0.955).max(min_pairs(0.95) as f64)
+    ((z * sigma / dist).powi(2) / 0.955).max(min_pairs(confidence) as f64)
 }
 
 /// The smallest distance from a boundary that `n` pairs clear with `power` (the minimum detectable effect).
@@ -591,9 +688,9 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
     let (finite, d, relative) = diffs(def, pairs);
     let base = crate::metrics::median(&finite.iter().map(|p| p.0).collect::<Vec<_>>());
     let head = crate::metrics::median(&finite.iter().map(|p| p.1).collect::<Vec<_>>());
-    // An exact counter that is stable on both sides (every block the same, from 2 pairs) has no noise
-    // to test: its difference is the answer. One that varies is compared like a timed metric.
-    if def.kind == Kind::Exact && finite.len() >= 2 && finite.iter().all(|p| p.0 == finite[0].0 && p.1 == finite[0].1) {
+    // An exact counter that is stable on both sides (every block the same, from `EXACT_MIN_PAIRS`) has
+    // no noise to test: its difference is the answer. One that varies is compared like a timed metric.
+    if def.kind == Kind::Exact && finite.len() >= EXACT_MIN_PAIRS && finite.iter().all(|p| p.0 == finite[0].0 && p.1 == finite[0].1) {
         let diff = head - base;
         let improved = (diff < 0.0) == (def.better == Better::Lower);
         let (kind, verdict) = match (diff == 0.0, improved) {
@@ -614,6 +711,8 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
             confidence: 1.0,
             p,
             bound: 0.0,
+            better: def.better,
+            words: def.words,
             verdict,
             kind,
             decided: true,
@@ -626,7 +725,7 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
     let (est, lo, hi, achieved) = hodges_lehmann(&d, confidence);
     let p = wilcoxon_p(&d);
     let (est, lo, hi) = if relative { (est.exp() - 1.0, lo.exp() - 1.0, hi.exp() - 1.0) } else { (est, lo, hi) };
-    let bound_abs = if relative { bound } else { (bound * base.abs()).max(0.5) };
+    let bound_abs = if relative { bound } else { in_unit(def, bound, base, head) };
     let good_low = def.better == Better::Lower;
     let n = d.len();
     // Below 6 pairs no signed-rank interval reaches 95%: its [min, max] covers only 1 − 2^(1−n).
@@ -638,8 +737,8 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
         let (kind, word) = if improved { (VerdictKind::Better, def.words.0) } else { (VerdictKind::Worse, def.words.1) };
         let small = if hi < 0.0 { hi > -bound_abs } else { lo < bound_abs };
         (kind, if small { format!("{word} (small)") } else { word.to_string() })
-    } else if lo > -bound_abs && hi < bound_abs {
-        (VerdictKind::Same, format!("same (±{})", fmt_bound(bound, relative, bound_abs)))
+    } else if (lo > -bound_abs && hi < bound_abs) || (lo == 0.0 && hi == 0.0) {
+        (VerdictKind::Same, format!("same (±{})", fmt_bound(def, bound, relative, bound_abs)))
     } else {
         (VerdictKind::Unclear, "unclear".to_string())
     };
@@ -664,6 +763,8 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
         confidence: achieved,
         p,
         bound: bound_abs,
+        better: def.better,
+        words: def.words,
         verdict,
         kind,
         decided,
@@ -674,30 +775,53 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
     }
 }
 
-/// Pairs a verdict needs, projected from a robust spread of the differences so far (1.4826·MAD,
-/// HL efficiency 0.955): a small-n interval is [min, max] of Walsh averages, so one odd pair would
-/// make a width-based projection give up early. `d` and `bound` are in the comparison's scale
-/// (log ratios for ratio metrics).
-pub fn pairs_needed(d: &[f64], bound: f64, confidence: f64) -> usize {
+/// Pairs a verdict needs, projected from a robust spread of the differences so far (`spread`, HL
+/// efficiency 0.955) for a `power` chance that the interval clears its boundary (`pairs_for`): a
+/// small-n interval is [min, max] of Walsh averages, so one odd pair would make a width-based
+/// projection give up early. `d` and `bound` are in the comparison's scale (log ratios for ratio
+/// metrics). The bench's futility rule asks for the even chance (`FUTILITY_POWER`: give up only when
+/// even the likely case needs more than the last look); what it prints as needed, and `plan`, the
+/// 80% chance (`PLAN_POWER`), so the two never disagree by the factor (z + z₀.₈)²/z² ≈ 1.8.
+pub fn pairs_needed(d: &[f64], bound: f64, confidence: f64, power: f64) -> usize {
     let v: Vec<f64> = d.iter().copied().filter(|x| x.is_finite()).collect();
     if v.len() < 2 {
         return usize::MAX;
     }
     let med = crate::metrics::median(&v);
-    let sigma = 1.4826 * crate::metrics::median(&v.iter().map(|x| (x - med).abs()).collect::<Vec<_>>());
     let dist = med.abs().max(bound - med.abs());
     if dist <= 0.0 {
         return usize::MAX;
     }
-    let z = normal_quantile(1.0 - (1.0 - confidence) / 2.0);
-    (((z * sigma / dist).powi(2) / 0.955).ceil() as usize).max(min_pairs(confidence))
+    pairs_for(spread(&v), dist, confidence, power).ceil() as usize
 }
+
+/// The chance a bench's futility projection asks for (`pairs_needed`): the likely case.
+pub const FUTILITY_POWER: f64 = 0.5;
+/// The chance `plan` and a verdict's "pairs needed" ask for (`pairs_needed`, `pairs_for`).
+pub const PLAN_POWER: f64 = 0.8;
+
+/// The fewest pairs over which an exact counter must hold one value on each side to be compared
+/// exactly: the fewest at which any metric gets a verdict (6, `min_pairs(0.95)`), and more than the 3
+/// an A/A needs to call a counter stable (SPEC §10.4). Two pairs once decided `more (exact)` in a
+/// `--pairs 2` smoke run, which promises no verdicts, from a counter that had not shown it holds still.
+pub const EXACT_MIN_PAIRS: usize = 6;
 
 /// The fewest pairs whose signed-rank interval can reach `confidence` (6 at 95%).
 pub fn min_pairs(confidence: f64) -> usize {
     (1..=50).find(|&n| 1.0 - 2f64.powi(1 - n as i32) >= confidence).unwrap_or(50)
 }
 
-fn fmt_bound(bound: f64, relative: bool, abs: f64) -> String {
-    if relative { format!("{}%", (bound * 100.0).round()) } else { format!("{abs:.1}") }
+fn fmt_bound(def: &MetricDef, bound: f64, relative: bool, abs: f64) -> String {
+    crate::fmt::bound(bound, relative, abs, def.unit)
+}
+
+/// A bound or margin `fraction` in the metric's own unit, for a metric compared by difference: the
+/// fraction of base's median (of head's when base's is 0, so a score that went from 0 to 0.3 is not
+/// within a bound of 0). Only a count (a `count` unit or an exact counter) is floored at half a count:
+/// a score or a duration has no smallest step, and a floor of 0.5 once made a layout shift of 0 → 0.30
+/// `same (±0.5)`.
+pub fn in_unit(def: &MetricDef, fraction: f64, base: f64, head: f64) -> f64 {
+    let scale = if base.is_finite() && base != 0.0 { base.abs() } else { head.abs() };
+    let abs = fraction * if scale.is_finite() { scale } else { 0.0 };
+    if def.unit == "count" || def.kind == Kind::Exact { abs.max(0.5) } else { abs }
 }

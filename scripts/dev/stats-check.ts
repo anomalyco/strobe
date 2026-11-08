@@ -118,13 +118,21 @@ if (group("tails")) {
     }
     return Math.exp(-x * x) / Math.sqrt(Math.PI) / fr
   }
+  // Up to 400 pairs the exact p is 2·2⁻ⁿ when every pair went one way.
   const cases = [60, 70, 90].map((n) => Array.from({ length: n }, (_, i) => i + 1))
   const res = all(cases.map((d) => ({ op: "wilcoxon", d })))
   for (const [i, d] of cases.entries()) {
     const n = d.length, mean = (n * (n + 1)) / 4, sd = Math.sqrt((n * (n + 1) * (2 * n + 1)) / 24)
     const z = ((n * (n + 1)) / 2 - mean - 0.5) / sd
-    console.log(`n=${n} all one way  z ${z.toFixed(2)}  truth ${erfcTail(z / Math.SQRT2).toExponential(3)}  ${bins.map((b, k) => `${short(b)} ${Number(res[k][i].p).toExponential(3)}`).join("  ")}`)
+    console.log(`n=${n} all one way  exact ${(2 / 2 ** n).toExponential(3)} (normal tail at z ${z.toFixed(2)}: ${erfcTail(z / Math.SQRT2).toExponential(3)})  ${bins.map((b, k) => `${short(b)} ${Number(res[k][i].p).toExponential(3)}`).join("  ")}`)
   }
+  // Above 400 pairs (the normal approximation): untied ranks, a strong shift.
+  const n = 450
+  const d = Array.from({ length: n }, (_, i) => (i % 4 === 0 ? -(i + 1) : i + 1))
+  const t = d.reduce((s, x) => s + (x > 0 ? x : 0), 0), mean = (n * (n + 1)) / 4, sd = Math.sqrt((n * (n + 1) * (2 * n + 1)) / 24)
+  const z = (Math.abs(t - mean) - 0.5) / sd
+  const r = all([{ op: "wilcoxon", d }])
+  console.log(`n=${n} three in four up  z ${z.toFixed(2)}  truth ${erfcTail(z / Math.SQRT2).toExponential(3)}  ${bins.map((b, k) => `${short(b)} ${Number(r[k][0].p).toExponential(3)}`).join("  ")}`)
 }
 
 // Pairs with a little noise around fixed base and head values.
@@ -134,6 +142,7 @@ if (group("bound")) {
   console.log("\n## cstat-5 / cstat-13 equivalence bound in a verdict (truth: arithmetic)")
   const cases: [string, Q][] = [
     ["layout.shift 0 → 0.30 (a score: 2% of 0.30 = 0.006)", { op: "compare", metric: "layout.shift", pairs: Array.from({ length: 12 }, () => [0, 0.3]), bound: 0.02, confidence: 0.95 }],
+    ["layout.shift 0 → about 0.1 (shifts that come and go)", { op: "compare", metric: "layout.shift", pairs: Array.from({ length: 12 }, (_, i) => [0, [0, 0.3, 0.1, 0.05][i % 4]]), bound: 0.02, confidence: 0.95 }],
     ["layout.shift 0 → 0 every pair", { op: "compare", metric: "layout.shift", pairs: Array.from({ length: 12 }, () => [0, 0]), bound: 0.02, confidence: 0.95 }],
     ["layout.count 40 → 40 ±0 (count: half a count floor stays)", { op: "compare", metric: "layout.count", pairs: Array.from({ length: 12 }, (_, i) => [40 + (i % 2), 40 + ((i + 1) % 2)]), bound: 0.002, confidence: 0.95 }],
     ["run.duration ±0.3% bound, same", { op: "compare", metric: "run.duration", pairs: noisy(12, 100, 100, 0.01), bound: 0.003, confidence: 0.95 }],
@@ -184,11 +193,11 @@ if (group("median")) {
   console.log("\n## cstat-10 a median beside a Hodges–Lehmann interval (truth: the median must lie inside its interval)")
   const med = (v: number[]) => { const s = [...v].sort((a, b) => a - b); const m = s.length; return m % 2 ? s[(m - 1) / 2] : (s[m / 2 - 1] + s[m / 2]) / 2 }
   // Skewed pairs (most a little faster, some much slower), as a port's ln ratios can be.
-  const cands = Array.from({ length: 400 }, () => Array.from({ length: 8 + Math.floor(rand() * 6) }, () => (rand() < 0.55 ? -0.01 + normal() * 0.001 : 0.05 + normal() * 0.01)))
+  const cands = Array.from({ length: 400 }, () => Array.from({ length: 26 + Math.floor(rand() * 15) }, () => (rand() < 0.55 ? -0.01 + normal() * 0.001 : 0.05 + normal() * 0.01)))
   const hl0 = ask(bins[0], cands.map((d) => ({ op: "hl", d })))
   const found = cands.filter((v, i) => med(v) < hl0[i].lo || med(v) > hl0[i].hi).slice(0, 3)
   console.log(`${cands.filter((v, i) => med(v) < hl0[i].lo || med(v) > hl0[i].hi).length} of ${cands.length} samples have their median outside their HL interval`)
-  const res = all(found.flatMap((v) => [{ op: "hl", d: v }, { op: "median_interval", v }]))
+  const res = found.length ? all(found.flatMap((v) => [{ op: "hl", d: v }, { op: "median_interval", v }])) : []
   for (const [i, v] of found.entries()) {
     console.log(`n=${v.length} median ${f(med(v))}`)
     for (const [k, b] of bins.entries()) {

@@ -333,7 +333,7 @@ pub(super) fn point(args: &Args, sides: &Sides, file: &Path, root: &Path, commit
         } else {
             None
         };
-        let def = model::metric(&metric);
+        let (def, better) = super::direction(s, &metric);
         let mut fingerprint = json!({
             "machine": statics, "power": r["env"]["power_plan"], "battery": r["env"]["on_battery"], "pin": r["plan"]["pin"],
             "runs": r["plan"]["runs_per_block"], "session": session, "display": display, "target_kinds": kinds, "headless": args.has("headless"), "engine": args.get("engine"),
@@ -352,17 +352,17 @@ pub(super) fn point(args: &Args, sides: &Sides, file: &Path, root: &Path, commit
                     "t": "series", "id": id, "family": history::family_id(&fam), "comparison": "implementations", "device": statics["device"], "repo": repo, "file": file_rel,
                     "abs_file": file, "root": root, "head_root": hr, "label": label, "case": s["case"], "params": s["params"], "metric": metric,
                     "base_target": sides.base_target, "head_target": sides.head_target, "base_spec": sides.base, "base_name": bn, "head_name": hn,
-                    "unit": "ln_ratio", "metric_unit": def.map(|d| d.unit), "better": def.map(|d| d.better), "kind": def.map(|d| d.kind), "words": def.map(|d| [d.words.0, d.words.1]),
+                    "unit": "ln_ratio", "metric_unit": def.map(|d| d.unit), "better": better, "kind": def.map(|d| d.kind), "words": def.map(|d| [d.words.0, d.words.1]),
                     "fingerprint": fingerprint, "seed": r["plan"]["seed"], "created": crate::app::record::now_iso(),
                 }),
             )?;
-        }
-        let (median, lo, hi, conf) = if ln.is_empty() {
-            (f64::NAN, f64::NAN, f64::NAN, 0.0)
         } else {
-            let (_, lo, hi, c) = stats::hodges_lehmann(&ln, 0.95);
-            (detect::median(&ln), lo, hi, c)
-        };
+            super::correct_direction(&id, def, better)?;
+        }
+        // The pairs' Hodges–Lehmann estimate with its own interval, as the bench compares them (kept
+        // under `median`, the point's level, for histories written before): the pairs' median beside
+        // that interval once read `slower −1.0%`.
+        let (median, lo, hi, conf) = if ln.is_empty() { (f64::NAN, f64::NAN, f64::NAN, 0.0) } else { stats::hodges_lehmann(&ln, 0.95) };
         let side_median = |i: usize| detect::median(&pv.iter().map(|p| if i == 0 { p.0 } else { p.1 }).collect::<Vec<_>>());
         let mut notes = warns.clone();
         notes.extend(s["warnings"].as_array().into_iter().flatten().map(|w| json!(format!("{}: {}", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or("")))));
@@ -376,7 +376,8 @@ pub(super) fn point(args: &Args, sides: &Sides, file: &Path, root: &Path, commit
         history::append(&id, &p)?;
         text += &match &why {
             None => {
-                format!("  {}  {id}  {label} · {metric} {hn}/{bn} {} [{} … {}] ({} pairs)\n", short(commit), fmt::pct(median.exp() - 1.0), fmt::pct(lo.exp() - 1.0), fmt::pct(hi.exp() - 1.0), ln.len())
+                let (e, l, h) = fmt::pct_ci(median.exp() - 1.0, lo.exp() - 1.0, hi.exp() - 1.0);
+                format!("  {}  {id}  {label} · {metric} {hn}/{bn} {e} [{l} … {h}] ({} pairs)\n", short(commit), ln.len())
             }
             Some(w) => format!("  {}  {id}  {label} · no value: {w}\n", short(commit)),
         };

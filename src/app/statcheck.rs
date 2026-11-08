@@ -42,7 +42,17 @@ fn answer(q: &Value) -> Result<Value> {
         },
         "repeated_p" => json!({ "p": stats::repeated_p(&nums(&q["d"]), &looks) }),
         "family_min_pairs" => json!({ "pairs": stats::family_min_pairs(q["journeys"].as_u64().unwrap_or(1) as usize, &looks) }),
-        "pairs_needed" => json!({ "pairs": stats::pairs_needed(&nums(&q["d"]), q["bound"].as_f64().unwrap_or(0.02), conf) }),
+        "pairs_needed" => json!({ "pairs": stats::pairs_needed(&nums(&q["d"]), q["bound"].as_f64().unwrap_or(0.02), conf, q["power"].as_f64().unwrap_or(stats::FUTILITY_POWER)) }),
+        "median_interval" => {
+            let (m, lo, hi, achieved) = stats::median_interval(&nums(&q["v"]), conf);
+            json!({ "median": m, "lo": lo, "hi": hi, "achieved": achieved })
+        }
+        "bound" => json!({ "text": fmt::bound(q["fraction"].as_f64().unwrap_or(f64::NAN), q["relative"] != false, q["abs"].as_f64().unwrap_or(f64::NAN), q["unit"].as_str().unwrap_or("")) }),
+        "pct_ci" => {
+            let (e, l, h) = fmt::pct_ci(q["est"].as_f64().unwrap_or(f64::NAN), q["lo"].as_f64().unwrap_or(f64::NAN), q["hi"].as_f64().unwrap_or(f64::NAN));
+            json!({ "text": format!("{e} [{l} … {h}]") })
+        }
+        "pct_vs" => json!({ "text": fmt::pct_vs(q["r"].as_f64().unwrap_or(f64::NAN), q["threshold"].as_f64().unwrap_or(f64::NAN)) }),
         "pairs_for" => json!({ "pairs": stats::pairs_for(q["sigma"].as_f64().unwrap_or(f64::NAN), q["dist"].as_f64().unwrap_or(f64::NAN), conf, q["power"].as_f64().unwrap_or(0.8)) }),
         "compare" => {
             let name = q["metric"].as_str().unwrap_or("");

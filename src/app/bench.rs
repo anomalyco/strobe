@@ -2597,10 +2597,25 @@ fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> 
     names
 }
 
-/// The secondaries that will be tested after these pairs: those every block has a value of.
+/// The secondaries that will be tested after these pairs: those every block has a value of, but a
+/// stable exact counter, which is compared exactly outside Holm (as the Holm family after the pairs
+/// counts them, so the pairs a series runs on for Holm are the ones that family needs).
 fn tested_names(s: &Series, script: bool, blocks: &[Block], pairs: &[(usize, usize)], bound: f64) -> Vec<String> {
     let rate_context = !same(blocks, pairs, "run.duration", bound);
-    secondary_names(s, script, rate_context).into_iter().filter(|n| model::metric(n).is_some() && !s.per_side(n) && blocks.iter().all(|b| b.values.get(n).is_some_and(|v| v.is_finite()))).collect()
+    secondary_names(s, script, rate_context)
+        .into_iter()
+        .filter(|n| model::metric(n).is_some() && !s.per_side(n) && blocks.iter().all(|b| b.values.get(n).is_some_and(|v| v.is_finite())) && !stable_exact(n, blocks, pairs))
+        .collect()
+}
+
+/// A counter (`kind: exact`) that held one value on each side in every pair, from 2 pairs: what
+/// `stats::compare` compares exactly.
+fn stable_exact(name: &str, blocks: &[Block], pairs: &[(usize, usize)]) -> bool {
+    if model::metric(name).is_none_or(|d| d.kind != model::Kind::Exact) || pairs.len() < stats::EXACT_MIN_PAIRS {
+        return false;
+    }
+    let (a0, b0) = (val(&blocks[pairs[0].0], name), val(&blocks[pairs[0].1], name));
+    pairs.iter().all(|&(a, b)| val(&blocks[a], name) == a0 && val(&blocks[b], name) == b0)
 }
 
 /// The fewest pairs whose exact signed-rank test can clear Holm's first step across `tests` secondaries.
@@ -2875,7 +2890,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         Some(m) => stats::compare_noworse(&s.primary, def, pp, m, confidence),
         None => stats::compare(&s.primary, def, pp, bound, confidence),
     };
-    progress(format!("\n{}  primary {}{}", s.label(), s.primary, margin.map(|m| format!(" · no worse than {}%?", (m * 1000.0).round() / 10.0)).unwrap_or_default()));
+    progress(format!("\n{}  primary {}{}", s.label(), s.primary, margin.map(|m| format!(" · no worse than {}?", fmt::bound(m, true, m, ""))).unwrap_or_default()));
     let series_started = Instant::now();
     // This series' deadline under `--max-time`: an equal share of the time left among the series still
     // to run (this one included); a series that ends early leaves its time to the ones after it.
@@ -2886,8 +2901,11 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let mut blocks: Vec<Block> = serde_json::from_value(saved["blocks"].clone()).unwrap_or_default();
     let mut pairs: Vec<(usize, usize)> = serde_json::from_value(saved["pairs"].clone()).unwrap_or_default();
     pairs.retain(|&(a, b)| a < blocks.len() && b < blocks.len());
+    // The look a resumed series' primary was decided at (it then ran on for its secondaries): the
+    // verdict stays that look's, never one taken again at a later look.
+    let mut decided_n: Option<usize> = saved["decided_n"].as_u64().map(|n| n as usize).filter(|&n| n >= 2 && n <= pairs.len());
     if !pairs.is_empty() {
-        progress(format!("  resumed with the {} pairs it had finished", pairs.len()));
+        progress(format!("  resumed with the {} pairs it had finished{}", pairs.len(), decided_n.map(|n| format!(" (the primary was decided at pair {n})")).unwrap_or_default()));
     }
     // Outside-in CPU (`cpu.work`) is a tested secondary where the target is measured from outside: a
     // script, a command, a native app, both sides of an implementation comparison, and a page in an
@@ -2897,8 +2915,16 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let mut last: Option<Comparison> = None;
     // Why the series ended early (a stop, or an error after some pairs), as the error to report.
     let mut halted: Option<Error> = None;
-    // The primary's verdict at the look that decided it, kept while pairs continue for the secondaries.
-    let mut decided_at: Option<Comparison> = None;
+    // The primary's verdict at the look that decided it, kept while pairs continue for the secondaries
+    // (a resumed series': taken again from the pairs up to that look, which give the same comparison).
+    let mut decided_at: Option<Comparison> = decided_n.and_then(|k| {
+        let pp: Vec<(f64, f64)> = pairs[..k].iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).collect();
+        let d = def_in(&s.primary, &blocks).ok().flatten().unwrap_or(def);
+        Some(compare_primary(&pp, d)).filter(|c| c.decided)
+    });
+    if decided_at.is_none() {
+        decided_n = None;
+    }
     // Why the two sides' journeys are not one (`NotEquivalent`, `InputMismatch`), from the pair that showed it.
     let mut journey_refused: Option<Refusal> = None;
     // Discarded warm-up blocks and their wall time, for `plan` (SPEC §9.1).
@@ -2959,7 +2985,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             progress(format!("  pair {}: the session locked or unlocked, or the display turned off or on, between its blocks; the pair runs again", pair + 1));
         }
         pairs.push((idx[0], idx[1]));
-        checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs }));
+        checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": decided_n }));
         let primary_pairs: Vec<(f64, f64)> = pairs.iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).collect();
         let n = pair + 1;
         // The two sides did not do the same journey (SPEC §9.10): nothing of the series compares.
@@ -2997,8 +3023,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         let mut cmp = cmp;
         if !cmp.decided {
             cmp.needed_pairs = Some(match cmp.noworse {
-                Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, cmp.relative, m), confidence),
-                None => stats::pairs_needed(&d, if cmp.relative { (1.0 + bound).ln() } else { cmp.bound }, confidence),
+                Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, cmp.relative, m), confidence, stats::FUTILITY_POWER),
+                None => stats::pairs_needed(&d, if cmp.relative { (1.0 + bound).ln() } else { cmp.bound }, confidence, stats::FUTILITY_POWER),
             });
         }
         // Where this series likely ends: at the look its projection reaches, or where it gives up.
@@ -3011,6 +3037,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         };
         let eta = eta(ctx, s, &blocks, &pairs, target);
         let side = |i: usize| if ctx.implementations { variants[i].name.clone() } else { variants[i].role.to_string() };
+        let (est_t, lo_t, hi_t) = change_ci(cmp.relative, cmp.estimate, cmp.lo, cmp.hi, def.unit);
         progress(format!(
             "  pair {:>2}  {} {:>10}  {} {:>10}  {}  [{} … {}]  {} · {eta}",
             n,
@@ -3018,9 +3045,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             fmt::value(val(&blocks[idx[0]], &s.primary), def.unit),
             side(1),
             fmt::value(val(&blocks[idx[1]], &s.primary), def.unit),
-            change(&cmp),
-            bound_text(cmp.lo, &cmp, def),
-            bound_text(cmp.hi, &cmp, def),
+            est_t,
+            lo_t,
+            hi_t,
             match (look, next) {
                 (true, _) => format!("look: {}", cmp.verdict),
                 (false, Some(l)) => format!("(next look at pair {l})"),
@@ -3042,6 +3069,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 let why = if fam > holm { format!("its verdict can clear Holm across the {journeys} journeys") } else { "the secondaries can clear Holm".to_string() };
                 progress(format!("  the primary is decided; {} more pair{} so {why} ({need} pairs)", need - n, if need - n == 1 { "" } else { "s" }));
                 decided_at = last.clone();
+                decided_n = Some(n);
+                checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": decided_n }));
                 continue;
             }
             stopped = "primary decided".into();
@@ -3075,7 +3104,11 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         }
     }
     let def = def_in(&s.primary, &blocks)?.unwrap_or(def);
-    // Pairs a resumed series had finished: the comparison at the last of them.
+    // Pairs a resumed series had finished: the comparison at the look that decided it, else at the
+    // last of them.
+    if last.is_none() {
+        last = decided_at.clone();
+    }
     if last.is_none() && !pairs.is_empty() {
         let pp: Vec<(f64, f64)> = pairs.iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).collect();
         last = Some(compare_primary(&pp, def));
@@ -3096,7 +3129,18 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             "stopped" => (VerdictKind::Stopped, format!("stopped after {} pair{}: no verdict (resume to finish)", pairs.len(), if pairs.len() == 1 { "" } else { "s" })),
             s if s.starts_with("failed") => (VerdictKind::Unclear, format!("unclear: {} pair{}, then the bench failed", pairs.len(), if pairs.len() == 1 { "" } else { "s" })),
             "more pairs cannot decide it" | "max pairs" | "max time" => match primary.needed_pairs {
-                Some(n) if n != usize::MAX && n > pairs.len() => (VerdictKind::Underpowered, format!("underpowered: ~{n} pairs needed")),
+                // Stopped on the likely case (`FUTILITY_POWER`); says the pairs for an 80% chance, as `plan` does.
+                Some(n) if n != usize::MAX && n > pairs.len() => {
+                    let d: Vec<f64> =
+                        pairs.iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).map(|(a, b)| if primary.relative { (b / a).ln() } else { b - a }).collect();
+                    let n80 = match primary.noworse {
+                        Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, primary.relative, m), confidence, stats::PLAN_POWER),
+                        None => stats::pairs_needed(&d, if primary.relative { (1.0 + bound).ln() } else { primary.bound }, confidence, stats::PLAN_POWER),
+                    };
+                    let n80 = if n80 == usize::MAX { n } else { n80.max(n) };
+                    primary.needed_pairs = Some(n80);
+                    (VerdictKind::Underpowered, format!("underpowered: ~{n80} pairs needed (for an 80% chance)"))
+                }
                 _ if stopped == "max pairs" && ctx.args.get("pairs").is_none() => (
                     VerdictKind::Unclear,
                     format!("unclear after {} pairs, the last planned look: the difference sits on the {}", pairs.len(), if margin.is_some() { "margin" } else { "equivalence bound" }),
@@ -3175,25 +3219,6 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         };
         secondaries.push(tail_check(d, blocks, c));
     }
-    // An exact comparison (a stable counter) is a fact, not a test: it skips Holm and the primary's gate.
-    let tested: Vec<usize> = (0..secondaries.len()).filter(|&i| !secondaries[i].exact).collect();
-    let ps: Vec<f64> = tested.iter().map(|&i| secondaries[i].p).collect();
-    let rejected = stats::holm(&ps, 0.05);
-    for (&i, rej) in tested.iter().zip(rejected) {
-        let c = &mut secondaries[i];
-        if c.kind == VerdictKind::Refused {
-            continue;
-        }
-        // A non-inferiority secondary's test is against its margin: rejected, its interval clears it.
-        let directional = if c.noworse.is_some() { c.decided } else { c.lo > 0.0 || c.hi < 0.0 };
-        let keep = primary_decided && ((rej && directional) || c.kind == VerdictKind::Same);
-        if !keep {
-            c.set_verdict(VerdictKind::Untested, "—");
-            c.decided = false;
-        }
-    }
-    // Smallest n whose exact signed-rank test can clear Holm's first step across the tested set.
-    let holm = holm_pairs(tested.len());
     let mut descriptive: Vec<Comparison> = Vec::new();
     // A launch's milestones and CPU, a process's CPU, and a command's launch, are context like the fixed list.
     let found: Vec<String> = blocks
@@ -3301,6 +3326,25 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     } else if session == "locked" {
         warnings.push(validity::info("SessionLocked", "every block ran on a locked screen (the series needs no presenting window): compare it only with runs that were locked too"));
     }
+    // Secondaries: gated on the primary, Holm-corrected, once every refusal is in. An exact comparison
+    // (a stable counter) is a fact, not a test, and a refused one tests nothing: neither joins the
+    // family (a refused row's p once sized it, so a valid secondary's verdict was wiped), and a
+    // primary refused after its blocks leaves every secondary untested.
+    let tested: Vec<usize> = (0..secondaries.len()).filter(|&i| !secondaries[i].exact && secondaries[i].kind != VerdictKind::Refused).collect();
+    let ps: Vec<f64> = tested.iter().map(|&i| secondaries[i].p).collect();
+    let rejected = stats::holm(&ps, 0.05);
+    for (&i, rej) in tested.iter().zip(rejected) {
+        let c = &mut secondaries[i];
+        // A non-inferiority secondary's test is against its margin: rejected, its interval clears it.
+        let directional = if c.noworse.is_some() { c.decided } else { c.lo > 0.0 || c.hi < 0.0 };
+        let keep = primary_decided && ((rej && directional) || c.kind == VerdictKind::Same);
+        if !keep {
+            c.set_verdict(VerdictKind::Untested, "—");
+            c.decided = false;
+        }
+    }
+    // Smallest n whose exact signed-rank test can clear Holm's first step across the tested set.
+    let holm = holm_pairs(tested.len());
     // Each pair ran in one display state; pairs in different ones still compare within themselves.
     let dark = pairs.iter().filter(|&&(a, _)| blocks[a].display == Some(0)).count();
     if dark > 0 {
@@ -3465,7 +3509,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         "until": launch::until_of(&s.launch),
         "engine": target["engine"], "headless": headless_of(ctx, s), "browser": series_browser(&blocks),
         "primary": primary, "decided": primary_decided, "session": session, "secondaries": secondaries, "descriptive": descriptive, "holm_pairs": holm,
-        "pairs": pairs.len(), "launches": blocks.len(), "stopped": stopped, "bound": bound, "noworse": s.noworse,
+        "pairs": pairs.len(), "primary_pairs": decided_n.unwrap_or(pairs.len()), "launches": blocks.len(), "stopped": stopped, "bound": bound, "noworse": s.noworse,
         "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms,
         "steps": mean_steps(&blocks), "elapsed_ms": series_started.elapsed().as_secs_f64() * 1e3 - (ctx.waited_ms - waited_before), "waited_ms": ctx.waited_ms - waited_before,
         "overhead": mean_overhead(&blocks), "untimed": untimed_of(&blocks.iter().map(|b| (b.values.get("untimed.n").copied(), b.values.get("untimed.ms").copied())).collect::<Vec<_>>()),
@@ -3582,15 +3626,8 @@ fn cells(c: &Value) -> (String, String, String, String) {
     let rel = c["relative"].as_bool().unwrap_or(false);
     let est = c["estimate"].as_f64().unwrap_or(f64::NAN);
     let (lo, hi) = (c["lo"].as_f64().unwrap_or(f64::NAN), c["hi"].as_f64().unwrap_or(f64::NAN));
-    let abs_unit = if unit == "%" { "pp" } else { unit };
-    let delta = if rel { fmt::pct(est) } else { fmt::signed(est, abs_unit) };
-    let ci = if c["exact"] == true {
-        "exact".to_string()
-    } else if rel {
-        format!("{} … {}", fmt::pct(lo), fmt::pct(hi))
-    } else {
-        format!("{} … {}", fmt::signed(lo, abs_unit), fmt::signed(hi, abs_unit))
-    };
+    let (delta, lo_t, hi_t) = change_ci(rel, est, lo, hi, unit);
+    let ci = if c["exact"] == true { "exact".to_string() } else { format!("{lo_t} … {hi_t}") };
     (fmt::value(c["base"].as_f64().unwrap_or(f64::NAN), unit), fmt::value(c["head"].as_f64().unwrap_or(f64::NAN), unit), delta, ci)
 }
 
@@ -3877,18 +3914,9 @@ fn implementation_series(ctx: &Ctx, s: &Series, variants: &[Variant], out: &mut 
                 continue;
             }
             let unit = model::metric(name).map_or("", |d| d.unit);
-            let (lo, hi) = match xs.len() {
-                1 => (Value::Null, Value::Null),
-                _ if xs.iter().all(|x| *x > 0.0) => {
-                    let (_, lo, hi, _) = stats::hodges_lehmann(&xs.iter().map(|x| x.ln()).collect::<Vec<_>>(), 0.95);
-                    (json!(lo.exp()), json!(hi.exp()))
-                }
-                _ => {
-                    let (_, lo, hi, _) = stats::hodges_lehmann(&xs, 0.95);
-                    (json!(lo), json!(hi))
-                }
-            };
-            per[role][name] = json!({ "median": metrics::median(&xs), "lo": lo, "hi": hi, "unit": unit, "n": xs.len() });
+            let (median, lo, hi, _) = stats::median_interval(&xs, 0.95);
+            let (lo, hi) = if xs.len() == 1 { (Value::Null, Value::Null) } else { (json!(lo), json!(hi)) };
+            per[role][name] = json!({ "median": median, "lo": lo, "hi": hi, "unit": unit, "n": xs.len() });
         }
     }
     out["per_side"] = per;
@@ -3989,12 +4017,15 @@ fn same(blocks: &[Block], pairs: &[(usize, usize)], name: &str, bound: f64) -> b
     stats::compare(name, d, &pp, bound, 0.95).kind == VerdictKind::Same
 }
 
-fn change(c: &Comparison) -> String {
-    if c.relative { fmt::pct(c.estimate) } else { fmt::signed(c.estimate, "count") }
-}
-
-fn bound_text(x: f64, c: &Comparison, def: &MetricDef) -> String {
-    if c.relative { fmt::pct(x) } else { fmt::signed(x, def.unit) }
+/// An estimate and its interval as the tables and the progress lines print them: percentages whose
+/// digits follow the interval's width (`fmt::pct_ci`), or differences in the metric's unit (a
+/// percentage's in points). A difference once printed as a count whatever its unit.
+fn change_ci(relative: bool, est: f64, lo: f64, hi: f64, unit: &str) -> (String, String, String) {
+    if relative {
+        return fmt::pct_ci(est, lo, hi);
+    }
+    let unit = if unit == "%" { "pp" } else { unit };
+    (fmt::signed(est, unit), fmt::signed(lo, unit), fmt::signed(hi, unit))
 }
 
 /// The analysers of a series' blocks; `names` are how its notes name base and head (`side_of`).
@@ -4048,6 +4079,48 @@ fn analyse(s: &Series, def: &MetricDef, blocks: &[Block], pairs: &[(usize, usize
         let trend = if relative { range >= 0.01 } else { range > (0.01 * base).max(if def.unit == "count" { 1.0 } else { 0.5 }) };
         if rho.abs() > 0.6 && trend {
             w.push(validity::warn("Drift", format!("the difference trends across pairs (Spearman {rho:.2}): the machine changed during the run")));
+        }
+    }
+    // `Outliers` (SPEC §9.3): the primary's block values past a side's Tukey fences (1.5 × IQR beyond
+    // the quartiles), listed and kept: the rank test is robust to them.
+    let paired: Vec<&Block> = pairs.iter().flat_map(|&(a, b)| [&blocks[a], &blocks[b]]).collect();
+    let mut outliers = Vec::new();
+    for (role, name) in ["base", "head"].into_iter().zip(names) {
+        let mine: Vec<&&Block> = paired.iter().filter(|b| b.variant == role && val(b, &s.primary).is_finite()).collect();
+        if mine.len() < 5 {
+            continue;
+        }
+        let mut v: Vec<f64> = mine.iter().map(|b| val(b, &s.primary)).collect();
+        v.sort_by(|a, b| a.total_cmp(b));
+        let q = |p: f64| {
+            let x = p * (v.len() - 1) as f64;
+            let (i, f) = (x.floor() as usize, x.fract());
+            v[i] + f * (v[(i + 1).min(v.len() - 1)] - v[i])
+        };
+        let (q1, q3) = (q(0.25), q(0.75));
+        let (lo, hi) = (q1 - 1.5 * (q3 - q1), q3 + 1.5 * (q3 - q1));
+        for b in mine.iter().filter(|b| !(lo..=hi).contains(&val(b, &s.primary))) {
+            outliers.push(format!("{name} pair {} ({})", b.pair + 1, fmt::value(val(b, &s.primary), def.unit)));
+        }
+    }
+    if !outliers.is_empty() {
+        w.push(validity::info("Outliers", format!("{}: {} past the Tukey fences (1.5 × IQR): {}; kept, the rank test is robust to them", s.primary, outliers.len(), outliers.join(", "))));
+    }
+    // `CounterUnstable` (SPEC §10.2): an exact counter that did not hold one value on a side in every
+    // block, so it was compared like a timed metric (by its noise), not exactly.
+    let counters: std::collections::BTreeSet<&String> = paired.iter().flat_map(|b| b.values.keys()).filter(|k| model::metric(k).is_some_and(|d| d.kind == model::Kind::Exact)).collect();
+    for name in counters {
+        let spread: Vec<String> = ["base", "head"]
+            .into_iter()
+            .zip(names)
+            .filter_map(|(role, who)| {
+                let v: Vec<f64> = paired.iter().filter(|b| b.variant == role).map(|b| val(b, name)).filter(|x| x.is_finite()).collect();
+                let (lo, hi) = (v.iter().copied().fold(f64::INFINITY, f64::min), v.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+                (v.len() >= 2 && lo < hi).then(|| format!("{who} {} to {}", fmt::value(lo, "count"), fmt::value(hi, "count")))
+            })
+            .collect();
+        if !spread.is_empty() {
+            w.push(validity::warn("CounterUnstable", format!("{name} varied between blocks of one build ({}): compared like a timed metric, by its noise, not exactly", spread.join("; "))));
         }
     }
     // Other work on the measured CPUs during a run: kept, flagged (SPEC §10.2).
@@ -9598,18 +9671,11 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     let steps: Vec<(String, f64)> = serde_json::from_value(s["steps"].clone()).unwrap_or_default();
     out += &format!("time   {} · per block {}\n", fmt::ms_duration(s["elapsed_ms"].as_f64().unwrap_or(0.0) as u64), steps_text(&steps));
     out += &self_line(s);
-    let ratio = def.is_none_or(|d| d.kind != model::Kind::Exact && d.unit != "count" && d.unit != "score") && !values.is_empty() && values.iter().all(|v| *v > 0.0);
     if stats::kind_of(&s["primary"]) == VerdictKind::Refused {
         out += &format!("\n★ {metric}  {}\n", s["primary"]["verdict"].as_str().unwrap_or("refused"));
     } else if values.len() >= 2 {
-        let (lo, hi, conf) = if ratio {
-            let (_, lo, hi, c) = stats::hodges_lehmann(&values.iter().map(|v| v.ln()).collect::<Vec<_>>(), 0.95);
-            (lo.exp(), hi.exp(), c)
-        } else {
-            let (_, lo, hi, c) = stats::hodges_lehmann(&values, 0.95);
-            (lo, hi, c)
-        };
-        out += &format!("\n★ {metric}  median {}  [{} … {}] ({:.0}% over the blocks)\n", fmt::value(metrics::median(&values), unit), fmt::value(lo, unit), fmt::value(hi, unit), 100.0 * conf);
+        let (median, lo, hi, conf) = stats::median_interval(&values, 0.95);
+        out += &format!("\n★ {metric}  median {}  [{} … {}] ({:.0}% over the blocks)\n", fmt::value(median, unit), fmt::value(lo, unit), fmt::value(hi, unit), 100.0 * conf);
     }
     let each = s["blocks"].as_array().into_iter().flatten().map(|b| b["values"][metric].as_f64().filter(|v| v.is_finite()).map_or("—".to_string(), |v| fmt::value(v, unit)));
     out += &format!("  blocks  {}\n", each.collect::<Vec<_>>().join(" · "));
@@ -9638,7 +9704,37 @@ fn warnings_text<'a>(warns: impl Iterator<Item = &'a Value>) -> String {
     if lines.is_empty() { lines } else { format!("\nwarnings\n{lines}") }
 }
 
+/// What an A/A series says (SPEC §10.4): the same build on both sides, so every decided direction is a
+/// false positive. The primary's, the share of tested secondaries that claimed a change against the
+/// nominal 5%, and the counters that held one value in every block (exact).
+fn aa_text(s: &Value) -> String {
+    let moved = |c: &Value| matches!(stats::kind_of(c), VerdictKind::Better | VerdictKind::Worse);
+    let primary = if moved(&s["primary"]) { "a false positive" } else { "no false positive" };
+    let secondaries: Vec<&Value> = s["secondaries"].as_array().into_iter().flatten().filter(|c| c["exact"] != true && stats::kind_of(c) != VerdictKind::Refused).collect();
+    let claimed = secondaries.iter().filter(|c| moved(c)).count();
+    let tested = secondaries.iter().filter(|c| stats::kind_of(c) != VerdictKind::Untested).count();
+    let stable: Vec<&str> = s["secondaries"]
+        .as_array()
+        .into_iter()
+        .chain(s["descriptive"].as_array())
+        .flatten()
+        .chain(std::iter::once(&s["primary"]))
+        .filter(|c| c["exact"] == true)
+        .filter_map(|c| c["metric"].as_str())
+        .collect();
+    let share = if tested > 0 {
+        format!("{claimed} of {tested} tested secondaries claimed a change ({:.0}%; must stay at or below 5%)", 100.0 * claimed as f64 / tested as f64)
+    } else {
+        "no secondary was tested (the primary gates them)".into()
+    };
+    format!(
+        "\nA/A    the same build on both sides: any faster or slower is a false positive\n       primary: {primary} · {share}\n       stable counters (one value in every block): {}\n",
+        if stable.is_empty() { "none".to_string() } else { stable.join(", ") }
+    )
+}
+
 fn render(r: &Value) -> String {
+    let aa = r["plan"]["aa"] == true;
     let mut out = String::new();
     let file = r["file"].as_str().map(|f| Path::new(f).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).unwrap_or_default();
     let base = &r["variants"][0];
@@ -9728,6 +9824,9 @@ fn render(r: &Value) -> String {
         // A seeded workload: both sides ran the same inputs, and `--seed` replays them.
         let seeded = if r["plan"]["used_random"] == true { format!(" · seed {}", r["plan"]["seed"]) } else { String::new() };
         out += &format!("blocks {} pairs ({} fresh launches) · {per_block}{seeded} · stopped: {}\n", s["pairs"], s["launches"], s["stopped"].as_str().unwrap_or(""));
+        if let Some(k) = s["primary_pairs"].as_u64().filter(|k| Some(*k) < s["pairs"].as_u64()) {
+            out += &format!("       ★ the primary's verdict, estimate and interval are its first {k} pairs' (the look that decided it); the rest ran for the secondaries\n");
+        }
         let steps: Vec<(String, f64)> = serde_json::from_value(s["steps"].clone()).unwrap_or_default();
         out += &format!("time   {} · per block {}\n", fmt::ms_duration(s["elapsed_ms"].as_f64().unwrap_or(0.0) as u64), steps_text(&steps));
         out += &self_line(&s);
@@ -9763,9 +9862,15 @@ fn render(r: &Value) -> String {
             let name = c["metric"].as_str().unwrap_or("");
             // A percentage compared as a difference is in percentage points (`cells`).
             let (b, h, delta, ci) = cells(&c);
-            table.push(vec![format!("{} {name}", if primary { "★" } else { " " }), b, h, delta, ci, c["verdict"].as_str().unwrap_or("").to_string()]);
+            // An A/A's builds are the same: a direction it decided is a false positive, never a change.
+            let verdict = c["verdict"].as_str().unwrap_or("").to_string();
+            let verdict = if aa && matches!(stats::kind_of(&c), VerdictKind::Better | VerdictKind::Worse) { format!("{verdict} ← false positive (A/A)") } else { verdict };
+            table.push(vec![format!("{} {name}", if primary { "★" } else { " " }), b, h, delta, ci, verdict]);
         }
         out += &fmt::table(&table, &[false, true, true, true, false, false], "", 2);
+        if aa {
+            out += &aa_text(&s);
+        }
         if let Some(per) = s["per_side"].as_object().filter(|_| sides) {
             let names: std::collections::BTreeSet<&String> = per.values().filter_map(Value::as_object).flat_map(|o| o.keys()).collect();
             if !names.is_empty() {

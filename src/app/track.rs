@@ -34,6 +34,33 @@ fn derived_seed(repo: &str, file_rel: &str) -> u32 {
     u32::from_be_bytes([d[0], d[1], d[2], d[3]])
 }
 
+/// The definition series `s` measured `metric` under and the direction it counted better: a
+/// `metric.<name>` whose command's lines said `higher` is `METRIC_HIGHER` (from its comparison's
+/// `better`, else its blocks' `directions`: `bench --blocks` compares nothing), every other the
+/// catalog's. The catalog alone once tracked a higher-is-better score as lower-is-better, so a win
+/// was suspected as a regression.
+pub(crate) fn direction(s: &Value, metric: &str) -> (Option<&'static model::MetricDef>, Option<model::Better>) {
+    let rows = std::iter::once(&s["primary"]).chain(["secondaries", "descriptive"].iter().flat_map(|k| s[*k].as_array().into_iter().flatten()));
+    let from_row = rows.filter(|c| c["metric"] == metric).find(|c| c["better"].is_string()).map(stats::better_in);
+    let from_blocks = || {
+        let dirs: Vec<&str> = s["blocks"].as_array().into_iter().flatten().filter_map(|b| b["directions"][metric].as_str()).collect();
+        (!dirs.is_empty() && dirs.iter().all(|d| *d == "higher")).then_some(model::Better::Higher)
+    };
+    let higher = metric.starts_with("metric.") && from_row.or_else(from_blocks) == Some(model::Better::Higher);
+    let def = if higher { Some(&model::METRIC_HIGHER) } else { model::metric(metric) };
+    (def, def.map(|d| d.better))
+}
+
+/// A series an older strobe wrote with the catalog's direction for a `metric.<name>` better higher:
+/// a `series` event that corrects its `better` and `words` (`history::load` lets later fields win).
+pub(crate) fn correct_direction(id: &str, def: Option<&'static model::MetricDef>, better: Option<model::Better>) -> Result<()> {
+    let Some(s) = history::load(id) else { return Ok(()) };
+    if better.is_none() || s.meta["better"] == json!(better) {
+        return Ok(());
+    }
+    history::append(id, &json!({ "t": "series", "id": id, "better": better, "words": def.map(|d| [d.words.0, d.words.1]) }))
+}
+
 /// `args` with the track's seed set: `--seed`, else `derived_seed`.
 fn with_seed(args: &Args, root: &Path, file: &Path) -> Result<Args> {
     let seed = match args.get("seed") {
@@ -248,6 +275,14 @@ fn run_key(args: &Args, file: &Path, commit: &str, statics: &Value) -> Value {
     if let Some(s) = args.get("seed") {
         key["seed"] = json!(s);
     }
+    // What the fingerprint keeps of the bench's own setup: another pin, power plan, reserved CPUs or
+    // runs per block is another series, so a commit tracked without them is not tracked with them
+    // (only when given, so keys from before stay).
+    for k in ["pin", "power", "reserve-cpus", "runs"] {
+        if let Some(v) = args.get(k) {
+            key[k] = json!(v);
+        }
+    }
     key
 }
 
@@ -326,7 +361,7 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         } else if displays.iter().any(|d| *d != displays[0]) {
             why = Some("the display turned off or on between the point's blocks".into());
         }
-        let def = model::metric(&metric);
+        let (def, better) = direction(s, &metric);
         let mut fingerprint = json!({
             "machine": statics, "power": r["env"]["power_plan"], "battery": r["env"]["on_battery"], "pin": r["plan"]["pin"],
             "runs": r["plan"]["runs_per_block"], "session": session, "display": display, "target_kind": s["target_kind"],
@@ -363,20 +398,19 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
                 &json!({
                     "t": "series", "id": id, "family": history::family_id(&family), "device": statics["device"], "repo": repo, "file": file_rel, "abs_file": file, "root": root,
                     "label": label, "case": s["case"], "target": s["target"], "params": s["params"], "metric": metric,
-                    "unit": def.map(|d| d.unit), "better": def.map(|d| d.better), "kind": def.map(|d| d.kind), "fingerprint": fingerprint, "seed": r["plan"]["seed"],
+                    "unit": def.map(|d| d.unit), "better": better, "kind": def.map(|d| d.kind), "words": def.map(|d| [d.words.0, d.words.1]), "fingerprint": fingerprint, "seed": r["plan"]["seed"],
                     "created": super::record::now_iso(),
                 }),
             )?;
+        } else {
+            correct_direction(&id, def, better)?;
         }
         let ratio = def.is_none_or(|d| d.kind != Kind::Exact && d.unit != "count" && d.unit != "score") && values.iter().all(|v| *v > 0.0);
         let (median, lo, hi, conf) = if values.is_empty() {
             (f64::NAN, f64::NAN, f64::NAN, 0.0)
-        } else if ratio {
-            let (_, lo, hi, c) = stats::hodges_lehmann(&values.iter().map(|v| v.ln()).collect::<Vec<_>>(), 0.95);
-            (detect::median(&values), lo.exp(), hi.exp(), c)
         } else {
-            let (_, lo, hi, c) = stats::hodges_lehmann(&values, 0.95);
-            (detect::median(&values), lo, hi, c)
+            // The median's own interval: a Hodges–Lehmann interval beside the median could leave it out.
+            stats::median_interval(&values, 0.95)
         };
         let mut notes = warns.clone();
         notes.extend(s["warnings"].as_array().into_iter().flatten().map(|w| json!(format!("{}: {}", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or("")))));
@@ -449,7 +483,9 @@ fn detect_run(s: &history::Series, args: &Args, valid: &[&Value], logs: bool) ->
         .collect();
     let b = bound(args, s);
     let level = detect::median(&valid.iter().filter_map(|p| p["median"].as_f64()).collect::<Vec<_>>()).abs();
-    let params = detect::Params { min_segment: 3, alpha: 0.001, bound: if ratio || logs { (1.0 + b).ln() } else { (b * level).max(0.5) }, k_sigma: 3.0 };
+    // A difference's bound as a bench sets it (`stats::in_unit`): half a count only for counts.
+    let in_unit = |def: Option<&model::MetricDef>| def.map_or(b * level, |d| stats::in_unit(d, b, level, f64::NAN));
+    let params = detect::Params { min_segment: 3, alpha: 0.001, bound: if ratio || logs { (1.0 + b).ln() } else { in_unit(model::metric(s.meta["metric"].as_str().unwrap_or(""))) }, k_sigma: 3.0 };
     let better_low = s.meta["better"] != "higher";
     let mut out = Vec::new();
     for c in detect::changes(&pts, &params) {
@@ -699,7 +735,8 @@ fn alert(args: &Args, s: &history::Series, c: &Value) -> Result<Value> {
     let unit = s.meta["unit"].as_str().unwrap_or("");
     let cf = &c["confirm"];
     let change = if cf["relative"] == true {
-        format!("{} [{} … {}]", fmt::pct(cf["estimate"].as_f64().unwrap_or(f64::NAN)), fmt::pct(cf["lo"].as_f64().unwrap_or(f64::NAN)), fmt::pct(cf["hi"].as_f64().unwrap_or(f64::NAN)))
+        let (e, lo, hi) = fmt::pct_ci(cf["estimate"].as_f64().unwrap_or(f64::NAN), cf["lo"].as_f64().unwrap_or(f64::NAN), cf["hi"].as_f64().unwrap_or(f64::NAN));
+        format!("{e} [{lo} … {hi}]")
     } else {
         format!(
             "{} [{} … {}]",

@@ -20,32 +20,63 @@ pub fn gap(s: &Value) -> bool {
     s["kind"] == "gap" || s["gap"].is_object() || s["primary"]["refusal"]["validator"] == "ParityGap"
 }
 
-/// A series that is not one of the compared journeys: a gap, or one refused before it ran (an engine
-/// without its primary on a side, `kind: "refused"`), which counts toward neither side.
-pub fn not_compared(s: &Value) -> bool {
-    gap(s) || s["kind"] == "refused"
+/// A series that never ran its pairs: refused before it ran (an engine without its primary on a side,
+/// `kind: "refused"`), or stopped before its first pair (`not_run`).
+fn not_run(s: &Value) -> bool {
+    s["kind"] == "refused" || s["not_run"] == true
 }
 
-/// Why a series was not compared: a gap's reason, or a refused series' `not run (<validator>): <why>`.
+/// A series that ran but whose primary was refused at run time (its blocks, a mixed lock state, the
+/// two sides' journeys differing): it compared nothing.
+fn refused_at_run(s: &Value) -> bool {
+    !not_run(s) && !gap(s) && stats::kind_of(&s["primary"]) == VerdictKind::Refused
+}
+
+/// A series that is not one of the compared journeys, which counts toward neither side and never as
+/// `unclear`: a gap, one that never ran (`not_run`), a leak run or a `--blocks` series (nothing paired),
+/// or one whose primary was refused (SPEC §9.3).
+pub fn not_compared(s: &Value) -> bool {
+    gap(s) || not_run(s) || s["kind"] == "leak" || s["kind"] == "blocks" || refused_at_run(s)
+}
+
+/// Why a series was not compared: a gap's reason, a refused series' `not run (<validator>): <why>`, a
+/// stopped one's `not run: <why>`, or a refused primary's `refused (<validator>): <why>`.
 pub fn not_compared_reason(r: &Value, s: &Value) -> String {
+    let x = &s["primary"]["refusal"];
     if s["kind"] == "refused" {
-        let x = &s["primary"]["refusal"];
         return format!("not run ({}): {}", x["validator"].as_str().unwrap_or(""), x["summary"].as_str().unwrap_or(""));
+    }
+    if s["not_run"] == true {
+        return format!("not run: {}", s["halt"]["message"].as_str().unwrap_or("stopped before its first pair").lines().next().unwrap_or(""));
+    }
+    if s["kind"] == "leak" || s["kind"] == "blocks" {
+        return format!("a {} run: nothing paired", s["kind"].as_str().unwrap_or(""));
+    }
+    if refused_at_run(s) {
+        return s["primary"]["verdict"].as_str().unwrap_or("refused").to_string();
     }
     gap_reason(r, s)
 }
 
-/// The not-compared journeys in words: `1 gap`, `2 not run`, both, or none.
+/// The not-compared journeys in words: `1 gap`, `2 not run`, `1 refused`, `1 leak run`, or none.
 pub fn not_compared_counts(r: &Value) -> Vec<String> {
     let series = r["series"].as_array().map(Vec::as_slice).unwrap_or_default();
-    let refused = series.iter().filter(|s| s["kind"] == "refused").count();
-    let gaps = series.iter().filter(|s| s["kind"] != "refused" && gap(s)).count();
+    let stopped = series.iter().filter(|s| not_run(s)).count();
+    let gaps = series.iter().filter(|s| !not_run(s) && gap(s)).count();
+    let refused = series.iter().filter(|s| refused_at_run(s)).count();
+    let unpaired = series.iter().filter(|s| s["kind"] == "leak" || s["kind"] == "blocks").count();
     let mut out = Vec::new();
     if gaps > 0 {
         out.push(format!("{gaps} gap{}", if gaps == 1 { "" } else { "s" }));
     }
+    if stopped > 0 {
+        out.push(format!("{stopped} not run"));
+    }
     if refused > 0 {
-        out.push(format!("{refused} not run"));
+        out.push(format!("{refused} refused"));
+    }
+    if unpaired > 0 {
+        out.push(format!("{unpaired} not paired"));
     }
     out
 }
@@ -70,10 +101,12 @@ fn looks(r: &Value) -> Vec<usize> {
 }
 
 /// A series' primary differences per pair in its comparison's scale (log ratios when it compared
-/// ratios, else differences), from its timed blocks.
-pub fn primary_diffs(s: &Value) -> Vec<f64> {
+/// ratios, else differences), from its timed blocks. Every pair with both values counts: one with a
+/// value of 0 or less (taken after the look that decided, whose pairs were all positive) turns the
+/// whole series to differences, as `stats::compare` would, rather than being dropped. Returns the
+/// differences and whether they are log ratios.
+fn primary_diffs(s: &Value) -> (Vec<f64>, bool) {
     let m = s["primary"]["metric"].as_str().unwrap_or("");
-    let relative = s["primary"]["relative"] == true;
     let mut by: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
     for b in s["blocks"].as_array().into_iter().flatten() {
         let Some(p) = b["pair"].as_u64().filter(|p| *p < 1_000_000) else { continue };
@@ -85,11 +118,16 @@ pub fn primary_diffs(s: &Value) -> Vec<f64> {
             e.1 = v;
         }
     }
-    by.into_values().filter(|(a, b)| a.is_finite() && b.is_finite() && (!relative || (*a > 0.0 && *b > 0.0))).map(|(a, b)| if relative { (b / a).ln() } else { b - a }).collect()
+    let pairs: Vec<(f64, f64)> = by.into_values().filter(|(a, b)| a.is_finite() && b.is_finite()).collect();
+    let relative = s["primary"]["relative"] == true && pairs.iter().all(|(a, b)| *a > 0.0 && *b > 0.0);
+    (pairs.into_iter().map(|(a, b)| if relative { (b / a).ln() } else { b - a }).collect(), relative)
 }
 
 /// A series' repeated p: as the bench stored it, else from its blocks and the plan's looks. A stable
-/// counter compared exactly has no noise: decided, its p is 0.
+/// counter compared exactly has no noise: decided, its p is 0. A primary in non-inferiority is tested
+/// against its margin (`stats::margin_shift`), as its verdict was; and a better or worse verdict whose
+/// pairs now lean the other way (the pairs run on past its look) has p 1: Holm never confirms a
+/// direction its data no longer show.
 pub fn p_repeated(r: &Value, s: &Value) -> f64 {
     let c = &s["primary"];
     if let Some(p) = c["p_repeated"].as_f64() {
@@ -98,7 +136,27 @@ pub fn p_repeated(r: &Value, s: &Value) -> f64 {
     if c["exact"] == true {
         return if stats::kind_of(c).decided() { 0.0 } else { 1.0 };
     }
-    stats::repeated_p(&primary_diffs(s), &looks(r))
+    let (mut d, relative) = primary_diffs(s);
+    let def = stats::def_in(c);
+    // The margin as the comparison kept it: a fraction for ratios, the unit otherwise.
+    if let (Some(m), Some(def)) = (c["noworse"].as_f64(), def)
+        && relative == (c["relative"] == true)
+    {
+        let shift = stats::margin_shift(def, relative, m);
+        d.iter_mut().for_each(|x| *x -= shift);
+    }
+    // Which way the verdict says head went, in the differences' scale (+: head higher).
+    let lower = stats::better_in(c) == crate::model::Better::Lower;
+    let way = match stats::kind_of(c) {
+        VerdictKind::Better => Some(if lower { -1.0 } else { 1.0 }),
+        VerdictKind::Worse => Some(if lower { 1.0 } else { -1.0 }),
+        _ => None,
+    };
+    let lean = crate::metrics::median(&d);
+    if way.is_some_and(|w: f64| lean.is_finite() && lean != 0.0 && lean.signum() != w) {
+        return 1.0;
+    }
+    stats::repeated_p(&d, &looks(r))
 }
 
 /// How far a comparison moved, as a log ratio's size: `|ln(head / base)|` (a 5× change and an 80%

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// The chance a planned run decides at the expected effect.
-const POWER: f64 = 0.8;
+const POWER: f64 = stats::PLAN_POWER;
 
 /// A block's wall time when nothing measured one here (October 2026, adais: a 2.7 s scroll case).
 const GUESS_BLOCK_MS: f64 = 22_000.0;
@@ -92,6 +92,9 @@ struct Past {
     id: String,
     d: Vec<f64>,
     relative: bool,
+    /// The definition its primary compared under: a `metric.<name>` its lines made better higher is
+    /// `METRIC_HIGHER` (`track::direction`).
+    def: Option<&'static model::MetricDef>,
     base: f64,
     estimate: f64,
     block_ms: f64,
@@ -129,6 +132,7 @@ fn past(id: &str, s: &Value) -> Option<Past> {
         id: id.to_string(),
         d,
         relative,
+        def: crate::app::track::direction(s, primary).0,
         base: crate::metrics::median(&pairs.iter().map(|p| p.0).collect::<Vec<_>>()),
         estimate: s["primary"]["estimate"].as_f64().unwrap_or(f64::NAN),
         block_ms,
@@ -254,6 +258,8 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
     };
     let mut out = Vec::new();
     let mut total = 0.0;
+    let implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
+    let journeys = series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()).count();
     for s in series {
         if let Some(r) = &s.refused {
             out.push(json!({ "label": s.label(), "case": s.case, "target": s.target, "primary": s.primary, "refused": r, "pairs": 0, "ms": 0.0 }));
@@ -271,17 +277,25 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         let spread_from = if from_series { "series" } else { "metric" };
         let metric_pool = if from_series { Vec::new() } else { history.same_metric(&s.primary, kind, &setup) };
         let pool: Vec<&Past> = if from_series { same.iter().collect() } else { metric_pool.iter().collect() };
-        // The spread of one pair's difference, from each experiment's differences around its own median.
+        // One scale only: the newest experiment's (log ratios, or differences in the unit). A log ratio
+        // and a difference in milliseconds pooled into one spread mean nothing.
+        let relative = pool.first().map(|p| p.relative).unwrap_or(true);
+        let pool: Vec<&Past> = pool.into_iter().filter(|p| p.relative == relative).collect();
+        let base_value = pool.first().map(|p| p.base).unwrap_or(f64::NAN);
+        // The spread of one pair's difference, from each experiment's differences around its own median;
+        // differences in the unit scaled to the newest experiment's base (another series' 3 ms around
+        // 30 ms is 30 ms around 300).
         let centred: Vec<f64> = pool
             .iter()
             .flat_map(|p| {
                 let m = crate::metrics::median(&p.d);
-                p.d.iter().map(move |x| x - m)
+                let scale = if relative || !(p.base.is_finite() && p.base != 0.0 && base_value.is_finite()) { 1.0 } else { (base_value / p.base).abs() };
+                p.d.iter().map(move |x| (x - m) * scale)
             })
             .collect();
-        let sigma = (centred.len() >= 4).then(|| stats::robust_sd(&centred)).filter(|s| s.is_finite() && *s > 0.0);
-        let relative = pool.first().map(|p| p.relative).unwrap_or(true);
-        let base_value = pool.first().map(|p| p.base).unwrap_or(f64::NAN);
+        let sigma = (centred.len() >= 4).then(|| stats::spread(&centred)).filter(|s| s.is_finite() && *s > 0.0);
+        // The direction it is better in: a `metric.<name>` its earlier lines made better higher.
+        let def = pool.iter().find_map(|p| p.def).or(def);
         let spread_source = match (sigma, spread_from) {
             (None, _) => "unknown: no earlier experiment measured this metric here (--pilot learns it)".to_string(),
             (Some(_), "series") => {
@@ -323,21 +337,23 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         let (expect, need, differs) = match (sigma, def) {
             (Some(sig), Some(def)) => match margin {
                 Some(m) => {
-                    let m_abs = if relative { m } else { (m * base_value.abs()).max(0.5) };
+                    let m_abs = if relative { m } else { stats::in_unit(def, m, base_value, f64::NAN) };
                     let shift = stats::margin_shift(def, relative, m_abs);
                     let worse = if def.better == model::Better::Lower { theta } else { -theta };
                     let need = stats::pairs_for(sig, (shift - theta).abs(), confidence, POWER);
-                    if worse < shift.abs() { (format!("no worse (≤{}%)", (m * 1000.0).round() / 10.0), need, false) } else { (format!("worse (>{}%)", (m * 1000.0).round() / 10.0), need, true) }
+                    let label = fmt::bound(m, relative, m_abs, def.unit);
+                    if worse < shift.abs() { (format!("no worse (≤{label})"), need, false) } else { (format!("worse (>{label})"), need, true) }
                 }
                 None => {
-                    let b = if relative { (1.0 + bound).ln() } else { (bound * base_value.abs()).max(0.5) };
+                    let b_abs = stats::in_unit(def, bound, base_value, f64::NAN);
+                    let b = if relative { (1.0 + bound).ln() } else { b_abs };
                     let differs = stats::pairs_for(sig, theta.abs(), confidence, POWER);
                     let same = if b > theta.abs() { stats::pairs_for(sig, b - theta.abs(), confidence, POWER) } else { f64::INFINITY };
                     let improved = (theta < 0.0) == (def.better == model::Better::Lower);
                     if differs < same {
                         ((if improved { def.words.0 } else { def.words.1 }).to_string(), differs, true)
                     } else {
-                        (format!("same (±{}%)", (bound * 1000.0).round() / 10.0), same, false)
+                        (format!("same (±{})", fmt::bound(bound, relative, b_abs, def.unit)), same, false)
                     }
                 }
             },
@@ -352,12 +368,16 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         } else {
             None
         };
-        let holm = same.first().and_then(|p| p.holm_pairs).unwrap_or_else(|| super::holm_pairs(s.metrics.len() + 2));
+        // A measure kept per side (one engine's own) is never tested, so it sizes no Holm family.
+        let holm = same.first().and_then(|p| p.holm_pairs).unwrap_or_else(|| super::holm_pairs(s.metrics.iter().filter(|m| !s.per_side(m)).count() + 2));
+        // An implementation comparison's journey decided better or worse runs on until its repeated p can
+        // clear Holm across the journeys (`stats::family_min_pairs`), as the bench does.
+        let family = if implementations && differs { stats::family_min_pairs(journeys, &LOOKS) } else { 0 };
         // Pairs the series runs: to its deciding look and on to Holm's; an undecidable one stops at the
         // first look its projection gives up (12 pairs), or runs to the end with --pairs N.
         let pairs = match (look, fixed) {
             (_, Some(n)) => n,
-            (Some(l), None) => l.max(holm).min(max_pairs),
+            (Some(l), None) => l.max(holm).max(family).min(max_pairs),
             (None, None) if sigma.is_some() => FUTILITY_FROM,
             (None, None) => LOOKS[0],
         };
@@ -375,7 +395,7 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
             "sigma": sigma, "spread_source": spread_source, "from": pool.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             "block_ms": block_ms, "block_source": block_source, "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms,
             "effect": effect, "effect_source": effect_source, "expect": expect, "pairs_needed": need.is_finite().then_some(need.ceil()),
-            "look": look, "pairs": pairs, "holm_pairs": holm, "underpowered": sigma.is_some() && look.is_none(), "detectable": detectable, "detectable_at": max_pairs,
+            "look": look, "pairs": pairs, "holm_pairs": holm, "family_pairs": family, "underpowered": sigma.is_some() && look.is_none(), "detectable": detectable, "detectable_at": max_pairs,
             "attribution_ms": attribution_ms, "ms": ms, "power": POWER, "confidence": confidence,
         }));
     }

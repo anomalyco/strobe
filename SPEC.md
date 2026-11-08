@@ -698,7 +698,9 @@ identity (§14.2) and track's fingerprints (§25): a run in another engine, vers
 experiment and another series.
 `--blocks N` measures `--head` alone: N timed blocks, each warmed until steady as a bench's, and
 their values, with nothing compared and nothing decided; the text gives the primary per block and the
-blocks' median with a Hodges–Lehmann interval over them. It is what `track` records for a commit
+blocks' median with the median's own distribution-free interval (order statistics, the sign
+test's: `stats::median_interval`; a Hodges–Lehmann interval beside a median could leave the median
+out, as 134 of 400 skewed samples of 26–40 values did in `scripts/dev/stats-check.ts`). It is what `track` records for a commit
 (§25.2); with `--base`, `--aa`, `--check`, `--probes memory`, or anything that compares or decides
 (`--require-verdict`, `--plan`, `--noworse`, `--pairs`, `--pixels`, `--pixels-only`) it is a usage
 error, as is N that is not a whole number from 1. The primary is refused as a comparison would refuse
@@ -2039,13 +2041,21 @@ flowchart LR
   leaves its time to those after it. The pairs a decided primary runs on for its secondaries end at
   either too (the primary keeps its verdict), and no series starts once the deadline passed (the
   `MaxTime` warning names them; the experiment is not decided). Pairs needed are projected from a robust spread of the
-  differences (1.4826·MAD), not the interval width: early intervals are [min, max] of few Walsh
+  differences (1.4826·MAD; where over half the differences are one value, as a quantized metric's
+  are, and the MAD is 0, the mean absolute deviation × √(π/2), since a spread of 0 projected 7 pairs
+  for any series and so never stopped one), not the interval width: early intervals are [min, max] of few Walsh
   averages, and one odd pair once stopped a series (a tab switch, "~78 pairs needed") that its
-  A/A twin decided as `same` at 19. `--pairs N` is one look at N at 95%. Secondaries and
+  A/A twin decided as `same` at 19. The stop asks for the likely case (an even chance that the
+  interval clears its boundary: give up only when even that needs more than the last look); the
+  pairs an `underpowered` verdict names are for an 80% chance, as `plan`'s are, so the two never
+  differ by the factor (z + z₀.₈)²/z² ≈ 1.8 they once did. `--pairs N` is one look at N at 95%. Secondaries and
   descriptive rows use 95% intervals at the final pair. When the primary is decided at a look with
   fewer pairs than the tested secondaries need to clear Holm (2·2⁻ⁿ ≤ 0.05/tests: 9 pairs from 7
   tests), the series runs on to that many pairs for them and keeps the primary's verdict from its
-  look (`--pairs N` runs exactly N). A share primary (`%`, not CPU) at 80% or more on both sides at a
+  look (`--pairs N` runs exactly N). The primary's estimate and interval are that look's too: the
+  series keeps `primary_pairs` (the pairs they come from) beside `pairs`, and the text says so, so a
+  tally or plot of the primary reads the first `primary_pairs` pairs. A checkpoint keeps the look
+  (`decided_n`), so `--resume` keeps the verdict rather than taking one again at a later look. A share primary (`%`, not CPU) at 80% or more on both sides at a
   look without a verdict stops as `saturated`: at its ceiling it moves with nothing the builds do
   (91.4% vs 91.6% dropped frames at background priority added looks at 2.5 min a pair), so the
   verdict says to choose another primary. A series that reaches the last look undecided says so:
@@ -2059,8 +2069,10 @@ flowchart LR
   of preference:
   - *Spread*: the primary's per-pair differences in earlier experiments of the same series (bench
     file name, series label, primary) on this device, each centred on its own median and pooled
-    (1.4826·MAD); with fewer than 4 such pairs, other series measuring that metric on the same kind
-    of target (labelled as such); else unknown. `--pilot` first runs 4 pairs per series (an A/A on
+    (1.4826·MAD, `stats::spread`), all in the newest experiment's scale (log ratios or differences,
+    never both; differences scaled to its base); with fewer than 4 such pairs, other series measuring that metric on the same kind
+    of target (labelled as such); else unknown. A `metric.<name>` is better in the direction those
+    experiments' lines gave (`higher`), else the catalog's. `--pilot` first runs 4 pairs per series (an A/A on
     head without `--base`, no attribution), stored like any experiment, and plans from them.
   - *Block time*: the mean of the earlier blocks' steps, else a `--check` of the case plus its
     warmup and runs (rough), else 22 s (a guess, said as one). Warm-up blocks (`gpuCache`) and a
@@ -2068,8 +2080,10 @@ flowchart LR
   - *Expected effect*: `--effect <pct>`, else what the latest run of the series measured, else 0.
   - *Pairs*: for an 80% chance that the look's interval clears the deciding boundary (0 or the
     equivalence bound; the margin in non-inferiority), `((z₁₋α/₂ + z₀.₈)·σ / distance)² / 0.955`
-    with the look's level, rounded up to the next planned look and to the pairs Holm needs; an
-    effect no look reaches is `underpowered`, which the bench says at about 12 pairs. The smallest
+    with the look's level and at least the pairs whose interval reaches it (7 at a look's 98.42%),
+    rounded up to the next planned look, to the pairs Holm needs (counting no measure kept per
+    side) and, for an implementation comparison's journey expected better or worse, to
+    `family_min_pairs`; an effect no look reaches is `underpowered`, which the bench says at about 12 pairs. The smallest
     effect 40 pairs decide (80%) is printed beside it.
   - *Builds*: a directory whose build key is unchanged, or a git ref whose worktree was built, is
     reused; otherwise the last time that build command took here (`builds/times.json`), else
@@ -2095,10 +2109,22 @@ flowchart LR
 
 ### 9.3 Statistics
 
-- **Test and interval**: Wilcoxon signed-rank on `d` (exact up to n = 50, normal approximation
-  with continuity correction above), Hodges–Lehmann estimate, distribution-free interval from
-  Walsh averages. Default 95%.
-- **Equivalence**: a bound per metric (default ±2%). `same` when the interval lies inside it.
+- **Test and interval**: Wilcoxon signed-rank on `d` (zeros dropped; tied |d| share their mid-rank
+  and the null distribution is that of those ranks, exact up to n = 400 from the doubled ranks'
+  distribution built as probabilities, the normal approximation above with the tie-corrected
+  variance `n(n+1)(2n+1)/24 − Σ(t³−t)/48` and its tail from erfc, never `1 − Φ`), Hodges–Lehmann
+  estimate, distribution-free interval from Walsh averages. Default 95%. Quantized metrics tie
+  often: the untied distribution with a rounded statistic gave p 0.039 for `d = [1, 0, 1, 3, 1, 0,
+  1, 1, −1, 2]`, whose exact p is 0.055 (a false Holm rejection), and a normal tail with a 0.5
+  continuity correction 0.044 for 60 pairs all tied with 39 up (sign test: 0.027); `1 − Φ(z)`
+  rounded to 0 from z ≈ 8.3 (`scripts/dev/stats-check.ts`, `strobe stats`, §5.11).
+- **Equivalence**: a bound per metric (default ±2%). `same` when the interval lies inside it. A
+  metric compared by difference (a count, a score, anything with a 0 in a pair) takes the bound as
+  that fraction of base's median, of head's when base's is 0; only a count (unit `count`, or an
+  exact counter) is floored at half a count, its smallest step. A score has no smallest step: a
+  floor of 0.5 once made a layout shift of 0 → 0.30 `jumpier (small)` and 0 → 0.1 in some runs
+  `same (±0.5)`. An interval of exactly 0 (every pair the same) is `same (±0)` at any bound. The
+  bound prints as given (`same (±0.3%)`, `no worse (≤1.5%)`), never rounded to whole percent.
 - **Verdicts**: interval entirely on the better side of 0 → `faster` (`less`, `fewer`); tagged
   `small` when it also overlaps the bound. Entirely on the worse side → `slower`. Inside the
   bound → `same`. Otherwise `unclear`.
@@ -2113,12 +2139,23 @@ flowchart LR
   case's metrics too (`--primary metric.x --metrics metric.x,…`) stays the primary alone: a case's
   metrics are read once each and without the primary, so it is never also a secondary (printed twice,
   at 95% and at its look's level, and one more Holm test), and `plan`'s Holm pairs, `--check`'s
-  declared list and the bench count the same metrics (`--metrics a,a` is `a`).
+  declared list and the bench count the same metrics (`--metrics a,a` is `a`). The Holm family is the
+  secondaries actually tested: a refused row (its block's refusal, `NotComparable`, a run-time
+  refusal such as `latency_skew`) and a stable exact counter are not in it, and neither sizes the
+  pairs a decided primary runs on for Holm (`tested_names`). Holm runs after every refusal, so a
+  primary refused after its blocks leaves its secondaries untested. A refused row once joined with p
+  1 and wiped a valid secondary's verdict (p 0.03 against 0.05/2).
+- **Direction**: every comparison keeps the direction it counted better (`better`: `lower` or
+  `higher`) and its words (`words`: `[better, worse]`), since a `metric.<name>` whose lines say
+  `higher` is better higher whatever the catalog says. Readers take them from the comparison
+  (`stats::better_in`, `stats::words_in`), never from `model::metric` alone, which had a win of such
+  a metric drawn and tracked as a regression.
 - **Non-inferiority** (`--noworse 2%`, or a case's `noworse`): the question "is head at most X%
   worse than base?", which refactors and dependency bumps ask, instead of "did it change?". Let θ
   be the true per-pair difference oriented so that positive is worse, and δ the margin in the same
   scale (`ln(1 + X)` for a ratio metric where lower is better, `−ln(1 − X)` where higher is better;
-  for a count, `max(X·base, 0.5)` in its unit, as the equivalence bound).
+  for a metric compared by difference, `X` of base's median in its unit, floored at 0.5 for a count
+  only, as the equivalence bound).
   - **Claims**: `no worse (≤X%)` rejects H₀: θ ≥ δ; `worse (>X%)` rejects H₀: θ ≤ δ. Otherwise
     `unclear`. Both are one-sided tests read off the same interval the two-sided design prints: at
     a look, `no worse` when the interval's worse end is inside the margin, `worse` when its better
@@ -2161,13 +2198,21 @@ flowchart LR
     motion seen at the looks' pairs, summed crossing by crossing, Simpson's rule on 161 points,
     ~2 ms), with the stop counted as a look of its own when it is not one. One look (`--pairs N`): α
     is the nominal p. The five looks at nominal 1.58% come to 5.1% overall (their spacing is uneven).
+    A primary in non-inferiority is tested against its margin (`d − δ`, as its verdict was); every
+    pair with both values counts (one with a 0 after a look whose pairs were all positive turns the
+    series to differences rather than being dropped); and a better or worse verdict whose pairs lean
+    the other way by the end (it ran on past its look) has repeated p 1, so Holm never confirms a
+    direction its data no longer show.
   - **Holm** across the compared journeys at 5% on the repeated p, the same rule both ways: a
     journey decided better (worse) on its own counts as `better` (`worse`) only when Holm rejects it,
     else as `unclear` (`better_alone`, `worse_alone`), so swapping the sides swaps the counts. An
     unconfirmed regression still stands in the report's caution, labelled "Unconfirmed regression
     (this journey alone, not after Holm across M)". One compared journey has no family: its own
     verdict counts. `same` counts `same` and `no worse`; better + worse + same + unclear = compared.
-    Gaps are counted apart and never compared. A stable counter compared exactly has p 0 when decided.
+    Gaps are counted apart and never compared, and so is every series that compared nothing: one
+    refused before it ran, one stopped before its first pair (`not_run`), a leak run or `--blocks`
+    series, and one whose primary was refused at run time (`family::not_compared`; they once counted
+    as compared and `unclear`). A stable counter compared exactly has p 0 when decided.
   - **family_min_pairs(M)**: the fewest pairs at which n-of-n pairs one way clear Holm's first step
     across M journeys (`stats::family_min_pairs`: 9 pairs for M = 2–3, 10 for 4–6, 11 for 7–12, 12
     for 13–16; 8 of 8 pairs has repeated p 2.7%, enough for one journey only). A journey decided
@@ -2187,15 +2232,27 @@ flowchart LR
     read `same` on one side and `unclear` on the other, because the ±2% bound is set on the ratio
     (ln 0.98 to ln 1.02 is not symmetric), which stops one side's series at an earlier look.
 - **Exact metrics**: a counter (`kind: exact`) that holds one value on each side in every block,
-  from 2 pairs, is compared exactly: the difference is the answer, printed as `exact`, with
-  `same (exact)` or a direction word. It needs no test, so it skips Holm and the primary's gate. A
-  counter that varies between blocks is compared like a timed metric, by difference.
+  from 6 pairs (`stats::EXACT_MIN_PAIRS`: the fewest at which anything gets a verdict, and more than
+  the 3 an A/A needs to call a counter stable, §10.4), is compared exactly: the difference is the
+  answer, printed as `exact`, with `same (exact)` or a direction word. It needs no test, so it skips
+  Holm and the primary's gate. A counter that varies between blocks is compared like a timed metric,
+  by difference, and warns `CounterUnstable` (§10.2). Two pairs once decided `more (exact)` in a
+  `--pairs 2` smoke run, which promises no verdicts.
 - **Modes**: mValue per variant on run values (threshold 3.2, as BenchmarkDotNet). On a
   multimodal result strobe names the likely cause from recorded data (core residency, GC in the
   window, background load).
-- **Outliers**: never removed. Tukey-fence outliers are listed by an analyser; the rank test is
-  robust to them.
-- **Digits**: printed precision follows the interval width.
+- **Outliers**: never removed. The primary's block values past a side's Tukey fences (1.5 × IQR
+  beyond the quartiles, from 5 blocks a side) are listed by the `Outliers` analyser (info); the rank
+  test is robust to them.
+- **Digits**: printed precision follows the interval width (`fmt::pct_ci`): an estimate and its
+  interval as percentages share one number of decimals, the interval width's first significant
+  digit or the estimate's usual ones (none from 10%, one from 0.1%, below that its first significant
+  digit), whichever is finer, and an end that would round to 0 keeps its own first digit:
+  `+0.03% [+0.02% … +0.04%]` (once `+0.0% [+0.0% … +0.0%]` for a decided change), `+15.2%
+  [+15.1% … +15.3%]`. A lone percentage never prints a nonzero change as 0.0% (`fmt::pct`); one
+  printed beside a threshold gets the decimals that tell them apart (`fmt::pct_vs`: `+15.2% > 15%`,
+  not `+15% > 15%`); a bound or margin prints as given (`fmt::bound`). A value under 0.01 in its unit
+  shows its first significant digit (a layout shift of 0.003, not 0.00).
 
 ### 9.4 Noise control and provenance
 
@@ -3366,7 +3423,12 @@ did moves `bad` there; otherwise `good`. Ends with the culprit commit and its be
 `unclear` with the remaining range.
 
 As built: step 0 benches `bad` against `good` to learn the direction (no move: `no change`, nothing
-to bisect). The midpoint is never `bad` itself. Every step is a full experiment of its own
+to bisect). The midpoint is never `bad` itself. A step that does not move the primary hands
+`good` on to its commit, so a change built up over several commits, each under what one step
+resolves (`same (±2%)` per commit, `+6%` over the range), would land on whichever commit tipped
+the sum. So the culprit must also move the primary against its own parent: when no step benched
+that pair, one more step does, and when it does not move there the bisect is `unclear` ("no one
+commit did it"), with `remaining` the range from the `good` it last moved against. Every step is a full experiment of its own
 (`<id>_s<k>`, with the bisect's flags; `--why never` unless given), and the file must narrow to
 one series. A step without a verdict counts as "not moved" and makes the result `unclear`, naming
 the range the culprit may still hide in. `--require-verdict` exits 5 unless the result is `found`
@@ -3525,7 +3587,7 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   `frames.presented.p*`): as a primary it is a usage error before anything builds (exit 2,
   `NotComparable: …`), as a declared secondary a row refused `NotComparable`; never tested, never a
   default secondary or descriptive row. Its blocks' values are kept per side in the series'
-  `per_side {base, head}` (median and a Hodges–Lehmann interval over the blocks) and printed as
+  `per_side {base, head}` (median and the median's own interval over the blocks, `stats::median_interval`) and printed as
   "per implementation, not compared". A `care` metric compares only as a total, and its note (what
   it sums on each side) goes into the comparison (`care_note`) and the text output: `cpu.work`,
   `cpu.app.total`, `cpu.wakes`, `memory.app.private`, `memory.app.host`, `gpu.vram`, `gpu.shared`,
@@ -3875,12 +3937,12 @@ writes it as `Refusal`s). Schema: `schema/result.v1.json`.
 ### 10.2 Analysers (warn in the result)
 
 `MultimodalDistribution` · `HighVariance` · `Underpowered` · `StateDrift` · `Background` ·
-`Throttling` · `HeadlessFrame` (a headless run's last step left its style and layout to the frame after the run, 7.3) · `Drift` (trend across pairs: Spearman |ρ| > 0.6 with tied ranks averaged, over ≥ 8 pairs, on the comparison's own scale: the log ratio moving at least 1% end to end, or for a metric compared by difference (counts, and any metric with a 0 in a pair) the difference moving at least 1% of base's median, so a near-constant difference never trends and a count's trend is not dropped) · `CounterUnstable` · `ProbeOverhead` ·
+`Throttling` · `HeadlessFrame` (a headless run's last step left its style and layout to the frame after the run, 7.3) · `Drift` (trend across pairs: Spearman |ρ| > 0.6 with tied ranks averaged, over ≥ 8 pairs, on the comparison's own scale: the log ratio moving at least 1% end to end, or for a metric compared by difference (counts, and any metric with a 0 in a pair) the difference moving at least 1% of base's median, so a near-constant difference never trends and a count's trend is not dropped) · `CounterUnstable` (an exact counter that did not hold one value on a side in every paired block, with each side's range: compared like a timed metric, by its noise, not exactly) · `ProbeOverhead` ·
 `Unresolved` (samples without a symbol above 5%) · `PowerPlan` (the user's plan was kept: `--power
 keep`, on battery, or no faster plan to switch to) · `Battery` · `VirtualMachine` · `BackgroundPriority`
 (strobe or the target runs at background priority: the frame and input-latency metrics are refused, §10.1,
 and the CPU metrics kept say to compare them only at the same priority) · `TimerCoalescing` (macOS: strobe's 5 ms sleeps wake over 5 ms late, median of 7: it runs in a launchd job of ProcessType Standard or Background, such as a remote shell's daemon whose plist sets none, and macOS coalesces the timers of everything in it, the target included: 20 to 60 ms late from a 16 ms sleep on air against 1 to 4 ms under ProcessType Interactive, and no thread QoS, `PRIO_DARWIN_ROLE`, `taskpolicy` tier or `NSProcessInfo` activity strobe may set changed it. The target's timer-driven work fires late and it wakes less than an app started from a terminal; `status` shows it on a `timers` line) · `CursorNotParked` (a native block's OS cursor could not be moved onto the pointer's points, so hover tracking saw it elsewhere) · `Unattributed` (macOS: a launched app bundle did not become its own responsible process, so its XPC services are missing from its CPU, memory, wakes and GPU, §13.2; said in a native block's experiment and in a native `record`) · `Unsampled` (macOS native stacks: processes of the target `/usr/bin/sample` gave no stacks of, such as a system XPC service macOS will not let it examine, or past the 16 it samples, root first; `query hotspots` names them, since their CPU is in no row)
-· `Outliers` · `CensusContaminated` · `StaleCalibration` (none, older than 7 days or failed; a headed run on a device calibrated only where frames could not be checked, 10.3; a bench is headed when any series it runs is, by its own target's `headless` too, not only `--headless`; `status` notes a kept display calibration that failed) · `DisplayOff`
+· `Outliers` (info: the primary's paired block values past a side's Tukey fences, named by side and pair, kept) · `CensusContaminated` · `StaleCalibration` (none, older than 7 days or failed; a headed run on a device calibrated only where frames could not be checked, 10.3; a bench is headed when any series it runs is, by its own target's `headless` too, not only `--headless`; `status` notes a kept display calibration that failed) · `DisplayOff`
 (pairs ran with the console display off, §10.5) · `CrossAdapterScanout` (a native app draws on one GPU
 while another drives its window's display: each frame crosses between adapters) · `OverheadBudget`
 (the present session's consumer over 0.5% of a core) · `PresentsLost` · `VariantChanged` (a folder
@@ -4003,7 +4065,10 @@ unlocked display with a GPU.
 `strobe bench <file> --aa --head <variant>` runs the same build on both sides. It prints
 the share of secondary metrics that claimed a change (must stay at or below the nominal rate)
 and which counters are stable. A counter is `exact` for a project and device only after an A/A
-with at least 3 pairs shows zero spread.
+with at least 3 pairs shows zero spread. The text marks every decided direction `← false positive
+(A/A)` (never a plain `faster` or `slower`, which read as a change) and ends each series with an
+`A/A` block: the primary's false positive or none, `k of m tested secondaries claimed a change
+(x%; must stay at or below 5%)`, and the counters that held one value in every block.
 
 Checking that strobe itself leaves nothing behind (a capture that ends after an early error, a
 launch closed on a stop): a CLI command exits right after the error, so nothing is left to look at.
@@ -4276,8 +4341,8 @@ pull request body, pasted verbatim. Few words, two drawers:
   `Run time unchanged, within ±2% (…)`; `no clear change in 12 pairs (…); ~50 pairs would settle
   it`), and the hero's second win when it came from this series. An unsteady case says so on its
   line (`; **unsteady case**: its work grew each run.`). When the medians and the paired change
-  point different ways by more than the bound (the paired change is the median of the pairs' own
-  changes, so a bimodal side can do it: medians 210 → 217 MB with a change of −20%), the line says
+  point different ways by more than the bound (the paired change is the Hodges–Lehmann estimate of
+  the pairs' own changes, so a bimodal side can do it: medians 210 → 217 MB with a change of −20%), the line says
   `**uneven pairs**` with both, and every such table row shows the medians' change beside its
   own (`−20% medians +3.2%`) with a footnote giving each side's spread of block values; a
   verdict's `~N pairs` is only a count past the pairs already run. A second line only for untested metrics
@@ -8223,14 +8288,22 @@ strobe track --schedules | --unschedule <sch_…> | --confirm [<ser_…|chg_…>
   experiment (`exp_…`), with the bench slot, the locked-session rules (§10.5), the power plan and
   reserved CPUs (§9.4) of any bench. Its blocks share one lock and display state, as a pair's do: a
   block in another state starts them again in it (at most 3 times). Each series of the file gets a point: the median of its blocks'
-  primary values and the Hodges–Lehmann interval of those block values (in log space for ratio
-  metrics; 6 blocks cover 96.9%).
+  primary values and the median's own distribution-free interval (order statistics, the sign
+  test's; 6 blocks cover 96.9%), which always holds the median (a Hodges–Lehmann interval beside the
+  median, as points before 2026-11-08 kept, could leave it out). A series keeps the direction its
+  primary is better in (`better`, `words`): the catalog's, or for a `metric.<name>` the one its
+  command's lines gave (`higher`: a score, a rate); a series an older strobe wrote with the
+  catalog's direction for such a metric gets a `series` event that corrects it (later fields win),
+  so the detector never calls a win a regression.
 - **A point without a value** is kept with the reason: a refused metric, fewer than 4 blocks with a
   value, blocks both locked and unlocked, or the display turning off or on between blocks. It stays
   in the history and the views; the detector skips it, so a refusal never splits or breaks a series.
 - `--ref` tracks one commit (default `HEAD`); `--range a..b` backfills every first-parent commit
   from `a` (included) to `b`, `--every N` keeps every Nth and the last. A commit already tracked on
-  this device with the same file, flags and machine is skipped unless `--again` (`runs.jsonl`).
+  this device with the same file, flags and machine is skipped unless `--again` (`runs.jsonl`). The
+  flags include what the fingerprint keeps of the bench's setup (`--pin`, `--power`,
+  `--reserve-cpus`, `--runs`, only when given, so keys from before stay): a run with another one is
+  another series, which a skip once left without the commit.
 - strobe never fetches: a ref moves when the user or their tooling fetches.
 - **Seed** (§9.6): every bench a track runs (points, confirmations, bisects) gets one seed:
   `--seed <n>`, else one derived from the repository (its first root commit) and the bench file's
@@ -8352,7 +8425,9 @@ strobe track <file.bench.ts> --base … --head <target>=git:<branch> --schedule 
   never` (`--pairs N` from 3: with fewer, three points on a side of a change can never reach the
   detector's p < 0.001, and 2 pairs reach only 50%): a short implementation comparison with the bench
   slot and every rule of a bench. Each journey gets a point: the pairs' `ln(head / base)` of its
-  primary, their median and Hodges–Lehmann interval with the confidence it reaches (`confidence`: 3
+  primary, their Hodges–Lehmann estimate and interval as the bench compares them (kept under
+  `median`; points before 2026-11-08 kept the pairs' median beside that interval, which could read
+  `slower −1.0%`) with the confidence it reaches (`confidence`: 3
   pairs 75%, 4 pairs 87.5%), each side's median, its parity state (`compared` or `gap` with the
   reason), and both sides' identities: the head's commit, and the base's identity and that identity
   as people read it. An executable or app comparator is identified by content: the SHA-256 of its

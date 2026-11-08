@@ -12,8 +12,10 @@ use std::path::Path;
 /// Walks `git rev-list --first-parent good..bad`. First benches `bad` against `good` to learn which
 /// way the primary moved; then each step benches the middle commit against `good` with the same
 /// settings. A step that moves the primary the way `bad` did becomes `bad`, any other outcome becomes
-/// `good`, until one commit is left: the culprit. A step without a verdict can hide the culprit
-/// behind it, so the result names those steps and is `unclear` instead of found.
+/// `good`, until one commit is left: the culprit, once it also moves the primary against its own
+/// parent (benched when no step did). A step without a verdict can hide the culprit behind it, and a
+/// culprit that does not move against its parent did not do it alone (a change built up over
+/// commits), so the result names them and is `unclear` instead of found.
 pub fn run(args: &Args, range: &str) -> Result<Output> {
     run_from(args, range, None, None)
 }
@@ -79,14 +81,46 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
             steps.push(s);
         }
     }
-    let culprit = direction.map(|_| json!({ "commit": bad, "short": short(&bad), "subject": subject(&root, &bad) }));
+    // A step that did not move the primary hands `good` on to its commit, so each later step is benched
+    // against a newer `good`: a change that built up over several commits, each under what one step
+    // resolves (a `same (±2%)`), lands on whichever commit tipped the sum, an innocent one. So the
+    // culprit must move the primary against its own parent (the last `good`) too; when no step benched
+    // that pair, one more does. Not moved there: no one commit did it, and the bisect is `unclear`.
+    let mut not_alone: Option<Value> = None;
+    if let Some(sign) = direction {
+        let direct = steps.iter().any(|st| st["commit"] == bad.as_str() && st["good"] == good.as_str() && moved(st) == Some(sign));
+        if !direct {
+            progress(format!("\n{} moved it against an earlier commit: benched against its parent {} to check it did it alone", short(&bad), short(&good)));
+            let s = step(args, &id, &root, side, steps.len(), &good, &bad)?;
+            if moved(&s) != Some(sign) {
+                not_alone = Some(s.clone());
+            }
+            steps.push(s);
+        }
+    }
+    let culprit = direction.filter(|_| not_alone.is_none()).map(|_| json!({ "commit": bad, "short": short(&bad), "subject": subject(&root, &bad) }));
+    // Where the move is known to be when no one commit did it: from the `good` the culprit last moved against.
+    let moved_from =
+        steps.iter().rev().find(|st| st["commit"] == bad.as_str() && direction.is_some_and(|d| moved(st) == Some(d))).and_then(|st| st["good"].as_str()).unwrap_or(&first_good).to_string();
     // What the bisect found, for code (`track`, `--require-verdict`): the words below are for people.
     let outcome = match (&culprit, undecided.is_empty()) {
+        _ if not_alone.is_some() => Outcome::Unclear,
         (None, _) => Outcome::NoChange,
         (Some(_), true) => Outcome::Found,
         (Some(_), false) => Outcome::Unclear,
     };
     let verdict = match (&culprit, undecided.is_empty()) {
+        _ if not_alone.is_some() => format!(
+            "unclear: {} {} moved {} against {} but not against its parent {} ({}): no one commit did it; it built up over {}..{} (each step under what one bench resolves), or more pairs settle it",
+            short(&bad),
+            subject(&root, &bad),
+            steps[0]["metric"].as_str().unwrap_or(""),
+            short(&moved_from),
+            short(&good),
+            not_alone.as_ref().and_then(|s| s["verdict"].as_str()).unwrap_or(""),
+            short(&moved_from),
+            short(&bad)
+        ),
         (None, _) => format!("no change: {} did not move between good and bad ({})", steps[0]["metric"].as_str().unwrap_or(""), steps[0]["verdict"].as_str().unwrap_or("")),
         (Some(_), true) => format!("found: {} {}", short(&bad), subject(&root, &bad)),
         (Some(_), false) => format!(
@@ -100,9 +134,14 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
         ),
     };
     // Where the culprit may still be: from the first undecided step's `good` (or the last `good`) to `bad`.
-    let remaining = culprit.as_ref().map(|_| json!({ "good": undecided.first().map_or(&good, |u| &u.1), "bad": bad }));
-    // Good against bad, as step 0 found it; a culprit that more pairs must still settle is unclear.
-    let verdict_kind = if culprit.is_some() && !undecided.is_empty() { json!(VerdictKind::Unclear) } else { steps[0]["verdict_kind"].clone() };
+    // No one commit: the range the move built up over.
+    let remaining = match &not_alone {
+        Some(_) => Some(json!({ "good": moved_from, "bad": bad })),
+        None => culprit.as_ref().map(|_| json!({ "good": undecided.first().map_or(&good, |u| &u.1), "bad": bad })),
+    };
+    // Good against bad, as step 0 found it; a culprit that more pairs must still settle, or no one
+    // commit, is unclear.
+    let verdict_kind = if outcome == Outcome::Unclear { json!(VerdictKind::Unclear) } else { steps[0]["verdict_kind"].clone() };
     let result = json!({
         "id": id, "kind": "bisect", "file": file, "range": range, "created": super::record::now_iso(),
         "metric": steps[0]["metric"], "series": steps[0]["series"], "steps": steps, "culprit": culprit, "verdict": verdict, "verdict_kind": verdict_kind,
@@ -188,7 +227,8 @@ fn moved(s: &Value) -> Option<i8> {
 fn change(s: &Value) -> String {
     let f = |k: &str| s[k].as_f64().unwrap_or(f64::NAN);
     if s["relative"] == true {
-        format!("{} [{} … {}]", fmt::pct(f("estimate")), fmt::pct(f("lo")), fmt::pct(f("hi")))
+        let (e, lo, hi) = fmt::pct_ci(f("estimate"), f("lo"), f("hi"));
+        format!("{e} [{lo} … {hi}]")
     } else {
         format!("{:+.2} [{:+.2} … {:+.2}]", f("estimate"), f("lo"), f("hi"))
     }

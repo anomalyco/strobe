@@ -915,7 +915,8 @@ fn summary(a: &Rec, b: &Rec) -> Result<Output> {
                 },
             )
         };
-        let rel = if u.is_finite() && v.is_finite() && u != 0.0 { v / u - 1.0 } else { f64::NAN };
+        // Of base's size: v / u − 1 turned a rise from a negative base into a fall.
+        let rel = if u.is_finite() && v.is_finite() && u != 0.0 { (v - u) / u.abs() } else { f64::NAN };
         table.push(vec![show(u), show(v), if u.is_finite() && v.is_finite() { signed(v - u, &change) } else { "—".into() }, fmt::pct(rel), k.clone()]);
         rows.push(json!({ "metric": k, "unit": unit, "base": u, "head": v, "delta": v - u, "relative": rel }));
     }

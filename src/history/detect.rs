@@ -169,13 +169,5 @@ pub fn mann_whitney(a: &[f64], b: &[f64]) -> f64 {
         return 1.0;
     }
     let z = ((u - f1 * f2 / 2.0).abs() - 0.5).max(0.0) / var.sqrt();
-    (2.0 * (1.0 - normal_cdf(z))).min(1.0)
-}
-
-fn normal_cdf(z: f64) -> f64 {
-    // Abramowitz–Stegun 7.1.26
-    let x = z / std::f64::consts::SQRT_2;
-    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
-    0.5 * (1.0 + if x >= 0.0 { y } else { -y })
+    crate::stats::two_tail(z).min(1.0)
 }
