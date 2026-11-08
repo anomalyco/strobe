@@ -2351,6 +2351,9 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     let (same, ops) = r.as_ref().map(|b| (json!(b.same), json!(b.ops))).unwrap_or_default();
     let input = r.as_ref().map(|b| input_of(std::slice::from_ref(b))).unwrap_or(Value::Null);
     let window = series_window(ctx, s, r.as_ref().map(std::slice::from_ref).unwrap_or_default());
+    // The run the check measured (from 0): a case with a reset measures its second when a process of
+    // the target ended in its first (`Warmup::after`), which then is no cold run.
+    let measured_run = r.as_ref().map_or(Value::Null, |b| json!(b.warmup));
     let (passed, error, hint, values, refused, locked, recording, screen, shown) = match r {
         Ok(b) => {
             let shown = shown::summarize(std::slice::from_ref(&b), false).0;
@@ -2385,7 +2388,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     let declared = declared_metrics(s);
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "check", "until": launch::until_of(&s.launch), "primary": { "metric": s.primary }, "declared": declared,
-        "passed": passed, "decided": passed, "error": error, "hint": hint, "values": values, "refused": refused, "session_locked": locked, "headless": headless_of(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
+        "passed": passed, "decided": passed, "error": error, "hint": hint, "values": values, "refused": refused, "measured_run": measured_run, "session_locked": locked, "headless": headless_of(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
         "recording": recording, "screen": screen, "shown": shown, "overhead": overhead, "untimed": untimed_of(&[(values["untimed.n"].as_f64(), values["untimed.ms"].as_f64())]),
         "video": recording.as_str().filter(|r| film && has_video(r)).map(|r| json!({ "head": r })),
         "log": log, "log_path": ctx.runner.log, "actions": actions,
@@ -2508,10 +2511,13 @@ fn check_output(
         let secs = s["elapsed_ms"].as_f64().unwrap_or(0.0) / 1e3;
         // Which of a batch's launches ran the case, and its place there.
         let launch = s["batch_id"].as_u64().map(|id| format!(" · launch {id}.{}", s["batch_seq"])).unwrap_or_default();
+        // A check that measured a later run than its first says which, on the line its values are on.
+        let later = s["measured_run"].as_u64().filter(|r| *r > 0);
         if s["passed"] == true {
             text += &format!(
-                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}\n",
+                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}\n",
                 s["label"].as_str().unwrap_or(""),
+                later.map(|r| format!(" · run {}", r + 1)).unwrap_or_default(),
                 s["engine"].as_str().filter(|e| *e != "chromium").map(|e| format!(" · {e}")).unwrap_or_default(),
                 // An emulated device's window says what it was (`390×844 @3x · emulated mobile`), and
                 // reduced motion (`1400×900 · reduced motion`).
@@ -2525,6 +2531,9 @@ fn check_output(
                 // The film's capture and encoder ran beside the run: its values are not a clean run's.
                 if s["video"]["head"].is_string() { " · perturbed (filmed)" } else { "" }
             );
+            if let Some(r) = later {
+                text += &format!("      run  {} measured, not run 1: a process of the target ended in run 1, so these values are a warm run's (from the state the reset left)\n", r + 1);
+            }
             if let Some(rec) = s["recording"].as_str() {
                 text += &format!("      rec  {rec} · strobe query {rec} {}\n", if s["target_kind"] == "native" { "threads" } else { "summary" });
             }
@@ -2605,8 +2614,15 @@ fn check_output(
     } else {
         "one cold run each, no warmup: values include first-run work such as shader compiles"
     };
+    // Cases that measured a later run (`measured_run`): their values are no first run's.
+    let later = series.iter().filter(|s| s["passed"] == true && s["measured_run"].as_u64().is_some_and(|r| r > 0)).count();
+    let later = match later {
+        0 => String::new(),
+        1 => "; 1 case measured run 2 instead, since a process of the target ended in its run 1".to_string(),
+        n => format!("; {n} cases measured run 2 instead, since a process of the target ended in their run 1"),
+    };
     text += &format!(
-        "\n{} of {ran} cases passed{}{}{} ({cold}; a case with a reset runs once more after it, unmeasured; nothing compared)\n",
+        "\n{} of {ran} cases passed{}{}{} ({cold}{later}; a case with a reset runs once more after it, unmeasured; nothing compared)\n",
         ran - failed,
         if refused > 0 { format!(", {refused} where the targets' journeys differ") } else { String::new() },
         if gaps > 0 { format!(", {gaps} parity gap{}", if gaps == 1 { "" } else { "s" }) } else { String::new() },

@@ -604,6 +604,7 @@ export default bench({
 Fewer than 6 pairs never gets a verdict.
 
 - Validate a new file with `--check` first: each case once, pass or fail with a screenshot. A case with a reset runs once more after it (unmeasured), so a run that cannot start from what the reset leaves fails the check.
+  - `· run 2` on a check line: a process of the target ended in run 1 of a case with a reset and its CPU could not be recovered, so strobe measured the run after the reset (warm). Don't compare it with another check's run 1. A case without a reset keeps run 1; only the `cpu.*` that lost the process refuse (`RunIncomplete`).
 - Many small cases (a fuzzer's)? `--check --batch 10` runs up to 10 run cases per launch (same target, params and setupKey), one prepare and setup.
   - After each case its page or app must be back at the launch's start (`ResetIncomplete`), answer, and show its `expect`; a case that fails, crashes or leaves dirty state fails alone, and the next case gets a fresh launch.
   - `bench({ reset })` is the reset of every case without its own: put the page back there.

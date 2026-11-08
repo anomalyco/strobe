@@ -577,7 +577,11 @@ no statistics (`--check --base <target> --head <target>`: each case on those two
 their implementation comparison measures them, 9.10). A case with a reset runs run → reset → run →
 reset: the second run, unmeasured, proves a run can start from what the reset leaves (a reset to
 about:blank, a relative `goto` after it) and gives the start check (`ResetIncomplete`) a second start
-to compare; the case's values are the first, cold run's. The second run is marked `warm:<i>` in the
+to compare; the case's values are the first, cold run's, except that when a process of the target
+ended in it and strobe could not recover its CPU (§9.6) a case with a reset and `resetCheck` on
+measures the run after the reset instead (` · run 2` on its line, §9.1). A case without a reset
+keeps its cold run 1, and only the `cpu.*` that lost the process refuse `RunIncomplete` (a refused
+primary fails the check). The second run is marked `warm:<i>` in the
 trace (no view counts it), and none of it reaches the block: its `expect.same` reads, input counts
 (`ops`), self cost and frames stay out. Each case passes, with its declared metrics' values from that run, or fails with
 the refusal, the page's URL and its screenshot; the next case still runs, and any failure exits 1.
@@ -2046,9 +2050,15 @@ flowchart LR
   ms of CPU just after the first page loads) leave the renderer alone. Two runs agree only when a
   process of the target ended in both or in neither (pages, native and terminal targets): Chromium
   on Windows starts a utility process for its processor metrics just after the first load and ends
-  it at once. A `--check` stays one cold run, except that when a process of the target ended in it,
-  the case's runs start alike (`resetCheck`) and it is no pixels or filmed block, the next run is
-  measured instead, once.
+  it at once. A `--check` stays one cold run, except that when a process of the target ended in it
+  and its CPU was not recovered (§9.6), the case has a reset with `resetCheck` on and it is no pixels or filmed block, the run after the
+  reset is measured instead, once. That run is warm, so the check says so: ` · run 2` on the
+  case's line, a `run` line under it, the count in the closing line, and `measured_run` 1 in
+  result.json. A case without a reset keeps run 1, and only the `cpu.*` that lost the process
+  refuse `RunIncomplete` (a refused primary fails the check): its run 2 would start where run 1
+  ended, another stretch of the target. A game's 8 s wait, whose round goes on without a reset,
+  read `main.work` 125 ms in 0.20.0 (run 1) and 181–191 ms in 0.21.0, which measured run 2 there
+  unsaid; its first 8 s read 121–124 ms in both and the 8 s after 8 s of play 182–184 ms in both.
   After 10 unsteady runs strobe measures anyway and warns `NotSteady`, saying which way: work that
   grew run after run (Spearman over 0.5 across the warmup runs and the last 5% over the first;
   `warmup.unsteady` 2) is state the runs leave (add a reset, or, with one, fix what it leaves behind:
@@ -8083,7 +8093,11 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   2–3 warmup runs, headless click blocks' `cpu.work` 69.5–71.6 ms (71.2 behind the old wait), idle
   5.1–8.2 ms (7.6) on adais; on vps click 72.8–76.1 ms against main's 73.1–75.4, and 1 of 6 click
   blocks refused `cpu.work` for a process ended in a measured run against main's 3 of 6. A `--check`
-  stays one cold run, chores included (its click `cpu.work` 264–315 ms, 84 ms behind the old wait).
+  stays one cold run, chores included (its click `cpu.work` 264–315 ms, 84 ms behind the old wait),
+  unless a process ended in it and the case has a reset: it then measures the run after the reset
+  and says so on the case's line, in the closing line and as `measured_run` (§9.1). A case without
+  a reset keeps run 1 and refuses the lost `cpu.*`: 0.21.0 had measured its run 2 unsaid, and a
+  0.20.0 → 0.21.0 check of a game's 8 s wait read `main.work` 125 → 186 ms for it.
 - Typed outcomes, crash-safe store and strict config (2026-11-05): validators are `ValidatorId`
   and refusals `Refusal` values on the error (§10.1); comparisons carry `kind` and `refusal`,
   which bench sets with each verdict it writes. Still to move to the types: `bench`, `pr`, `card`,

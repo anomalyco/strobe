@@ -10,7 +10,7 @@ fn steady(a: f64, b: f64) -> bool {
     a.is_finite() && b.is_finite() && ((a - b).abs() <= 1.0 || (a.max(b) > 0.0 && (a - b).abs() / a.max(b) <= 0.05))
 }
 
-/// Warmup until steady (SPEC §9.2): runs go on until two consecutive ones do the same work, then
+/// Warmup until steady (SPEC §9.1): runs go on until two consecutive ones do the same work, then
 /// `Exec::runs` more are measured (a leak run's: twice that). Both steady runs count as measured in a
 /// timing block; an attribution or memory block starts its probes at the steady point and measures
 /// the runs after it, as does a block that never got steady in `MAX_WARMUP` runs. An untimed block
@@ -29,7 +29,10 @@ pub(super) struct Warmup {
     /// Unsteady, and the work grew across the runs (`grew`).
     growth: bool,
     /// An untimed block that may measure its second run when its first lost a process: not a pixels
-    /// block (its snapshots are the first run's) or a filmed one, and a case whose runs start alike.
+    /// block (its snapshots are the first run's) or a filmed one, and a case whose reset brings each run
+    /// back to the same start (`resetCheck` on). Without a reset the second run starts where the first
+    /// ended, another stretch of the target than a cold run 1, so run 1 stays measured and its `cpu.*`
+    /// refuse.
     retry: bool,
 }
 
@@ -38,7 +41,7 @@ impl Warmup {
         let measured = if x.set == Set::Memory { 2 * x.runs } else { x.runs };
         // Not a pixels block: its snapshots are the first run's.
         let again = usize::from(x.untimed && s.reset && x.pixels.is_none());
-        let retry = x.untimed && x.pixels.is_none() && !x.video && s.reset_check;
+        let retry = x.untimed && x.pixels.is_none() && !x.video && s.reset && s.reset_check;
         // A video block films the one run after the steady point: run 0 is cold, never the filmed one.
         Warmup { first: None, unsteady: false, untimed: x.untimed, keeps_pair: !matches!(x.set, Set::Attribution | Set::Memory) && !x.video, measured, again, growth: false, retry }
     }
@@ -86,7 +89,8 @@ impl Warmup {
     /// process ended in both or in neither: a chore the target ran once (Chromium's processor-metrics
     /// utility process, a moment after its first page loaded) stays in warmup, where it had refused the
     /// block's `cpu.*`. An untimed block whose one run lost a process, and that may run again
-    /// (`retry`), measures the next run instead, once. `cpu`, where the work is one process's main
+    /// (`retry`: a case with a reset), measures the run after the reset instead, once; one without a
+    /// reset keeps its run, whose lost `cpu.*` refuse. `cpu`, where the work is one process's main
     /// thread (a page's renderer): the target's whole process tree's CPU per run (NaN where unread or
     /// short), which must hold steady too: a browser's after-startup chores (Chromium's network and
     /// storage services' deferred work, about 230 ms of CPU just after its first page loads) leave the
