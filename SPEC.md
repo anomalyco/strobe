@@ -7976,9 +7976,11 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   a page 6.7 s → 1.7 s, exp_7b9e04). Those 5 s had also let Chromium's after-startup chores (its
   network and storage services' deferred work and processor-metrics utility process, about 230 ms
   of CPU just after the first page loads) pass before the first run. Warmup now holds a page's
-  browser CPU steady beside its renderer's task time, and waits out a run that lost a process (§9.2);
-  a `--check` stays one cold run, chores included (its click `cpu.work` 315 ms, 84 ms behind the old
-  wait).
+  browser CPU steady beside its renderer's task time, and waits out a run that lost a process (§9.2):
+  2–3 warmup runs, headless click blocks' `cpu.work` 69.5–71.6 ms (71.2 behind the old wait), idle
+  5.1–8.2 ms (7.6) on adais; on vps click 72.8–76.1 ms against main's 73.1–75.4, and 1 of 6 click
+  blocks refused `cpu.work` for a process ended in a measured run against main's 3 of 6. A `--check`
+  stays one cold run, chores included (its click `cpu.work` 264–315 ms, 84 ms behind the old wait).
 - Typed outcomes, crash-safe store and strict config (2026-11-05): validators are `ValidatorId`
   and refusals `Refusal` values on the error (§10.1); comparisons carry `kind` and `refusal`,
   which bench sets with each verdict it writes. Still to move to the types: `bench`, `pr`, `card`,
