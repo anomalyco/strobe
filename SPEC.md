@@ -8835,6 +8835,22 @@ macOS window placement and pixels (they need Accessibility and Screen Recording)
   Automation (on locked adais a Chromium window in a native target exposed only its title elements, no
   document). A deep recording's summary gives both resolved shares (`resolved: X% of leaf frames, Y% of
   all frames`), as `query hotspots` does.
+- **Windows on Arm package, a lost phone (2026-11-09)**: the release builds win32-arm64 (`strobe.exe`,
+  `strobew.exe`) natively on an Arm runner with a static C runtime, published as
+  `@hona/strobe-win32-arm64` beside win32-x64 (20); `strobe update` maps Windows aarch64 to it.
+  `scripts/release.ts` refuses a release whose `@hona/strobe` optional dependencies and platform list
+  differ, and with `--publish` checks that npm knows every package before publishing any (a new
+  package is bootstrapped by hand once: release.yml's header). The phone a run picked (`--mobile`; the
+  state is that device's, never the process's) is lost once the adb server no longer has it, or its
+  shell does not run `true` within 5 s after a command timed out or lost its connection: its later
+  requests fail at once (exit 255), and every bench mode (check, batch, blocks, compare) ends at it with
+  one `Stopped` line naming the cases not run, without retrying the launch. An emulator killed
+  mid-`--check` on adais ended the bench with exit 255 and `emulator-5554 went away: device
+  'emulator-5554' not found; not run: …` (that run first retried once on a closed connection, which a
+  lost connection now probes). Dev fixture `known tick <hz> <work_ms>` plants
+  pure spin work with a known wake cost (`tick <hz> 0`); on vps (`native.bench.ts` tick, one noisy
+  `--check`) 50 Hz read `cpu.work` 0.93, 201 and 405 ms a second for 0, 4 and 8 ms a wake (truth o,
+  200 + o and 400 + o, where tick-0 reads o).
 
 ## 25. Continuous benchmarking (`track`, `history`)
 
