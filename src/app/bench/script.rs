@@ -1,7 +1,8 @@
 //! Script targets (SPEC §9.6): a variant's Bun or Node module, loaded by strobe's host in a fresh
 //! process per block and called from the bench file (`ctx.call(name, ...args)`). Runs are timed on the
 //! process's own CPU (`cpu.work`) and wall clock; attribution blocks add the runtime's CPU and
-//! allocation profiles (`--cpu-prof`, `--heap-prof`).
+//! allocation profiles (`--cpu-prof`, `--heap-prof`), the CPU profile placed on strobe's clock and cut
+//! to each measured run (`Profiled`).
 
 use super::*;
 use std::io::{BufRead, BufReader, Write};
@@ -15,6 +16,30 @@ struct Host {
     conn: TcpStream,
     lines: Receiver<String>,
     next: u64,
+}
+
+/// A profiled host's clocks against strobe's (`probe::cpu::Sync`), and its runtime (`name`, `version`).
+type Clocks = (probe::cpu::Sync, Value);
+
+/// The run folder a profiled host writes its profiles to: removed when dropped, whatever happened, so
+/// a failed block leaves no partial profile behind.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A measured run as `runs.json` keeps it: its key, case, span with untimed stretches and phase marks
+/// (strobe's clock), and its wall and CPU ms.
+struct Measured {
+    key: String,
+    case: String,
+    timed: metrics::Timed,
+    marks: Vec<(String, u64)>,
+    ms: f64,
+    cpu_ms: f64,
 }
 
 /// The harness module for `root`. The entry resolves from the bench file, like everything else in it,
@@ -147,13 +172,32 @@ impl Host {
         self.child.pid()
     }
 
-    /// A normal exit (profiles are written), then its group, whatever is left of it (the drop).
-    fn exit(mut self) {
+    /// The host's clocks against strobe's (`probe::cpu::Sync`): one request in which it spins 5 ms and
+    /// reads its wall clock at a millisecond edge, then five quick round trips.
+    fn clocks(&mut self) -> Result<Clocks> {
+        let t = Duration::from_secs(10);
+        let a = host::now_ns();
+        let marked = self.request(json!({ "op": "clock", "mark": true }), t)?;
+        let b = host::now_ns();
+        let mut trips = Vec::new();
+        for _ in 0..5 {
+            let a = host::now_ns();
+            let v = self.request(json!({ "op": "clock" }), t)?;
+            trips.push((a, host::now_ns(), v["mono_us"].as_f64().unwrap_or(f64::NAN)));
+        }
+        Ok((probe::cpu::Sync::of((a, b, &marked), &trips)?, json!({ "name": marked["runtime"], "version": marked["version"] })))
+    }
+
+    /// A normal exit (profiles are written), then its group, whatever is left of it (the drop). A
+    /// profiled host's clocks are read first (`clocks`).
+    fn exit(mut self, profiled: bool) -> Option<Result<Clocks>> {
+        let clocks = profiled.then(|| self.clocks());
         let _ = self.request(json!({ "op": "exit" }), Duration::from_secs(5));
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline && self.child.exited().is_none() {
             std::thread::sleep(Duration::from_millis(50));
         }
+        clocks
     }
 }
 
@@ -182,19 +226,29 @@ type ScriptRun = (f64, f64, BTreeMap<String, f64>, f64, Vec<(String, u64)>, prob
 pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) -> Result<Launch> {
     let s = &cases[0];
     let batch = ctx.batch.is_some();
-    let (set, keep) = (x.set, x.keep);
+    let set = x.set;
     let target = ctx.describe["targets"][&s.target].clone();
     let root = v.root.clone().ok_or_else(|| Error::msg(format!("{}: a script target runs in a variant's folder (a directory or a git ref)", v.role)))?;
     let id = store::new_id("rec");
-    let profiles = (set == Set::Attribution).then(|| host::paths::run().join(format!("{id}-prof")));
+    // Attribution blocks only: a clean timing block starts no profiler.
+    let profiles = (set == Set::Attribution).then(|| Scratch(host::paths::run().join(format!("{id}-prof"))));
     if let Some(p) = &profiles {
-        std::fs::create_dir_all(p)?;
+        std::fs::create_dir_all(&p.0)?;
     }
     let mut steps: Vec<(String, f64)> = Vec::new();
     let launched = Instant::now();
     let entry = place(Path::new(ctx.describe["file"].as_str().unwrap_or(".")), target["entry"].as_str().unwrap_or(""), &root)?;
     let log = store::experiment_dir(&ctx.exp)?.join("script.log");
-    let host = RefCell::new(Host::spawn(&target, &entry, &root, ctx.pin, profiles.as_deref(), &log)?);
+    // What a profile is cut to, on strobe's clock: the host's life outside the measured runs
+    // (`lifecycle_spans`), each passing case's measured runs, and its measured range of the launch's runs.
+    let life: RefCell<Vec<(String, u64, u64)>> = RefCell::new(Vec::new());
+    let kept: RefCell<Vec<Measured>> = RefCell::new(Vec::new());
+    let passed: RefCell<Vec<(usize, std::ops::Range<usize>)>> = RefCell::new(Vec::new());
+    let started = host::now_ns();
+    let mut spawned = Host::spawn(&target, &entry, &root, ctx.pin, profiles.as_ref().map(|p| p.0.as_path()), &log)?;
+    life.borrow_mut().push(("startup".into(), started, host::now_ns()));
+    let ready = if profiles.is_some() { Some(spawned.clocks()?) } else { None };
+    let host = RefCell::new(spawned);
     let heap_mb = || -> Result<f64> { Ok(host.borrow_mut().request(json!({ "op": "heap" }), Duration::from_secs(120))?.as_f64().unwrap_or(f64::NAN) / (1024.0 * 1024.0)) };
     steps.push(("launch".into(), launched.elapsed().as_secs_f64() * 1e3));
     let pid = host.borrow().pid();
@@ -234,7 +288,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         let root_text = host::paths::plain(&root);
         ctx.runner.call("block", json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": "", "root": root_text }), t, &serve)?;
         let lapped = Instant::now();
+        let set0 = host::now_ns();
         let setup = ctx.runner.call("setup", json!({}), t, &serve);
+        life.borrow_mut().push(("setup".into(), set0, host::now_ns()));
         super::batch::launch_hook_case(ctx)?;
         setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup"))?;
         hooks.check_fixture();
@@ -318,7 +374,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     }));
                     runs.push((timed.ns() as f64 / 1e6, used, hooks.counts(), retained, hooks.take_marks(), counted, timed, foreign));
                     if s.reset {
+                        let r0 = host::now_ns();
                         ctx.runner.call("reset", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset"))?;
+                        life.borrow_mut().push((format!("reset:{}", base + runs.len() - 1), r0, host::now_ns()));
                     }
                     // Without CPU (cycles that are not time), steady by wall time.
                     warmup.after(&runs.iter().map(|r| if r.1.is_finite() { r.1 } else { r.0 }).collect::<Vec<_>>(), &[], &lost.iter().map(|l| l.1).collect::<Vec<_>>());
@@ -393,6 +451,14 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let r = script_unread_refusal(&m);
                     refused.insert(m, r);
                 }
+                if profiles.is_some() {
+                    for (i, r) in runs.iter().enumerate().filter(|(i, _)| !local.contains(i)) {
+                        let what = if i < local.start { "warm" } else { "unmeasured" };
+                        life.borrow_mut().push((format!("{what}:{}", base + i), r.6.t0, r.6.t1));
+                    }
+                    kept.borrow_mut().extend(measured.iter().enumerate().map(|(j, r)| Measured { key: key(j), case: s.case.clone(), timed: r.6.clone(), marks: r.4.clone(), ms: r.0, cpu_ms: r.1 }));
+                    passed.borrow_mut().push((k, base + local.start..base + local.end));
+                }
                 base += runs.len();
                 Ok(Block {
                     variant: v.role.to_string(),
@@ -435,18 +501,68 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
             }
         }
         if launch.cases.iter().any(Result::is_ok) {
+            let c0 = host::now_ns();
             let _ = ctx.runner.call("close", json!({}), t, &serve);
+            life.borrow_mut().push(("teardown".into(), c0, host::now_ns()));
         }
         Ok(launch)
     })();
-    host.into_inner().exit();
+    let exited = host.into_inner().exit(profiles.is_some());
     let mut launch = result?;
-    if let Some(dir) = profiles.filter(|_| keep || set == Set::Attribution)
-        && let Some(Ok(block)) = launch.cases.first_mut()
+    if let Some(dir) = &profiles
+        && launch.cases.iter().any(Result::is_ok)
     {
+        let clocks = ready.zip(exited).map(|(r, e)| e.map(|e| (r, e)));
+        let made = Profiled { dir: &dir.0, id: &id, cases, v, target: &target, clocks, life: &life.take(), runs: &kept.take(), passed: &passed.take() };
+        match made.keep(ctx, &launch) {
+            Ok(()) => {
+                for b in launch.cases.iter_mut().flatten() {
+                    b.recording = Some(id.clone());
+                }
+            }
+            // The block's profile is the reason it ran: without a valid one there is no block.
+            Err(e) => {
+                for c in launch.cases.iter_mut().filter(|c| c.is_ok()) {
+                    *c = Err(e.clone());
+                }
+            }
+        }
+    }
+    Ok(launch)
+}
+
+/// What a profiled host left (`--cpu-prof`, `--heap-prof` in `dir`) and what to cut it to.
+struct Profiled<'a> {
+    dir: &'a Path,
+    id: &'a str,
+    cases: &'a [Series],
+    v: &'a Variant,
+    target: &'a Value,
+    /// The host's clocks at its start and before its exit; an error where the exit's could not be read.
+    clocks: Option<Result<(Clocks, Clocks)>>,
+    life: &'a [(String, u64, u64)],
+    runs: &'a [Measured],
+    passed: &'a [(usize, std::ops::Range<usize>)],
+}
+
+impl Profiled<'_> {
+    /// The block's recording (SPEC §8.3): the host's CPU profile on strobe's clock, cut to each measured
+    /// run's timed span (`cpu-<run>.cpuprofile`, what `query hotspots` reads), and whole
+    /// (`whole-host.json.gz`, startup, setup, warmup, runs, resets and teardown: `--source host`); the
+    /// runs' spans and phase marks (`runs.json`) and the rest of the host's life (`lifecycle_spans`).
+    /// Only passing cases' runs. Refuses a profile strobe cannot place within 1 ms (`ClockUnsynced`) or
+    /// that ends before the last measured run did (`RunIncomplete`); nothing is kept then.
+    fn keep(&self, ctx: &mut Ctx, launch: &Launch) -> Result<()> {
+        let incomplete =
+            |what: String| -> Error { Refusal::new(ValidatorId::RunIncomplete, format!("the script host's CPU profile: {what}")).fix("run it again; see the experiment's script.log").into() };
+        let ((ready, runtime), (exit, _)) = match &self.clocks {
+            Some(Ok(c)) => c.clone(),
+            Some(Err(e)) => return Err(incomplete(format!("its clock could not be read before it exited: {}", e.message))),
+            None => return Err(incomplete("its clock was not read".into())),
+        };
         // The runtime names its own files: the newest of each kind is this process's.
         let newest = |ext: &str| {
-            std::fs::read_dir(&dir)
+            std::fs::read_dir(self.dir)
                 .into_iter()
                 .flatten()
                 .flatten()
@@ -454,27 +570,57 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 .filter(|p| p.extension().is_some_and(|x| x == ext))
                 .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
         };
-        let draft = store::claim_recording(&id)?;
-        let rec = draft.dir().to_path_buf();
-        if let Some(p) = newest("cpuprofile") {
-            store::write_atomic(&rec.join("cpu-0.cpuprofile"), &std::fs::read(&p)?)?;
+        let raw = newest("cpuprofile").ok_or_else(|| incomplete("the host wrote none (it did not exit normally)".into()))?;
+        let bytes = std::fs::read(&raw)?;
+        let mut de = serde_json::Deserializer::from_slice(&bytes);
+        de.disable_recursion_limit();
+        let profile: Value = serde::Deserialize::deserialize(&mut de).map_err(|e: serde_json::Error| incomplete(format!("{}: {e}", raw.display())))?;
+        let rt = runtime["name"].as_str().and_then(probe::cpu::Runtime::of).ok_or_else(|| incomplete(format!("an unknown runtime {}", runtime["name"])))?;
+        let rebased = probe::cpu::rebase(&profile, rt, &ready, &exit)?;
+        let us = |ns: u64| ns as f64 / 1e3;
+        let end = self.runs.iter().map(|r| r.timed.t1).max().unwrap_or(0);
+        if rebased.times_us.last().is_none_or(|t| *t < us(end) - 5_000.0) {
+            return Err(incomplete(format!("its last sample is {:.1} ms before the last measured run ended", rebased.times_us.last().map_or(f64::NAN, |t| (us(end) - t) / 1e3))));
         }
+        let draft = store::claim_recording(self.id)?;
+        let rec = draft.dir().to_path_buf();
+        for r in self.runs {
+            let untimed: Vec<(f64, f64)> = r.timed.untimed.iter().map(|&(a, b)| (us(a), us(b))).collect();
+            if let Some(p) = rebased.clip(&profile, (us(r.timed.t0), us(r.timed.t1)), &untimed) {
+                store::write_json(&rec.join(format!("cpu-{}.cpuprofile", r.key.trim_start_matches("run:"))), &p)?;
+            }
+        }
+        crate::symbol::write_gz(&rec.join(probe::cpu::WHOLE_HOST), &rebased.whole(&profile))?;
         if let Some(p) = newest("heapprofile") {
             store::write_atomic(&rec.join("alloc-0.heapprofile"), &std::fs::read(&p)?)?;
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let runs: Vec<Value> = self
+            .runs
+            .iter()
+            .map(|r| json!({ "run": r.key, "case": r.case, "t0_ns": r.timed.t0, "t1_ns": r.timed.t1, "untimed": r.timed.untimed, "marks": r.marks, "ms": r.ms, "cpu_ms": r.cpu_ms }))
+            .collect();
+        store::write_json(&rec.join(probe::cpu::RUNS), &json!({ "runs": runs }))?;
         super::keep_actions(ctx, &rec)?;
-        store::write_json(
-            &rec.join("meta.json"),
-            &json!({
-                "id": id, "kind": "block", "experiment": ctx.exp, "seed": ctx.seed, "series": s.label(), "variant": v.role, "variant_label": v.label, "variant_git": variant_git(v),
-                "target": target["entry"], "probes": set, "runs": block.run_ms.len(), "values": block.values,
-                "created": super::super::record::now_iso(), "valid": true, "env": host::env(), "script": true,
-                "note": "script profiles cover the whole host process: its start, setup, warmup and measured runs",
-            }),
-        )?;
+        let segments: Vec<(f64, f64)> = self.runs.iter().flat_map(|r| r.timed.segments()).map(|(a, b)| (us(a), us(b))).collect();
+        let sampling = probe::cpu::Sampling::of(probe::cpu::interval_us() as f64, rebased.gaps_in(&segments));
+        let s = &self.cases[0];
+        let batch = ctx.batch.is_some();
+        let blocks: Vec<&Block> = launch.cases.iter().flatten().collect();
+        let mut meta = json!({
+            "id": self.id, "kind": "block", "experiment": ctx.exp, "seed": ctx.seed, "series": s.label(), "variant": self.v.role, "variant_label": self.v.label, "variant_git": variant_git(self.v),
+            "target": self.target["entry"], "probes": Set::Attribution, "timing": "perturbed", "runs": self.runs.len(), "measured": self.runs.iter().map(|r| &r.key).collect::<Vec<_>>(),
+            "values": if batch { json!({}) } else { json!(blocks.first().map(|b| &b.values)) },
+            "created": super::super::record::now_iso(), "valid": true, "env": host::env(), "script": true,
+            "runtime": runtime, "sampling": sampling, "whole_host": probe::cpu::WHOLE_HOST,
+            "lifecycle_spans": self.life.iter().map(|(name, a, b)| json!({ "name": name, "t0_ns": a, "t1_ns": b })).collect::<Vec<_>>(),
+            "clock": { "rtt_ms": [ready.rtt_ns as f64 / 1e6, exit.rtt_ns as f64 / 1e6], "drift_ms": (exit.offset_ns - ready.offset_ns) / 1e6, "cap_ms": rebased.cap_us / 1e3 },
+            "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile: the whole host process",
+        });
+        if batch {
+            meta["batch"] = super::batch::meta(self.passed.iter().zip(&blocks).map(|((k, r), b)| (&self.cases[*k], r.clone(), *b)));
+        }
+        store::write_json(&rec.join("meta.json"), &meta)?;
         draft.keep();
-        block.recording = Some(id);
+        Ok(())
     }
-    Ok(launch)
 }

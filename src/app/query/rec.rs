@@ -23,6 +23,8 @@ pub struct Rec {
     /// Source maps decode once per script for every view (a `Symbolizer` caches per instance).
     pub(super) sym: Mutex<Symbolizer>,
     cpu: OnceLock<Result<Stacks>>,
+    /// A script recording's whole host profile (`whole-host.json.gz`, `Scope::Host`).
+    host_cpu: OnceLock<Result<Stacks>>,
     alloc: OnceLock<Result<Stacks>>,
     native: OnceLock<Result<Option<NativeStacks>>>,
     heap: OnceLock<Result<crate::heapsnap::Snapshot>>,
@@ -117,6 +119,7 @@ impl Rec {
             meta,
             sym: Mutex::new(Symbolizer::open(dir)),
             cpu: OnceLock::new(),
+            host_cpu: OnceLock::new(),
             alloc: OnceLock::new(),
             native: OnceLock::new(),
             heap: OnceLock::new(),
@@ -198,8 +201,9 @@ impl Rec {
     /// The interval the recording's page sampler was asked for and the one it kept: as the recording
     /// stored it (`meta.json`, a Firefox recording's `gecko.json`), else, for a recording from before
     /// strobe stored it, the median gap of its page's CPU profiles, asked `INTERVAL_US` as they all were
-    /// (a Firefox one the interval its `gecko.json` gave). None for a script target's profiles: they
-    /// cover a whole host process, no page's thread.
+    /// (a Firefox one the interval its `gecko.json` gave). A script recording stores the gaps of its
+    /// measured runs; one from before strobe cut script profiles to the runs has none: its profile
+    /// covers a whole host process.
     pub fn sampling(&self) -> Option<Sampling> {
         let stored = |v: &Value| serde_json::from_value::<Sampling>(v["sampling"].clone()).ok();
         if let Some(s) = stored(&self.meta).or_else(|| self.gecko().and_then(stored)) {
@@ -264,6 +268,55 @@ impl Rec {
         cache.get(&p).map(|r| r.as_ref().map(Arc::clone).map_err(Error::clone)).unwrap_or_else(|| Err(Error::msg("trace part missing")))
     }
 
+    /// A script recording's whole host process (`whole-host.json.gz`): startup, setup, warmup, the
+    /// runs, resets and teardown. Each sample weighs its gap up to the cap strobe placed it with.
+    pub(super) fn host_cpu(&self) -> Result<&Stacks> {
+        cached(self.host_cpu.get_or_init(|| self.load_script(&[(f64::NEG_INFINITY, f64::INFINITY)], &[])))
+    }
+
+    /// A script recording's samples inside `spans` and outside `untimed` (ns on strobe's clock, as
+    /// `runs.json` keeps them): one phase's stretches of the measured runs.
+    pub(super) fn phase_cpu(&self, spans: &[(u64, u64)], untimed: &[(u64, u64)]) -> Result<Stacks> {
+        let us = |v: &[(u64, u64)]| {
+            let mut v: Vec<(f64, f64)> = v.iter().map(|&(a, b)| (a as f64 / 1e3, b as f64 / 1e3)).collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v
+        };
+        self.load_script(&us(spans), &us(untimed))
+    }
+
+    /// The whole host profile's samples inside `spans` and outside `untimed` (µs, sorted), as
+    /// `probe::cpu::weights` weighs them.
+    fn load_script(&self, spans: &[(f64, f64)], untimed: &[(f64, f64)]) -> Result<Stacks> {
+        let path = self.dir.join(crate::probe::cpu::WHOLE_HOST);
+        if !path.is_file() {
+            return Err(Error::usage(format!(
+                "{} has no whole host profile: --source host and a script's --phase read a script target's attribution recording, and one from before strobe cut its profile to the runs covers the whole host already (strobe query {} hotspots)",
+                self.id, self.id
+            )));
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(std::fs::File::open(&path)?), &mut bytes)?;
+        let prof: CpuProfile = parse(&bytes)?;
+        let mut t = prof.start_time;
+        let times: Vec<f64> = prof
+            .samples
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                t += prof.time_deltas.get(i).copied().unwrap_or(0.0);
+                t
+            })
+            .collect();
+        let cap = prof.cap_us.unwrap_or(crate::probe::cpu::MAX_GAP_US);
+        let gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0 && *g <= cap).collect();
+        let last = Sampling::of(0.0, gaps).map_or(0.0, |s| s.median_us);
+        let w = crate::probe::cpu::weights(&times, cap, last, spans, untimed);
+        let mut out = Stacks::default();
+        self.add_profile(&mut out, &prof, |i| w.get(i).copied().filter(|w| *w > 0.0));
+        Ok(out)
+    }
+
     fn load_cpu(&self) -> Result<Stacks> {
         let profiles = files(&self.dir, "cpuprofile")?;
         if profiles.is_empty() {
@@ -281,34 +334,38 @@ impl Rec {
             if p.file_stem().is_some_and(|s| s != "cpu-main") {
                 self.gaps.lock().unwrap_or_else(|e| e.into_inner()).extend(gaps);
             }
-            // Parsing runs beside other loads; symbolizing shares the recording's source maps.
-            let sym = self.sym.lock().unwrap_or_else(|e| e.into_inner());
-            let index: HashMap<u64, usize> = prof.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
-            let mut parent = vec![usize::MAX; prof.nodes.len()];
-            for (i, n) in prof.nodes.iter().enumerate() {
-                for c in &n.children {
-                    if let Some(&j) = index.get(c) {
-                        parent[j] = i;
-                    }
-                }
-            }
-            // Per profile node: µs, samples and Σ Δt² (a sample's time is the delta to the next sample).
-            let mut at: BTreeMap<usize, (f64, u64, f64)> = BTreeMap::new();
-            for (i, s) in prof.samples.iter().enumerate() {
-                let Some(&k) = index.get(s) else { continue };
-                let dt = prof.time_deltas.get(i + 1).copied().unwrap_or(last).max(0.0);
-                let e = at.entry(k).or_default();
-                e.0 += dt;
-                e.1 += 1;
-                e.2 += dt * dt;
-            }
-            let mut frames = Symbolized::new(&sym, prof.nodes.len());
-            for (k, (w, n, var)) in at {
-                let stack = frames.chain(k, &parent, |i| &prof.nodes[i].call_frame, &mut out);
-                out.weights.push(Weight { stack, w, n, var });
-            }
+            self.add_profile(&mut out, &prof, |i| Some(prof.time_deltas.get(i + 1).copied().unwrap_or(last).max(0.0)));
         }
         Ok(out)
+    }
+
+    /// One profile's samples into `out`, sample i weighing `weight(i)` µs (none: left out).
+    fn add_profile(&self, out: &mut Stacks, prof: &CpuProfile, weight: impl Fn(usize) -> Option<f64>) {
+        // Parsing runs beside other loads; symbolizing shares the recording's source maps.
+        let sym = self.sym.lock().unwrap_or_else(|e| e.into_inner());
+        let index: HashMap<u64, usize> = prof.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+        let mut parent = vec![usize::MAX; prof.nodes.len()];
+        for (i, n) in prof.nodes.iter().enumerate() {
+            for c in &n.children {
+                if let Some(&j) = index.get(c) {
+                    parent[j] = i;
+                }
+            }
+        }
+        // Per profile node: µs, samples and Σ Δt² (a sample's time is the delta to the next sample).
+        let mut at: BTreeMap<usize, (f64, u64, f64)> = BTreeMap::new();
+        for (i, s) in prof.samples.iter().enumerate() {
+            let (Some(&k), Some(dt)) = (index.get(s), weight(i)) else { continue };
+            let e = at.entry(k).or_default();
+            e.0 += dt;
+            e.1 += 1;
+            e.2 += dt * dt;
+        }
+        let mut frames = Symbolized::new(&sym, prof.nodes.len());
+        for (k, (w, n, var)) in at {
+            let stack = frames.chain(k, &parent, |i| &prof.nodes[i].call_frame, out);
+            out.weights.push(Weight { stack, w, n, var });
+        }
     }
 
     fn load_alloc(&self) -> Result<Stacks> {
@@ -409,6 +466,11 @@ struct CpuProfile<'a> {
     samples: Vec<u64>,
     #[serde(default, rename = "timeDeltas")]
     time_deltas: Vec<f64>,
+    #[serde(default, rename = "startTime")]
+    start_time: f64,
+    /// What a sample of a script's whole host profile weighs at most (`probe::cpu::Rebased::cap_us`).
+    #[serde(default, rename = "capUs")]
+    cap_us: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]

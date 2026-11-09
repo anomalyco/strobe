@@ -365,6 +365,22 @@ fn attribution(rec: &Rec, plan_runs: Option<u64>) -> Option<Value> {
     if let Ok(o) = query::hotspots_of(rec, "file", 25) {
         h["files"] = o.json["rows"].clone();
     }
+    // A script target's whole host process beside its measured runs (the default), labelled, per
+    // recording: the report's toggle shows it.
+    if rec.dir.join(crate::probe::cpu::WHOLE_HOST).is_file()
+        && let Ok(o) = query::hotspots_scoped(rec, "function", 50, query::Sort::Own, query::Scope::Host)
+    {
+        let mut w = o.json;
+        if let Ok(f) = query::hotspots_scoped(rec, "file", 25, query::Sort::Own, query::Scope::Host) {
+            w["files"] = f.json["rows"].clone();
+        }
+        if let Some(o) = w.as_object_mut() {
+            o.remove("callers");
+        }
+        w["label"] = json!(query::WHOLE_HOST_TEXT);
+        w["runs"] = json!(1);
+        h["whole_host"] = w;
+    }
     if let Ok(o) = query::alloc(rec, "function", 25) {
         h["alloc"] = o.json;
         if let Ok(f) = query::alloc(rec, "file", 25) {
@@ -393,7 +409,7 @@ fn attribution(rec: &Rec, plan_runs: Option<u64>) -> Option<Value> {
     // indices into it: lossless, and a fifth of the bytes.
     let mut table: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for key in ["rows", "files", "alloc.rows", "alloc.files", "layout.rows"] {
+    for key in ["rows", "files", "whole_host.rows", "whole_host.files", "alloc.rows", "alloc.files", "layout.rows"] {
         let rows = key.split('.').try_fold(&mut h, |v, k| v.get_mut(k));
         for (i, row) in rows.and_then(Value::as_array_mut).into_iter().flatten().enumerate() {
             let Some(stacks) = row["stacks"].as_array_mut() else { continue };

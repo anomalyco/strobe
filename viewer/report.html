@@ -1363,7 +1363,7 @@ const STROBE = /*STROBE_DATA*/null;
 function hydrateAttributionSide(side) {
   const tbl = side?.frame_table;
   if (!Array.isArray(tbl) || !tbl.length) return;
-  const lists = [side.rows, side.files, side.alloc?.rows, side.alloc?.files, side.layout?.rows];
+  const lists = [side.rows, side.files, side.whole_host?.rows, side.whole_host?.files, side.alloc?.rows, side.alloc?.files, side.layout?.rows];
   for (const list of lists) {
     if (!Array.isArray(list)) continue;
     for (const row of list) {
@@ -1395,6 +1395,8 @@ const state = {
   focusMetric: null,
   hoverPair: null,
   whyBy: "fn",
+  /* A script target's CPU profile: its measured runs ("runs") or its whole host process ("host") */
+  cpuScope: "runs",
   allocBy: "fn",
   cliOpen: false,
   metricsOpen: false,
@@ -3880,8 +3882,28 @@ function groupWeightedRows(list, byFile, div, valFn) {
   return map;
 }
 
+/* A script target's attribution side as its whole host process (`whole_host`: per recording, not per run) when the scope toggle says so */
+function cpuScoped(side, host) {
+  const w = side?.whole_host;
+  if (!host || !w?.rows?.length) return side;
+  return { ...side, rows: w.rows, files: w.files, samples: w.samples, mapped_samples: w.mapped_samples, runs: 1 };
+}
+
+/* The measured runs / whole host toggle, where every side given has a whole host profile */
+function cpuScopeToggle(...sides) {
+  const label = sides.find((x) => x?.whole_host?.label)?.whole_host?.label;
+  if (!label || !sides.every((x) => x?.whole_host?.rows?.length)) return null;
+  return h("div", { class: "seg", role: "group", "aria-label": "CPU profile scope" },
+    [["runs", "Measured runs"], ["host", label]].map(([val, lbl]) =>
+      h("button", { type: "button", "aria-pressed": String(state.cpuScope === val), onclick: () => { state.cpuScope = val; render(); } }, lbl)
+    )
+  );
+}
+
 function renderCpuHotspotsSection(s, aa) {
-  const hs = s.hotspots;
+  const scopeToggle = cpuScopeToggle(s.hotspots?.base, s.hotspots?.head);
+  const host = !!scopeToggle && state.cpuScope === "host";
+  const hs = host ? { base: cpuScoped(s.hotspots.base, true), head: cpuScoped(s.hotspots.head, true) } : s.hotspots;
   if (!hs?.base?.rows?.length || !hs?.head?.rows?.length) return null;
 
   const canFiles = !!(hs.base.files?.length && hs.head.files?.length);
@@ -3952,9 +3974,9 @@ function renderCpuHotspotsSection(s, aa) {
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
         h("h2", { class: "sec-title" }, "CPU self-time hotspots"),
-        h("span", { class: "sec-sub" }, `1 profiled launch / build${mappedPct} · click rows for stacks & full paths`)
+        h("span", { class: "sec-sub" }, `1 profiled launch / build${host ? ` · ${hs.base.whole_host?.label || "whole host process"}, per recording` : ""}${mappedPct} · click rows for stacks & full paths`)
       ),
-      h("div", { class: "card-hd-right" }, toggle)
+      h("div", { class: "card-hd-right" }, scopeToggle, toggle)
     ),
     noteText ? h("div", { class: "attr-note" }, noteText) : null,
     h("div", { class: "attr-table" },
@@ -3962,7 +3984,7 @@ function renderCpuHotspotsSection(s, aa) {
         h("span", {}, byFile ? "File / script" : "Function & caller"),
         h("span", { class: "col-ba" }, "Base → Head"),
         h("span", { style: "text-align:center" }, aa ? "← Lower in head · Higher in head →" : "← Saved in head · Added in head →"),
-        h("span", { style: "text-align:right" }, "Δ / run")
+        h("span", { style: "text-align:right" }, host ? "Δ / recording" : "Δ / run")
       ),
       rows.flatMap((x) => {
         const left = Math.min(posPct(0), posPct(x.delta));
@@ -4020,9 +4042,9 @@ function renderCpuHotspotsSection(s, aa) {
     ),
     h("div", { class: "attr-foot" },
       [
-        progB || progH ? `Runtime / VM: ${progB ? shortNum(rowMs(progB) / runsB) : "—"} → ${progH ? shortNum(rowMs(progH) / runsH) : "—"} ms/run` : null,
-        gcB || gcH ? `V8 GC profiler samples: ${gcB ? shortNum(rowMs(gcB) / runsB) : "—"} → ${gcH ? shortNum(rowMs(gcH) / runsH) : "—"} ms/run` : null,
-        `${hs.base.samples ?? "?"} / ${hs.head.samples ?? "?"} samples (${runsB} runs, idle excluded)`,
+        progB || progH ? `Runtime / VM: ${progB ? shortNum(rowMs(progB) / runsB) : "—"} → ${progH ? shortNum(rowMs(progH) / runsH) : "—"} ${host ? "ms" : "ms/run"}` : null,
+        gcB || gcH ? `V8 GC profiler samples: ${gcB ? shortNum(rowMs(gcB) / runsB) : "—"} → ${gcH ? shortNum(rowMs(gcH) / runsH) : "—"} ${host ? "ms" : "ms/run"}` : null,
+        `${hs.base.samples ?? "?"} / ${hs.head.samples ?? "?"} samples (${host ? "whole host process" : `${runsB} runs`}, idle excluded)`,
       ].filter(Boolean).join("  ·  ")
     )
   );
@@ -5378,7 +5400,10 @@ function renderSingleMainThreadPhases(v, perturbed) {
   );
 }
 
-function renderSingleCpuHotspots(att) {
+function renderSingleCpuHotspots(side) {
+  const scopeToggle = cpuScopeToggle(side);
+  const host = !!scopeToggle && state.cpuScope === "host";
+  const att = cpuScoped(side, host);
   if (!att?.rows?.length) return null;
   const canFiles = !!att.files?.length;
   const byFile = state.whyBy === "file" && canFiles;
@@ -5410,9 +5435,9 @@ function renderSingleCpuHotspots(att) {
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
         h("h2", { class: "sec-title" }, "CPU self-time hotspots"),
-        h("span", { class: "sec-sub" }, `Sampled V8 self-time${perRun ? ` (${runs} runs)` : ""}${mappedPct} · click rows for stacks & full paths`)
+        h("span", { class: "sec-sub" }, `Sampled V8 self-time${host ? ` · ${side.whole_host.label}, per recording` : perRun ? ` (${runs} runs)` : ""}${mappedPct} · click rows for stacks & full paths`)
       ),
-      h("div", { class: "card-hd-right" }, toggle)
+      h("div", { class: "card-hd-right" }, scopeToggle, toggle)
     ),
     h("div", { class: "attr-table" },
       h("div", { class: "single-row hd" },

@@ -17,9 +17,43 @@ const write = (message) => socket.write(JSON.stringify(message) + "\n")
 
 const mod = await import(pathToFileURL(process.argv[2]).href)
 
+// The runtime's monotonic clock (µs): the one Node's CPU profile counts in, and Bun's
+// `performance.now()` (Bun's profile counts in wall µs: `strobeClockMark` reads the two together).
+const bun = !!globalThis.Bun
+const mono = () => {
+  if (bun) return performance.now() * 1000
+  const ns = process.hrtime.bigint()
+  return Number(ns / 1000n) + Number(ns % 1000n) / 1000
+}
+
+// Spins `ms` milliseconds (attribution blocks only, twice a block) and reads the wall clock at a
+// Date.now() millisecond edge inside it: the samples the CPU profile takes of this function show
+// where the profile puts a moment strobe also timed.
+function strobeClockMark(ms) {
+  const end = performance.now() + ms
+  let wall = 0
+  let at = 0
+  const d0 = Date.now()
+  while (performance.now() < end) {
+    if (!wall) {
+      const d = Date.now()
+      if (d !== d0) {
+        at = mono()
+        wall = d * 1000
+      }
+    }
+  }
+  return { wall_us: wall, wall_mono_us: at }
+}
+
 createInterface({ input: socket }).on("line", async (line) => {
   if (!line.trim()) return
-  const { id, op, name, args } = JSON.parse(line)
+  const { id, op, name, args, mark } = JSON.parse(line)
+  if (op === "clock") {
+    const edge = mark ? strobeClockMark(5) : {}
+    write({ id, ok: { ...edge, mono_us: mono(), runtime: bun ? "bun" : "node", version: bun ? Bun.version : process.versions.node } })
+    return
+  }
   // `js.heap.retained`: the heap after a full collection, between runs.
   if (op === "heap") {
     if (globalThis.Bun) Bun.gc(true)
