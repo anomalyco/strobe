@@ -152,6 +152,15 @@ impl Typing {
 /// frame pacer does) and so delay the driver's waits on its own schedule.
 pub const NATIVE_RAF: &str = "window.__strobeRaf ??= window.requestAnimationFrame.bind(window)";
 
+/// Installed in every document before its scripts run: when a key last went down or up in it (`Date.now()`),
+/// so a wait after keys sent to no element can tell whether any reached the page (`Driver::unfocused`). One
+/// passive listener at the window's capture phase.
+pub const KEYS_SEEN: &str = r#"window.__strobeKeys ??= (() => {
+  const s = { at: 0 }
+  for (const e of ["keydown", "keyup"]) addEventListener(e, (ev) => { if (ev.isTrusted) s.at = Date.now() }, { capture: true, passive: true })
+  return s
+})(), true"#;
+
 /// The probe's script as a profile names it (`HELPER`'s `sourceURL`).
 pub const SOURCE_URL: &str = "strobe-driver.js";
 
@@ -1652,7 +1661,7 @@ impl Driver {
                 if typing == Typing::Burst {
                     unmeasured();
                 }
-                self.until(&o)
+                self.until(&o).map_err(|e| if no_selector(&sel(0)) { self.unfocused(e) } else { e })
             }
             "press" => {
                 let o = opts(1);
@@ -1660,7 +1669,7 @@ impl Driver {
                 let (mods, key) = keys::parse_chord(&s(0))?;
                 self.before_input(&o)?;
                 self.stroke(key, cdp_mods(mods))?;
-                self.until(&o)
+                self.until(&o).map_err(|e| if no_selector(&o["selector"]) { self.unfocused(e) } else { e })
             }
             // The pointer over an element, without a click: reveals hover-only controls, or parks the pointer.
             "hover" => {
@@ -1783,6 +1792,7 @@ impl Driver {
                     }
                     self.before_input(&o)?;
                     self.key(key, call == "down")?;
+                    return self.until(&o).map_err(|e| self.unfocused(e));
                 }
                 self.until(&o)
             }
@@ -1901,6 +1911,34 @@ impl Driver {
 
     fn until(&self, opts: &Value) -> Result<Value> {
         Ok(each_until(opts, self.timeout(opts), |o, _| self.until_one(o))?.unwrap_or(Value::Bool(true)))
+    }
+
+    /// The `until` of keys sent to no element (a press, typing or a key down or up with no selector) that
+    /// ran out (a timeout, an image that never showed): when no key reached the document since the call
+    /// (`KEYS_SEEN`) and it had no focus (`document.hasFocus()`), both read within 1 s, the error says so.
+    /// Focus alone proves nothing: a headless page reads no focus until a click, and takes keys all the same.
+    /// Not on a phone, whose clock is not this computer's.
+    fn unfocused(&self, mut e: Error) -> Error {
+        const NOTE: &str = "the page had no focus (document.hasFocus() is false), so keys did not reach it; click the page first or pass a selector";
+        if (e.code != 124 && e.validator() != Some(ValidatorId::AnchorNotFound)) || self.phone {
+            return e;
+        }
+        let Ok(seen) = self.page.eval_timeout("[document.hasFocus(), window.__strobeKeys?.at ?? null]", Duration::from_secs(1)) else { return e };
+        // The call's start on the wall clock the page's `Date.now()` reads.
+        let ago = Duration::from_nanos(crate::host::now_ns().saturating_sub(self.call_at.get()));
+        let called_ms = std::time::SystemTime::now().checked_sub(ago).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_millis() as f64);
+        let reached = seen[1].as_f64().is_none_or(|at| at + 1.0 >= called_ms);
+        if seen[0] != false || reached {
+            return e;
+        }
+        match e.refusal.as_deref_mut() {
+            Some(r) => {
+                r.detail = Some(r.detail.take().map_or(NOTE.to_string(), |d| format!("{d}; {NOTE}")));
+                e.message = r.message();
+            }
+            None => e.message = format!("{}; {NOTE}", e.message),
+        }
+        e
     }
 
     /// One wait of a call's `until` (`each_until` runs a list's in turn).

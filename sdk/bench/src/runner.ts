@@ -347,6 +347,22 @@ function setupKeyText(value: unknown, at = "the key", seen = new Set<object>()):
   return out
 }
 
+// The addresses in what a target's `prepare` returned (strings that start with a web scheme, in its plain
+// objects and arrays, a few levels down): on a phone, strobe reverses those on this computer's loopback
+// (a second server prepare started, an API or WebSocket the page reaches) to the phone's.
+function addresses(value: unknown, depth = 4, seen = new Set<object>(), out: string[] = []): string[] {
+  if (typeof value === "string") {
+    if (/^(https?|wss?):\/\//i.test(value) && out.length < 64) out.push(value)
+  } else if (value && typeof value === "object" && depth > 0 && !seen.has(value)) {
+    seen.add(value)
+    const proto = Object.getPrototypeOf(value)
+    if (Array.isArray(value) || proto === Object.prototype || proto === null)
+      for (const v of Object.values(value)) addresses(v, depth - 1, seen, out)
+    else if (value instanceof URL) addresses(value.href, depth, seen, out)
+  }
+  return out
+}
+
 // The hook about to run starts its stream (`ctx.random()`) over.
 const stream = (hook: string) => void (state.stream = mulberry32(mix(state.caseSeed, hook)))
 
@@ -800,7 +816,7 @@ async function handle(op: string, args: any) {
           typeof target?.url === "function"
             ? await target.url(seeded({ get case() { return caseOf() }, setupKey: state.setupKey, prepared: state.prepared, params: state.params }))
             : undefined
-        return { url }
+        return { url, reach: addresses(state.prepared) }
       } finally {
         launchHook = null
       }

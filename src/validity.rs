@@ -789,11 +789,11 @@ pub fn thermal_refusal(serial: &str, why: &str, when: &str) -> Refusal {
 /// on this computer's CPU, usually with a software GPU, as no phone does), adb over the network
 /// (`WirelessTransport`: the radio's work and the link's latency are in every number), Battery Saver
 /// (`PowerSave`) and a battery under 20% (`LowBattery`): both slow the phone down. Heat is `phone_hot`'s:
-/// a bench waits for it to pass. An untimed run (`--check`, `look`, attribution) takes none of these.
+/// a bench waits for it to pass. An untimed run (`--check`, `look`, attribution, a leak run) takes none of these.
 pub fn phone_timed(f: &host::adb::Facts) -> Result<()> {
     if let Some(why) = &f.emulator {
         return Err(Refusal::new(ValidatorId::Emulator, format!("{} is an emulator ({why}): it runs on this computer's CPU and GPU, not a phone's, so its timing describes no phone", f.serial))
-            .fix("time the page on a phone on a cable; an emulator runs `bench --check`, `look` and attribution recordings")
+            .fix("time the page on a phone on a cable; an emulator runs `bench --check`, leak runs (`--probes memory`), `look` and attribution recordings")
             .into());
     }
     if f.transport == host::adb::Transport::Wireless {

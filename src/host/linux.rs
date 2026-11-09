@@ -775,10 +775,13 @@ fn locked_hint(bus: &mut super::dbus::Conn) -> std::io::Result<bool> {
 }
 
 /// The active display outputs from the kernel's mode setting (DRM): position in the framebuffer, size
-/// and the exact refresh (pixel clock over the mode's totals), with the driver that scans them out.
+/// and the exact refresh (pixel clock over the mode's totals), with the driver and the adapter that scan
+/// them out.
 #[derive(Clone, Debug)]
 pub struct Output {
     pub driver: String,
+    /// The card's adapter id as the GPU sampler names it (`probe::gpu_linux::card_luid`); 0 unknown.
+    pub adapter_luid: u64,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -865,7 +868,8 @@ pub fn outputs() -> Vec<Output> {
     use std::os::fd::AsRawFd;
     let mut out = Vec::new();
     for e in std::fs::read_dir("/dev/dri").into_iter().flatten().flatten() {
-        if !e.file_name().to_string_lossy().starts_with("card") {
+        let card = e.file_name().to_string_lossy().to_string();
+        if !card.starts_with("card") {
             continue;
         }
         let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(e.path()).or_else(|_| std::fs::File::open(e.path())) else { continue };
@@ -878,6 +882,7 @@ pub fn outputs() -> Vec<Output> {
         if unsafe { libc::ioctl(fd, iowr(0xA0, 64) as _, &mut res) } != 0 || res.n_crtcs == 0 {
             continue;
         }
+        let adapter_luid = crate::probe::gpu_linux::card_luid(&card);
         let mut crtcs = vec![0u32; res.n_crtcs as usize];
         let mut res2 = CardRes { crtc_ptr: crtcs.as_mut_ptr() as u64, n_crtcs: res.n_crtcs, ..CardRes::default() };
         if unsafe { libc::ioctl(fd, iowr(0xA0, 64) as _, &mut res2) } != 0 {
@@ -898,7 +903,7 @@ pub fn outputs() -> Vec<Output> {
                 total *= 2.0; // double scan
             }
             let hz = if total > 0.0 { m.clock as f64 * 1000.0 / total } else { m.vrefresh as f64 };
-            out.push(Output { driver: driver.clone(), x: c.x as i32, y: c.y as i32, width: m.hdisplay as u32, height: m.vdisplay as u32, hz });
+            out.push(Output { driver: driver.clone(), adapter_luid, x: c.x as i32, y: c.y as i32, width: m.hdisplay as u32, height: m.vdisplay as u32, hz });
         }
     }
     out
@@ -970,5 +975,10 @@ pub fn display_of(hwnd: isize) -> Option<super::DisplayPath> {
     let (cx, cy) = (w.rect.0 + w.rect.2 / 2, w.rect.1 + w.rect.3 / 2);
     let outs = outputs();
     let o = outs.iter().find(|o| cx >= o.x && cy >= o.y && cx < o.x + o.width as i32 && cy < o.y + o.height as i32).or(if outs.len() == 1 { outs.first() } else { None })?;
-    Some(super::DisplayPath { device: format!("{} {}x{}+{}+{}{}", o.driver, o.width, o.height, o.x, o.y, if o.is_virtual() { " (virtual)" } else { "" }), target: 0, adapter_luid: 0, hz: o.hz })
+    Some(super::DisplayPath {
+        device: format!("{} {}x{}+{}+{}{}", o.driver, o.width, o.height, o.x, o.y, if o.is_virtual() { " (virtual)" } else { "" }),
+        target: 0,
+        adapter_luid: o.adapter_luid,
+        hz: o.hz,
+    })
 }
