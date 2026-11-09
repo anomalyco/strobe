@@ -200,6 +200,9 @@ pub struct Sync {
     pub wall_lead_us: f64,
     /// strobe's clock around the request in which `strobeClockMark` spun and read that edge.
     pub mark: (u64, u64),
+    /// The spin's own span on strobe's clock (ns): the host's monotonic readings at its ends, placed by
+    /// `offset_ns`. None from a host before it said so.
+    pub spin: Option<(f64, f64)>,
 }
 
 impl Sync {
@@ -216,7 +219,9 @@ impl Sync {
             .fix("run it again on a machine with CPUs to spare")
             .into());
         }
-        Ok(Sync { offset_ns: (best.0 as f64 + best.1 as f64) / 2.0 - best.2 * 1e3, rtt_ns: best.1 - best.0, wall_lead_us: wall - at, mark: (mark.0, mark.1) })
+        let offset_ns = (best.0 as f64 + best.1 as f64) / 2.0 - best.2 * 1e3;
+        let spin = mark.2["spin_mono_us"].as_array().and_then(|s| Some((s.first()?.as_f64()? * 1e3 + offset_ns, s.get(1)?.as_f64()? * 1e3 + offset_ns)));
+        Ok(Sync { offset_ns, rtt_ns: best.1 - best.0, wall_lead_us: wall - at, mark: (mark.0, mark.1), spin })
     }
 }
 
@@ -310,10 +315,27 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     let mut offs: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
     // Per spin: the shifts (ms) that would put all its samples inside strobe's span, `(a - first, b - last)`.
     let mut fit_ms = [(f64::NEG_INFINITY, f64::INFINITY); 2];
+    // Each spin's span: its own (the host's monotonic readings at its ends), which must lie inside strobe's
+    // request around it, else strobe's request.
+    let mut spans = [(0.0, 0.0); 2];
+    for (k, (when, s)) in readings.iter().enumerate() {
+        let (a, b) = (s.mark.0 as f64, s.mark.1 as f64);
+        spans[k] = match s.spin {
+            Some((x, y)) if x < a - SYNC_NS || y > b + SYNC_NS => {
+                return Err(unsynced(format!(
+                    "the host's spin {when} lies {:+.2} to {:+.2} ms from strobe's request around it, on the host's monotonic clock as strobe places it: that clock does not match strobe's",
+                    (x - a) / 1e6,
+                    (y - b) / 1e6
+                )));
+            }
+            Some(span) => span,
+            None => (a, b),
+        };
+    }
     for at in times_us.iter().zip(&marked).filter(|(_, m)| **m).map(|(t, _)| t) {
         let ns = at * 1e3;
         let k = usize::from((ns - exit.mark.0 as f64).abs() < (ns - ready.mark.0 as f64).abs());
-        let (a, b) = (readings[k].1.mark.0 as f64, readings[k].1.mark.1 as f64);
+        let (a, b) = spans[k];
         offs[k].push(if ns < a { ns - a } else { (ns - b).max(0.0) });
         fit_ms[k] = (fit_ms[k].0.max((a - ns) / 1e6), fit_ms[k].1.min((b - ns) / 1e6));
     }

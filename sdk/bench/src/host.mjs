@@ -26,13 +26,15 @@ const mono = () => {
   return Number(ns / 1000n) + Number(ns % 1000n) / 1000
 }
 
-// Spins at least `ms` milliseconds (attribution blocks only, twice a block) and until it has read the
+// Spins at least `ms` milliseconds (attribution blocks only, twice a block), saying when on the
+// monotonic clock, and until it has read the
 // wall clock at a Date.now() millisecond tick it caught tightly: two Date.now() calls a millisecond
 // apart, under 50 µs apart on the monotonic clock, so the tick (between them) is known within 25 µs.
 // A tick seen after the thread was off a CPU (the calls far apart, or two milliseconds in one step)
 // is skipped. Without a tight tick in 20 ms, wall_us is 0 and strobe refuses the profile. The samples
 // the CPU profile takes of this function show where the profile puts a moment strobe also timed.
 function strobeClockMark(ms) {
+  const first = mono()
   const start = performance.now()
   let wall = 0
   let at = 0
@@ -53,7 +55,8 @@ function strobeClockMark(ms) {
     before = b
     d0 = d
   }
-  return { wall_us: wall, wall_mono_us: at }
+  // The spin's own span on the monotonic clock: where its samples must lie.
+  return { wall_us: wall, wall_mono_us: at, spin_mono_us: [first, mono()] }
 }
 
 createInterface({ input: socket }).on("line", async (line) => {
