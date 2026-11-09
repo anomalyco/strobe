@@ -308,7 +308,8 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
     // The stop watcher ends first: a stop now no longer races this close.
     drop(stop);
     n.close(home.fresh);
-    result
+    // What the app's last moments did to the user's own state, after everything of it ended (as a tty look).
+    result.and_then(|o| guard.check("after the look").map(|_| o))
 }
 
 /// A windowless look (`--windowless`, a profile's `window: false`): there is no window to read, so it watches
@@ -339,20 +340,33 @@ fn windowless(n: &mut crate::target::native::Native, guard: &crate::target::isol
         }
     };
     let mut ended = None;
+    let guarded = |problems: &mut Vec<String>, when: &str| match guard.check(when) {
+        Ok(()) => true,
+        Err(e) => {
+            problems.push(format!("{}{}", e.message, e.hint.map(|h| format!(" ({h})")).unwrap_or_default()));
+            false
+        }
+    };
+    let mut intact = true;
     while started.elapsed() < wait {
         take(&*n, Instant::now() + Duration::from_millis(100));
+        // The guards first, so an app that ends at once is checked too.
+        if !guarded(&mut problems, "while the app ran") {
+            intact = false;
+            break;
+        }
         // A launcher that exits cleanly and leaves the app running is not the app ending.
         if let Some(code) = n.exited().filter(|&c| c != 0 || n.processes().is_empty()) {
             ended = Some((code, started.elapsed()));
             break;
         }
-        if let Err(e) = guard.check("while the app ran") {
-            problems.push(format!("{}{}", e.message, e.hint.map(|h| format!(" ({h})")).unwrap_or_default()));
-            break;
-        }
     }
     // What it printed before it ended, read to the end of its pipes (at most half a second more).
     take(&*n, Instant::now() + if ended.is_some() { Duration::from_millis(500) } else { Duration::ZERO });
+    // And the guards once more after that, whatever ended the watch.
+    if intact {
+        guarded(&mut problems, "after the app ran");
+    }
     let processes = n.pids().len();
     if let Some((code, _)) = ended.filter(|(c, _)| *c != 0) {
         problems.push(format!("the app exited with code {code}"));

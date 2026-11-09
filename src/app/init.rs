@@ -111,6 +111,9 @@ impl Project {
             _ => return None,
         };
         let file = file.trim_start_matches("./").to_string();
+        if !inside(&file) {
+            return None;
+        }
         let first = std::fs::read_to_string(self.dir.join(&file)).ok().and_then(|t| t.lines().next().map(str::to_string)).unwrap_or_default();
         let runtime = if first.starts_with("#!") && first.contains("node") { "node" } else { "bun" };
         Some((name, format!("{runtime} {file}")))
@@ -133,7 +136,7 @@ impl Project {
         declared
             .into_iter()
             .map(|f| f.trim_start_matches("./").to_string())
-            .find(|f| code(f) && (built || self.dir.join(f).is_file()))
+            .find(|f| inside(f) && code(f) && (built || self.dir.join(f).is_file()))
             .or_else(|| usual.into_iter().find(|f| self.dir.join(f).is_file()))
     }
 
@@ -191,6 +194,12 @@ fn cargo_bins(text: &str, dir: &Path) -> Vec<String> {
         bins.push(p);
     }
     bins
+}
+
+/// Whether a path a package names stays in its folder: relative, without `..`.
+fn inside(path: &str) -> bool {
+    let p = Path::new(path);
+    p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_) | std::path::Component::RootDir))
 }
 
 /// The folder as the OS resolves it, without Windows' `\\?\` prefix.
@@ -476,16 +485,18 @@ fn plan(kind: Kind, p: &Project) -> Result<Plan> {
             // Both run in the variant's root, so their paths are from there.
             let cli = kind == Kind::Cli;
             let opts = |build: Option<String>| build.map(|b| format!(", {{ build: {} }}", lit(&b))).unwrap_or_default();
+            // A package whose program is its build's output (TypeScript to dist/) builds once per variant first.
+            let script_build = p.script("build").map(|_| p.in_dir(&p.run("build")));
             let (exe, run, opts, what) = if let Some((name, line)) = p.bin() {
                 let line = p.rooted_line(&line);
                 let line = if cli { format!("{line} --help") } else { line };
-                (String::new(), lit(&line), opts(None), format!("the package's program {name}"))
+                (String::new(), lit(&line), opts(script_build), format!("the package's program {name}"))
             } else if let Some(bin) = p.bins.first() {
                 let (exe, build) = cargo_exe(p, bin);
                 let run = if cli { "`${exe} --help`".to_string() } else { "exe".to_string() };
                 (exe, run, opts(Some(build)), format!("the Cargo binary {bin}"))
             } else if !cli && p.script("start").is_some() {
-                (String::new(), lit(&p.in_dir(&p.run("start"))), opts(None), "the package's start script".to_string())
+                (String::new(), lit(&p.in_dir(&p.run("start"))), opts(script_build), "the package's start script".to_string())
             } else {
                 return Err(Error::usage(format!("a {} bench runs the project's program, and {} names none (package.json bin, a Cargo.toml binary)", kind.name(), p.dir.display()))
                     .hint("write the command in the bench yourself: cli(\"<command> <args>\") or tty(\"<command>\")"));
@@ -518,6 +529,17 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let given = args.get("target").map(|t| Kind::parse(t.trim())).transpose()?;
     let dir = real(&dir).ok_or_else(|| Error::usage(format!("{} cannot be read", dir.display())))?;
+    // strobe's own folders are no project: <state>/strobe.json is the user's config for every repository.
+    for own in [crate::host::paths::state_path(), super::up::install_dir()] {
+        if real(&own).is_some_and(|o| dir.starts_with(&o)) {
+            return Err(Error::usage(format!("{} is inside strobe's own folder {}: init writes a project's files, never strobe's", dir.display(), own.display()))
+                .hint("run it in your project's folder; your own app profiles go in strobe.json there, which strobe config checks"));
+        }
+    }
+    // Nothing is written through a symbolic link: it could point out of the project.
+    if std::fs::symlink_metadata(dir.join("perf")).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(Error::usage(format!("{} is a symbolic link: init writes perf/ in the project only", dir.join("perf").display())));
+    }
     let p = Project::read(&dir)?;
     let kind = match given {
         Some(k) => k,
@@ -551,8 +573,14 @@ pub fn run(args: &Args) -> Result<Output> {
     let shown = |f: &Path| f.strip_prefix(&dir).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.display().to_string());
     let (mut wrote, mut kept) = (Vec::new(), Vec::new());
     let mut config_differs = false;
+    // A link counts as there (a broken one too) and is never written through, --force or not: refused
+    // before anything is written.
+    let link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    if force && let Some((path, _)) = files.iter().find(|(p, _)| link(p)) {
+        return Err(Error::usage(format!("{} is a symbolic link: init never writes through one (it could point out of the project)", path.display())).hint("remove the link, then strobe init --force"));
+    }
     for (path, text) in &files {
-        if path.exists() && !force {
+        if (link(path) || path.exists()) && !force {
             kept.push(shown(path));
             config_differs |= path.ends_with("strobe.json") && std::fs::read_to_string(path).ok().as_ref() != Some(text);
             continue;

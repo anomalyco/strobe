@@ -805,6 +805,26 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// The command line with a relative program path (one holding `/` or `\`) made absolute from `cwd`
+    /// (`.exe` added when it has no extension and that file is there): CreateProcessW would resolve it from
+    /// strobe's own folder. A bare name is left to the search Windows does.
+    fn from_cwd(line: &str, cwd: &std::path::Path) -> String {
+        let line = line.trim_start();
+        let (program, rest) = match line.strip_prefix('"') {
+            Some(q) => q.split_once('"').unwrap_or((q, "")),
+            None => line.split_once(char::is_whitespace).unwrap_or((line, "")),
+        };
+        let path = std::path::Path::new(program);
+        if !path.is_relative() || !program.contains(['/', '\\']) {
+            return line.to_string();
+        }
+        let joined = cwd.join(path);
+        let exe = joined.with_extension("exe");
+        let joined = if path.extension().is_none() && exe.is_file() { exe } else { joined };
+        let shown = joined.display().to_string().replace('/', "\\");
+        if rest.is_empty() { quote(&shown) } else { format!("{} {}", quote(&shown), rest.trim_start()) }
+    }
+
     /// One argument as `CommandLineToArgvW` reads it back.
     fn quote(a: &str) -> String {
         if !a.is_empty() && !a.contains([' ', '\t', '"']) {
@@ -896,6 +916,7 @@ mod win {
                         return Err(Error::usage("tty(): an empty command"));
                     }
                 };
+                let line = from_cwd(&line, &spec.cwd);
                 let mut cmdline = wide(&line);
                 let mut sorted: Vec<&(String, String)> = env.iter().collect();
                 sorted.sort_by_key(|(k, _)| k.to_uppercase());

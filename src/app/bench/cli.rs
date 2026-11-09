@@ -78,7 +78,13 @@ fn command(line: &str, shell: bool, root: &Path) -> Command {
             return crate::target::command::shell(line);
         }
         let path = Path::new(&program);
-        let program = if path.is_relative() && program.contains(['/', '\\']) && root.join(path).is_file() { root.join(path).display().to_string() } else { program };
+        let program = if path.is_relative() && program.contains(['/', '\\']) {
+            let joined = root.join(path);
+            let exe = joined.with_extension("exe");
+            if path.extension().is_none() && exe.is_file() { exe } else { joined }.display().to_string()
+        } else {
+            program
+        };
         let mut c = Command::new(program);
         if !rest.trim().is_empty() {
             c.raw_arg(rest.trim());

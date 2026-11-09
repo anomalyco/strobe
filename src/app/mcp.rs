@@ -119,7 +119,7 @@ const TOOLS: &[Tool] = &[
             ("wayland", "Linux: the file's native targets on a headless Wayland compositor strobe starts per launch (sway): no display needed; frame and input-latency metrics refused (Headless)"),
             (
                 "mobile",
-                "true, or an adb serial: the file's phone targets (emulate: \"mobile\") run in Chrome on an Android phone over adb instead of being emulated (every other target refused NotForTarget); timed blocks are refused on an emulator (Emulator; check runs there) or over Wi-Fi (WirelessTransport); on a phone (not an emulator) strobe drives only a Chrome channel given to it once (strobe up --mobile=<serial> --channel canary)",
+                "true, or an adb serial: the file's phone targets (emulate: \"mobile\") run in Chrome on an Android phone over adb instead of being emulated (every other target refused NotForTarget); timed blocks are refused on an emulator (Emulator; check and leak runs run there) or over Wi-Fi (WirelessTransport); on a phone (not an emulator) strobe drives only a Chrome channel given to it once (strobe up --mobile=<serial> --channel canary)",
             ),
             ("blocks", "N timed blocks of head alone and their values, nothing compared (what track records for a commit)"),
             ("filter", "case names, comma-separated; exact unless a name holds * (a glob)"),
@@ -465,6 +465,13 @@ fn daemon_look(target: &str, obj: &serde_json::Map<String, Value>) -> Result<()>
     }
     if let Some(out) = obj.get("out").and_then(Value::as_str).filter(|o| relative(o)) {
         return Err(Error::usage(format!("look: out {out:?} is relative, which the daemon would write in its own working folder: give the absolute path")));
+    }
+    if let Some(home) = obj.get("home").and_then(Value::as_str).filter(|h| relative(h)) {
+        return Err(Error::usage(format!("look: home {home:?} is relative, which the daemon would read from its own working folder: give the absolute path")));
+    }
+    let image = obj.get("until").and_then(Value::as_str).and_then(|u| u.strip_prefix("image=")).map(|i| i.split(',').next().unwrap_or(""));
+    if let Some(png) = image.filter(|p| relative(p)) {
+        return Err(Error::usage(format!("look: until image={png:?} is relative, which the daemon would read from its own working folder: give the absolute path")));
     }
     if target.starts_with("tty:") || obj.get("build").is_some_and(|b| *b == Value::Bool(true)) {
         return Err(Error::usage(

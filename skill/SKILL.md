@@ -209,8 +209,10 @@ export default bench({
   targets in Chrome on the phone over adb; `look --mobile`, `record --mobile` too.
   - Give strobe a channel once: install Chrome Canary (or Dev, Beta), open it once, then
     `strobe up --mobile=<serial> --channel canary`. strobe never drives the phone's own Chrome.
-  - An emulator runs `--check`, `look` and attribution only (`Emulator`); timed runs refuse Wi-Fi
-    adb, Battery Saver, under 20% battery, and wait up to 3 min for a hot phone.
+  - An emulator runs `--check`, `look`, attribution and leak runs (`--probes memory`) only (`Emulator`);
+    timed runs refuse Wi-Fi adb, Battery Saver, under 20% battery, and wait up to 3 min for a hot phone.
+  - Leak runs work on a phone (the phone's heap and snapshots). Loopback addresses `prepare` returns
+    (an API, a WebSocket) are reversed to the phone, like `serve`.
   - `cpu.*`, `memory.*`, `gpu.*` refuse `NotForTarget` (this computer's processes): measure
     `main.work`, `frames.*`, `interaction.*`, `run.duration`. A lost phone ends the bench (exit 255).
 - An iPhone on a cable: `look wir:` and `record wir:` read an open Safari tab or WKWebView over Web
@@ -288,7 +290,8 @@ strobe run --base "<command>" --head "<command>" [--aa | --check] [--metrics met
 strobe query <rec_…|exp_…|recA..recB> <view> [--top N] [--by …] [--reveal] [--case <name>]
 strobe report <exp_…|rec_…|ser_…|result.json> [--format html|md|pr|card|badge] [--open]
 strobe report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
-                  (a --blocks run: HTML and md, its median and interval, no verdict; pr/card/badge refused)
+                  (a --blocks run: HTML and md, its median and interval, no verdict; pr/card/badge refused;
+                  --blocks 1 prints ★ <metric> <value> (1 block))
 strobe open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
 strobe look <url|file|wir:…|app:<id>|exe:<path>|tty:<command>> [--until <selector>] [--out shot.png]
 strobe look app:<id>|exe:<path> [--windowless] [--wait 2s] [--timeout 30s] [-- <args…>]
@@ -437,6 +440,8 @@ export default bench({
 - Clicks aim at the visible part of the element: nothing visible is `OutOfView`, something over it
   `Covered`. `type` is paced (one key a frame, each an `interaction.*` sample);
   `{ burst: true }` refuses `interaction.*` (measure `cpu.work` or a phase).
+- A key call with no selector whose `until` fails says `the page had no focus …` only when no key
+  reached the page and it had no focus: click the page first, or pass `{ selector }`.
 - `page.eval` takes a function; never call it in `run` (`main.script` refuses after it).
 - Headless pages: a run ends at its last step; `! HeadlessFrame` says the frame after it did the
   step's style and layout: give that step `{ until: [selector, "frame"] }`.

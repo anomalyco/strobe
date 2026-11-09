@@ -449,7 +449,8 @@ Use
         [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a comparison keeps
                                         the pairs it has, anything else stops, exit 124)
         [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over adb instead
-                                        of emulated; timed blocks refuse an emulator: --check runs there)
+                                        of emulated; timed blocks refuse an emulator: --check and leak runs
+                                        run there)
         [--pin auto|none|ccdN|<cpus>]  (auto: the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its fastest cores;
                                         otherwise all but the last 1-2 whole cores, which strobe and the runner get;
                                         fewer than 4 cores, more than 64 CPUs, or macOS: unpinned)
