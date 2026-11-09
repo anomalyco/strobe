@@ -377,9 +377,10 @@ pub fn win_error(rc: u32) -> String {
 
 /// Field layouts of manifest events, from TDH once per (provider, id, version) per process: read from
 /// the providers' manifests before a session (`Schema::read_manifests`), else from an event's record.
-/// A session's consumer takes what earlier sessions learned (`Schema::shared`) and gives it back when
-/// it ends (`Schema::keep`), so a session's first events cost a lookup, not a TDH call each.
-#[derive(Default)]
+/// A session's consumer starts from a copy of what earlier sessions learned (`Schema::shared`) and adds
+/// what it learned when it ends (`Schema::keep`), so a session's first events cost a lookup, not a TDH
+/// call each; a session abandoned before its end loses only its own additions.
+#[derive(Clone, Default)]
 pub struct Schema {
     cache: HashMap<(u128, u16, u8), Option<Vec<Prop>>>,
     /// (provider, id, version, call site, 64-bit) → field offsets, for fixed layouts.
@@ -388,6 +389,7 @@ pub struct Schema {
 
 static SHARED: std::sync::Mutex<Option<Schema>> = std::sync::Mutex::new(None);
 
+#[derive(Clone)]
 struct Prop {
     name: String,
     flags: i32,
@@ -411,9 +413,9 @@ fn key(g: &GUID) -> u128 {
 }
 
 impl Schema {
-    /// What this process's sessions learned so far (taken: a session running beside it starts empty).
+    /// A copy of what this process's sessions learned so far.
     pub fn shared() -> Schema {
-        SHARED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+        SHARED.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
     }
 
     /// Gives what this session learned back to the process's sessions.
@@ -496,7 +498,7 @@ impl Schema {
         let data = payload(e);
         let Some(props) = self.layout(e) else { return out };
         let mut off = 0usize;
-        let mut values = Values::default();
+        let mut values: Vec<u64> = Vec::with_capacity(props.len());
         let (mut fixed, mut cacheable, mut left) = (true, true, N);
         for p in props.iter().take_while(|p| !p.name.starts_with('\u{1}')) {
             if left == 0 {
@@ -574,41 +576,15 @@ fn read_tei(get: impl Fn(*mut TRACE_EVENT_INFO, &mut u32) -> u32) -> Option<Vec<
     }
 }
 
-/// The values of the properties walked so far (counts and lengths of later ones name them): the first
-/// 32 on the stack.
-#[derive(Default)]
-struct Values {
-    head: [u64; 32],
-    n: usize,
-    rest: Vec<u64>,
-}
-
-impl Values {
-    fn push(&mut self, v: u64) {
-        match self.head.get_mut(self.n) {
-            Some(slot) => *slot = v,
-            None => self.rest.push(v),
-        }
-        self.n += 1;
-    }
-
-    fn get(&self, i: usize) -> Option<u64> {
-        if i >= self.n {
-            return None;
-        }
-        self.head.get(i).or_else(|| self.rest.get(i - self.head.len())).copied()
-    }
-}
-
 /// Size of one element and the element count of property `p` at `off`.
-fn prop_size(props: &[Prop], p: &Prop, data: &[u8], off: usize, ptr64: bool, values: &Values) -> (usize, usize) {
-    let count = if p.flags & PropertyParamCount != 0 { values.get(p.count as usize).unwrap_or(0) as usize } else { (p.count as usize).max(1) };
+fn prop_size(props: &[Prop], p: &Prop, data: &[u8], off: usize, ptr64: bool, values: &[u64]) -> (usize, usize) {
+    let count = if p.flags & PropertyParamCount != 0 { values.get(p.count as usize).copied().unwrap_or(0) as usize } else { (p.count as usize).max(1) };
     if p.flags & PropertyStruct != 0 {
         let (start, n) = p.members;
         let size = (start..start + n).filter_map(|i| props.get(i as usize)).map(|m| m.length as usize * (m.count as usize).max(1)).sum();
         return (size, count);
     }
-    let length = if p.flags & PropertyParamLength != 0 { values.get(p.length as usize).unwrap_or(0) as usize } else { p.length as usize };
+    let length = if p.flags & PropertyParamLength != 0 { values.get(p.length as usize).copied().unwrap_or(0) as usize } else { p.length as usize };
     let size = match p.in_type as i32 {
         TDH_INTYPE_UNICODESTRING => {
             if length > 0 {
