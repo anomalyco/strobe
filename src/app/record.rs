@@ -108,7 +108,13 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
             format!("next     strobe query {rec} hotspots --by package · strobe query {rec} summary (per run) · strobe query {rec} style · strobe report recording {rec} --open\n")
         };
     }
-    Ok(Output::new(text, json!({ "recordings": recordings })))
+    // Other work on the CPUs (a slow speed check is said, never waited for): the recordings are a loaded
+    // machine's.
+    let busy: Vec<Value> = out.json["warnings"].as_array().into_iter().flatten().filter(|w| matches!(w["id"].as_str(), Some("Background" | "Throttled")) && w["level"] == "warn").cloned().collect();
+    for w in &busy {
+        text += &format!("! {:<24}{}\n", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or(""));
+    }
+    Ok(Output::new(text, json!({ "recordings": recordings, "warnings": busy })))
 }
 
 pub fn run(args: &Args) -> Result<Output> {

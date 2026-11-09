@@ -497,7 +497,9 @@ Not built: `--ring` (the flight recorder, below) and `--name`. `--pin` is the CP
   case, any WebKit case) runs its check and then refuses `EngineUnsupported` (exit 4) with why: there is
   no recording. `--max-time` caps it as a check's (§9.1 "Stop rule"): a wait that reaches it ends the
   record with exit 124 and no recording; without `--bench` it is a usage error (`--for` ends a recording).
-  Its check block's slow speed check is a warning, never a wait (§10.1 `Throttled`).
+  Its check block's slow speed check is a warning, never a wait (§10.1 `Throttled`): it prints the
+  run's `Background` and `Throttled` warnings under the recordings (JSON `warnings`), since they were
+  taken on a loaded machine.
 - `--engine firefox [--headless]` (or `webkit`: Safari headed only on macOS; WebKitGTK on Linux, headed,
   or `--headless` under `xvfb-run`; WPE headless sees a touch device and refuses `DeviceMismatch`) records a
   page in that engine (§13.1) from outside: its processes' CPU
@@ -7372,7 +7374,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | Tool | Input (beyond the CLI flags of the same name) | Output |
 |---|---|---|
 | `status` | `calibrate?`, `fast?` | §5.4 JSON |
-| `record` | `target` (not with `bench`), `for?`, `probes?`, `native?`, `app?`, `windowless?`, `headless?`, `wayland?`, `emulate?`, `engine?`, `mobile?`, `served?`, `style?`, `os-frames?`, `until-line?`, `stop-line?`, `bench?`, `head?`, `gpu-cache?`, `params?`, `runs?`, `seed?`, `pin?`, `power?`, `video?`, `max-time?`, `timeout?` | `{ handle, valid, summary, warnings }` (with `bench`: `{ recordings }`) |
+| `record` | `target` (not with `bench`), `for?`, `probes?`, `native?`, `app?`, `windowless?`, `headless?`, `wayland?`, `emulate?`, `engine?`, `mobile?`, `served?`, `style?`, `os-frames?`, `until-line?`, `stop-line?`, `bench?`, `head?`, `gpu-cache?`, `params?`, `runs?`, `seed?`, `pin?`, `power?`, `video?`, `max-time?`, `timeout?` | `{ handle, valid, summary, warnings }` (with `bench`: `{ recordings, warnings }`) |
 | `bench` | `file` (not with `stop`/`resume`), `head?`, `base?`, `aa?`, `check?`, `batch?`, `headless?`, `engine?`, `wayland?`, `mobile?`, `blocks?`, `filter?`, `target?`, `params?`, `primary?`, `equivalence?`, `noworse?`, `plan?`, `effect?`, `pilot?`, `pairs?`, `runs?`, `probes?`, `repeat?`, `seed?`, `bisect?`, `pin?`, `power?`, `reserve-cpus?`, `why?`, `trace?`, `keep?`, `pixels?`, `pixels-only?`, `video?`, `style?`, `max-time?`, `unlock-wait?`, `require-verdict?`, `require-parity?`, `stop?`, `resume?`, `timeout?` | result (§5.6) or `{ id, state: "running", progress }` |
 | `query` | `handle`, `view?`, `sql?`, `by?`, `source?`, `top?`, `reveal?`, `at?`, `native?`, `thread?`, `pid?`, `sort?`, `case?`, `phase?`, `timeline?`; `history`, `changes` or `ser_…` for tracked history (§25.5) | view JSON |
 | `report` | `handle` (or a `result.json`/`meta.json` path), `view?`, `format?`, `out?`, `theme?`, `update-pr?`, `repo?`, `force?`, `no-card?`, `badge-url?`, `scoreboard?` | `{ path, bytes }` |
