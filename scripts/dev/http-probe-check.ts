@@ -1,5 +1,5 @@
 // The HTTP probe's known answers (http-probe.bench.ts, SPEC §8.9) and its secret hygiene, dev only, not shipped:
-// runs every case as a --check with a fresh random token (the server's bearer token, also in the probe's URL query),
+// runs every case as a --check with a fresh random token (the probe's bearer token, also in its URL's query),
 // checks what strobe read against the truth, records one case (record --bench: its attribution block probes too),
 // builds each recording's Perfetto trace and the experiments' reports, then reads every file strobe wrote for them
 // (gzipped ones unpacked), every answer it printed, for the token. Exit 0 only when every check held.
@@ -21,10 +21,17 @@ const check = (ok: boolean, what: string) => {
   if (!ok) failed++
 }
 
+// The token reaches the bench file through a file, and the server only as its hash: no process strobe starts has it in
+// its environment, and the server's heap (an attribution block keeps its heap profile) never holds it.
+const scratch = mkdtempSync(join(tmpdir(), "http-probe-token-"))
+const tokenFile = join(scratch, "token")
+await Bun.write(tokenFile, token)
+const tokenEnv = { HTTP_PROBE_TOKEN_FILE: tokenFile, HTTP_PROBE_TOKEN_SHA256: new Bun.CryptoHasher("sha256").update(`Bearer ${token}`).digest("hex") }
+
 function run(args: string[], env: Record<string, string> = {}): any {
   const p = Bun.spawnSync([strobe, ...args, "--json", "--progress", "off"], {
     cwd: repo,
-    env: { ...process.env, HTTP_PROBE_TOKEN: token, ...env },
+    env: { ...process.env, ...tokenEnv, ...env },
     stdout: "pipe",
     stderr: "pipe",
     timeout: 10 * 60_000,
@@ -121,5 +128,6 @@ roots.forEach(walk)
 check(files > 0 && seen.length === 0, `the token is in none of the ${files} files strobe wrote${seen.length ? `: ${seen.join(", ")}` : ""}`)
 check(!printed.some((t) => needles.some((n) => t.includes(n))), "the token is in nothing strobe printed")
 rmSync(out, { recursive: true, force: true })
+rmSync(scratch, { recursive: true, force: true })
 console.log(failed ? `${failed} checks failed` : "every check held")
 process.exit(failed ? 1 : 0)

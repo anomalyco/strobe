@@ -5864,7 +5864,8 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
         b.phases.clear();
     }
     let asked = taken.is_some();
-    let Some(mut data) = taken.and_then(|t| t.data) else {
+    let (data, secrets) = taken.map_or((None, http_probe::Secrets::default()), |t| (t.data, t.secrets));
+    let Some(mut data) = data else {
         if x.probes_http() {
             let why = if !asked { "the case's setup never called ctx.httpProbe" } else { "the HTTP probe did not run in this block" };
             for m in declared {
@@ -5890,6 +5891,18 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     if let Some(pct) = summary["cpu_pct"].as_f64() {
         b.overhead.get_or_insert_with(Overhead::default).http_probe_pct = Some(pct);
     }
+    // The target got what the probe sent (its authorization, its URL's query): what it wrote of its own
+    // memory into the block's recording (a script host's heap profile holds the requests its server
+    // read) or printed to the experiment's logs keeps none of it.
+    let mut written: Vec<PathBuf> = b.recording.iter().filter_map(|id| store::resolve(id).ok()).collect();
+    if let Ok(dir) = store::experiment_dir(&ctx.exp) {
+        written.extend(std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "log")));
+    }
+    let redacted = http_probe::scrub(&written, &secrets);
+    if redacted > 0 {
+        summary["redacted_files"] = json!(redacted);
+    }
+    drop(secrets);
     if x.keep || x.untimed || x.set == Set::Attribution {
         match keep_probes(ctx, s, v, x, &mut b, &data, &summary) {
             Ok(rec) => summary["recording"] = json!(rec),

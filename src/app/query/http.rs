@@ -183,10 +183,10 @@ impl View {
             n => format!("idle      {n} probes after setup, before any run: p50 {} · p95 {} · max {}\n", ms(&j["idle"]["p50"]), ms(&j["idle"]["p95"]), ms(&j["idle"]["max"])),
         };
         t += &format!(
-            "measured  {} due in {} measured run{}' timed parts: {} answered · {} timeouts · {} errors · {} missed{}\n",
+            "measured  {} due in {} measured run{} timed parts: {} answered · {} timeouts · {} errors · {} missed{}\n",
             m["due"],
             m["runs"],
-            if m["runs"] == 1 { "" } else { "s" },
+            if m["runs"] == 1 { "'s" } else { "s'" },
             m["ok"],
             m["timeouts"],
             m["errors"],
@@ -213,7 +213,13 @@ impl View {
                 (Some(h), true) => format!("the server answered none for at least {} (the last timed out)", fmt::value(h, "ms")),
                 (None, _) => "none of them was answered".to_string(),
             };
-            t += &format!("  {} +{:.2} s  {} probes: {} ms  · {held}\n", c["run"].as_str().unwrap_or(c["when"].as_str().unwrap_or("")), c["at_s"].as_f64().unwrap_or(0.0), c["probes"], lat.join(" "));
+            // Where it began: a measured run, or a run that is not (warmup, the check's run after its reset).
+            let at = match (c["run"].as_str(), c["when"].as_str().unwrap_or("")) {
+                (Some(r), "measured") => r.to_string(),
+                (Some(r), when) => format!("{r} ({})", if when == "warmup" { "not measured" } else { when }),
+                (None, when) => when.to_string(),
+            };
+            t += &format!("  {at} +{:.2} s  {} probes: {} ms  · {held}\n", c["at_s"].as_f64().unwrap_or(0.0), c["probes"], lat.join(" "));
         }
         t
     }

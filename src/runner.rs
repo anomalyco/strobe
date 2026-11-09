@@ -122,6 +122,8 @@ struct Http {
     /// options were wrong (the setup's error, exit 2).
     described: Option<http_probe::Described>,
     asked: Option<http_probe::Config>,
+    /// What the probe sends that strobe never writes, for the block's recording (`http_probe::scrub`).
+    secrets: Option<http_probe::Secrets>,
     usage: Option<Error>,
     driver: Option<http_probe::Driver>,
     stopped: Option<http_probe::Stopped>,
@@ -140,6 +142,8 @@ struct Http {
 pub struct HttpTaken {
     pub described: http_probe::Described,
     pub data: Option<http_probe::Data>,
+    /// What the probe sent that the target may have written into the block's recording itself.
+    pub secrets: http_probe::Secrets,
 }
 
 /// What the runner reports about a bench file.
@@ -317,7 +321,7 @@ impl Runner {
         let h = std::mem::take(&mut self.http);
         let described = h.described?;
         let data = h.stopped.map(|s| http_probe::Data { config: described.clone(), start_ns: s.start_ns, end_ns: s.end_ns, cpu_ms: s.cpu_ms, idle: h.idle, runs: h.runs, samples: s.samples });
-        Some(HttpTaken { described, data })
+        Some(HttpTaken { described, data, secrets: h.secrets.unwrap_or_default() })
     }
 
     /// `ctx.httpProbe(options)` from setup: its options read (the authorization into a `Secret`), and
@@ -333,6 +337,7 @@ impl Runner {
         match r {
             Ok(cfg) => {
                 self.http.described = Some(cfg.describe());
+                self.http.secrets = Some(cfg.secrets());
                 self.http.asked = Some(cfg);
                 Ok(())
             }

@@ -76,6 +76,86 @@ pub fn wipe_value(v: &mut Value) {
     }
 }
 
+/// What a probe sent that strobe never writes (`Config::secrets`), kept until the block's recording is
+/// written: the target got them, and what it wrote of its own memory there (a script host's heap profile
+/// holds the requests its server read, header strings and all) has each occurrence made `*`s (`scrub`).
+#[derive(Debug, Default)]
+pub struct Secrets(Vec<Secret>);
+
+/// Makes every occurrence of `secrets` in the files `paths` (a directory: every file under it) as many
+/// `*`s, gzipped files unpacked and packed again; a file that held one is written again owner-only, or
+/// removed when it cannot be. Returns how many files held one.
+pub fn scrub(paths: &[std::path::PathBuf], secrets: &Secrets) -> usize {
+    if secrets.0.is_empty() {
+        return 0;
+    }
+    let mut files = Vec::new();
+    let mut todo: Vec<std::path::PathBuf> = paths.to_vec();
+    while let Some(p) = todo.pop() {
+        match std::fs::read_dir(&p) {
+            Ok(rd) => todo.extend(rd.flatten().map(|e| e.path())),
+            Err(_) if p.is_file() => files.push(p),
+            Err(_) => {}
+        }
+    }
+    let mut n = 0;
+    for path in files {
+        let Ok(raw) = std::fs::read(&path) else { continue };
+        let gz = raw.starts_with(&[0x1f, 0x8b]);
+        let mut bytes = if gz {
+            let mut out = Vec::new();
+            if flate2::read::GzDecoder::new(raw.as_slice()).read_to_end(&mut out).is_err() {
+                continue;
+            }
+            out
+        } else {
+            raw
+        };
+        let mut hit = false;
+        for s in &secrets.0 {
+            hit |= redact(&mut bytes, &s.0);
+        }
+        if !hit {
+            continue;
+        }
+        let body = if gz {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            if e.write_all(&bytes).is_err() {
+                continue;
+            }
+            e.finish().unwrap_or_default()
+        } else {
+            bytes
+        };
+        let written = crate::store::create(&path).ok().is_some_and(|mut f| f.write_all(&body).is_ok() && f.commit().is_ok());
+        // A file that cannot be written again goes: it never keeps the secret.
+        if !written {
+            let _ = std::fs::remove_file(&path);
+        }
+        n += 1;
+    }
+    n
+}
+
+/// Every occurrence of `needle` in `hay` made `*`s; whether there was one.
+fn redact(hay: &mut [u8], needle: &[u8]) -> bool {
+    let k = needle.len();
+    if k == 0 || hay.len() < k {
+        return false;
+    }
+    let (mut hit, mut i) = (false, 0);
+    while i + k <= hay.len() {
+        if hay[i] == needle[0] && hay[i..i + k] == *needle {
+            hay[i..i + k].fill(b'*');
+            hit = true;
+            i += k;
+        } else {
+            i += 1;
+        }
+    }
+    hit
+}
+
 /// A header whose value is a `Secret`: its name may be said, its value never.
 #[derive(Debug)]
 pub struct SecretHeader {
@@ -277,6 +357,24 @@ impl Config {
             return Err(usage("expect: a HEAD response has no body to read"));
         }
         Ok(Config { method, authority, addrs, target, url: shown, cadence_ms, timeout_ms, idle_ms, connection, max_in_flight, headers, authorization, expect })
+    }
+
+    /// What it sends that strobe never writes: the authorization's value (and its credential alone, past a
+    /// scheme such as `Bearer `), and the URL's query values of 8 characters or more.
+    pub fn secrets(&self) -> Secrets {
+        let mut v = Vec::new();
+        if let Some(a) = &self.authorization {
+            v.push(Secret(a.value.0.clone()));
+            if let Some(i) = a.value.0.iter().position(|b| *b == b' ')
+                && a.value.0.len() - i > 8
+            {
+                v.push(Secret(a.value.0[i + 1..].to_vec()));
+            }
+        }
+        if let Some((_, q)) = self.target.split_once('?') {
+            v.extend(q.split('&').filter_map(|p| p.split_once('=')).filter(|(_, x)| x.len() >= 8).map(|(_, x)| Secret(x.as_bytes().to_vec())));
+        }
+        Secrets(v)
     }
 
     pub fn describe(&self) -> Described {
@@ -921,7 +1019,8 @@ impl Driver {
                         if sh.stop.load(Ordering::SeqCst) {
                             break 'slots;
                         }
-                        std::thread::sleep(Duration::from_nanos((due - now).min(20_000_000)));
+                        // One sleep to the slot (each wake costs the probe CPU); a stop waits at most 200 ms.
+                        std::thread::sleep(Duration::from_nanos((due - now).min(200_000_000)));
                     }
                     // Calibration: the scheduler held up, as a busy machine would hold it.
                     if let Some((_, len)) = pause.filter(|(at, _)| due >= start + at) {

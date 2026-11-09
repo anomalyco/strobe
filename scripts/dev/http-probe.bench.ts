@@ -1,6 +1,6 @@
 // Known-answer bench for the HTTP probe (SPEC §8.9; dev only, not shipped). http-probe-server.ts serves GET /health in
-// the script host's own thread, so a stall of that thread holds every request. Run it through the check, which sets the
-// server's token and greps strobe's files for it afterwards:
+// the script host's own thread, so a stall of that thread holds every request. Run it through the check, which makes a
+// token (HTTP_PROBE_TOKEN_FILE, its hash for the server) and greps strobe's files for it afterwards:
 //   bun scripts/dev/http-probe-check.ts [path/to/strobe]
 // Truth, a probe every 100 ms:
 //   stall-750ms       the thread is held 750 ms: the ~8 probes due then form one cohort, the first ~4 timing out at
@@ -32,9 +32,12 @@ const answering = (mode: string) => async ({ call }: any) => {
 export default bench({
   targets: { server: script("./http-probe-server.ts") },
   async setup(ctx) {
-    const { url, token } = await ctx.call<{ url: string; token: string }>("start")
+    const url = await ctx.call<string>("start")
+    // The bench file reads the token; the server knows only its hash. It goes in the URL's query too, which strobe
+    // sends and must never write.
+    const token = (await Bun.file(process.env.HTTP_PROBE_TOKEN_FILE ?? "").text()).trim()
     await ctx.httpProbe({
-      url,
+      url: `${url}?key=${token}`,
       authorization: `Bearer ${token}`,
       cadenceMs: 100,
       timeoutMs: ctx.case === "stall-750ms-long" ? 1500 : 400,
