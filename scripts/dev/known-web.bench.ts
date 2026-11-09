@@ -40,14 +40,21 @@ const target = url(`http://127.0.0.1:${port}/`, {
   },
 })
 
-// CPU time (ms) of every process of the browsers strobe drives, from the OS; null off Windows.
+// CPU time (ms) of the browser this strobe drives, from the OS; null off Windows or when none is found.
+// Only its tree: the processes whose command line names this strobe's profile (`run\profile-<strobe pid>-…`,
+// strobe being the runner's parent) and their descendants, never a person's browser running beside it.
 function osCpuMs(): number | null {
   if (process.platform !== "win32") return null
-  // Only browsers started in the last 10 minutes: this block's, not another session's left running.
-  const ps =
-    "$since = (Get-Date).AddMinutes(-10); (Get-Process firefox,chrome,chrome-headless-shell,msedge -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt $since } | ForEach-Object { $_.TotalProcessorTime.Ticks } | Measure-Object -Sum).Sum"
-  const out = Bun.spawnSync(["powershell", "-NoProfile", "-Command", ps]).stdout.toString().trim()
-  return Number(out) / 1e4
+  // The profile reaches PowerShell in its environment, not its command line, which it would match itself.
+  const profile = `\\strobe\\run\\profile-${process.ppid}-`.toLowerCase()
+  const ps = [
+    "$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CommandLine,CreationDate,KernelModeTime,UserModeTime)",
+    "$set = @{}; foreach ($p in $all) { if ($p.ProcessId -ne $PID -and $p.CommandLine -and $p.CommandLine.ToLower().Contains($env:STROBE_PROFILE)) { $set[$p.ProcessId] = $p } }",
+    "do { $n = $set.Count; foreach ($p in $all) { $up = $set[$p.ParentProcessId]; if (-not $set.ContainsKey($p.ProcessId) -and $up -and $p.CreationDate -ge $up.CreationDate) { $set[$p.ProcessId] = $p } } } while ($set.Count -ne $n)",
+    "if ($set.Count) { ($set.Values | ForEach-Object { $_.KernelModeTime + $_.UserModeTime } | Measure-Object -Sum).Sum }",
+  ].join("; ")
+  const out = Bun.spawnSync(["powershell", "-NoProfile", "-Command", ps], { env: { ...process.env, STROBE_PROFILE: profile } }).stdout.toString().trim()
+  return out ? Number(out) / 1e4 : null
 }
 
 const main = ["main.work", "main.busy", "main.script", "main.tasks.long", "run.duration", "cpu.renderer", "cpu.app.total", "cpu.browser", "cpu.gpu"]
@@ -122,8 +129,8 @@ export default bench({
         count("frame_ms", Number(await page.eval(() => (window as any).known.twoFrames())) > 0 ? 1 : 0)
       },
     },
-    // A 2 s spin, with the browser's CPU read by the OS around it (Windows: every browser process's
-    // TotalProcessorTime, 15.6 ms ticks): count.os_cpu_ms is the truth for cpu.work.
+    // A 2 s spin, with the browser's CPU read by the OS around it (Windows: the kernel and user time of
+    // strobe's browser tree, 15.6 ms ticks): count.os_cpu_ms is the truth for cpu.work.
     cpu2s: {
       primary: "cpu.work",
       metrics: ["count.os_cpu_ms", "cpu.renderer", "cpu.app.total", "run.duration"],

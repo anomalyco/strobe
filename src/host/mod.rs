@@ -1174,6 +1174,23 @@ impl Topology {
         self.groups.iter().find(|g| g.l3_mb == max)
     }
 
+    /// The CPU's shape as `status` and `up` print it: one L3 group is no CCD (an Intel CPU, a single-CCD
+    /// Ryzen), several are named with their CPUs and V-Cache; a hybrid CPU adds its kinds of core.
+    pub fn cpu_shape(&self) -> Vec<String> {
+        let vcache = self.vcache().map(|v| v.mask);
+        let mut shape: Vec<String> = match self.groups.as_slice() {
+            [g] => vec![format!("{} MB L3", g.l3_mb)],
+            groups => groups.iter().enumerate().map(|(i, g)| format!("CCD{i} {} MB L3 ({} CPUs{})", g.l3_mb, g.cpus, if vcache == Some(g.mask) { ", V-Cache" } else { "" })).collect(),
+        };
+        let fastest = self.cores.iter().map(|c| c.class).max().unwrap_or(0);
+        let fast = self.cores.iter().filter(|c| c.class == fastest).count();
+        let slower = self.cores.len() - fast;
+        if slower > 0 {
+            shape.push(format!("{fast} fast and {slower} slower core{}", if slower == 1 { "" } else { "s" }));
+        }
+        shape
+    }
+
     /// Every CPU strobe may use (`allowed`).
     pub fn all(&self) -> u64 {
         self.allowed

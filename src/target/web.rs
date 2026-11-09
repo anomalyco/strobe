@@ -49,8 +49,14 @@ pub fn short_url(url: &str) -> String {
 
 /// Why a page of `engine` cannot run here at all, known before anything builds: WebKit on Windows has
 /// no browser a person runs (Safari is macOS only, Playwright's WebKit build is a test shell), and
-/// Safari has no headless mode; a headed page on Linux with no display has no window to open.
+/// Safari has no headless mode; a headed page on Linux with no display has no window to open; a Firefox
+/// older than strobe drives (`firefox::too_old`) runs no block.
 pub fn refusal(engine: WebEngine, headless: bool) -> Option<Error> {
+    if engine == WebEngine::Firefox
+        && let Some(r) = firefox::find().as_deref().and_then(firefox::too_old)
+    {
+        return Some(r.into());
+    }
     if !headless
         && cfg!(target_os = "linux")
         && let Some(why) = chromium::no_display()
