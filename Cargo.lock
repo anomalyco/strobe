@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "strobe"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "addr2line",
  "aes-gcm",
