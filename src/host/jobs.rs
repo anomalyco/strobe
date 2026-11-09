@@ -66,6 +66,24 @@ struct Watched {
 /// The watched jobs by their handle, taken out (`forget`) before the handle is closed.
 static WATCHED: Mutex<Option<HashMap<isize, Watched>>> = Mutex::new(None);
 
+/// Who hears of each process as it joins a watched job (`subscribe`): told by pid and creation time
+/// once the port's thread holds it, without waiting (a send to a channel never blocks), so the joining
+/// process never waits on strobe. A subscriber that went is dropped at the next join.
+static SUBSCRIBERS: Mutex<Vec<std::sync::mpsc::Sender<(u32, u64)>>> = Mutex::new(Vec::new());
+
+/// Every process that joins a watched job from now on, by pid and creation time, as the port's thread
+/// opens it (while its creation is still in progress: its first thread may not exist yet). Dropping
+/// the receiver ends it.
+pub fn subscribe() -> std::sync::mpsc::Receiver<(u32, u64)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+    rx
+}
+
+fn tell(key: (u32, u64)) {
+    SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| s.send(key).is_ok());
+}
+
 /// The completion port and its thread, made at the first job; None where it could not be.
 fn port() -> Option<isize> {
     static PORT: std::sync::OnceLock<Option<isize>> = std::sync::OnceLock::new();
@@ -157,6 +175,7 @@ fn take(jobs: &mut HashMap<isize, Watched>, msg: u32, key: usize, pid: u32) {
             if !h.is_null()
                 && let Some(k) = add(w, job, pid, h as isize)
             {
+                tell(k);
                 wrap(w, k, h as isize);
             }
         }

@@ -3,6 +3,7 @@
 mod actions;
 mod diff;
 mod http;
+mod inputs;
 mod rec;
 pub(crate) use rec::windows_sql;
 mod waits;
@@ -162,13 +163,27 @@ pub fn run(args: &Args) -> Result<Output> {
             Ok(Output::new(text, json))
         }
         "style" => style(&rec, top),
-        "sql" if !trace.is_file() => Err(Error::usage(format!(
-            "this recording has no trace to query{}",
-            if other_engine { ": a page in another engine than Chromium is measured without one (strobe open shows what it holds)" } else { "" }
-        ))),
         "sql" => {
             let sql = args.pos.get(2).ok_or_else(|| Error::usage("query <h> sql \"select …\""))?;
-            sql_view(&trace, sql, top.max(50))
+            // Without a Chrome trace (a script recording, a native one, a page in another engine): the
+            // Perfetto trace `strobe open` builds from what the recording holds, built now when it is not yet.
+            let file = if trace.is_file() {
+                trace
+            } else {
+                let built = dir.join("perfetto.pftrace");
+                if !built.is_file() {
+                    super::progress(format!("building {}'s Perfetto trace (what strobe open shows) to query", rec.id));
+                    crate::perfetto::build(&dir, &built).map_err(|e| {
+                        Error::usage(format!(
+                            "this recording has no trace to query, and its Perfetto trace could not be built: {}{}",
+                            e.message,
+                            if other_engine { " (a page in another engine than Chromium is measured without a trace)" } else { "" }
+                        ))
+                    })?;
+                }
+                built
+            };
+            sql_view(&file, sql, top.max(50))
         }
         "frames" if meta["wir"] == true => Err(Error::refused(
             "EngineUnsupported",
@@ -180,6 +195,7 @@ pub fn run(args: &Args) -> Result<Output> {
             Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", format!("strobe query {} memory --by layer", rec.id)))
         }
         "frames" if dir.join("frames.json").exists() || meta["native"] == true => native_frames(&dir, top, case.as_ref().map(|c| c.runs.as_slice())),
+        "inputs" => inputs::inputs(&dir, meta, top, case.as_ref().map(|c| c.runs.as_slice())),
         "threads" if case.is_some() && (args.has("timeline") || dir.join("threads.json").exists()) => {
             Err(Error::usage("--case: a native recording's threads count every case of its launch together (threads.json has no per-run rows); its frames take --case"))
         }
@@ -256,7 +272,9 @@ pub fn run(args: &Args) -> Result<Output> {
             }
             memory(&dir, by, top, args.get("at"))
         }
-        other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network insights actions sql"))),
+        other => {
+            Err(Error::usage(format!("unknown view {other}: summary frames inputs threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network insights actions sql")))
+        }
     }
 }
 
@@ -297,7 +315,7 @@ struct Case {
 }
 
 /// The views whose rows come from a recording's runs, so `--case` can keep one case's.
-const CASE_VIEWS: [&str; 8] = ["summary", "frames", "threads", "gpu", "layout", "style", "gc", "actions"];
+const CASE_VIEWS: [&str; 9] = ["summary", "frames", "inputs", "threads", "gpu", "layout", "style", "gc", "actions"];
 
 /// Narrows a batch recording to one case (by its name, its label or its place in the launch): its
 /// measured runs are the only runs every view reads.
@@ -1487,18 +1505,9 @@ fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
 /// inputs strobe gave the app, and each input's latency to the frame that showed it (SPEC §7.4).
 fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Output> {
     let f = store::read_json(&dir.join("frames.json")).map_err(|_| Error::usage("this native recording has no frames: they come from bench blocks of a native target (--keep, or attribution)"))?;
-    let presents: crate::probe::present::Presents = {
-        let path = dir.join("presents.json.gz");
-        let mut text = String::new();
-        std::io::Read::read_to_string(
-            &mut flate2::read::GzDecoder::new(std::fs::File::open(&path).map_err(|_| Error::usage("this recording has no OS present events (no access, or a block without a window)"))?),
-            &mut text,
-        )?;
-        serde_json::from_str(&text)?
-    };
+    let presents = inputs::presents(dir)?;
     let pids: Vec<u32> = f["pids"].as_array().into_iter().flatten().filter_map(|p| p.as_u64().map(|p| p as u32)).collect();
-    // The block's own display rate when it kept one: macOS and X11 sessions have no vertical blanks.
-    let refresh = f["display_hz"].as_f64().filter(|hz| *hz > 1.0).map(|hz| 1000.0 / hz).or_else(|| crate::probe::present::frames::refresh_ms(&presents.vsyncs, presents.t0_ns, presents.t1_ns, None));
+    let refresh = inputs::refresh_ms(&f, &presents);
     let quiet = crate::probe::present::frames::quiet_ns(refresh.unwrap_or(1000.0 / 60.0));
     let mut text = String::new();
     let mut runs_json = Vec::new();
@@ -1506,12 +1515,7 @@ fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     // Frames on screen by process over the runs: which of the app's processes drew them.
     let mut by_pid: BTreeMap<u32, usize> = BTreeMap::new();
     for (run, r) in f["runs"].as_object().into_iter().flatten().filter(|(k, _)| only.is_none_or(|o| o.contains(k))) {
-        // The run's span without its untimed stretches (none in a recording from before them).
-        let timed = crate::metrics::Timed {
-            t0: r["t0_ns"].as_u64().unwrap_or(0),
-            t1: r["t1_ns"].as_u64().unwrap_or(0),
-            untimed: r["untimed"].as_array().into_iter().flatten().filter_map(|g| Some((g[0].as_u64()?, g[1].as_u64()?))).collect(),
-        };
+        let (timed, sent, changes) = inputs::run_of(r);
         for (t0, t1) in timed.segments() {
             for p in presents.presents.iter().filter(|p| p.state == "displayed" && pids.contains(&p.pid) && p.start_ns >= t0 && p.start_ns < t1) {
                 *by_pid.entry(p.pid).or_default() += 1;
@@ -1522,32 +1526,8 @@ fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
         screens.sort_unstable();
         let mut gaps: Vec<f64> = screens.windows(2).filter(|w| w[0].0 == w[1].0).map(|w| (w[1].1 - w[0].1) as f64 / 1e6).collect();
         gaps.sort_by(f64::total_cmp);
-        let inputs = r["inputs"].as_array().cloned().unwrap_or_default();
-        let kind = |k: &str| inputs.iter().filter(|i| i["kind"] == k).count();
-        let sent: Vec<crate::probe::present::frames::Sent> = inputs
-            .iter()
-            .filter(|i| i["kind"] == "discrete" || (i["kind"] == "scroll" && i["first"] == true))
-            .map(|i| crate::probe::present::frames::Sent {
-                t_ns: i["t_ns"].as_u64().unwrap_or(0),
-                scroll: i["kind"] == "scroll",
-                press: i["press_ns"].as_u64(),
-                acted: i["acted"].as_bool(),
-                burst: i["burst"] == true,
-                pixel: i["pixel"][0].as_u64().zip(i["pixel"][1].as_u64()),
-            })
-            .filter(|s| !timed.untimed_at(s.t_ns) && !s.press.is_some_and(|p| timed.untimed_at(p)))
-            .collect();
-        // Each change as its earliest and latest time; a recording from before kept one time, the latest.
-        let changes: Vec<crate::probe::present::frames::Change> = r["changes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|c| match (c.as_u64(), c[0].as_u64(), c[1].as_u64()) {
-                (Some(t), _, _) => Some(crate::probe::present::frames::notified(t, false)),
-                (None, Some(lo), Some(hi)) => Some(crate::probe::present::frames::Change(lo, hi, c[2].as_bool().unwrap_or(false))),
-                _ => None,
-            })
-            .collect();
+        let all = r["inputs"].as_array().cloned().unwrap_or_default();
+        let kind = |k: &str| all.iter().filter(|i| i["kind"] == k).count();
         let got = crate::probe::present::frames::reactions(&sent, &changes, &presents.presents, &pids, quiet);
         let pressed = |e: crate::probe::present::frames::Edge| if e == crate::probe::present::frames::Edge::Press { "press" } else { "input" };
         slow.extend(got.interaction.iter().map(|(ms, e)| (*ms, run.clone(), pressed(*e))));
@@ -1594,7 +1574,10 @@ fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     for (ms, run, k) in slow.iter().take(top.min(10)) {
         text += &format!("  {:>9}  {run} {k}\n", fmt::value(*ms, "ms"));
     }
-    text += "an input counts when the app changed its accessibility tree after it and was not drawing already or still to show an earlier input (SPEC §7.4)\n";
+    text += &format!(
+        "an input counts when the app changed its accessibility tree after it and was not drawing already or still to show an earlier input (SPEC §7.4); each input, and why one gave no sample: strobe query {} inputs\n",
+        dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    );
     let processes: Vec<Value> = by_pid.iter().map(|(pid, n)| json!({ "pid": pid, "frames": n })).collect();
     Ok(Output::new(text, json!({ "runs": runs_json, "refresh_ms": refresh, "processes": processes })))
 }
@@ -1950,21 +1933,58 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sor
     let deep: Option<crate::probe::stacks::Deep> =
         std::fs::File::open(dir.join("deep.json.gz")).ok().and_then(|f| serde_json::from_reader(std::io::BufReader::new(flate2::read::GzDecoder::new(f))).ok());
     // What share of the processes' CPU the samples stand for: the tree's own cycles around the capture
-    // where strobe read them (`record pid:`), else what strobe's own sampler saw its threads use.
-    // Only over all samples of a timed capture.
+    // where strobe read them (`record pid:`), else what strobe's own sampler saw its threads use. Both
+    // span the whole capture, so the samples counted are all the capture took (its own count: a block
+    // keeps the samples of its measured runs only). Only for a timed capture read whole.
     if !n.untimed && !pick.any() {
-        let set = rec.meta["set_cpu_ms"].as_f64().map(|c| (c, "the processes' cycles around the capture"));
-        let seen = deep.as_ref().and_then(|d| d.suspend.as_ref()?.cpu_ms).map(|c| (c, "the CPU the sampler saw the threads use"));
-        if let Some((cpu, source)) = set.or(seen).filter(|c| c.0 > 0.0) {
-            let sampled = n.samples as f64 * n.interval_us / 1e3;
+        let stats = deep.as_ref().and_then(|d| d.suspend.as_ref());
+        let set = rec.meta["set_cpu_ms"].as_f64().filter(|c| *c > 0.0);
+        let seen = stats.and_then(|s| s.cpu_ms).filter(|c| *c > 0.0);
+        if let Some(cpu) = set.or(seen) {
+            let source = if set.is_some() { "the processes' cycles around the capture" } else { "the CPU the sampler saw the threads use" };
+            let taken = stats.map(|s| s.samples).or_else(|| deep.as_ref().map(|d| d.samples.len() as u64)).unwrap_or(n.samples);
+            let every_ms = n.interval_us / 1e3;
+            let sampled = taken as f64 * every_ms;
             let share = sampled / cpu;
-            out.json["cpu_coverage"] = json!({ "share": share, "sampled_ms": sampled, "cpu_ms": cpu, "source": source });
+            // Where the rest went, as far as the sampler counted it. Threads it never opened only show as
+            // the set's own cycles above what it saw.
+            let capped_ms = stats.map_or(0.0, |s| s.capped as f64 * every_ms);
+            let forgone_ms = stats.map_or(0.0, |s| s.forgone_ms);
+            let late_ms = stats.map_or(0.0, |s| s.late_ms);
+            let unseen_ms = set.zip(seen).map(|(s, v)| s - v).filter(|d| *d > 1.0);
+            let unopened = stats.map_or(0, |s| s.unopened);
+            let lost = deep.as_ref().map_or(0, |d| d.events_lost);
+            out.json["cpu_coverage"] = json!({
+                "share": share, "sampled_ms": sampled, "cpu_ms": cpu, "source": source, "samples": taken, "samples_asked": cpu / every_ms,
+                "capped_ms": capped_ms, "forgone_ms": forgone_ms, "late_ms": late_ms, "unseen_ms": unseen_ms, "unopened_threads": unopened, "events_lost": lost,
+            });
             if share < 0.8 {
+                let mut why: Vec<String> = Vec::new();
+                if late_ms > 0.5 {
+                    why.push(format!("{} ran in threads before strobe opened them", fmt::value(late_ms, "ms")));
+                }
+                if let Some(u) = unseen_ms {
+                    why.push(format!("{} ran outside the threads strobe followed (begun and ended between its looks, or around the capture's edges)", fmt::value(u, "ms")));
+                }
+                if forgone_ms > 0.5 {
+                    why.push(format!("{} ran past two intervals between looks at a thread (waking between set refreshes, or a late tick)", fmt::value(forgone_ms, "ms")));
+                }
+                if capped_ms > 0.0 {
+                    why.push(format!("{} went over its rate cap", fmt::value(capped_ms, "ms")));
+                }
+                if unopened > 0 {
+                    why.push(format!("{unopened} threads could not be opened"));
+                }
+                if lost > 0 {
+                    why.push(format!("the OS lost {lost} events"));
+                }
                 out.text += &format!(
-                    "! Coverage: samples cover {:.0}% of the processes' {:.2} s CPU ({source}): {} sampled; the rest ran where the sampler did not look (a thread's life before strobe found it)\n",
-                    100.0 * share,
+                    "! Coverage: {taken} samples of the {:.0} the processes' {:.2} s CPU asks for at one per {} ({:.0}%; {source}){}\n",
+                    cpu / every_ms,
                     cpu / 1e3,
-                    fmt::value(sampled, "ms")
+                    fmt::value(every_ms, "ms"),
+                    100.0 * share,
+                    if why.is_empty() { "; the sampler counted no cause for the rest".to_string() } else { format!("; {}", why.join("; ")) }
                 );
             }
         }
