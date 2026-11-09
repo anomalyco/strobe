@@ -1010,9 +1010,18 @@ Not built: `--max-bytes` (agents get top-K rows, §17).
 strobe report [experiment|recording|history] <exp_…|rec_…|ser_…|result.json|meta.json>
               [--format html|md|pr] [--out <path>] [--open] [--json]
 strobe report experiment <exp_…> --format pr --update-pr <n> [-R|--repo owner/repo] [--force] [--no-card]
+              [--labels <base>,<head>]
 strobe report experiment <exp_…> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto]
-              [--badge-url] [--scoreboard]
+              [--badge-url] [--scoreboard] [--labels <base>,<head>]
 ```
+
+`--labels` names the two sides of a comparison in the PR block and the card (§11.2, side names);
+without it a block calls them "Before" and "This PR" only when head is the pull request's own change.
+An HTML report opens on the view its address names: `#series=<i>`, `#scope=runs|host|startup|setup`
+(a script target's CPU profile: its measured runs, its whole host process, the host's startup or the
+bench file's setup alone, where the report has that profile) and `#metric=<name>` (the metric
+pair-by-pair consistency shows), joined with `&` (`report.html#series=1&scope=host`); a headless
+`strobe look <file:///…/report.html#scope=host>` shoots that view.
 
 Writes a self-contained artifact from a view in the catalog (§11.2) and prints its path (`md` and
 `pr` print the markdown on stdout and the path on stderr). The view follows from the handle when it
@@ -4110,7 +4119,8 @@ experiment's `script.log`.
     `--phase <name>` that phase's
     stretches of the measured runs from the whole-host profile and `runs.json` (`scope: phase`); `a..b
     hotspots` takes two script recordings; the report has a "Measured runs / Whole host process
-    (startup, setup, warmup, runs, resets)" toggle; `strobe open` draws the measured runs' samples on
+    (startup, setup, warmup, runs, resets) / Host startup / Bench file's setup" toggle (`#scope=`,
+    §5.8); `strobe open` draws the measured runs' samples on
     the host's main thread at their true times and the whole host on a track of its own (§11.4).
   - A block whose run failed keeps no recording and no `run/<id>-prof` (removed when dropped); a
     `--check --batch` launch keeps only its passing cases' runs. Known answer:
@@ -5436,7 +5446,10 @@ labelled "Whole host process (startup, setup, warmup, runs, resets)" shows the w
 with the lifecycle split (each part's wall time as a bar, sampled as its fill, %) and the modules line,
 for a recording, a `--blocks` head and both sides of a comparison (`whole_host.lifecycle`,
 `whole_host.modules`; the scope toggle stays when only runtime rows such as `(program)` and `(idle)`
-have self time). A `--blocks` experiment's report draws its blocks (§5.6), never a comparison.
+have self time); "Host startup" and "Bench file's setup" show `--source startup` and `--source setup`
+alone (`startup`, `setup` beside `whole_host`, where the recording kept that span), each a button only
+when every side has it. The address picks one: `#scope=host|startup|setup|runs` (§5.8), falling back to
+the measured runs where the report has no such profile. A `--blocks` experiment's report draws its blocks (§5.6), never a comparison.
 
 A recording or series with an HTTP probe (§8.9) gets an `HTTP probe & stalled cohorts` card: the
 probe's setup, a row per probe block and probed recording (p50, p95, max as `query http` gives them,
@@ -5582,7 +5595,18 @@ pull request body, pasted verbatim. Few words, two drawers:
 - **Rerun** (one drawer): the `strobe bench` command, one flag per line, the full report, the
   Perfetto line, kept recordings.
 
-Rules: "before" and "this PR", never base and head, and no column header that names only one side;
+Side names (`pr::side_names`, the card's too), the first that applies: `--labels <base>,<head>`
+(two different names, neither empty, else a usage error); an implementation comparison's names
+(§9.10); `Base (A/A)` and `Head (A/A)` for an A/A run; "Before" and "This PR" only when head is the
+working tree (`--head .`, a folder) or `HEAD` and, with `--update-pr`, its commit is the pull
+request's head (`gh pr view --json headRefOid`; uncommitted changes count as the pull request's);
+else each side's tag (`1982f5313f`, `origin/x@7bf4e2d566`), or `Base` and `Head` when the tags do not
+tell them apart. So an A/B of two old builds pasted as evidence into a later pull request never
+calls one of them "This PR". Sentences use the same words: `before` and `with this PR`, else `on
+<name>`; How it was measured leads each side's line with its name (with its role when the name is
+the tag the line gives).
+
+Rules: "before" and "this PR" (or the side names above), never base and head, and no column header that names only one side;
 metric names in words with one scheme per family (`Frame gap, p95`, `Frame latency, p99`); three
 significant figures and a non-breaking space between number and unit; decided changes bold, no
 colour; no charts (GitHub draws Mermaid blank inside a closed drawer and covers it with pan
@@ -5652,7 +5676,7 @@ assets: they would write to the user's repository.
 size), from the same rows as the hero line and its caution (`pr::hero`): up to three tiles in the
 hero's order (a metric that won in several series gets a tile per series), each the
 change as a very large number in the direction's colour (`90%`, `219 MB`), the metric in words for
-that direction (`fewer wake-ups`), `before 71.4/s → this PR 7.06/s`, a strip with one dot per pair
+that direction (`fewer wake-ups`), `before 71.4/s → this PR 7.06/s` (the block's side names, above), a strip with one dot per pair
 on a log-ratio scale, `ln(head / base)`, for a ratio comparison (so −80% and +400% sit as far from no
 change as they are; a difference comparison plots differences) (green past the bound the good way,
 red the bad way, grey inside the shaded bound, ln(1 − b) to ln(1 + b), around a `no change` tick)
@@ -7843,7 +7867,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | `record` | `target` (not with `bench`), `for?`, `probes?`, `native?`, `app?`, `windowless?`, `headless?`, `wayland?`, `emulate?`, `engine?`, `mobile?`, `served?`, `style?`, `os-frames?`, `until-line?`, `stop-line?`, `bench?`, `head?`, `gpu-cache?`, `params?`, `runs?`, `seed?`, `pin?`, `power?`, `video?`, `max-time?`, `timeout?` | `{ handle, valid, summary, warnings }` (with `bench`: `{ recordings, warnings }`) |
 | `bench` | `file` (not with `stop`/`resume`), `head?`, `base?`, `aa?`, `check?`, `batch?`, `headless?`, `engine?`, `wayland?`, `mobile?`, `blocks?`, `filter?`, `target?`, `params?`, `primary?`, `equivalence?`, `noworse?`, `plan?`, `effect?`, `pilot?`, `pairs?`, `runs?`, `probes?`, `repeat?`, `seed?`, `bisect?`, `pin?`, `power?`, `reserve-cpus?`, `why?`, `trace?`, `keep?`, `pixels?`, `pixels-only?`, `video?`, `style?`, `max-time?`, `unlock-wait?`, `require-verdict?`, `require-parity?`, `stop?`, `resume?`, `timeout?` | result (§5.6) or `{ id, state: "running", progress }` |
 | `query` | `handle`, `view?`, `sql?`, `by?`, `source?`, `top?`, `reveal?`, `at?`, `native?`, `thread?`, `pid?`, `sort?`, `case?`, `phase?`, `timeline?`; `history`, `changes` or `ser_…` for tracked history (§25.5) | view JSON |
-| `report` | `handle` (or a `result.json`/`meta.json` path), `view?`, `format?`, `out?`, `theme?`, `update-pr?`, `repo?`, `force?`, `no-card?`, `badge-url?`, `scoreboard?` | `{ path, bytes }` |
+| `report` | `handle` (or a `result.json`/`meta.json` path), `view?`, `format?`, `out?`, `theme?`, `update-pr?`, `repo?`, `force?`, `no-card?`, `labels?`, `badge-url?`, `scoreboard?` | `{ path, bytes }` |
 | `look` | `target`, `until?`, `wait?`, `timeout?`, `out?`, `size?`, `scale?`, `chars?`, `full?`, `element?`, `headed?`, `mobile?`, `app?`, `build?`, `keys?`, `windowless?`, `wayland?`, `home?`, `type?`, `press?`; no arguments after `--` (a native app's own) | §5.12 JSON (exit 124: problems, still a result) |
 | `config` | `dir?` | §5 JSON (a problem: `isError`) |
 | `init` | `dir?`, `target?`, `force?` | §5 JSON: `wrote`, `kept`, `next` |
@@ -8101,9 +8125,18 @@ describe it now. The sections above say what strobe does; this list only dates i
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
 
-**After 0.26.0**
+**After 0.27.0**
 
-- 2026-11-10 · this change · `strobe init`: a first strobe.json and runnable smoke bench from a
+- 2026-11-10 · this change · PR block and card side names: `report --labels <base>,<head>`; "Before"
+  and "This PR" only when head is the working tree or `HEAD` at the pull request's head commit
+  (`--update-pr` reads `headRefOid`), `Base (A/A)`/`Head (A/A)` for an A/A run, else each side's
+  commit; report HTML opens on `#series=`, `#scope=runs|host|startup|setup` and `#metric=`, with
+  "Host startup" and "Bench file's setup" beside the whole host in the CPU scope toggle (5.8, 9.6,
+  11.2, 17).
+
+**0.27.0** (bbdd4f0, 2026-11-10)
+
+- 2026-11-10 · ae86bb5 · `strobe init`: a first strobe.json and runnable smoke bench from a
   folder's generic markers (web, server, native, electron, tty, cli) and the commands that check
   them; `look --windowless` (and a `window: false` profile) watches the app over `--wait` and exits 0,
   the native window waited 30 s with a fix that names it; MCP tools `look`, `config` and `init` (5,

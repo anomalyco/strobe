@@ -492,7 +492,7 @@ impl<'a> Doc<'a> {
             .map(|(s, c)| {
                 let m = c["metric"].as_str().unwrap_or("");
                 let who = if self.multi() { format!(" in {}", self.title(s)) } else { String::new() };
-                format!("{}{who} read {} before and {} with this PR", lc(&noun(m)), spread(s, m, "base"), spread(s, m, "head"))
+                format!("{}{who} read {} {} and {} {}", lc(&noun(m)), spread(s, m, "base"), self.on_side(true), spread(s, m, "head"), self.on_side(false))
             })
             .collect();
         format!(
@@ -505,7 +505,7 @@ impl<'a> Doc<'a> {
 
     /// Every tested metric of every series in one table.
     pub(super) fn metrics(&self) -> String {
-        let mut t = String::from("#### Metrics\n\n| Metric | Before | This PR | Change | Likely range | Verdict |\n|:---|---:|---:|---:|---:|:---|\n");
+        let mut t = format!("#### Metrics\n\n| Metric | {} | Change | Likely range | Verdict |\n|:---|---:|---:|---:|---:|:---|\n", self.side_heads());
         let (mut conf_main, mut conf_rest) = (String::new(), String::new());
         let mut mains: Vec<&Value> = Vec::new();
         let mut odd: Vec<(&Value, &Value)> = Vec::new();
@@ -566,7 +566,7 @@ impl<'a> Doc<'a> {
 
     /// The metrics measured but not tested, last: what moved in a table, what held still in a line.
     pub(super) fn also_measured(&self) -> String {
-        let mut t = String::from("| Metric | Before | This PR | Change | Likely range |\n|:---|---:|---:|---:|---:|\n");
+        let mut t = format!("| Metric | {} | Change | Likely range |\n|:---|---:|---:|---:|---:|\n", self.side_heads());
         let (mut any, mut zeros, mut held) = (false, Vec::<String>::new(), Vec::<(String, String)>::new());
         let mut odd: Vec<(&Value, &Value)> = Vec::new();
         for s in &self.series {
@@ -824,7 +824,7 @@ impl<'a> Doc<'a> {
             }
             let gap = |name: &str, side: &str| nb(&disp(gap(name, side == "head"), "ms"));
             let title = if self.multi() { format!(": {}", self.title(s)) } else { String::new() };
-            t += &format!("#### Frame pacing{title}\n\n| {:.0} Hz display | Before | This PR |\n|:---|---:|---:|\n", 1000.0 / vs);
+            t += &format!("#### Frame pacing{title}\n\n| {:.0} Hz display | {} |\n|:---|---:|---:|\n", 1000.0 / vs, self.side_heads());
             t += &format!("| On time | {} | {} |\n", pct2(share(&b, 0.0, 1.5)), pct2(share(&h, 0.0, 1.5)));
             t += &format!("| One frame late | {} | {} |\n", pct2(share(&b, 1.5, 2.5)), pct2(share(&h, 1.5, 2.5)));
             t += &format!("| Two or more late | {} | {} |\n", pct2(share(&b, 2.5, f64::INFINITY)), pct2(share(&h, 2.5, f64::INFINITY)));
@@ -855,12 +855,14 @@ impl<'a> Doc<'a> {
         let mut used: Vec<&Value> = Vec::new();
         let mut t = String::from("#### Where it came from, in profiled launches\n\n");
         // Native: threads and memory.
-        let mut th = String::from("| Thread | Started in | Wake-ups/s, before → this PR | CPU per run, before → this PR |\n|:---|:---|---:|---:|\n");
-        let mut mem = String::from("| Memory | Before | This PR | Change |\n|:---|---:|---:|---:|\n");
+        let ba = format!("{} → {}", self.side_word(true), self.side_word(false));
+        let heads = self.side_heads();
+        let mut th = format!("| Thread | Started in | Wake-ups/s, {ba} | CPU per run, {ba} |\n|:---|:---|---:|---:|\n");
+        let mut mem = format!("| Memory | {heads} | Change |\n|:---|---:|---:|---:|\n");
         let (mut any_th, mut any_mem) = (false, false);
         // Web: main thread, then the functions that moved.
-        let mut main = String::from("| Main thread, per run | Before | This PR |\n|:---|---:|---:|\n");
-        let mut fns = String::from("| Function | File | What, per run | Before | This PR | Change |\n|:---|:---|:---|---:|---:|---:|\n");
+        let mut main = format!("| Main thread, per run | {heads} |\n|:---|---:|---:|\n");
+        let mut fns = format!("| Function | File | What, per run | {heads} | Change |\n|:---|:---|:---|---:|---:|---:|\n");
         let (mut any_main, mut any_fns) = (false, false);
         let mut heaps = Vec::new();
         for s in &prof {
@@ -1035,10 +1037,13 @@ impl<'a> Doc<'a> {
             }
         };
         let side = |role: &str, v: &Value| shared(role).map(|x| code(&x)).unwrap_or_else(|| format!("{}{}", code(&tag(v)), subj(v)));
+        // Each side by its name, or by its role when the name is the tag the line goes on to give.
+        let (bn, hn) = side_names(r);
+        let lead = |n: String, v: &Value, role: &str| if n == tag(v) { role.to_string() } else { cell(&n) };
         if !b.is_null() {
-            t += &format!("- **Before:** {}\n", side("base", &b));
+            t += &format!("- **{}:** {}\n", lead(bn, &b, "Base"), side("base", &b));
         }
-        t += &format!("- **This PR:** {}\n", side("head", &h));
+        t += &format!("- **{}:** {}\n", lead(hn, &h, "Head"), side("head", &h));
         // A page the side's label does not already name (fixed pages beside builds, or different
         // ones): each series says it, for the sides it is known on.
         let (sb, sh) = (shared("base"), shared("head"));
@@ -1047,9 +1052,9 @@ impl<'a> Doc<'a> {
             let ph = fixed_href(r, s, "head").filter(|_| sh.is_none());
             let page = match (pb, ph) {
                 (Some(x), Some(y)) if x == y => format!("{} on both sides", code(&x)),
-                (Some(x), Some(y)) => format!("{} before, {} with this PR", code(&x), code(&y)),
-                (Some(x), None) => format!("{} before", code(&x)),
-                (None, Some(y)) => format!("{} with this PR", code(&y)),
+                (Some(x), Some(y)) => format!("{} {}, {} {}", code(&x), self.on_side(true), code(&y), self.on_side(false)),
+                (Some(x), None) => format!("{} {}", code(&x), self.on_side(true)),
+                (None, Some(y)) => format!("{} {}", code(&y), self.on_side(false)),
                 (None, None) => continue,
             };
             t += &format!("- **Page{}:** {page}, whatever the build\n", if self.multi() { format!(", {}", cell(&self.title(s))) } else { String::new() });
@@ -1137,14 +1142,9 @@ impl<'a> Doc<'a> {
     pub(super) fn notes(&self) -> String {
         let r = self.r;
         let mut t = String::new();
-        // A note's base and head by the words the block uses for them: an implementation's compact
-        // name, as the card has it.
-        let sides = if crate::app::family::implementations(r) {
-            let (b, h) = side_names(r);
-            super::compact_names(&b, &h)
-        } else {
-            ("before".to_string(), "this PR".to_string())
-        };
+        // A note's base and head by the words the block uses for them (`side_words`): a compact name,
+        // as the card has it.
+        let sides = side_words(r);
         let mut seen: Vec<(String, String, Vec<String>)> = Vec::new();
         for (series, w) in r["warnings"]
             .as_array()
@@ -1217,14 +1217,27 @@ impl<'a> Doc<'a> {
         }
     }
 
-    /// A side in a sentence: `before` and `this PR`, or each implementation's name.
+    /// A side in a sentence: `before` and `this PR`, or each side's name (`side_names`).
     pub(super) fn side_word(&self, base: bool) -> String {
-        if crate::app::family::implementations(self.r) {
-            let (b, h) = side_names(self.r);
-            cell(if base { &b } else { &h })
-        } else {
-            (if base { "before" } else { "this PR" }).to_string()
+        match side_names(self.r) {
+            (b, h) if b == "Before" && h == "This PR" => (if base { "before" } else { "this PR" }).to_string(),
+            (b, h) => cell(if base { &b } else { &h }),
         }
+    }
+
+    /// Where a value was read, after it in a sentence: `before` and `with this PR`, or `on <name>`.
+    pub(super) fn on_side(&self, base: bool) -> String {
+        match self.side_word(base) {
+            w if w == "before" => w,
+            w if w == "this PR" => "with this PR".into(),
+            w => format!("on {w}"),
+        }
+    }
+
+    /// Two table headings, base's then head's (`side_names`): `Before | This PR`.
+    pub(super) fn side_heads(&self) -> String {
+        let (b, h) = side_names(self.r);
+        format!("{} | {}", cell(&b), cell(&h))
     }
 
     /// Rerun: the command, then where to look closer.

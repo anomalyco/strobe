@@ -75,6 +75,17 @@ pub fn run(args: &Args) -> Result<Output> {
         return Err(Error::usage(format!("{handle} is a --{} run: it decides nothing, so there is no --format {format} of it", if kind == "check" { "check" } else { "pixels-only" }))
             .hint(format!("strobe report experiment {handle} (HTML) shows it; a verdict comes from a comparison (--base, --aa)")));
     }
+    // What the PR block and card call the sides (`pr::side_names`): the names given, else by whether
+    // head is the pull request's own head commit.
+    if let Some(l) = args.get("labels") {
+        if !experiment || !compares {
+            return Err(Error::usage(format!("--labels names the two sides of a comparison: {handle} compares nothing")));
+        }
+        let (b, h) = super::pr::labels(l)?;
+        data["side_names"] = json!([b, h]);
+    } else if let (Some(n), Some("pr")) = (args.get("update-pr"), args.get("format")) {
+        data["pr_head_commit"] = json!(super::pr::head_commit(n, args.get("repo"))?);
+    }
     // A card or badge needs only the result: no views, no insights.
     if let Some(format @ ("card" | "badge")) = args.get("format") {
         if !experiment {
@@ -425,6 +436,22 @@ fn attribution(rec: &Rec, plan_runs: Option<u64>) -> Option<Value> {
         w["label"] = json!(query::WHOLE_HOST_TEXT);
         w["runs"] = json!(1);
         h["whole_host"] = w;
+        // The host's startup and the bench file's setup alone (`query hotspots --source startup|setup`),
+        // the toggle's other scopes; none for a recording that kept no such span.
+        for (key, scope, label) in [("startup", query::Scope::Startup, "Host startup"), ("setup", query::Scope::Setup, "Bench file's setup")] {
+            if let Ok(o) = query::hotspots_scoped(rec, "function", 50, query::Sort::Own, scope) {
+                let mut w = o.json;
+                if let Ok(f) = query::hotspots_scoped(rec, "file", 25, query::Sort::Own, scope) {
+                    w["files"] = f.json["rows"].clone();
+                }
+                if let Some(o) = w.as_object_mut() {
+                    o.remove("callers");
+                }
+                w["label"] = json!(label);
+                w["runs"] = json!(1);
+                h[key] = w;
+            }
+        }
     }
     if let Ok(o) = query::alloc(rec, "function", 25) {
         h["alloc"] = o.json;
@@ -454,7 +481,7 @@ fn attribution(rec: &Rec, plan_runs: Option<u64>) -> Option<Value> {
     // indices into it: lossless, and a fifth of the bytes.
     let mut table: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for key in ["rows", "files", "whole_host.rows", "whole_host.files", "alloc.rows", "alloc.files", "layout.rows"] {
+    for key in ["rows", "files", "whole_host.rows", "whole_host.files", "startup.rows", "startup.files", "setup.rows", "setup.files", "alloc.rows", "alloc.files", "layout.rows"] {
         let rows = key.split('.').try_fold(&mut h, |v, k| v.get_mut(k));
         for (i, row) in rows.and_then(Value::as_array_mut).into_iter().flatten().enumerate() {
             let Some(stacks) = row["stacks"].as_array_mut() else { continue };

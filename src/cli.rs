@@ -104,6 +104,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("repo", Value, "report"),
     ("force", Switch, "report update init"),
     ("no-card", Switch, "report"),
+    ("labels", Value, "report"),
     ("theme", Value, "report"),
     ("badge-url", Switch, "report"),
     ("scoreboard", Switch, "report"),
@@ -508,10 +509,12 @@ Use
                                   (md and pr print the markdown; the file's path goes to stderr; the view follows from the
                                   handle; a path to a result.json or meta.json is read as it is, nothing written beside it;
                                   a bench --blocks run: HTML and md, its blocks' median and interval, no verdict)
-  report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
-                                  put the block in PR n's body, with the result card and badges attached through gh
+  report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card] [--labels <base>,<head>]
+                                  put the block in PR n's body, with the result card and badges attached through gh;
+                                  the sides read Before and This PR only when head is the PR's head commit (or the
+                                  working tree), else each side's commit; --labels names them (pr and card)
   report experiment <exp> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto] [--badge-url]
-                                  [--scoreboard]
+                                  [--scoreboard] [--labels <base>,<head>]
                                   the result as an image: card 1200×630 (decided wins large, else what happened), badge one
                                   line; SVG follows the reader's colour scheme (auto); --badge-url prints a shields.io URL;
                                   --scoreboard: an implementation comparison's journeys (vs <base> | better in 4/5 · 1 gap)

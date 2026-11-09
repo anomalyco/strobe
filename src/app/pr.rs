@@ -18,7 +18,7 @@ use crate::store;
 pub(crate) use extract::judged;
 use extract::*;
 use github::*;
-pub use github::{Updated, hero_level, relevel, splice, update_pr};
+pub use github::{Updated, head_commit, hero_level, relevel, splice, update_pr};
 pub use implementations::{claim, cpu_scope, factor_or_pct, fairness, range_x, ready_noun};
 use markdown::*;
 use serde_json::Value;
@@ -57,11 +57,64 @@ pub(crate) fn pct_bound(frac: f64) -> String {
     fmt::bound(frac, true, 0.0, "")
 }
 
-/// What a report calls base and head: an implementation comparison's sides by name (SPEC §9.10),
-/// else "Before" and "This PR".
+/// What a report calls base and head (SPEC §11.2), first that applies: `report --labels` (the
+/// result's `side_names`); an implementation comparison's sides by name (SPEC §9.10); `Base (A/A)`
+/// and `Head (A/A)` for an A/A run; "Before" and "This PR" when head is the working tree or `HEAD`
+/// and, when the pull request is known (`--update-pr`: its `pr_head_commit`), its commit is the
+/// pull request's head (or uncommitted); else each side's tag (`1982f5313f`, `origin/x@7bf4e2d566`),
+/// or `Base` and `Head` when the tags do not tell them apart.
 pub(crate) fn side_names(r: &Value) -> (String, String) {
-    let name = |i: usize, other: &str| r["variants"][i]["name"].as_str().filter(|_| r["comparison"] == "implementations").unwrap_or(other).to_string();
-    (name(0, "Before"), name(1, "This PR"))
+    let pair = |b: &str, h: &str| (b.to_string(), h.to_string());
+    if let Some([b, h]) = r["side_names"].as_array().map(Vec::as_slice)
+        && let (Some(b), Some(h)) = (b.as_str(), h.as_str())
+    {
+        return pair(b, h);
+    }
+    let named = |i: usize| r["variants"][i]["name"].as_str().filter(|_| r["comparison"] == "implementations");
+    if let (Some(b), Some(h)) = (named(0), named(1)) {
+        return pair(b, h);
+    }
+    if r["plan"]["aa"] == true {
+        return pair("Base (A/A)", "Head (A/A)");
+    }
+    if this_pr(r) {
+        return pair("Before", "This PR");
+    }
+    let (b, h) = variants(r);
+    let (tb, th) = (tag(&b), tag(&h));
+    if tb.is_empty() || th.is_empty() || tb == th { pair("Base", "Head") } else { (tb, th) }
+}
+
+/// Whether head is the pull request's own change: the working tree (a folder, or a result from before
+/// variants named their kind: `.` or a path) or `HEAD`, at the pull request's head commit when that
+/// is known (uncommitted changes count as the pull request's).
+fn this_pr(r: &Value) -> bool {
+    let (_, h) = variants(r);
+    let spec = h["spec"].as_str().unwrap_or("");
+    let tree = h["kind"] == "dir" || (h["kind"].is_null() && (spec == "." || local_path(spec))) || spec == "HEAD";
+    let at_head = match r["pr_head_commit"].as_str() {
+        None => true,
+        Some(pr) => h["dirty"] == true || h["commit"].as_str().is_some_and(|c| c.len() >= 7 && pr.to_ascii_lowercase().starts_with(&c.to_ascii_lowercase())),
+    };
+    tree && at_head
+}
+
+/// The sides in a sentence: `before` and `this PR`, else the names `side_names` gives with the words
+/// both start with left out (`compact_names`).
+pub(crate) fn side_words(r: &Value) -> (String, String) {
+    match side_names(r) {
+        (b, h) if b == "Before" && h == "This PR" => ("before".into(), "this PR".into()),
+        (b, h) => compact_names(&b, &h),
+    }
+}
+
+/// `--labels <base>,<head>`: two distinct names, neither empty.
+pub fn labels(arg: &str) -> Result<(String, String)> {
+    let parts: Vec<&str> = arg.split(',').map(str::trim).collect();
+    match parts.as_slice() {
+        [b, h] if !b.is_empty() && !h.is_empty() && b != h => Ok((b.to_string(), h.to_string())),
+        _ => Err(Error::usage(format!("--labels {arg:?}: two different names, base then head, separated by a comma (--labels v1.4,v1.5)"))),
+    }
 }
 
 /// Side names for a label with little room: without the words both start with, and a rest that is

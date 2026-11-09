@@ -38,29 +38,42 @@ pub struct Updated {
 /// How long GitHub may serve the body from before an edit, at most, before strobe reads it again.
 const LAG: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// `gh pr` with `extra`, in `repo` when given.
+fn gh_pr(repo: Option<&str>, extra: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new("gh");
+    c.args(["pr"]).args(extra);
+    if let Some(r) = repo {
+        c.args(["-R", r]);
+    }
+    c
+}
+
+/// Pull request `n` as GitHub serves it now: its address, body (LF line ends) and head commit.
+fn view(n: &str, repo: Option<&str>) -> Result<(String, String, Option<String>)> {
+    let out = gh_pr(repo, &["view", n, "--json", "body,url,headRefOid"]).output().map_err(|e| Error::msg(format!("--update-pr needs the GitHub CLI (gh) on PATH: {e}")))?;
+    if !out.status.success() {
+        return Err(Error::msg(format!("gh pr view {n} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    let pr: Value = serde_json::from_slice(&out.stdout).map_err(|_| Error::msg("gh pr view: unexpected output"))?;
+    let head = pr["headRefOid"].as_str().filter(|c| !c.is_empty()).map(str::to_string);
+    Ok((pr["url"].as_str().unwrap_or("").to_string(), pr["body"].as_str().unwrap_or("").replace("\r\n", "\n"), head))
+}
+
+/// Pull request `n`'s head commit, which decides whether the block calls head "This PR"
+/// (`side_names`).
+pub fn head_commit(n: &str, repo: Option<&str>) -> Result<Option<String>> {
+    Ok(view(n, repo)?.2)
+}
+
 /// Replaces this experiment's block in pull request `n`'s body, or appends it, through `gh`. The
 /// author's text outside the markers is untouched. A block edited by hand (its content no longer
 /// matches the marker's hash) is refused unless `force`. `attach` are the images the block names as
 /// `./<file name>`: `gh pr edit --attach` uploads them and puts each one's address in its place. When
 /// gh cannot (a gh without `--attach`, a failed upload), `plain`, the block without images, goes in.
 pub fn update_pr(n: &str, repo: Option<&str>, id: &str, block: &str, force: bool, attach: &[std::path::PathBuf], plain: Option<&str>) -> Result<Updated> {
-    let gh = |extra: &[&str]| {
-        let mut c = std::process::Command::new("gh");
-        c.args(["pr"]).args(extra);
-        if let Some(r) = repo {
-            c.args(["-R", r]);
-        }
-        c
-    };
+    let gh = |extra: &[&str]| gh_pr(repo, extra);
     // The body and address as GitHub serves them now.
-    let read = || -> Result<(String, String)> {
-        let out = gh(&["view", n, "--json", "body,url"]).output().map_err(|e| Error::msg(format!("--update-pr needs the GitHub CLI (gh) on PATH: {e}")))?;
-        if !out.status.success() {
-            return Err(Error::msg(format!("gh pr view {n} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
-        }
-        let pr: Value = serde_json::from_slice(&out.stdout).map_err(|_| Error::msg("gh pr view: unexpected output"))?;
-        Ok((pr["url"].as_str().unwrap_or("").to_string(), pr["body"].as_str().unwrap_or("").replace("\r\n", "\n")))
-    };
+    let read = || view(n, repo).map(|(url, body, _)| (url, body));
     let (url, current) = read()?;
     // The hero's heading nests under the author's sections, and every block of the body agrees.
     let level = hero_level(&splice(&current, id, block, true)?, id);

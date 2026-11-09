@@ -230,6 +230,9 @@ export default bench({
      strobe refuses to update a hand-edited block. Write your reading above or below it, and say
      there when a metric was refused or `unclear`. One block per experiment.
    - Never put a card or badge in a PR without the block. `--format card|badge` is for elsewhere.
+   - The sides read "Before" and "This PR" only when head is the PR's own change (`--head .` or
+     `HEAD` at the PR's head commit); an A/B of other builds reads by commit, an A/A as `Base (A/A)`
+     and `Head (A/A)`. Name them with `--labels <base>,<head>` (`--labels v1.4,v1.5`).
 4. **The bench**: the case's code, or a link to it. A new case ships in the PR of the first change
    it measures.
 
@@ -290,8 +293,11 @@ strobe run --base "<command>" --head "<command>" [--aa | --check] [--metrics met
 strobe query <rec_…|exp_…|recA..recB> <view> [--top N] [--by …] [--reveal] [--case <name>]
 strobe report <exp_…|rec_…|ser_…|result.json> [--format html|md|pr|card|badge] [--open]
 strobe report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
+                  [--labels <base>,<head>]
                   (a --blocks run: HTML and md, its median and interval, no verdict; pr/card/badge refused;
                   --blocks 1 prints ★ <metric> <value> (1 block))
+                  (HTML: report.html#series=1&scope=runs|host|startup|setup&metric=<name> opens that view;
+                  strobe look file:///…/report.html#scope=host shoots it headless)
 strobe open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
 strobe look <url|file|wir:…|app:<id>|exe:<path>|tty:<command>> [--until <selector>] [--out shot.png]
 strobe look app:<id>|exe:<path> [--windowless] [--wait 2s] [--timeout 30s] [-- <args…>]
