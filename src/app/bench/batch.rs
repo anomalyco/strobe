@@ -87,10 +87,10 @@ pub(super) fn line(b: &Value) -> Option<String> {
 /// device and motion), its params (a fixture's, a seed folder's and the hooks' own), its GPU cache,
 /// whether it is measured from outside and its `setupKey`. None for a case that needs a launch of its
 /// own: a launch case, a command line's (`cli()`), a series that counts instructions in a block of
-/// their own (Linux).
+/// their own (Linux), one that declares `http.*` (its probe times one case's runs, SPEC §8.9).
 pub(super) fn key(ctx: &Ctx, s: &Series) -> Option<String> {
     let kind = ctx.describe["targets"][&s.target]["kind"].as_str().unwrap_or("");
-    if s.gap.is_some() || s.refused.is_some() || s.launch.is_object() || kind == "cli" || counting(s) != Counting::InTiming {
+    if s.gap.is_some() || s.refused.is_some() || s.launch.is_object() || kind == "cli" || counting(s) != Counting::InTiming || probing(s) != Probing::Aside {
         return None;
     }
     Some(format!("{}\n{}\n{:?}\n{}\n{:?}", s.target, serde_json::to_string(&s.params).unwrap_or_default(), s.gpu_cache, s.cross_engine, s.setup_key))

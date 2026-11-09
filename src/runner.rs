@@ -2,6 +2,7 @@
 
 use crate::host::{self, paths};
 use crate::model::{Error, Refusal, Result};
+use crate::probe::http_probe;
 use crate::store::actions::{ActionLog, Hook, Outcome};
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -60,6 +61,10 @@ pub fn find_bun() -> Option<PathBuf> {
 /// validator refused one of its driver calls (`Runner::call`) is that validator's refusal, named
 /// for the hook: a covered window is `WindowHidden`, which a bench waits out, not a broken case.
 pub fn incomplete(what: &str, op: &str, e: Error, extra: &str, fix: &str) -> Error {
+    // A question the bench file asked wrong (`ctx.httpProbe`'s options): exit 2, as it is.
+    if e.code == 2 {
+        return e;
+    }
     let prefix = format!("{op}: ");
     let msg = e.message.strip_prefix(&prefix).unwrap_or(&e.message);
     match e.refusal {
@@ -102,6 +107,44 @@ pub struct Runner {
     /// How long a CPU quota throttled strobe's cgroup during each `run` call of the block, in order
     /// (`host::cgroup_throttled_ns`; None where nothing reads it): `Throttled` over the measured runs.
     throttled: Vec<Option<u64>>,
+    /// The block's HTTP probe (SPEC §8.9).
+    http: Http,
+}
+
+/// What a block's setup asked of the HTTP probe (`ctx.httpProbe`), and the probe while it runs: from
+/// the end of setup (after its idle control) until the block's teardown begins.
+#[derive(Default)]
+struct Http {
+    /// Whether this block runs the probe its setup asks for, and on which CPUs (`Runner::http_probe`).
+    on: bool,
+    cpus: Option<u64>,
+    /// What setup asked for: its setup as recordings keep it, the probe until it starts, or why the
+    /// options were wrong (the setup's error, exit 2).
+    described: Option<http_probe::Described>,
+    asked: Option<http_probe::Config>,
+    /// What the probe sends that strobe never writes: no memory dump while it runs (`http_secret`), and
+    /// the experiment's logs scrubbed after the block (`http_probe::scrub_logs`).
+    secrets: Option<http_probe::Secrets>,
+    usage: Option<Error>,
+    driver: Option<http_probe::Driver>,
+    stopped: Option<http_probe::Stopped>,
+    idle: Option<(u64, u64)>,
+    /// Each `run` call's span on the host clock with its `ctx.untimed` stretches, and the stretch open now.
+    runs: Vec<http_probe::Span>,
+    untimed: Vec<(u64, u64)>,
+    open: Option<u64>,
+    /// The run's `ctx.phase` spans so far, and those open now (innermost last).
+    phases: Vec<(String, u64, u64)>,
+    open_phases: Vec<(String, u64)>,
+}
+
+/// A block's HTTP probe after the block: what setup asked for, and what the probe read (None when the
+/// block ran none: a clean timing block, or a setup that failed before it started).
+pub struct HttpTaken {
+    pub described: http_probe::Described,
+    pub data: Option<http_probe::Data>,
+    /// What the probe sent, which the target or the hooks may have printed to the experiment's logs.
+    pub secrets: http_probe::Secrets,
 }
 
 /// What the runner reports about a bench file.
@@ -116,7 +159,15 @@ impl Runner {
         // processes, and Bun's `$` hands stdin on to them, which stalled on a protocol pipe that never
         // closes. stdin is empty; stdout and stderr are the experiment's runner.log.
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        let out = std::fs::File::create(&log)?;
+        // Owner-only: the hooks print what they like there (SPEC rule 9).
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let out = o.open(&log)?;
         let err = out.try_clone()?;
         let mut cmd = Command::new(bun);
         cmd.arg("--preload")
@@ -176,6 +227,7 @@ impl Runner {
             batch: false,
             read_case: None,
             throttled: Vec::new(),
+            http: Http::default(),
         };
         runner.wait_ready()?;
         Ok(runner)
@@ -208,14 +260,116 @@ impl Runner {
     pub fn call(&mut self, op: &str, args: Value, timeout: Duration, serve: impl FnMut(&str, &Value) -> Result<Value>) -> Result<Value> {
         if op == "block" {
             self.throttled.clear();
+            let (on, cpus) = (self.http.on, self.http.cpus);
+            self.http = Http { on, cpus, ..Http::default() };
+        }
+        // The probe stops as the teardown begins: the target may go away in it.
+        if op == "close" {
+            self.stop_http();
         }
         let run = Hook::of_op(op) == Some(Hook::Run);
         let quota = if run { host::cgroup_throttled_ns() } else { None };
+        let probing = run && self.http.driver.is_some();
+        let t0 = probing.then(host::now_ns);
         let r = self.exchange(op, args, timeout, serve);
         if run {
             self.throttled.push(quota.zip(host::cgroup_throttled_ns()).map(|(a, b)| b.saturating_sub(a)));
         }
+        if let Some(t0) = t0 {
+            let t1 = host::now_ns();
+            let mut untimed = std::mem::take(&mut self.http.untimed);
+            if let Some(a) = self.http.open.take() {
+                untimed.push((a, t1));
+            }
+            let mut phases = std::mem::take(&mut self.http.phases);
+            phases.extend(self.http.open_phases.drain(..).map(|(n, a)| (n, a, t1)));
+            let key = format!("run:{}", self.runs.saturating_sub(1));
+            self.http.runs.push(http_probe::Span { key, t0_ns: t0, t1_ns: t1, untimed, phases, measured: false });
+        }
+        if op == "setup" {
+            return self.after_setup(r);
+        }
         r
+    }
+
+    /// Whether the next block runs the HTTP probe its setup asks for, its threads on `cpus` (SPEC §8.9).
+    /// A block that runs none still says what setup asked for (`take_http`).
+    pub fn http_probe(&mut self, on: bool, cpus: Option<u64>) {
+        self.http = Http { on, cpus, ..Http::default() };
+    }
+
+    /// After setup: its `ctx.httpProbe` options' mistake (exit 2, even when the hook caught it), else the
+    /// probe starts once the server settles, and the idle control runs before any run.
+    fn after_setup(&mut self, r: Result<Value>) -> Result<Value> {
+        if let Some(e) = self.http.usage.take() {
+            return Err(e);
+        }
+        let r = r?;
+        if self.http.on
+            && let Some(cfg) = self.http.asked.take()
+        {
+            std::thread::sleep(http_probe::SETTLE);
+            let d = http_probe::Driver::start(cfg, self.http.cpus)?;
+            match d.idle() {
+                Ok(idle) => {
+                    self.http.driver = Some(d);
+                    self.http.idle = idle;
+                }
+                // The block ends here: the probe stops at once (its probes kept for `take_http`).
+                Err(e) => {
+                    self.http.stopped = Some(d.stop());
+                    return Err(e);
+                }
+            }
+        }
+        Ok(r)
+    }
+
+    /// Whether this block's HTTP probe runs (or ran) with something strobe never writes (an
+    /// authorization, a query value, a header's value): the target has it then, so no dump of the
+    /// target's memory is taken (`--probes memory` aside).
+    pub fn http_secret(&self) -> bool {
+        self.http.secrets.as_ref().is_some_and(|s| !s.is_empty()) && (self.http.driver.is_some() || self.http.stopped.is_some())
+    }
+
+    fn stop_http(&mut self) {
+        if let Some(d) = self.http.driver.take() {
+            self.http.stopped = Some(d.stop());
+        }
+    }
+
+    /// The block's HTTP probe, stopped: what setup asked for and what it read; None when setup asked
+    /// for none.
+    pub fn take_http(&mut self) -> Option<HttpTaken> {
+        self.stop_http();
+        let h = std::mem::take(&mut self.http);
+        let described = h.described?;
+        let data = h.stopped.map(|s| http_probe::Data { config: described.clone(), start_ns: s.start_ns, end_ns: s.end_ns, cpu_ms: s.cpu_ms, idle: h.idle, runs: h.runs, samples: s.samples });
+        Some(HttpTaken { described, data, secrets: h.secrets.unwrap_or_default() })
+    }
+
+    /// `ctx.httpProbe(options)` from setup: its options read (the authorization into a `Secret`), and
+    /// the reply. Never an action of the block's log, never echoed.
+    fn ask_http(&mut self, hook: Option<Hook>, args: &Value) -> std::result::Result<(), Error> {
+        let r = if hook != Some(Hook::Setup) {
+            Err(Error::usage("ctx.httpProbe: call it in the bench file's setup, once the server is up"))
+        } else if self.http.described.is_some() {
+            Err(Error::usage("ctx.httpProbe: one probe per block, and setup asked for two"))
+        } else {
+            http_probe::Config::parse(args)
+        };
+        match r {
+            Ok(cfg) => {
+                self.http.described = Some(cfg.describe());
+                self.http.secrets = Some(cfg.secrets());
+                self.http.asked = Some(cfg);
+                Ok(())
+            }
+            Err(e) => {
+                self.http.usage = Some(e.clone());
+                Err(e)
+            }
+        }
     }
 
     /// How long a CPU quota throttled strobe's cgroup during each `run` call since the block began.
@@ -250,12 +404,29 @@ impl Runner {
             if left.is_zero() {
                 return Err(Error::timeout(format!("{op} took longer than {} s", timeout.as_secs())));
             }
-            let line = match self.lines.recv_timeout(left) {
+            let mut line = match self.lines.recv_timeout(left) {
                 Ok(l) => l,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(_) => return Err(self.died("exited")),
             };
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+            let Ok(mut msg) = serde_json::from_str::<Value>(&line) else { continue };
+            // `ctx.httpProbe`: its options hold the authorization. Read here, never served, logged or
+            // echoed, and every copy of the line zeroed once read.
+            if msg["op"] == "http_probe"
+                && let Some(rid) = msg.get("id").and_then(Value::as_str).map(str::to_string)
+            {
+                let mut args = msg.get_mut("args").map(Value::take).unwrap_or(Value::Null);
+                let asked = self.ask_http(hook, &args);
+                http_probe::wipe_value(&mut args);
+                http_probe::wipe_value(&mut msg);
+                http_probe::wipe_string(&mut line);
+                let reply = match asked {
+                    Ok(()) => json!({ "id": rid, "ok": true }),
+                    Err(e) => json!({ "id": rid, "error": e.message }),
+                };
+                self.write(&reply)?;
+                continue;
+            }
             if msg.get("id").and_then(Value::as_u64) == Some(id) {
                 self.used_random |= msg["used_random"] == true;
                 if self.read_case.is_none()
@@ -283,7 +454,28 @@ impl Runner {
                 let args = msg.get("args").cloned().unwrap_or(Value::Null);
                 let action = hook.filter(|_| self.collect).and_then(|h| ActionLog::of_request(h, run, self.untimed, self.phases.last().cloned(), &req_op, &args, host::now_ns()));
                 crate::driver::take_sending();
+                // The probe's view of a run's `ctx.untimed` stretch: from before strobe's readings at its
+                // start to after those at its end, so a probe due during them is in neither the run nor
+                // out of it by mistake.
+                let probed = hook == Some(Hook::Run) && self.http.driver.is_some() && matches!(req_op.as_str(), "untimed" | "phase");
+                let edge = probed.then(|| (args["edge"] == "start", host::now_ns()));
                 let served = serve(&req_op, &args);
+                if let (Some((start, before)), Ok(Value::Bool(true))) = (edge, &served) {
+                    match (req_op.as_str(), start) {
+                        ("untimed", true) => self.http.open = Some(before),
+                        ("untimed", false) => {
+                            if let Some(a) = self.http.open.take() {
+                                self.http.untimed.push((a, host::now_ns()));
+                            }
+                        }
+                        (_, true) => self.http.open_phases.push((args["name"].as_str().unwrap_or("").to_string(), before)),
+                        (_, false) => {
+                            if let Some((n, a)) = self.http.open_phases.pop() {
+                                self.http.phases.push((n, a, host::now_ns()));
+                            }
+                        }
+                    }
+                }
                 if let Some(mut a) = action {
                     a.case.clone_from(&case);
                     // What the driver said it sent: its send time, a click's press, what it aimed at.

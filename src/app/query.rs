@@ -2,6 +2,7 @@
 
 mod actions;
 mod diff;
+mod http;
 mod rec;
 pub(crate) use rec::windows_sql;
 mod waits;
@@ -29,6 +30,10 @@ pub fn run(args: &Args) -> Result<Output> {
     // Tracked history (SPEC §25.5): `query history`, `query changes`, `query <ser_…> history|changes`.
     if handle == "history" || handle == "changes" || handle.starts_with("ser_") {
         return super::history::query(args);
+    }
+    // The HTTP probe (SPEC §8.9) of a recording, an experiment's blocks, or two recordings.
+    if view == "http" {
+        return http::run(args, top);
     }
     if let Some(dir) = store::resolve(handle).ok().filter(|d| store::is_experiment(d)) {
         if !dir.join("result.json").exists() {
@@ -96,7 +101,7 @@ pub fn run(args: &Args) -> Result<Output> {
                     recs.extend(s["attribution"].as_str().map(str::to_string));
                 }
                 Err(Error::usage(format!(
-                    "experiments support summary, progress, insights, actions and the base..head views ({}); {other} reads a recording{}",
+                    "experiments support summary, progress, insights, actions, http and the base..head views ({}); {other} reads a recording{}",
                     diff::VIEWS.join(" "),
                     if recs.is_empty() { " (this experiment kept none)".to_string() } else { format!(": strobe query <rec> {other} with one of {}", recs.join(", ")) }
                 )))
@@ -240,7 +245,7 @@ pub fn run(args: &Args) -> Result<Output> {
             }
             memory(&dir, by, top, args.get("at"))
         }
-        other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory log network insights actions sql"))),
+        other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network insights actions sql"))),
     }
 }
 

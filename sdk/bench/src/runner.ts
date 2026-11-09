@@ -469,6 +469,13 @@ function addInitScript(script: string | Function, arg?: unknown) {
   return request("init", { source }).then(() => undefined)
 }
 
+// The HTTP probe runs in strobe, on threads of its own (SPEC §8.9): the options go there once, the
+// authorization with them, and nothing of them stays here.
+function httpProbe(opts: object) {
+  if (!opts || typeof opts !== "object") return Promise.reject(new Error("ctx.httpProbe takes one options object ({ url, … })"))
+  return request("http_probe", opts).then(() => undefined)
+}
+
 // Playwright connects over CDP, which only Chromium speaks: on another engine reading it throws, typed
 // as strobe's EngineUnsupported refusal, so the bench names the cause instead of a null page failing later.
 const prepareContext = () => seeded({
@@ -803,7 +810,7 @@ async function handle(op: string, args: any) {
       launchHook = "the bench file's setup"
       try {
         // Not spread: that would read `ctx.seed`.
-        await spec.setup?.(Object.assign(context(), { addInitScript }))
+        await spec.setup?.(Object.assign(context(), { addInitScript, httpProbe }))
       } finally {
         launchHook = null
       }

@@ -8,7 +8,7 @@ use crate::host::{self, git};
 use crate::metrics;
 use crate::model::{self, Error, Hidden, MetricDef, Refusal, Result, ValidatorId, VerdictKind, WebEngine};
 use crate::png;
-use crate::probe::{self, Set};
+use crate::probe::{self, Set, http_probe};
 use crate::runner::Runner;
 use crate::stats::{self, Comparison};
 use crate::store;
@@ -123,6 +123,15 @@ const DESCRIPTIVE: &[&str] = &[
     "tty.frame.p50",
     "tty.frame.p95",
     "cpu.pty_host",
+    // A probe block's readings beside the declared ones (SPEC §8.9).
+    "http.latency.p50",
+    "http.latency.p95",
+    "http.latency.max",
+    "http.timeouts",
+    "http.errors",
+    "http.missed_sends",
+    "http.probes",
+    "http.idle.p50",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -661,6 +670,10 @@ struct Block {
     /// devices (`validity::InputSeen`): a target's `motion` or the OS's own setting (`admit_motion`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reduced_motion: Option<bool>,
+    /// The HTTP probe in this block (SPEC §8.9): its summary (`http_probe::reading`), and the recording
+    /// that keeps its probes when the block kept one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http: Option<Value>,
 }
 
 /// What a page block's browser was (`Block::browser`): read once per target and headless mode, since
@@ -988,20 +1001,35 @@ struct Exec {
     /// `--video` (SPEC §8.8): the block films its runs, so nothing it measures is timed: a `--check`
     /// block, or the one block per variant after a comparison's timed pairs, never in them.
     video: bool,
+    /// A probe block (SPEC §8.9): the HTTP probe its setup asks for runs, and only its `http.*` values
+    /// are kept (the probe's requests are work the server does).
+    http: bool,
 }
 
 impl Exec {
     fn timed(set: Set, runs: usize, keep: bool) -> Exec {
-        Exec { set, runs, untimed: false, keep, pixels: None, counters: false, video: false }
+        Exec { set, runs, untimed: false, keep, pixels: None, counters: false, video: false, http: false }
     }
 
     fn untimed(keep: bool, pixels: Option<PathBuf>) -> Exec {
-        Exec { set: Set::Lean, runs: 1, untimed: true, keep, pixels, counters: false, video: false }
+        Exec { set: Set::Lean, runs: 1, untimed: true, keep, pixels, counters: false, video: false, http: false }
     }
 
     /// This block as a counter block, or as it is.
     fn counting(self, counters: bool) -> Exec {
         Exec { counters, ..self }
+    }
+
+    /// This block as a probe block, or as it is.
+    fn probing(self, http: bool) -> Exec {
+        Exec { http, ..self }
+    }
+
+    /// Whether the HTTP probe setup asks for runs in this block (SPEC §8.9): a probe block, and the blocks
+    /// that keep a recording to explain one (attribution, a `--check`'s), never a clean timing block, a
+    /// filmed one, or a pixels block.
+    fn probes_http(&self) -> bool {
+        self.http || (!self.video && self.pixels.is_none() && (self.set == Set::Attribution || (self.untimed && self.keep)))
     }
 
     /// The video block a comparison runs per variant after its timed pairs: warmed, one measured run,
@@ -1056,6 +1084,39 @@ enum Counting {
     /// Counter and time metrics declared: timing blocks stay clean and a counter pass follows (or,
     /// with `cpu.instructions` the primary, comes first and a timing pass follows).
     Separate,
+}
+
+/// Where a series' HTTP probe runs (SPEC §8.9). Its requests are work the server does, so no clean timing
+/// block ever runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Probing {
+    /// No `http.*` declared: only the blocks that keep a recording to explain one (`Exec::probes_http`).
+    Aside,
+    /// Only `http.*` declared: every block is a probe block.
+    Only,
+    /// `http.*` and other metrics declared: timing blocks stay clean and a probe pass follows (or, with an
+    /// `http.*` primary, comes first and a timing pass follows).
+    Separate,
+}
+
+/// Whether a series' paired blocks are probe blocks: a series of `http.*` alone, or one whose primary is.
+fn main_probes(s: &Series) -> bool {
+    match probing(s) {
+        Probing::Only => true,
+        Probing::Separate => http_probe::metric(&s.primary),
+        Probing::Aside => false,
+    }
+}
+
+fn probing(s: &Series) -> Probing {
+    let declared = declared_metrics(s);
+    if !declared.iter().any(|m| http_probe::metric(m)) {
+        Probing::Aside
+    } else if declared.iter().all(|m| http_probe::metric(m)) {
+        Probing::Only
+    } else {
+        Probing::Separate
+    }
 }
 
 /// The series' declared metrics: its primary, its metrics and those it gives a no-worse margin.
@@ -1383,6 +1444,10 @@ struct Overhead {
     /// a filmed block is never timed.
     #[serde(skip_serializing_if = "Option::is_none")]
     encoder_pct: Option<f64>,
+    /// The HTTP probe's threads (SPEC §8.9), their CPU over the probe's span (§19: 0.5%; over 2% refuses
+    /// `http.latency.*`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_probe_pct: Option<f64>,
 }
 
 impl Overhead {
@@ -1397,6 +1462,7 @@ impl Overhead {
             ("terminal", self.terminal_pct),
             ("pixels", self.pixel_pct),
             ("encoder", self.encoder_pct),
+            ("http probe", self.http_probe_pct),
         ]
         .into_iter()
         .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
@@ -1412,6 +1478,7 @@ impl Overhead {
             ("the reserved-CPU sweep", self.reserve_pct, 5.0),
             ("the terminal's reader", self.terminal_pct, 0.5),
             ("strobe's pixel reads", self.pixel_pct, 0.5),
+            ("the HTTP probe", self.http_probe_pct, http_probe::CPU_BUDGET_PCT),
         ]
         .into_iter()
         .filter_map(|(n, p, b)| p.filter(|p| *p > b).map(|p| (n, p, b)))
@@ -1447,9 +1514,10 @@ fn untimed_values(runs: &[&metrics::Timed], values: &mut BTreeMap<String, f64>) 
     values.insert("untimed.ms".into(), metrics::median(&runs.iter().map(|r| r.untimed_in(r.t0, r.t1) as f64 / 1e6).collect::<Vec<_>>()));
 }
 
-/// The blocks' overhead, each part's mean over the blocks that measured it.
-fn mean_overhead(blocks: &[Block]) -> Option<Overhead> {
-    let all: Vec<&Overhead> = blocks.iter().filter_map(|b| b.overhead.as_ref()).collect();
+/// The blocks' overhead, each part's mean over the blocks that measured it (a series' pass blocks too:
+/// the HTTP probe's runs only in its probe blocks).
+fn mean_overhead<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Option<Overhead> {
+    let all: Vec<&Overhead> = blocks.into_iter().filter_map(|b| b.overhead.as_ref()).collect();
     let mean = |f: fn(&Overhead) -> Option<f64>| {
         let v: Vec<f64> = all.iter().filter_map(|o| f(o)).filter(|x| x.is_finite()).collect();
         (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
@@ -1463,6 +1531,7 @@ fn mean_overhead(blocks: &[Block]) -> Option<Overhead> {
         terminal_pct: mean(|o| o.terminal_pct),
         pixel_pct: mean(|o| o.pixel_pct),
         encoder_pct: mean(|o| o.encoder_pct),
+        http_probe_pct: mean(|o| o.http_probe_pct),
     })
 }
 
@@ -2066,6 +2135,14 @@ pub fn run(args: &Args) -> Result<Output> {
             s.case
         )));
     }
+    // `http.*` (SPEC §8.9), said before any series runs: the probe starts at the end of a setup, which a
+    // launch case has none of; and Linux's counter blocks and the probe blocks are one pass too many.
+    if let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && probing(s) != Probing::Aside && s.launch.is_object()) {
+        return Err(Error::usage(format!("{}: http.* comes from ctx.httpProbe in setup, and a launch case runs no setup: probe the server in a case with runs", s.case)));
+    }
+    if let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && probing(s) == Probing::Separate && counting(s) == Counting::Separate) {
+        return Err(Error::usage(format!("{}: declare cpu.instructions and http.* in separate cases: each needs blocks of its own beside the timing blocks (Linux)", s.case)));
+    }
     let mut batching = batch.map(batch::Batching::new);
     for (i, s) in series.iter().enumerate() {
         if halted.is_none() && stop_requested() {
@@ -2625,7 +2702,7 @@ fn check_output(
         let later = s["measured_run"].as_u64().filter(|r| *r > 0);
         if s["passed"] == true {
             text += &format!(
-                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}\n",
+                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}{}\n",
                 s["label"].as_str().unwrap_or(""),
                 later.map(|r| format!(" · run {}", r + 1)).unwrap_or_default(),
                 s["engine"].as_str().filter(|e| *e != "chromium").map(|e| format!(" · {e}")).unwrap_or_default(),
@@ -2639,13 +2716,24 @@ fn check_output(
                 if s["headless"] == true { " · headless" } else { "" },
                 if s["session_locked"] == true { " · session locked" } else { "" },
                 // The film's capture and encoder ran beside the run: its values are not a clean run's.
-                if s["video"]["head"].is_string() { " · perturbed (filmed)" } else { "" }
+                if s["video"]["head"].is_string() { " · perturbed (filmed)" } else { "" },
+                // So did the HTTP probe: its requests are work the server did in the run.
+                if s["values"]["http.probes"].is_number() { " · probed (its times hold the HTTP probe's requests)" } else { "" }
             );
             if let Some(r) = later {
                 text += &format!("      run  {} measured, not run 1: a process of the target ended in run 1, so these values are a warm run's (from the state the reset left)\n", r + 1);
             }
             if let Some(rec) = s["recording"].as_str() {
-                text += &format!("      rec  {rec} · strobe query {rec} {}\n", if s["target_kind"] == "native" { "threads" } else { "summary" });
+                text += &format!(
+                    "      rec  {rec} · strobe query {rec} {}\n",
+                    if s["values"]["http.probes"].is_number() {
+                        "http"
+                    } else if s["target_kind"] == "native" {
+                        "threads"
+                    } else {
+                        "summary"
+                    }
+                );
             }
             if let Some(n) = s["actions"]["count"].as_u64() {
                 text += &format!("      actions  {n} sent · strobe query {exp} actions\n");
@@ -2807,8 +2895,9 @@ fn leak_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Val
 /// The secondaries a series tests: its declared metrics and the defaults. A script's or native app's CPU
 /// per run is its main.work, so it is tested as main.busy is for a page. `cpu.app.total` is CPU over run
 /// time: once runs get shorter or longer (`rate_context`), its move says nothing about the CPU they spent
-/// (a run 84% shorter for 80% less CPU reads +28%), so it is then context.
-fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> {
+/// (a run 84% shorter for 80% less CPU reads +28%), so it is then context, as is `cpu.main.busy` (the
+/// main thread's CPU over run time). `extra`: this target's own defaults (`target_defaults`).
+fn secondary_names(s: &Series, extra: &[&str], rate_context: bool) -> Vec<String> {
     // `s.metrics` holds each declared metric once, never the primary (`case_metrics`).
     let mut names: Vec<String> = s.metrics.clone();
     // A metric with a no-worse margin is declared: it is tested.
@@ -2817,8 +2906,12 @@ fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> 
             names.push(m.clone());
         }
     }
-    for m in DEFAULT_SECONDARIES.iter().copied().chain(script.then_some("cpu.work")) {
-        let skip = names.iter().any(|n| n == m) || m == s.primary || (s.primary == "cpu.process.total" && m == "cpu.app.total") || (m == "cpu.app.total" && rate_context) || s.per_side(m);
+    for m in DEFAULT_SECONDARIES.iter().chain(extra).copied() {
+        let skip = names.iter().any(|n| n == m)
+            || m == s.primary
+            || (s.primary == "cpu.process.total" && m == "cpu.app.total")
+            || (matches!(m, "cpu.app.total" | "cpu.main.busy") && rate_context)
+            || s.per_side(m);
         if !skip {
             names.push(m.to_string());
         }
@@ -2826,12 +2919,23 @@ fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> 
     names
 }
 
+/// A target's own default secondaries: `cpu.work` where it is measured from outside (a script, a
+/// command, a native app, a page in an engine without the renderer's task time, either side of an
+/// implementation comparison), and the main thread's (`cpu.main`, `cpu.main.busy`) where that is the
+/// event loop a person waits on with no window to time: a script's host, a windowless native app.
+fn target_defaults(ctx: &Ctx, s: &Series, target: &Value) -> Vec<&'static str> {
+    let outside = matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) || is_native(target) || s.sides.is_some() || engine_of(target) != WebEngine::Chromium;
+    let windowless = target["window"] == false || profile_of(target).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
+    let main = target["kind"] == "script" || (is_native(target) && windowless);
+    outside.then_some("cpu.work").into_iter().chain(if main { ["cpu.main", "cpu.main.busy"].as_slice() } else { &[] }.iter().copied()).collect()
+}
+
 /// The secondaries that will be tested after these pairs: those every block has a value of, but a
 /// stable exact counter, which is compared exactly outside Holm (as the Holm family after the pairs
 /// counts them, so the pairs a series runs on for Holm are the ones that family needs).
-fn tested_names(s: &Series, script: bool, blocks: &[Block], pairs: &[(usize, usize)], bound: f64) -> Vec<String> {
+fn tested_names(s: &Series, extra: &[&str], blocks: &[Block], pairs: &[(usize, usize)], bound: f64) -> Vec<String> {
     let rate_context = !same(blocks, pairs, "run.duration", bound);
-    secondary_names(s, script, rate_context)
+    secondary_names(s, extra, rate_context)
         .into_iter()
         .filter(|n| model::metric(n).is_some() && !s.per_side(n) && blocks.iter().all(|b| b.values.get(n).is_some_and(|v| v.is_finite())) && !stable_exact(n, blocks, pairs))
         .collect()
@@ -2888,7 +2992,7 @@ fn warm_gpu(ctx: &mut Ctx, s: &Series, variants: &[Variant], halted: &mut Option
     // counting (SPEC §7.5).
     let split = counting(s);
     let main_counters = split == Counting::Only || (split == Counting::Separate && counted_apart(&s.primary));
-    let exec = Exec::timed(timed_set(ctx), ctx.runs, false).counting(main_counters);
+    let exec = Exec::timed(timed_set(ctx), ctx.runs, false).counting(main_counters).probing(main_probes(s));
     // A `--pairs N` smoke run below the pairs any verdict needs decides nothing: no block for it.
     let smoke = ctx.args.get("pairs").and_then(|p| p.parse::<usize>().ok()).is_some_and(|n| n < stats::min_pairs(0.95));
     for v in variants.iter() {
@@ -3012,6 +3116,11 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     if split == Counting::Separate {
         progress(format!("  counters: {} blocks of each kind (cpu.instructions in counter blocks, times in timing blocks)", n));
     }
+    let main_http = main_probes(s);
+    let probe_apart = probing(s) == Probing::Separate;
+    if probe_apart {
+        progress(format!("  HTTP probe: {n} blocks of each kind (http.* in probe blocks, times in clean timing blocks)"));
+    }
     // The blocks of a point share one lock and display state, as a pair's do: a block in another state
     // starts the point again from it (a locked session's display goes to sleep once, early).
     let mut restarts = 0;
@@ -3023,10 +3132,21 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
         let i = blocks.len();
         let keep = ctx.keep_all || i == 0;
         let both = |ctx: &mut Ctx| -> Result<Block> {
-            let mut b = block_on_screen(ctx, s, &variants[0], i, &Exec::timed(timed_set(ctx), ctx.runs, keep).counting(main_counters))?;
+            let mut b = block_on_screen(ctx, s, &variants[0], i, &Exec::timed(timed_set(ctx), ctx.runs, keep).counting(main_counters).probing(main_http))?;
             if split == Counting::Separate {
                 let other = block_on_screen(ctx, s, &variants[0], i, &Exec::timed(timed_set(ctx), ctx.runs, false).counting(!main_counters))?;
                 take_metrics(&mut b, &other, |m| counted_apart(m) != main_counters);
+            }
+            if probe_apart {
+                let other = block_on_screen(ctx, s, &variants[0], i, &Exec::timed(timed_set(ctx), ctx.runs, keep && !main_http).probing(!main_http))?;
+                take_metrics(&mut b, &other, |m| http_probe::metric(m) != main_http);
+                // The probe's CPU is its blocks' (`overhead.http_probe_pct`).
+                let probed = if main_http { &b } else { &other };
+                let pct = probed.overhead.as_ref().and_then(|o| o.http_probe_pct);
+                b.overhead.get_or_insert_with(Overhead::default).http_probe_pct = pct;
+                if other.http.is_some() {
+                    b.http = other.http;
+                }
             }
             Ok(b)
         };
@@ -3164,10 +3284,10 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     if !pairs.is_empty() {
         progress(format!("  resumed with the {} pairs it had finished{}", pairs.len(), decided_n.map(|n| format!(" (the primary was decided at pair {n})")).unwrap_or_default()));
     }
-    // Outside-in CPU (`cpu.work`) is a tested secondary where the target is measured from outside: a
-    // script, a command, a native app, both sides of an implementation comparison, and a page in an
-    // engine without the renderer's task time.
-    let script = matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) || is_native(&target) || s.sides.is_some() || engine_of(&target) != WebEngine::Chromium;
+    // Outside-in CPU (`cpu.work`) and the main thread's are tested secondaries where they measure the
+    // target (`target_defaults`).
+    let extra = target_defaults(ctx, s, &target);
+    let script = extra.as_slice();
     // Why the series ended early (a stop, or an error after some pairs), as the error to report.
     let mut halted: Option<Error> = None;
     // The look, the run-on and the stop (SPEC §9.1): `sequential::Driver`, which `strobe stats
@@ -3189,6 +3309,10 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // blocks for a series of counters, or one whose primary is counted apart.
     let split = counting(s);
     let main_counters = split == Counting::Only || (split == Counting::Separate && counted_apart(&s.primary));
+    // Nor does the HTTP probe (SPEC §8.9): the paired loop runs on probe blocks for a series of `http.*`,
+    // or one whose primary is.
+    let probe = probing(s);
+    let main_http = main_probes(s);
     let from = if halted.is_some() { max_pairs } else { pairs.len() };
     'pairs: for pair in from..max_pairs {
         if stop_requested() {
@@ -3202,7 +3326,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             let start = blocks.len();
             for &v in &order {
                 let keep = ctx.keep_all || pair == 0;
-                let b = match block_on_screen(ctx, s, &variants[v], pair, &Exec::timed(timed_set(ctx), ctx.runs, keep).counting(main_counters)) {
+                let b = match block_on_screen(ctx, s, &variants[v], pair, &Exec::timed(timed_set(ctx), ctx.runs, keep).counting(main_counters).probing(main_http)) {
                     Ok(b) => b,
                     // A side that reached for an adapter entry it lacks, which the runner's scan did not
                     // see (a name built at run time): at any pair the journey is a gap, never half run.
@@ -3386,16 +3510,34 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         counters_note =
             Some(format!("separate blocks: cpu.instructions in counter blocks (perf events), times in timing blocks; {} → {k} pairs", if main_counters { "times" } else { "cpu.instructions" }));
         progress(format!("  {} blocks: {k} pairs (Linux perf events never run in a timing block)", if main_counters { "timing" } else { "counter" }));
-        match pass_pairs(ctx, s, variants, !main_counters, k) {
+        match pass_pairs(ctx, s, variants, (!main_counters, false), k) {
             Ok(p) => pass = Some(p),
             Err(e) if e.code == 130 || e.code == 124 || stop_requested() => halted = Some(if e.code == 124 { e } else { stop_error() }),
             Err(e) => counters_note = Some(format!("the {} blocks failed: {}", if main_counters { "timing" } else { "counter" }, e.message)),
         }
     }
+    // A series of `http.*` and other metrics (SPEC §8.9): K pairs of the other kind of block, as above.
+    let mut http_note: Option<String> = None;
+    if probe == Probing::Separate && halted.is_none() && !pairs.is_empty() {
+        let family = tested_names(s, script, &blocks, &pairs, bound).into_iter().filter(|m| http_probe::metric(m) == main_http).count()
+            + secondary_names(s, script, false).into_iter().filter(|m| http_probe::metric(m) != main_http && model::metric(m).is_some() && !s.per_side(m)).count();
+        let k = holm_pairs(family).max(min_pairs).min(pairs.len());
+        http_note = Some(format!(
+            "separate blocks: http.* in probe blocks (the probe's requests are work the server does), times in clean timing blocks; {} → {k} pairs",
+            if main_http { "times" } else { "http.*" }
+        ));
+        progress(format!("  {} blocks: {k} pairs (the HTTP probe never runs in a clean timing block)", if main_http { "timing" } else { "probe" }));
+        match pass_pairs(ctx, s, variants, (false, !main_http), k) {
+            Ok(p) => pass = Some(p),
+            Err(e) if e.code == 130 || e.code == 124 || stop_requested() => halted = Some(if e.code == 124 { e } else { stop_error() }),
+            Err(e) => http_note = Some(format!("the {} blocks failed: {}", if main_http { "timing" } else { "probe" }, e.message)),
+        }
+    }
     // Which blocks measure a metric: the pass's for what the paired loop's kind does not.
+    let apart = |name: &str| (split == Counting::Separate && counted_apart(name) != main_counters) || (probe == Probing::Separate && http_probe::metric(name) != main_http);
     let source = |name: &str| -> (&[Block], &[(usize, usize)]) {
         match &pass {
-            Some((pb, pp)) if counted_apart(name) != main_counters => (pb, pp),
+            Some((pb, pp)) if apart(name) => (pb, pp),
             _ => (&blocks, &pairs),
         }
     };
@@ -3436,16 +3578,23 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     }
     let mut descriptive: Vec<Comparison> = Vec::new();
     // A launch's milestones and CPU, a process's CPU, and a command's launch, are context like the fixed list.
-    let found: Vec<String> = blocks
+    // From the pass's blocks too: an `http.*` primary's paired blocks keep only `http.*`, its timing
+    // pass the rest.
+    let mut found: Vec<String> = blocks
         .first()
-        .map(|b| {
-            b.values
-                .keys()
-                .filter(|k| k.starts_with("launch.") || k.starts_with("metric.") || *k == "memory.peak" || *k == "cpu.work" || *k == "cli.launch" || (*k == "cpu.app.total" && rate_context))
-                .cloned()
-                .collect()
+        .into_iter()
+        .chain(pass.as_ref().and_then(|(pb, _)| pb.first()))
+        .flat_map(|b| b.values.keys())
+        .filter(|k| {
+            k.starts_with("launch.")
+                || k.starts_with("metric.")
+                || matches!(k.as_str(), "memory.peak" | "cpu.work" | "cli.launch" | "cpu.main")
+                || (matches!(k.as_str(), "cpu.app.total" | "cpu.main.busy") && rate_context)
         })
-        .unwrap_or_default();
+        .cloned()
+        .collect();
+    found.sort();
+    found.dedup();
     for name in DESCRIPTIVE.iter().map(|n| n.to_string()).chain(found) {
         let name = name.as_str();
         if name == s.primary || names.iter().any(|n| n == name) || s.per_side(name) {
@@ -3476,6 +3625,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let mut warnings: Vec<Warning> = Vec::new();
     if let Some(note) = counters_note {
         warnings.push(validity::info("Counters", note));
+    }
+    if let Some(note) = http_note {
+        warnings.push(validity::info("HttpProbe", note));
     }
     let names = match &*variants {
         [b, h] if ctx.implementations => [b.name.as_str(), h.name.as_str()],
@@ -3735,9 +3887,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         "pairs": pairs.len(), "launches": blocks.len(), "stopped": stopped, "bound": bound, "noworse": s.noworse,
         "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms,
         "steps": mean_steps(&blocks), "elapsed_ms": series_started.elapsed().as_secs_f64() * 1e3 - (ctx.waited_ms - waited_before), "waited_ms": ctx.waited_ms - waited_before,
-        "overhead": mean_overhead(&blocks), "untimed": untimed_of(&blocks.iter().map(|b| (b.values.get("untimed.n").copied(), b.values.get("untimed.ms").copied())).collect::<Vec<_>>()),
+        "overhead": mean_overhead(blocks.iter().chain(pass.iter().flat_map(|(pb, _)| pb))), "untimed": untimed_of(&blocks.iter().map(|b| (b.values.get("untimed.n").copied(), b.values.get("untimed.ms").copied())).collect::<Vec<_>>()),
         "blocks": blocks, "warnings": warnings, "attribution": recordings, "attribution_sampling": if sampling.is_empty() { Value::Null } else { Value::Object(sampling) }, "timing_recordings": timing_recordings, "shown": shown,
-        "pass": pass.map(|(b, p)| json!({ "counters": !main_counters, "blocks": b, "pairs": p })),
+        "pass": pass.map(|(b, p)| if probe == Probing::Separate { json!({ "counters": false, "http": !main_http, "blocks": b, "pairs": p }) } else { json!({ "counters": !main_counters, "blocks": b, "pairs": p }) }),
         "halt": halted.as_ref().map(halt_json),
     });
     out["video"] = if videos.as_object().is_some_and(|o| !o.is_empty()) { videos } else { Value::Null };
@@ -3756,10 +3908,11 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
 /// Blocks and their pairs (indexes into the blocks: base, head).
 type Pass = (Vec<Block>, Vec<(usize, usize)>);
 
-/// `k` pairs of the other kind of block for a series of both counters and times (SPEC §7.5):
-/// counter blocks (`counters`) or timing blocks, base and head alternating as the series' own pairs,
-/// both blocks of a pair in one lock and display state.
-fn pass_pairs(ctx: &mut Ctx, s: &Series, variants: &[Variant], counters: bool, k: usize) -> Result<Pass> {
+/// `k` pairs of the other kind of block for a series of both counters and times (SPEC §7.5), or of both
+/// `http.*` and times (SPEC §8.9): counter blocks, probe blocks (`kind`: counters, http) or timing blocks,
+/// base and head alternating as the series' own pairs, both blocks of a pair in one lock and display state.
+fn pass_pairs(ctx: &mut Ctx, s: &Series, variants: &[Variant], kind: (bool, bool), k: usize) -> Result<Pass> {
+    let (counters, http) = kind;
     let (mut blocks, mut pairs): (Vec<Block>, Vec<(usize, usize)>) = (Vec::new(), Vec::new());
     for pair in 0..k {
         if stop_requested() {
@@ -3771,7 +3924,7 @@ fn pass_pairs(ctx: &mut Ctx, s: &Series, variants: &[Variant], counters: bool, k
             let start = blocks.len();
             let mut idx = [0usize; 2];
             for &v in &order {
-                let x = Exec::timed(timed_set(ctx), ctx.runs, ctx.keep_all).counting(counters);
+                let x = Exec::timed(timed_set(ctx), ctx.runs, ctx.keep_all || (http && pair == 0)).counting(counters).probing(http);
                 let b = block_on_screen(ctx, s, &variants[v], pair, &x)?;
                 idx[v] = blocks.len();
                 blocks.push(b);
@@ -3790,7 +3943,17 @@ fn pass_pairs(ctx: &mut Ctx, s: &Series, variants: &[Variant], counters: bool, k
                 return Err(Error::refused("SessionLocked", "the session kept locking and unlocking between a pair's blocks", "bench while the session stays locked or stays unlocked"));
             }
         }
-        progress(format!("  {} pair {:>2}", if counters { "counter" } else { "timing" }, pair + 1));
+        progress(format!(
+            "  {} pair {:>2}",
+            if counters {
+                "counter"
+            } else if http {
+                "probe"
+            } else {
+                "timing"
+            },
+            pair + 1
+        ));
     }
     Ok((blocks, pairs))
 }
@@ -3899,6 +4062,7 @@ fn tail_of(name: &str) -> (&'static str, &'static str) {
         Some("tty") if name.starts_with("tty.latency.") => ("tty.latency.n", "inputs"),
         Some("tty") if name.starts_with("tty.settle.") => ("tty.settle.n", "inputs"),
         Some("tty") => ("tty.frame.n", "synchronized frames"),
+        Some("http") => ("http.latency.n", "probes"),
         _ if metrics::split_metric(name) => ("frames.split.n", "frames with their stages"),
         _ if name.starts_with("frames.interval.") => ("frames.interval.n", "gaps between presented frames"),
         _ => ("frames.n", "frames"),
@@ -4150,7 +4314,7 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
         }
         return b;
     }
-    let parts = [o.reserve_pct, o.sampler_pct, o.present_pct, o.terminal_pct, o.pixel_pct].iter().flatten().sum::<f64>();
+    let parts = [o.reserve_pct, o.sampler_pct, o.present_pct, o.terminal_pct, o.pixel_pct, o.http_probe_pct].iter().flatten().sum::<f64>();
     let residual = (strobe - parts).max(0.0) + runner;
     if residual > 10.0 {
         once(
@@ -5330,8 +5494,11 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
     in_slot(ctx, &what, |ctx| {
         let reserve = reserve_for(ctx, x);
         ctx.target_qos = None;
+        // The HTTP probe its setup asks for (SPEC §8.9), on strobe's own CPUs; a batch's launch runs none.
+        ctx.runner.http_probe(cases.len() == 1 && x.probes_http(), ctx.runner_pin.or_else(thread_pin));
         let quota = host::cgroup_throttled_ns();
         let launch = any_launch(ctx, cases, v, pair, x);
+        let mut http = ctx.runner.take_http();
         let whole = quota.zip(host::cgroup_throttled_ns()).map(|(a, b)| b.saturating_sub(a));
         let runs_throttled = ctx.runner.throttled().to_vec();
         let report = reserve.map(host::reserve::Reserve::finish);
@@ -5347,6 +5514,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 .map(|b| software_state(ctx, s, b))
                 .map(|b| phase_state(ctx, s, b))
                 .map(|b| counter_state(s, x, b))
+                .map(|b| http_state(ctx, s, v, x, http.take(), b))
                 .map(|b| tail_state(x, b))
                 .map(|b| {
                     let ns = quota_of(s, &b, &runs_throttled, whole, cases.len() > 1);
@@ -5703,6 +5871,120 @@ fn counter_state(s: &Series, x: &Exec, mut b: Block) -> Block {
         b.refused.insert(m.clone(), Refusal::new(ValidatorId::NoCounter, format!("{what} reads no counters: they are read around a case's runs")).fix("count in a case with runs"));
     }
     b
+}
+
+/// The HTTP probe's part of a block (SPEC §8.9): its `http.*` values and refusals from the probes due in
+/// the measured runs' timed parts, the probe's own CPU, and its probes kept in the block's recording (one
+/// of their own when the block kept none: a script's `--check`, a probe pass's first pair). A timed probe
+/// block keeps nothing else: the probe's requests are work the server does, in every time and CPU metric
+/// of its runs.
+fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<crate::runner::HttpTaken>, mut b: Block) -> Block {
+    let declared: Vec<String> = declared_metrics(s).into_iter().filter(|m| http_probe::metric(m)).cloned().collect();
+    // What a target's own reading made of a name it does not know is none of the probe's.
+    b.values.retain(|k, _| !http_probe::metric(k));
+    b.refused.retain(|k, _| !http_probe::metric(k));
+    if x.http && !x.untimed {
+        // What says whether the block is valid stays: its untimed stretches, warmup, other work on its CPUs.
+        b.values.retain(|k, _| matches!(k.as_str(), "untimed.n" | "untimed.ms" | "warmup.unsteady" | "cpu.foreign" | "cpu.foreign.max"));
+        b.refused.clear();
+        b.frames.clear();
+        b.intervals.clear();
+        b.phases.clear();
+    }
+    let asked = taken.is_some();
+    let (data, secrets) = taken.map_or((None, http_probe::Secrets::default()), |t| (t.data, t.secrets));
+    let Some(mut data) = data else {
+        if x.probes_http() {
+            let why = if !asked { "the case's setup never called ctx.httpProbe" } else { "the HTTP probe did not run in this block" };
+            for m in declared {
+                b.refused.insert(m.clone(), Refusal::new(ValidatorId::NoMetric, format!("{m}: {why}")).fix("call ctx.httpProbe({ url, … }) in setup, once the server is up"));
+            }
+        }
+        return b;
+    };
+    // The block's measured runs, by their place among its runs (a block of one case: no batch).
+    let measured = b.warmup..b.warmup + b.run_ms.len();
+    for (i, r) in data.runs.iter_mut().enumerate() {
+        r.measured = measured.contains(&i);
+    }
+    http_probe::classify(&mut data.samples, data.idle, &data.runs);
+    let reading = http_probe::reading(&data, b.run_ms.len());
+    b.values.extend(reading.values);
+    for m in declared {
+        if let Some(r) = reading.refused.get(&m) {
+            b.refused.insert(m, r.clone());
+        }
+    }
+    let mut summary = reading.summary;
+    if let Some(pct) = summary["cpu_pct"].as_f64() {
+        b.overhead.get_or_insert_with(Overhead::default).http_probe_pct = Some(pct);
+        // Over 2% of a core the probe competed with what it timed: a timed block refuses its latencies, a
+        // `--check` says a timed bench would, an attribution block times nothing.
+        if let Some(r) = http_probe::cpu_refusal(pct) {
+            let hit = |m: &str| http_probe::LATENCIES.iter().any(|(n, _)| *n == m);
+            if x.measures_time() {
+                for (m, _) in http_probe::LATENCIES {
+                    b.values.remove(m);
+                    if declared_metrics(s).iter().any(|d| *d == m) {
+                        b.refused.insert(m.to_string(), Refusal { summary: format!("{m}: {}", r.summary), ..r.clone() });
+                    }
+                }
+            } else if x.untimed {
+                check_overhead(&mut ctx.warnings, s, &format!("the HTTP probe used {pct:.1}% of a core"), &hit, r.fix.as_deref());
+            }
+        }
+    }
+    // The target got what the probe sent (its authorization, its URL's query, its headers' values): what
+    // it or the hooks printed to the experiment's logs keeps none of it. Recordings are never rewritten:
+    // a block whose probe carries any takes no dump of the target's memory (`Runner::http_secret`).
+    if let Ok(dir) = store::experiment_dir(&ctx.exp) {
+        let logs: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "log")).collect();
+        let (redacted, failed) = http_probe::scrub_logs(&logs, &secrets);
+        if redacted > 0 {
+            summary["redacted_logs"] = json!(redacted);
+        }
+        for f in failed {
+            ctx.warnings.push(validity::warn("HttpProbe", format!("{}: a log that holds what the probe sent could not be written: {f}", s.label())));
+        }
+    }
+    drop(secrets);
+    if x.keep || x.untimed || x.set == Set::Attribution {
+        match keep_probes(ctx, s, v, x, &mut b, &data, &summary) {
+            Ok(rec) => summary["recording"] = json!(rec),
+            Err(e) => ctx.warnings.push(validity::warn("HttpProbe", format!("{}: the {} block's probes were not kept: {}", s.label(), v.role, e.message))),
+        }
+    }
+    b.http = Some(summary);
+    b
+}
+
+/// Writes a block's probes (`http_probe.json.gz`, owner-only) into its recording, or into one of their
+/// own, and says what the probe read in its `meta.json`; returns the recording.
+fn keep_probes(ctx: &Ctx, s: &Series, v: &Variant, x: &Exec, b: &mut Block, data: &http_probe::Data, summary: &Value) -> Result<String> {
+    if let Some(id) = b.recording.clone() {
+        let dir = store::resolve(&id)?;
+        http_probe::write(&dir, data)?;
+        let mut meta = store::read_json(&dir.join("meta.json"))?;
+        meta["http_probe"] = summary.clone();
+        store::write_json(&dir.join("meta.json"), &meta)?;
+        return Ok(id);
+    }
+    let (id, draft) = store::new_recording()?;
+    let dir = draft.dir().to_path_buf();
+    http_probe::write(&dir, data)?;
+    let timing = if x.http && !x.untimed { "http-probe" } else { "perturbed" };
+    store::write_json(
+        &dir.join("meta.json"),
+        &json!({
+            "id": id, "kind": "block", "experiment": ctx.exp, "seed": ctx.seed, "series": s.label(), "variant": v.role, "variant_label": v.label, "variant_git": variant_git(v),
+            "target": ctx.describe["targets"][v.target_of(s)]["entry"], "probes": "http-probe", "timing": timing, "runs": b.run_ms.len(), "values": b.values,
+            "created": super::record::now_iso(), "valid": true, "env": host::env(), "http_probe": summary,
+            "note": "an HTTP probe's block: the probes' scheduled, sent and answered times on the host clock (strobe query <rec> http, strobe open <rec>)",
+        }),
+    )?;
+    draft.keep();
+    b.recording = Some(id.clone());
+    Ok(id)
 }
 
 fn background_refusal(why: &str, what: &str) -> Error {
@@ -7371,8 +7653,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 probe::census::add_allocators(&mut c, cb()?, cp()?, &dir.join("memdump-0.pftrace"));
                 census.push(c);
                 // The live objects after the runs (post-GC), once no trace subscription copies every
-                // snapshot chunk (SPEC §8.6).
-                if let Err(e) = probe::heap::snapshot(cp()?, &dir.join("heap-0.heapsnapshot.gz")) {
+                // snapshot chunk (SPEC §8.6). Not where the block's HTTP probe sent the target a secret: a
+                // snapshot holds every string it kept (`--probes memory` takes one, owner-only).
+                if ctx.runner.http_secret() {
+                    if !ctx.warnings.iter().any(|w| w.id == "Attribution" && w.text.contains("no heap snapshot")) {
+                        ctx.warnings.push(validity::info(
+                            "Attribution",
+                            format!("{}: no heap snapshot in the attribution block: its HTTP probe sends the target a credential, which a snapshot of the target's memory would keep (--probes memory takes one)", s.label()),
+                        ));
+                    }
+                } else if let Err(e) = probe::heap::snapshot(cp()?, &dir.join("heap-0.heapsnapshot.gz")) {
                     ctx.warnings.push(validity::warn("HeapSnapshot", format!("{} heap snapshot failed: {}", side, e.message)));
                 }
                 lap("heap");
@@ -7873,6 +8163,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     ops: journey::ops(&run_counts.get(range.clone()).unwrap_or_default().iter().collect::<Vec<_>>()),
                     input,
                     reduced_motion,
+                    http: None,
                 });
             }
             // From outside there is no trace to keep: the block's numbers are in result.json. A Firefox block

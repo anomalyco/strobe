@@ -435,17 +435,21 @@ Use
                                   or go on with one (a unique prefix of the id works)
   config [<dir>]                  check the project's strobe.json (and your own) without a bench: where it is, each
                                   app profile resolved for this OS (its executable, guards, window), build and serve
-  query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash] [--reveal] [--native] [--thread <name>]
-                                  views: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory log network insights
-                                  actions sql
-                                  (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe> --phase <name>;
+  query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash|host] [--reveal] [--native] [--thread <name>]
+                                  views: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network
+                                  insights actions sql
+                                  (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe>; --phase <name>:
+                                  native samples, or a script recording's profile; --source host: a script target's whole
+                                  host process (its measured runs by default);
                                   --case <name>: one case of a --batch recording)
+                                  (http: a bench block's HTTP probe (ctx.httpProbe): idle against the runs, timeouts,
+                                  errors, missed sends, stalled cohorts; --phase <name>; exp_… its probe blocks, a..b too)
                                   (actions: what a bench block's hooks sent the target, in order; --phase; --reveal shows
                                   typed text, act values, ctx.call arguments and ctx.exec lines)
                                   (waits: where threads were off their CPUs and who woke them, from a native capture;
                                   --thread <name> --phase <name> --by function|file|package)
                                   (a..b: hotspots alloc layout style threads frames summary heap memory, per-run deltas;
-                                  exp_…: summary progress insights, and those views as each series' base..head;
+                                  exp_…: summary progress insights http, and those views as each series' base..head;
                                   memory: --by process|layer|allocator --at <i>;
                                   threads --timeline: each thread's CPU per second from the launch, exited ones too)
   report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]

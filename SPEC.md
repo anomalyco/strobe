@@ -206,7 +206,7 @@ model.rs        plain data: errors, `ValidatorId` and `Refusal`, verdict kinds, 
 config.rs       strobe.json, read strictly (jsonc.rs: comments and trailing commas)
 app/            commands: up/ (autostart), status, record, bench/ (blocks, launches, batches, cli,
                 script, tty and native targets, fixtures, journeys, the slot, the decision loop in
-                sequential.rs), plan, query/ (recording views, a..b diffs, actions, waits, wir),
+                sequential.rs), plan, query/ (recording views, a..b diffs, actions, waits, http, wir),
                 report, pr/ (the PR block), card/ (cards, badges, forest plots), open, look, top,
                 track/, history/, bisect, family (implementation comparisons), run, update, mcp,
                 statcheck/ (hidden `strobe stats`), outside (record pid:), video, helper
@@ -235,8 +235,8 @@ probe/          collecting → trace.rs, cpu.rs, alloc.rs, heap.rs, symbols.rs a
                 present events, sck.rs ScreenCaptureKit, xpresent.rs X11 Present, wayland.rs the
                 compositor's own, frames.rs frame metrics), video/ (`--video`, §8.8: wgc.rs Windows,
                 avf.rs macOS, x11.rs Linux, screencast.rs a Chromium page's renderer, ffmpeg.rs the
-                external encoder). The helper runs present and stack sessions, and both use its
-                access, so they live in one backend.
+                external encoder), http_probe.rs (the HTTP probe, §8.9). The helper runs present and
+                stack sessions, and both use its access, so they live in one backend.
 heapsnap.rs     V8 heap snapshots: streaming parse, dominators, classes, retainer paths, diff, leaks
 metrics.rs      a block's trace → metric values
 perfetto.rs     `strobe open`'s merged trace (§11.4)
@@ -1287,13 +1287,20 @@ What strobe reads from a native app (§13.7), per run:
 - **A thread timeline** (native `record`, `record pid:`, and native bench blocks that are not timed:
   `--check` and attribution): a thread of strobe's takes the same system snapshot every second from
   the launch (or the recording's start) to the last run's end, over the tree (and what runs from
-  its home, read every 5 s), and keeps each thread's CPU (its kernel and user times: Windows counts
-  them in 15.6 ms clock ticks, within a few percent over a second) and wakes per second, when it
-  first and last showed, its name and its start module, read while it ran (`timeline.json.gz`). `query <rec> threads --timeline` draws one column per second (coarser
-  past two minutes) per thread with the runs marked, so work that starts late and stops shows when
-  it ran ("a driver thread from 23 s to 52 s"), and threads that exited are listed (`query <rec>
-  threads` names them below the per-run list, with their CPU over the recording). A thread's CPU
-  between its last snapshot and its exit is missing (at most one interval). Its own CPU is in the
+  its home, read every 5 s), and keeps each thread's CPU (exact: Windows from each thread's cycle
+  counter, a handle held while the thread lives, so one that exits between two snapshots keeps its
+  last CPU; Linux from schedstat; macOS from the thread's own times; where none is exact, `cpu_refused`
+  says why and the cells hold wakes only, as they do for a thread strobe may not open, `cpu_unknown`)
+  and wakes per second, when it first and last showed, its name and its start module, read while it
+  ran (`timeline.json.gz`). A run's edges take a snapshot each (`Timeline::mark_edge`), so no tick
+  spans a run's start or end, and each tick keeps the span it covers. `query <rec> threads --timeline`
+  draws one column per second (coarser past two minutes) per thread with the runs marked, each tick's
+  CPU and wakes spread over the columns it covers in proportion (`TimelineData::binned`: a tick that
+  came 2.6 s late fills each second it covers, never a 0% gap beside a 260% spike), so work that
+  starts late and stops shows when it ran ("a driver thread from 23 s to 52 s"), and threads that
+  exited are listed (`query <rec> threads` names them below the per-run list, with their CPU over the
+  recording). On Linux and macOS a thread's CPU between its last snapshot and its exit is missing (at
+  most one interval). Its own CPU is in the
   file: the system snapshot dominates (about 9 ms a second on adais with 350 processes and 8,000
   threads), which is over the samplers' budget (§19), so timed blocks have none.
 - **The UI thread, from outside:** the thread that owns the main window is the app's UI thread (on
@@ -1304,6 +1311,33 @@ What strobe reads from a native app (§13.7), per run:
   second. The bridge's split of UI work into view, layout, text, paint and encode is gone: where the
   UI thread's time goes comes from native stacks in attribution blocks (§13.4), by function, file or
   package, per phase (`query <rec> hotspots --thread <name> --phase <name>`).
+- **The main thread** (`cpu.main`, `cpu.main.busy`; script and native targets, and `record pid:`):
+  the thread the target's process started with, bound to that thread for good (`host::MainThread`:
+  Windows the launch's suspended first thread's handle, or for an attached process its oldest thread
+  when it was born within 5 ms of the process; Linux the thread whose id is the pid, its schedstat and
+  stat held open; macOS its lowest 64-bit thread id), read from that one thread's own counter at the
+  run's edges and each untimed stretch's (one system call, about 1 µs, so clean timing blocks read it
+  too). The readings r₀ … r₂ₖ (the run's start, each untimed stretch's start and end, the run's end)
+  are each a CPU count and the instant it is exact at; the share is Σ over the timed pairs of (cpu end
+  − cpu start) / Σ (at end − at start), at most 1 (`host::main_share`). `cpu.main.busy` is 100 × the
+  share (100% is an event loop that never waited) and `cpu.main` the share × the run's timed ms: the
+  event loop alone, beside the whole tree's `cpu.work`, never its workers or children. On Windows and
+  macOS the readings sit µs from the edges. Linux's schedstat (its first field, CPU ns) is added at
+  switches and scheduler ticks, so a thread on a CPU reads short by up to one tick (4 ms at 250 Hz: a
+  busy share of 101% on a 2-vCPU VM before this): a reading of a running thread is read again every
+  50 µs until its count moves (its next tick, or it leaves the CPU; at most 25 ms) and is exact then,
+  one off a CPU is read twice; such a reading lies outside the timed part (before its start, after its
+  end, inside an untimed stretch), so the pairs' span can be up to a tick per edge longer than the
+  timed time. One `--check` run of a spinning thread can then read `cpu.main` up to a tick above
+  `cpu.work`, whose process clock counts a thread on a CPU only to its last tick; strobe never clamps
+  one to the other. Tested by default on script targets and windowless native apps (`cpu.main.busy` is
+  context once `run.duration` moves); a windowed app's main thread is its UI thread (`ui.cpu`).
+  Refused `NotOnThisOs` where no exact per-thread counter exists (Windows: cycles that are not time;
+  Linux: no schedstat, decided once from strobe's own main thread, or tickless `nohz_full` CPUs; macOS:
+  `EPERM`, `EINVAL`), never read from clock ticks; `RunIncomplete` when the thread or its process
+  ended (a zombie leader too: a launcher that hands over refuses it) or the clock gave no rate. Known
+  answer: `scripts/dev/main-thread.bench.ts` (a main-thread spin, a worker's, a child process's and a
+  timer wait: `cpu.work` high for the first three, `cpu.main` high only for the first).
 - **Presented frames** (`frames.interval.*`, `frames.dropped*`, `frames.discarded`,
   `frames.presented.count`, `display.hz`) on Windows from the OS's present events (§7.2) of the
   app's processes; on macOS from ScreenCaptureKit and on Linux X11 from X Present (§13.6), which tell
@@ -1623,8 +1657,8 @@ one also in `gecko.json`), and every view says it: the block's line, the experim
 result (`head JavaScript sampled every 2.0 ms (asked 1 ms: 2.0× coarser)`; `attribution_sampling`:
 the one sampling of a `--check`, else per variant, null when none), `record` and `record --bench` and
 `query <rec> summary` (`samples` line), `query hotspots` and Firefox's `query threads` (header, and
-`sampling` in their JSON; hotspots' `interval_us` is the median kept). A script target's profile
-covers its whole host process, no page's thread: it gets none. A recording from before 2026-11-07
+`sampling` in their JSON; hotspots' `interval_us` is the median kept). A script target's is its
+measured runs' gaps on strobe's clock (§9.6: its profile is cut to them). A recording from before 2026-11-07
 reads its own profiles' median gap, asked 200 µs as they all were. Checked on adais (Windows 11,
 headless, 2026-11-07): Chromium kept 0.52 ms asked 400 µs; Firefox 159 2.0 ms asked 1 ms; Nightly 162
 0.53 ms asked 0.5 ms. What strobe claims from a profile holds at the interval kept: a sample weighs
@@ -2147,6 +2181,109 @@ from exists, so its video would miss the launch it times.
   vps (2 vCPU VM): Playwright's ffmpeg (VP8) 3.1 s of CPU over 3.5 s. air (M4, headless page at
   60 fps, 1280×750): strobe's thread 6 ms, Homebrew's ffmpeg (libx264) 470 ms over 2.9 s. The capture thread waits for
   the GPU's copy by sleeping: the driver's own wait spun (350 ms over the same 3.3 s).
+
+### 8.9 HTTP probe (`ctx.httpProbe`)
+
+Whether a server the target hosts could answer another client while the runs worked, on the timeline
+of its runs, threads and stacks (`probe::http_probe`, `app::query::http`). A bench file's `setup`
+asks for it once per block: `ctx.httpProbe({ url, method, cadenceMs, timeoutMs, idleMs, connection,
+maxInFlight, headers, authorization, expect })`. strobe sends the request from threads of its own on
+strobe's CPUs (off the target's, §9.4), on absolute deadlines: slot k is due at the probe's start + k ×
+`cadenceMs` (default 100, at least 10) whatever the probes before it are doing (open loop). A
+scheduler thread hands each due slot to a free worker, which stamps `dispatch` before it takes or
+opens a connection, `sent` once the request is written and flushed, and `completed` once the whole
+response is read. Latency is `completed − dispatch`: from the dispatch, not the slot's due time, so up
+to the lateness allowed below of strobe's own lag never counts as the server's.
+
+- **Missed sends.** A slot whose dispatch comes more than min(cadence / 2, 10 ms) after it was due is
+  never sent (`skipped_driver_late`, with its lag), and one due while every connection the probe may
+  hold is open is not either (`skipped_busy`): strobe's lag, never billed to the server, never sent
+  late, never a burst to catch up. `http.missed_sends` counts them; more than max(1, 5% of those due)
+  in the measured runs refuses `http.latency.*` (`OverheadBudget`: a stall then would go unseen).
+- **Connections.** `"new"` (the default) opens a fresh TCP connection (Nagle off) per probe: a server
+  whose JavaScript thread is held for 750 ms still has each probe accepted by the kernel on time, and
+  answers the whole cohort once it is free: 750, 650, … 50 ms, never one slow sample and a gap.
+  `"keep-alive"` takes a free connection the probe kept, else opens one; a kept one the server had
+  closed is replaced within the same deadline. `maxInFlight` (default 64) must allow
+  ⌈`timeoutMs` / `cadenceMs`⌉ + 1 probes open at once (usage error, exit 2, otherwise: the probe never
+  holds a send back); strobe runs that many workers and two more.
+- **Options.** `url`: `http://` on this computer's loopback only (127.0.0.1, [::1], `localhost`):
+  https, `user:pass@` and any other host are usage errors. `method`: GET (default), HEAD or POST (no
+  body). `timeoutMs` (default 1000): from the dispatch to the whole response, connecting included.
+  `expect`: `status` (a code or `[lo, hi]`, default 200–299), optionally `bodyContains` or `jsonPath`
+  (`{ path: "$.status", equals: "ok" }`), read from a body of at most 1 MiB that strobe never keeps.
+  A mistake in any option fails setup with exit 2, as do a second call, a call outside `setup`, and
+  `headers` that carry a credential (`Authorization`, `Cookie`, `Proxy-Authorization`, `X-Api-Key`)
+  or one strobe writes itself (`Host`, `Connection`, `Content-Length`, `Transfer-Encoding`,
+  `User-Agent`).
+- **Secrets.** `authorization` (the Authorization header's value, or `{ header, value }` for another
+  header) is held in strobe's memory only (`http_probe::Secret`: no `Serialize`, `Display` or `Clone`,
+  `Debug` prints `[REDACTED]`, zeroed when it drops, as are the protocol line and request bytes that
+  carried it). It reaches strobe over the runner's loopback socket (never argv, no CLI flag takes a
+  credential) and never a recording, result, log, report, trace, MCP answer or panic message. The
+  probe's request is no action of the block's log (§9.6). A URL's query values and extra headers'
+  values are sent, never written: recordings keep the URL as `…?key=…` (a segment without `=` as `…`)
+  and the headers' names. The target gets all of them, so strobe never writes a dump of the target's
+  memory in a block whose probe carries one (`Runner::http_secret`: the authorization, any extra
+  header's value, a query value of 8 characters or more): an attribution block takes no heap snapshot
+  and says so (`Attribution`, info), and a script host runs without `--heap-prof`; `--probes memory`
+  still takes them, owner-only (rule 9). Recordings are never rewritten. The experiment's text logs
+  (what the target and the hooks printed: `runner.log` and `script.log`, owner-only) have each
+  occurrence of those values, as sent and percent-decoded, made as many `*`s in place after the block
+  (`http_probe::scrub_logs`; a log it cannot write is said, `HttpProbe`, never removed).
+  `scripts/dev/http-probe-check.ts` reads every file strobe wrote (a Chromium attribution block's
+  too), and every answer it printed, for a fresh random token sent both ways.
+- **Idle control.** Once setup has settled (100 ms) and before warmup, the probe runs alone for
+  `idleMs` (default 500; 0 skips it). Every probe due then must answer as `expect` asks, else the
+  block is refused `RunIncomplete` before any run (a server that fails a probe idle fails it in
+  every run). Its median is `http.idle.p50`: the server's own floor.
+- **Blocks** (rule 3). The probe's requests are work the server does, so it never runs in a clean
+  timing block. A series that declares no `http.*` runs it only in the blocks that keep a recording
+  to explain one: attribution blocks (`--why`, `record --bench`) and `--check` blocks, so stacks, the
+  threads' timeline and the probe land on one recording. A series that declares `http.*` pairs probe
+  blocks (`timing: http-probe`, no profilers, keeping only their `http.*` values): every block when
+  it declares nothing else; otherwise its timing blocks stay clean and K pairs of probe blocks follow
+  (with an `http.*` primary they come first and K timing pairs follow), K chosen as for counter blocks
+  (§7.5), kept in `result.json` `pass` (`http: true` for probe blocks) and said once (`HttpProbe`,
+  info). `--blocks N` runs N of each kind. Usage errors: `http.*` in a launch case (no setup), or
+  beside `cpu.instructions` on Linux (one pass of other blocks per series). Such a series is never
+  batched (§5.6); a batch's launch runs no probe.
+- **Metrics** (`src/model.rs`). Only probes due in a measured run's timed parts count: not the idle
+  control, warmup runs, `ctx.untimed` stretches (from before strobe's readings at their start to
+  after those at their end), resets or setup. `http.latency.p50` (minimum n 10), `.p95` (20) and
+  `.max` (1), in ms, pooled over the block's measured runs; `http.timeouts`, `http.errors`,
+  `http.missed_sends` and `http.probes` per measured run; `http.idle.p50`. Undeclared ones are context
+  (descriptive) where every block has them. A response not as `expect` asks, or a connection that
+  failed, is an error, never a latency, and any error refuses `http.latency.*` (`RunIncomplete`: a
+  fast error is no fast answer). A timeout ranks above every answer. A quantile is the R-7 one (the
+  value at position (n − 1) × p of the n ranked probes, interpolated between its two neighbours), so
+  it is right-censored as soon as either neighbour is a timeout: p > (answers − 1) / (n − 1). It is
+  then refused `RunIncomplete`, never read as the timeout and never taken from the answers alone
+  (the looser 1 − timeouts / n would read p 0.89 of 9 answers and 1 timeout from a timeout); `http.timeouts`
+  counts them. No probe due in a timed part refuses the latencies `TailTooShort`. `http.*` declared
+  where setup never called `ctx.httpProbe`: `NoMetric`.
+- **Cost.** The probe's threads read their own CPU (`overhead.http_probe_pct`, % of one core over the
+  probe's span; §19: 1%, over it a timed block warns `OverheadBudget`; over 2% a timed block refuses
+  `http.latency.*` `OverheadBudget`, a `--check` warns that a timed bench would, an attribution block
+  says nothing). Measured at the default 100 ms (2026-11-09): vps (2 vCPU, unpinned) 0.27–0.29% of a
+  core with a new connection per probe and no missed send; adais (Windows 11) 0.56–0.58% with a new
+  connection per probe (Windows' loopback connect and close, about 0.55 ms of CPU a probe) and 0.23%
+  with `keep-alive`.
+- **Data.** `http_probe.json.gz` (owner-only) in the block's recording, or in one of its own when the
+  block kept none (a script's `--check`, a probe pass's first pair; `probes: http-probe`): the setup
+  without secrets (`config`), the probe's span and CPU, the idle window, each run's span with its
+  untimed stretches and phases, and every probe (`seq`, `scheduled_ns`, `dispatch_ns`, `sent_ns`,
+  `completed_ns`, `status`, `outcome`, `when`, `run`). Its summary is `meta.json` `http_probe` and each
+  block's `http` in `result.json` (with the recording that keeps its probes).
+- **Views.** `query <rec|exp|a..b> http [--phase <name>] [--top N]` (§11.1): the idle control against
+  the measured runs, each fate, the quantiles with censoring said, the probe's CPU, and the stalled
+  cohorts. `open` (§11.4) draws the probe beside the runs and threads.
+- **Calibration.** `scripts/dev/http-probe.bench.ts` (run through `http-probe-check.ts`): a 750 ms
+  stall of the server's thread probed every 100 ms is one cohort of about 8 probes (the first ones
+  timing out at 400 ms, then a falling staircase; with a 1500 ms timeout its slowest ≈750 ms), a 500
+  or a wrong JSON answer is counted and refuses the latencies, and strobe's own scheduler held 400 ms
+  (`STROBE_PROBE_PAUSE=<at_ms>,<for_ms>`, calibration only: holds it once) is missed sends with no
+  timeout or error.
 
 ## 9. Experiments (`bench`)
 
@@ -2886,7 +3023,9 @@ undefined without one; also in `prepare`, a `url` function and a launch's `befor
 `head`, for logging only), `url`, `root` (the variant's folder, a plain path without Windows' `\\?\`
 prefix, so `${ctx.root}/tool.exe` works), `prepared`, `seed` and `random()`
 (below; also in `prepare` and a launch's `before`), in `prepare` and `setup`
-`addInitScript(script, arg?)`, and in `prepare` only `playwright` and `mock(pattern, handler)`.
+`addInitScript(script, arg?)`, in `setup` `httpProbe(options)` (a probe of a server the setup
+started, from strobe's own threads until the block's teardown, §8.9), and in `prepare` only
+`playwright` and `mock(pattern, handler)`.
 
 **Seeded workloads** (`ctx.seed`, `ctx.random()`): a fuzzer or a random walk through an app replays
 exactly from the experiment's seed (`--seed`, §5.6). A case's seed (`ctx.seed`, a 32-bit unsigned
@@ -3510,9 +3649,51 @@ experiment's `script.log`.
   `gc()` under `--expose-gc`) after a run minus before it, read outside the run's span: what each
   run keeps alive. `memory.app.private` is the host tree's private bytes at the end of the last
   measured run, before its reset (§9.6).
-- **Attribution:** the process starts with `--cpu-prof` (200 µs, 400 µs on Windows: §8.3) and `--heap-prof`; the profiles
-  cover the whole process and name the harness's and the variant's own source files, so nothing
-  needs a source map.
+- **Attribution:** the process starts with `--cpu-prof` (200 µs, 400 µs on Windows: §8.3), and Node's
+  with `--heap-prof` (attribution blocks only: a clean timing block starts no profiler; Bun's
+  `--heap-prof` writes a heap snapshot, every string the host holds, so a Bun host gets none and `query
+  alloc` of a Bun script recording refuses `EngineUnsupported`: run a `runtime: "node"` target for
+  sampled allocation stacks, or declare `js.heap.retained`). The profiles name the harness's and the
+  variant's own source files, so nothing needs a source map. Bun's sampler is costly: in a script
+  attribution block on adais its 0.4 ms sampler raised the host's `cpu.work` from 60 to 146 ms a run;
+  the block is perturbed and its CPU is not compared.
+  - Clocks (`probe::cpu::rebase`, `Sync`): strobe reads the host's `clock` op just after it is ready and
+    before it exits: one request in which the host spins 5 ms (`strobeClockMark`) and reads `Date.now()`
+    at a millisecond edge, then five quick round trips (the offset from the quickest trip's midpoint).
+    Node's profile counts in hrtime (V8's TimeTicks: QPC, `CLOCK_MONOTONIC`, mach); Bun 1.4's in wall µs
+    from JSC's `approximateWallTime` at the host's exit (shifted by the wall clock's lead over the
+    monotonic one then: 0.28 ms on adais after 11 s), each delta truncated to whole µs (0.5 µs a
+    sample: 0.8 ms early after 20 s on vps); strobe adds both back. `ClockUnsynced`: a reading's round
+    trip over 2 ms, the monotonic offset moving over 1 ms between start and exit, or a
+    `strobeClockMark` sample over 1 ms outside strobe's span around its request (or none in either
+    spin). `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms before
+    the last measured run's end, or the exit's reading failing.
+  - Weights, as Firefox's (§8.3): a sample weighs its gap, cut to the run, its untimed stretches out;
+    a gap over `capUs` weighs `overUs` (the runtime took no sample then). Node: both 50 ms. Bun, which
+    takes no sample while its VM is idle: from the median gap m inside `strobeClockMark`'s spins (a
+    busy VM), `capUs` 4 m and `overUs` m, so a sample before an idle gap stands for one interval.
+    `starved` (Node only; null on Bun, whose gaps cannot tell an `await` from a starved sampler): the
+    cap-cut time where the same stack is on both sides of a gap, busy JavaScript the sampler missed;
+    over 5% of the measured time `query hotspots` and the bench's `Attribution` warning say its rows
+    undercount (vps, 2 vCPU under load: 40% of a 30 ms spin in such gaps).
+  - Files: `cpu-<run>.cpuprofile`, one per measured run of a passing case (`<run>` the run's global
+    number), integer µs, `startTime` and `endTime` its timed span, each delta the previous sample's
+    weight; `whole-host.json.gz` (owner-only), the whole host process on strobe's clock in true µs with
+    `capUs` and `overUs`; `runs.json` (`{ runs }`: each measured run's case, span, untimed stretches,
+    phase marks, wall and CPU ms); and in `meta.json` the host's life outside them (`lifecycle_spans`:
+    startup, setup, `warm:<n>`, `unmeasured:<n>`, `reset:<n>`, teardown), `runtime`, `sampling` (the
+    gaps inside timed parts, under the cap), `starved`, `clock` (`rtt_ms`, `drift_ms`, `cap_ms`), `pid`
+    and `main_tid`. Never `frames.json`.
+  - Views: `query hotspots` reads the measured runs (`scope: measured_runs`), `--source host` the
+    whole host process (`scope: whole_host`, never divided by runs), `--phase <name>` that phase's
+    stretches of the measured runs from the whole-host profile and `runs.json` (`scope: phase`); `a..b
+    hotspots` takes two script recordings; the report has a "Measured runs / Whole host process
+    (startup, setup, warmup, runs, resets)" toggle; `strobe open` draws the measured runs' samples on
+    the host's main thread at their true times and the whole host on a track of its own (§11.4).
+  - A block whose run failed keeps no recording and no `run/<id>-prof` (removed when dropped); a
+    `--check --batch` launch keeps only its passing cases' runs. Known answer:
+  `scripts/dev/script-profile.bench.ts` (setup, run phases and reset each burn a function of their
+  own: the measured hotspots hold only the run's two, `--phase` one, `--source host` all four).
 
 **Point locators.** Wherever a call takes an element (`click`, `hover`, `wheel`, `scroll`, `drag`, the
 element `type` clicks into, `down`/`up`'s `at`) it also takes a point: `[x, y]` in the target's own
@@ -4271,7 +4452,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `Background` (refusing) | the native speed check stayed slow for 2 minutes while other processes kept the target's CPUs busy (an antivirus scanning new files, an update, a build): the message names the busiest. A bench block waits it out first, holding nothing (a minute, then until the CPUs are quiet, and the check again), up to 15 times, about an hour: on a shared machine another agent's build ends. Blocks that run through a locked session (a headless page, a windowless app) wait the same way: they once ended the bench at the first busy check |
 | `BackgroundPriority` | the target runs at background priority, inherited from strobe or its own: macOS `taskpolicy -b` (`PRIO_DARWIN_PROCESS`), Windows' idle priority class, efficiency mode (EcoQoS) or background mode (very low memory priority), Linux `SCHED_IDLE` or nice 19. The OS keeps it on efficiency cores, at low clocks or behind other work: a drag in an Electron app read 83–91% dropped frames under `taskpolicy -b` against 0.4% at normal priority. Refuses frame and input-latency metrics (`frames.*`, `interaction.*`, `scroll.*`, `canvas.*`, `input.*`, `launch.painted`, `launch.settled`): a primary among them refuses the bench before anything builds (strobe's own priority) or at the block (the target's), a secondary shows refused, and `record` prints `frames refused`. CPU, memory and counters stay, with a warning to compare them only with runs at the same priority. Attribution and memory blocks are untimed and keep running. `record pid:` measures a process as its user runs it and is not checked |
 | `PresentsUnmatched` | over 5% of the inputs strobe sent a native app (those after which its accessibility tree changed) showed no frame within a second while the present session lost no events (refuses `interaction.*`, §7.4) |
-| `OverheadBudget` (refusing) | strobe's own work disturbed a timed block's runs, by §19's budgets: strobe and the runner over 20% of a core while they share the target's CPUs (unpinned) refuses wall-time, CPU-share, frame and latency metrics (`cpu.*` in ms and exact counters stay); a `script()` target's relay of `ctx.call` (strobe and the runner) over 20% refuses `run.duration`; the OS present session's consumer over 2% refuses the frame metrics; the terminal reader over 2% refuses `tty.latency.*`, `tty.settle.*` and `tty.frame.*`; pixel reads over 2% refuse the series' timing and latency metrics. Only timed blocks refuse: a `--check` keeps those values, warns naming the declared metrics a timed bench would refuse, and passes. Over each part's lower budget it only warns (§10.2) |
+| `OverheadBudget` (refusing) | strobe's own work disturbed a timed block's runs, by §19's budgets: strobe and the runner over 20% of a core while they share the target's CPUs (unpinned) refuses wall-time, CPU-share, frame and latency metrics (`cpu.*` in ms and exact counters stay); a `script()` target's relay of `ctx.call` (strobe and the runner) over 20% refuses `run.duration`; the OS present session's consumer over 2% refuses the frame metrics; the terminal reader over 2% refuses `tty.latency.*`, `tty.settle.*` and `tty.frame.*`; pixel reads over 2% refuse the series' timing and latency metrics; the HTTP probe's own CPU over 2% of a core refuses `http.latency.*` (§8.9). Only timed blocks refuse these: a `--check` keeps those values, warns naming the declared metrics a timed bench would refuse, and passes. One refuses in every block: the HTTP probe's missed sends (slots strobe could not send on time) over max(1, 5% of those due in the measured runs) refuse `http.latency.*`, which then never saw the server when a stall would have shown. Over each part's lower budget it only warns (§10.2) |
 | `NoDisplayForBudget` | a budget metric is requested without a real display. Reserved: nothing refuses it now (a headless page's display metrics are `Headless`, a virtual display's `SoftwareGpu`, a missing one `NoPresentSource`) |
 | `TailTooShort` | a percentile lacks its minimum n (refuses that metric only) |
 | `ClockUnsynced` | sources cannot be aligned within 1 ms (§6); a page launch whose own time for `until` falls outside strobe's span from its navigation command to hearing of it, by over 2 ms (§9.6); a Firefox profile that gives no process start on the host's monotonic clock, or puts strobe's run marks outside the runs (§8.3); an app's `STROBE_EVENTS` event that arrived later than this OS delivers one after the `t_ns` it carries (§13.9) |
@@ -4359,7 +4540,7 @@ emits:
 | `SoftwareGpu` | warn | a series kept its CPU metrics on a software rasterizer: frame and GPU metrics are refused (§10.1), and the browser's CPU metrics hold the rasterization a GPU would do; a native app on strobe's Wayland compositor without a GPU render node: `cpu.work` holds the app's own rasterization |
 | `Headless` | info | a native app ran on strobe's headless Wayland compositor: what reaches a display is refused (§13.7) |
 | **strobe's own cost** | | |
-| `OverheadBudget` | warn | strobe's own work over a budget of §19: strobe and the runner over 5% of a core while they share the target's CPUs (unpinned; the warning names both shares and a fix by why they share: macOS, under 4 cores, `--pin none`), or over 10% beside its budgeted parts while pinned; the present consumer, the terminal reader or pixel reads over 0.5%. Over the refusing level a timed block refuses (§10.1) and a `--check` warns, naming the declared metrics a timed bench would refuse |
+| `OverheadBudget` | warn | strobe's own work over a budget of §19: strobe and the runner over 5% of a core while they share the target's CPUs (unpinned; the warning names both shares and a fix by why they share: macOS, under 4 cores, `--pin none`), or over 10% beside its budgeted parts while pinned; the present consumer, the terminal reader or pixel reads over 0.5%, the HTTP probe over 1%. Over the refusing level a timed block refuses (§10.1) and a `--check` warns, naming the declared metrics a timed bench would refuse |
 | `ObserverCost` | warn | every bench, per side: strobe's reads of a side's page or accessibility tree inside its runs took over 2% of their wall time, or a native app's tree was read over 8 times a run (`driver.reads`, `driver.read_ms`), or pixels over 8 times (`driver.pixel_reads`); a page's attribution profile's driver rows, `(strobe driver)` and `(native, via strobe driver)`, held over 2% of its active main-thread time (every sample but `(idle)`, when that is at least 2 ms a run); a `script()` target's relay of `ctx.call` over 10% of a core. An implementation comparison also warns when one side's reads came at least 4 more times a run and over 4 times as often as the other's (§9.10) |
 | `ProbeOverhead` | warn | a Chromium-family series timed with `--trace full`: its timed blocks traced every task of every thread, which costs the page main-thread time (§8.1: `main.work` +0.8% on a click, +35% on an idle page, `cpu.work` +3.5%); compare it only with full-trace runs. `query a..b` of a lean and a full-trace recording says the same |
 | `TickSampledCpu` | warn | a `cli()` run's `cpu.work` holds child processes' CPU from Windows' clock ticks (where strobe did not hold them): their share of `cpu.work` (§9.6) |
@@ -4367,6 +4548,7 @@ emits:
 | `EndedCpu` | info | once per series: processes ended inside measured runs (or before a launch was ready), and `cpu.work` holds the CPU they used, from Linux's launch cgroups or the handles Windows strobe held from each process's start: how many runs, the median ms, and on Windows the executables that used the most (§9.6) |
 | `HeadlessFrame` | warn | a headless run's last step left at least 1.0 ms and 5% of `main.work` of style and layout (or layouts the run read 0 of) to the frame after the run, and the series declares a metric read before that frame (`run.duration`, `cpu.*` but `cpu.wakes`, the trace's metrics over the run): names those metrics and the time; pass `{ until: [selector, "frame"] }` (§7.3) |
 | `Counters` | info | a series' counter blocks ran apart from its timing blocks (Linux, §7.5): how many pairs each kind got |
+| `HttpProbe` | info, warn | info: a series' HTTP probe blocks ran apart from its clean timing blocks, and how many pairs each kind got (or that the other kind failed); warn: a block's probes could not be kept in a recording (§8.9) |
 | `Attribution` | info, warn | where the attribution blocks went (`→ rec_…`), or why there is none (an engine strobe has no profiler for) |
 | `Unresolved` | warn | over 5% of a profile's script samples map to no source, or a native capture's leaf or all-frame resolved share is under 95% (§11.1) |
 | `InitScript` | info | the engine has no preload script (WebKit): `ctx.addInitScript` ran after the first document's own scripts, and a block that loads another document is refused (§9.6) |
@@ -4636,8 +4818,9 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 | `style` | `--top` | what invalidated style in the measured runs, from the trace's invalidation tracking (`disabled-by-default-devtools.timeline.invalidationTracking`, in attribution blocks only: of a series that declares `main.style` or `style.count`, with `--style`, or `record --probes attribution --style`): recalcs per run with the elements they restyled and the largest; invalidations by what changed (a class, an id, an attribute, a pseudo-class such as `:hover`, an inline style or custom property, a sheet) with the nodes they hit, by the selector whose invalidation set matched, and by the script line that made the change (source-mapped) |
 | `frames` | `--phase` `--case` | frame percentiles, dropped vsyncs, budget misses, worst frames with handles; `by process`: a trace's vsyncs presented and reported per process (the page's renderers marked), a native recording's frames on screen per pid |
 | `threads` | `--phase` `--case` `--timeline` | busy share by thread and category, long tasks; a native recording's threads with wakes and CPU per run (a `record` without runs: `cpu ms` over the recording) and `by whose threads` (`app`, `driver`, `os`, `unknown (?)`); `--timeline` each thread's CPU per second from the launch (§7.4) |
-| `hotspots` | `--by function\|file\|package` `--phase` `--thread` `--pid` `--native` `--sort self\|total` | rows with self and total time (total: every stack the row's frame is in, once a stack, CPU views only, not `alloc` or `layout`; `self_ms`, `total_ms`, `share`, `total_share`; a function that only calls is a row by its total, sorted after every row with self time; strobe's driver script is its own row by file or package, never the app's; report.html's self-time tables leave rows of 0 self out), sample counts, intervals, handles; native samples (`deep`) in the same shape (a recording without a JavaScript profile shows them by default). Sorted by self time (the default), the callers whose time is in what they called and that missed the rows (5% of the total or more, up to 8) follow as `callers by total time` (`callers` in JSON); `--sort total` ranks by total. Native samples of several processes say `N samples of P processes` and add a `by process` split (pid, executable, samples, sampled ms = samples × interval, share); `--pid <pid\|exe>` keeps one process (its id or a part of its executable's name). Untimed samples (macOS `sample`'s snapshots) are counts, never ms. The header gives two resolved shares, of leaf frames and of all frames (a leaf in a named system library can resolve while every caller in an unsymbolized binary does not), and `Unresolved` warns when either is under 95%; `cpu_coverage` compares the sampled CPU with the tree's cycles over the capture (or the sampler's own count when a process of it ended) and `Coverage` warns under 80%. `--thread main` also matches a thread whose id is its process's (Linux) |
+| `hotspots` | `--by function\|file\|package` `--phase` `--thread` `--pid` `--native` `--sort self\|total` `--source host` | a script target's attribution recording: its measured runs' profiles by default (`scope: measured_runs`, §9.6), `--phase` that phase's stretches of them (`scope: phase`), `--source host` the whole host process instead (`scope: whole_host`: startup, setup, warmup, runs, resets, never divided by runs; the header and JSON say which); rows with self and total time (total: every stack the row's frame is in, once a stack, CPU views only, not `alloc` or `layout`; `self_ms`, `total_ms`, `share`, `total_share`; a function that only calls is a row by its total, sorted after every row with self time; strobe's driver script is its own row by file or package, never the app's; report.html's self-time tables leave rows of 0 self out), sample counts, intervals, handles; native samples (`deep`) in the same shape (a recording without a JavaScript profile shows them by default). Sorted by self time (the default), the callers whose time is in what they called and that missed the rows (5% of the total or more, up to 8) follow as `callers by total time` (`callers` in JSON); `--sort total` ranks by total. Native samples of several processes say `N samples of P processes` and add a `by process` split (pid, executable, samples, sampled ms = samples × interval, share); `--pid <pid\|exe>` keeps one process (its id or a part of its executable's name). Untimed samples (macOS `sample`'s snapshots) are counts, never ms. The header gives two resolved shares, of leaf frames and of all frames (a leaf in a named system library can resolve while every caller in an unsymbolized binary does not), and `Unresolved` warns when either is under 95%; `cpu_coverage` compares the sampled CPU with the tree's cycles over the capture (or the sampler's own count when a process of it ended) and `Coverage` warns under 80%. `--thread main` also matches a thread whose id is its process's (Linux) |
 | `waits` | `--by function\|file\|package` `--thread` `--phase` | off-CPU waits of a native capture taken with `--probes waits` (attribution only, rule 3): per row (the innermost frame of the wait's stack outside the OS, the kernel and the language runtime), the time off CPU, waits, the longest, the part waiting and the part runnable (preempted, or woken and queued for a CPU), who woke them (a thread with the frame it woke them from, or an interrupt: a timer or a device) and the heaviest full stack; the header gives the threads, waits, totals and the share with a known waker. `--phase` clips each wait to the phase's spans. A capture without waits refuses (`NoWaits`, saying why) |
+| `http` | `--phase` `--top`; `exp_…` and `a..b` too | the HTTP probe (§8.9) of a bench block's recording: its setup (the URL without query values, whether an authorization was sent, never its value), the idle control (probes, p50, p95, max) against the probes due in the measured runs' timed parts (due, answered, timeouts, errors, missed sends, statuses; p50, p95 and max, a quantile that falls on a timeout said `censored`, never a number), the probe's own CPU, and the stalled cohorts: probes in a row slower than max(5 × the idle p95, 50 ms) or timed out, each with its run, when, every probe's latency in order (`TIMEOUT` for one) and how long the server answered none. `--phase` keeps the probes due in that phase's spans. `exp_…` lists every probe block (its side, pair, quantiles, counts and the recording that keeps its probes) and the probed check and attribution recordings; `a..b` shows two recordings' side by side |
 | `alloc` | `--by function\|file\|package` | bytes allocated per row from sampled allocations (collected objects included), with complete locations and the three heaviest full stacks per function |
 | `layout` | | forced (synchronous) layouts and style recalculations by the JavaScript call site that forced them, with full stacks; per-run counts and time, forced and in the frame lifecycle |
 | `shifts` | | the five largest layout shifts of an attribution block (a series declaring `layout.shift`): score, run, time into it, and the elements that moved with their rects before and after |
@@ -4755,7 +4938,8 @@ hotspots by function `(name, location)` and by file, allocation sites, forced la
 heap and its base/head diff, and attribution run counts, default cap 2 MB: a report keeps three full
 stacks for its top 15 rows and the heaviest below them, frames once per side in a `frame_table`
 that stacks index, while recordings and `query` keep all);
-markdown is GitHub-flavoured.
+markdown is GitHub-flavoured. A script target's hotspots are its measured runs' (§9.6); a toggle
+labelled "Whole host process (startup, setup, warmup, runs, resets)" shows the whole host's instead.
 
 A recording or series with a video (§8.8) gets a video panel (`video_player`): its players side by
 side on one clock (t = 0 at each side's first measured run's start), Play/Pause for both, 0.25×
@@ -5127,7 +5311,10 @@ protobuf written by hand (no generated code, no C):
   StackSamples plugin: a Callstacks track per sampled thread with a flame chart, and the area
   selection's Callstack Flamegraph). One sequence per source: `javascript` (V8 CPU profiles, each
   sample weighted by the time to the next one, `(idle)` left out; `cpu-main` profiles on the
-  browser's main thread, the others on the thread that ran strobe's marks), `javascript.allocations`
+  browser's main thread, the others on the thread that ran strobe's marks; a script recording's
+  whole-host profile cut to its measured runs' timed parts on the host's main thread, at true times,
+  and whole on a `Whole host process (startup, setup, warmup, runs, resets)` track of its own, a gap
+  over `capUs` weighing `overUs`), `javascript.allocations`
   (sampled allocations in bytes; they carry no time and all stand at the first measured run, which
   the counter's name says) and `native` (ETW, perf, `sample` or strobe's own sampler, weighted by the
   sampling interval; untimed samples count samples, so the UI offers no flame chart for them). Frames
@@ -5144,13 +5331,19 @@ protobuf written by hand (no generated code, no C):
 - strobe's own data as tracks under one `strobe <rec>` root: `recording` (one slice over the
   recording whose arguments are its meta: validity, timing, probes, note, warnings, environment,
   values, OS averages), `runs and phases` (from strobe's marks in the Chrome trace, or a native
-  block's `frames.json`, with `runs.json` per run), `marks`, `inputs strobe sent` (a bench block's
+  block's `frames.json`, with `runs.json` per run; a script block's `runs.json`, with its untimed
+  stretches, and its host's `lifecycle_spans`: startup, setup, `warm i`, `reset i`, teardown), `marks`, `inputs strobe sent` (a bench block's
   actions from `actions.json.gz` as slices from when each call's input went out (a single click's
   press) to strobe's answer, named by call and selector, with seq, hook, run, phase, untimed, the
   element hit, the latency sample and outcome as arguments, never the typed text,
   in every recording that kept them, Chromium trace recordings too; and a native or traceless block's
   measured input edges from `frames.json` as instants), `accessibility tree
-  changes`, `OS presents` (every present by process as a slice named by its fate, the app's frames on
+  changes`, `HTTP probe · <METHOD> <path>` (§8.9: its latency in ms at each answered probe's
+  dispatch; its idle control; the probes as a waterfall, each from its dispatch to its whole response
+  on the first lane free then, named by its fate, `200 748.1 ms`, `TIMEOUT >400 ms` or `ERR HTTP 500,
+  not 200–299`, with seq, when, run, how late it went out and when it was sent as arguments; and
+  `missed sends (driver lag)` as instants at each slot strobe could not send; a probe block's own
+  recording draws its runs, untimed stretches and phases from the probe's file), `OS presents` (every present by process as a slice named by its fate, the app's frames on
   screen, their interval in ms, vertical blanks per display path), `memory · <process>` (the readings
   in MB), per thread its CPU (% of a core) and wakes per second from the thread timeline (§7.4),
   under the thread's own track when the recording has no Chrome trace, and `strobe itself (its own
@@ -6841,7 +7034,9 @@ so nothing needs a display: it runs on a locked session and on a server alike (`
 recordings/rec_3f9a1c/
   meta.json             target, probes, blocks, environment, validity, clock map, census, values and refusals
   trace.pftrace         Perfetto proto: Chrome trace + strobe packets (§15)
-  cpu-<n>.cpuprofile    CPU profiles (plain JSON); alloc-<n>.heapprofile sampled allocations
+  cpu-<n>.cpuprofile    CPU profiles (plain JSON; a script block's: one per measured run, cut to its timed
+                        parts on strobe's clock, §9.6); alloc-<n>.heapprofile sampled allocations
+  whole-host.json.gz    a script block's whole host profile on strobe's clock (`--source host`), owner-only
   heap-<n>.heapsnapshot.gz  heap snapshots (heap-s0, heap-s1 … for memory recordings), owner-only
   leaks.json            a memory recording's suspects
   census.json           a leak run's censuses (§8.6); memdump-<n>.pftrace Chromium's memory-infra dumps
@@ -6858,7 +7053,10 @@ recordings/rec_3f9a1c/
   deep-symbols.json.gz  their symbols, cached on first read
   waits-symbols.json.gz the waits' symbols (their own modules and stacks), cached on first `query <rec> waits`
   presents.json.gz      OS present events: every present (start, screen time or discarded) and vertical blank
-  runs.json             native apps: per measured run, wall and CPU time, wakes, IO, counts, accessibility elements
+  runs.json             native apps: per measured run, wall and CPU time, the main thread's CPU, wakes, IO,
+                        counts, accessibility elements; script blocks: `{ runs }`, each measured run's span,
+                        untimed stretches, phase marks, wall and CPU ms (`meta.json` `lifecycle_spans`: the
+                        host's life around them)
   frames.json           native apps: the app's pids, and per measured run its span, strobe's inputs, phase marks and accessibility change times
   threads.json          native apps: per thread wakes per second, CPU per run, name
   timeline.json.gz      native apps: each thread's CPU and wakes per second from the launch (§7.4)
@@ -6873,6 +7071,8 @@ recordings/rec_3f9a1c/
                         order (§9.6 Actions; `store::actions`), owner-only: it holds typed text
   video.mp4 | video.webm  `--video`: what the target showed (§8.8), owner-only
   video.json            the video's kind, source, encoder, size, clock map, runs and input markers on media time
+  http_probe.json.gz    the HTTP probe (§8.9): its setup without secrets, span, CPU, idle window, each run's
+                        span, and every probe's due, dispatch, sent and completed times and fate, owner-only
 ```
 
 A bench block's `meta.json` names the experiment's `seed` beside `experiment`.
@@ -7087,6 +7287,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
 | `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% a timed block's `tty.latency.*`, `tty.settle.*` and `tty.frame.*` are refused (a `--check` keeps them and warns, naming the declared ones a timed bench refuses; an attribution block neither). Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
 | Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches, opening the window's capture included: a run whose first pixel read opens it pays for it; Windows makes the capture's Direct3D device once per process, 118 of the 126 ms of CPU an open took on adais); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
+| HTTP probe (`ctx.httpProbe`, §8.9; never in a clean timing block) | ≤ 1% of one core over the probe's span (`http_probe_pct`: its scheduler's and workers' own CPU, on strobe's CPUs; a new connection per probe at 100 ms: vps 0.29%, adais 0.58%); over it a timed probe block warns `OverheadBudget`, over 2% refuses `http.latency.*` (a `--check` warns) |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
 
@@ -7223,8 +7424,8 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   renderer's perf refusal, X11 video, a headed WebKitGTK under a desktop's settings daemon.
 - macOS: screen video (ScreenCaptureKit into AVAssetWriter), GPU time against a GPU-bound app,
   `ri_child_*_time` in ns, `interaction.*` from a pixel proof under the 2% budget, a visible Dock's
-  work area, Safari Technology Preview, plain `bun` under the terminal bench with its cache, and an
-  app bundle that needs a permission its parent had.
+  work area, Safari Technology Preview, plain `bun` under the terminal bench with its cache, an
+  app bundle that needs a permission its parent had, and the HTTP probe (§8.9).
 - Phones: everything on a real Android phone (thermal and battery readings, a PIN lock, Wi-Fi adb,
   a channel given to strobe, touch slop and timing, a fixture through `adb reverse`, the 10-pair
   `--aa` and calibration); a headed phone's touch `interaction.*`; on an iPhone, driven Safari
@@ -7235,7 +7436,9 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   a one-L3 machine with 4 or more cores, a ScreenCaptureKit start that times out, the helper's
   `hello` refusal and restored interval after a forced error, the daemon's restart after an update,
   a comparison's `--require-verdict` exit on a refused series, a bisect's one seed and a track's
-  derived seed in timed runs, a page launch timed to an image (refused `NotForTarget` today).
+  derived seed in timed runs, a page launch timed to an image (refused `NotForTarget` today), the
+  HTTP probe's timed probe blocks and probe pass (§8.9: checked in `--check` and attribution blocks
+  only).
 - Known gaps by design: load on CPUs outside the target's mask is not refused, and a target
   suspended from outside reads as slow wall time.
 
@@ -7270,6 +7473,14 @@ describe it now. The sections above say what strobe does; this list only dates i
 2026-11-09 this section also held the notes of where and how each change was checked, with their
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
+
+**After 0.23.0**
+
+- 2026-11-09 · this change · the HTTP probe: `ctx.httpProbe` in setup sends a loopback request on
+  absolute deadlines from strobe's own threads (open loop, missed sends never billed to the server),
+  with an idle control, `http.*` metrics (timeouts right-censor a quantile, errors refuse the
+  latencies), probe blocks apart from clean timing blocks, `query http` with stalled cohorts, a
+  Perfetto waterfall, and an authorization held in memory only (§8.9, §11.1, §11.4, §19).
 
 **After 0.22.0**
 
