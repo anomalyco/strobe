@@ -3,6 +3,8 @@
 //   strobe bench scripts/dev/main-thread.bench.ts --head . --check
 // Truth per 300 ms run:
 //   main-spin    the main thread busy: cpu.work ~300 ms, cpu.main ~300 ms (cpu.main.busy ~100%)
+//   main-spin-30 the same for 30 ms: cpu.work ~30 ms, never below cpu.main (the host idles after the run, so a
+//                cycles-to-ms rate taken over the end's process listing would read it short)
 //   worker-spin  a worker thread busy:  cpu.work ~300 ms, cpu.main < 10 ms
 //   child-spin   a child process busy:  cpu.work ~300 ms (or refused where the child's CPU left with it), cpu.main < 10 ms
 //   timer-wait   a timer: cpu.work < 5 ms, cpu.main < 5 ms
@@ -20,7 +22,7 @@ const exe = join(tmpdir(), process.platform === "win32" ? "main-thread-app.exe" 
 if (!existsSync(exe)) copyFileSync(process.execPath, exe)
 const app = (mode: string) => native(exe, { args: [harness, mode], window: false })
 const metrics = ["cpu.main", "cpu.main.busy", "run.duration"]
-const call = (name: string) => ({ targets: ["harness"], primary: "cpu.work", metrics, run: ({ call }: any) => call(name, 300) })
+const call = (name: string, ms = 300) => ({ targets: ["harness"], primary: "cpu.work", metrics, run: ({ call }: any) => call(name, ms) })
 const wait = (target: string) => ({ targets: [target], primary: "cpu.work", metrics, run: ({ page }: any) => page.wait(300) })
 
 export default bench({
@@ -36,6 +38,7 @@ export default bench({
   },
   cases: {
     "main-spin": call("mainSpin"),
+    "main-spin-30": call("mainSpin", 30),
     "worker-spin": call("workerSpin"),
     "child-spin": call("childSpin"),
     "timer-wait": call("timerWait"),

@@ -4,7 +4,7 @@
 //! bench file's `page` drives it through the OS's accessibility tree and its own message loop
 //! (`driver::native`), and input latency comes from those inputs to the presents that showed them.
 
-use super::super::record::{Cycles, per_process};
+use super::super::record::{Clock, Cycles, per_process, read_at, read_known};
 use super::launch::{Line, found_all, joined, milestones, no_page, screen_times, tail};
 use super::*;
 use crate::driver::native::{Log, Session};
@@ -80,19 +80,10 @@ impl Drive {
     }
 }
 
-/// The target's processes' CPU so far in cycles, each by its pid and start time, and the time stamp
-/// counter.
-fn cycles(n: &Native) -> (Cycles, Option<u64>) {
-    (per_process(&n.processes()), host::tsc())
-}
-
-/// CPU ms of `cycles` (over a run's timed parts: `record::timed_cpu`), from the cycle clock's rate
-/// between `a` and `b`, the first and last readings, `wall_ms` apart; unknown (NaN) without cycles.
-fn cpu_ms(cycles: u64, a: &(Cycles, Option<u64>), b: &(Cycles, Option<u64>), wall_ms: f64) -> f64 {
-    match (a.1, b.1) {
-        (Some(t0), Some(t1)) if t1 > t0 && b.0.values().any(|c| *c > 0) => cycles as f64 / (t1 - t0) as f64 * wall_ms,
-        _ => f64::NAN,
-    }
+/// CPU ms of `cycles` (over a run's timed parts: `record::timed_cpu`), at the cycle clock's rate
+/// between the run's two clock readings; unknown (NaN) without cycles in `last`, the run's last reading.
+fn cpu_ms(cycles: u64, last: &Cycles, a: &Clock, b: &Clock) -> f64 {
+    if last.values().any(|c| *c > 0) { a.ms(b, cycles) } else { f64::NAN }
 }
 
 /// The app's processes' cycles, threads and what tells one that ended (`host::ended_marks`) at one edge
@@ -647,22 +638,31 @@ fn runs(
                 // process that differs between the two is refused, never miscounted (`dead_since`).
                 // Listed again: one that ended during the snapshot would mark every run skewed.
                 let ended0 = host::ended_marks(&n.pids(), Some(&n.home));
-                let c0 = cycles(n);
+                let mut c0 = per_process(&n.processes());
                 let main0 = main_read();
                 if let Some(t) = timeline {
                     t.mark_edge();
                 }
+                // The listed processes read again right at the run's start, and at its end before the app's
+                // processes are listed for new ones, each by itself and with the clocks: a listing takes
+                // milliseconds, which would be on one side of the run (`record::read_known`, `Clock`).
+                let at0 = read_known(c0.keys());
+                read_at(&mut c0, &at0);
+                let clock0 = Clock::now();
                 cost.start();
                 let t0 = host::now_ns();
                 let ran = ctx.runner.call("run", json!({ "case": s.case }), run_timeout, &serve);
                 let t1 = host::now_ns();
                 cost.end();
+                let at1 = read_known(c0.keys().chain(edges.borrow().iter().flat_map(|e| e.0.keys())));
+                let clock1 = Clock::now();
                 let main1 = main_read();
                 if let Some(t) = timeline {
                     t.mark_edge();
                 }
                 let procs1 = n.processes();
-                let c1 = (per_process(&procs1), host::tsc());
+                let mut c1 = per_process(&procs1);
+                read_at(&mut c1, &at1);
                 let ended1 = host::ended_marks(&procs1.iter().map(|p| p.pid).collect::<Vec<_>>(), Some(&n.home));
                 let snap1 = Snapshot::take_since(wakes::wall_us(), &procs1.iter().map(|p| p.pid).collect::<Vec<_>>(), perf.as_ref());
                 // A launcher that hands over to the app and exits cleanly (code 0) is not the app ending: what
@@ -686,12 +686,12 @@ fn runs(
                 // The readings at the run's start, each untimed stretch's edges and the run's end: each pair a
                 // timed part. A stretch the run never ended (it threw) ends with the run.
                 let mut e = edges.take();
-                let end: Edge = (c1.0.clone(), snap1.clone(), ended1);
+                let end: Edge = (c1.clone(), snap1.clone(), ended1);
                 if e.len() % 2 == 1 {
                     e.push(end.clone());
                 }
                 let mut edge_list: Vec<&Edge> = e.iter().collect();
-                let start: Edge = (c0.0.clone(), snap0.clone(), ended0);
+                let start: Edge = (c0.clone(), snap0.clone(), ended0);
                 edge_list.insert(0, &start);
                 edge_list.push(&end);
                 // The main thread's CPU over the same timed parts.
@@ -706,24 +706,23 @@ fn runs(
                     .and_then(|at| host::main_share(&at).ok_or_else(|| host::MainLost::Gone("the CPU clock gave no rate over the run".into())));
                 let cycles_at: Vec<&Cycles> = edge_list.iter().map(|x| &x.0).collect();
                 let parts: Vec<Span> = edge_list.as_chunks::<2>().0.iter().map(|[a, b]| wakes::span(&a.1, &b.1)).collect();
-                let whole_ms = (t1 - t0) as f64 / 1e6;
                 // A process of the app that ended in a timed part took its CPU there with it, counted only
                 // where its launch's cgroup kept it (`record::timed_cpu`); one that ended in an untimed
                 // stretch is in only the whole span's (`cpu_whole`, for cpu.foreign).
                 let ended_at: Vec<&host::EndedMarks> = edge_list.iter().map(|x| &x.2).collect();
                 let timed_cpu = super::super::record::timed_cpu(&cycles_at, &ended_at);
-                let whole_cpu = super::super::record::timed_cpu(&[&c0.0, &c1.0], &[&start.2, &end.2]);
+                let whole_cpu = super::super::record::timed_cpu(&[&c0, &c1], &[&start.2, &end.2]);
                 let (cpu_lost, whole_lost) = (timed_cpu.is_none(), timed_cpu.is_none() || whole_cpu.is_none());
                 runs.push(Run {
                     main,
                     cpu_lost,
                     whole_lost,
-                    ended_ms: timed_cpu.as_ref().map_or(0.0, |c| cpu_ms(c.ended, &c0, &c1, whole_ms)),
-                    ended_exes: timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), cpu_ms(*cy, &c0, &c1, whole_ms), *k)).collect()).unwrap_or_default(),
+                    ended_ms: timed_cpu.as_ref().map_or(0.0, |c| cpu_ms(c.ended, &c1, &clock0, &clock1)),
+                    ended_exes: timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), cpu_ms(*cy, &c1, &clock0, &clock1), *k)).collect()).unwrap_or_default(),
                     ms: timed.ns() as f64 / 1e6,
                     // Short CPU is none (runs.json, warmup falls back to the run's time).
-                    cpu: timed_cpu.as_ref().map_or(f64::NAN, |c| cpu_ms(c.total, &c0, &c1, whole_ms)),
-                    cpu_whole: whole_cpu.as_ref().filter(|_| !whole_lost).map_or(f64::NAN, |c| cpu_ms(c.total, &c0, &c1, whole_ms)),
+                    cpu: timed_cpu.as_ref().map_or(f64::NAN, |c| cpu_ms(c.total, &c1, &clock0, &clock1)),
+                    cpu_whole: whole_cpu.as_ref().filter(|_| !whole_lost).map_or(f64::NAN, |c| cpu_ms(c.total, &c1, &clock0, &clock1)),
                     span: Span::joined(parts),
                     timed,
                     counts: hooks.counts(),

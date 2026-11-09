@@ -230,9 +230,9 @@ pub(super) fn cpu_ms(a: (u64, Option<u64>), b: (u64, Option<u64>), wall_ms: f64)
     }
 }
 
-/// The host process tree's cycles by process (`record::per_process`) and the cycle clock.
-fn cycles(pid: u32) -> (super::super::record::Cycles, Option<u64>) {
-    (super::super::record::per_process(&host::process_tree(pid)), host::tsc())
+/// The host process tree's cycles by process (`record::per_process`).
+fn cycles(pid: u32) -> super::super::record::Cycles {
+    super::super::record::per_process(&host::process_tree(pid))
 }
 
 /// One run: wall ms, CPU ms (both without its untimed stretches), its counters, the heap it retained
@@ -302,7 +302,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     cost.pause();
                     main_edges.borrow_mut().push(main_read());
                 }
-                let c = cycles(pid).0;
+                let c = cycles(pid);
                 let e = ended_of(&c);
                 edges.borrow_mut().push((c, e));
                 if !start {
@@ -363,17 +363,25 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // Right before the cycles (nothing read between), so it adds nothing to the run's CPU; a
                     // process that differs between the two is refused, never miscounted (`dead_since`).
                     let ended0 = host::ended_marks(&host::tree_pids(pid), None);
-                    let c0 = cycles(pid);
+                    let mut c0 = cycles(pid);
                     let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
                     let main0 = main_read();
                     if let Some(tl) = &timeline {
                         tl.mark_edge();
                     }
+                    // The listed processes read again right at the run's start, and at its end before the tree
+                    // is listed for new ones, each by itself and with the clocks: a listing takes milliseconds,
+                    // which would be on one side of the run (`record::read_known`, `record::Clock`).
+                    let at0 = super::super::record::read_known(c0.keys());
+                    super::super::record::read_at(&mut c0, &at0);
+                    let clock0 = super::super::record::Clock::now();
                     cost.start();
                     let t0 = host::now_ns();
                     ctx.runner.call("run", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw or timed out"))?;
                     let t1 = host::now_ns();
                     cost.end();
+                    let at1 = super::super::record::read_known(c0.keys().chain(edges.borrow().iter().flat_map(|e| e.0.keys())));
+                    let clock1 = super::super::record::Clock::now();
                     let main1 = main_read();
                     if let Some(tl) = &timeline {
                         tl.mark_edge();
@@ -388,14 +396,16 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         .collect::<std::result::Result<Vec<_>, _>>()
                         .and_then(|at| host::main_share(&at).ok_or_else(|| host::MainLost::Gone("the CPU clock gave no rate over the run".into())));
                     mains.push(main);
-                    // Ended before the tree's snapshot, which takes milliseconds: the tree's CPU below spans it.
+                    // Ended after the known processes' readings and before the tree's listing, which takes
+                    // milliseconds: the tree's CPU below lies inside it.
                     let busy = busy.zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
-                    let c1 = cycles(pid);
-                    let ended1 = ended_of(&c1.0);
+                    let mut c1 = cycles(pid);
+                    super::super::record::read_at(&mut c1, &at1);
+                    let ended1 = ended_of(&c1);
                     // The whole tree's CPU over the run, untimed stretches too, in cycles, with what processes
                     // of it that ended used (`record::timed_cpu`): the rest of the CPUs' busy time is other
                     // work. Unknown where what ended is not known.
-                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0.0, &c1.0], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total));
+                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total));
                     let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &host::tree_pids(pid), perf.as_ref()));
                     hooks.end();
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
@@ -403,20 +413,17 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // the run never ended ends with it), at the cycle clock's rate over the run.
                     let mut e = edges.take();
                     if e.len() % 2 == 1 {
-                        e.push((c1.0.clone(), ended1.clone()));
+                        e.push((c1.clone(), ended1.clone()));
                     }
-                    let mut at: Vec<&super::super::record::Cycles> = vec![&c0.0];
+                    let mut at: Vec<&super::super::record::Cycles> = vec![&c0];
                     at.extend(e.iter().map(|x| &x.0));
-                    at.push(&c1.0);
+                    at.push(&c1);
                     let mut ended_at: Vec<&host::EndedMarks> = vec![&ended0];
                     ended_at.extend(e.iter().map(|x| &x.1));
                     ended_at.push(&ended1);
                     let timed_cpu = super::super::record::timed_cpu(&at, &ended_at);
                     // Short CPU is none (warmup falls back to the run's time).
-                    let ms = |cycles: u64| match (c0.1, c1.1) {
-                        (Some(a), Some(b)) if b > a && c1.0.values().any(|c| *c > 0) => cycles as f64 / (b - a) as f64 * ((t1 - t0) as f64 / 1e6),
-                        _ => f64::NAN,
-                    };
+                    let ms = |cycles: u64| if c1.values().any(|c| *c > 0) { clock0.ms(&clock1, cycles) } else { f64::NAN };
                     let used = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
                     lost.push((timed_cpu.as_ref().map_or(0.0, |c| ms(c.ended)), timed_cpu.is_none()));
                     let retained = if heap { heap_mb()? - h0 } else { f64::NAN };
