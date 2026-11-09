@@ -3683,8 +3683,8 @@ experiment's `script.log`.
     offset) outside strobe's request around it by over 1 ms, or a spin's `strobeClockMark` samples
     over 1 ms outside the spin (or none in either spin). The samples fill the spin, so a clock off by
     d puts them within d of one edge past it: the check reads each sample, never a median (a uniform
-    +2.6 ms leaves most of them inside; `STROBE_DEV_PROFILE_SHIFT_US=±2600`, dev only, refuses with 5
-    late and 6 early). A spin of four or more samples may have one past each edge, together at most a
+    +2.6 ms leaves most of them inside; `STROBE_DEV_PROFILE_SHIFT_US=±2600`, dev only, refuses: the start
+    spin's samples 5 of 14 late, 3 of 14 early, each fitting the spin only moved back 2.4 ms). A spin of four or more samples may have one past each edge, together at most a
     quarter of it, none over 2.5 ms (a sampler that stamps a sample and waits for a CPU before it takes
     the stack); `meta.clock.mark_outliers` counts them, `mark_worst_ms` the farthest and `mark_fit_ms`
     the shifts each spin's samples would fit. Where outliers are not 0, `mark_worst_ms` is also how far
@@ -3693,8 +3693,10 @@ experiment's `script.log`.
     drifts against its own `performance.now()` while it samples densely: Bun alone, 16 spins of 4 ms
     between 750 ms busy spins, its samples of the last spin 3 ms late after 27,600 samples (adais) and
     4.5 ms after 38,800 (vps), growing with each spin from 0 at the first, none over 16 idle seconds.
-    So a probed Bun block (about 17,000 samples) is refused on vps most times (3 of 4: its exit spin
-    1.6 to 2 ms off), and a kept one is within 1 ms at both spins, the drift between them growing with
+    So a probed Bun block (12,000 to 17,000 samples) is refused at times (vps 1 of 3: its exit spin
+    1.9 ms off, the kept ones' exit spins fit moved back 0.4 and 1.8 ms with one stray; adais, a game
+    running, 1 of 1: 1.4 ms late), while a short one is kept (the phases fixture's Bun exit spin
+    within 0.55 ms); a kept one is within 1 ms at both spins, the drift between them growing with
     the samples. `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms
     before the last measured run's end, or the exit's reading failing.
   - Weights, as Firefox's (§8.3): a sample weighs its gap, cut to the run, its untimed stretches out;
