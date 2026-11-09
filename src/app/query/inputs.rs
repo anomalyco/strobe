@@ -131,7 +131,13 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
             // and before the next input that is no press feedback, by when it was known to have happened.
             let change = match s.pixel {
                 Some((_, had)) => Some(("pixels", (had as f64 - s.t_ns as f64) / 1e6)),
-                None => changes.iter().filter(|c| c.1 > from && c.1 <= (from + frames::HORIZON_NS).min(next) && !c.2).map(|c| c.1).min().map(|c| ("change", (c as f64 - s.t_ns as f64) / 1e6)),
+                // One that may have happened before the next input (its earliest, when known) is this one's.
+                None => changes
+                    .iter()
+                    .filter(|c| c.1 > from && (if c.0 == 0 { c.1 } else { c.0 }) <= (from + frames::HORIZON_NS).min(next) && !c.2)
+                    .map(|c| c.1)
+                    .min()
+                    .map(|c| ("change", (c as f64 - s.t_ns as f64) / 1e6)),
             };
             // The last frame on the screen before it and the next three, as their screen time from it;
             // one shown after it but begun before its first edge is marked (it cannot hold its reaction).
