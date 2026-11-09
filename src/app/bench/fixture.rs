@@ -93,7 +93,7 @@ impl Spec {
                 c.stdout(Stdio::null()).stderr(Stdio::null());
             }
         }
-        let mut owned = host::spawn_owned(&mut c, cpus, 0, Some(&home)).map_err(|e| Error::msg(format!("fixture: {cmd}: {e}")))?;
+        let mut owned = host::spawn_owned(&mut c, cpus, 0, Some(&home)).map_err(|e| Error::msg(format!("fixture: {cmd} in {}: {e}", host::paths::plain(&self.dir))))?;
         let pid = owned.pid();
         let ready = self.ready.as_deref().map(|r| fill(r, port, &home, params));
         let deadline = Instant::now() + self.timeout;
@@ -108,15 +108,16 @@ impl Spec {
             if let Some(code) = owned.exited() {
                 isolate::release_home(&home);
                 let _ = std::fs::remove_dir_all(&home);
-                return Err(Error::msg(format!("the fixture exited (code {code}) before it was ready: {cmd} (its output: {})", log.display())));
+                return Err(Error::msg(format!("the fixture exited (code {code}) before it was ready: {cmd} in {} (its output: {})", host::paths::plain(&self.dir), log.display())));
             }
             if Instant::now() > deadline {
                 drop(owned);
                 isolate::release_home(&home);
                 let _ = std::fs::remove_dir_all(&home);
                 return Err(Error::timeout(format!(
-                    "the fixture was not ready in {} s: {cmd} (waited for {}; its output: {})",
+                    "the fixture was not ready in {} s: {cmd} in {} (waited for {}; its output: {})",
                     self.timeout.as_secs(),
+                    host::paths::plain(&self.dir),
                     ready.as_deref().unwrap_or("its port"),
                     log.display()
                 )));

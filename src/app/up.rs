@@ -71,9 +71,8 @@ pub fn run(args: &Args) -> Result<Output> {
     let mut s = Steps::new(&format!("strobe up · {device}"));
     let env = host::env();
     let topo = host::topology();
-    let groups: Vec<String> =
-        topo.groups.iter().enumerate().map(|(i, g)| format!("CCD{i} {} MB L3{}", g.l3_mb, if topo.vcache().is_some_and(|v| v.mask == g.mask) { " (V-Cache)" } else { "" })).collect();
-    s.line("✓", "cpu", format!("{} · {} logical{}", env.cpu, env.logical_cpus, if groups.is_empty() { String::new() } else { format!(" · {}", groups.join(", ")) }));
+    let shape = topo.cpu_shape();
+    s.line("✓", "cpu", format!("{} · {} logical{}", env.cpu, env.logical_cpus, if shape.is_empty() { String::new() } else { format!(" · {}", shape.join(", ")) }));
     let fast = env.power_plan.contains("performance");
     s.line(
         if fast { "✓" } else { "i" },
@@ -85,7 +84,19 @@ pub fn run(args: &Args) -> Result<Output> {
         Err(e) => s.line("✗", "browser", format!("{}: {}", e.message, e.hint.unwrap_or_default())),
     }
     match crate::target::firefox::find() {
-        Some(p) => s.line("✓", "firefox", format!("{} · {}", crate::target::firefox::version_of(&p).unwrap_or_else(|| "Firefox".into()), p.display())),
+        Some(p) => {
+            let old = crate::target::firefox::too_old(&p).is_some();
+            s.line(
+                if old { "i" } else { "✓" },
+                "firefox",
+                format!(
+                    "{} · {}{}",
+                    crate::target::firefox::version_of(&p).unwrap_or_else(|| "Firefox".into()),
+                    p.display(),
+                    if old { format!(" (needs Firefox {}+ for --engine firefox)", crate::target::firefox::MIN_MAJOR) } else { String::new() }
+                ),
+            )
+        }
         None => s.line("i", "firefox", "none (only --engine firefox needs it: install Firefox from mozilla.org)"),
     }
     let webkit = [false, true].into_iter().any(|h| crate::target::webkit::find(h).is_some());

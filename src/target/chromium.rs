@@ -578,10 +578,20 @@ impl Browser {
     /// GPU devices and whether compositing runs on a hardware adapter.
     pub fn gpu(&self) -> Result<Gpu> {
         let info = self.cdp.send("SystemInfo.getInfo", json!({}), None)?;
-        let devices: Vec<String> =
-            info["gpu"]["devices"].as_array().map(|a| a.iter().map(|d| d["deviceString"].as_str().unwrap_or("").to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+        let mut list: Vec<&Value> = info["gpu"]["devices"].as_array().map(|a| a.iter().filter(|d| d["deviceString"].as_str().is_some_and(|s| !s.is_empty())).collect()).unwrap_or_default();
+        // Chromium lists the primary adapter first, which on a machine with two (a laptop's integrated and
+        // discrete GPUs) need not be the one it draws with: that one is the adapter its GL renderer names
+        // (ANGLE's "NVIDIA GeForce RTX … (0x00002C05) Direct3D11"), by device id, else by name.
+        let renderer = info["gpu"]["auxAttributes"]["glRenderer"].as_str().unwrap_or("").to_lowercase();
+        let by_id = |d: &&Value| d["deviceId"].as_u64().is_some_and(|id| id != 0 && renderer.contains(&format!("(0x{id:08x})")));
+        let by_name = |d: &&Value| d["deviceString"].as_str().is_some_and(|s| renderer.contains(&s.to_lowercase()));
+        if let Some(i) = list.iter().position(by_id).or_else(|| list.iter().position(by_name)) {
+            let d = list.remove(i);
+            list.insert(0, d);
+        }
+        let devices: Vec<String> = list.iter().filter_map(|d| d["deviceString"].as_str().map(str::to_string)).collect();
         let compositing = info["gpu"]["featureStatus"]["gpu_compositing"].as_str().unwrap_or("").to_string();
-        // Element 0 is the adapter Chromium uses; the rest are every other adapter on the system.
+        // Element 0 is the adapter Chromium draws with; the rest are every other adapter on the system.
         let software = devices.first().is_none_or(|d| crate::validity::is_software_gpu(d)) || !compositing.starts_with("enabled");
         Ok(Gpu { devices, compositing, software })
     }
