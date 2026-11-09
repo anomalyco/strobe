@@ -3665,8 +3665,12 @@ experiment's `script.log`.
   attribution block on adais its 0.4 ms sampler raised the host's `cpu.work` from 60 to 146 ms a run;
   the block is perturbed and its CPU is not compared.
   - Clocks (`probe::cpu::rebase`, `Sync`): strobe reads the host's `clock` op just after it is ready and
-    before it exits: one request in which the host spins 5 ms (`strobeClockMark`) and reads `Date.now()`
-    at a millisecond edge, then five quick round trips (the offset from the quickest trip's midpoint).
+    before it exits: one request in which the host spins at least 5 ms (`strobeClockMark`) and until it
+    catches a `Date.now()` millisecond tick tightly (two calls one millisecond apart, under 50 µs apart
+    on the monotonic clock, so the tick is known within 25 µs; a tick seen after the thread was off a
+    CPU is skipped; none in 20 ms refuses `ClockUnsynced`), then five quick round trips (the offset
+    from the quickest trip's midpoint; the profile is placed by the reading, start or exit, with the
+    quicker trip).
     Node's profile counts in hrtime (V8's TimeTicks: QPC, `CLOCK_MONOTONIC`, mach); Bun 1.4's in wall µs
     from JSC's `approximateWallTime` at the host's exit (shifted by the wall clock's lead over the
     monotonic one then: 0.28 ms on adais after 11 s), each delta truncated to whole µs (0.5 µs a
@@ -3675,13 +3679,19 @@ experiment's `script.log`.
     says the gaps lost in all, spread over the samples (0.5 µs each without it). A fixed 0.5 µs
     put the exit's spin 1.1 ms late in a probed 10 s block on adais (`ClockUnsynced`).
     `ClockUnsynced`: a reading's round trip over 2 ms, the monotonic offset moving over 1 ms between
-    start and exit, or the median of a spin's `strobeClockMark` samples over 1 ms outside strobe's
-    span around its request (or none in either spin). A single sample may lie further: a sampler kept
-    off a CPU between its clock read and the stack it takes stamps it off (vps, a probed Bun host: up
-    to 3 of a spin's 9 samples, -1.68 to +1.69 ms, the median inside; 3 of 3 blocks kept, where a
-    per-sample 1 ms check refused 3 of 4), which is that sample's time, not the clocks';
-    `meta.clock.mark_outliers` and `mark_worst_ms` count them. `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms before
-    the last measured run's end, or the exit's reading failing.
+    start and exit, no tight tick, or a spin's `strobeClockMark` samples over 1 ms outside strobe's
+    span around its request (or none in either spin). The spin fills that span, so a clock off by d
+    puts the samples within d of one edge past it: the check reads each sample, never a median (a
+    uniform +2.6 ms leaves most of them inside). A spin of four or more samples may have one past
+    each edge, together at most a quarter of it, none over 2.5 ms (a sampler that stamps a sample
+    and waits for a CPU before it takes the stack); `meta.clock.mark_outliers` counts them and
+    `mark_worst_ms` the farthest. Where they are not 0, `mark_worst_ms` is also how far a sample near
+    a run's edge may be from where the profile puts it: per-run clipping, `--phase` and the untimed
+    stretches are that uncertain at their edges. A wall tick read after the thread was off a CPU, as
+    `strobeClockMark` took before it bracketed the tick, shifted every sample of a Bun profile by up to
+    1.9 ms (vps, a probed host: 3 of 4 blocks refused). `RunIncomplete`: no profile written (an
+    abnormal exit), its last sample over 5 ms before the last measured run's end, or the exit's
+    reading failing.
   - Weights, as Firefox's (§8.3): a sample weighs its gap, cut to the run, its untimed stretches out;
     a gap over `capUs` weighs `overUs` (the runtime took no sample then). Node: both 50 ms. Bun, which
     takes no sample while its VM is idle: from the median gap m inside `strobeClockMark`'s spins (a
@@ -7474,8 +7484,9 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   `hello` refusal and restored interval after a forced error, the daemon's restart after an update,
   a comparison's `--require-verdict` exit on a refused series, a bisect's one seed and a track's
   derived seed in timed runs, a page launch timed to an image (refused `NotForTarget` today), the
-  HTTP probe's timed probe blocks and probe pass (§8.9: checked in `--check` and attribution blocks
-  only).
+  HTTP probe's timed probe blocks of a series that declares only `http.*` (§8.9; its probe pass, a
+  `mixed` A/A with 6 clean pairs then 6 probe pairs, ran timed on adais and vps, with its report and
+  no token in any file).
 - Known gaps by design: load on CPUs outside the target's mask is not refused, and a target
   suspended from outside reads as slow wall time.
 

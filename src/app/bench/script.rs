@@ -190,8 +190,9 @@ impl Host {
         self.child.pid()
     }
 
-    /// The host's clocks against strobe's (`probe::cpu::Sync`): one request in which it spins 5 ms and
-    /// reads its wall clock at a millisecond edge, then five quick round trips.
+    /// The host's clocks against strobe's (`probe::cpu::Sync`): one request in which it spins at least
+    /// 5 ms and until it catches a wall-clock millisecond tick within 50 µs (20 ms at most), then five
+    /// quick round trips.
     fn clocks(&mut self) -> Result<Clocks> {
         let t = Duration::from_secs(10);
         let a = host::now_ns();
@@ -650,6 +651,8 @@ impl Profiled<'_> {
             |what: String| -> Error { Refusal::new(ValidatorId::RunIncomplete, format!("the script host's CPU profile: {what}")).fix("run it again; see the experiment's script.log").into() };
         let ((ready, runtime), (exit, _)) = match &self.clocks {
             Some(Ok(c)) => c.clone(),
+            // A reading strobe refused (no tight wall-clock tick: `ClockUnsynced`) says so as it is.
+            Some(Err(e)) if e.refusal.is_some() => return Err(e.clone()),
             Some(Err(e)) => return Err(incomplete(format!("its clock could not be read before it exited: {}", e.message))),
             None => return Err(incomplete("its clock was not read".into())),
         };

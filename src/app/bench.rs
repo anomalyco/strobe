@@ -1444,7 +1444,7 @@ struct Overhead {
     /// a filmed block is never timed.
     #[serde(skip_serializing_if = "Option::is_none")]
     encoder_pct: Option<f64>,
-    /// The HTTP probe's threads (SPEC §8.9), their CPU over the probe's span (§19: 0.5%; over 2% refuses
+    /// The HTTP probe's threads (SPEC §8.9), their CPU over the probe's span (§19: 1%; over 2% refuses
     /// `http.latency.*`).
     #[serde(skip_serializing_if = "Option::is_none")]
     http_probe_pct: Option<f64>,

@@ -179,6 +179,10 @@ const MAX_RTT_NS: u64 = 2_000_000;
 /// How far apart two placements of one moment may be (SPEC §6).
 const SYNC_NS: f64 = 1_000_000.0;
 
+/// The farthest a single sample of a clock-reading spin may lie outside strobe's span around it, as one
+/// of the few `rebase` lets through: the most a run's edge may then be off for the samples near it.
+const MAX_STRAY_NS: f64 = 2_500_000.0;
+
 /// The function `host.mjs` spins in while it reads its clocks: its samples are where the profile puts
 /// a span strobe timed.
 const MARK: &str = "strobeClockMark";
@@ -191,7 +195,8 @@ pub struct Sync {
     /// quickest of a few round trips, and that trip (ns): the reading is off by at most half of it.
     pub offset_ns: f64,
     pub rtt_ns: u64,
-    /// The runtime's wall clock minus its monotonic one (µs), at a `Date.now()` millisecond edge.
+    /// The runtime's wall clock minus its monotonic one (µs), at a `Date.now()` millisecond tick caught
+    /// between two calls under 50 µs apart (`strobeClockMark`).
     pub wall_lead_us: f64,
     /// strobe's clock around the request in which `strobeClockMark` spun and read that edge.
     pub mark: (u64, u64),
@@ -204,7 +209,12 @@ impl Sync {
         let best = trips.iter().filter(|t| t.2.is_finite() && t.1 >= t.0).min_by_key(|t| t.1 - t.0).ok_or_else(|| Error::msg("the script host gave no clock reading"))?;
         let (wall, at) = (mark.2["wall_us"].as_f64().unwrap_or(0.0), mark.2["wall_mono_us"].as_f64().unwrap_or(0.0));
         if wall <= 0.0 {
-            return Err(Error::msg("the script host read no wall-clock edge"));
+            return Err(Refusal::new(
+                ValidatorId::ClockUnsynced,
+                "the script host's CPU profile: the host caught no wall-clock millisecond tick within 50 µs in 20 ms (its thread kept off a CPU), so where its profile's wall times lie is not known",
+            )
+            .fix("run it again on a machine with CPUs to spare")
+            .into());
         }
         Ok(Sync { offset_ns: (best.0 as f64 + best.1 as f64) / 2.0 - best.2 * 1e3, rtt_ns: best.1 - best.0, wall_lead_us: wall - at, mark: (mark.0, mark.1) })
     }
@@ -222,8 +232,8 @@ pub struct Rebased {
     pub over_us: f64,
     /// What the last sample weighs: the median gap under the cap.
     pub last_us: f64,
-    /// Samples of the clock reads' spins over 1 ms outside strobe's spans (their median is inside), and
-    /// the farthest one's distance (ns, signed).
+    /// Samples of the clock reads' spins over 1 ms outside strobe's spans (at most one past each edge of
+    /// a spin, under `MAX_STRAY_NS`), and the farthest one's distance (ns, signed).
     pub outliers: usize,
     pub worst_ns: f64,
 }
@@ -232,7 +242,8 @@ pub struct Rebased {
 /// start and before its exit (`Runtime` says how each runtime keeps time). Refuses `ClockUnsynced` a
 /// reading that took over 2 ms, a monotonic clock that moved over 1 ms against strobe's between the
 /// two, and a profile that puts the samples of either reading's spin more than 1 ms outside strobe's
-/// span around it, or has none of them.
+/// span around it (one stray past each edge of a spin of four or more, under 2.5 ms, aside), or has
+/// none of them.
 pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebased> {
     let unsynced = |what: String| -> Error { Refusal::new(ValidatorId::ClockUnsynced, format!("the script host's CPU profile: {what}")).fix("run it again on a machine with CPUs to spare").into() };
     let readings = [("at its start", ready), ("before its exit", exit)];
@@ -260,8 +271,13 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         _ if truncated => 0.5,
         _ => 0.0,
     };
+    // Bun made its samples wall time as it exited: the lead then. The monotonic offset from the reading
+    // with the quicker round trip (the two agree within SYNC_NS, checked above). Dev only: every sample
+    // moved by `STROBE_DEV_PROFILE_SHIFT_US`, to see the spins' check refuse a clock that is off.
     let lead = if rt == Runtime::Bun { exit.wall_lead_us } else { 0.0 };
-    let base = exit.offset_ns / 1e3 - lead;
+    let anchor = if ready.rtt_ns < exit.rtt_ns { ready } else { exit };
+    let shift = std::env::var("STROBE_DEV_PROFILE_SHIFT_US").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let base = anchor.offset_ns / 1e3 - lead + shift;
     let mut t = start;
     let times_us: Vec<f64> = (0..samples)
         .map(|i| {
@@ -296,27 +312,33 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         let (a, b) = (readings[k].1.mark.0 as f64, readings[k].1.mark.1 as f64);
         offs[k].push(if ns < a { ns - a } else { (ns - b).max(0.0) });
     }
-    // The clocks match when each spin's samples sit inside its span: their median within SYNC_NS. Single
-    // samples may lie further: a sampler kept off a CPU between its clock read and the stack it takes
-    // stamps that sample off (vps, 2 vCPUs, the probe's threads beside a Bun host: up to 3 of a spin's
-    // 9 samples, -1.68 to +1.69 ms, its median inside the span), which is the sample's time, not the
-    // clocks'. They are counted (`outliers`, the farthest in `worst_ns`), never hidden.
+    // The clocks match when each spin's samples sit inside strobe's span around it, within SYNC_NS. The
+    // spin fills the span, so a clock off by d puts its samples within d of one edge past it: the first
+    // and last samples are what can see it, never a median (a uniform +2.6 ms leaves most samples inside).
+    // One sample past each edge is let through when the spin holds four or more and they are at most a
+    // quarter of it, and none past `MAX_STRAY_NS`: a sampler that stamps a sample and then waits for a
+    // CPU before it takes the stack. They are counted (`outliers`, the farthest in `worst_ns`).
     let (mut outliers, mut worst_ns) = (0, 0.0f64);
-    for (k, o) in offs.iter_mut().enumerate() {
+    for (k, o) in offs.iter().enumerate() {
+        let when = readings[k].0;
         if o.is_empty() {
-            return Err(unsynced(format!("it holds no sample of the 5 ms the host spent reading its clock {}, so where it puts that moment cannot be checked", readings[k].0)));
+            return Err(unsynced(format!("it holds no sample of the spin in which the host read its clock {when}, so where it puts that moment cannot be checked")));
         }
-        o.sort_by(f64::total_cmp);
-        let median = o[o.len() / 2];
-        if median.abs() > SYNC_NS {
+        let (early, late) = (o.iter().filter(|x| **x < -SYNC_NS).count(), o.iter().filter(|x| **x > SYNC_NS).count());
+        let worst = o.iter().copied().fold(0.0f64, |w, x| if x.abs() > w.abs() { x } else { w });
+        let tolerated = early + late == 0 || (o.len() >= 4 && early <= 1 && late <= 1 && 4 * (early + late) <= o.len());
+        if !tolerated || worst.abs() > MAX_STRAY_NS {
             return Err(unsynced(format!(
-                "it puts the samples of the 5 ms the host spent reading its clock {} {:+.2} ms (their median) outside strobe's span around that: its clock does not match strobe's",
-                readings[k].0,
-                median / 1e6
+                "it puts {} of the {} samples of the spin in which the host read its clock {when} over 1 ms outside strobe's span around that ({early} early, {late} late; the farthest {:+.2} ms): its clock does not match strobe's",
+                early + late,
+                o.len(),
+                worst / 1e6
             )));
         }
-        outliers += o.iter().filter(|x| x.abs() > SYNC_NS).count();
-        worst_ns = o.iter().copied().fold(worst_ns, |w, x| if x.abs() > w.abs() { x } else { w });
+        outliers += early + late;
+        if worst.abs() > worst_ns.abs() {
+            worst_ns = worst;
+        }
     }
     Ok(Rebased { start_us, times_us, cap_us, over_us, last_us, outliers, worst_ns })
 }

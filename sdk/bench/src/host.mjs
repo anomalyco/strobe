@@ -26,22 +26,32 @@ const mono = () => {
   return Number(ns / 1000n) + Number(ns % 1000n) / 1000
 }
 
-// Spins `ms` milliseconds (attribution blocks only, twice a block) and reads the wall clock at a
-// Date.now() millisecond edge inside it: the samples the CPU profile takes of this function show
-// where the profile puts a moment strobe also timed.
+// Spins at least `ms` milliseconds (attribution blocks only, twice a block) and until it has read the
+// wall clock at a Date.now() millisecond tick it caught tightly: two Date.now() calls a millisecond
+// apart, under 50 µs apart on the monotonic clock, so the tick (between them) is known within 25 µs.
+// A tick seen after the thread was off a CPU (the calls far apart, or two milliseconds in one step)
+// is skipped. Without a tight tick in 20 ms, wall_us is 0 and strobe refuses the profile. The samples
+// the CPU profile takes of this function show where the profile puts a moment strobe also timed.
 function strobeClockMark(ms) {
-  const end = performance.now() + ms
+  const start = performance.now()
   let wall = 0
   let at = 0
-  const d0 = Date.now()
-  while (performance.now() < end) {
-    if (!wall) {
-      const d = Date.now()
-      if (d !== d0) {
-        at = mono()
-        wall = d * 1000
-      }
+  let before = mono()
+  let d0 = Date.now()
+  for (;;) {
+    const spun = performance.now() - start
+    if (spun >= ms && (wall || spun >= 20)) break
+    if (wall) continue
+    const b = mono()
+    const d = Date.now()
+    const a = mono()
+    // The tick lies between the last call (after `before`) and this one (before `a`).
+    if (d === d0 + 1 && a - before < 50) {
+      wall = d * 1000
+      at = (before + a) / 2
     }
+    before = b
+    d0 = d
   }
   return { wall_us: wall, wall_mono_us: at }
 }
