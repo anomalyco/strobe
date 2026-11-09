@@ -5,7 +5,7 @@ use super::bidi::{self, Bidi};
 use super::chromium::{Emulation, Gpu, Window};
 use crate::host;
 use crate::host::spawn::Owned;
-use crate::model::{Error, Result};
+use crate::model::{Error, Refusal, Result, ValidatorId};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -106,9 +106,15 @@ pub struct Page {
     pub context: String,
 }
 
+/// The first Firefox strobe drives: BiDi's chrome scope (`moz:scope "chrome"`, where strobe reads process
+/// roles and the compositor) arrived in it.
+pub const MIN_MAJOR: u32 = 148;
+
 /// Stock Firefox only (release, then Developer Edition and Nightly, all Mozilla's): `STROBE_FIREFOX`,
-/// else the standard install locations. Playwright's patched Firefox is never picked up (it changes the
-/// process model and preferences); `STROBE_FIREFOX` naming one is the user's choice, and `patched` says so.
+/// else the standard install locations, one strobe drives (`MIN_MAJOR` or later) before one of unknown
+/// version before an older one (a distribution's ESR beside a newer release). Playwright's patched
+/// Firefox is never picked up (it changes the process model and preferences); `STROBE_FIREFOX` naming
+/// one is the user's choice, and `patched` says so.
 pub fn find() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("STROBE_FIREFOX").map(PathBuf::from).filter(|p| p.is_file()) {
         return Some(p);
@@ -133,7 +139,34 @@ pub fn find() -> Option<PathBuf> {
             c.push(p.into());
         }
     }
-    c.into_iter().find(|p| p.is_file())
+    let rank = |p: &Path| match major(p) {
+        Some(m) if m >= MIN_MAJOR => 0,
+        None => 1,
+        Some(_) => 2,
+    };
+    c.into_iter().filter(|p| p.is_file()).enumerate().min_by_key(|(i, p)| (rank(p), *i)).map(|(_, p)| p)
+}
+
+/// The major version an install says it is (`version_of`): 147 for `Firefox 147.0.2`.
+pub fn major(exe: &Path) -> Option<u32> {
+    version_of(exe)?.trim_start_matches("Firefox ").split('.').next()?.parse().ok()
+}
+
+/// `EngineUnsupported` for an install older than `MIN_MAJOR`, known from its `application.ini` before it
+/// starts: its BiDi has no chrome scope, so every Firefox block would fail in a tab.
+pub fn too_old(exe: &Path) -> Option<Refusal> {
+    major(exe).filter(|m| *m < MIN_MAJOR)?;
+    Some(
+        Refusal::new(
+            ValidatorId::EngineUnsupported,
+            format!(
+                "{} ({}) is too old: strobe reads Firefox's process roles and compositor in the browser's own scope over WebDriver BiDi (moz:scope \"chrome\"), which arrived in Firefox {MIN_MAJOR}",
+                version_of(exe).unwrap_or_default(),
+                exe.display()
+            ),
+        )
+        .fix(format!("update Firefox to {MIN_MAJOR} or later, or set STROBE_FIREFOX to a newer one (Developer Edition or Nightly)")),
+    )
 }
 
 /// A test build (Playwright's patched Firefox), named by its path.
@@ -194,7 +227,7 @@ fn emulation_prefs(emulation: &Emulation, exe: &Path) -> Vec<(String, String)> {
         // CSS pixels of a 390×844 phone's viewport on vps (378×832).
         set("ui.useOverlayScrollbars", "1".into());
     }
-    let major = version_of(exe).and_then(|v| v.trim_start_matches("Firefox ").split('.').next().map(str::to_string)).unwrap_or_else(|| "0".into());
+    let major = major(exe).unwrap_or(0);
     let agent = emulation.user_agent.clone().or_else(|| emulation.mobile.then(|| format!("Mozilla/5.0 (Android 10; Mobile; rv:{major}.0) Gecko/{major}.0 Firefox/{major}.0")));
     if let Some(a) = agent {
         set("general.useragent.override", serde_json::to_string(&a).unwrap_or_default());
@@ -208,6 +241,9 @@ pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, emulation: 
     let exe = find().ok_or_else(|| {
         Error::msg("no Firefox found").hint("install Firefox from mozilla.org (winget install Mozilla.Firefox, brew install --cask firefox, or the distribution's package), or set STROBE_FIREFOX")
     })?;
+    if let Some(r) = too_old(&exe) {
+        return Err(r.into());
+    }
     if !headless && let Some(e) = super::chromium::headed_refusal("Firefox") {
         return Err(e);
     }
@@ -378,8 +414,16 @@ impl Browser {
 
     pub fn chrome_eval_timeout(&self, expression: &str, timeout: Duration) -> Result<Value> {
         let tree = self.bidi.send("browsingContext.getTree", json!({ "maxDepth": 0, "moz:scope": "chrome" }))?;
-        let context = tree["contexts"][0]["context"].as_str().ok_or_else(|| Error::msg("Firefox gave no chrome context"))?.to_string();
-        Page { bidi: self.bidi.clone(), context }.eval_timeout(expression, timeout)
+        let contexts = tree["contexts"].as_array().filter(|a| !a.is_empty()).ok_or_else(|| Error::msg(format!("{} gave no chrome context over WebDriver BiDi", self.version)))?;
+        // Before Firefox 148 BiDi has no chrome scope: the tree is the content tabs, where an expression
+        // would fail for want of Gecko's APIs (`Cc is not defined`). `launch_as` refuses such a Firefox
+        // when its `application.ini` says so; this one did not.
+        let Some(context) = contexts.iter().find(|c| c["url"].as_str().is_some_and(|u| u.starts_with("chrome://"))).and_then(|c| c["context"].as_str()) else {
+            return Err(Refusal::new(ValidatorId::EngineUnsupported, format!("{} gave no chrome context over WebDriver BiDi (moz:scope \"chrome\" needs Firefox {MIN_MAJOR} or later)", self.version))
+                .fix(format!("update Firefox to {MIN_MAJOR} or later, or set STROBE_FIREFOX to a newer one"))
+                .into());
+        };
+        Page { bidi: self.bidi.clone(), context: context.to_string() }.eval_timeout(expression, timeout)
     }
 
     /// The content process that holds the page's document now: strobe's browsing context, found by its

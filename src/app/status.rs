@@ -50,9 +50,11 @@ pub fn run(args: &Args) -> Result<Output> {
     };
     // Optional: page targets run in Firefox only when a bench or record asks for it (`--engine firefox`).
     let firefox = crate::target::firefox::find();
+    let firefox_old = firefox.as_deref().and_then(crate::target::firefox::too_old).is_some();
     let firefox_text = firefox.as_ref().map(|p| {
         let patched = if crate::target::firefox::patched(p) { " (Playwright's patched build, from STROBE_FIREFOX: not the Firefox people run)" } else { "" };
-        format!("{} · {}{patched}", crate::target::firefox::version_of(p).unwrap_or_else(|| "Firefox".into()), p.display())
+        let old = if firefox_old { format!(" (needs Firefox {}+ for --engine firefox)", crate::target::firefox::MIN_MAJOR) } else { String::new() };
+        format!("{} · {}{patched}{old}", crate::target::firefox::version_of(p).unwrap_or_else(|| "Firefox".into()), p.display())
     });
     // And in WebKit only for `--engine webkit`.
     let webkit = [false, true].into_iter().any(|h| crate::target::webkit::find(h).is_some());
@@ -64,6 +66,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let disk: u64 = dir_size(&host::paths::recordings()) + dir_size(&host::paths::experiments());
     let vcache = topo.vcache().map(|g| format!("{} MB L3 on {} CPUs", g.l3_mb, g.cpus));
     let groups: Vec<String> = topo.groups.iter().enumerate().map(|(i, g)| format!("CCD{i} {} MB L3 ({} CPUs)", g.l3_mb, g.cpus)).collect();
+    let shape = topo.cpu_shape();
     let mut problems: Vec<String> = Vec::new();
     if busy > 0.10 {
         problems.push(format!("background load {:.0}% of all CPUs", busy * 100.0));
@@ -158,7 +161,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let mark = |ok: bool| if ok { "✓" } else { "!" };
     let mut t = String::new();
     t += &format!("  {} os         {}\n", mark(true), env.os);
-    t += &format!("  {} cpu        {} · {} logical{}\n", mark(true), env.cpu, env.logical_cpus, if groups.is_empty() { String::new() } else { format!(" · {}", groups.join(", ")) });
+    t += &format!("  {} cpu        {} · {} logical{}\n", mark(true), env.cpu, env.logical_cpus, if shape.is_empty() { String::new() } else { format!(" · {}", shape.join(", ")) });
     t += &format!("  {} power      {}{}\n", mark(!env.on_battery), env.power_plan, if env.on_battery { " · on battery" } else { "" });
     t += &format!("  {} load       {:.0}% of all CPUs busy\n", mark(busy <= 0.10), busy * 100.0);
     t += &format!("  {} cycles     {cycle_clock}\n", mark(cycles_refused.is_none()));
@@ -174,7 +177,7 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     t += &format!("  {} screen     {}\n", mark(!locked), if locked { "locked: benches wait for an unlock" } else { "unlocked" });
     t += &format!("  {} browser    {browser_text}\n", mark(browser.is_some()));
-    t += &format!("  {} firefox    {}\n", if firefox.is_some() { "✓" } else { "i" }, firefox_text.as_deref().unwrap_or("none (only for --engine firefox)"));
+    t += &format!("  {} firefox    {}\n", if firefox.is_some() && !firefox_old { "✓" } else { "i" }, firefox_text.as_deref().unwrap_or("none (only for --engine firefox)"));
     t += &format!("  {} webkit     {}\n", if webkit { "✓" } else { "i" }, webkit_text);
     match &ios {
         Ok((d, _)) if d.is_empty() => t += "  i ios        none on a cable\n",

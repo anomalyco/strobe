@@ -5862,7 +5862,9 @@ profilers, heap snapshots, the census, Playwright) asks for the Chromium side an
   would otherwise apply its test preferences (no process priority manager, no hang monitor, focus test
   mode, no window occlusion tracking), which a person's Firefox does not run with (checked in
   `RecommendedPreferences.sys.mjs`). `MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1` lets strobe read the chrome scope
-  (process roles, the compositor), nothing a page reaches; `MOZ_CRASHREPORTER_DISABLE=1`.
+  (process roles, the compositor), nothing a page reaches; `MOZ_CRASHREPORTER_DISABLE=1`. BiDi has a
+  chrome scope from Firefox 148: an earlier Firefox lists its content tabs there, and strobe stops naming
+  its version and that 148 is needed, rather than failing in a tab (`Cc is not defined`, Firefox 147).
 - A preload script makes `navigator.webdriver` false (Firefox reports true under BiDi otherwise).
 - The window is sized and placed with `browser.setClientWindowState`, then refitted so the viewport is
   the target's (no responsive-design override); on Windows it is kept on top without focus, as an
