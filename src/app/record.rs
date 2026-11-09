@@ -1135,9 +1135,11 @@ pub fn per_process(procs: &[host::ProcTimes]) -> Cycles {
 
 /// The processes `keys` names, each read by itself now (`host::process_cycles_at`, microseconds),
 /// never by a listing of the system's processes (milliseconds on Windows): read right at a window's
-/// edge, so the listing that found them is outside the window's CPU. One that ended is left out.
+/// edge, so the listing that found them is outside the window's CPU. One that ended is left out;
+/// each process is read once, however often `keys` names it.
 pub fn read_known<'a>(keys: impl IntoIterator<Item = &'a (u32, u64)>) -> Cycles {
-    keys.into_iter().filter_map(|&k| Some((k, host::process_cycles_at(k.0, k.1)?))).collect()
+    let keys: std::collections::BTreeSet<(u32, u64)> = keys.into_iter().copied().collect();
+    keys.into_iter().filter_map(|k| Some((k, host::process_cycles_at(k.0, k.1)?))).collect()
 }
 
 /// A listing's readings with each process `at` read (`read_known`) at that reading: the processes are

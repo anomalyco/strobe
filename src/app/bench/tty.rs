@@ -438,14 +438,15 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let t0 = host::now_ns();
                     let ran = ctx.runner.call("run", json!({ "case": s.case }), rt, serve);
                     // The run's end and its readings: (t1, the CPUs' busy time, reader, console host, cycles, the
-                    // clocks, ended children, threads and IO). The busy time is stopped before the process
-                    // listing, which takes milliseconds: the program's CPU below lies inside it.
+                    // clocks, ended children, threads and IO). The busy time is stopped after the known
+                    // processes' readings and before the process listing, which takes milliseconds: the
+                    // program's CPU below lies inside it.
                     let read_end = || {
                         let t1 = host::now_ns();
-                        let busy = busy.as_ref().zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
                         let (r1, h1) = (tty.reader_cycles(), host_cycles(&tty));
                         let at1 = super::super::record::read_known(c0.keys().chain(edges.borrow().iter().flat_map(|e| e.0.keys())));
                         let clock1 = super::super::record::Clock::now();
+                        let busy = busy.as_ref().zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
                         let mut c1 = cycles(pid, &set_home);
                         super::super::record::read_at(&mut c1, &at1);
                         // Right after the cycles, of the processes they listed (`dead_since`).
