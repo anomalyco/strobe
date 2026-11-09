@@ -276,6 +276,8 @@ struct Builder {
     /// Child tracks of the root by name.
     tracks: HashMap<String, u64>,
     thread_tracks: HashMap<(u32, u32), u64>,
+    /// Processes described so far: one descriptor each.
+    processes: HashSet<u32>,
     lo: Option<u64>,
     hi: Option<u64>,
     /// The page's runs in the Chrome trace's own time, when it has them.
@@ -461,6 +463,9 @@ impl Builder {
         let mut pids: Vec<u32> = pids.into_iter().collect();
         pids.sort_unstable();
         for pid in pids {
+            if !self.processes.insert(pid) {
+                continue;
+            }
             let uuid = self.uuid();
             let name = t.processes.get(&pid).cloned();
             self.descriptor(|d| {
@@ -638,12 +643,12 @@ impl Builder {
             let track = self.track("runs and phases", 0, None);
             for r in &d.runs {
                 self.runs.push((r.t0_ns, r.t1_ns));
-                self.slice(track, MONOTONIC, r.t0_ns, r.t1_ns, &format!("{}{}", r.key, if r.measured { "" } else { " (not measured)" }), &[]);
+                self.slice(track, MONOTONIC, r.t0_ns, r.t1_ns, &format!("{}{}", span_name(&r.key), if r.measured { "" } else { " (not measured)" }), &[]);
                 for (a, b) in &r.untimed {
                     self.slice(track, MONOTONIC, *a, *b, "untimed", &[]);
                 }
                 for (n, a, b) in &r.phases {
-                    self.slice(track, MONOTONIC, *a, *b, n, &[]);
+                    self.slice(track, MONOTONIC, *a, *b, &format!("{} · phase {n}", span_name(&r.key)), &[]);
                 }
                 self.count("runs and phases");
             }
@@ -1065,7 +1070,7 @@ impl Builder {
             let name = meta["target"].as_str().map(|s| s.rsplit(['\\', '/']).next().unwrap_or(s).to_string()).unwrap_or_else(|| "script".into());
             let pid = meta["pid"].as_u64().map_or(1, |p| p as u32);
             let tid = main_tid(meta).unwrap_or(pid);
-            if !self.thread_tracks.contains_key(&(pid, tid)) {
+            if self.processes.insert(pid) {
                 let uuid = self.uuid();
                 self.descriptor(|d| {
                     d.u(1, uuid).m(3, |p| {
@@ -1111,15 +1116,16 @@ impl Builder {
             }
             let mut stacks: HashMap<u64, Option<u64>> = HashMap::new();
             let samples = prof["samples"].as_array().cloned().unwrap_or_default();
-            let deltas: Vec<i64> = prof["timeDeltas"].as_array().into_iter().flatten().map(|d| d.as_i64().unwrap_or(0)).collect();
+            // µs, whole in V8's own files, fractional in a profile strobe placed on its clock (§9.6).
+            let deltas: Vec<f64> = prof["timeDeltas"].as_array().into_iter().flatten().map(|d| d.as_f64().unwrap_or(0.0)).collect();
             // The last sample has no gap after it: it weighs the profile's median gap.
-            let last = crate::probe::cpu::Sampling::of(0.0, crate::probe::cpu::gaps(&prof)).map_or(1.0, |s| s.median_us).round() as i64;
-            let mut t = prof["startTime"].as_i64().unwrap_or(0);
+            let last = crate::probe::cpu::Sampling::of(0.0, crate::probe::cpu::gaps(&prof)).map_or(1.0, |s| s.median_us);
+            let mut t = prof["startTime"].as_f64().unwrap_or(0.0);
             let task = js.task(pid, tid);
             for (i, s) in samples.iter().enumerate() {
-                t += deltas.get(i).copied().unwrap_or(0);
+                t += deltas.get(i).copied().unwrap_or(0.0);
                 let Some(id) = s.as_u64() else { continue };
-                if frames.get(&id).is_some_and(|f| f.name == "(idle)") || t <= 0 {
+                if frames.get(&id).is_some_and(|f| f.name == "(idle)") || t <= 0.0 {
                     continue;
                 }
                 let stack = *stacks.entry(id).or_insert_with(|| {
@@ -1128,10 +1134,10 @@ impl Builder {
                 });
                 let Some(stack) = stack else { continue };
                 // A sample stands for the time to the next one (the profile's own weighting).
-                let us = deltas.get(i + 1).copied().filter(|d| *d > 0).unwrap_or(last);
-                let ts = t as u64 * 1000;
+                let us = deltas.get(i + 1).copied().filter(|d| *d > 0.0).unwrap_or(last);
+                let ts = (t * 1000.0).round() as u64;
                 first_ts = Some(first_ts.map_or(ts, |f| f.min(ts)));
-                js.sample(ts, task, None, stack, us as u64 * 1000);
+                js.sample(ts, task, None, stack, (us * 1000.0).round() as u64);
                 self.seen(ts);
                 self.built.js_samples += 1;
             }

@@ -434,7 +434,7 @@ export type AddInitScript = <A = undefined>(script: string | ((arg: A) => unknow
 /**
  * An HTTP probe of a server on this computer (SPEC §8.9): strobe sends `method url` every `cadenceMs` from threads of
  * its own, on absolute deadlines (open loop: a probe never waits for the ones before it, so a stall shows as the cohort
- * of probes it held), and times each from its send to its whole response (`http.latency.*`). A probe strobe could not
+ * of probes it held), and times each from its dispatch (before it connects) to its whole response (`http.latency.*`). A probe strobe could not
  * send on time is a missed send (`http.missed_sends`), never a slow server. It runs only in blocks that measure it:
  * attribution blocks (`--why`, `record --bench`) and `--check`, or a series' own probe blocks when it declares `http.*`;
  * never in a clean timing block.
@@ -446,7 +446,7 @@ export interface HttpProbe {
   method?: "GET" | "HEAD" | "POST"
   /** Milliseconds between probes: default 100, at least 10. */
   cadenceMs?: number
-  /** Milliseconds a probe may take from its send to its whole response: default 1000. Past it, a timeout (`http.timeouts`). */
+  /** Milliseconds a probe may take from its dispatch (connecting included) to its whole response: default 1000. Past it, a timeout (`http.timeouts`). */
   timeoutMs?: number
   /** The idle control: probes for this long after setup, before any run, each of which must answer as `expect` asks, or the block is refused (`RunIncomplete`). Default 500; 0 skips it. */
   idleMs?: number

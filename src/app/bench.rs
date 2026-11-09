@@ -1514,9 +1514,10 @@ fn untimed_values(runs: &[&metrics::Timed], values: &mut BTreeMap<String, f64>) 
     values.insert("untimed.ms".into(), metrics::median(&runs.iter().map(|r| r.untimed_in(r.t0, r.t1) as f64 / 1e6).collect::<Vec<_>>()));
 }
 
-/// The blocks' overhead, each part's mean over the blocks that measured it.
-fn mean_overhead(blocks: &[Block]) -> Option<Overhead> {
-    let all: Vec<&Overhead> = blocks.iter().filter_map(|b| b.overhead.as_ref()).collect();
+/// The blocks' overhead, each part's mean over the blocks that measured it (a series' pass blocks too:
+/// the HTTP probe's runs only in its probe blocks).
+fn mean_overhead<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Option<Overhead> {
+    let all: Vec<&Overhead> = blocks.into_iter().filter_map(|b| b.overhead.as_ref()).collect();
     let mean = |f: fn(&Overhead) -> Option<f64>| {
         let v: Vec<f64> = all.iter().filter_map(|o| f(o)).filter(|x| x.is_finite()).collect();
         (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
@@ -3139,6 +3140,10 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
             if probe_apart {
                 let other = block_on_screen(ctx, s, &variants[0], i, &Exec::timed(timed_set(ctx), ctx.runs, keep && !main_http).probing(!main_http))?;
                 take_metrics(&mut b, &other, |m| http_probe::metric(m) != main_http);
+                // The probe's CPU is its blocks' (`overhead.http_probe_pct`).
+                let probed = if main_http { &b } else { &other };
+                let pct = probed.overhead.as_ref().and_then(|o| o.http_probe_pct);
+                b.overhead.get_or_insert_with(Overhead::default).http_probe_pct = pct;
                 if other.http.is_some() {
                     b.http = other.http;
                 }
@@ -3573,21 +3578,23 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     }
     let mut descriptive: Vec<Comparison> = Vec::new();
     // A launch's milestones and CPU, a process's CPU, and a command's launch, are context like the fixed list.
-    let found: Vec<String> = blocks
+    // From the pass's blocks too: an `http.*` primary's paired blocks keep only `http.*`, its timing
+    // pass the rest.
+    let mut found: Vec<String> = blocks
         .first()
-        .map(|b| {
-            b.values
-                .keys()
-                .filter(|k| {
-                    k.starts_with("launch.")
-                        || k.starts_with("metric.")
-                        || matches!(k.as_str(), "memory.peak" | "cpu.work" | "cli.launch" | "cpu.main")
-                        || (matches!(k.as_str(), "cpu.app.total" | "cpu.main.busy") && rate_context)
-                })
-                .cloned()
-                .collect()
+        .into_iter()
+        .chain(pass.as_ref().and_then(|(pb, _)| pb.first()))
+        .flat_map(|b| b.values.keys())
+        .filter(|k| {
+            k.starts_with("launch.")
+                || k.starts_with("metric.")
+                || matches!(k.as_str(), "memory.peak" | "cpu.work" | "cli.launch" | "cpu.main")
+                || (matches!(k.as_str(), "cpu.app.total" | "cpu.main.busy") && rate_context)
         })
-        .unwrap_or_default();
+        .cloned()
+        .collect();
+    found.sort();
+    found.dedup();
     for name in DESCRIPTIVE.iter().map(|n| n.to_string()).chain(found) {
         let name = name.as_str();
         if name == s.primary || names.iter().any(|n| n == name) || s.per_side(name) {
@@ -3880,7 +3887,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         "pairs": pairs.len(), "launches": blocks.len(), "stopped": stopped, "bound": bound, "noworse": s.noworse,
         "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms,
         "steps": mean_steps(&blocks), "elapsed_ms": series_started.elapsed().as_secs_f64() * 1e3 - (ctx.waited_ms - waited_before), "waited_ms": ctx.waited_ms - waited_before,
-        "overhead": mean_overhead(&blocks), "untimed": untimed_of(&blocks.iter().map(|b| (b.values.get("untimed.n").copied(), b.values.get("untimed.ms").copied())).collect::<Vec<_>>()),
+        "overhead": mean_overhead(blocks.iter().chain(pass.iter().flat_map(|(pb, _)| pb))), "untimed": untimed_of(&blocks.iter().map(|b| (b.values.get("untimed.n").copied(), b.values.get("untimed.ms").copied())).collect::<Vec<_>>()),
         "blocks": blocks, "warnings": warnings, "attribution": recordings, "attribution_sampling": if sampling.is_empty() { Value::Null } else { Value::Object(sampling) }, "timing_recordings": timing_recordings, "shown": shown,
         "pass": pass.map(|(b, p)| if probe == Probing::Separate { json!({ "counters": false, "http": !main_http, "blocks": b, "pairs": p }) } else { json!({ "counters": !main_counters, "blocks": b, "pairs": p }) }),
         "halt": halted.as_ref().map(halt_json),
@@ -5911,17 +5918,34 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     let mut summary = reading.summary;
     if let Some(pct) = summary["cpu_pct"].as_f64() {
         b.overhead.get_or_insert_with(Overhead::default).http_probe_pct = Some(pct);
+        // Over 2% of a core the probe competed with what it timed: a timed block refuses its latencies, a
+        // `--check` says a timed bench would, an attribution block times nothing.
+        if let Some(r) = http_probe::cpu_refusal(pct) {
+            let hit = |m: &str| http_probe::LATENCIES.iter().any(|(n, _)| *n == m);
+            if x.measures_time() {
+                for (m, _) in http_probe::LATENCIES {
+                    b.values.remove(m);
+                    if declared_metrics(s).iter().any(|d| *d == m) {
+                        b.refused.insert(m.to_string(), Refusal { summary: format!("{m}: {}", r.summary), ..r.clone() });
+                    }
+                }
+            } else if x.untimed {
+                check_overhead(&mut ctx.warnings, s, &format!("the HTTP probe used {pct:.1}% of a core"), &hit, r.fix.as_deref());
+            }
+        }
     }
-    // The target got what the probe sent (its authorization, its URL's query): what it wrote of its own
-    // memory into the block's recording (a script host's heap profile holds the requests its server
-    // read) or printed to the experiment's logs keeps none of it.
-    let mut written: Vec<PathBuf> = b.recording.iter().filter_map(|id| store::resolve(id).ok()).collect();
+    // The target got what the probe sent (its authorization, its URL's query, its headers' values): what
+    // it or the hooks printed to the experiment's logs keeps none of it. Recordings are never rewritten:
+    // a block whose probe carries any takes no dump of the target's memory (`Runner::http_secret`).
     if let Ok(dir) = store::experiment_dir(&ctx.exp) {
-        written.extend(std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "log")));
-    }
-    let redacted = http_probe::scrub(&written, &secrets);
-    if redacted > 0 {
-        summary["redacted_files"] = json!(redacted);
+        let logs: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "log")).collect();
+        let (redacted, failed) = http_probe::scrub_logs(&logs, &secrets);
+        if redacted > 0 {
+            summary["redacted_logs"] = json!(redacted);
+        }
+        for f in failed {
+            ctx.warnings.push(validity::warn("HttpProbe", format!("{}: a log that holds what the probe sent could not be written: {f}", s.label())));
+        }
     }
     drop(secrets);
     if x.keep || x.untimed || x.set == Set::Attribution {
@@ -7629,8 +7653,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 probe::census::add_allocators(&mut c, cb()?, cp()?, &dir.join("memdump-0.pftrace"));
                 census.push(c);
                 // The live objects after the runs (post-GC), once no trace subscription copies every
-                // snapshot chunk (SPEC §8.6).
-                if let Err(e) = probe::heap::snapshot(cp()?, &dir.join("heap-0.heapsnapshot.gz")) {
+                // snapshot chunk (SPEC §8.6). Not where the block's HTTP probe sent the target a secret: a
+                // snapshot holds every string it kept (`--probes memory` takes one, owner-only).
+                if ctx.runner.http_secret() {
+                    if !ctx.warnings.iter().any(|w| w.id == "Attribution" && w.text.contains("no heap snapshot")) {
+                        ctx.warnings.push(validity::info(
+                            "Attribution",
+                            format!("{}: no heap snapshot in the attribution block: its HTTP probe sends the target a credential, which a snapshot of the target's memory would keep (--probes memory takes one)", s.label()),
+                        ));
+                    }
+                } else if let Err(e) = probe::heap::snapshot(cp()?, &dir.join("heap-0.heapsnapshot.gz")) {
                     ctx.warnings.push(validity::warn("HeapSnapshot", format!("{} heap snapshot failed: {}", side, e.message)));
                 }
                 lap("heap");

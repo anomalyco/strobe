@@ -2210,9 +2210,17 @@ to the lateness allowed below of strobe's own lag never counts as the server's.
   carried it). It reaches strobe over the runner's loopback socket (never argv, no CLI flag takes a
   credential) and never a recording, result, log, report, trace, MCP answer or panic message. The
   probe's request is no action of the block's log (§9.6). A URL's query values and extra headers'
-  values are sent, never written: recordings keep the URL as `…?key=…` and the headers' names.
-  `scripts/dev/http-probe-check.ts` reads every file strobe wrote, and every answer it printed, for a
-  fresh random token sent both ways.
+  values are sent, never written: recordings keep the URL as `…?key=…` (a segment without `=` as `…`)
+  and the headers' names. The target gets all of them, so strobe never writes a dump of the target's
+  memory in a block whose probe carries one (`Runner::http_secret`: the authorization, any extra
+  header's value, a query value of 8 characters or more): an attribution block takes no heap snapshot
+  and says so (`Attribution`, info), and a script host runs without `--heap-prof`; `--probes memory`
+  still takes them, owner-only (rule 9). Recordings are never rewritten. The experiment's text logs
+  (what the target and the hooks printed: `runner.log` and `script.log`, owner-only) have each
+  occurrence of those values, as sent and percent-decoded, made as many `*`s in place after the block
+  (`http_probe::scrub_logs`; a log it cannot write is said, `HttpProbe`, never removed).
+  `scripts/dev/http-probe-check.ts` reads every file strobe wrote (a Chromium attribution block's
+  too), and every answer it printed, for a fresh random token sent both ways.
 - **Idle control.** Once setup has settled (100 ms) and before warmup, the probe runs alone for
   `idleMs` (default 500; 0 skips it). Every probe due then must answer as `expect` asks, else the
   block is refused `RunIncomplete` before any run (a server that fails a probe idle fails it in
@@ -2235,17 +2243,20 @@ to the lateness allowed below of strobe's own lag never counts as the server's.
   `http.missed_sends` and `http.probes` per measured run; `http.idle.p50`. Undeclared ones are context
   (descriptive) where every block has them. A response not as `expect` asks, or a connection that
   failed, is an error, never a latency, and any error refuses `http.latency.*` (`RunIncomplete`: a
-  fast error is no fast answer). A timeout ranks above every answer: a quantile that falls on one, or
-  between one and an answer (at or past 1 − timeouts / n), is right-censored and refused
-  `RunIncomplete`, never read as the timeout and never taken from the answers alone; `http.timeouts`
+  fast error is no fast answer). A timeout ranks above every answer. A quantile is the R-7 one (the
+  value at position (n − 1) × p of the n ranked probes, interpolated between its two neighbours), so
+  it is right-censored as soon as either neighbour is a timeout: p > (answers − 1) / (n − 1). It is
+  then refused `RunIncomplete`, never read as the timeout and never taken from the answers alone
+  (the looser 1 − timeouts / n would read p 0.89 of 9 answers and 1 timeout from a timeout); `http.timeouts`
   counts them. No probe due in a timed part refuses the latencies `TailTooShort`. `http.*` declared
   where setup never called `ctx.httpProbe`: `NoMetric`.
 - **Cost.** The probe's threads read their own CPU (`overhead.http_probe_pct`, % of one core over the
-  probe's span; §19: 0.5%, over 2% refuses `http.latency.*` `OverheadBudget`). Measured at the default
-  100 ms (2026-11-09): vps (2 vCPU, unpinned) 0.27–0.29% of a core with a new connection per probe and
-  no missed send; adais (Windows 11) 0.56–0.58% with a new connection per probe (Windows' loopback
-  connect and close, about 0.55 ms of CPU a probe: over the budget, so a timed probe block warns
-  `OverheadBudget`) and 0.23% with `keep-alive`.
+  probe's span; §19: 1%, over it a timed block warns `OverheadBudget`; over 2% a timed block refuses
+  `http.latency.*` `OverheadBudget`, a `--check` warns that a timed bench would, an attribution block
+  says nothing). Measured at the default 100 ms (2026-11-09): vps (2 vCPU, unpinned) 0.27–0.29% of a
+  core with a new connection per probe and no missed send; adais (Windows 11) 0.56–0.58% with a new
+  connection per probe (Windows' loopback connect and close, about 0.55 ms of CPU a probe) and 0.23%
+  with `keep-alive`.
 - **Data.** `http_probe.json.gz` (owner-only) in the block's recording, or in one of its own when the
   block kept none (a script's `--check`, a probe pass's first pair; `probes: http-probe`): the setup
   without secrets (`config`), the probe's span and CPU, the idle window, each run's span with its
@@ -4408,7 +4419,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `Background` (refusing) | the native speed check stayed slow for 2 minutes while other processes kept the target's CPUs busy (an antivirus scanning new files, an update, a build): the message names the busiest. A bench block waits it out first, holding nothing (a minute, then until the CPUs are quiet, and the check again), up to 15 times, about an hour: on a shared machine another agent's build ends. Blocks that run through a locked session (a headless page, a windowless app) wait the same way: they once ended the bench at the first busy check |
 | `BackgroundPriority` | the target runs at background priority, inherited from strobe or its own: macOS `taskpolicy -b` (`PRIO_DARWIN_PROCESS`), Windows' idle priority class, efficiency mode (EcoQoS) or background mode (very low memory priority), Linux `SCHED_IDLE` or nice 19. The OS keeps it on efficiency cores, at low clocks or behind other work: a drag in an Electron app read 83–91% dropped frames under `taskpolicy -b` against 0.4% at normal priority. Refuses frame and input-latency metrics (`frames.*`, `interaction.*`, `scroll.*`, `canvas.*`, `input.*`, `launch.painted`, `launch.settled`): a primary among them refuses the bench before anything builds (strobe's own priority) or at the block (the target's), a secondary shows refused, and `record` prints `frames refused`. CPU, memory and counters stay, with a warning to compare them only with runs at the same priority. Attribution and memory blocks are untimed and keep running. `record pid:` measures a process as its user runs it and is not checked |
 | `PresentsUnmatched` | over 5% of the inputs strobe sent a native app (those after which its accessibility tree changed) showed no frame within a second while the present session lost no events (refuses `interaction.*`, §7.4) |
-| `OverheadBudget` (refusing) | strobe's own work disturbed a timed block's runs, by §19's budgets: strobe and the runner over 20% of a core while they share the target's CPUs (unpinned) refuses wall-time, CPU-share, frame and latency metrics (`cpu.*` in ms and exact counters stay); a `script()` target's relay of `ctx.call` (strobe and the runner) over 20% refuses `run.duration`; the OS present session's consumer over 2% refuses the frame metrics; the terminal reader over 2% refuses `tty.latency.*`, `tty.settle.*` and `tty.frame.*`; pixel reads over 2% refuse the series' timing and latency metrics. Only timed blocks refuse: a `--check` keeps those values, warns naming the declared metrics a timed bench would refuse, and passes. Over each part's lower budget it only warns (§10.2) |
+| `OverheadBudget` (refusing) | strobe's own work disturbed a timed block's runs, by §19's budgets: strobe and the runner over 20% of a core while they share the target's CPUs (unpinned) refuses wall-time, CPU-share, frame and latency metrics (`cpu.*` in ms and exact counters stay); a `script()` target's relay of `ctx.call` (strobe and the runner) over 20% refuses `run.duration`; the OS present session's consumer over 2% refuses the frame metrics; the terminal reader over 2% refuses `tty.latency.*`, `tty.settle.*` and `tty.frame.*`; pixel reads over 2% refuse the series' timing and latency metrics; the HTTP probe's own CPU over 2% of a core refuses `http.latency.*` (§8.9). Only timed blocks refuse these: a `--check` keeps those values, warns naming the declared metrics a timed bench would refuse, and passes. One refuses in every block: the HTTP probe's missed sends (slots strobe could not send on time) over max(1, 5% of those due in the measured runs) refuse `http.latency.*`, which then never saw the server when a stall would have shown. Over each part's lower budget it only warns (§10.2) |
 | `NoDisplayForBudget` | a budget metric is requested without a real display. Reserved: nothing refuses it now (a headless page's display metrics are `Headless`, a virtual display's `SoftwareGpu`, a missing one `NoPresentSource`) |
 | `TailTooShort` | a percentile lacks its minimum n (refuses that metric only) |
 | `ClockUnsynced` | sources cannot be aligned within 1 ms (§6); a page launch whose own time for `until` falls outside strobe's span from its navigation command to hearing of it, by over 2 ms (§9.6); a Firefox profile that gives no process start on the host's monotonic clock, or puts strobe's run marks outside the runs (§8.3); an app's `STROBE_EVENTS` event that arrived later than this OS delivers one after the `t_ns` it carries (§13.9) |
@@ -4496,7 +4507,7 @@ emits:
 | `SoftwareGpu` | warn | a series kept its CPU metrics on a software rasterizer: frame and GPU metrics are refused (§10.1), and the browser's CPU metrics hold the rasterization a GPU would do; a native app on strobe's Wayland compositor without a GPU render node: `cpu.work` holds the app's own rasterization |
 | `Headless` | info | a native app ran on strobe's headless Wayland compositor: what reaches a display is refused (§13.7) |
 | **strobe's own cost** | | |
-| `OverheadBudget` | warn | strobe's own work over a budget of §19: strobe and the runner over 5% of a core while they share the target's CPUs (unpinned; the warning names both shares and a fix by why they share: macOS, under 4 cores, `--pin none`), or over 10% beside its budgeted parts while pinned; the present consumer, the terminal reader, pixel reads or the HTTP probe over 0.5%. Over the refusing level a timed block refuses (§10.1) and a `--check` warns, naming the declared metrics a timed bench would refuse |
+| `OverheadBudget` | warn | strobe's own work over a budget of §19: strobe and the runner over 5% of a core while they share the target's CPUs (unpinned; the warning names both shares and a fix by why they share: macOS, under 4 cores, `--pin none`), or over 10% beside its budgeted parts while pinned; the present consumer, the terminal reader or pixel reads over 0.5%, the HTTP probe over 1%. Over the refusing level a timed block refuses (§10.1) and a `--check` warns, naming the declared metrics a timed bench would refuse |
 | `ObserverCost` | warn | every bench, per side: strobe's reads of a side's page or accessibility tree inside its runs took over 2% of their wall time, or a native app's tree was read over 8 times a run (`driver.reads`, `driver.read_ms`), or pixels over 8 times (`driver.pixel_reads`); a page's attribution profile's driver rows, `(strobe driver)` and `(native, via strobe driver)`, held over 2% of its active main-thread time (every sample but `(idle)`, when that is at least 2 ms a run); a `script()` target's relay of `ctx.call` over 10% of a core. An implementation comparison also warns when one side's reads came at least 4 more times a run and over 4 times as often as the other's (§9.10) |
 | `ProbeOverhead` | warn | a Chromium-family series timed with `--trace full`: its timed blocks traced every task of every thread, which costs the page main-thread time (§8.1: `main.work` +0.8% on a click, +35% on an idle page, `cpu.work` +3.5%); compare it only with full-trace runs. `query a..b` of a lean and a full-trace recording says the same |
 | `TickSampledCpu` | warn | a `cli()` run's `cpu.work` holds child processes' CPU from Windows' clock ticks (where strobe did not hold them): their share of `cpu.work` (§9.6) |
@@ -7240,7 +7251,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
 | `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% a timed block's `tty.latency.*`, `tty.settle.*` and `tty.frame.*` are refused (a `--check` keeps them and warns, naming the declared ones a timed bench refuses; an attribution block neither). Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
 | Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches, opening the window's capture included: a run whose first pixel read opens it pays for it; Windows makes the capture's Direct3D device once per process, 118 of the 126 ms of CPU an open took on adais); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
-| HTTP probe (`ctx.httpProbe`, §8.9; never in a clean timing block) | ≤ 0.5% of one core over the probe's span (`http_probe_pct`: its scheduler's and workers' own CPU, on strobe's CPUs); over it warns `OverheadBudget`, over 2% refuses `http.latency.*` |
+| HTTP probe (`ctx.httpProbe`, §8.9; never in a clean timing block) | ≤ 1% of one core over the probe's span (`http_probe_pct`: its scheduler's and workers' own CPU, on strobe's CPUs; a new connection per probe at 100 ms: vps 0.29%, adais 0.58%); over it a timed probe block warns `OverheadBudget`, over 2% refuses `http.latency.*` (a `--check` warns) |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
 

@@ -122,7 +122,8 @@ struct Http {
     /// options were wrong (the setup's error, exit 2).
     described: Option<http_probe::Described>,
     asked: Option<http_probe::Config>,
-    /// What the probe sends that strobe never writes, for the block's recording (`http_probe::scrub`).
+    /// What the probe sends that strobe never writes: no memory dump while it runs (`http_secret`), and
+    /// the experiment's logs scrubbed after the block (`http_probe::scrub_logs`).
     secrets: Option<http_probe::Secrets>,
     usage: Option<Error>,
     driver: Option<http_probe::Driver>,
@@ -142,7 +143,7 @@ struct Http {
 pub struct HttpTaken {
     pub described: http_probe::Described,
     pub data: Option<http_probe::Data>,
-    /// What the probe sent that the target may have written into the block's recording itself.
+    /// What the probe sent, which the target or the hooks may have printed to the experiment's logs.
     pub secrets: http_probe::Secrets,
 }
 
@@ -158,7 +159,15 @@ impl Runner {
         // processes, and Bun's `$` hands stdin on to them, which stalled on a protocol pipe that never
         // closes. stdin is empty; stdout and stderr are the experiment's runner.log.
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        let out = std::fs::File::create(&log)?;
+        // Owner-only: the hooks print what they like there (SPEC rule 9).
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let out = o.open(&log)?;
         let err = out.try_clone()?;
         let mut cmd = Command::new(bun);
         cmd.arg("--preload")
@@ -301,11 +310,26 @@ impl Runner {
         {
             std::thread::sleep(http_probe::SETTLE);
             let d = http_probe::Driver::start(cfg, self.http.cpus)?;
-            let idle = d.idle();
-            self.http.driver = Some(d);
-            self.http.idle = idle?;
+            match d.idle() {
+                Ok(idle) => {
+                    self.http.driver = Some(d);
+                    self.http.idle = idle;
+                }
+                // The block ends here: the probe stops at once (its probes kept for `take_http`).
+                Err(e) => {
+                    self.http.stopped = Some(d.stop());
+                    return Err(e);
+                }
+            }
         }
         Ok(r)
+    }
+
+    /// Whether this block's HTTP probe runs (or ran) with something strobe never writes (an
+    /// authorization, a query value, a header's value): the target has it then, so no dump of the
+    /// target's memory is taken (`--probes memory` aside).
+    pub fn http_secret(&self) -> bool {
+        self.http.secrets.as_ref().is_some_and(|s| !s.is_empty()) && (self.http.driver.is_some() || self.http.stopped.is_some())
     }
 
     fn stop_http(&mut self) {

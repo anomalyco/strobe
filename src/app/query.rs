@@ -101,7 +101,7 @@ pub fn run(args: &Args) -> Result<Output> {
                     recs.extend(s["attribution"].as_str().map(str::to_string));
                 }
                 Err(Error::usage(format!(
-                    "experiments support summary, progress, insights, actions and the base..head views ({}); {other} reads a recording{}",
+                    "experiments support summary, progress, insights, actions, http and the base..head views ({}); {other} reads a recording{}",
                     diff::VIEWS.join(" "),
                     if recs.is_empty() { " (this experiment kept none)".to_string() } else { format!(": strobe query <rec> {other} with one of {}", recs.join(", ")) }
                 )))
@@ -243,7 +243,7 @@ pub fn run(args: &Args) -> Result<Output> {
             }
             memory(&dir, by, top, args.get("at"))
         }
-        other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory log network insights actions sql"))),
+        other => Err(Error::usage(format!("unknown view {other}: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network insights actions sql"))),
     }
 }
 

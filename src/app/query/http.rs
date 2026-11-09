@@ -50,6 +50,8 @@ struct View {
     measured: Vec<Sample>,
     idle: Vec<f64>,
     threshold: f64,
+    /// `--phase`: its spans in the measured runs, which the cohorts are cut to as well.
+    spans: Option<Vec<(u64, u64)>>,
 }
 
 impl View {
@@ -60,6 +62,7 @@ impl View {
         let idle_p95 = http_probe::censored_quantile(&idle, 0, 0.95).filter(|v| v.is_finite());
         let threshold = idle_p95.map_or(STALL_MS, |p| (STALL_IDLE * p).max(STALL_MS));
         let mut measured: Vec<Sample> = data.samples.iter().filter(|s| s.when == When::Measured).cloned().collect();
+        let mut scope = None;
         if let Some(p) = phase {
             let spans: Vec<(u64, u64)> = data.runs.iter().filter(|r| r.measured).flat_map(|r| r.phases.iter()).filter(|(n, _, _)| n == p || mark_name(n) == p).map(|(_, a, b)| (*a, *b)).collect();
             if spans.is_empty() {
@@ -72,8 +75,14 @@ impl View {
                 )));
             }
             measured.retain(|s| spans.iter().any(|(a, b)| s.scheduled_ns >= *a && s.scheduled_ns < *b));
+            scope = Some(spans);
         }
-        Ok(View { id, data, measured, idle, threshold })
+        Ok(View { id, data, measured, idle, threshold, spans: scope })
+    }
+
+    /// Whether a probe was due where the view looks: anywhere but the idle control, or in `--phase`.
+    fn in_scope(&self, s: &Sample) -> bool {
+        s.when != When::Idle && self.spans.as_ref().is_none_or(|sp| sp.iter().any(|(a, b)| s.scheduled_ns >= *a && s.scheduled_ns < *b))
     }
 
     fn answers(&self) -> Vec<f64> {
@@ -98,7 +107,7 @@ impl View {
     fn cohorts(&self) -> Vec<Vec<&Sample>> {
         let mut out: Vec<Vec<&Sample>> = Vec::new();
         let mut cur: Vec<&Sample> = Vec::new();
-        for s in self.data.samples.iter().filter(|s| s.when != When::Idle) {
+        for s in self.data.samples.iter().filter(|s| self.in_scope(s)) {
             let stalled = s.outcome == Outcome::Timeout || s.latency_ms().is_some_and(|l| l > self.threshold);
             if stalled && cur.last().is_none_or(|l| l.seq + 1 == s.seq) {
                 cur.push(s);

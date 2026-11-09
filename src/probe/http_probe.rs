@@ -20,7 +20,7 @@ use std::time::Duration;
 pub const MAX_BODY: usize = 1 << 20;
 /// The probe's own CPU (% of one core over its span) above which its readings are flagged, and above
 /// which they are refused `OverheadBudget` (SPEC §19).
-pub const CPU_BUDGET_PCT: f64 = 0.5;
+pub const CPU_BUDGET_PCT: f64 = 1.0;
 pub const CPU_REFUSE_PCT: f64 = 2.0;
 /// Settling time between the end of setup and the first idle probe.
 pub const SETTLE: Duration = Duration::from_millis(100);
@@ -76,68 +76,58 @@ pub fn wipe_value(v: &mut Value) {
     }
 }
 
-/// What a probe sent that strobe never writes (`Config::secrets`), kept until the block's recording is
-/// written: the target got them, and what it wrote of its own memory there (a script host's heap profile
-/// holds the requests its server read, header strings and all) has each occurrence made `*`s (`scrub`).
+/// What a probe sends that strobe never writes (`Config::secrets`), kept until the block ends. The
+/// target gets them, so a block whose probe carries any takes no dump of the target's memory unless
+/// asked (`--probes memory`), and the experiment's text logs (what the target and the hooks printed)
+/// have each occurrence made `*`s (`scrub_logs`). Recordings are never rewritten.
 #[derive(Debug, Default)]
 pub struct Secrets(Vec<Secret>);
 
-/// Makes every occurrence of `secrets` in the files `paths` (a directory: every file under it) as many
-/// `*`s, gzipped files unpacked and packed again; a file that held one is written again owner-only, or
-/// removed when it cannot be. Returns how many files held one.
-pub fn scrub(paths: &[std::path::PathBuf], secrets: &Secrets) -> usize {
-    if secrets.0.is_empty() {
-        return 0;
+impl Secrets {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
-    let mut files = Vec::new();
-    let mut todo: Vec<std::path::PathBuf> = paths.to_vec();
-    while let Some(p) = todo.pop() {
-        match std::fs::read_dir(&p) {
-            Ok(rd) => todo.extend(rd.flatten().map(|e| e.path())),
-            Err(_) if p.is_file() => files.push(p),
-            Err(_) => {}
-        }
-    }
-    let needles: Vec<&[u8]> = secrets.0.iter().map(|s| s.0.as_slice()).collect();
-    // A file read as a stream (a heap snapshot or a trace can be gigabytes unpacked), gzipped or not.
-    let open = |path: &std::path::Path| -> std::io::Result<(Box<dyn Read>, bool)> {
-        let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
-        let gz = std::io::BufRead::fill_buf(&mut f)?.starts_with(&[0x1f, 0x8b]);
-        Ok((if gz { Box::new(flate2::read::GzDecoder::new(f)) } else { Box::new(f) }, gz))
-    };
-    let mut n = 0;
-    for path in files {
-        let Ok((r, gz)) = open(&path) else { continue };
-        if !pass(r, None, &needles).unwrap_or(false) {
-            continue;
-        }
-        let written = (|| -> std::io::Result<()> {
-            let (r, _) = open(&path)?;
-            let mut f = crate::store::create(&path).map_err(|e| std::io::Error::other(e.message))?;
-            if gz {
-                let mut e = flate2::write::GzEncoder::new(&mut f, flate2::Compression::fast());
-                pass(r, Some(&mut e), &needles)?;
-                e.finish()?;
-            } else {
-                pass(r, Some(&mut f), &needles)?;
-            }
-            f.commit()
-        })();
-        // A file that cannot be written again goes: it never keeps the secret.
-        if written.is_err() {
-            let _ = std::fs::remove_file(&path);
-        }
-        n += 1;
-    }
-    n
 }
 
-/// Reads `r` through, every occurrence of `needles` made `*`s (across its chunks' edges too), writing
-/// what it read to `w` when given; whether it held one.
-fn pass(mut r: impl Read, mut w: Option<&mut dyn Write>, needles: &[&[u8]]) -> std::io::Result<bool> {
+/// Makes every occurrence of `secrets` in the plain-text logs `logs` as many `*`s, in place (the same
+/// length, so a process that still appends to a log keeps its file). Returns how many held one, and the
+/// logs it could not write (left as they were and said, never removed).
+pub fn scrub_logs(logs: &[std::path::PathBuf], secrets: &Secrets) -> (usize, Vec<String>) {
+    use std::io::{Seek, SeekFrom};
+    let (mut n, mut failed) = (0, Vec::new());
+    if secrets.0.is_empty() {
+        return (n, failed);
+    }
+    let needles: Vec<&[u8]> = secrets.0.iter().map(|s| s.0.as_slice()).collect();
+    for path in logs.iter().filter(|p| p.is_file()) {
+        let Ok(f) = std::fs::File::open(path) else { continue };
+        let Ok(at) = find(f, &needles) else { continue };
+        if at.is_empty() {
+            continue;
+        }
+        n += 1;
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new().write(true).open(path)?;
+            for (off, len) in at {
+                f.seek(SeekFrom::Start(off))?;
+                f.write_all(&vec![b'*'; len])?;
+            }
+            f.sync_all()
+        })();
+        if let Err(e) = written {
+            failed.push(format!("{}: {e}", path.display()));
+        }
+    }
+    (n, failed)
+}
+
+/// Where `needles` occur in `r` (offset, length), across its chunks' edges too.
+fn find(mut r: impl Read, needles: &[&[u8]]) -> std::io::Result<Vec<(u64, usize)>> {
     let keep = needles.iter().map(|n| n.len()).max().unwrap_or(1).saturating_sub(1);
     let (mut buf, mut chunk) = (Vec::with_capacity(1 << 20), vec![0u8; 1 << 20]);
-    let mut hit = false;
+    // The offset of `buf[0]` in the stream.
+    let mut base = 0u64;
+    let mut out: Vec<(u64, usize)> = Vec::new();
     loop {
         let n = match r.read(&mut chunk) {
             Ok(n) => n,
@@ -146,37 +136,42 @@ fn pass(mut r: impl Read, mut w: Option<&mut dyn Write>, needles: &[&[u8]]) -> s
         };
         buf.extend_from_slice(&chunk[..n]);
         for nd in needles {
-            hit |= redact(&mut buf, nd);
+            for i in redact(&mut buf, nd) {
+                let at = (base + i as u64, nd.len());
+                if !out.contains(&at) {
+                    out.push(at);
+                }
+            }
         }
         // The last bytes stay for the next chunk: an occurrence may run across the edge.
-        let out = if n == 0 { buf.len() } else { buf.len().saturating_sub(keep) };
-        if let Some(w) = w.as_deref_mut() {
-            w.write_all(&buf[..out])?;
-        }
-        buf.drain(..out);
+        let drop = if n == 0 { buf.len() } else { buf.len().saturating_sub(keep) };
+        buf.drain(..drop);
+        base += drop as u64;
         if n == 0 {
-            return Ok(hit);
+            return Ok(out);
         }
     }
 }
 
-/// Every occurrence of `needle` in `hay` made `*`s; whether there was one.
-fn redact(hay: &mut [u8], needle: &[u8]) -> bool {
+/// Every occurrence of `needle` in `hay` made `*`s (so a later needle never matches it twice); where
+/// each began.
+fn redact(hay: &mut [u8], needle: &[u8]) -> Vec<usize> {
     let k = needle.len();
+    let mut at = Vec::new();
     if k == 0 || hay.len() < k {
-        return false;
+        return at;
     }
-    let (mut hit, mut i) = (false, 0);
+    let mut i = 0;
     while i + k <= hay.len() {
         if hay[i] == needle[0] && hay[i..i + k] == *needle {
             hay[i..i + k].fill(b'*');
-            hit = true;
+            at.push(i);
             i += k;
         } else {
             i += 1;
         }
     }
-    hit
+    at
 }
 
 /// A header whose value is a `Secret`: its name may be said, its value never.
@@ -383,21 +378,32 @@ impl Config {
     }
 
     /// What it sends that strobe never writes: the authorization's value (and its credential alone, past a
-    /// scheme such as `Bearer `), and the URL's query values of 8 characters or more.
+    /// scheme such as `Bearer `), every extra header's value, and the URL's query values (a segment
+    /// without `=` whole) of 8 characters or more, as sent and percent-decoded. Longest first, so a
+    /// value is made `*`s whole before a part of it would be.
     pub fn secrets(&self) -> Secrets {
-        let mut v = Vec::new();
+        let mut v: Vec<Vec<u8>> = Vec::new();
         if let Some(a) = &self.authorization {
-            v.push(Secret(a.value.0.clone()));
+            v.push(a.value.0.clone());
             if let Some(i) = a.value.0.iter().position(|b| *b == b' ')
-                && a.value.0.len() - i > 8
+                && a.value.0.len() - i > 1
             {
-                v.push(Secret(a.value.0[i + 1..].to_vec()));
+                v.push(a.value.0[i + 1..].to_vec());
             }
         }
+        v.extend(self.headers.iter().filter(|(_, x)| !x.is_empty()).map(|(_, x)| x.as_bytes().to_vec()));
         if let Some((_, q)) = self.target.split_once('?') {
-            v.extend(q.split('&').filter_map(|p| p.split_once('=')).filter(|(_, x)| x.len() >= 8).map(|(_, x)| Secret(x.as_bytes().to_vec())));
+            for part in q.split('&') {
+                let x = part.split_once('=').map_or(part, |(_, x)| x);
+                if x.len() >= 8 {
+                    v.push(x.as_bytes().to_vec());
+                    v.push(percent_decoded(x));
+                }
+            }
         }
-        Secrets(v)
+        v.sort_by_key(|x| std::cmp::Reverse(x.len()));
+        v.dedup();
+        Secrets(v.into_iter().map(Secret).collect())
     }
 
     pub fn describe(&self) -> Described {
@@ -469,6 +475,27 @@ impl Config {
     }
 }
 
+/// `%XX` escapes decoded (`+` stays: a form's space is the server's reading, not the URL's).
+fn percent_decoded(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// `http://<loopback>[:port]/path?query`: its authority, addresses, request target and the URL with its
 /// query's values left out. TLS, credentials in the URL and any host but this computer's loopback are
 /// usage errors.
@@ -516,7 +543,8 @@ fn parse_url(url: &str) -> Result<(String, Vec<SocketAddr>, String, String)> {
     }
     let shown_target = match target.split_once('?') {
         Some((path, query)) => {
-            let keys: Vec<String> = query.split('&').filter(|p| !p.is_empty()).map(|p| format!("{}=…", p.split('=').next().unwrap_or(""))).collect();
+            // Keys stay, values go; a segment without `=` is all value (`?<token>`): it goes whole.
+            let keys: Vec<String> = query.split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').map_or("…".to_string(), |(k, _)| format!("{k}=…"))).collect();
             format!("{path}?{}", keys.join("&"))
         }
         None => target.clone(),
@@ -578,7 +606,7 @@ pub enum Outcome {
     Ok,
     /// The server answered, not as `expect` asked (a 500, a body without the text).
     Bad { why: String },
-    /// No whole response within `timeoutMs` of the send.
+    /// No whole response within `timeoutMs` of its dispatch.
     Timeout,
     /// The connection failed (refused, reset, closed mid-response).
     Error { why: String },
@@ -1248,6 +1276,15 @@ pub fn censored_quantile(answers: &[f64], timeouts: usize, p: f64) -> Option<f64
     Some(v[lo] + (v[hi] - v[lo]) * (i - lo as f64))
 }
 
+/// What the probe's own CPU says of a block's latencies: over `CPU_REFUSE_PCT` of a core it competed with
+/// what it timed (a timed block refuses them, a `--check` warns, an attribution block says nothing).
+pub fn cpu_refusal(pct: f64) -> Option<Refusal> {
+    (pct > CPU_REFUSE_PCT).then(|| {
+        Refusal::new(ValidatorId::OverheadBudget, format!("the HTTP probe used {pct:.1}% of a core (budget {CPU_BUDGET_PCT}%, refused over {CPU_REFUSE_PCT}%)"))
+            .fix("probe less often (cadenceMs), or use connection: \"keep-alive\"")
+    })
+}
+
 /// The block's `http.*` values and refusals from what the probe read in its measured runs (`measured`
 /// of them), and the summary result.json and meta.json keep.
 pub struct Reading {
@@ -1339,14 +1376,8 @@ pub fn reading(d: &Data, measured: usize) -> Reading {
             .fix("keep other work off strobe's CPUs (--pin), or probe less often (cadenceMs)"),
         );
     }
+    // The probe's own CPU refuses only a timed block's latencies (`cpu_refusal`, the caller's).
     let cpu_pct = Stopped { described: d.config.clone(), start_ns: d.start_ns, end_ns: d.end_ns, samples: Vec::new(), cpu_ms: d.cpu_ms }.cpu_pct();
-    if let Some(pct) = cpu_pct.filter(|p| *p > CPU_REFUSE_PCT) {
-        latency(
-            &mut refused,
-            Refusal::new(ValidatorId::OverheadBudget, format!("the probe used {pct:.1}% of a core (budget {CPU_BUDGET_PCT}%, refused over {CPU_REFUSE_PCT}%)"))
-                .fix("probe less often (cadenceMs), or use connection: \"keep-alive\""),
-        );
-    }
     for name in refused.keys() {
         values.remove(name);
     }

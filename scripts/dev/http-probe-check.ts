@@ -87,8 +87,18 @@ check(/^OverheadBudget: .*missed/.test(refusal(d, "http.latency.p50")), `driver-
 // record --bench: the check and the attribution block, both probed.
 const rec = run(["record", "--bench", `${bench}#stall-750ms`, "--head", "."])
 const recs: string[] = (rec.recordings ?? []).map((r: any) => r.recording).filter((r: any) => typeof r === "string")
+// A Chromium page's attribution block (headless): the probe carries a credential, so no heap snapshot.
+const page = run(["record", "--bench", `${bench}#page`, "--head", ".", "--headless"])
+const pageRec: string | undefined = page.recordings?.[0]?.recording
+check(!!pageRec, `page: a Chromium attribution recording (${pageRec})`)
+const stateDir = process.platform === "win32" ? join(process.env.LOCALAPPDATA!, "strobe") : join(process.env.XDG_DATA_HOME ?? join(process.env.HOME!, ".local", "share"), "strobe")
+if (pageRec) {
+  recs.push(pageRec)
+  check(!existsSync(join(stateDir, "recordings", pageRec, "heap-0.heapsnapshot.gz")), `page: no heap snapshot beside the probe's credential`)
+  check(existsSync(join(stateDir, "recordings", pageRec, "trace.pftrace")), `page: its trace is kept`)
+}
 for (const r of exp.series.map((s: any) => s.recording).concat(late.series.map((s: any) => s.recording))) if (r) recs.push(r)
-check(recs.length >= 5, `recordings kept: ${recs.join(" ")}`)
+check(recs.length >= 6, `recordings kept: ${recs.join(" ")}`)
 for (const r of recs) {
   const o = run(["open", r, "--no-server"])
   check((o.built?.tracks?.["HTTP probe latency"] ?? 0) > 0, `${r}: Perfetto holds the probe (${JSON.stringify(o.built?.tracks ?? {})})`)
@@ -97,7 +107,7 @@ for (const r of recs) {
 // Every file strobe wrote for these, and every answer it printed.
 const out = mkdtempSync(join(tmpdir(), "http-probe-check-"))
 for (const e of [exp.id, late.id]) run(["report", e, "--out", join(out, `${e}.html`)])
-const state = process.platform === "win32" ? join(process.env.LOCALAPPDATA!, "strobe") : join(process.env.XDG_DATA_HOME ?? join(process.env.HOME!, ".local", "share"), "strobe")
+const state = stateDir
 // Every recording and experiment written since this check began (record --bench's experiment and check block
 // too), the reports, and the run folder strobe's runner and hosts use.
 const since = (d: string) => (existsSync(d) ? readdirSync(d).map((n) => join(d, n)).filter((p) => statSync(p).mtimeMs >= started) : [])

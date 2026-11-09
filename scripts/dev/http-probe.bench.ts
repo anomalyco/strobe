@@ -12,11 +12,13 @@
 //   status-500        the server answers 500 for 300 ms: http.errors, and http.latency.* refused.
 //   wrong-json        the server answers {"status":"degraded"} for 300 ms where expect asks for "ok": the same.
 //   mixed             cpu.work from clean timing pairs, http.* from a probe pass after them (timed runs only).
-import { bench, script } from "@hona/strobe"
+//   page              a Chromium page beside a server in the bench file's own process: its attribution block
+//                     (record --bench --headless) takes no heap snapshot, since the probe carries a credential.
+import { bench, script, url } from "@hona/strobe"
 
 const all = ["http.latency.p50", "http.latency.p95", "http.latency.max", "http.timeouts", "http.errors", "http.missed_sends", "http.probes", "http.idle.p50"]
 // A primary that is never refused, so a check keeps the case's values beside what it refused.
-const declare = (primary: string) => ({ primary, metrics: all.filter((m) => m !== primary) })
+const declare = (primary: string) => ({ targets: ["server"], primary, metrics: all.filter((m) => m !== primary) })
 const stall = async ({ call }: any) => {
   await call("idle", 300)
   await call("stall", 750)
@@ -30,13 +32,26 @@ const answering = (mode: string) => async ({ call }: any) => {
   await call("idle", 300)
 }
 
+// The page case's server, in this (the runner's) process, by the same rule as http-probe-server.ts.
+let here: ReturnType<typeof Bun.serve> | undefined
+const serveHere = () => {
+  const expected = process.env.HTTP_PROBE_TOKEN_SHA256 ?? ""
+  here ??= Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (req) => (new Bun.CryptoHasher("sha256").update(req.headers.get("authorization") ?? "").digest("hex") === expected ? Response.json({ status: "ok" }) : new Response("unauthorized", { status: 401 })),
+  })
+  return `http://127.0.0.1:${here.port}/health`
+}
+
 export default bench({
-  targets: { server: script("./http-probe-server.ts") },
+  targets: { server: script("./http-probe-server.ts"), page: url(new URL("pages/click.html", import.meta.url).href) },
   async setup(ctx) {
-    const url = await ctx.call<string>("start")
+    const url = ctx.target === "page" ? serveHere() : await ctx.call<string>("start")
     // The bench file reads the token; the server knows only its hash. It goes in the URL's query too, which strobe
-    // sends and must never write.
+    // sends and must never write, and this hook prints it, which the experiment's runner.log must not keep.
     const token = (await Bun.file(process.env.HTTP_PROBE_TOKEN_FILE ?? "").text()).trim()
+    console.log(`probing ${url}?key=${token}`)
     await ctx.httpProbe({
       url: `${url}?key=${token}`,
       authorization: `Bearer ${token}`,
@@ -54,6 +69,7 @@ export default bench({
     "wrong-json": { ...declare("http.errors"), run: answering("wrong-json") },
     // Timed only (the orchestrator's A/A, `--aa --pairs 6`): clean pairs for cpu.work, then a probe pass for
     // http.* (`pass.http`, `i HttpProbe`); stall-750ms-long alone pairs probe blocks only.
-    mixed: { primary: "cpu.work", metrics: ["http.latency.p50", "http.timeouts"], run: stall },
+    mixed: { targets: ["server"], primary: "cpu.work", metrics: ["http.latency.p50", "http.timeouts"], run: stall },
+    page: { targets: ["page"], primary: "http.latency.p50", metrics: ["http.errors"], run: ({ page }: any) => page.wait(1500), reset: async () => {} },
   },
 })
