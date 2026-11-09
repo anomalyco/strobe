@@ -136,7 +136,9 @@ export default bench({
     // A 2 s spin, with the browser's CPU read by the OS around it (Windows: the kernel and user time of
     // strobe's browser tree, 15.6 ms ticks): count.os_cpu_ms is the truth for cpu.work. A process of the
     // tree that ended in the run (a utility process) took its CPU out of the second read, which can no
-    // longer say the truth: count.os_cpu_ended counts those instead, and no count.os_cpu_ms is given.
+    // longer say the truth: count.os_cpu_ended counts those instead, and no count.os_cpu_ms is given. One
+    // born and ended inside the run is in neither read: compare only runs the recording's ended_runs does
+    // not list (`strobe query <rec> summary`, `ended` lines), as strobe's cpu.work counts it.
     cpu2s: {
       primary: "cpu.work",
       metrics: ["count.os_cpu_ms", "count.os_cpu_ended", "cpu.renderer", "cpu.app.total", "run.duration"],

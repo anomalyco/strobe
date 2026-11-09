@@ -434,9 +434,6 @@ pub fn text(meta: &Value) -> String {
     if meta["session_locked"] == true {
         s += "session  locked: CPU and GPU numbers compare only with other locked recordings\n";
     }
-    if let Some(line) = super::bench::screen_line(&meta["screen"]) {
-        s += &format!("screen   {line}\n");
-    }
     if get("cpu.app.total").is_finite() {
         s += &format!("cpu      {} of one core · {} in the window, process tree\n", fmt::value(get("cpu.app.total"), "%"), fmt::value(get("cpu.work"), "ms"));
     }

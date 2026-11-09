@@ -2676,6 +2676,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     }
     let mut launches: Vec<Block> = Vec::new();
     let mut r: Result<Block> = Err(Error::msg("internal: a check ran no launch"));
+    let mut sent: Option<store::actions::ActionLog> = None;
     for i in 0..repeat {
         if repeat > 1 {
             progress(format!("  {} launch {} of {repeat}", s.label(), i + 1));
@@ -2688,6 +2689,12 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
             }
             Ok(b)
         });
+        // The actions of the launch the result shows: the first, or the one that failed (each launch's
+        // recording keeps its own).
+        let taken = ctx.runner.take_actions();
+        if i == 0 || r.is_err() {
+            sent = Some(taken);
+        }
         match &r {
             Ok(b) => launches.push(b.clone()),
             // A later launch failed: the case fails with it, named.
@@ -2715,7 +2722,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     }
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     let log = runner_log(ctx, log_from, None);
-    let sent = ctx.runner.take_actions();
+    let sent = sent.unwrap_or_else(|| ctx.runner.take_actions());
     let mut out = check_case(ctx, s, variants, r, elapsed_ms, log, sent, film)?;
     if let Some(rep) = repeated {
         out["repeat"] = rep;
