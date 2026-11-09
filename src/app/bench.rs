@@ -6827,7 +6827,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         // The driver's frame waits use the browser's own rAF, kept before the page's scripts can replace it.
         page.add_init_script(crate::driver::NATIVE_RAF)?;
-        page.add_init_script(crate::driver::KEYS_SEEN)?;
+        // Keys the page saw, for a key call's failure (`Driver::unfocused`): not through the OS (which counts
+        // its own), on a phone, or in a block that takes a census (its listeners would be in the page's).
+        if !os_input && on_phone.is_none() && !matches!(set, Set::Attribution | Set::Memory) {
+            page.add_init_script(crate::driver::KEYS_SEEN)?;
+        }
         // `count.<name>` metrics: the page counts through a global installed in every document it loads.
         if counting {
             page.add_init_script(COUNT_SCRIPT)?;
@@ -7240,8 +7244,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         ctx.runner.call("block", block, t, &serve)?;
         // `prepare` (and a target `url` function) may name the first page, so a block loads one page, not two.
         let mut first = url.clone();
-        // The addresses in what `prepare` returned (`ctx.prepared`): a phone reaches those on this
-        // computer's loopback too (a second server, an API or WebSocket the page talks to).
+        // The loopback ports in what `prepare` returned (`ctx.prepared`), as the runner gives them
+        // (`http://127.0.0.1:<port>`, nothing else of the address): a phone reaches those too (a second
+        // server, an API or WebSocket the page talks to).
         let mut addresses: Vec<String> = Vec::new();
         if target["prepare"].as_bool() == Some(true) {
             // Playwright connects over CDP: Chromium only (the runner's `playwright` throws elsewhere).
@@ -10106,7 +10111,8 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
         ));
     }
     if args.has("mobile") {
-        return Ok(phone_refusal(s, name, t));
+        // A leak run (`Mode::Leak`): `--probes memory` without `--check`, which runs the primary once.
+        return Ok(phone_refusal(s, name, t, args.get("probes") == Some("memory") && !args.has("check")));
     }
     if on_headless_compositor(t, config) {
         let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
@@ -10236,8 +10242,9 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
 /// "mobile"`) run in Chrome on the phone (SPEC 13.1 "Chrome on a phone"): any other target is not for the
 /// phone (`NotForTarget`: a desktop's or a touch screen's page, an app; `DeviceMismatch` would say the
 /// page saw the wrong device), nor is a target in another engine (`EngineUnsupported`), a launch case (its
-/// clock is the phone's), or a primary strobe reads from this computer's processes (`NotForTarget`).
-fn phone_refusal(s: &Series, name: &str, t: &Value) -> Option<Refusal> {
+/// clock is the phone's), or a primary strobe reads from this computer's processes (`NotForTarget`), but in
+/// a leak run (`leak`: `--probes memory`), which reads the page's heap and DOM over DevTools, not the primary.
+fn phone_refusal(s: &Series, name: &str, t: &Value, leak: bool) -> Option<Refusal> {
     let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
     let kind = t["kind"].as_str().unwrap_or("?");
     let r = if !matches!(kind, "web" | "url") {
@@ -10255,6 +10262,8 @@ fn phone_refusal(s: &Series, name: &str, t: &Value) -> Option<Refusal> {
     } else if s.launch.is_object() {
         Refusal::new(ValidatorId::NotForTarget, format!("{on}a launch case on a phone: strobe times a launch from its own clock, and the page's is the phone's"))
             .fix("time the load in a run case (a phase around page.goto)")
+    } else if leak {
+        return None;
     } else {
         return validity::phone_refusal(&s.primary).map(|r| Refusal { summary: format!("{on}{}", r.summary), ..r });
     };

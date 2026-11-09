@@ -16,7 +16,7 @@ const page = `<!doctype html><title>focus</title>
 <script>
 addEventListener("keydown", (e) => { got.textContent += " " + e.key })
 // #unseen: the page wipes what strobe saw of its keys, as if none had come (the report's own check).
-if (location.hash === "#unseen") addEventListener("keyup", () => { window.__strobeKeys.at = 0 })
+if (location.hash === "#unseen") addEventListener("keyup", () => { window.__strobeKeys.at = -1 })
 pop.addEventListener("click", () => { window.open("about:blank", "_blank", "popup,width=200,height=200") })
 </script>`
 

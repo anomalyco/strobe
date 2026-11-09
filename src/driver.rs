@@ -152,14 +152,19 @@ impl Typing {
 /// frame pacer does) and so delay the driver's waits on its own schedule.
 pub const NATIVE_RAF: &str = "window.__strobeRaf ??= window.requestAnimationFrame.bind(window)";
 
-/// Installed in every document before its scripts run: when a key last went down or up in it (`Date.now()`),
-/// so a wait after keys sent to no element can tell whether any reached the page (`Driver::unfocused`). One
-/// passive listener at the window's capture phase.
+/// Installed in every document of a page strobe drives over DevTools or WebDriver on this computer (not
+/// through the OS, not on a phone) before its scripts run: when a key last went down or up in it, on the
+/// document's own monotonic clock (`performance.now`, bound before the page's scripts could replace it;
+/// -1 before any), so a wait after keys sent to no element can tell whether any reached the page
+/// (`Driver::unfocused`). Two passive listeners at the window's capture phase, under the driver's source
+/// URL, so a profile folds their ticks into strobe's.
 pub const KEYS_SEEN: &str = r#"window.__strobeKeys ??= (() => {
-  const s = { at: 0 }
-  for (const e of ["keydown", "keyup"]) addEventListener(e, (ev) => { if (ev.isTrusted) s.at = Date.now() }, { capture: true, passive: true })
+  const now = performance.now.bind(performance)
+  const s = { at: -1, now }
+  for (const e of ["keydown", "keyup"]) addEventListener(e, (ev) => { if (ev.isTrusted) s.at = now() }, { capture: true, passive: true })
   return s
-})(), true"#;
+})(), true
+//# sourceURL=strobe-driver.js"#;
 
 /// The probe's script as a profile names it (`HELPER`'s `sourceURL`).
 pub const SOURCE_URL: &str = "strobe-driver.js";
@@ -960,8 +965,11 @@ fn no_selector(sel: &Value) -> bool {
     sel.is_null() || sel.as_str() == Some("")
 }
 
-/// What a key call's failure adds when its keys reached no page that had no focus.
-const UNFOCUSED: &str = "the page had no focus (document.hasFocus() is false), so keys did not reach it; click the page first or pass a selector";
+/// What a key call's failure adds when its keys reached no page that had no focus; with no selector, a
+/// selector would have clicked into its element first.
+fn unfocused_note(selector: bool) -> String {
+    format!("the page had no focus (document.hasFocus() is false), so keys did not reach it; click the page first{}", if selector { "" } else { " or pass a selector" })
+}
 
 /// `e` with `note` after what it says (a refusal's detail, so its validator and fix stay).
 fn noted(mut e: Error, note: &str) -> Error {
@@ -1932,22 +1940,26 @@ impl Driver {
     /// failed (a wait in the page or one that ran out, an image that never showed): when no key reached
     /// the document since the call (`KEYS_SEEN`) and it had no focus (`document.hasFocus()`), both read
     /// within 1 s, the error says so. Focus alone proves nothing: a headless page reads no focus until a
-    /// click, and takes keys all the same. Nothing is said of a document that began after the call (a key
-    /// that navigated reached the one before), nor on a phone, whose clock is not this computer's.
+    /// click, and takes keys all the same. Both clocks are monotonic: the time since the call on strobe's,
+    /// and the document's own (`performance.now`, as `KEYS_SEEN` bound it, so a page's fake timers change
+    /// neither), with 5 ms of slack for the reads. Nothing is said of a document that began after the call
+    /// (a key that navigated reached the one before), of one whose focus is in a frame (its keys went
+    /// there), of a page without `KEYS_SEEN` (OS input, a phone), or on a phone.
     fn unfocused(&self, e: Error) -> Error {
         if !(matches!(e.code, 1 | 124) || e.validator() == Some(ValidatorId::AnchorNotFound)) || self.phone {
             return e;
         }
-        let Ok(seen) = self.page.eval_timeout("[document.hasFocus(), window.__strobeKeys?.at ?? null, performance.timeOrigin]", Duration::from_secs(1)) else { return e };
-        // The call's start on the wall clock the page's `Date.now()` reads.
-        let ago = Duration::from_nanos(crate::host::now_ns().saturating_sub(self.call_at.get()));
-        let called_ms = std::time::SystemTime::now().checked_sub(ago).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_millis() as f64);
-        let reached = seen[1].as_f64().is_none_or(|at| at + 1.0 >= called_ms);
-        let later = seen[2].as_f64().is_none_or(|origin| origin + 1.0 >= called_ms);
-        if seen[0] != false || reached || later {
+        let read = "[document.hasFocus(), window.__strobeKeys?.at ?? null, window.__strobeKeys?.now?.() ?? performance.now(), /^(IFRAME|FRAME)$/.test(document.activeElement?.tagName ?? \"\")]";
+        let Ok(seen) = self.page.eval_timeout(read, Duration::from_secs(1)) else { return e };
+        // Read after the page answered: the longer, the less the page is said to have missed.
+        let elapsed_ms = crate::host::now_ns().saturating_sub(self.call_at.get()) as f64 / 1e6;
+        let (Some(at), Some(doc_now)) = (seen[1].as_f64(), seen[2].as_f64()) else { return e };
+        let reached = at >= 0.0 && doc_now - at <= elapsed_ms + 5.0;
+        let later = doc_now <= elapsed_ms + 5.0;
+        if seen[0] != false || seen[3] == true || reached || later {
             return e;
         }
-        noted(e, UNFOCUSED)
+        noted(e, &unfocused_note(false))
     }
 
     /// One wait of a call's `until` (`each_until` runs a list's in turn).

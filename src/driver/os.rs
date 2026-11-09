@@ -873,7 +873,12 @@ impl Driver {
         // Keys whose wait ran out: one that never reached the page says so (`InputMismatch`, with whether it
         // had focus), not the wait it left waiting.
         let keyed = matches!(call, "type" | "press") || (matches!(call, "down" | "up") && keys::mouse_button(&s(0)).is_none());
-        self.os_until(os, &o, at).map_err(|e| if keyed && (matches!(e.code, 1 | 124) || e.validator() == Some(ValidatorId::AnchorNotFound)) { self.undelivered(os, e) } else { e })?;
+        let selector = match call {
+            "type" => !no_selector(&sel(0)),
+            "press" => !no_selector(&o["selector"]),
+            _ => false,
+        };
+        self.os_until(os, &o, at).map_err(|e| if keyed && (matches!(e.code, 1 | 124) || e.validator() == Some(ValidatorId::AnchorNotFound)) { self.undelivered(os, e, selector) } else { e })?;
         Ok(Value::Bool(true))
     }
 
@@ -893,13 +898,13 @@ impl Driver {
 
     /// A key call's wait that ran out: when what strobe posted did not reach the page (`delivered`), that
     /// refusal instead, saying so when the page had no focus (`document.hasFocus()`, read within 1 s);
-    /// else the wait's own error.
-    fn undelivered(&self, os: &OsInput, e: Error) -> Error {
+    /// else the wait's own error. `selector`: the call named the element to click into first.
+    fn undelivered(&self, os: &OsInput, e: Error, selector: bool) -> Error {
         let Err(r) = os.delivered(&self.page) else { return e };
         if r.validator() != Some(ValidatorId::InputMismatch) {
             return e;
         }
-        if self.page.eval_timeout("document.hasFocus()", Duration::from_secs(1)).ok() == Some(Value::Bool(false)) { super::noted(r, super::UNFOCUSED) } else { r }
+        if self.page.eval_timeout("document.hasFocus()", Duration::from_secs(1)).ok() == Some(Value::Bool(false)) { super::noted(r, &super::unfocused_note(selector)) } else { r }
     }
 
     /// The element's centre (scrolled into view) as a screen point, and the browser window the OS
@@ -965,16 +970,18 @@ impl Driver {
         Ok(last)
     }
 
-    /// Clicks into the element unless focus is already in it, as a person clicks into a field (that
-    /// click is no keystroke). After the click focus must be in it, in a document that has focus (one
-    /// read): keys the OS sends go to what has focus, which may be elsewhere (the address bar, another
-    /// field), and `InputMismatch` refuses rather than time keys the element never got.
+    /// Clicks into the element unless focus is already in it and its document has the OS's focus, as a
+    /// person clicks into a field (that click is no keystroke): an element that is `:focus` in a window
+    /// in the background gets no key the OS sends until a click brings the window back. After the click
+    /// focus must be in it, in a document that has focus (one read): keys the OS sends go to what has
+    /// focus, which may be elsewhere (the address bar, another field), and `InputMismatch` refuses rather
+    /// than time keys the element never got.
     fn os_focus(&self, os: &OsInput, sel: &Value, o: &Value) -> Result<()> {
         if no_selector(sel) {
             return Ok(());
         }
         let (x, y, t, focused) = self.os_aim_focus(os, sel, o)?;
-        if !focused {
+        if !focused || self.read("document.hasFocus()", self.timeout(o))? != Value::Bool(true) {
             self.os_click_at(os, (x, y, t), &json!({}), "pointer")?;
             // Its frames (a focus ring, a caret) settle before the first key, which is measured: at least
             // 2 refreshes, since the click's first frame may not have begun yet.

@@ -5,8 +5,9 @@
 //   strobe bench scripts/dev/prepared-servers.bench.ts --head . --check --headless   (an emulated phone)
 //   strobe bench scripts/dev/prepared-servers.bench.ts --head . --check --mobile
 //   strobe bench scripts/dev/prepared-servers.bench.ts --head . --probes memory --repeat 3 --mobile
-// Each run fetches the API and fails unless it answers. Leak run truth: `keeps` holds about 100 KB more after each run
-// (25,000 references to one string), so its js heap grows; `clean` keeps nothing, so its heap does not.
+// Each run fetches the API and fails unless it answers. Leak run truth: `keeps` and `keeps host` hold about 100 KB more
+// after each run (25,000 references to one string), so their js heap grows; `clean` keeps nothing, so its heap does
+// not. `keeps host` is refused NotForTarget on a phone but for the leak run (its primary is this computer's cpu.work).
 import { bench, web } from "@hona/strobe"
 
 const page = `<!doctype html><title>prepared servers</title><meta name="viewport" content="width=device-width">
@@ -50,5 +51,8 @@ export default bench({
   cases: {
     keeps: { primary: "run.duration", run: ping(true) },
     clean: { primary: "run.duration", run: ping(false) },
+    // A primary strobe reads from this computer's processes: refused NotForTarget on a phone, but for a leak
+    // run, which reads the page's heap and not the primary (the same growth as `keeps`).
+    "keeps host": { primary: "cpu.work", run: ping(true) },
   },
 })

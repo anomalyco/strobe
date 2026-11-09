@@ -347,12 +347,19 @@ function setupKeyText(value: unknown, at = "the key", seen = new Set<object>()):
   return out
 }
 
-// The addresses in what a target's `prepare` returned (strings that start with a web scheme, in its plain
-// objects and arrays, a few levels down): on a phone, strobe reverses those on this computer's loopback
-// (a second server prepare started, an API or WebSocket the page reaches) to the phone's.
+// The loopback ports in what a target's `prepare` returned (web addresses on 127.0.0.1, localhost or [::1]
+// with a port, in its plain objects and arrays, a few levels down), each as `http://127.0.0.1:<port>`: on a
+// phone, strobe reverses them to the phone's (a second server prepare started, an API or WebSocket the page
+// reaches). Nothing else of the address (a path, a token, a user) leaves the runner.
 function addresses(value: unknown, depth = 4, seen = new Set<object>(), out: string[] = []): string[] {
   if (typeof value === "string") {
-    if (/^(https?|wss?):\/\//i.test(value) && out.length < 64) out.push(value)
+    let u: URL | undefined
+    try {
+      u = new URL(value)
+    } catch {}
+    const loopback = u && /^(https?|wss?):$/.test(u.protocol) && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) && u.port
+    const port = loopback ? `http://127.0.0.1:${u!.port}` : ""
+    if (port && !out.includes(port) && out.length < 64) out.push(port)
   } else if (value && typeof value === "object" && depth > 0 && !seen.has(value)) {
     seen.add(value)
     const proto = Object.getPrototypeOf(value)
