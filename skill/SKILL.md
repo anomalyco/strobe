@@ -176,8 +176,8 @@ export default bench({
 - `record --bench <file>#<case>` (or `--check`, `--why always`): stacks, the threads' timeline and the
   probe on one recording. `query <rec> http`: idle against the runs, timeouts, errors and the stalled
   cohorts: one stall (`answered none for X`) or stalls back to back (`spanned N stalls …`), timeouts
-  wherever they fell; `strobe open <rec>` draws the probes beside the runs and threads, and `report`
-  an HTTP probe card.
+  wherever they fell; a quantile the block refuses reads `—` with why. `strobe open <rec>` draws the
+  probes beside the runs and threads, and `report` an HTTP probe card.
 - To compare it, declare `http.latency.p95` (or `http.timeouts`, `http.errors`): the probe then runs
   in probe blocks of its own. A clean timing block never probes.
 - A timeout ranks above every answer: a quantile on one refuses `RunIncomplete` (raise `timeoutMs`).
