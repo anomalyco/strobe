@@ -347,6 +347,29 @@ function setupKeyText(value: unknown, at = "the key", seen = new Set<object>()):
   return out
 }
 
+// The loopback ports in what a target's `prepare` returned (web addresses on 127.0.0.1, localhost or [::1]
+// with a port, in its plain objects and arrays, a few levels down), each as `http://127.0.0.1:<port>`: on a
+// phone, strobe reverses them to the phone's (a second server prepare started, an API or WebSocket the page
+// reaches). Nothing else of the address (a path, a token, a user) leaves the runner.
+function addresses(value: unknown, depth = 4, seen = new Set<object>(), out: string[] = []): string[] {
+  if (typeof value === "string") {
+    let u: URL | undefined
+    try {
+      u = new URL(value)
+    } catch {}
+    const loopback = u && /^(https?|wss?):$/.test(u.protocol) && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) && u.port
+    const port = loopback ? `http://127.0.0.1:${u!.port}` : ""
+    if (port && !out.includes(port) && out.length < 64) out.push(port)
+  } else if (value && typeof value === "object" && depth > 0 && !seen.has(value)) {
+    seen.add(value)
+    const proto = Object.getPrototypeOf(value)
+    if (Array.isArray(value) || proto === Object.prototype || proto === null)
+      for (const v of Object.values(value)) addresses(v, depth - 1, seen, out)
+    else if (value instanceof URL) addresses(value.href, depth, seen, out)
+  }
+  return out
+}
+
 // The hook about to run starts its stream (`ctx.random()`) over.
 const stream = (hook: string) => void (state.stream = mulberry32(mix(state.caseSeed, hook)))
 
@@ -800,7 +823,7 @@ async function handle(op: string, args: any) {
           typeof target?.url === "function"
             ? await target.url(seeded({ get case() { return caseOf() }, setupKey: state.setupKey, prepared: state.prepared, params: state.params }))
             : undefined
-        return { url }
+        return { url, reach: addresses(state.prepared) }
       } finally {
         launchHook = null
       }

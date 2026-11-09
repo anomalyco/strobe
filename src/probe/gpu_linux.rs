@@ -13,6 +13,19 @@ fn pci_id(addr: &str) -> u64 {
     addr.split([':', '.']).filter_map(|p| u64::from_str_radix(p, 16).ok()).fold(0, |a, p| (a << 16) | p)
 }
 
+/// A DRM card's device (`/sys/class/drm/cardN/device`, resolved): its PCI address, or a platform
+/// device's name.
+fn card_addr(card: &str) -> String {
+    let dev = std::path::Path::new("/sys/class/drm").join(card).join("device");
+    std::fs::canonicalize(&dev).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default()
+}
+
+/// A DRM card's (`cardN`) adapter id, as `adapters` gives it: what names the adapter that scans out a
+/// display (`host::linux::outputs`). 0 when the card has no device to read.
+pub fn card_luid(card: &str) -> u64 {
+    pci_id(&card_addr(card))
+}
+
 /// The DRM cards (`/sys/class/drm/cardN`): driver, PCI address and vendor:device ids.
 pub fn adapters() -> Vec<Adapter> {
     let mut out = Vec::new();
@@ -22,7 +35,7 @@ pub fn adapters() -> Vec<Adapter> {
     for card in cards {
         let dev = std::path::Path::new("/sys/class/drm").join(&card).join("device");
         let driver = std::fs::read_link(dev.join("driver")).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default();
-        let addr = std::fs::canonicalize(&dev).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default();
+        let addr = card_addr(&card);
         let id = |f: &str| std::fs::read_to_string(dev.join(f)).map(|s| s.trim().trim_start_matches("0x").to_string()).unwrap_or_default();
         let name = format!("{driver} {addr} ({}:{})", id("vendor"), id("device"));
         out.push(Adapter { luid: pci_id(&addr), name, bus: None, nodes: Vec::new(), apertures: Vec::new() });

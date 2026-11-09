@@ -1886,13 +1886,8 @@ pub fn run(args: &Args) -> Result<Output> {
         if args.get("engine").is_some_and(|e| e != "chromium") {
             return Err(Error::usage("--mobile drives Chrome on Android (Chromium): drop --engine"));
         }
-        if args.get("probes") == Some("memory") {
-            return Err(Error::refused(
-                "NotForTarget",
-                "--probes memory on a phone: a leak run's census reads the browser's processes on this computer, and the page's are on the phone",
-                "leak-check the page on a desktop target, or record --probes attribution on the phone (it ends with a heap snapshot)",
-            ));
-        }
+        // A leak run on a phone reads the page over DevTools (its JS heap, DOM counters, heap snapshots and
+        // Chrome's own memory dump, all the phone's); its census names no process of this computer's.
     }
     if args.has("plan") {
         return plan::run(args);
@@ -2048,11 +2043,11 @@ pub fn run(args: &Args) -> Result<Output> {
         ran_out: false,
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
-    // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check` or a
-    // pixel comparison takes none of them.
+    // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check`, a
+    // pixel comparison or a leak run (heap censuses, no time: `Set::Memory`) takes none of them.
     if let Some(serial) = args.get("mobile") {
         let phone = crate::target::android_chrome::pick(serial)?;
-        if !matches!(mode, Mode::Check | Mode::Pixels) {
+        if !matches!(mode, Mode::Check | Mode::Pixels | Mode::Leak) {
             validity::phone_timed(&phone.facts)?;
         }
         progress(format!("phone {} {} · Android {} · {}", phone.facts.manufacturer, phone.facts.model, phone.facts.android, phone.device.serial));
@@ -3427,7 +3422,8 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     release_machine(ctx);
     ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
     prepare_all(ctx, s, variants, config)?;
-    progress(format!("\n{}  primary {} · {n} blocks of head alone", s.label(), s.primary));
+    let n_blocks = if n == 1 { "1 block".to_string() } else { format!("{n} blocks") };
+    progress(format!("\n{}  primary {} · {n_blocks} of head alone", s.label(), s.primary));
     let series_started = Instant::now();
     let waited_before = ctx.waited_ms;
     let mut blocks: Vec<Block> = serde_json::from_value(ctx.saved["series"][s.label()]["blocks"].clone()).unwrap_or_default();
@@ -3442,12 +3438,12 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     let split = counting(s);
     let main_counters = split == Counting::Only || (split == Counting::Separate && counted_apart(&s.primary));
     if split == Counting::Separate {
-        progress(format!("  counters: {} blocks of each kind (cpu.instructions in counter blocks, times in timing blocks)", n));
+        progress(format!("  counters: {n_blocks} of each kind (cpu.instructions in counter blocks, times in timing blocks)"));
     }
     let main_http = main_probes(s);
     let probe_apart = probing(s) == Probing::Separate;
     if probe_apart {
-        progress(format!("  HTTP probe: {n} blocks of each kind (http.* in probe blocks, times in clean timing blocks)"));
+        progress(format!("  HTTP probe: {n_blocks} of each kind (http.* in probe blocks, times in clean timing blocks)"));
     }
     // The blocks of a point share one lock and display state, as a pair's do: a block in another state
     // starts the point again from it (a locked session's display goes to sleep once, early).
@@ -6831,6 +6827,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         // The driver's frame waits use the browser's own rAF, kept before the page's scripts can replace it.
         page.add_init_script(crate::driver::NATIVE_RAF)?;
+        // Keys the page saw, for a key call's failure (`Driver::unfocused`): not through the OS (which counts
+        // its own), on a phone, or in a block that takes a census (its listeners would be in the page's).
+        if !os_input && on_phone.is_none() && !matches!(set, Set::Attribution | Set::Memory) {
+            page.add_init_script(crate::driver::KEYS_SEEN)?;
+        }
         // `count.<name>` metrics: the page counts through a global installed in every document it loads.
         if counting {
             page.add_init_script(COUNT_SCRIPT)?;
@@ -7243,6 +7244,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         ctx.runner.call("block", block, t, &serve)?;
         // `prepare` (and a target `url` function) may name the first page, so a block loads one page, not two.
         let mut first = url.clone();
+        // The loopback ports in what `prepare` returned (`ctx.prepared`), as the runner gives them
+        // (`http://127.0.0.1:<port>`, nothing else of the address): a phone reaches those too (a second
+        // server, an API or WebSocket the page talks to).
+        let mut addresses: Vec<String> = Vec::new();
         if target["prepare"].as_bool() == Some(true) {
             // Playwright connects over CDP: Chromium only (the runner's `playwright` throws elsewhere).
             let (endpoint, target_id) = match (browser.cdp(), page.cdp()) {
@@ -7254,6 +7259,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             batch::launch_hook_case(ctx)?;
             let r = r.map_err(|e| crate::runner::incomplete("prepare", "prepare", e, "", "fix the target's prepare in the bench file"))?;
             first = first_page(&url, r.get("url").and_then(Value::as_str))?;
+            addresses = r["reach"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
         }
         lap("prepare");
         prepared.set(true);
@@ -7261,11 +7267,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let mut phone_screen = Value::Null;
         if !app {
             // On a phone: the page's origin starts empty as a fresh desktop profile's would, and servers on
-            // this computer's loopback (the variant's, the fixture's) are reversed to the phone's.
+            // this computer's loopback (the variant's, the fixture's, those `prepare` named) are reversed to
+            // the phone's.
             if let (Some(p), Some(cp)) = (on_phone, page.cdp()) {
                 p.load(&first)?;
                 if let Some(f) = &ctx.fixture_running {
                     p.reach(&f.url())?;
+                }
+                for a in &addresses {
+                    p.reach(a)?;
                 }
                 crate::target::android_chrome::clear_origin(cp, &first)?;
             }
@@ -10101,7 +10111,8 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
         ));
     }
     if args.has("mobile") {
-        return Ok(phone_refusal(s, name, t));
+        // A leak run (`Mode::Leak`): `--probes memory` without `--check`, which runs the primary once.
+        return Ok(phone_refusal(s, name, t, args.get("probes") == Some("memory") && !args.has("check")));
     }
     if on_headless_compositor(t, config) {
         let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
@@ -10231,8 +10242,9 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
 /// "mobile"`) run in Chrome on the phone (SPEC 13.1 "Chrome on a phone"): any other target is not for the
 /// phone (`NotForTarget`: a desktop's or a touch screen's page, an app; `DeviceMismatch` would say the
 /// page saw the wrong device), nor is a target in another engine (`EngineUnsupported`), a launch case (its
-/// clock is the phone's), or a primary strobe reads from this computer's processes (`NotForTarget`).
-fn phone_refusal(s: &Series, name: &str, t: &Value) -> Option<Refusal> {
+/// clock is the phone's), or a primary strobe reads from this computer's processes (`NotForTarget`), but in
+/// a leak run (`leak`: `--probes memory`), which reads the page's heap and DOM over DevTools, not the primary.
+fn phone_refusal(s: &Series, name: &str, t: &Value, leak: bool) -> Option<Refusal> {
     let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
     let kind = t["kind"].as_str().unwrap_or("?");
     let r = if !matches!(kind, "web" | "url") {
@@ -10250,6 +10262,8 @@ fn phone_refusal(s: &Series, name: &str, t: &Value) -> Option<Refusal> {
     } else if s.launch.is_object() {
         Refusal::new(ValidatorId::NotForTarget, format!("{on}a launch case on a phone: strobe times a launch from its own clock, and the page's is the phone's"))
             .fix("time the load in a run case (a phase around page.goto)")
+    } else if leak {
+        return None;
     } else {
         return validity::phone_refusal(&s.primary).map(|r| Refusal { summary: format!("{on}{}", r.summary), ..r });
     };
@@ -11325,7 +11339,7 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     let blocks = s["blocks"].as_array().map_or(0, Vec::len);
     // A `url()` target's address, not the build, whose code it never loads.
     let head = s["href"].as_str().filter(|_| r["variants"][0]["kind"] != "url").or(r["variants"][0]["label"].as_str()).unwrap_or("");
-    let mut out = format!("strobe bench {file} · {} · head {head} · {blocks} blocks, nothing compared\n", s["label"].as_str().unwrap_or(""));
+    let mut out = format!("strobe bench {file} · {} · head {head} · {blocks} block{}, nothing compared\n", s["label"].as_str().unwrap_or(""), if blocks == 1 { "" } else { "s" });
     let input = s["input"].as_str().map(|i| format!("{i} input")).unwrap_or_default();
     let window = s["window"].as_str().map(|w| format!("window {w}")).unwrap_or_default();
     let engine = fmt::fields([s["browser"].as_str().unwrap_or(""), &input, &window, motion_note(s, &window), if s["headless"] == true { "headless (no display)" } else { "" }]);
@@ -11341,6 +11355,10 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     } else if values.len() >= 2 {
         let (median, lo, hi, conf) = stats::median_interval(&values, 0.95);
         out += &format!("\n★ {metric}  median {}  [{} … {}] ({:.0}% over the blocks)\n", fmt::value(median, unit), fmt::value(lo, unit), fmt::value(hi, unit), 100.0 * conf);
+    } else if let [v] = values[..] {
+        out += &format!("\n★ {metric}  {} ({})\n", fmt::value(v, unit), if blocks == 1 { "1 block".to_string() } else { format!("1 of {blocks} blocks") });
+    } else {
+        out += &format!("\n★ {metric}  no value\n");
     }
     let each = s["blocks"].as_array().into_iter().flatten().map(|b| b["values"][metric].as_f64().filter(|v| v.is_finite()).map_or("—".to_string(), |v| fmt::value(v, unit)));
     out += &format!("  blocks  {}\n", each.collect::<Vec<_>>().join(" · "));
