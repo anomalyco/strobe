@@ -179,8 +179,11 @@ const TOOLS: &[Tool] = &[
         ],
         flags: &[
             ("by", "hotspots, waits and alloc: function, file, package; memory: process, layer, allocator"),
-            ("source", "log: console, device or crash; hotspots: host (a script target's whole host process: startup, setup, warmup, runs, resets; its measured runs by default)"),
-            ("top", "rows (default 15)"),
+            (
+                "source",
+                "log: console, device or crash; hotspots: host (a script target's whole host process: startup, setup, warmup, runs, resets, with a by-lifecycle split; its measured runs by default), startup (the host's spawn until it said ready: the runtime's boot, strobe's host and the target's static imports) or setup (the bench file's setup: what it called in the target, a server's dynamic imports among them)",
+            ),
+            ("top", "rows (default 15; inputs: 100, the rest counted)"),
             (
                 "reveal",
                 "heap: show string values (redacted by default; snapshots can hold user content); log and network: show raw Cookie/Authorization/Bearer values and secret query parameters; actions: show typed text, act values, ctx.call arguments and ctx.exec lines",

@@ -52,7 +52,8 @@ The design and every rule behind this file: SPEC.md.
   macOS refuses `NoWaits`).
 - A slow page frame in the renderer or the GPU process: `frames.renderer.p95` against `frames.viz.p95`,
   and `query <rec> frames` (each worst frame's stages).
-- Inputs with no latency sample (`busy`), or one that looks wrong: `query <rec> inputs [--case <c>]`:
+- Inputs with no latency sample (`busy`), or one that looks wrong: `query <rec> inputs [--case <c>]`
+  (the first 100; `--top N`, `--json` every one):
   each input's run and time, what proved its change, the frames around it, its latency or why it
   was busy (`mid_drawing`, `behind`, `ambiguous_press`, `multi_frame_pixel`) and how much later it
   had to come. Give the case that wait before such inputs.
@@ -162,11 +163,16 @@ export default bench({
 - `cpu.main` is the main thread alone beside `cpu.work` (the tree): `cpu.main.busy` near 100% is a
   saturated event loop; a worker or a child process shows in `cpu.work` only.
 - A script's `query <rec> hotspots` is its measured runs; `--source host` the whole host process
-  (start, setup, warmup, resets); `--phase <name>` one phase. `! Missed` there: the main thread used
-  CPU (`cpu.main`) the profile has no sample of, so rows undercount (Node labels short timer callbacks
-  `(idle)`; Bun never samples its event loop's own work). `! Waited`: rows include time the thread
-  waited for a CPU (samples weigh wall time). `query <rec> threads --timeline`: which
-  thread was busy when, runs marked.
+  (start, setup, warmup, resets), its `by lifecycle` lines each part's wall time against the JavaScript
+  sampled in it; `--source startup` the host's start and the target's static imports, `--source setup`
+  the bench file's setup (a server's dynamic imports); `--phase <name>` one phase.
+  - Slow startup with few rows: `N modules evaluated` (each module is a stack of its own: `--by file`
+    sums them); on Bun little sampled of a part is native work (transpiling, module loading),
+    which `--cpu-prof` never samples.
+  - `! Missed`: the main thread used CPU (`cpu.main`) the profile has no sample of, so rows
+    undercount (Node labels short timer callbacks `(idle)`; Bun never samples its event loop's own
+    work). `! Waited`: rows include time the thread waited for a CPU (samples weigh wall time).
+  - `query <rec> threads --timeline`: which thread was busy when, runs marked.
 
 ### Phones
 
