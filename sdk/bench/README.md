@@ -75,9 +75,12 @@ export default bench({
     "slow handler": {
       primary: "http.latency.p95",
       metrics: ["cpu.main", "cpu.main.busy", "http.timeouts"],
-      // Four slow requests: about 22 probes in a run, enough for a p95 in a --check.
+      // Four slow requests 100 ms apart: about 26 probes a run, enough for a p95 in a --check.
       run: async (ctx) => {
-        for (let i = 0; i < 4; i++) await ctx.call("stall", 550)
+        for (let i = 0; i < 4; i++) {
+          await ctx.call("stall", 550)
+          await Bun.sleep(100)
+        }
       },
     },
   },
