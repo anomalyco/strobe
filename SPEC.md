@@ -299,8 +299,9 @@ Sizes print in binary units: KB, MB and GB are 2^10, 2^20 and 2^30 bytes (§7.1)
 the power plan and CPU-set restores every other command does, and makes no state folder): the strict read every command
 does (§9.5), then every app profile resolved for this OS as a launch resolves it (its executable,
 its guards and `moved` folders, whose variables must be set: a profile that cannot be used here is a
-usage error naming it), its kind, whether its executable is there yet (relative paths from the
-project root, the folder of the nearest strobe.json) and `window: false`, and the build and serve
+usage error naming it), its kind, the file its executable resolves to or `not there yet` (a relative
+path from the project root, the folder of the nearest strobe.json, a bare name else from `PATH`:
+§13.2) and `window: false`, and the build and serve
 commands for this OS with the folders they run in: those are from the checkout's root (§9.5), whichever
 folder of it holds strobe.json; a `build.output` given per OS without this OS is a problem.
 It launches nothing.
@@ -3885,7 +3886,13 @@ experiment's `script.log`.
     that wrote no profile refuses the block `RunIncomplete` ("the script host's CPU profile: the host
     wrote none") with how it ended (it exited with code N without writing one, signal N ended it, or
     it still ran N s after strobe asked it to exit and strobe ended it; `--max-time cut the wait
-    short`) and the last 6 lines of `script.log`. vps, a synthetic profile (4,000 functions in
+    short`) and the last 6 lines of `script.log`. The tail strobe quotes from `script.log` (those 6
+    lines; a host that did not load, its last 12) is scrubbed first: what an HTTP probe sent leaves
+    the file in place (`Runner::scrub_log`, as the runner's own log on its death), and each line has
+    cookies, authorization, bearer tokens and URL secrets redacted (`redact_text`) before its 200
+    characters (vps: a host printing the probe's `Authorization`, its URL and the bare token, its
+    exit hung: the refusal quotes `authorization=***`, `?key=<redacted>` and `******`, and the token
+    is in no output, `result.json` or file of the experiment). vps, a synthetic profile (4,000 functions in
     random 6-deep chains, 8 s runs) with 16 spinners started by the teardown: 0.24.0 refused "the
     host wrote none (it did not exit normally)"; now kept (129 s, 92 s unloaded); with `--max-time
     100s` the refusal says it still ran 34 s after strobe asked it to exit.
@@ -4845,7 +4852,7 @@ emits:
 | `ScreenChanged` | warn | base and head ended their runs on different screens, or some blocks of one variant did (below) |
 | `UnpacedSpin` | warn | a native block's presents ran 1.5 times faster than the display refreshes (from the vertical blanks, else the display's mode): its pacing is broken, such as an app composited while the session is locked at about 545 frames a second on a 165 Hz display, so its CPU and GPU numbers describe a spin; said for every series, with the session and display state; native `record` and `record pid:` keep it as `unpaced` and `query summary` prints it |
 | `PresentsLost` | warn | the present session lost events: frame counts may be short |
-| the refusing validator's id | info | a native series whose OS present events were refused in a block (`NoPresentSource`, …): `frames refused (…); frames.* and interaction.* are missing from every block`, said once per bench |
+| the refusing validator's id | info | a native series whose OS present events were refused in a block other than an attribution block (`NoPresentSource`, …): `frames refused (…); frames.* and interaction.* are missing from every block`, said once per bench |
 | `CrossAdapterScanout` | info | a native app, or a headed page's browser, draws on one GPU while another drives its window's display: each frame crosses between adapters (a page block's `screen.gpu`: "The adapter it drew on" below) |
 | `CursorNotParked` | warn | a native block's OS cursor could not be moved onto the pointer's points, so hover tracking saw it elsewhere |
 | `GpuCacheGrowing` | warn | a variant's GPU shader caches still grew in its third warm-up block (§13.2) |
@@ -6503,15 +6510,20 @@ What one app needs beyond that is its **app profile**, in the consumer's strobe.
 - `exe`: a path or one per OS; `~`, `%VAR%` and `${VAR}` expand from the real user's environment,
   names in any case on Windows (`%APPDATA%` is `AppData`). A variable that is not set refuses the
   profile (`exe` or `guard`): a path left holding `%VAR%` names nothing, and a guard on it would pass
-  every check while protecting nothing. A relative `exe` in a project's strobe.json is the
-  project's own build, from the project's root (the folder of its strobe.json, `config::ROOT`): one
-  that names a folder (`./app.exe`, `build/app`), or a bare name of a file there; a bare name of
-  nothing there is the OS's (`PATH`). A profile in the user's own strobe.json is not resolved.
-  `exe:<path>`, `native(path)`, `webview(path)` and `look exe:` resolve a relative path the same way
-  from the current folder (`.` and `..` by name). `strobe config` shows the resolved path (`not there
-  yet` when missing; a bare `PATH` name is looked up). adais: 0.24.0 `look app:<id>` of a profile with
-  `exe: "tool.exe"` said "program not found"; now it launches the project's file from its root and
-  from a subfolder, as `look exe:./tool.exe --app <id>` and `exe:../tool.exe` do.
+  every check while protecting nothing. A relative `exe` resolves to a file. In a project's
+  strobe.json (the profile of the `extends` chain that gives `exe`, whose root `config::ROOT`
+  stamps): one that names a folder (`./app.exe`, `build/app`) is from the project's root (the folder
+  of its strobe.json); a bare name is a file of that name in the root, else the file on `PATH`
+  (Windows adds `.exe` to a name without one); a folder of that name never counts. A user profile's
+  bare name is the one on `PATH`; its relative path with folders stays as it is. `exe:<path>`,
+  `native(path)`, `webview(path)` and `look exe:` resolve the same way from the current folder; `.`
+  and `..` resolve by name. `strobe config` shows the file, or `not there yet` when it is none.
+  adais: 0.24.0 `look app:<id>` of a profile with `exe: "tool.exe"` said "program not found"; now it
+  launches the project's file from its root and from a subfolder, as `look exe:./tool.exe --app <id>`
+  and `exe:../tool.exe` do, and a bare system name beside a folder of that name in the root resolves
+  to the system's program. vps: a bare `sleep` beside a `sleep/` folder resolves to `/usr/bin/sleep`;
+  a project profile extending a user profile resolves its own `./bin/x` from the project's root and
+  the user's inherited bare `true` from `PATH`.
 - `env`, `unset` (exact names or `PREFIX*`, any case on Windows), `dirs` and `files` (JSON or text; a
   string that is exactly `{port}` becomes a number) shape the copy; `args` are extra command-line
   arguments. `window: false`: the app opens no window (a tray app); `record app:<id>` waits for none.
@@ -6696,9 +6708,11 @@ As built (Windows):
   attribution`) records present events beside its stacks, stacks first. The helper serves one
   connection: while the stacks hold it, presents come only from a session in strobe's own process
   (an elevated or Performance Log Users token). A logon with neither gets its frames refused
-  `NoPresentSource` ("present events: the native stacks hold the deep helper's one connection, and
-  this logon may not run a present session itself"), never a wait on the helper. With strobe's own
-  sampler (no helper), and off Windows, nothing is shared.
+  `NoPresentSource` ("OS present events: the native stacks hold the deep helper's one connection,
+  and this logon may not run a present session itself"), each refused frame metric keeping the
+  fix, never a wait on the helper. An attribution block's frames are its recording's alone: it adds
+  no "missing from every block" note (§10.2). With strobe's own sampler (no helper), and off
+  Windows, nothing is shared.
 - **Present events: field layouts.** They come from TDH once per process: before a session starts,
   the providers' manifests are read for the events they enable (`TdhEnumerateManifestProviderEvents`,
   `TdhGetManifestEventInformation`), so the consumer never waits on TDH's first read of a provider
@@ -7894,9 +7908,10 @@ what was built but not yet run on a device is in §21.
   (the measured runs' timed stretches, untimed apart), the module-evaluation line, wall-time notes;
   `--by file|package` names native, runtime and `file://` frames; `--source` refused off `hotspots`
   and `log` and beside native picks (9.6, 11.1).
-- 2026-11-10 · a61f34d · native attribution blocks keep their presents beside the stacks, and their
-  recording when the primary is refused; a script host's profile waited for under load, and how the
-  host ended said; a relative app `exe` from the project's root or the current folder; `cpu.main`
+- 2026-11-10 · 41dad90 · native attribution blocks keep their presents beside the stacks, and their
+  recording when the primary is refused; a script host's profile waited for under load, how the host
+  ended said, the `script.log` tail it quotes scrubbed and redacted; a relative app `exe` resolves to
+  a file from the project's root or the current folder, else `PATH`; `cpu.main`
   on script and windowless check lines, `tty.latency` inputs counted; `record`'s dead `--ring` check
   gone; the canvas fixture at `devicePixelRatio` (5.5, 5.6, 9.6, 13.2, 13.4).
 

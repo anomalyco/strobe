@@ -512,8 +512,9 @@ export default bench({
 - Everything about the app under test lives in its repo: `build` and `serve` for web targets, `apps`
   profiles (`kind`, `exe` per OS, `env`, `unset`, `files`, `guard`, `protocols`, `extends`).
   `build.windows|macos|linux` overlay `build` (`env` merged). Strobe itself names no product.
-- A relative `exe` (`./app.exe`, `build/app`) is the project's build, from strobe.json's folder;
-  `exe:<path>` resolves from the current folder. `strobe config` shows where each resolves.
+- A relative `exe` (`./app.exe`, `build/app`) is the project's build, from strobe.json's folder; a
+  bare name is a file there, else the program on PATH. `exe:<path>` resolves from the current
+  folder. `strobe config` shows the file each resolves to.
 - The nearest strobe.json upward from the bench file wins; `build.cwd` and `serve.cwd` resolve
   from the checkout's root. `//` comments and trailing commas are fine; an unknown key exits 2.
 - `"$schema": "./node_modules/@hona/strobe/schema/strobe.v1.json"`. `strobe config` checks it.
