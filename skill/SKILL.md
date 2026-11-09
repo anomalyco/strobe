@@ -175,7 +175,9 @@ export default bench({
 
 - `record --bench <file>#<case>` (or `--check`, `--why always`): stacks, the threads' timeline and the
   probe on one recording. `query <rec> http`: idle against the runs, timeouts, errors and the stalled
-  cohorts; `strobe open <rec>` draws the probes beside the runs and threads.
+  cohorts: one stall (`answered none for X`) or stalls back to back (`spanned N stalls …`), timeouts
+  wherever they fell; `strobe open <rec>` draws the probes beside the runs and threads, and `report`
+  an HTTP probe card.
 - To compare it, declare `http.latency.p95` (or `http.timeouts`, `http.errors`): the probe then runs
   in probe blocks of its own. A clean timing block never probes.
 - A timeout ranks above every answer: a quantile on one refuses `RunIncomplete` (raise `timeoutMs`).
@@ -286,6 +288,7 @@ strobe run --base "<command>" --head "<command>" [--aa | --check] [--metrics met
 strobe query <rec_…|exp_…|recA..recB> <view> [--top N] [--by …] [--reveal] [--case <name>]
 strobe report <exp_…|rec_…|ser_…|result.json> [--format html|md|pr|card|badge] [--open]
 strobe report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
+                  (a --blocks run: HTML and md, its median and interval, no verdict; pr/card/badge refused)
 strobe open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
 strobe look <url|file|wir:…|app:<id>|exe:<path>|tty:<command>> [--until <selector>] [--out shot.png]
 strobe look app:<id>|exe:<path> [--windowless] [--wait 2s] [--timeout 30s] [-- <args…>]

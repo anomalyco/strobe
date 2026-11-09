@@ -492,7 +492,8 @@ Use
                                   --pid or --phase;
                                   --case <name>: one case of a --batch recording)
                                   (http: a bench block's HTTP probe (ctx.httpProbe): idle against the runs, timeouts,
-                                  errors, missed sends, stalled cohorts; --phase <name>; exp_… its probe blocks, a..b too)
+                                  errors, missed sends, stalled cohorts (one stall, or stalls back to back that held
+                                  probes across a drain); --phase <name>; exp_… its probe blocks, a..b too)
                                   (actions: what a bench block's hooks sent the target, in order; --phase; --reveal shows
                                   typed text, act values, ctx.call arguments and ctx.exec lines)
                                   (waits: where threads were off their CPUs and who woke them, from a native capture;
@@ -504,7 +505,8 @@ Use
   report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
                                   write a self-contained HTML (or markdown) report; pr: an experiment's tables for a PR body
                                   (md and pr print the markdown; the file's path goes to stderr; the view follows from the
-                                  handle; a path to a result.json or meta.json is read as it is, nothing written beside it)
+                                  handle; a path to a result.json or meta.json is read as it is, nothing written beside it;
+                                  a bench --blocks run: HTML and md, its blocks' median and interval, no verdict)
   report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
                                   put the block in PR n's body, with the result card and badges attached through gh
   report experiment <exp> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto] [--badge-url]
