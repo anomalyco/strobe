@@ -372,14 +372,22 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     // CPU in cycles over the time stamp counter, as native targets read it: process times move in
     // clock ticks (15.6 ms on Windows), so an idle page read 0.00% on one run and 0.52% on the next.
     let cycles = || read_set(&browser.processes(), browser.profile.as_deref());
-    let cpu0 = cycles();
+    // The listed processes read again right at the window's edges, each by itself, beside the cycle
+    // clock: the end's listing (milliseconds) only finds those born meanwhile (`read_known`).
+    let mut cpu0 = cycles();
+    let at0 = read_known(cpu0.0.keys());
+    read_at(&mut cpu0.0, &at0);
+    let tsc0 = host::tsc();
     let t0 = host::now_ns();
     driver.mark("run:0:start")?;
     progress(format!("recording {} for {}", id, fmt::ms_duration(for_ms)));
     std::thread::sleep(Duration::from_millis(for_ms));
     driver.mark("run:0:end")?;
     let t1 = host::now_ns();
-    let cpu1 = cycles();
+    let at1 = read_known(cpu0.0.keys());
+    let tsc1 = host::tsc();
+    let mut cpu1 = cycles();
+    read_at(&mut cpu1.0, &at1);
     let video = video.map(|v| v.finish(&dir, &[("run:0".into(), t0, t1, true)], &[], &[])).transpose()?;
     let samples = sampler.map(probe::os::Sampler::stop);
     let os = samples.as_ref().map(|s| s.window(t0, t1));
@@ -426,7 +434,7 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let data = metrics::read(&dir.join("trace.pftrace"), &token)?;
     let mut extra: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     let mut refused = serde_json::Map::new();
-    match (cpu0.2, cpu1.2) {
+    match (tsc0, tsc1) {
         (Some(a), Some(b)) if !attach && b > a && cpu1.0.values().any(|c| *c > 0) => match set_used(&cpu0, &cpu1) {
             Some(used) => {
                 extra.entry("cpu.app.total".into()).or_default().insert("run:0".into(), 100.0 * used as f64 / (b - a) as f64);
@@ -701,12 +709,19 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     }
     // `--video`: the browser's window from the OS (no stock engine but Chromium has a screencast).
     let video = args.has("video").then(|| super::video::Recorder::start(host::main_window(&browser.pids()).filter(|_| !headless).as_ref(), None, headless)).transpose()?;
-    let cpu0 = cycles();
+    // As for Chromium: the listed processes read again right at the window's edges, with the clocks.
+    let mut cpu0 = cycles();
+    let at0 = read_known(cpu0.0.keys());
+    read_at(&mut cpu0.0, &at0);
+    let clock0 = Clock::now();
     let t0 = host::now_ns();
     progress(format!("recording {id} for {}", fmt::ms_duration(for_ms)));
     std::thread::sleep(Duration::from_millis(for_ms));
     let t1 = host::now_ns();
-    let cpu1 = cycles();
+    let at1 = read_known(cpu0.0.keys());
+    let clock1 = Clock::now();
+    let mut cpu1 = cycles();
+    read_at(&mut cpu1.0, &at1);
     let video = video.map(|v| v.finish(&dir, &[("run:0".into(), t0, t1, true)], &[], &[])).transpose()?;
     if profiler.is_some() {
         driver.mark("run:0:end")?;
@@ -733,12 +748,12 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     let mut values: BTreeMap<String, f64> = BTreeMap::new();
     let mut refused = serde_json::Map::new();
     // Where cycles are not time on this machine (`outside::not_on_this_os`), both CPU metrics are refused.
-    match (cpu0.2, cpu1.2, super::outside::not_on_this_os("cpu.app.total")) {
-        (Some(a), Some(b), None) if b > a && cpu1.0.values().any(|c| *c > 0) => match set_used(&cpu0, &cpu1) {
+    match (clock0.per_ms(&clock1), super::outside::not_on_this_os("cpu.app.total")) {
+        (Some(rate), None) if cpu1.0.values().any(|c| *c > 0) => match set_used(&cpu0, &cpu1) {
             Some(used) => {
-                let share = used as f64 / (b - a) as f64;
-                values.insert("cpu.app.total".into(), 100.0 * share);
-                values.insert("cpu.work".into(), share * (t1 - t0) as f64 / 1e6);
+                let cpu = used as f64 / rate;
+                values.insert("cpu.app.total".into(), 100.0 * cpu / ((t1 - t0) as f64 / 1e6));
+                values.insert("cpu.work".into(), cpu);
             }
             None => {
                 for m in ["cpu.app.total", "cpu.work"] {
@@ -746,7 +761,7 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
                 }
             }
         },
-        (_, _, why) => {
+        (_, why) => {
             let r = why.unwrap_or_else(|| crate::model::Refusal::new(crate::model::ValidatorId::RunIncomplete, "no CPU of the browser's processes could be read"));
             for m in ["cpu.app.total", "cpu.work"] {
                 refused.insert(m.into(), json!(r.message()));
@@ -924,7 +939,12 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let video = args.has("video").then(|| super::video::Recorder::start(n.window.as_ref(), None, false)).transpose()?;
         let snap0 = wakes::Snapshot::take(&n.pids());
         let procs0 = (host::now_ns(), host::all_processes());
-        let c0 = cycles();
+        // The listed processes read again right at the window's edges, each by itself, with the clocks:
+        // the end's listing (milliseconds) only finds those born meanwhile (`read_known`).
+        let mut c0 = cycles();
+        let at0 = read_known(c0.0.keys());
+        read_at(&mut c0.0, &at0);
+        let clock0 = Clock::now();
         let t0 = host::now_ns();
         match &stop {
             Some(re) => {
@@ -938,8 +958,11 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             None => std::thread::sleep(Duration::from_millis(for_ms)),
         }
         let t1 = host::now_ns();
+        let at1 = read_known(c0.0.keys());
+        let clock1 = Clock::now();
         let for_ms = (t1 - t0) / 1_000_000;
-        let c1 = cycles();
+        let mut c1 = cycles();
+        read_at(&mut c1.0, &at1);
         let video = video.map(|v| v.finish(&dir, &[("run:0".into(), t0, t1, true)], &[], &[])).transpose()?;
         let span = wakes::span(&snap0, &wakes::Snapshot::take(&n.pids()));
         // A launcher that exits cleanly (code 0) and leaves the app running is not the app ending.
@@ -1020,10 +1043,10 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         // A process of the app that ended in the window took its CPU there with it.
         let used = set_used(&c0, &c1);
         let lost = used.is_none();
-        if let (Some(a), Some(b), Some(used)) = (c0.2, c1.2, used)
+        if let (Some(rate), Some(used)) = (clock0.per_ms(&clock1), used)
             && c1.0.values().any(|c| *c > 0)
         {
-            let cpu = used as f64 / b.saturating_sub(a).max(1) as f64 * ms;
+            let cpu = used as f64 / rate;
             values.insert("cpu.work", cpu);
             values.insert("cpu.app.total", 100.0 * cpu / ms);
         }
@@ -1108,6 +1131,52 @@ pub type Cycles = BTreeMap<(u32, u64), u64>;
 
 pub fn per_process(procs: &[host::ProcTimes]) -> Cycles {
     procs.iter().map(|p| ((p.pid, host::start_time(p.pid).unwrap_or(0)), p.cycles)).collect()
+}
+
+/// The processes `keys` names, each read by itself now (`host::process_cycles_at`, microseconds),
+/// never by a listing of the system's processes (milliseconds on Windows): read right at a window's
+/// edge, so the listing that found them is outside the window's CPU. One that ended is left out.
+pub fn read_known<'a>(keys: impl IntoIterator<Item = &'a (u32, u64)>) -> Cycles {
+    keys.into_iter().filter_map(|&k| Some((k, host::process_cycles_at(k.0, k.1)?))).collect()
+}
+
+/// A listing's readings with each process `at` read (`read_known`) at that reading: the processes are
+/// still the listing's (what tells one that ended is read against them, `host::EndedMarks`).
+pub fn read_at(listed: &mut Cycles, at: &Cycles) {
+    for (k, c) in listed.iter_mut() {
+        if let Some(v) = at.get(k) {
+            *c = *v;
+        }
+    }
+}
+
+/// The cycle clock (`host::tsc`) and the host clock read together. Cycles are ms at the cycle
+/// clock's rate between two of these, over their own span: a rate over any other span (a run's
+/// `t0`..`t1` against cycle clock readings taken after a listing) is off by what lies between.
+#[derive(Clone, Copy, Debug)]
+pub struct Clock {
+    pub tsc: Option<u64>,
+    pub ns: u64,
+}
+
+impl Clock {
+    pub fn now() -> Clock {
+        let tsc = host::tsc();
+        Clock { tsc, ns: host::now_ns() }
+    }
+
+    /// Cycle clock units per ms from `self` to `later`; None where the cycle clock gives none.
+    pub fn per_ms(&self, later: &Clock) -> Option<f64> {
+        match (self.tsc, later.tsc) {
+            (Some(a), Some(b)) if b > a && later.ns > self.ns => Some((b - a) as f64 / ((later.ns - self.ns) as f64 / 1e6)),
+            _ => None,
+        }
+    }
+
+    /// `cycles` in ms (`per_ms`); NaN without a rate.
+    pub fn ms(&self, later: &Clock, cycles: u64) -> f64 {
+        self.per_ms(later).map_or(f64::NAN, |r| cycles as f64 / r)
+    }
 }
 
 /// Cycles used between two readings, each process against its own earlier reading: one that started in
