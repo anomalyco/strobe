@@ -9,7 +9,7 @@
 
 use super::super::Output;
 use crate::host::{self, paths};
-use crate::model::{Error, Result};
+use crate::model::{Error, Refusal, Result, ValidatorId};
 use crate::store;
 use serde_json::{Value, json};
 use std::fs::File;
@@ -173,6 +173,12 @@ impl Registration {
     /// Waits for the slot: until no live bench asked before this one and the lock is free. Returns
     /// the slot and how long it waited.
     pub fn acquire(&self, what: &str) -> Result<(Slot, Duration)> {
+        self.acquire_until(what, None)
+    }
+
+    /// `acquire`, never past `deadline` (`--max-time`): a wait that reaches it leaves the queue and
+    /// refuses `ConcurrentBench` (exit 124), naming what held the slot.
+    pub fn acquire_until(&self, what: &str, deadline: Option<Instant>) -> Result<(Slot, Duration)> {
         let started = Instant::now();
         let file = File::options().create(true).truncate(false).write(true).open(paths::run().join("bench.slot"))?;
         let mut machine = machine_file();
@@ -248,6 +254,14 @@ impl Registration {
                 self.set("idle", "");
                 return Err(super::stop_error());
             }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                self.set("idle", "");
+                let held = shown.split_once(": ").map_or(shown.as_str(), |(_, w)| w).trim_start_matches("waiting for ");
+                return Err(Error::timeout_refused(
+                    Refusal::new(ValidatorId::ConcurrentBench, format!("--max-time ran out after {} waiting for {held}", super::super::fmt::ms_duration(started.elapsed().as_millis() as u64)))
+                        .fix("run it again once that bench ends (strobe status lists what holds the slot), or give --max-time room for the wait"),
+                ));
+            }
             std::thread::sleep(Duration::from_millis(200));
         }
         self.set("running", what);
@@ -295,6 +309,25 @@ fn machine_file() -> Option<File> {
         },
         Err(_) => None,
     }
+}
+
+/// The machine-wide lock held while this state folder's slot is free (`strobe status`): a bench of
+/// another user or state folder holds it, whose registration this one cannot read, and every bench
+/// here waits for it. None when it is free, or a bench of this folder (listed by `list`) holds it.
+pub fn machine_busy() -> Option<String> {
+    let machine = machine_file()?;
+    match machine.try_lock() {
+        Ok(()) => {
+            let _ = machine.unlock();
+            return None;
+        }
+        Err(std::fs::TryLockError::WouldBlock) => {}
+        Err(_) => return None,
+    }
+    let mine = File::options().create(true).truncate(false).write(true).open(paths::run().join("bench.slot")).ok()?;
+    mine.try_lock().ok()?;
+    let _ = mine.unlock();
+    Some(format!("held by a bench of another user or state folder (the machine-wide lock {}): benches here wait for it", machine_path()?.display()))
 }
 
 fn legacy() -> PathBuf {

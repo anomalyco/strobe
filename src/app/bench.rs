@@ -661,6 +661,25 @@ fn note_ended(warnings: &mut Vec<validity::Warning>, s: &Series, runs: &[(f64, b
     ));
 }
 
+/// One run's ended processes for its recording (`ended_runs`): its key, whether it is measured, what
+/// processes that ended in its timed parts used there (ms), whether its CPU was lost anyway, and by
+/// executable (ms, processes).
+pub(crate) type EndedRun<'a> = (String, bool, f64, bool, &'a [(String, f64, u32)]);
+
+/// A recording's `ended_runs` (meta.json, `query <rec> summary`): each run of it in which processes of
+/// the target ended inside its timed parts, or whose CPU was lost to one; null when none did.
+pub(crate) fn ended_runs<'a>(runs: impl IntoIterator<Item = EndedRun<'a>>) -> Value {
+    let out: Vec<Value> = runs
+        .into_iter()
+        .filter(|r| r.2 > 0.0 || r.3)
+        .map(|(run, measured, ms, lost, exes)| {
+            let processes: Vec<Value> = exes.iter().map(|(exe, ms, n)| json!({ "exe": exe, "count": n, "cpu_ms": ms })).collect();
+            json!({ "run": run, "measured": measured, "cpu_lost": lost, "ended_ms": Some(ms).filter(|m| m.is_finite()), "processes": processes })
+        })
+        .collect();
+    if out.is_empty() { Value::Null } else { json!(out) }
+}
+
 /// Where `EndedCpu` reads what ended processes used.
 const ENDED_FROM: &str = if cfg!(windows) { "the handles strobe held to them from their start (their launch's job)" } else { "their launch's cgroup" };
 
@@ -760,6 +779,25 @@ struct Block {
     /// that keeps its probes when the block kept one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     http: Option<Value>,
+    /// A `--check --runs N` block's spread (`run_spread`): each per-run metric's lowest and highest
+    /// measured run, beside its median in `values`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spread: BTreeMap<String, [f64; 2]>,
+}
+
+/// Each per-run metric's lowest and highest measured run (`Block::spread`), for an untimed block of
+/// several runs (`--check --runs N`); none for any other block.
+fn run_spread(x: &Exec, extra: &BTreeMap<String, BTreeMap<String, f64>>) -> BTreeMap<String, [f64; 2]> {
+    if !x.untimed || x.runs < 2 {
+        return BTreeMap::new();
+    }
+    extra
+        .iter()
+        .filter_map(|(m, runs)| {
+            let v: Vec<f64> = runs.values().copied().filter(|v| v.is_finite()).collect();
+            (v.len() >= 2).then(|| (m.clone(), [v.iter().copied().fold(f64::INFINITY, f64::min), v.iter().copied().fold(f64::NEG_INFINITY, f64::max)]))
+        })
+        .collect()
 }
 
 /// What a page block's browser was (`Block::browser`): read once per target and headless mode, since
@@ -1099,6 +1137,11 @@ impl Exec {
 
     fn untimed(keep: bool, pixels: Option<PathBuf>) -> Exec {
         Exec { set: Set::Lean, runs: 1, untimed: true, keep, pixels, counters: false, video: false, http: false }
+    }
+
+    /// An untimed block that measures `runs` runs, still without warmup (`--check --runs N`).
+    fn measuring(self, runs: usize) -> Exec {
+        Exec { runs: runs.max(1), ..self }
     }
 
     /// This block as a counter block, or as it is.
@@ -1531,6 +1574,10 @@ struct Overhead {
     /// CPU over the runs' wall time (§19: 0.5%; over 2% refuses timing and latency metrics).
     #[serde(skip_serializing_if = "Option::is_none")]
     pixel_pct: Option<f64>,
+    /// The same pixel reads' CPU in ms per measured run (the mean over them): their absolute cost, which
+    /// compares across builds whose runs differ in length where `pixel_pct` does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pixel_cpu_ms: Option<f64>,
     /// A filmed block's video encoder (a process of strobe's), its CPU over the video's span. No budget:
     /// a filmed block is never timed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1556,7 +1603,12 @@ impl Overhead {
             ("http probe", self.http_probe_pct),
         ]
         .into_iter()
-        .filter_map(|(n, p)| Some(format!("{n} {}", pct_of_core(p?))))
+        .filter_map(|(n, p)| {
+            // The pixel reads' CPU per run beside their share: a share alone misleads across builds whose
+            // runs differ in length.
+            let ms = self.pixel_cpu_ms.filter(|_| n == "pixels").map(|ms| format!(" ({}/run)", fmt::value(ms, "ms"))).unwrap_or_default();
+            Some(format!("{n} {}{ms}", pct_of_core(p?)))
+        })
         .collect();
         if parts.is_empty() { String::new() } else { format!("{} of a core", parts.join(" · ")) }
     }
@@ -1621,6 +1673,7 @@ fn mean_overhead<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Option<Over
         reserve_pct: mean(|o| o.reserve_pct),
         terminal_pct: mean(|o| o.terminal_pct),
         pixel_pct: mean(|o| o.pixel_pct),
+        pixel_cpu_ms: mean(|o| o.pixel_cpu_ms),
         encoder_pct: mean(|o| o.encoder_pct),
         http_probe_pct: mean(|o| o.http_probe_pct),
     })
@@ -1781,6 +1834,17 @@ pub fn run(args: &Args) -> Result<Output> {
             return Err(Error::usage(format!("--video: {why}: drop one of them")));
         }
     }
+    // `--check --repeat R`: each case in R fresh launches (a leak run's `--repeat` is its runs per half).
+    if args.has("check")
+        && let Some(r) = args.get("repeat")
+    {
+        if args.num("repeat")?.is_none_or(|n| !n.is_finite() || n < 2.0 || n.fract() != 0.0) {
+            return Err(Error::usage(format!("--check --repeat: a whole number of fresh launches per case from 2, not {r}")));
+        }
+        if args.has("video") {
+            return Err(Error::usage("--check --repeat R launches each case R times, and --video films one run: drop one of them"));
+        }
+    }
     // `--batch N`: many cases per launch, in `--check` only (SPEC §5.6). In timed blocks the fresh launch
     // is what a verdict is made of, and a profile, a leak run or a pixel comparison is one case's block.
     let batch = match args.get("batch") {
@@ -1790,6 +1854,8 @@ pub fn run(args: &Args) -> Result<Output> {
                 Some("it runs many cases in one launch, which only --check may: a timed block is one fresh launch per case")
             } else if args.get("why") == Some("always") {
                 Some("--why always profiles each case in a block of its own")
+            } else if args.get("repeat").is_some() {
+                Some("--repeat R launches each case R times on its own, cold")
             } else if args.has("pixels") || args.has("pixels-only") {
                 Some("--pixels compares each case's snapshots from a launch of its own")
             } else if args.get("probes") == Some("memory") {
@@ -1920,9 +1986,12 @@ pub fn run(args: &Args) -> Result<Output> {
         browser_version: String::new(),
         baseline: validity::baseline(),
         keep_all: args.has("keep"),
-        // A leak run's N: S0, N runs, S1, N runs, S2.
-        runs: if check {
+        // A leak run's N: S0, N runs, S1, N runs, S2. A check's runs in its one launch (`--runs N`, no
+        // warmup): with `--why always`, `--runs` is its attribution block's, and the check runs once.
+        runs: if check && args.get("why") == Some("always") {
             1
+        } else if check {
+            args.num("runs")?.unwrap_or(1.0).max(1.0) as usize
         } else if leak_run {
             args.num("repeat")?.unwrap_or(10.0).max(3.0) as usize
         } else {
@@ -2010,7 +2079,7 @@ pub fn run(args: &Args) -> Result<Output> {
     if series.is_empty() {
         return Err(Error::usage("no series matches --filter / --target / --params"));
     }
-    ctx.projects = target_projects(&ctx.describe)?;
+    ctx.projects = target_projects(&ctx.describe, &series, &variants)?;
     ctx.implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     check_engines(&mut series, &ctx.describe, args, &variants, &config, &ctx.projects)?;
     // A series the display cannot show refuses before anything counts it (journeys, the Holm family). A
@@ -2336,19 +2405,40 @@ pub fn run(args: &Args) -> Result<Output> {
                 continue;
             }
             Err(e) => {
+                // The series' own refusal (OverheadBudget, a target's engine, …): it is listed refused,
+                // and the rest of the file runs on.
+                if let Some(r) = series_refusal(&ctx, &e) {
+                    progress(format!("\n{}  refused: {}", s.label(), refused_text(&json!(r))));
+                    let out = refused_series(&ctx, s, &r);
+                    checkpoint(&mut ctx, &s.label(), json!({ "done": out }));
+                    all_decided = false;
+                    series_out.push(out);
+                    continue;
+                }
                 halted = Some(if e.code == 130 || stop_requested() { stop_error() } else { e });
                 not_run.push(s.label());
                 continue;
             }
         };
-        // A series that stopped part way: what it finished is kept and `--resume` goes on from there.
-        let partial = out.get("halt").is_some_and(Value::is_object);
+        let mut out = out;
+        // A series that stopped part way: what it finished is kept and `--resume` goes on from there. One
+        // that met a refusal of its own ends refused with what it finished, and the rest runs on.
+        let mut partial = false;
         if let Some(h) = out.get("halt").filter(|h| h.is_object()) {
             let e = halt_error(h);
             if screened_out(&e) && !stop_requested() {
                 screened = Some(e);
+                partial = true;
+            } else if let Some(r) = series_refusal(&ctx, &e) {
+                progress(format!("\n{}  refused: {}", s.label(), refused_text(&json!(r))));
+                if out["not_run"] == true {
+                    out = refused_series(&ctx, s, &r);
+                } else {
+                    refused_after(&mut out, &r);
+                }
             } else {
                 halted = Some(e);
+                partial = true;
             }
         }
         if out["not_run"] == true {
@@ -2364,13 +2454,18 @@ pub fn run(args: &Args) -> Result<Output> {
     if halted.is_none() {
         halted = screened;
     }
+    let nothing_ran = series_out.is_empty() && ctx.saved["series"].as_object().is_none_or(|o| o.is_empty());
     if halted.as_ref().is_some_and(|h| matches!(h.code, 130 | 124)) {
-        progress(format!("\nstopped: kept {} series; strobe bench --resume {exp} runs the rest", series_out.len()));
+        progress(if nothing_ran { "\nstopped: nothing ran".to_string() } else { format!("\nstopped: kept {} series; strobe bench --resume {exp} runs the rest", series_out.len()) });
     }
-    // Nothing finished and nothing to resume: the failure is the answer.
-    if let Some(e) = halted.take_if(|e| e.code != 130 && series_out.is_empty() && ctx.saved["series"].as_object().is_none_or(|o| o.is_empty())) {
+    // Nothing finished and nothing to resume: the failure is the answer, and the command again (not
+    // `--resume`) is what runs it.
+    if let Some(mut e) = halted.take_if(|e| e.code != 130 && nothing_ran) {
         release_machine(&mut ctx);
         ctx.runner.exit();
+        if e.hint.as_deref().is_some_and(|h| h.contains("--resume")) {
+            e.hint = Some("nothing ran, so there is nothing to resume: run the same command again".into());
+        }
         return Err(e);
     }
     release_machine(&mut ctx);
@@ -2572,13 +2667,38 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         }
         skip.is_none()
     };
-    let r = block_on_screen(ctx, s, &variants[0], 0, &Exec { video: film, ..Exec::untimed(true, None).counting(main_counters) }).and_then(|mut b| {
-        if split == Counting::Separate {
-            let other = block_on_screen(ctx, s, &variants[0], 0, &Exec::untimed(false, None).counting(!main_counters))?;
-            take_metrics(&mut b, &other, |m| counted_apart(m) != main_counters);
+    // `--runs N`: N runs in its one launch, no warmup. `--repeat R`: R fresh launches of the case, each
+    // as cold as the first (only the first filmed).
+    let repeat = ctx.args.num("repeat")?.map_or(1, |r| r as usize).max(1);
+    // A launch case's one run is its launch.
+    if ctx.runs > 1 && s.launch.is_object() && !ctx.warnings.iter().any(|w| w.id == "LaunchRuns") {
+        ctx.warnings.push(validity::info("LaunchRuns", format!("{}: a launch case times one launch, so --runs does not repeat it: --repeat N launches it N times", s.label())));
+    }
+    let mut launches: Vec<Block> = Vec::new();
+    let mut r: Result<Block> = Err(Error::msg("internal: a check ran no launch"));
+    for i in 0..repeat {
+        if repeat > 1 {
+            progress(format!("  {} launch {} of {repeat}", s.label(), i + 1));
         }
-        Ok(b)
-    });
+        let x = Exec { video: film && i == 0, ..Exec::untimed(true, None).counting(main_counters) }.measuring(ctx.runs);
+        r = block_on_screen(ctx, s, &variants[0], 0, &x).and_then(|mut b| {
+            if split == Counting::Separate {
+                let other = block_on_screen(ctx, s, &variants[0], 0, &Exec::untimed(false, None).counting(!main_counters).measuring(ctx.runs))?;
+                take_metrics(&mut b, &other, |m| counted_apart(m) != main_counters);
+            }
+            Ok(b)
+        });
+        match &r {
+            Ok(b) => launches.push(b.clone()),
+            // A later launch failed: the case fails with it, named.
+            Err(e) if i > 0 => {
+                r = Err(Error { message: format!("launch {} of {repeat}: {}", i + 1, e.message), ..e.clone() });
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
     // A stop, an unlock wait that ran out, or a question the check cannot answer ends the bench, as a
     // batch's launch does: the case is not run (`--resume` runs it), never a failure. So does a phone that
     // went away, with one line, rather than failing each case after it.
@@ -2596,7 +2716,45 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     let log = runner_log(ctx, log_from, None);
     let sent = ctx.runner.take_actions();
-    check_case(ctx, s, variants, r, elapsed_ms, log, sent, film)
+    let mut out = check_case(ctx, s, variants, r, elapsed_ms, log, sent, film)?;
+    if let Some(rep) = repeated {
+        out["repeat"] = rep;
+    }
+    Ok(out)
+}
+
+/// `--check --repeat R`: the case's R launches as one check result. Its values are each metric's
+/// median over the launches (a launch's own value is its runs' median), refused where any launch
+/// refused it; `repeat` keeps every launch's value and recording.
+fn repeated_launches(r: &mut Result<Block>, launches: &[Block]) -> Value {
+    let Ok(b) = r else { return Value::Null };
+    // Each launch's value is listed instead of the first launch's runs.
+    b.spread.clear();
+    let names: std::collections::BTreeSet<&String> = launches.iter().flat_map(|l| l.values.keys()).collect();
+    let mut each: BTreeMap<String, Vec<Option<f64>>> = BTreeMap::new();
+    for name in names {
+        let got: Vec<Option<f64>> = launches.iter().map(|l| l.values.get(name).copied().filter(|v| v.is_finite())).collect();
+        each.insert(name.clone(), got);
+    }
+    for l in launches {
+        for (m, why) in &l.refused {
+            b.refused.entry(m.clone()).or_insert_with(|| why.clone());
+        }
+    }
+    b.values = each
+        .iter()
+        .filter(|(m, _)| !b.refused.contains_key(*m))
+        .filter_map(|(m, v)| {
+            let v: Vec<f64> = v.iter().flatten().copied().collect();
+            (!v.is_empty()).then(|| (m.clone(), metrics::median(&v)))
+        })
+        .collect();
+    json!({
+        "launches": launches.len(),
+        "values": each,
+        "recordings": launches.iter().map(|l| &l.recording).collect::<Vec<_>>(),
+        "measured_run": launches.iter().map(|l| l.warmup).collect::<Vec<_>>(),
+    })
 }
 
 /// What the bench file's hooks printed from byte `from` of runner.log (to `to`): console.log and error.
@@ -2630,6 +2788,8 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     let measured_run = r.as_ref().map_or(Value::Null, |b| json!(b.warmup));
     // The validator that failed the case, when one did (`state` and `refusal` in result.json).
     let failed_by = r.as_ref().err().and_then(|e| e.refusal.as_deref()).map_or(Value::Null, |f| json!(f));
+    // `--runs N`: each per-run metric's lowest and highest run beside its median.
+    let spread = r.as_ref().ok().filter(|b| !b.spread.is_empty()).map_or(Value::Null, |b| json!(b.spread));
     let (passed, error, hint, values, refused, locked, recording, screen, shown) = match r {
         Ok(b) => {
             let shown = shown::summarize(std::slice::from_ref(&b), false).0;
@@ -2666,6 +2826,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "check", "until": launch::until_of(&s.launch), "primary": { "metric": s.primary }, "declared": declared,
         "passed": passed, "decided": passed, "error": error, "hint": hint, "refusal": failed_by, "values": values, "refused": refused, "measured_run": measured_run, "session_locked": locked, "headless": headless_series(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
         "recording": recording, "screen": screen, "shown": shown, "overhead": overhead, "untimed": untimed_of(&[(values["untimed.n"].as_f64(), values["untimed.ms"].as_f64())]),
+        "runs": ctx.runs, "spread": spread,
         "video": recording.as_str().filter(|r| film && has_video(r)).map(|r| json!({ "head": r })),
         "log": log, "log_path": ctx.runner.log, "actions": actions,
         // For the parity matrix (`journey::matrix`).
@@ -2710,6 +2871,20 @@ fn head_attribution(ctx: &mut Ctx, s: &Series, v: &Variant, runs: usize) -> Resu
     }
 }
 
+/// What a check line adds to a metric's value: ` [lo … hi]`, its lowest and highest run with `--runs N`
+/// (`spread`), and ` (a · b · c)`, each launch's value with `--repeat R` (`repeat`).
+fn check_spread(s: &Value, name: &str) -> String {
+    let unit = model::metric(name).map_or("", |d| d.unit);
+    let mut out = String::new();
+    if let (Some(lo), Some(hi)) = (s["spread"][name][0].as_f64(), s["spread"][name][1].as_f64()) {
+        out += &format!(" [{} … {}]", fmt::value(lo, unit), fmt::value(hi, unit));
+    }
+    if let Some(each) = s["repeat"]["values"][name].as_array() {
+        out += &format!(" ({})", each.iter().map(|v| v.as_f64().map_or("—".to_string(), |v| fmt::value(v, unit))).collect::<Vec<_>>().join(" · "));
+    }
+    out
+}
+
 /// `seeded`: the experiment's seed, and whether a hook used it. `ran`: the machine (`env`) and, for a
 /// check that stopped, why and what it did not run (`stopped`, as an experiment's).
 #[allow(clippy::too_many_arguments)]
@@ -2744,7 +2919,8 @@ fn check_output(
     }
     // A gap is listed, not failed; journeys whose sides differ (`journey_refusal`) fail.
     let gaps = series.iter().filter(|s| s["kind"] == "gap").count();
-    // Refused before it ran (`check_engines`): listed, not failed, as a gap is; the rest of the file ran.
+    // Refused before it ran (`check_engines`) or as it ran (`series_refusal`): listed, not failed, as a
+    // gap is; the rest of the file ran.
     let before = series.iter().filter(|s| s["kind"] == "refused").count();
     let refused = series.iter().filter(|s| s["journey_refusal"].is_object()).count();
     let failed = series.iter().filter(|s| !matches!(s["kind"].as_str(), Some("gap" | "refused")) && (s["passed"] != true || s["journey_refusal"].is_object())).count();
@@ -2783,7 +2959,10 @@ fn check_output(
                     let def = model::metric(name);
                     let (count, what) = tail_of(name);
                     match (def.filter(|d| d.min_n > 1), s["values"][count].as_f64()) {
-                        (Some(d), n) if (n.unwrap_or(0.0) as usize) < d.min_n => format!("{name} — ({} {what} < {} in 1 check run)", n.unwrap_or(0.0) as usize, d.min_n),
+                        (Some(d), n) if (n.unwrap_or(0.0) as usize) < d.min_n => {
+                            let runs = s["runs"].as_u64().unwrap_or(1);
+                            format!("{name} — ({} {what} < {} in {runs} check run{})", n.unwrap_or(0.0) as usize, d.min_n, if runs == 1 { "" } else { "s" })
+                        }
                         _ => format!("{name} {}", fmt::value(v, def.map_or("", |m| m.unit))),
                     }
                 })
@@ -2793,6 +2972,7 @@ fn check_output(
                     ("interaction.p95", _, Some(p)) => format!("{t} ({p:.0} at a press)"),
                     _ => t,
                 })
+                .map(|t| if t.contains('—') { t } else { t + &check_spread(s, name) })
                 .or_else(|| s["refused"][name].is_string().then(|| format!("{name} refused")))
         };
         // A launch's milestones too, declared or not: when each line or pixel change came.
@@ -2841,6 +3021,11 @@ fn check_output(
                         "summary"
                     }
                 );
+            }
+            // `--repeat R`: each launch's recording, in order (the line above is the first's).
+            let recs: Vec<&str> = s["repeat"]["recordings"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            if recs.len() > 1 {
+                text += &format!("      launches  {}\n", recs.join(" · "));
             }
             if let Some(n) = s["actions"]["count"].as_u64() {
                 text += &format!("      actions  {n} sent · strobe query {exp} actions\n");
@@ -2913,11 +3098,19 @@ fn check_output(
         text += &format!("\nparity\n{m}");
     }
     let ran = series.len() - gaps - before;
-    // A batch's later cases run in a launch the cases before them warmed.
-    let cold = if batched.is_object() {
-        "one run each, no warmup: a launch's first case runs cold, the others in a page or app the cases before them warmed"
-    } else {
-        "one cold run each, no warmup: values include first-run work such as shader compiles"
+    // A batch's later cases run in a launch the cases before them warmed. `--runs N`: N runs in a launch,
+    // each value their median; `--repeat R`: R launches, each value their median.
+    let runs = series.iter().find_map(|s| s["runs"].as_u64()).unwrap_or(1);
+    let launches = series.iter().find_map(|s| s["repeat"]["launches"].as_u64());
+    let cold = match (batched.is_object(), runs, launches) {
+        (true, 1, _) => "one run each, no warmup: a launch's first case runs cold, the others in a page or app the cases before them warmed".to_string(),
+        (true, n, _) => format!("{n} runs each, no warmup, values their median [lowest … highest run]: a launch's first case runs cold, the others in a page or app the cases before them warmed"),
+        (false, 1, None) => "one cold run each, no warmup: values include first-run work such as shader compiles".to_string(),
+        (false, n, None) => format!("{n} runs each in one launch, no warmup, values their median [lowest … highest run]: the first run is cold"),
+        (false, n, Some(l)) => format!(
+            "{l} fresh launches each, {}, values the median over the launches (each launch's): every launch is cold",
+            if n == 1 { "one run per launch".to_string() } else { format!("{n} runs per launch") }
+        ),
     };
     // Cases that measured a later run (`measured_run`): their values are no first run's.
     let later = series.iter().filter(|s| s["passed"] == true && s["measured_run"].as_u64().is_some_and(|r| r > 0)).count();
@@ -2931,7 +3124,7 @@ fn check_output(
         ran - failed,
         if refused > 0 { format!(", {refused} where the targets' journeys differ") } else { String::new() },
         if gaps > 0 { format!(", {gaps} parity gap{}", if gaps == 1 { "" } else { "s" }) } else { String::new() },
-        if before > 0 { format!(", {before} refused before running") } else { String::new() }
+        if before > 0 { format!(", {before} refused") } else { String::new() }
     );
     if let Some(l) = batch::line(&batched) {
         text += &l;
@@ -2952,7 +3145,8 @@ fn check_output(
     let mut out = Output::new(text, result);
     if failed > 0 {
         out.code = 1;
-    } else if gaps > 0 && require_parity {
+    } else if (gaps > 0 && require_parity) || (ran == 0 && before > 0) {
+        // Every case that could run was refused: nothing was checked.
         out.code = 4;
     }
     Ok(out)
@@ -4513,19 +4707,45 @@ fn unpinned_fix(ctx: &Ctx) -> String {
     format!("this machine has {machine} (--pin auto needs 4 or more cores to keep strobe and the runner apart): run timed benches on 4 or more cores{pin_list}, {MOCKS}")
 }
 
+/// strobe's pixel reads' CPU in a block's measured runs, in ms: per run, and the runs' mean length.
+#[derive(Clone, Copy)]
+struct PixelCpu {
+    per_run_ms: f64,
+    run_ms: f64,
+}
+
+impl PixelCpu {
+    /// From each measured run's (pixel CPU ms, run ms).
+    fn of(runs: impl Iterator<Item = (f64, f64)>) -> PixelCpu {
+        let (mut n, mut cpu, mut ms) = (0usize, 0.0, 0.0);
+        for (c, m) in runs {
+            n += 1;
+            cpu += c;
+            ms += m;
+        }
+        let n = n.max(1) as f64;
+        PixelCpu { per_run_ms: cpu / n, run_ms: ms / n }
+    }
+}
+
 /// `OverheadBudget` (SPEC §19): strobe's pixel reads in the runs used over 2% of a core, so the runs they
 /// timed are disturbed: a timed block's (`refuse`) timing and latency metrics are refused; a `--check`
-/// warns, naming what a timed block would refuse.
-fn pixel_overhead(s: &Series, pct: Option<f64>, refuse: bool, warnings: &mut Vec<Warning>, values: &mut BTreeMap<String, f64>, refused: &mut BTreeMap<String, Refusal>) {
+/// warns, naming what a timed block would refuse. `pct` with the CPU it was (`PixelCpu`).
+fn pixel_overhead(s: &Series, pct: Option<(f64, PixelCpu)>, refuse: bool, warnings: &mut Vec<Warning>, values: &mut BTreeMap<String, f64>, refused: &mut BTreeMap<String, Refusal>) {
     const FIX: &str = "find images in setup (page.query({ image })) and aim at the points, or wait on until: \"frame\" or \"idle\" in the runs";
-    let Some(p) = pct.filter(|p| *p > 2.0) else { return };
+    let Some((p, cpu)) = pct.filter(|p| p.0 > 2.0) else { return };
     // Times and rates over the runs' wall time: what strobe's reads stretched or competed with. A total
     // of the app's own work (`cpu.work`, memory, IO) stays.
     let timing = |m: &str| {
         ["frames.", "interaction.", "scroll.", "display.", "phase.", "span.", "launch.", "tty.", "input."].iter().any(|x| m.starts_with(x))
             || matches!(m, "run.duration" | "cpu.app.total" | "cpu.wakes" | "ui.wakes" | "main.busy")
     };
-    let used = format!("strobe's pixel reads in the runs used {} of a core (over 2%; the budget is 0.5%)", pct_of_core(p));
+    let used = format!(
+        "strobe's pixel reads in the runs used {} of a core ({} CPU/run over {} runs; over 2%, the budget is 0.5%)",
+        pct_of_core(p),
+        fmt::value(cpu.per_run_ms, "ms"),
+        fmt::value(cpu.run_ms, "ms")
+    );
     if !refuse {
         check_overhead(warnings, s, &used, &timing, Some(FIX));
         return;
@@ -4695,6 +4915,36 @@ fn refused_series(ctx: &Ctx, s: &Series, r: &Refusal) -> Value {
     // It drew in no window.
     series_setup(ctx, s, Value::Null, &mut out);
     out
+}
+
+/// The series' own refusal, which ends that series alone: an exit-4 refusal that is not the machine's
+/// (`ValidatorId::machine_wide`), outside a stop, a wait `--max-time` cut, or a phone that went away. The
+/// user's state disturbed, a launch that kept failing and strobe's own errors are no refusal: they stop
+/// the bench.
+fn series_refusal(ctx: &Ctx, e: &Error) -> Option<Refusal> {
+    let r = e.refusal.as_deref().filter(|_| e.code == 4 && !stop_requested() && !ctx.ran_out && phone_lost(ctx).is_none())?;
+    (!r.validator.machine_wide()).then(|| r.clone())
+}
+
+/// A series that met its own refusal (`series_refusal`) after some of its blocks: they are kept, and
+/// its primary is refused with why, unless a look had decided it already (the refusal then ended only
+/// the pairs run on for its secondaries, and is said in its warnings).
+fn refused_after(out: &mut Value, r: &Refusal) {
+    out["halt"] = Value::Null;
+    if out["decided"] == true {
+        let w = validity::warn("Stopped", format!("the series ended after its primary was decided: {}", r.message()));
+        match out["warnings"].as_array_mut() {
+            Some(a) => a.push(json!(w)),
+            None => out["warnings"] = json!([w]),
+        }
+        return;
+    }
+    out["primary"]["verdict"] = json!(format!("refused ({}): {}", r.validator, r.summary));
+    out["primary"]["verdict_kind"] = json!(VerdictKind::Refused);
+    out["primary"]["refusal"] = json!(r);
+    out["primary"]["decided"] = json!(false);
+    out["decided"] = json!(false);
+    out["stopped"] = json!("refused");
 }
 
 /// `<validator>: <summary> · fix: <fix>`, for a refusal as result.json keeps it.
@@ -5174,7 +5424,8 @@ pub(crate) fn drawing_gpu(samples: &probe::os::Samples, windows: &[&probe::os::S
 }
 
 /// `CrossAdapterScanout` (info, once an experiment) for a block whose `drawing_gpu` crossed adapters.
-fn cross_adapter_note(warnings: &mut Vec<Warning>, what: &str, gpu: &Value) {
+/// `who`: what drew, "the page" or "the app".
+fn cross_adapter_note(warnings: &mut Vec<Warning>, what: &str, who: &str, gpu: &Value) {
     if gpu["cross"] != true || warnings.iter().any(|w| w.id == "CrossAdapterScanout") {
         return;
     }
@@ -5182,7 +5433,7 @@ fn cross_adapter_note(warnings: &mut Vec<Warning>, what: &str, gpu: &Value) {
     warnings.push(validity::info(
         "CrossAdapterScanout",
         format!(
-            "{what}: the page draws on {} while {} drives its window's display ({}): each frame crosses between adapters, as it does for the page's users on this kind of machine",
+            "{what}: {who} draws on {} while {} drives its window's display ({}): each frame crosses between adapters, as it does for {who}'s users on this kind of machine",
             drawing.join(" and "),
             gpu["display_adapter"].as_str().unwrap_or("another adapter"),
             gpu["display"].as_str().unwrap_or("?")
@@ -5695,7 +5946,7 @@ fn hold_machine(ctx: &mut Ctx, what: &str) -> Result<()> {
     match ctx.slot {
         Some(_) => ctx.reg.set("running", what),
         None => {
-            let (s, waited) = ctx.reg.acquire(what)?;
+            let (s, waited) = slot_within(ctx, what)?;
             ctx.waited_ms += waited.as_secs_f64() * 1e3;
             ctx.slot = Some(s);
         }
@@ -5718,6 +5969,16 @@ fn hold_machine(ctx: &mut Ctx, what: &str) -> Result<()> {
     }
     ctx.awake.hold(true);
     Ok(())
+}
+
+/// The bench slot, never past `--max-time`: a wait that reaches it is the bench's time running out
+/// (`out_of_time`'s `ran_out`: a comparison keeps its pairs, anything else stops with exit 124).
+fn slot_within(ctx: &mut Ctx, what: &str) -> Result<(slot::Slot, Duration)> {
+    let r = ctx.reg.acquire_until(what, ctx.deadline);
+    if r.as_ref().err().is_some_and(|e| e.code == 124 && e.validator() == Some(ValidatorId::ConcurrentBench)) {
+        ctx.ran_out = true;
+    }
+    r
 }
 
 /// Gives back what `hold_machine` took: the user's power plan, sleep as their settings say, and the
@@ -6307,9 +6568,11 @@ fn dark_page(ctx: &Ctx, s: &Series) -> bool {
 }
 
 /// What a headless Chromium page's throttled clock moves with the display off: wall times and shares
-/// of them. CPU and main-thread time per run, counts, network and memory stay.
+/// of them. CPU and main-thread time per run, counts, network and memory stay, and so does strobe's own
+/// input pacing (`input.rate`, `input.gap.p95`): a headless page's moves go at 60 Hz on strobe's clock
+/// (`Driver::frame_period`), not on the page's.
 fn dark_metric(m: &str) -> bool {
-    matches!(m, "run.duration" | "main.busy" | "main.busy.cdp" | "cpu.app.total" | "cpu.process.total" | "cpu.renderer" | "cpu.gpu" | "cpu.browser" | "input.rate" | "input.gap.p95")
+    matches!(m, "run.duration" | "main.busy" | "main.busy.cdp" | "cpu.app.total" | "cpu.process.total" | "cpu.renderer" | "cpu.gpu" | "cpu.browser")
         || m.starts_with("phase.")
         || m.starts_with("span.")
 }
@@ -8069,7 +8332,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 if on_phone.is_none()
                     && let Some(g) = drawing_gpu(&samples, &gpu_runs.iter().map(|(_, w)| w).collect::<Vec<_>>(), display.as_ref())
                 {
-                    cross_adapter_note(&mut ctx.warnings, &format!("{} · {side} block", s.label()), &g);
+                    cross_adapter_note(&mut ctx.warnings, &format!("{} · {side} block", s.label()), "the page", &g);
                     case_screen["gpu"] = g;
                 }
                 // The processes' memory as the last measured run left it, before its reset; a leak run's after
@@ -8137,6 +8400,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 extra.insert("driver.read_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.reads.1)).collect());
                 extra.insert("driver.pixel_reads".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.0 as f64)).collect());
                 extra.insert("driver.pixel_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.1)).collect());
+                extra.insert("driver.pixel_cpu_ms".to_string(), measured.iter().enumerate().map(|(j, r)| (key(j), r.pixels.2)).collect());
                 // The page as each measured run left it (`RunEnd`), the median over the runs.
                 let heap: BTreeMap<String, f64> = measured.iter().enumerate().filter_map(|(j, r)| Some((key(j), r.end.heap_mb?))).collect();
                 let dom: BTreeMap<String, f64> = measured.iter().enumerate().filter_map(|(j, r)| Some((key(j), r.end.nodes? as f64))).collect();
@@ -8425,9 +8689,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 // timing they shared the runs with is refused.
                 let run_ms_sum: f64 = measured.iter().map(|r| r.ms).sum();
                 let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms_sum.max(1.0));
+                let pixel_cpu = pixel_pct.map(|_| PixelCpu::of(measured.iter().map(|r| (r.pixels.2, r.ms))));
                 let disturbed = x.measures_time() && pixel_pct.is_some_and(|p| p > 2.0);
                 if x.judges_time() {
-                    pixel_overhead(s, pixel_pct, x.measures_time(), &mut ctx.warnings, &mut values, &mut refused);
+                    pixel_overhead(s, pixel_pct.zip(pixel_cpu), x.measures_time(), &mut ctx.warnings, &mut values, &mut refused);
                 }
                 // The launch's steps before the runs, the case's warmup and runs, then the launch's after them.
                 let launch_steps = steps.borrow();
@@ -8460,6 +8725,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         runner_pct,
                         sampler_pct,
                         pixel_pct,
+                        pixel_cpu_ms: pixel_cpu.map(|p| p.per_run_ms),
                         encoder_pct: stopped.as_ref().and_then(|s| s.as_ref().ok()).and_then(super::video::Stopped::encoder_pct),
                         ..Overhead::default()
                     }),
@@ -8474,6 +8740,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     input,
                     reduced_motion,
                     http: None,
+                    spread: run_spread(x, &extra),
                 });
             }
             // From outside there is no trace to keep: the block's numbers are in result.json. A Firefox block
@@ -8537,6 +8804,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             if batch {
                 meta["batch"] = batch::meta(page_cases.iter().map(|(k, c)| (&cases[*k], measured_of(c).1)).zip(&blocks).map(|((s, r), b)| (s, r, b)));
             }
+            meta["ended_runs"] = ended_runs(page_cases.iter().flat_map(|(_, c)| {
+                let local = measured_of(c).0;
+                c.runs.iter().enumerate().map(move |(i, r)| (format!("run:{}", c.base + i), local.contains(&i), r.ended_ms, r.cpu_lost, r.ended_exes.as_slice()))
+            }));
             if let Some(p) = on_phone {
                 meta["phone"] = p.meta(phone_screen.clone());
             }
@@ -9680,7 +9951,7 @@ fn fit_answer(ctx: Option<&mut Ctx>, engine: WebEngine, scale: Option<f64>, aske
     let held = match ctx.slot {
         Some(_) => None,
         None => {
-            let (slot, waited) = ctx.reg.acquire(&what)?;
+            let (slot, waited) = slot_within(ctx, &what)?;
             ctx.waited_ms += waited.as_secs_f64() * 1e3;
             Some(slot)
         }
@@ -9864,23 +10135,23 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
     if let Some(r) = motion::engine_refusal(engine, headless).filter(|_| reduce.reduced()) {
         return Ok(Some(Refusal { summary: format!("{on}{}", r.summary), ..r }));
     }
-    if let Some(e) = web::refusal(engine, headless) {
-        return Err(e);
+    // An engine that cannot run here (WebKit on Windows, a Firefox too old, no display): the series that
+    // use it, not the file's other series.
+    if let Some(r) = web::refusal(engine, headless).and_then(|e| e.refusal) {
+        return Ok(Some(Refusal { summary: format!("{on}{}", r.summary), ..*r }));
     }
     if engine == WebEngine::Webkit && t["scale"].is_number() {
-        return Err(Error::refused(
-            "EngineUnsupported",
-            format!("{}: the target asks for scale {}, and a WebKit page draws at the display's own: WebDriver has no device scale override", s.label(), t["scale"]),
-            "drop the target's scale for --engine webkit, or measure the scaled page in Chromium or Firefox",
+        return Ok(Some(
+            Refusal::new(ValidatorId::EngineUnsupported, format!("{on}the target asks for scale {}, and a WebKit page draws at the display's own: WebDriver has no device scale override", t["scale"]))
+                .fix("drop the target's scale for --engine webkit, or measure the scaled page in Chromium or Firefox"),
         ));
     }
     // Firefox attributes with its own profiler and leak-checks with about:memory (`probe::gecko`); a
     // WebKit page has neither in strobe.
     if engine == WebEngine::Webkit && matches!(args.get("probes"), Some("attribution" | "memory")) {
-        return Err(Error::refused(
-            "EngineUnsupported",
-            format!("{}: --probes {}: WebKit pages have no profilers or memory census in strobe", s.label(), args.get("probes").unwrap_or("")),
-            "attribute or leak-check the page in Chromium or Firefox (--engine firefox)",
+        return Ok(Some(
+            Refusal::new(ValidatorId::EngineUnsupported, format!("{on}--probes {}: WebKit pages have no profilers or memory census in strobe", args.get("probes").unwrap_or("")))
+                .fix("attribute or leak-check the page in Chromium or Firefox (--engine firefox)"),
         ));
     }
     // A launch is timed by an observer in every document from its first script: Chromium's DevTools and
@@ -10438,12 +10709,19 @@ pub(crate) fn target_project(describe: &Value, name: &str) -> Result<Option<(Pat
     Ok(Some((project, config)))
 }
 
-/// Every target's own project, for those with a `cwd`.
-fn target_projects(describe: &Value) -> Result<BTreeMap<String, (PathBuf, Value)>> {
+/// The own project of each target the run uses (its series' and sides'), for those with a `cwd`: a
+/// target no series runs is not read.
+fn target_projects(describe: &Value, series: &[Series], variants: &[Variant]) -> Result<BTreeMap<String, (PathBuf, Value)>> {
+    let used: std::collections::BTreeSet<&str> = series
+        .iter()
+        .filter(|s| s.gap.is_none())
+        .flat_map(|s| std::iter::once(s.target.as_str()).chain(s.sides.iter().flat_map(|(b, h)| [b.as_str(), h.as_str()])))
+        .chain(variants.iter().filter_map(|v| v.target.as_deref()))
+        .collect();
     let mut out = BTreeMap::new();
-    for name in describe["targets"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
-        if let Some(p) = target_project(describe, &name)? {
-            out.insert(name, p);
+    for name in used {
+        if let Some(p) = target_project(describe, name)? {
+            out.insert(name.to_string(), p);
         }
     }
     Ok(out)

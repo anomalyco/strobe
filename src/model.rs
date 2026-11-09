@@ -158,6 +158,20 @@ impl ValidatorId {
             | AnchorAmbiguous => false,
         }
     }
+
+    /// The machine or the phone, not the series that met it: every series after it would meet it too,
+    /// so a bench stops on it rather than refuse each series in turn. Any other refusal is the series'
+    /// own: a bench lists it refused and runs the rest.
+    pub fn machine_wide(self) -> bool {
+        use ValidatorId::*;
+        match self {
+            SessionLocked | Background | BackgroundPriority | Thermal | DeviceAsleep | ConcurrentBench | PowerSave | LowBattery | Emulator | WirelessTransport => true,
+            SoftwareGpu | DevBuild | DebuggerAttached | WindowHidden | WrongScreen | UnpacedSpin | NoPresentSource | AmbiguousInteraction | PatternInput | VariantMismatch | RunIncomplete
+            | Throttled | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter | NotOnThisOs
+            | NotForTarget | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent | Untimed
+            | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | NotProfileable | MouseNotEnabled | AnchorNotFound | AnchorAmbiguous => false,
+        }
+    }
 }
 
 /// The browser engine a page target runs in (SPEC §13.1): Chromium over CDP (the default), Firefox
@@ -723,6 +737,16 @@ pub const METRICS: &[MetricDef] = &[
         min_n: 0,
         across: Across::Compared,
         about: "the wall time of strobe's driver.pixel_reads inside a run: capture, copy and matching (ObserverCost)",
+    },
+    MetricDef {
+        name: "driver.pixel_cpu_ms",
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 0,
+        across: Across::Compared,
+        about: "strobe's CPU in its driver.pixel_reads inside a run (capture, copy and matching): their absolute cost, where overhead.pixel_pct is its share of the run's wall time (ObserverCost)",
     },
     MetricDef {
         name: "scroll.latency.p50",

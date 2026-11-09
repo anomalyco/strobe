@@ -45,6 +45,9 @@ struct Measured {
     ms: f64,
     cpu_ms: f64,
     main_ms: std::result::Result<f64, host::MainLost>,
+    /// What processes of the host's tree that ended in its timed parts used there (ms), whether that is not
+    /// known, and by executable (ms, processes): the recording's `ended_runs`.
+    ended: (f64, bool, Vec<(String, f64, u32)>),
 }
 
 /// The harness module for `root`. The entry resolves from the bench file, like everything else in it,
@@ -347,6 +350,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // Per run: what processes of the host's tree that ended in a timed part used there (ms), and
                 // whether that is not known (their CPU there gone with them).
                 let mut lost: Vec<(f64, bool)> = Vec::new();
+                // And by executable (ms, processes), where the OS names them.
+                let mut ended_exes: Vec<Vec<(String, f64, u32)>> = Vec::new();
                 // Per run: the share of the timed parts the host's main thread was on a CPU (`cpu.main`), or why none.
                 let mut mains: Vec<std::result::Result<f64, host::MainLost>> = Vec::new();
                 // Who else used the CPUs, from two snapshots outside the runs, for a block with other work.
@@ -426,6 +431,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let ms = |cycles: u64| if c1.values().any(|c| *c > 0) { clock0.ms(&clock1, cycles) } else { f64::NAN };
                     let used = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
                     lost.push((timed_cpu.as_ref().map_or(0.0, |c| ms(c.ended)), timed_cpu.is_none()));
+                    ended_exes.push(timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), ms(*cy), *k)).collect()).unwrap_or_default());
                     let retained = if heap { heap_mb()? - h0 } else { f64::NAN };
                     // The host's memory as the run left it, before its reset (SPEC §9.6), where this run may be
                     // the last measured one.
@@ -495,7 +501,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // A process the host started that ended inside a timed part took its CPU with it, where what
                 // it used is not known.
                 let gone = lost[local.clone()].iter().filter(|l| l.1).count();
-                super::note_ended(&mut ctx.warnings, s, &lost[local.clone()], &[]);
+                let exes: Vec<(String, f64, u32)> = lost[local.clone()].iter().zip(&ended_exes[local.clone()]).filter(|(l, _)| !l.1).flat_map(|(_, e)| e.iter().cloned()).collect();
+                super::note_ended(&mut ctx.warnings, s, &lost[local.clone()], &exes);
                 if gone > 0 {
                     for m in ["cpu.work", "cpu.app.total", "cpu.process.total"] {
                         values.remove(m);
@@ -529,7 +536,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         let what = if i < local.start { "warm" } else { "unmeasured" };
                         life.borrow_mut().push((format!("{what}:{}", base + i), r.6.t0, r.6.t1));
                     }
-                    kept.borrow_mut().extend(measured.iter().zip(&mains[local.clone()]).enumerate().map(|(j, (r, m))| Measured {
+                    let ended = lost[local.clone()].iter().zip(&ended_exes[local.clone()]);
+                    kept.borrow_mut().extend(measured.iter().zip(&mains[local.clone()]).zip(ended).enumerate().map(|(j, ((r, m), (l, e)))| Measured {
                         key: key(j),
                         case: s.case.clone(),
                         timed: r.6.clone(),
@@ -537,6 +545,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         ms: r.0,
                         cpu_ms: r.1,
                         main_ms: m.clone().map(|share| share * r.0),
+                        ended: (l.0, l.1, e.clone()),
                     }));
                     passed.borrow_mut().push((k, base + local.start..base + local.end));
                 }
@@ -569,6 +578,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     frame: false,
                     browser: None,
                     directions: BTreeMap::new(),
+                    spread: super::run_spread(x, &extra),
                     ..Block::default()
                 })
             })();
@@ -736,6 +746,7 @@ impl Profiled<'_> {
         if batch {
             meta["batch"] = super::batch::meta(self.passed.iter().zip(&blocks).map(|((k, r), b)| (&self.cases[*k], r.clone(), *b)));
         }
+        meta["ended_runs"] = super::ended_runs(self.runs.iter().map(|r| (r.key.clone(), true, r.ended.0, r.ended.1, r.ended.2.as_slice())));
         store::write_json(&rec.join("meta.json"), &meta)?;
         draft.keep();
         Ok(())

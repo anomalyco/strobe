@@ -56,7 +56,11 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
         .into_iter()
         .flatten()
         .filter_map(|s| {
-            Some(json!({ "case": s["label"], "recording": s["attribution"].as_str()?, "values": s["values"], "refused": s["refused"], "declared": s["declared"], "headless": s["headless"], "sampling": s["attribution_sampling"], "video": s["video"]["head"] }))
+            // The attribution block's recording (`kind`), beside the check run's own (`check_recording`).
+            Some(json!({
+                "case": s["label"], "recording": s["attribution"].as_str()?, "kind": "attribution", "check_recording": s["recording"], "values": s["values"], "refused": s["refused"], "declared": s["declared"],
+                "headless": s["headless"], "sampling": s["attribution_sampling"], "video": s["video"]["head"],
+            }))
         })
         .collect();
     // A case that ran but whose engine strobe has no profiler for (a Firefox launch, a WebKit page) says so.
@@ -108,9 +112,11 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
             format!("next     strobe query {rec} hotspots --by package · strobe query {rec} summary (per run) · strobe query {rec} style · strobe report recording {rec} --open\n")
         };
     }
-    // Other work on the CPUs (a slow speed check is said, never waited for): the recordings are a loaded
-    // machine's.
-    let busy: Vec<Value> = out.json["warnings"].as_array().into_iter().flatten().filter(|w| matches!(w["id"].as_str(), Some("Background" | "Throttled")) && w["level"] == "warn").cloned().collect();
+    // What the recordings are: a loaded machine's (other work on the CPUs; a slow speed check is said,
+    // never waited for), a profile that missed or failed (`Attribution`), one that cost the page its time
+    // (`ProbeOverhead`, `ObserverCost`), or timers the target inherited coalesced (`TimerCoalescing`).
+    let shown = |id: Option<&str>| matches!(id, Some("Background" | "Throttled" | "Attribution" | "ProbeOverhead" | "ObserverCost" | "TimerCoalescing"));
+    let busy: Vec<Value> = out.json["warnings"].as_array().into_iter().flatten().filter(|w| shown(w["id"].as_str()) && w["level"] == "warn").cloned().collect();
     for w in &busy {
         text += &format!("! {:<24}{}\n", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or(""));
     }
@@ -124,9 +130,6 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     if args.has("seed") {
         return Err(Error::usage("--seed seeds a bench file's ctx.random(): record --bench <file>#<case> --seed <n>"));
-    }
-    if args.has("max-time") {
-        return Err(Error::usage("--max-time caps a record --bench's waits; a recording of a target ends at --for"));
     }
     let target = args.pos.first().ok_or_else(|| Error::usage("record needs a target: strobe record https://… [--for 10s], or --bench <file>#<case>"))?.clone();
     if let Some(id) = args.get("id") {
@@ -176,7 +179,14 @@ pub fn run(args: &Args) -> Result<Output> {
     // A timed recording takes turns with benches for the device's slot (SPEC §10.1 `ConcurrentBench`),
     // before its power plan: its numbers and a timed block never share the machine. Not a flight
     // recorder (`--ring`), which runs for as long as the daemon keeps it.
-    let _slot = if timed && !args.has("ring") { Some(super::bench::slot::Registration::new(&store::new_id("rec"), &target).acquire(&format!("strobe record {target}"))?.0) } else { None };
+    // `--max-time` caps that wait (exit 124, `ConcurrentBench`); a recording that takes no slot ends at --for.
+    let slotted = timed && !args.has("ring");
+    let deadline = match args.get("max-time") {
+        Some(_) if !slotted => return Err(Error::usage("--max-time caps a record --bench's waits, and a timed recording's wait for the bench slot; this recording takes no slot and ends at --for")),
+        Some(t) => Some(std::time::Instant::now() + Duration::from_millis(duration_ms(t)?)),
+        None => None,
+    };
+    let _slot = if slotted { Some(super::bench::slot::Registration::new(&store::new_id("rec"), &target).acquire_until(&format!("strobe record {target}"), deadline)?.0) } else { None };
     let power = if timed { Some(super::bench::power_quiet(args)?) } else { None };
     let mut out = recorded(args, target)?;
     // The user's plan is put back (the guard dropped) before the result says so.
@@ -1041,8 +1051,15 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let mut values: BTreeMap<&str, f64> = BTreeMap::new();
         values.insert("run.duration", ms);
         // A process of the app that ended in the window took its CPU there with it.
-        let used = set_used(&c0, &c1);
+        let set_cpu = timed_cpu(&[&c0.0, &c1.0], &[&c0.1, &c1.1]);
+        let used = set_cpu.as_ref().map(|c| c.total);
         let lost = used.is_none();
+        // What ended processes used in the window, by executable (`ended_runs`, as a bench block's).
+        let ended = clock0.per_ms(&clock1).filter(|_| c1.0.values().any(|c| *c > 0)).map_or((f64::NAN, Vec::new()), |rate| {
+            let by = set_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), *cy as f64 / rate, *k)).collect()).unwrap_or_default();
+            (set_cpu.as_ref().map_or(0.0, |c| c.ended as f64 / rate), by)
+        });
+        let ended_runs = super::bench::ended_runs([("recording".to_string(), true, ended.0, lost, ended.1.as_slice())]);
         if let (Some(rate), Some(used)) = (clock0.per_ms(&clock1), used)
             && c1.0.values().any(|c| *c > 0)
         {
@@ -1111,6 +1128,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
             "note": if set == Set::Attribution { format!("native attribution: OS samples; {stacks_note}") } else { String::new() },
             // macOS: the app's XPC services are missing from every number (SPEC §13.2).
             "unattributed": n.unattributed(),
+            "ended_runs": ended_runs,
         });
         for (k, x) in frame_values {
             meta["values"][k] = json!(x);
@@ -1521,6 +1539,7 @@ fn engine_summary(meta: &Value) -> String {
 pub fn summary_text(meta: &Value) -> String {
     let mut s = summary_body(meta);
     s += &batch_lines(meta);
+    s += &ended_lines(meta);
     s += &context_lines(meta);
     if meta["video"].is_object() {
         s += &super::video::line(meta["id"].as_str().unwrap_or(""), &meta["video"]);
@@ -1550,6 +1569,39 @@ fn batch_lines(meta: &Value) -> String {
         if !refused.is_empty() {
             s += &format!("      refused {}\n", refused.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
         }
+    }
+    s
+}
+
+/// `ended    run:2 measured · 222 ms of CPU counted · chrome.exe 180 ms (2 processes) …`: the runs in
+/// which processes of the target ended inside the timed parts (`ended_runs` in meta.json), what they
+/// used there and which executables they were (where the OS names them); a run whose CPU was lost
+/// anyway (a process ended unread) says so.
+fn ended_lines(meta: &Value) -> String {
+    let Some(runs) = meta["ended_runs"].as_array().filter(|a| !a.is_empty()) else { return String::new() };
+    let mut s = String::new();
+    for (i, r) in runs.iter().enumerate() {
+        let used = match (r["cpu_lost"] == true, r["ended_ms"].as_f64()) {
+            (true, _) => "CPU lost (a process ended before strobe read it)".to_string(),
+            (false, Some(ms)) => format!("{} of CPU counted", fmt::value(ms, "ms")),
+            (false, None) => "CPU not read".to_string(),
+        };
+        let procs: Vec<String> = r["processes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let n = p["count"].as_u64().unwrap_or(0);
+                format!("{} {} ({n} process{})", p["exe"].as_str().unwrap_or("?"), fmt::value(p["cpu_ms"].as_f64().unwrap_or(f64::NAN), "ms"), if n == 1 { "" } else { "es" })
+            })
+            .collect();
+        s += &format!(
+            "{}{} {} · {used}{}\n",
+            if i == 0 { "ended    " } else { "         " },
+            r["run"].as_str().unwrap_or("?"),
+            if r["measured"] == true { "measured" } else { "not measured" },
+            if procs.is_empty() { String::new() } else { format!(" · {}", procs.join(", ")) }
+        );
     }
     s
 }
