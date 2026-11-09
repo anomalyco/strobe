@@ -550,9 +550,11 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let shown = |f: &Path| f.strip_prefix(&dir).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.display().to_string());
     let (mut wrote, mut kept) = (Vec::new(), Vec::new());
+    let mut config_differs = false;
     for (path, text) in &files {
         if path.exists() && !force {
             kept.push(shown(path));
+            config_differs |= path.ends_with("strobe.json") && std::fs::read_to_string(path).ok().as_ref() != Some(text);
             continue;
         }
         if let Some(parent) = path.parent() {
@@ -567,7 +569,9 @@ pub fn run(args: &Args) -> Result<Output> {
     let cwd = std::env::current_dir().ok().and_then(|c| real(&c));
     let mut next = Vec::new();
     if cwd.as_deref() != Some(dir.as_path()) {
-        next.push((format!("cd {}", dir.display()), "the commands below run from the project".to_string()));
+        let shown = dir.display().to_string();
+        let shown = if shown.contains(' ') { format!("\"{shown}\"") } else { shown };
+        next.push((format!("cd {shown}"), "the commands below run from the project".to_string()));
     }
     next.push((format!("{strobe} config"), "strobe.json as strobe reads it: builds, server, app profiles".to_string()));
     next.push((
@@ -587,6 +591,11 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     for f in &kept {
         text += &format!("kept     {f} (there already; --force replaces it)\n");
+    }
+    // The bench leans on what init would have put in strobe.json: say so when the file there was kept.
+    if config_differs && !plan.config.is_empty() {
+        let keys: Vec<&str> = plan.config.iter().map(|(k, _)| *k).collect();
+        text += &format!("note     the bench needs strobe.json's {}: check yours has them (strobe config), or --force\n", keys.join(" and "));
     }
     if package.is_none() {
         text += "note     no @hona/strobe in node_modules: bun add -d @hona/strobe pins strobe for the project and types the bench\n";

@@ -348,8 +348,15 @@ can show: Linux without a display, a locked session) and a timed comparison agai
 checkout's `origin/HEAD` names, else `main` or `master`, else `--aa` outside git; `bunx strobe` where
 the folder resolves the package. Like `config` it runs before the restores other commands do and
 writes nothing of strobe's own; it builds and launches nothing. JSON: `dir`, `root`, `target`,
-`what`, `wrote`, `kept`, `schema`, `headless`, `next`. Checked on adais (Windows 11; web headless,
-server, cli and tty folders, each `config` then `--check` passing as written):
+`what`, `wrote`, `kept`, `schema`, `headless`, `next`; a kept strobe.json that differs from what init
+would write gets a note naming the keys the bench needs from it. Checked (2026-11-10), each `config`
+then `--check` passing as written: adais (Windows 11) web (`--headless`), server, cli and tty, each as
+its own folder and as a package below a monorepo's git root; vps (2 vCPU) web (`--headless`), server,
+cli, tty and native (an X11 window on Xvfb that sets `_NET_WM_PID`, as toolkits do). vps from an
+empty folder holding a three-file web app, on a cold Bun cache: `bun add -d @hona/strobe` 1.5 s,
+`init` and `config` under 0.1 s each, the `--check` 7.5 s (its build, the server and both cases;
+Chromium was installed): about 10 s of commands from install to a passing check. Not run: an Electron
+project (a headed app; as root on Linux it also needs `--no-sandbox`).
 
 Every flag strobe reads is in one table (`cli::FLAGS`, with whether it takes a value and which
 commands read it); any other
