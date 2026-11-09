@@ -6,7 +6,8 @@
 //           cpu.renderer refused "a renderer process ended inside the run"
 //   unread  a frame of another site comes and goes in the run: a renderer Chromium starts in the run ends
 //           in it before any role was read for it: cpu.renderer refused "processes that ended inside the
-//           run (role unread) used … ms, …% of cpu.renderer (over the 1% limit)"
+//           run (role unread) used … ms, …% of cpu.renderer (over the 1% limit)" (Windows); where the frame
+//           takes Chromium's spare renderer, alive at the run's start, it reads as swap's (Linux headless shell)
 import { bench, url } from "@hona/strobe"
 
 const port = Number(process.env.ENDED_PORT ?? 4824)
