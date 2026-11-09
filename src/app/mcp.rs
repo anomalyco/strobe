@@ -87,14 +87,14 @@ const TOOLS: &[Tool] = &[
             ("pin", "with bench: auto, none, ccdN or a CPU list"),
             ("power", "high (default for timed recordings) or keep"),
             ("video", "also film the recording (timing perturbed): the window's screen (headed) or a Chromium page's renderer (headless); report recording <rec> plays it with its input markers"),
-            ("max-time", "with bench: no wait (a locked session, a launch that runs again) runs past this, e.g. 10m"),
+            ("max-time", "e.g. 10m: with bench, no wait (the bench slot, a locked session, a launch that runs again) runs past it; a timed recording's wait for the bench slot ends there (exit 124, ConcurrentBench)"),
         ],
         required: &[],
         long: true,
     },
     Tool {
         name: "bench",
-        description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
+        description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups; a series refused on its own (exit 4: its engine, an overhead budget) ends alone and the rest of the file runs. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
         args: &[("file", "absolute path to the .bench.ts file (not with stop or resume)")],
         flags: &[
             (
@@ -106,7 +106,7 @@ const TOOLS: &[Tool] = &[
                 "baseline variant: an absolute directory, a git ref (e.g. origin/dev), url:<href>, cmd:<line> (a cli() target's command line); or a target of the file, target[=variant]: base and head naming two targets compare two implementations",
             ),
             ("aa", "same build on both sides (checks the method)"),
-            ("check", "validate the file: each case once on head, pass or fail with a screenshot, no statistics"),
+            ("check", "validate the file: each case once on head (one launch; runs N runs in it, repeat R launches), pass or fail with a screenshot, no statistics"),
             (
                 "batch",
                 "with check: up to N run cases per launch (one prepare and setup), each held to the launch's start after its reset; a failing or dirty case ends its launch and the next case gets a fresh one",
@@ -129,9 +129,9 @@ const TOOLS: &[Tool] = &[
             ("effect", "with plan: the expected change of the primary in % (default: what the last run of the series measured, else 0)"),
             ("pilot", "with plan: run 4 pairs first to learn the spread"),
             ("pairs", "auto (default) or a number"),
-            ("runs", "measured runs per block (default 5)"),
+            ("runs", "measured runs per block (default 5); with check: N runs in each case's one launch, no warmup, its value their median with the lowest and highest run"),
             ("probes", "timing skips attribution blocks; memory runs a leak run per variant (no base needed); waits adds off-CPU waits to native attribution blocks (with why always)"),
-            ("repeat", "leak run: N runs to the middle snapshot and N more to the last (default 10)"),
+            ("repeat", "leak run: N runs to the middle snapshot and N more to the last (default 10); with check: R fresh cold launches per case (from 2), the median over them and each launch's value (not with batch or video)"),
             ("seed", "the seed of the bench file's ctx.seed and ctx.random() (a 32-bit unsigned integer): replays a seeded workload; default: drawn, kept in result.json plan.seed and printed"),
             ("bisect", "good..bad: find the commit on the first-parent line that moved the primary (one series)"),
             (
@@ -149,7 +149,7 @@ const TOOLS: &[Tool] = &[
             ("style", "attribution blocks also trace what invalidated style"),
             (
                 "max-time",
-                "the run's deadline, e.g. 30m: no series, pair or wait (busy CPUs, a locked session, a launch that runs again) starts or runs past it; a comparison keeps its verdicts, a check stops (exit 124, resumable)",
+                "the run's deadline, e.g. 30m: no series, pair or wait (the bench slot, busy CPUs, a locked session, a launch that runs again) starts or runs past it; a comparison keeps its verdicts, a check stops (exit 124, resumable)",
             ),
             ("unlock-wait", "a series that needs a presenting window waits at most this long for an unlock, or on macOS for nobody to use the Mac (default: no limit), e.g. 2h"),
             ("require-verdict", "exit 5 when a series has no verdict"),

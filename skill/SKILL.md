@@ -196,8 +196,10 @@ noisy discovery evidence, or leave them out.
     engine or mode cannot give that metric; pick another primary (the message names one).
   - `OverheadBudget`: strobe's own work disturbed timed runs (a `--check` only warns).
   - `VariantMismatch`, `DisplayTooSmall`, `DeviceMismatch`, `InputMismatch`: the sides differ.
-- A refused primary refuses its series; the rest of the file runs. Every compared primary refused:
-  exit 4.
+- A refused primary refuses its series; the rest of the file runs. A series refused while it runs
+  (`OverheadBudget`, `NoPhase`) ends alone too: `refused` in the listing, `--resume` keeps it. Only
+  the machine's refusals (`SessionLocked`, `Background`, `Thermal`, …) stop the bench. Every series
+  refused: exit 4.
 - `!` lines warn next to a kept number; `i` lines inform. Read them before trusting a number:
   `NotSteady`, `HighVariance`, `ScreenChanged`, `EndedCpu`, `HeadlessFrame`, `ObserverCost`,
   `Rerun`, `StaleCalibration`, `DisplayOff`, `TimerCoalescing`. SPEC §10 lists them all.
@@ -212,7 +214,8 @@ strobe record app:<id>|exe:<path> [--native] [--windowless] [--until-line "<re>"
 strobe record pid:<n>|proc:<name> [--probes timing|deep|waits|stacks-unprivileged] [--for 10s]
 strobe record wir:[<selector>] [--probes attribution|memory] [--for 10s]
 strobe record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--max-time 10m]
-strobe bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check [--batch N] | --blocks N]
+strobe bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check [--batch N] [--runs N]
+             [--repeat R] | --blocks N]
              [--filter <cases>] [--target <names>] [--params k=v|all] [--primary <metric>]
              [--pairs auto|N] [--runs 5] [--noworse 2%] [--why auto|always|never] [--trace lean|full]
              [--probes memory --repeat 10] [--bisect good..bad] [--pixels | --pixels-only]
@@ -237,8 +240,13 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - `strobe <command> --help` lists that command's flags. An unknown flag exits 2 naming the closest;
   so does another command's flag (`status --runs 5`: which commands take it), never ignored.
 - `--max-time` is the run's deadline, `--check` and `record --bench` too: no series starts and no wait
-  (busy CPUs, a locked session, a launch retried) runs past it. A comparison keeps its verdicts; a
-  check stops with exit 124 and `--resume` runs the rest.
+  (the bench slot, busy CPUs, a locked session, a launch retried) runs past it. A comparison keeps its
+  verdicts; a check stops with exit 124 and `--resume` runs the rest. On a timed `record` and
+  `run -- <command>` it caps the wait for the bench slot (exit 124, `ConcurrentBench`).
+- `strobe status` lists the benches holding or queued for the slot, and a `slot` line when a bench of
+  another user or state folder holds it.
+- `record --bench` prints the bench's warnings (`Attribution`, `ProbeOverhead`, `ObserverCost`,
+  `TimerCoalescing`); `--json` marks each recording `kind: "attribution"`.
 - Every duration needs its unit (`500ms`, `10s`, `2m`, `2h`, `1d`): `--for 2000` exits 2.
 - `--filter`, `--target`, `--params`, `--metrics` and `--noworse` given twice add up; any other flag
   given twice with another value exits 2. `--params n=1,n=3` runs both values.
@@ -369,7 +377,8 @@ export default bench({
   `{ selector, role, text, exact, index }`. Points: `page.click([x, y])`.
 - No DOM or tree (a canvas, a game): image anchors, `page.click({ image: "play.png" })`,
   `until: { image }`, `{ pixels: { changed: true } }`; `AnchorNotFound`, `AnchorAmbiguous`. Pixel
-  reads cost (`ObserverCost` past 8 a run); find images in setup and click points in runs.
+  reads cost (`ObserverCost` past 8 a run); find images in setup and click points in runs. Compare
+  their cost across builds by `driver.pixel_cpu_ms` (ms a run), not the share of a run's time.
   `resetPixels: { region, ignore, tolerance }` on a target or case: runs that start from other pixels
   are `ResetIncomplete`.
 
@@ -394,6 +403,9 @@ export default bench({
 - `--check --batch 10`: up to 10 run cases share a launch (same target, params and `setupKey`); each
   must leave the launch's start state. A setup that differs per case: `setupKey: (ctx) => …` and read
   `ctx.setupKey` in `prepare`, `url` and `setup`. Only `--check`: a verdict needs a fresh launch.
+- Several untimed known-answer runs without a verdict: `--check --runs 5` (5 runs in the one launch,
+  the median and `[lowest … highest run]`) or `--check --repeat 3` (3 fresh cold launches per case,
+  each launch's value listed). Still a check: nothing is decided.
 
 ### Native apps, webviews, terminals
 
@@ -433,7 +445,8 @@ export default bench({
   own; Windows refuses all three (`NoCounter`).
 - A process that ends inside a run: Linux and Windows add the CPU it used (`i EndedCpu`); macOS and
   targets strobe did not launch refuse `cpu.*` (`RunIncomplete`). `· run 2` on a check line: run 1
-  lost a process, so strobe measured the run after the reset.
+  lost a process, so strobe measured the run after the reset. `query <rec> summary` lists per run
+  what ended (`ended` lines: executable, count, CPU).
 
 ## The machine
 

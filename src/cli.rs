@@ -426,6 +426,8 @@ Use
                                   (--video: also film it, timing perturbed: the window's screen, or a headless page's renderer)
                                   (--mobile[=<serial>]: the page in Chrome on an Android phone over adb, its own screen
                                   and touch; timed: no emulator, no adb over Wi-Fi, no hot, saving or low phone)
+                                  (--max-time 5m: a timed recording caps its wait for the bench slot, exit 124
+                                  ConcurrentBench)
   record wir:[<selector>] [--for 10s] [--probes attribution|memory] [--served <dir>]
                                   an open Safari tab (or WKWebView) on a USB-cabled iPhone over Web Inspector: Timeline,
                                   ScriptProfiler, Heap, Network, Safari/WebKit device logs and crashes (read-only)
@@ -441,6 +443,11 @@ Use
         [--pixels | --pixels-only]     (compare base and head at the case's page.snapshot()s, after or instead of timing)
         [--video]                      (film untimed: the check run, or one warmed run per side after the timed pairs)
         [--check --batch N]            (up to N run cases per launch, each held to the launch's start after its reset)
+        [--check --runs N]             (N runs in each case's one launch, no warmup: values their median, [lowest … highest run])
+        [--check --repeat R]           (R fresh cold launches per case, from 2: the median over them and each launch's value;
+                                        not with --batch or --video)
+        [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a comparison keeps
+                                        the pairs it has, anything else stops, exit 124)
         [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over adb instead
                                         of emulated; timed blocks refuse an emulator: --check runs there)
         [--pin auto|none|ccdN|<cpus>]  (auto: the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its fastest cores;
@@ -524,10 +531,10 @@ Use
                                   tty: the program on strobe's own terminal in an isolated home: its grid, the modes it set
   top [--target <pid>] [--once] [--interval 1s] [--limit N] [--sort cpu|gpu|vram|mem]
                                   live per-core load by CCD, processes with CPU, GPU, VRAM
-  run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] -- <command> [args…]
+  run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] [--max-time 5m] -- <command> [args…]
                                   run your own harness as a bench block runs: the bench slot, the fastest power plan,
                                   pinned to the target's CPUs with other processes kept off them (--pin as for bench);
-                                  it prints its own numbers
+                                  it prints its own numbers (--max-time caps the wait for the bench slot, not the command)
   run --base \"<command>\" --head \"<command>\" [--aa] [--check] [--primary cpu.work] [--metrics metric.<name>,…] [--pairs auto|N]
       [--runs 5] [--noworse 2%] [--pin …] [--reserve-cpus auto|on|off] [--power high|keep] [--require-verdict]
                                   a paired A/B of two commands, as a bench (verdicts, report, PR block): each run starts the
@@ -537,7 +544,7 @@ Use
 
 Setup
   up [--skip deep,daemon,mcp,calibrate]  install, download the engine, deep mode (one UAC prompt), start the daemon,
-                                  register MCP and the skill
+                                  register MCP and the skill (--check: only what it finds, cpu to bun; nothing changes)
   up --mobile[=<serial>] --channel canary|dev|beta
                                   give strobe that Chrome channel on the phone, once: --mobile runs may force-stop it and
                                   clear the origins they load (strobe never drives a phone's own Chrome)
