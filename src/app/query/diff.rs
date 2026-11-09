@@ -93,7 +93,10 @@ fn run_with(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize, plan_runs: Op
             let made = |i: usize| -> Result<Side> {
                 let r = if i == 0 { a } else { b };
                 match cut {
-                    Some(c) => Ok(Side { stacks: c[i].0, runs: (c[i].1 != super::Scope::Host).then(|| r.runs().or(plan_runs)).flatten(), untimed: false, whole: c[i].1 == super::Scope::Host }),
+                    Some(c) => {
+                        let whole = c[i].1.per_recording();
+                        Ok(Side { stacks: c[i].0, runs: whole.is_none().then(|| r.runs().or(plan_runs)).flatten(), untimed: false, whole })
+                    }
                     None => side(r, kind, plan_runs, over(i)),
                 }
             };
@@ -230,8 +233,9 @@ struct Side<'a> {
     stacks: &'a Stacks,
     runs: Option<u64>,
     untimed: bool,
-    /// A script target's whole host process (`--source host`), which no run count divides.
-    whole: bool,
+    /// A script target's whole host process (`--source host`) or one part of its life (`--source
+    /// startup|setup`), which no run count divides: what it reads.
+    whole: Option<&'static str>,
 }
 
 /// A side's stacks; `over` stands in for its native samples (one thread's or one phase's).
@@ -239,18 +243,18 @@ fn side<'a>(rec: &'a Rec, kind: Kind, plan_runs: Option<u64>, over: Option<&'a N
     let missing = || Error::usage(format!("{} has no native samples; record with --probes deep", rec.id));
     let runs = rec.runs().or(plan_runs);
     match kind {
-        Kind::Cpu => Ok(Side { stacks: rec.cpu()?, runs, untimed: false, whole: false }),
+        Kind::Cpu => Ok(Side { stacks: rec.cpu()?, runs, untimed: false, whole: None }),
         Kind::Native => {
             let n = match over {
                 Some(n) => n,
                 None => rec.native()?.ok_or_else(missing)?,
             };
-            Ok(Side { stacks: &n.stacks, runs: (!n.untimed).then_some(runs).flatten(), untimed: n.untimed, whole: false })
+            Ok(Side { stacks: &n.stacks, runs: (!n.untimed).then_some(runs).flatten(), untimed: n.untimed, whole: None })
         }
-        Kind::Alloc => Ok(Side { stacks: rec.alloc()?, runs, untimed: false, whole: false }),
+        Kind::Alloc => Ok(Side { stacks: rec.alloc()?, runs, untimed: false, whole: None }),
         Kind::Layout => {
             let f = super::forced(rec)?;
-            Ok(Side { stacks: &f.stacks, runs: (f.runs > 0).then_some(f.runs as u64), untimed: false, whole: false })
+            Ok(Side { stacks: &f.stacks, runs: (f.runs > 0).then_some(f.runs as u64), untimed: false, whole: None })
         }
     }
 }
@@ -357,8 +361,8 @@ pub struct Weighted {
     runs: [f64; 2],
     per_run: bool,
     untimed: bool,
-    /// Script targets' whole host processes (`--source host`).
-    whole: bool,
+    /// What script targets' per-recording scope reads (`--source host|startup|setup`).
+    whole: Option<&'static str>,
     /// A thread or phase the native samples were narrowed to (said in the header).
     selection: String,
 }
@@ -411,7 +415,7 @@ fn weighted(sides: [Side; 2], kind: Kind, by: &str) -> Weighted {
         runs,
         per_run,
         untimed: sides.iter().any(|s| s.untimed),
-        whole: sides.iter().any(|s| s.whole),
+        whole: sides.iter().find_map(|s| s.whole),
         selection: String::new(),
     }
 }
@@ -460,8 +464,8 @@ impl Weighted {
         let runs = |s: usize| format!("{:.0}", self.runs[s]);
         let per = if self.untimed {
             "per recording: these native samples carry no times and cover the whole capture (launch, warmup runs and resets included), so no run count divides them".to_string()
-        } else if self.whole {
-            format!("per recording: each side's {}, which no run count divides", super::WHOLE_HOST_TEXT.to_lowercase())
+        } else if let Some(w) = self.whole {
+            format!("per recording: each side's {w}, which no run count divides")
         } else if self.per_run {
             format!("per run ({} and {} measured runs)", runs(0), runs(1))
         } else {
@@ -533,7 +537,7 @@ impl Weighted {
             Kind::Layout => "traced: every forced layout and recalc in the measured runs counted, one launch per side (no interval across launches)\n",
         };
         let json = json!({
-            "view": k.view(), "what": k.what(), "by": self.by, "unit": k.unit(), "sampled": k.sampled(), "per_run": self.per_run, "untimed": self.untimed, "whole_host": self.whole, "selection": self.selection,
+            "view": k.view(), "what": k.what(), "by": self.by, "unit": k.unit(), "sampled": k.sampled(), "per_run": self.per_run, "untimed": self.untimed, "whole_host": self.whole.is_some() && self.whole == super::Scope::Host.per_recording(), "per_recording": self.whole, "selection": self.selection,
             "base": { "recording": a.id, "runs": self.runs[0], "samples": self.samples[0], "total": self.total[0] },
             "head": { "recording": b.id, "runs": self.runs[1], "samples": self.samples[1], "total": self.total[1] },
             "total_delta": self.total[1] - self.total[0], "rows_total": self.rows.len(), "rows": rows_json,

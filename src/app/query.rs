@@ -2,7 +2,7 @@
 
 mod actions;
 mod diff;
-mod http;
+pub(super) mod http;
 mod inputs;
 mod rec;
 pub(crate) use rec::windows_sql;
@@ -99,7 +99,6 @@ pub fn run(args: &Args) -> Result<Output> {
                 }
                 // A view of two recordings answers for the experiment: each series' base..head.
                 if diff::VIEWS.contains(&other) {
-                    one_side_source(args)?;
                     return diff::experiment(&result, other, args, top);
                 }
                 for s in result["series"].as_array().into_iter().flatten() {
@@ -116,7 +115,6 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     // `a..b`: one view of two recordings, side by side and per run.
     if let Some((a, b)) = handle.split_once("..") {
-        one_side_source(args)?;
         let (a, b) = (Rec::resolve(a)?, Rec::resolve(b)?);
         let mut out = diff::run(&a, &b, view, args, top)?;
         // A full trace costs the page main-thread time (SPEC §8.1): a lean and a full-trace recording's
@@ -239,11 +237,7 @@ pub fn run(args: &Args) -> Result<Output> {
             if view == "alloc" {
                 alloc(&rec, by, top)
             } else if let Some(scope) = Scope::of(&rec, args)? {
-                let mut out = hotspots_scoped(&rec, by, top, sort, scope)?;
-                if scope == Scope::Host {
-                    by_lifecycle(&rec, &mut out);
-                }
-                Ok(out)
+                hotspots_scoped(&rec, by, top, sort, scope)
             } else if args.has("native") || pick.any() {
                 native_hotspots_of(&rec, by, top, pick, sort)
             } else {
@@ -285,17 +279,6 @@ pub fn run(args: &Args) -> Result<Output> {
         other => {
             Err(Error::usage(format!("unknown view {other}: summary frames inputs threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network insights actions sql")))
         }
-    }
-}
-
-/// `--source startup|setup` reads one recording's view: a..b compares the measured runs per run, or
-/// `--source host` per recording.
-fn one_side_source(args: &Args) -> Result<()> {
-    match args.get("source") {
-        Some(s @ ("startup" | "setup")) => {
-            Err(Error::usage(format!("--source {s} reads one script recording (strobe query <rec> hotspots --source {s}); a..b compares --source host or the measured runs")))
-        }
-        _ => Ok(()),
     }
 }
 
@@ -1771,6 +1754,17 @@ impl<'a> Scope<'a> {
         }
     }
 
+    /// What a scope that no run count divides reads, for a..b's header (`each side's …`): the whole
+    /// host process, or one part of its life; None for the measured runs or a phase of them.
+    fn per_recording(self) -> Option<&'static str> {
+        match self {
+            Scope::Host => Some("whole host process (startup, setup, warmup, runs, resets)"),
+            Scope::Startup => Some("host's startup alone"),
+            Scope::Setup => Some("bench file's setup alone"),
+            Scope::Measured | Scope::Phase(_) => None,
+        }
+    }
+
     /// The scope as `--json` says it (`scope`) and the header's words for it. A script recording from
     /// before strobe cut its profile to the runs holds the whole host in its one profile.
     fn named(self, rec: &Rec) -> (String, String) {
@@ -1892,6 +1886,9 @@ pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope
     }
     if named.is_some() && !runs {
         host_trailer(rec, scope, stacks, &mut out);
+    }
+    if named.is_some() && scope == Scope::Host {
+        by_lifecycle(rec, &mut out);
     }
     out.json["interval_us"] = json!(sampling.map(|s| s.median_us));
     out.json["sampling"] = json!(sampling);
