@@ -7648,7 +7648,7 @@ what was built but not yet run on a device is in §21.
   every wait, and reaches `record --bench`; `cpu.<role>` refusals say which cause; the adapter a page
   or recording drew on (`screen.gpu`, the screen line, `query gpu`) and `CrossAdapterScanout` for
   pages (5.5, 5.6, 9.1, 9.6, 10.1, 10.2, 11.1).
-- 2026-11-09 · 758dc27 · `cpu.work`'s run edges: known processes read at `t0`/`t1`, cycles to ms at
+- 2026-11-09 · 758dc27 5ed6744 · `cpu.work`'s run edges: known processes read once each at `t0`/`t1`, cycles to ms at
   the paired clocks' rate (7.4, 9.6).
 - 2026-11-09 · 5e1b949 ba68125 · headed input on Windows: `Chrome_*` windows take physical points;
   pixel regions in the monitor's DIPs; the page map parks the cursor beside its probes; web view
