@@ -208,11 +208,20 @@ mod imp {
             (n, ms, cpu + self.grabber.borrow().as_ref().map_or(0.0, Grabber::take_cpu_ms))
         }
 
-        /// Closes the window's capture (after setup, between a batch's cases): a capture setup opened
-        /// would otherwise copy every frame through the runs. A run that reads pixels opens it again.
+        /// Closes the window's capture (after a launch timed to pixels).
         pub fn close_pixels(&self) {
             if let Some(g) = self.grabber.borrow_mut().take() {
                 self.pixels.bank_cpu(g.take_cpu_ms());
+            }
+        }
+
+        /// Before a case's runs (after setup, between a batch's cases): the capture setup or the case
+        /// before read pixels through stays open for the runs, so no run pays for opening it; one nothing
+        /// read since is closed, so it follows no frames through runs that read none (a run that does
+        /// opens it again).
+        pub fn ready_pixels(&self) {
+            if !self.pixels.take_used() {
+                self.close_pixels();
             }
         }
 

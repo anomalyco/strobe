@@ -1075,9 +1075,15 @@ impl Driver {
         (n, ms, cpu + self.grabber.borrow().as_ref().map_or(0.0, crate::host::capture::Grabber::take_cpu_ms))
     }
 
-    /// Closes the browser window's capture (after setup, between a batch's cases), so none copies frames
-    /// through runs that read no pixels.
-    pub fn close_pixels(&self) {
+    /// Before a case's runs (after setup, between a batch's cases): when setup (or the case before) read
+    /// pixels and the runs read them from outside (`timed`: a timing block's headed page), the browser
+    /// window's capture is opened now, so no run pays for opening it; otherwise it is closed, so none
+    /// follows frames through runs that read no pixels.
+    pub fn ready_pixels(&self, timed: bool) {
+        if self.images.take_used() && timed && !self.headless && !self.phone {
+            let _ = WindowShots { d: self }.with(|_| Ok(()));
+            return;
+        }
         if let Some(g) = self.grabber.borrow_mut().take() {
             self.images.bank_cpu(g.take_cpu_ms());
         }

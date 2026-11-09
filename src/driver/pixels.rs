@@ -288,6 +288,8 @@ pub(crate) struct Pixels {
     templates: RefCell<HashMap<(String, u64), Rc<Template>>>,
     /// Captures since the last `take_reads`, their wall time and strobe's CPU in them (ms).
     reads: Cell<(u64, f64, f64)>,
+    /// Whether any pixel work ran since the last `take_used`.
+    used: Cell<bool>,
 }
 
 impl Pixels {
@@ -317,11 +319,18 @@ impl Pixels {
     /// Runs pixel work that is no read of its own (a template's first decode): its wall time and CPU
     /// count with the reads.
     fn charged<T>(&self, f: impl FnOnce() -> T) -> T {
+        self.used.set(true);
         let (at, cpu) = (Instant::now(), crate::probe::video::ThreadCpu::start());
         let r = f();
         let (n, ms, c) = self.reads.get();
         self.reads.set((n, ms + at.elapsed().as_secs_f64() * 1e3, c + cpu.ms().unwrap_or(0.0)));
         r
+    }
+
+    /// Whether pixels were read since the last call (setup's reads, a case's runs): the runs after it
+    /// are likely to read them too, so a capture is opened or kept for them before they start.
+    pub fn take_used(&self) -> bool {
+        self.used.replace(false)
     }
 
     /// CPU (ms) of a window capture strobe closes or replaces (its open and frame events), kept for the

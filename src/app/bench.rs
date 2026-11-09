@@ -7381,9 +7381,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let start = start_screen.clone();
                 starts.case(s, x, batch.then_some(base));
                 pixel_starts.case(s, x, batch.then_some(base))?;
-                // A window capture setup (or the case before) opened would copy frames through these runs;
-                // the viewport a timed pixel read maps is read now, outside them.
-                driver.close_pixels();
+                // The window capture timed pixel reads use, opened now when setup (or the case before) read
+                // pixels, else closed; the viewport a timed pixel read maps is read now, outside the runs.
+                driver.ready_pixels(!x.untimed && x.pixels.is_none());
                 if !headless && on_phone.is_none() {
                     let _ = driver.prime_viewport();
                 }

@@ -584,9 +584,9 @@ fn runs(
             let start = start_screen.clone();
             starts.case(s, x, batch.then_some(base));
             pixel_starts.case(s, x, batch.then_some(base))?;
-            // A capture setup (or the case before) opened would copy every frame through these runs.
+            // The capture setup (or the case before) read through, kept for these runs; else closed.
             if let Some(se) = drive.session.get() {
-                se.close_pixels();
+                se.ready_pixels();
             }
             if batch {
                 case_marks.push((format!("{mark}:start"), host::now_ns()));

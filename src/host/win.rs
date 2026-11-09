@@ -1183,9 +1183,76 @@ pub fn maximize_window(hwnd: isize, work: [f64; 4]) -> crate::model::Result<()> 
     set_window_frame(hwnd, [work[0] - l, work[1] - t, work[2] + l + r, work[3] + t + b])
 }
 
+/// What says a window's place, state and display are unchanged, read per-monitor DPI aware with calls
+/// that stay inside user32 (no DWM or display driver round trip): its frame and client size, minimized,
+/// shown and zoomed, and its display (handle, rectangle and DPI). Equal keys: `window_placement`,
+/// `client_in_visual` and the display's refresh rate read before still hold.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowKey {
+    frame: [i32; 4],
+    client: (i32, i32),
+    iconic: bool,
+    visible: bool,
+    zoomed: bool,
+    monitor: isize,
+    monitor_rect: [i32; 4],
+    dpi: u32,
+}
+
+impl WindowKey {
+    /// Minimized or hidden: nothing of it is on the screen.
+    pub fn unseen(&self) -> bool {
+        self.iconic || !self.visible
+    }
+
+    /// The refresh rate (Hz) of the display the window is on (most of it), as `refresh_at` reads it.
+    pub fn refresh(&self) -> Option<u32> {
+        refresh_of(self.monitor as windows_sys::Win32::Graphics::Gdi::HMONITOR)
+    }
+}
+
+/// A window's `WindowKey` now; None once it no longer exists.
+pub fn window_key(hwnd: isize) -> Option<WindowKey> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{MONITORINFO, MonitorFromWindow};
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, IsZoomed};
+    let h = hwnd as windows_sys::Win32::Foundation::HWND;
+    per_monitor(|| unsafe {
+        if IsWindow(h) == 0 {
+            return None;
+        }
+        let (mut r, mut c): (RECT, RECT) = (zeroed(), zeroed());
+        GetWindowRect(h, &mut r);
+        GetClientRect(h, &mut c);
+        let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(mon, &mut info);
+        let (mut dx, mut dy) = (0u32, 0u32);
+        GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        let m = info.rcMonitor;
+        Some(WindowKey {
+            frame: [r.left, r.top, r.right, r.bottom],
+            client: (c.right - c.left, c.bottom - c.top),
+            iconic: IsIconic(h) != 0,
+            visible: IsWindowVisible(h) != 0,
+            zoomed: IsZoomed(h) != 0,
+            monitor: mon as isize,
+            monitor_rect: [m.left, m.top, m.right, m.bottom],
+            dpi: dx,
+        })
+    })
+}
+
 pub fn refresh_at(x: i32, y: i32) -> Option<u32> {
+    refresh_of(unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// The display mode's refresh rate (Hz) of a monitor (`EnumDisplaySettingsW`, which asks the display
+/// driver: milliseconds on some machines).
+fn refresh_of(mon: windows_sys::Win32::Graphics::Gdi::HMONITOR) -> Option<u32> {
     unsafe {
-        let mon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
         let mut info: MONITORINFOEXW = zeroed();
         info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
         if GetMonitorInfoW(mon, &mut info as *mut _ as *mut _) == 0 {
