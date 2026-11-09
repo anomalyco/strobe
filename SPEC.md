@@ -3673,11 +3673,14 @@ experiment's `script.log`.
     quicker trip).
     Node's profile counts in hrtime (V8's TimeTicks: QPC, `CLOCK_MONOTONIC`, mach); Bun 1.4's in wall µs
     from JSC's `approximateWallTime` at the host's exit (shifted by the wall clock's lead over the
-    monotonic one then: 0.28 ms on adais after 11 s), each delta truncated to whole µs (0.5 µs a
-    sample on vps: 0.8 ms early after 20 s; 0.37 µs on adais, where the gaps' fractions are not
-    even); strobe adds both back, the truncation as its `endTime` (the last sample's time, whole)
-    says the gaps lost in all, spread over the samples (0.5 µs each without it). A fixed 0.5 µs
-    put the exit's spin 1.1 ms late in a probed 10 s block on adais (`ClockUnsynced`).
+    monotonic one then: 0.28 ms on adais after 11 s), as f64 epoch µs (about 1.8e15, where an f64
+    steps 0.25 µs), each delta truncated to whole µs: a gap loses 0, 0.25, 0.5 or 0.75 µs, 0.375 on
+    average. strobe adds both back, the truncation as its `endTime` (the last sample's time, whole)
+    says the gaps lost in all, spread over the samples (0.5 µs each without it). It subtracts the
+    lead from `startTime` first and sums the gaps from 0, adding the loss once per sample: a loss of
+    about 0.375 µs added onto an epoch time rounds to a 0.25 µs step every time (0.25 or 0.5), which
+    put the samples 0.125 µs a sample off (1.5 ms after 12,000 samples, 4.5 ms after 38,800), late
+    or early by whether the loss was just over or under 0.375.
     `ClockUnsynced`: a reading's round trip over 2 ms, the monotonic offset moving over 1 ms between
     start and exit, no tight tick, a spin (its own ends on the host's monotonic clock, placed by the
     offset) outside strobe's request around it by over 1 ms, or a spin's `strobeClockMark` samples
@@ -3689,16 +3692,10 @@ experiment's `script.log`.
     the stack); `meta.clock.mark_outliers` counts them, `mark_worst_ms` the farthest and `mark_fit_ms`
     the shifts each spin's samples would fit. Where outliers are not 0, `mark_worst_ms` is also how far
     a sample near a run's edge may be from where the profile puts it: per-run clipping, `--phase` and
-    the untimed stretches are that uncertain at their edges. Bun's timeline, as its deltas give it,
-    drifts against its own `performance.now()` while it samples densely: Bun alone, 16 spins of 4 ms
-    between 750 ms busy spins, its samples of the last spin 3 ms late after 27,600 samples (adais) and
-    4.5 ms after 38,800 (vps), growing with each spin from 0 at the first, none over 16 idle seconds.
-    So a probed Bun block (12,000 to 17,000 samples) is refused at times (vps 1 of 3: its exit spin
-    1.9 ms off, the kept ones' exit spins fit moved back 0.4 and 1.8 ms with one stray; adais, a game
-    running, 1 of 1: 1.4 ms late), while a short one is kept (the phases fixture's Bun exit spin
-    within 0.55 ms); a kept one is within 1 ms at both spins, the drift between them growing with
-    the samples. `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms
-    before the last measured run's end, or the exit's reading failing.
+    the untimed stretches are that uncertain at their edges. Bun alone, 16 spins of 4 ms between
+    750 ms busy spins (27,600 samples): every spin's samples inside it, the last as the first.
+    `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms before the last
+    measured run's end, or the exit's reading failing.
   - Weights, as Firefox's (§8.3): a sample weighs its gap, cut to the run, its untimed stretches out;
     a gap over `capUs` weighs `overUs` (the runtime took no sample then). Node: both 50 ms. Bun, which
     takes no sample while its VM is idle: from the median gap m inside `strobeClockMark`'s spins (a

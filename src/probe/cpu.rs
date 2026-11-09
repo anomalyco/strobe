@@ -100,9 +100,10 @@ impl Sampling {
 /// µs: each sample's monotonic time made wall time as the host exits and writes it (JSC's
 /// `approximateWallTime`), so offset by how far the wall clock led the monotonic one then, and each gap
 /// truncated to whole µs while the time it is taken from moves on exactly (Bun 1.4,
-/// `BunCPUProfiler.cpp`): 0.5 µs a sample on vps, which put a run's samples 0.8 ms early after 20 s
-/// there, 0.37 µs on adais; its `endTime`, the last sample's time untruncated, says how much in all. Bun's sampler takes no sample while the VM runs no JavaScript: a 1 s sleep is one 1 s
-/// gap, where V8 samples `(idle)` every interval.
+/// `BunCPUProfiler.cpp`). Those times are f64 epoch µs (about 1.8e15, an f64 step of 0.25 µs), so a
+/// gap loses 0, 0.25, 0.5 or 0.75 µs, 0.375 on average; its `endTime`, the last sample's time
+/// untruncated, says how much in all. Bun's sampler takes no sample while the VM runs no JavaScript:
+/// a 1 s sleep is one 1 s gap, where V8 samples `(idle)` every interval.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
@@ -219,7 +220,7 @@ impl Sync {
             .fix("run it again on a machine with CPUs to spare")
             .into());
         }
-        let offset_ns = (best.0 as f64 + best.1 as f64) / 2.0 - best.2 * 1e3;
+        let offset_ns = best.0 as f64 + (best.1 - best.0) as f64 / 2.0 - best.2 * 1e3;
         let spin = mark.2["spin_mono_us"].as_array().and_then(|s| Some((s.first()?.as_f64()? * 1e3 + offset_ns, s.get(1)?.as_f64()? * 1e3 + offset_ns)));
         Ok(Sync { offset_ns, rtt_ns: best.1 - best.0, wall_lead_us: wall - at, mark: (mark.0, mark.1), spin })
     }
@@ -270,8 +271,9 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     let deltas: Vec<f64> = p["timeDeltas"].as_array().into_iter().flatten().map(|d| d.as_f64().unwrap_or(0.0)).collect();
     let samples = p["samples"].as_array().map_or(0, Vec::len);
     let start = p["startTime"].as_f64().ok_or_else(|| Error::msg("the script host's CPU profile has no startTime"))?;
-    // Bun's `endTime` is its last sample's time, not truncated: what the truncated gaps lost in all, spread
-    // over the samples (0.37 µs a sample on adais, where gaps are not spread evenly over a µs).
+    // Bun's times are f64 epoch µs on a 0.25 µs grid, so each gap, truncated to whole µs, lost 0, 0.25,
+    // 0.5 or 0.75 µs (0.375 on average); its `endTime`, the last sample's time untruncated, says how much
+    // in all, spread over the samples.
     let truncated = rt == Runtime::Bun && deltas.iter().all(|d| d.fract() == 0.0);
     let lost = match p["endTime"].as_f64() {
         Some(end) if truncated && samples > 0 => Some((end - start - deltas.iter().take(samples).map(|d| d.max(0.0)).sum::<f64>()) / samples as f64).filter(|l| (0.0..=1.0).contains(l)).unwrap_or(0.5),
@@ -284,16 +286,20 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     let lead = if rt == Runtime::Bun { exit.wall_lead_us } else { 0.0 };
     let anchor = if ready.rtt_ns < exit.rtt_ns { ready } else { exit };
     let shift = std::env::var("STROBE_DEV_PROFILE_SHIFT_US").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let base = anchor.offset_ns / 1e3 - lead + shift;
-    let mut t = start;
+    // Bun's times are wall-clock epoch µs (about 1.8e15, where an f64 steps 0.25 µs): `start - lead`
+    // first, the gaps summed from 0 and the loss added once per sample, never small µs added onto an
+    // epoch time, which rounds each add to a 0.25 µs step (+0.125 µs a sample with a loss just over
+    // 0.375: 1.5 ms after 12,000 samples).
+    let origin_us = (start - lead) + anchor.offset_ns / 1e3 + shift;
+    let mut raw_us = 0.0;
     let times_us: Vec<f64> = (0..samples)
         .map(|i| {
-            t += deltas.get(i).copied().unwrap_or(0.0).max(0.0) + lost;
-            t + base
+            raw_us += deltas.get(i).copied().unwrap_or(0.0).max(0.0);
+            origin_us + raw_us + (i + 1) as f64 * lost
         })
         .collect();
     // Bun read its start as wall time when the profiler started, with the wall clock's lead then.
-    let start_us = start - if rt == Runtime::Bun { ready.wall_lead_us } else { 0.0 } + ready.offset_ns / 1e3;
+    let start_us = (start - if rt == Runtime::Bun { ready.wall_lead_us } else { 0.0 }) + ready.offset_ns / 1e3 + shift;
     let gaps: Vec<f64> = times_us.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0 && *g <= MAX_GAP_US).collect();
     let marked = under(p, MARK);
     // Bun's interval, from the gaps inside `strobeClockMark`'s spins, where the VM is busy throughout:
