@@ -123,10 +123,13 @@ pub struct Capture {
 
 impl Capture {
     /// Starts tracking presents in this process (needs admin or Performance Log Users). Buffers
-    /// flush every 10 ms, so a wait on the next frame hears of it within a frame or two.
+    /// flush every 10 ms, so a wait on the next frame hears of it within a frame or two. The
+    /// providers' manifests are read first, once per process (`Schema::read_manifests`).
     pub fn start() -> Result<Capture> {
         etw::reap();
         let cfg = etw::Config { kind: "presents", kernel: 0, providers: providers(), buffer_kb: 64, buffers: (32, 256), flush_ms: 10 };
+        // Before the session: its consumer then never waits on TDH's first read of a manifest.
+        Schema::read_manifests(&cfg.providers);
         let t0 = crate::host::now_ns();
         let armed = Arc::new(AtomicU64::new(0));
         let tracker_armed = armed.clone();
