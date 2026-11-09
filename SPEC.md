@@ -2409,10 +2409,15 @@ to the lateness allowed below of strobe's own lag never counts as the server's.
   a `script("./server.ts")` harness whose `start(tokenHash)` serves `/health` to the bearer token
   with that SHA-256 only (the bench file makes the token in `setup` and passes the hash, so neither
   the harness's heap nor an action's arguments hold it), `ctx.httpProbe({ url, authorization,
-  cadenceMs: 20, expect })`, and a case holding the server's thread 500 ms with `http.latency.p95`
-  as its primary beside `cpu.main` and `cpu.main.busy`: one run is about 25 probes, enough for a
-  p95 in a `--check`. `scripts/dev/http-probe-example.bench.ts` is that file, run against
-  `http-probe-server.ts`; its snippets type-check against the SDK (`tsc` with the SDK's types).
+  cadenceMs: 40, connection: "keep-alive", expect })`, and a case holding the server's thread 900 ms
+  with `http.latency.p95` as its primary beside `cpu.main` and `cpu.main.busy`: one run is about 22
+  probes, enough for a p95 in a `--check` (at 20 ms the probe cost vps 1.06% of a core, over its
+  budget; at 40 ms with kept connections 0.34–0.53%). `scripts/dev/http-probe-example.bench.ts` is
+  that file, run against `http-probe-server.ts`; the snippets type-check against the SDK (`tsc`
+  with the SDK's types and Bun's). vps (2 vCPU, other builds running): `--check` p95 823 ms,
+  `cpu.main` 793 ms, `cpu.main.busy` 86.8%, no timeout; `--blocks 1` p95 844 ms, `cpu.main`
+  883 ms, `cpu.main.busy` 97.8%; `query <rec> http` of `record --bench`: one cohort a run of 22–24
+  probes, 511 ms down to 51 ms (at 20 ms and 500 ms).
 
 ## 9. Experiments (`bench`)
 

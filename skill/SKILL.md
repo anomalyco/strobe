@@ -140,13 +140,13 @@ export default bench({
     const hash = new Bun.CryptoHasher("sha256").update(`Bearer ${token}`).digest("hex")
     const url = await ctx.call<string>("start", hash)
     const expect = { jsonPath: { path: "$.status", equals: "ok" } }
-    await ctx.httpProbe({ url, authorization: `Bearer ${token}`, cadenceMs: 20, expect })
+    await ctx.httpProbe({ url, authorization: `Bearer ${token}`, cadenceMs: 40, expect })
   },
   cases: {
     "slow handler": {
-      primary: "http.latency.p95", // one 500 ms run: ~25 probes, enough for a p95 in a --check
+      primary: "http.latency.p95", // one 900 ms run: ~22 probes, enough for a p95 in a --check
       metrics: ["cpu.main", "cpu.main.busy", "http.timeouts"],
-      run: (ctx) => ctx.call("stall", 500),
+      run: (ctx) => ctx.call("stall", 900),
     },
   },
 })

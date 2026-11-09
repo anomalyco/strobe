@@ -71,7 +71,9 @@ export default bench({
     await ctx.httpProbe({
       url,
       authorization: `Bearer ${token}`,
-      cadenceMs: 20,
+      // A probe every 40 ms: about 22 in one 900 ms run, enough for a p95 in a --check.
+      cadenceMs: 40,
+      connection: "keep-alive",
       expect: { jsonPath: { path: "$.status", equals: "ok" } },
     })
   },
@@ -79,14 +81,14 @@ export default bench({
     "slow handler": {
       primary: "http.latency.p95",
       metrics: ["cpu.main", "cpu.main.busy", "http.timeouts"],
-      run: (ctx) => ctx.call("stall", 500),
+      run: (ctx) => ctx.call("stall", 900),
     },
   },
 })
 ```
 
 ```sh
-bunx strobe bench perf/server.bench.ts --head . --check     # http.latency.p95 ≈ 500 ms: the held cohort
+bunx strobe bench perf/server.bench.ts --head . --check     # http.latency.p95 ≈ 850 ms: the held cohort
 bunx strobe record --bench "perf/server.bench.ts#slow handler" --head .   # then: strobe query <rec> http
 ```
 
