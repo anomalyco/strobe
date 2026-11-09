@@ -375,13 +375,18 @@ pub fn win_error(rc: u32) -> String {
     }
 }
 
-/// Field layouts of manifest events, from TDH once per (provider, id, version).
+/// Field layouts of manifest events, from TDH once per (provider, id, version) per process: read from
+/// the providers' manifests before a session (`Schema::read_manifests`), else from an event's record.
+/// A session's consumer takes what earlier sessions learned (`Schema::shared`) and gives it back when
+/// it ends (`Schema::keep`), so a session's first events cost a lookup, not a TDH call each.
 #[derive(Default)]
 pub struct Schema {
     cache: HashMap<(u128, u16, u8), Option<Vec<Prop>>>,
     /// (provider, id, version, call site, 64-bit) → field offsets, for fixed layouts.
     fixed: HashMap<(u128, u16, u8, usize, bool), Vec<Field>>,
 }
+
+static SHARED: std::sync::Mutex<Option<Schema>> = std::sync::Mutex::new(None);
 
 struct Prop {
     name: String,
@@ -406,56 +411,78 @@ fn key(g: &GUID) -> u128 {
 }
 
 impl Schema {
+    /// What this process's sessions learned so far (taken: a session running beside it starts empty).
+    pub fn shared() -> Schema {
+        SHARED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+    }
+
+    /// Gives what this session learned back to the process's sessions.
+    pub fn keep(self) {
+        let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        match shared.as_mut() {
+            Some(s) => {
+                s.cache.extend(self.cache);
+                s.fixed.extend(self.fixed);
+            }
+            None => *shared = Some(self),
+        }
+    }
+
+    /// Reads the layouts of the events `providers` enable from their manifests into the process's
+    /// layouts, once per provider, before a session starts: TDH's first read of a provider's manifest
+    /// costs hundreds of milliseconds of CPU (DxgKrnl's, 85 to 290 ms on an i7-12800H), which the
+    /// session's consumer would otherwise spend on its first event, inside the runs it measures.
+    /// Events a manifest does not list are still read from their record (`layout`).
+    pub fn read_manifests(providers: &[Provider]) {
+        static READ: std::sync::Mutex<Vec<u128>> = std::sync::Mutex::new(Vec::new());
+        let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+        let todo: Vec<&Provider> = providers.iter().filter(|p| !read.contains(&key(&p.guid))).collect();
+        if todo.is_empty() {
+            return;
+        }
+        let mut s = Schema::shared();
+        for pr in todo {
+            read.push(key(&pr.guid));
+            unsafe {
+                let mut size = 0u32;
+                TdhEnumerateManifestProviderEvents(&pr.guid, std::ptr::null_mut(), &mut size);
+                if size == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+                let info = buf.as_mut_ptr() as *mut PROVIDER_EVENT_INFO;
+                if TdhEnumerateManifestProviderEvents(&pr.guid, info, &mut size) != 0 {
+                    continue;
+                }
+                let descs = std::ptr::addr_of!((*info).EventDescriptorsArray) as *const EVENT_DESCRIPTOR;
+                for i in 0..(*info).NumberOfEvents as usize {
+                    let d = &*descs.add(i);
+                    if !pr.ids.is_empty() && !pr.ids.contains(&d.Id) {
+                        continue;
+                    }
+                    let k = (key(&pr.guid), d.Id, d.Version);
+                    if s.cache.contains_key(&k) {
+                        continue;
+                    }
+                    let props = read_tei(|tei, size| TdhGetManifestEventInformation(&pr.guid, d, tei, size));
+                    if props.is_some() {
+                        s.cache.insert(k, props);
+                    }
+                }
+            }
+        }
+        s.keep();
+    }
+
     fn layout(&mut self, e: &EVENT_RECORD) -> Option<&Vec<Prop>> {
         let h = &e.EventHeader;
         let k = (key(&h.ProviderId), h.EventDescriptor.Id, h.EventDescriptor.Version);
-        self.cache
-            .entry(k)
-            .or_insert_with(|| unsafe {
-                let mut size = 0u32;
-                TdhGetEventInformation(e, 0, std::ptr::null(), std::ptr::null_mut(), &mut size);
-                if size == 0 {
-                    return None;
-                }
-                let mut buf = vec![0u64; (size as usize).div_ceil(8)];
-                let tei = buf.as_mut_ptr() as *mut TRACE_EVENT_INFO;
-                if TdhGetEventInformation(e, 0, std::ptr::null(), tei, &mut size) != 0 {
-                    return None;
-                }
-                let base = tei as *const u8;
-                let arr = std::ptr::addr_of!((*tei).EventPropertyInfoArray) as *const EVENT_PROPERTY_INFO;
-                let n = (*tei).PropertyCount as usize;
-                let mut out = Vec::with_capacity(n);
-                for i in 0..n {
-                    let p = &*arr.add(i);
-                    let at = base.add(p.NameOffset as usize) as *const u16;
-                    let mut len = 0;
-                    while *at.add(len) != 0 {
-                        len += 1;
-                    }
-                    let name = String::from_utf16_lossy(std::slice::from_raw_parts(at, len));
-                    let st = p.Flags & PropertyStruct != 0;
-                    out.push(Prop {
-                        name,
-                        flags: p.Flags,
-                        in_type: if st { 0 } else { p.Anonymous1.nonStructType.InType },
-                        length: p.Anonymous3.length,
-                        count: p.Anonymous2.count,
-                        members: if st { (p.Anonymous1.structType.StructStartIndex, p.Anonymous1.structType.NumOfStructMembers) } else { (0, 0) },
-                    });
-                }
-                // Only top-level properties are walked; struct members follow them.
-                out.truncate(n.max((*tei).TopLevelPropertyCount as usize));
-                let top = (*tei).TopLevelPropertyCount as usize;
-                out.iter_mut().skip(top).for_each(|p| p.name.insert(0, '\u{1}'));
-                Some(out)
-            })
-            .as_ref()
+        self.cache.entry(k).or_insert_with(|| read_tei(|tei, size| unsafe { TdhGetEventInformation(e, 0, std::ptr::null(), tei, size) })).as_ref()
     }
 
     /// Finds `names` in the event's payload. Missing names (another version) stay `found: false`.
-    /// Where every field up to the last one asked for has a fixed size, the offsets are cached per
-    /// event and call site, so most events cost a hash lookup.
+    /// Where every field found has a fixed offset and size and fits the payload, the result is cached
+    /// per event and call site (names the layout lacks included), so most events cost a hash lookup.
     pub fn fields<const N: usize>(&mut self, e: &EVENT_RECORD, names: [&str; N]) -> [Field; N] {
         let h = &e.EventHeader;
         let ptr64 = h.Flags as u32 & EVENT_HEADER_FLAG_64_BIT_HEADER != 0;
@@ -469,8 +496,8 @@ impl Schema {
         let data = payload(e);
         let Some(props) = self.layout(e) else { return out };
         let mut off = 0usize;
-        let mut values: Vec<u64> = Vec::with_capacity(props.len());
-        let (mut fixed, mut left) = (true, N);
+        let mut values = Values::default();
+        let (mut fixed, mut cacheable, mut left) = (true, true, N);
         for p in props.iter().take_while(|p| !p.name.starts_with('\u{1}')) {
             if left == 0 {
                 break;
@@ -488,27 +515,100 @@ impl Schema {
             };
             values.push(value.unwrap_or(0));
             if let Some(i) = names.iter().position(|n| *n == p.name) {
-                out[i] = Field { off, size, count, found: off + size * count.max(1) <= data.len() || count == 0 };
+                let inside = off + size * count.max(1) <= data.len() || count == 0;
+                out[i] = Field { off, size, count, found: inside };
+                // A field cut short in this event says nothing of the next one.
+                cacheable &= fixed && inside;
                 left -= 1;
             }
             off += size * count;
         }
-        if fixed && out.iter().all(|f| f.found) {
+        if cacheable {
             self.fixed.insert(site, out.to_vec());
         }
         out
     }
 }
 
+/// The properties of one event's layout from TDH: `get` fills a `TRACE_EVENT_INFO` of the size it is
+/// given (asked once with none to learn the size).
+fn read_tei(get: impl Fn(*mut TRACE_EVENT_INFO, &mut u32) -> u32) -> Option<Vec<Prop>> {
+    let mut size = 0u32;
+    get(std::ptr::null_mut(), &mut size);
+    if size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+    let tei = buf.as_mut_ptr() as *mut TRACE_EVENT_INFO;
+    if get(tei, &mut size) != 0 {
+        return None;
+    }
+    unsafe {
+        let base = tei as *const u8;
+        let arr = std::ptr::addr_of!((*tei).EventPropertyInfoArray) as *const EVENT_PROPERTY_INFO;
+        let n = (*tei).PropertyCount as usize;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let p = &*arr.add(i);
+            let at = base.add(p.NameOffset as usize) as *const u16;
+            let mut len = 0;
+            while *at.add(len) != 0 {
+                len += 1;
+            }
+            let name = String::from_utf16_lossy(std::slice::from_raw_parts(at, len));
+            let st = p.Flags & PropertyStruct != 0;
+            out.push(Prop {
+                name,
+                flags: p.Flags,
+                in_type: if st { 0 } else { p.Anonymous1.nonStructType.InType },
+                length: p.Anonymous3.length,
+                count: p.Anonymous2.count,
+                members: if st { (p.Anonymous1.structType.StructStartIndex, p.Anonymous1.structType.NumOfStructMembers) } else { (0, 0) },
+            });
+        }
+        // Only top-level properties are walked; struct members follow them.
+        out.truncate(n.max((*tei).TopLevelPropertyCount as usize));
+        let top = (*tei).TopLevelPropertyCount as usize;
+        out.iter_mut().skip(top).for_each(|p| p.name.insert(0, '\u{1}'));
+        Some(out)
+    }
+}
+
+/// The values of the properties walked so far (counts and lengths of later ones name them): the first
+/// 32 on the stack.
+#[derive(Default)]
+struct Values {
+    head: [u64; 32],
+    n: usize,
+    rest: Vec<u64>,
+}
+
+impl Values {
+    fn push(&mut self, v: u64) {
+        match self.head.get_mut(self.n) {
+            Some(slot) => *slot = v,
+            None => self.rest.push(v),
+        }
+        self.n += 1;
+    }
+
+    fn get(&self, i: usize) -> Option<u64> {
+        if i >= self.n {
+            return None;
+        }
+        self.head.get(i).or_else(|| self.rest.get(i - self.head.len())).copied()
+    }
+}
+
 /// Size of one element and the element count of property `p` at `off`.
-fn prop_size(props: &[Prop], p: &Prop, data: &[u8], off: usize, ptr64: bool, values: &[u64]) -> (usize, usize) {
-    let count = if p.flags & PropertyParamCount != 0 { values.get(p.count as usize).copied().unwrap_or(0) as usize } else { (p.count as usize).max(1) };
+fn prop_size(props: &[Prop], p: &Prop, data: &[u8], off: usize, ptr64: bool, values: &Values) -> (usize, usize) {
+    let count = if p.flags & PropertyParamCount != 0 { values.get(p.count as usize).unwrap_or(0) as usize } else { (p.count as usize).max(1) };
     if p.flags & PropertyStruct != 0 {
         let (start, n) = p.members;
         let size = (start..start + n).filter_map(|i| props.get(i as usize)).map(|m| m.length as usize * (m.count as usize).max(1)).sum();
         return (size, count);
     }
-    let length = if p.flags & PropertyParamLength != 0 { values.get(p.length as usize).copied().unwrap_or(0) as usize } else { p.length as usize };
+    let length = if p.flags & PropertyParamLength != 0 { values.get(p.length as usize).unwrap_or(0) as usize } else { p.length as usize };
     let size = match p.in_type as i32 {
         TDH_INTYPE_UNICODESTRING => {
             if length > 0 {
