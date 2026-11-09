@@ -303,6 +303,11 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     // The display the process shows on: its main window's, else any window's (an app that shows only
     // an overlay, such as a HUD, has no main window).
     let display_of = |pids: &[u32]| host::main_window(pids).map(|w| w.hwnd).or_else(|| host::top_windows(pids).first().map(|w| w.0)).and_then(host::display_of);
+    // The adapter the tree drew on over the window, and the one driving its display (`screen.gpu`).
+    let mut screen = screen;
+    if let Some(g) = super::bench::drawing_gpu(&samples, &[&os], display_of(&pids).as_ref()) {
+        screen["gpu"] = g;
+    }
     let unpaced = presents.as_ref().ok().and_then(|p| {
         let pids = pids_now();
         let display = display_of(&pids);

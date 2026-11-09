@@ -942,26 +942,13 @@ fn runs(
                 ctx.gpu = json!({ "devices": devices });
                 ctx.gpu_checked = true;
             }
-            // The display path the window shows on, for the refresh period and `CrossAdapterScanout`: an app
-            // that draws on one adapter while another drives its monitor pays a copy across the bus per frame.
-            if let Some(d) = &display {
-                let luid = |name: &str| samples.adapters.iter().find(|a| a.name == name).map(|a| a.luid);
-                let drawing: Vec<&String> = adapters.iter().filter(|a| by_adapter[*a].get("3D").copied().unwrap_or(0.0) > 0.0).collect();
-                // An adapter the OS does not name for the display (id 0, or none of the sampled ones: a
-                // single-GPU Mac) is unknown, not another adapter.
-                let known = d.adapter_luid != 0 && samples.adapters.iter().any(|a| a.luid == d.adapter_luid);
-                if known && !drawing.is_empty() && !drawing.iter().any(|a| luid(a) == Some(d.adapter_luid)) && !ctx.warnings.iter().any(|w| w.id == "CrossAdapterScanout") {
-                    let scanout = samples.adapters.iter().find(|a| a.luid == d.adapter_luid).map_or_else(|| format!("adapter 0x{:x}", d.adapter_luid), |a| a.name.clone());
-                    ctx.warnings.push(validity::info(
-                        "CrossAdapterScanout",
-                        format!(
-                            "{} block: the app draws on {} while {scanout} drives its window's display ({}): each frame crosses between adapters, as it does for the app's users on this kind of machine",
-                            v.role,
-                            drawing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" and "),
-                            d.device
-                        ),
-                    ));
-                }
+            // The adapter the app drew on over this case's measured runs, and the one driving its window's
+            // display (`screen.gpu`): an app that draws on one adapter while another drives its monitor pays
+            // a copy across the bus per frame (`CrossAdapterScanout`).
+            let mut case_screen = screen.clone();
+            if let Some(g) = super::drawing_gpu(&samples, &gpu_runs.iter().collect::<Vec<_>>(), display.as_ref()) {
+                super::cross_adapter_note(&mut ctx.warnings, &format!("{} · {} block", s.label(), v.role), "the app", &g);
+                case_screen["gpu"] = g;
             }
             if !windowless && let Err(e) = admit_setup(ctx, s, v, adapter.as_deref(), n.window.as_ref().map(|w| w.scale())) {
                 blocks.push(Err(e));
@@ -1005,8 +992,10 @@ fn runs(
             // And of its pixels (image locators, pixel waits; 0 for runs that read none).
             extra.insert("driver.pixel_reads".into(), per_run(&|r| r.pixels.0 as f64));
             extra.insert("driver.pixel_ms".into(), per_run(&|r| r.pixels.1));
+            extra.insert("driver.pixel_cpu_ms".into(), per_run(&|r| r.pixels.2));
             let run_ms: f64 = measured.iter().map(|r| r.ms).sum();
             let pixel_pct = measured.iter().any(|r| r.pixels.0 > 0).then(|| 100.0 * measured.iter().map(|r| r.pixels.2).sum::<f64>() / run_ms.max(1.0));
+            let pixel_cpu = pixel_pct.map(|_| super::PixelCpu::of(measured.iter().map(|r| (r.pixels.2, r.ms))));
             // Drags: the moves strobe posted, beside the frames the app drew.
             if measured.iter().any(|r| crate::driver::input_pacing(&r.log.drags).is_some()) {
                 extra.insert("input.rate".into(), per_run(&|r: &Run| crate::driver::input_pacing(&r.log.drags).map_or(f64::NAN, |p| p.0)));
@@ -1235,7 +1224,7 @@ fn runs(
             }
             super::block::untimed_state(s, &measured.iter().map(|r| &r.timed).collect::<Vec<_>>(), &mut values, &mut refused);
             if x.judges_time() {
-                super::pixel_overhead(s, pixel_pct, x.measures_time(), &mut ctx.warnings, &mut values, &mut refused);
+                super::pixel_overhead(s, pixel_pct.zip(pixel_cpu), x.measures_time(), &mut ctx.warnings, &mut values, &mut refused);
             }
             for m in refused.keys() {
                 values.remove(m);
@@ -1263,7 +1252,7 @@ fn runs(
                 background: background.clone(),
                 refused,
                 leak: leak_result,
-                screen: Some(screen.clone()),
+                screen: Some(case_screen),
                 shown,
                 overhead: Some(Overhead {
                     strobe_pct,
@@ -1271,6 +1260,7 @@ fn runs(
                     sampler_pct,
                     present_pct,
                     pixel_pct,
+                    pixel_cpu_ms: pixel_cpu.map(|p| p.per_run_ms),
                     encoder_pct: stopped.as_ref().and_then(|s| s.as_ref().ok()).and_then(crate::app::video::Stopped::encoder_pct),
                     ..Overhead::default()
                 }),
@@ -1283,6 +1273,7 @@ fn runs(
                 directions: BTreeMap::new(),
                 same: c.same.take(local.clone()),
                 ops: super::journey::ops(&measured.iter().map(|r| &r.counts).collect::<Vec<_>>()),
+                spread: super::run_spread(x, &extra),
                 ..Block::default()
             }));
         }
@@ -1393,6 +1384,12 @@ fn runs(
             None => String::new(),
         };
         let (t0, t1) = (all.first().map_or(0, |r| r.1.t0), all.last().map_or(0, |r| r.1.t1));
+        // The recording's adapter, over every measured run it holds.
+        let mut screen = screen;
+        let windows: Vec<probe::os::Summary> = all.iter().map(|(_, r)| samples.window(r.t0, r.t1)).collect();
+        if let Some(g) = super::drawing_gpu(&samples, &windows.iter().collect::<Vec<_>>(), display.as_ref()) {
+            screen["gpu"] = g;
+        }
         let mut meta = json!({
             "id": id, "kind": "block", "native": true, "experiment": ctx.exp, "seed": ctx.seed, "series": s0.label(), "variant": v.role, "variant_label": v.label, "variant_git": variant_git(v),
             "target": app.exe, "probes": set, "runs": all.len(),
@@ -1410,6 +1407,12 @@ fn runs(
             let done: Vec<(&Series, std::ops::Range<usize>, &Block)> = native_cases.iter().zip(&blocks).filter_map(|((k, c), b)| Some((&cases[*k], measured_of(c).1, b.as_ref().ok()?))).collect();
             meta["batch"] = super::batch::meta(done.into_iter());
         }
+        // Every run of the cases kept, warmup ones too, by its key among the launch's runs.
+        meta["ended_runs"] = super::ended_runs(kept.iter().flat_map(|c| {
+            let (local, range) = measured_of(c);
+            let base = range.start - local.start;
+            c.runs.iter().enumerate().map(move |(i, r)| (format!("run:{}", base + i), local.contains(&i), r.ended_ms, r.cpu_lost, r.ended_exes.as_slice()))
+        }));
         store::write_json(&dir.join("meta.json"), &meta)?;
         draft.keep();
         for b in blocks.iter_mut().flatten() {
@@ -2066,11 +2069,14 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         // A launch timed to pixels: strobe's reads of the window while it launched, over 2% of a core
         // refusing its times (`pixel_overhead`).
         let pixel_pct = pixel_reads.get().map(|(_, _, cpu)| 100.0 * cpu / ready_ms.max(1.0));
-        if let Some((k, ms, _)) = pixel_reads.get() {
+        // The launch is its one run.
+        let pixel_cpu = pixel_reads.get().map(|(_, _, cpu)| super::PixelCpu::of(std::iter::once((cpu, ready_ms))));
+        if let Some((k, ms, cpu)) = pixel_reads.get() {
             values.insert("driver.pixel_reads".into(), k as f64);
             values.insert("driver.pixel_ms".into(), ms);
+            values.insert("driver.pixel_cpu_ms".into(), cpu);
             if !profile {
-                super::pixel_overhead(s, pixel_pct, !ctx.args.has("check"), &mut ctx.warnings, &mut values, &mut refused);
+                super::pixel_overhead(s, pixel_pct.zip(pixel_cpu), !ctx.args.has("check"), &mut ctx.warnings, &mut values, &mut refused);
             }
         }
         if let (false, Some(r)) = (profile, refused.get(&s.primary)) {
@@ -2145,7 +2151,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             steps: steps.clone(),
             shown,
             refused,
-            overhead: pixel_pct.map(|p| Overhead { pixel_pct: Some(p), ..Overhead::default() }),
+            overhead: pixel_pct.map(|p| Overhead { pixel_pct: Some(p), pixel_cpu_ms: pixel_cpu.map(|c| c.per_run_ms), ..Overhead::default() }),
             process_set: Some(programs(&procs)),
             same: same.take(0..1),
             client: opened.as_ref().map(client_of),

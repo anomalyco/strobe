@@ -507,6 +507,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         client: None,
         frame: false,
         browser: None,
+        spread: super::run_spread(x, &extra),
         directions,
         ..Block::default()
     })
