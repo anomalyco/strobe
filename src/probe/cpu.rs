@@ -236,6 +236,8 @@ pub struct Rebased {
     /// a spin, under `MAX_STRAY_NS`), and the farthest one's distance (ns, signed).
     pub outliers: usize,
     pub worst_ns: f64,
+    /// Per spin (start, exit): the shifts (ms) that would put all its samples inside strobe's span.
+    pub fit_ms: [(f64, f64); 2],
 }
 
 /// Places a script host's CPU profile `p` on strobe's clock from the host's clock readings at its
@@ -306,12 +308,23 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     let last_us = Sampling::of(0.0, gaps.into_iter().filter(|g| *g <= cap_us).collect()).map_or(0.0, |s| s.median_us);
     // Each spin's samples, by the reading nearer them: how far each lies outside strobe's span around it.
     let mut offs: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    // Per spin: the shifts (ms) that would put all its samples inside strobe's span, `(a - first, b - last)`.
+    let mut fit_ms = [(f64::NEG_INFINITY, f64::INFINITY); 2];
     for at in times_us.iter().zip(&marked).filter(|(_, m)| **m).map(|(t, _)| t) {
         let ns = at * 1e3;
         let k = usize::from((ns - exit.mark.0 as f64).abs() < (ns - ready.mark.0 as f64).abs());
         let (a, b) = (readings[k].1.mark.0 as f64, readings[k].1.mark.1 as f64);
         offs[k].push(if ns < a { ns - a } else { (ns - b).max(0.0) });
+        fit_ms[k] = (fit_ms[k].0.max((a - ns) / 1e6), fit_ms[k].1.min((b - ns) / 1e6));
     }
+    let fits = format!(
+        "its spins' samples fit inside strobe's spans moved {:+.2} to {:+.2} ms (start) and {:+.2} to {:+.2} ms (exit); {samples} samples, {lost:.3} µs truncated a sample, the wall clock's lead moved {:+.3} ms from the start to the exit",
+        fit_ms[0].0,
+        fit_ms[0].1,
+        fit_ms[1].0,
+        fit_ms[1].1,
+        (exit.wall_lead_us - ready.wall_lead_us) / 1e3
+    );
     // The clocks match when each spin's samples sit inside strobe's span around it, within SYNC_NS. The
     // spin fills the span, so a clock off by d puts its samples within d of one edge past it: the first
     // and last samples are what can see it, never a median (a uniform +2.6 ms leaves most samples inside).
@@ -329,7 +342,7 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         let tolerated = early + late == 0 || (o.len() >= 4 && early <= 1 && late <= 1 && 4 * (early + late) <= o.len());
         if !tolerated || worst.abs() > MAX_STRAY_NS {
             return Err(unsynced(format!(
-                "it puts {} of the {} samples of the spin in which the host read its clock {when} over 1 ms outside strobe's span around that ({early} early, {late} late; the farthest {:+.2} ms): its clock does not match strobe's",
+                "it puts {} of the {} samples of the spin in which the host read its clock {when} over 1 ms outside strobe's span around that ({early} early, {late} late; the farthest {:+.2} ms; {fits}): its clock does not match strobe's",
                 early + late,
                 o.len(),
                 worst / 1e6
@@ -340,7 +353,7 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
             worst_ns = worst;
         }
     }
-    Ok(Rebased { start_us, times_us, cap_us, over_us, last_us, outliers, worst_ns })
+    Ok(Rebased { start_us, times_us, cap_us, over_us, last_us, outliers, worst_ns, fit_ms })
 }
 
 /// Per sample of `p`: whether its stack holds a function named `name`.
