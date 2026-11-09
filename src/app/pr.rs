@@ -26,10 +26,12 @@ use std::collections::BTreeMap;
 
 /// The blocks that measured `metric` in series `s`: a series that counts cpu.instructions apart from
 /// its times (Linux perf events never run in a timing block, SPEC §7.5) keeps the other kind's blocks
-/// in `pass` (`counters`: whether they are the counter blocks).
+/// in `pass` (`counters`: whether they are the counter blocks), and so does one that probes HTTP apart
+/// from its times (SPEC §8.9; `http`: whether they are the probe blocks).
 pub(crate) fn blocks_for<'a>(s: &'a Value, metric: &str) -> &'a Value {
     let pass = &s["pass"];
-    if pass["blocks"].as_array().is_some_and(|b| !b.is_empty()) && (metric == "cpu.instructions") == (pass["counters"] == true) { &pass["blocks"] } else { &s["blocks"] }
+    let theirs = if pass["http"].is_boolean() { metric.starts_with("http.") == (pass["http"] == true) } else { (metric == "cpu.instructions") == (pass["counters"] == true) };
+    if pass["blocks"].as_array().is_some_and(|b| !b.is_empty()) && theirs { &pass["blocks"] } else { &s["blocks"] }
 }
 
 /// The direction comparison `c` counted as better, as every report reads it: its own `better`; in a

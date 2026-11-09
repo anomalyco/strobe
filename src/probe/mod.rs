@@ -14,6 +14,7 @@ pub mod gpu_macos;
 pub mod heap;
 #[cfg(windows)]
 pub mod helper;
+pub mod http_probe;
 #[cfg(windows)]
 pub mod kernel_profile;
 pub mod memory;

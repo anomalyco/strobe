@@ -120,6 +120,7 @@ pub fn build(dir: &Path, out: &Path) -> Result<Built> {
     let host_clock = !(b.built.chrome && meta["phone"].is_object());
     if host_clock {
         b.native_runs(dir);
+        b.http_probe(dir);
         b.actions(dir);
         b.timeline(dir, &threads);
         b.presents(dir, &meta);
@@ -591,6 +592,86 @@ impl Builder {
             for t in changes {
                 self.instant(track, MONOTONIC, t, "changed", &[]);
                 self.count("accessibility changes");
+            }
+        }
+    }
+
+    /// The HTTP probe (SPEC §8.9) as a group `HTTP probe · <METHOD> <path>`: its latency as a counter (each
+    /// answer at its dispatch), its probes as a waterfall (each from its dispatch to its whole response, on
+    /// the first lane free then, named by its fate: `200 748.1 ms`, `TIMEOUT >400 ms`, `ERR HTTP 500`), its
+    /// idle control and the slots strobe missed (its own lag, never the server's) as instants.
+    fn http_probe(&mut self, dir: &Path) {
+        use crate::probe::http_probe::Outcome;
+        let Some(d) = crate::probe::http_probe::read(dir) else { return };
+        let path = d.config.url.split_once("://").and_then(|(_, r)| r.find('/').map(|i| r[i..].to_string())).unwrap_or_else(|| "/".into());
+        let method = serde_json::to_value(d.config.method).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let group = self.track(&format!("HTTP probe · {method} {path}"), 5, None);
+        let latency = self.track_under(Some(group), "latency (ms), at each dispatch", 0, Some("ms"));
+        let timeout_ns = (d.config.timeout_ms * 1e6) as u64;
+        // A recording with no runs of its own (a probe block's) draws the runs as the probe saw them.
+        if self.runs.is_empty() && !d.runs.is_empty() {
+            let track = self.track("runs and phases", 0, None);
+            for r in &d.runs {
+                self.runs.push((r.t0_ns, r.t1_ns));
+                self.slice(track, MONOTONIC, r.t0_ns, r.t1_ns, &format!("{}{}", r.key, if r.measured { "" } else { " (not measured)" }), &[]);
+                for (a, b) in &r.untimed {
+                    self.slice(track, MONOTONIC, *a, *b, "untimed", &[]);
+                }
+                for (n, a, b) in &r.phases {
+                    self.slice(track, MONOTONIC, *a, *b, n, &[]);
+                }
+                self.count("runs and phases");
+            }
+        }
+        if let Some((a, b)) = d.idle {
+            let t = self.track_under(Some(group), "idle control", 1, None);
+            self.slice(t, MONOTONIC, a, b, "idle control (after setup, before the runs)", &[]);
+        }
+        // Each lane's track and when its last probe ended.
+        let mut lanes: Vec<(u64, u64)> = Vec::new();
+        for s in &d.samples {
+            let mut args: Vec<(String, Value)> =
+                vec![("seq".into(), json!(s.seq)), ("when".into(), json!(s.when)), ("due_late_ms".into(), json!(s.dispatch_ns.map(|t| t.saturating_sub(s.scheduled_ns) as f64 / 1e6)))];
+            if let Some(r) = &s.run {
+                args.push(("run".into(), json!(r)));
+            }
+            if s.outcome.missed() {
+                let t = self.track_under(Some(group), "missed sends (driver lag)", 99, None);
+                let lag = match s.outcome {
+                    Outcome::SkippedDriverLate { lag_ms } => format!("missed: strobe {lag_ms:.0} ms late"),
+                    _ => "missed: no free connection".into(),
+                };
+                self.instant(t, MONOTONIC, s.scheduled_ns, &lag, &args);
+                self.count("HTTP probe missed sends");
+                continue;
+            }
+            let start = s.dispatch_ns.unwrap_or(s.scheduled_ns);
+            let end = s.completed_ns.unwrap_or(start + timeout_ns).max(start + 1);
+            let name = match (&s.outcome, s.latency_ms()) {
+                (Outcome::Ok, Some(ms)) => format!("{} {ms:.1} ms", s.status.unwrap_or(0)),
+                (Outcome::Timeout, _) => format!("TIMEOUT >{} ms", d.config.timeout_ms),
+                (Outcome::Bad { why }, _) => format!("ERR {why}"),
+                (Outcome::Error { why }, _) => format!("ERR {why}"),
+                _ => "PENDING".into(),
+            };
+            if let Some(sent) = s.sent_ns {
+                args.push(("sent_after_ms".into(), json!(sent.saturating_sub(start) as f64 / 1e6)));
+            }
+            let lane = match lanes.iter().position(|l| l.1 <= start) {
+                Some(i) => i,
+                None => {
+                    let i = lanes.len();
+                    let t = self.track_under(Some(group), &format!("probes {}", i + 1), 2 + i as i32, None);
+                    lanes.push((t, 0));
+                    i
+                }
+            };
+            lanes[lane].1 = end;
+            self.slice(lanes[lane].0, MONOTONIC, start, end, &name, &args);
+            self.count("HTTP probe");
+            if let Some(ms) = s.latency_ms() {
+                self.counter(latency, MONOTONIC, start, ms);
+                self.count("HTTP probe latency");
             }
         }
     }

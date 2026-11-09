@@ -206,7 +206,7 @@ model.rs        plain data: errors, `ValidatorId` and `Refusal`, verdict kinds, 
 config.rs       strobe.json, read strictly (jsonc.rs: comments and trailing commas)
 app/            commands: up/ (autostart), status, record, bench/ (blocks, launches, batches, cli,
                 script, tty and native targets, fixtures, journeys, the slot, the decision loop in
-                sequential.rs), plan, query/ (recording views, a..b diffs, actions, waits, wir),
+                sequential.rs), plan, query/ (recording views, a..b diffs, actions, waits, http, wir),
                 report, pr/ (the PR block), card/ (cards, badges, forest plots), open, look, top,
                 track/, history/, bisect, family (implementation comparisons), run, update, mcp,
                 statcheck/ (hidden `strobe stats`), outside (record pid:), video, helper
@@ -235,8 +235,8 @@ probe/          collecting → trace.rs, cpu.rs, alloc.rs, heap.rs, symbols.rs a
                 present events, sck.rs ScreenCaptureKit, xpresent.rs X11 Present, wayland.rs the
                 compositor's own, frames.rs frame metrics), video/ (`--video`, §8.8: wgc.rs Windows,
                 avf.rs macOS, x11.rs Linux, screencast.rs a Chromium page's renderer, ffmpeg.rs the
-                external encoder). The helper runs present and stack sessions, and both use its
-                access, so they live in one backend.
+                external encoder), http_probe.rs (the HTTP probe, §8.9). The helper runs present and
+                stack sessions, and both use its access, so they live in one backend.
 heapsnap.rs     V8 heap snapshots: streaming parse, dominators, classes, retainer paths, diff, leaks
 metrics.rs      a block's trace → metric values
 perfetto.rs     `strobe open`'s merged trace (§11.4)
@@ -2148,6 +2148,94 @@ from exists, so its video would miss the launch it times.
   60 fps, 1280×750): strobe's thread 6 ms, Homebrew's ffmpeg (libx264) 470 ms over 2.9 s. The capture thread waits for
   the GPU's copy by sleeping: the driver's own wait spun (350 ms over the same 3.3 s).
 
+### 8.9 HTTP probe (`ctx.httpProbe`)
+
+Whether a server the target hosts could answer another client while the runs worked, on the timeline
+of its runs, threads and stacks (`probe::http_probe`, `app::query::http`). A bench file's `setup`
+asks for it once per block: `ctx.httpProbe({ url, method, cadenceMs, timeoutMs, idleMs, connection,
+maxInFlight, headers, authorization, expect })`. strobe sends the request from threads of its own on
+strobe's CPUs (off the target's, §9.4), on absolute deadlines: slot k is due at the probe's start + k ×
+`cadenceMs` (default 100, at least 10) whatever the probes before it are doing (open loop). A
+scheduler thread hands each due slot to a free worker, which stamps `dispatch` before it takes or
+opens a connection, `sent` once the request is written and flushed, and `completed` once the whole
+response is read. Latency is `completed − dispatch`: from the dispatch, not the slot's due time, so up
+to the lateness allowed below of strobe's own lag never counts as the server's.
+
+- **Missed sends.** A slot whose dispatch comes more than min(cadence / 2, 10 ms) after it was due is
+  never sent (`skipped_driver_late`, with its lag), and one due while every connection the probe may
+  hold is open is not either (`skipped_busy`): strobe's lag, never billed to the server, never sent
+  late, never a burst to catch up. `http.missed_sends` counts them; more than max(1, 5% of those due)
+  in the measured runs refuses `http.latency.*` (`OverheadBudget`: a stall then would go unseen).
+- **Connections.** `"new"` (the default) opens a fresh TCP connection (Nagle off) per probe: a server
+  whose JavaScript thread is held for 750 ms still has each probe accepted by the kernel on time, and
+  answers the whole cohort once it is free: 750, 650, … 50 ms, never one slow sample and a gap.
+  `"keep-alive"` takes a free connection the probe kept, else opens one; a kept one the server had
+  closed is replaced within the same deadline. `maxInFlight` (default 64) must allow
+  ⌈`timeoutMs` / `cadenceMs`⌉ + 1 probes open at once (usage error, exit 2, otherwise: the probe never
+  holds a send back); strobe runs that many workers and two more.
+- **Options.** `url`: `http://` on this computer's loopback only (127.0.0.1, [::1], `localhost`):
+  https, `user:pass@` and any other host are usage errors. `method`: GET (default), HEAD or POST (no
+  body). `timeoutMs` (default 1000): from the dispatch to the whole response, connecting included.
+  `expect`: `status` (a code or `[lo, hi]`, default 200–299), optionally `bodyContains` or `jsonPath`
+  (`{ path: "$.status", equals: "ok" }`), read from a body of at most 1 MiB that strobe never keeps.
+  A mistake in any option fails setup with exit 2, as do a second call, a call outside `setup`, and
+  `headers` that carry a credential (`Authorization`, `Cookie`, `Proxy-Authorization`, `X-Api-Key`)
+  or one strobe writes itself (`Host`, `Connection`, `Content-Length`, `Transfer-Encoding`,
+  `User-Agent`).
+- **Secrets.** `authorization` (the Authorization header's value, or `{ header, value }` for another
+  header) is held in strobe's memory only (`http_probe::Secret`: no `Serialize`, `Display` or `Clone`,
+  `Debug` prints `[REDACTED]`, zeroed when it drops, as are the protocol line and request bytes that
+  carried it). It reaches strobe over the runner's loopback socket (never argv, no CLI flag takes a
+  credential) and never a recording, result, log, report, trace, MCP answer or panic message. The
+  probe's request is no action of the block's log (§9.6). A URL's query values and extra headers'
+  values are sent, never written: recordings keep the URL as `…?key=…` and the headers' names.
+  `scripts/dev/http-probe-check.ts` reads every file strobe wrote, and every answer it printed, for a
+  fresh random token sent both ways.
+- **Idle control.** Once setup has settled (100 ms) and before warmup, the probe runs alone for
+  `idleMs` (default 500; 0 skips it). Every probe due then must answer as `expect` asks, else the
+  block is refused `RunIncomplete` before any run (a server that fails a probe idle fails it in
+  every run). Its median is `http.idle.p50`: the server's own floor.
+- **Blocks** (rule 3). The probe's requests are work the server does, so it never runs in a clean
+  timing block. A series that declares no `http.*` runs it only in the blocks that keep a recording
+  to explain one: attribution blocks (`--why`, `record --bench`) and `--check` blocks, so stacks, the
+  threads' timeline and the probe land on one recording. A series that declares `http.*` pairs probe
+  blocks (`timing: http-probe`, no profilers, keeping only their `http.*` values): every block when
+  it declares nothing else; otherwise its timing blocks stay clean and K pairs of probe blocks follow
+  (with an `http.*` primary they come first and K timing pairs follow), K chosen as for counter blocks
+  (§7.5), kept in `result.json` `pass` (`http: true` for probe blocks) and said once (`HttpProbe`,
+  info). `--blocks N` runs N of each kind. Usage errors: `http.*` in a launch case (no setup), or
+  beside `cpu.instructions` on Linux (one pass of other blocks per series). Such a series is never
+  batched (§5.6); a batch's launch runs no probe.
+- **Metrics** (`src/model.rs`). Only probes due in a measured run's timed parts count: not the idle
+  control, warmup runs, `ctx.untimed` stretches (from before strobe's readings at their start to
+  after those at their end), resets or setup. `http.latency.p50` (minimum n 10), `.p95` (20) and
+  `.max` (1), in ms, pooled over the block's measured runs; `http.timeouts`, `http.errors`,
+  `http.missed_sends` and `http.probes` per measured run; `http.idle.p50`. Undeclared ones are context
+  (descriptive) where every block has them. A response not as `expect` asks, or a connection that
+  failed, is an error, never a latency, and any error refuses `http.latency.*` (`RunIncomplete`: a
+  fast error is no fast answer). A timeout ranks above every answer: a quantile that falls on one, or
+  between one and an answer (at or past 1 − timeouts / n), is right-censored and refused
+  `RunIncomplete`, never read as the timeout and never taken from the answers alone; `http.timeouts`
+  counts them. No probe due in a timed part refuses the latencies `TailTooShort`. `http.*` declared
+  where setup never called `ctx.httpProbe`: `NoMetric`.
+- **Cost.** The probe's threads read their own CPU (`overhead.http_probe_pct`, % of one core over the
+  probe's span; §19: 0.5%, over 2% refuses `http.latency.*` `OverheadBudget`).
+- **Data.** `http_probe.json.gz` (owner-only) in the block's recording, or in one of its own when the
+  block kept none (a script's `--check`, a probe pass's first pair; `probes: http-probe`): the setup
+  without secrets (`config`), the probe's span and CPU, the idle window, each run's span with its
+  untimed stretches and phases, and every probe (`seq`, `scheduled_ns`, `dispatch_ns`, `sent_ns`,
+  `completed_ns`, `status`, `outcome`, `when`, `run`). Its summary is `meta.json` `http_probe` and each
+  block's `http` in `result.json` (with the recording that keeps its probes).
+- **Views.** `query <rec|exp|a..b> http [--phase <name>] [--top N]` (§11.1): the idle control against
+  the measured runs, each fate, the quantiles with censoring said, the probe's CPU, and the stalled
+  cohorts. `open` (§11.4) draws the probe beside the runs and threads.
+- **Calibration.** `scripts/dev/http-probe.bench.ts` (run through `http-probe-check.ts`): a 750 ms
+  stall of the server's thread probed every 100 ms is one cohort of about 8 probes (the first ones
+  timing out at 400 ms, then a falling staircase; with a 1500 ms timeout its slowest ≈750 ms), a 500
+  or a wrong JSON answer is counted and refuses the latencies, and strobe's own scheduler held 400 ms
+  (`STROBE_PROBE_PAUSE=<at_ms>,<for_ms>`, calibration only: holds it once) is missed sends with no
+  timeout or error.
+
 ## 9. Experiments (`bench`)
 
 ### 9.1 Pipeline
@@ -2886,7 +2974,9 @@ undefined without one; also in `prepare`, a `url` function and a launch's `befor
 `head`, for logging only), `url`, `root` (the variant's folder, a plain path without Windows' `\\?\`
 prefix, so `${ctx.root}/tool.exe` works), `prepared`, `seed` and `random()`
 (below; also in `prepare` and a launch's `before`), in `prepare` and `setup`
-`addInitScript(script, arg?)`, and in `prepare` only `playwright` and `mock(pattern, handler)`.
+`addInitScript(script, arg?)`, in `setup` `httpProbe(options)` (a probe of a server the setup
+started, from strobe's own threads until the block's teardown, §8.9), and in `prepare` only
+`playwright` and `mock(pattern, handler)`.
 
 **Seeded workloads** (`ctx.seed`, `ctx.random()`): a fuzzer or a random walk through an app replays
 exactly from the experiment's seed (`--seed`, §5.6). A case's seed (`ctx.seed`, a 32-bit unsigned
@@ -4359,7 +4449,7 @@ emits:
 | `SoftwareGpu` | warn | a series kept its CPU metrics on a software rasterizer: frame and GPU metrics are refused (§10.1), and the browser's CPU metrics hold the rasterization a GPU would do; a native app on strobe's Wayland compositor without a GPU render node: `cpu.work` holds the app's own rasterization |
 | `Headless` | info | a native app ran on strobe's headless Wayland compositor: what reaches a display is refused (§13.7) |
 | **strobe's own cost** | | |
-| `OverheadBudget` | warn | strobe's own work over a budget of §19: strobe and the runner over 5% of a core while they share the target's CPUs (unpinned; the warning names both shares and a fix by why they share: macOS, under 4 cores, `--pin none`), or over 10% beside its budgeted parts while pinned; the present consumer, the terminal reader or pixel reads over 0.5%. Over the refusing level a timed block refuses (§10.1) and a `--check` warns, naming the declared metrics a timed bench would refuse |
+| `OverheadBudget` | warn | strobe's own work over a budget of §19: strobe and the runner over 5% of a core while they share the target's CPUs (unpinned; the warning names both shares and a fix by why they share: macOS, under 4 cores, `--pin none`), or over 10% beside its budgeted parts while pinned; the present consumer, the terminal reader, pixel reads or the HTTP probe over 0.5%. Over the refusing level a timed block refuses (§10.1) and a `--check` warns, naming the declared metrics a timed bench would refuse |
 | `ObserverCost` | warn | every bench, per side: strobe's reads of a side's page or accessibility tree inside its runs took over 2% of their wall time, or a native app's tree was read over 8 times a run (`driver.reads`, `driver.read_ms`), or pixels over 8 times (`driver.pixel_reads`); a page's attribution profile's driver rows, `(strobe driver)` and `(native, via strobe driver)`, held over 2% of its active main-thread time (every sample but `(idle)`, when that is at least 2 ms a run); a `script()` target's relay of `ctx.call` over 10% of a core. An implementation comparison also warns when one side's reads came at least 4 more times a run and over 4 times as often as the other's (§9.10) |
 | `ProbeOverhead` | warn | a Chromium-family series timed with `--trace full`: its timed blocks traced every task of every thread, which costs the page main-thread time (§8.1: `main.work` +0.8% on a click, +35% on an idle page, `cpu.work` +3.5%); compare it only with full-trace runs. `query a..b` of a lean and a full-trace recording says the same |
 | `TickSampledCpu` | warn | a `cli()` run's `cpu.work` holds child processes' CPU from Windows' clock ticks (where strobe did not hold them): their share of `cpu.work` (§9.6) |
@@ -4367,6 +4457,7 @@ emits:
 | `EndedCpu` | info | once per series: processes ended inside measured runs (or before a launch was ready), and `cpu.work` holds the CPU they used, from Linux's launch cgroups or the handles Windows strobe held from each process's start: how many runs, the median ms, and on Windows the executables that used the most (§9.6) |
 | `HeadlessFrame` | warn | a headless run's last step left at least 1.0 ms and 5% of `main.work` of style and layout (or layouts the run read 0 of) to the frame after the run, and the series declares a metric read before that frame (`run.duration`, `cpu.*` but `cpu.wakes`, the trace's metrics over the run): names those metrics and the time; pass `{ until: [selector, "frame"] }` (§7.3) |
 | `Counters` | info | a series' counter blocks ran apart from its timing blocks (Linux, §7.5): how many pairs each kind got |
+| `HttpProbe` | info, warn | info: a series' HTTP probe blocks ran apart from its clean timing blocks, and how many pairs each kind got (or that the other kind failed); warn: a block's probes could not be kept in a recording (§8.9) |
 | `Attribution` | info, warn | where the attribution blocks went (`→ rec_…`), or why there is none (an engine strobe has no profiler for) |
 | `Unresolved` | warn | over 5% of a profile's script samples map to no source, or a native capture's leaf or all-frame resolved share is under 95% (§11.1) |
 | `InitScript` | info | the engine has no preload script (WebKit): `ctx.addInitScript` ran after the first document's own scripts, and a block that loads another document is refused (§9.6) |
@@ -4638,6 +4729,7 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 | `threads` | `--phase` `--case` `--timeline` | busy share by thread and category, long tasks; a native recording's threads with wakes and CPU per run (a `record` without runs: `cpu ms` over the recording) and `by whose threads` (`app`, `driver`, `os`, `unknown (?)`); `--timeline` each thread's CPU per second from the launch (§7.4) |
 | `hotspots` | `--by function\|file\|package` `--phase` `--thread` `--pid` `--native` `--sort self\|total` | rows with self and total time (total: every stack the row's frame is in, once a stack, CPU views only, not `alloc` or `layout`; `self_ms`, `total_ms`, `share`, `total_share`; a function that only calls is a row by its total, sorted after every row with self time; strobe's driver script is its own row by file or package, never the app's; report.html's self-time tables leave rows of 0 self out), sample counts, intervals, handles; native samples (`deep`) in the same shape (a recording without a JavaScript profile shows them by default). Sorted by self time (the default), the callers whose time is in what they called and that missed the rows (5% of the total or more, up to 8) follow as `callers by total time` (`callers` in JSON); `--sort total` ranks by total. Native samples of several processes say `N samples of P processes` and add a `by process` split (pid, executable, samples, sampled ms = samples × interval, share); `--pid <pid\|exe>` keeps one process (its id or a part of its executable's name). Untimed samples (macOS `sample`'s snapshots) are counts, never ms. The header gives two resolved shares, of leaf frames and of all frames (a leaf in a named system library can resolve while every caller in an unsymbolized binary does not), and `Unresolved` warns when either is under 95%; `cpu_coverage` compares the sampled CPU with the tree's cycles over the capture (or the sampler's own count when a process of it ended) and `Coverage` warns under 80%. `--thread main` also matches a thread whose id is its process's (Linux) |
 | `waits` | `--by function\|file\|package` `--thread` `--phase` | off-CPU waits of a native capture taken with `--probes waits` (attribution only, rule 3): per row (the innermost frame of the wait's stack outside the OS, the kernel and the language runtime), the time off CPU, waits, the longest, the part waiting and the part runnable (preempted, or woken and queued for a CPU), who woke them (a thread with the frame it woke them from, or an interrupt: a timer or a device) and the heaviest full stack; the header gives the threads, waits, totals and the share with a known waker. `--phase` clips each wait to the phase's spans. A capture without waits refuses (`NoWaits`, saying why) |
+| `http` | `--phase` `--top`; `exp_…` and `a..b` too | the HTTP probe (§8.9) of a bench block's recording: its setup (the URL without query values, whether an authorization was sent, never its value), the idle control (probes, p50, p95, max) against the probes due in the measured runs' timed parts (due, answered, timeouts, errors, missed sends, statuses; p50, p95 and max, a quantile that falls on a timeout said `censored`, never a number), the probe's own CPU, and the stalled cohorts: probes in a row slower than max(5 × the idle p95, 50 ms) or timed out, each with its run, when, every probe's latency in order (`TIMEOUT` for one) and how long the server answered none. `--phase` keeps the probes due in that phase's spans. `exp_…` lists every probe block (its side, pair, quantiles, counts and the recording that keeps its probes) and the probed check and attribution recordings; `a..b` shows two recordings' side by side |
 | `alloc` | `--by function\|file\|package` | bytes allocated per row from sampled allocations (collected objects included), with complete locations and the three heaviest full stacks per function |
 | `layout` | | forced (synchronous) layouts and style recalculations by the JavaScript call site that forced them, with full stacks; per-run counts and time, forced and in the frame lifecycle |
 | `shifts` | | the five largest layout shifts of an attribution block (a series declaring `layout.shift`): score, run, time into it, and the elements that moved with their rects before and after |
@@ -5150,7 +5242,12 @@ protobuf written by hand (no generated code, no C):
   element hit, the latency sample and outcome as arguments, never the typed text,
   in every recording that kept them, Chromium trace recordings too; and a native or traceless block's
   measured input edges from `frames.json` as instants), `accessibility tree
-  changes`, `OS presents` (every present by process as a slice named by its fate, the app's frames on
+  changes`, `HTTP probe · <METHOD> <path>` (§8.9: its latency in ms at each answered probe's
+  dispatch; its idle control; the probes as a waterfall, each from its dispatch to its whole response
+  on the first lane free then, named by its fate, `200 748.1 ms`, `TIMEOUT >400 ms` or `ERR HTTP 500,
+  not 200–299`, with seq, when, run, how late it went out and when it was sent as arguments; and
+  `missed sends (driver lag)` as instants at each slot strobe could not send; a probe block's own
+  recording draws its runs, untimed stretches and phases from the probe's file), `OS presents` (every present by process as a slice named by its fate, the app's frames on
   screen, their interval in ms, vertical blanks per display path), `memory · <process>` (the readings
   in MB), per thread its CPU (% of a core) and wakes per second from the thread timeline (§7.4),
   under the thread's own track when the recording has no Chrome trace, and `strobe itself (its own
@@ -6873,6 +6970,8 @@ recordings/rec_3f9a1c/
                         order (§9.6 Actions; `store::actions`), owner-only: it holds typed text
   video.mp4 | video.webm  `--video`: what the target showed (§8.8), owner-only
   video.json            the video's kind, source, encoder, size, clock map, runs and input markers on media time
+  http_probe.json.gz    the HTTP probe (§8.9): its setup without secrets, span, CPU, idle window, each run's
+                        span, and every probe's due, dispatch, sent and completed times and fate, owner-only
 ```
 
 A bench block's `meta.json` names the experiment's `seed` beside `experiment`.
@@ -7087,6 +7186,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
 | `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% a timed block's `tty.latency.*`, `tty.settle.*` and `tty.frame.*` are refused (a `--check` keeps them and warns, naming the declared ones a timed bench refuses; an attribution block neither). Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
 | Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches, opening the window's capture included: a run whose first pixel read opens it pays for it; Windows makes the capture's Direct3D device once per process, 118 of the 126 ms of CPU an open took on adais); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
+| HTTP probe (`ctx.httpProbe`, §8.9; never in a clean timing block) | ≤ 0.5% of one core over the probe's span (`http_probe_pct`: its scheduler's and workers' own CPU, on strobe's CPUs); over it warns `OverheadBudget`, over 2% refuses `http.latency.*` |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
 
@@ -7270,6 +7370,14 @@ describe it now. The sections above say what strobe does; this list only dates i
 2026-11-09 this section also held the notes of where and how each change was checked, with their
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
+
+**After 0.23.0**
+
+- 2026-11-09 · this change · the HTTP probe: `ctx.httpProbe` in setup sends a loopback request on
+  absolute deadlines from strobe's own threads (open loop, missed sends never billed to the server),
+  with an idle control, `http.*` metrics (timeouts right-censor a quantile, errors refuse the
+  latencies), probe blocks apart from clean timing blocks, `query http` with stalled cohorts, a
+  Perfetto waterfall, and an authorization held in memory only (§8.9, §11.1, §11.4, §19).
 
 **After 0.22.0**
 

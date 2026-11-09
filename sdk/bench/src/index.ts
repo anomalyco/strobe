@@ -431,9 +431,46 @@ export interface PrepareContext<P, K = any> extends Seeded {
  */
 export type AddInitScript = <A = undefined>(script: string | ((arg: A) => unknown), arg?: A) => Promise<void>
 
-/** `setup`'s context: a run's, plus {@link AddInitScript} for the documents the block loads next. */
+/**
+ * An HTTP probe of a server on this computer (SPEC §8.9): strobe sends `method url` every `cadenceMs` from threads of
+ * its own, on absolute deadlines (open loop: a probe never waits for the ones before it, so a stall shows as the cohort
+ * of probes it held), and times each from its send to its whole response (`http.latency.*`). A probe strobe could not
+ * send on time is a missed send (`http.missed_sends`), never a slow server. It runs only in blocks that measure it:
+ * attribution blocks (`--why`, `record --bench`) and `--check`, or a series' own probe blocks when it declares `http.*`;
+ * never in a clean timing block.
+ */
+export interface HttpProbe {
+  /** A loopback address: `http://127.0.0.1:<port>/…`, `http://[::1]:<port>/…` or `http://localhost:<port>/…`. No https, no `user:pass@`; query values are sent, never written. */
+  url: string
+  /** Default GET. A POST sends no body. */
+  method?: "GET" | "HEAD" | "POST"
+  /** Milliseconds between probes: default 100, at least 10. */
+  cadenceMs?: number
+  /** Milliseconds a probe may take from its send to its whole response: default 1000. Past it, a timeout (`http.timeouts`). */
+  timeoutMs?: number
+  /** The idle control: probes for this long after setup, before any run, each of which must answer as `expect` asks, or the block is refused (`RunIncomplete`). Default 500; 0 skips it. */
+  idleMs?: number
+  /** `"new"` (default): a fresh connection per probe; `"keep-alive"`: a free connection the probe kept, else a new one. */
+  connection?: "new" | "keep-alive"
+  /** Most probes open at once: default 64. It must allow ceil(timeoutMs / cadenceMs) + 1. */
+  maxInFlight?: number
+  /** Extra request headers. Not Authorization, Cookie, Proxy-Authorization or X-Api-Key: a credential goes in `authorization`. Their values are sent, never written. */
+  headers?: Record<string, string>
+  /** The Authorization header's value, or `{ header, value }` for another header that carries a credential. In strobe's memory only: never in a recording, result, log, report, trace or MCP answer. */
+  authorization?: string | { header: string; value: string }
+  /**
+   * What an answer must be to count: its status (default 200–299), and optionally text in its body or a JSON value at a
+   * path (`{ path: "$.status", equals: "ok" }`), read from a body of at most 1 MiB that strobe never keeps. Anything else
+   * (a 500, a body without the text) is an error (`http.errors`), never a fast answer.
+   */
+  expect?: { status?: number | [number, number]; bodyContains?: string; jsonPath?: { path: string; equals: unknown } }
+}
+
+/** `setup`'s context: a run's, plus {@link AddInitScript} for the documents the block loads next and {@link HttpProbe}. */
 export interface SetupContext<P, K = any> extends Context<P, K> {
   addInitScript: AddInitScript
+  /** Probes a server the setup started, from now to the block's teardown ({@link HttpProbe}). Once per block. */
+  httpProbe(opts: HttpProbe): Promise<void>
 }
 
 /** What a launch's `before` hook gets: the launch has not started yet. */

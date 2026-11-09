@@ -119,6 +119,23 @@ The design and every rule behind this file: SPEC.md.
 - Linux without `DISPLAY`: native apps run on strobe's headless Wayland compositor (install sway,
   dbus-daemon and at-spi2-core); frames and latency refuse `Headless`.
 
+### A busy server: which thread held it, and could a client get an answer?
+
+- Host the server in a `script()` target. In `setup`, `await ctx.httpProbe({ url, authorization })`:
+  strobe probes it every `cadenceMs` (100) from its own threads on fixed deadlines, `timeoutMs` 1000.
+- `record --bench <file>#<case>` (or `--check`, `--why always`): stacks, the threads' timeline and the
+  probe on one recording. `query <rec> http`: idle against the runs, timeouts, errors and the stalled
+  cohorts; `strobe open <rec>` draws the probes beside the runs and threads.
+- To compare it, declare `http.latency.p95` (or `http.timeouts`, `http.errors`): the probe then runs
+  in probe blocks of its own. A clean timing block never probes.
+- A timeout ranks above every answer: a quantile on one refuses `RunIncomplete` (raise `timeoutMs`).
+  A 500 or a failed `expect` refuses the latencies. `http.missed_sends` is strobe's lag, not the server's.
+- `authorization` stays in strobe's memory: never in a file, report, trace or answer. Loopback only.
+- `cpu.main` is the main thread alone beside `cpu.work` (the tree): `cpu.main.busy` near 100% is a
+  saturated event loop; a worker or a child process shows in `cpu.work` only.
+- A script's `query <rec> hotspots` is its measured runs; `--source host` the whole host process
+  (start, setup, warmup, resets); `--phase <name>` one phase.
+
 ### Phones
 
 - Emulated: `web({ emulate: "mobile" })` is a phone (390×844 @3x, touch, headless): `click` is a tap,
@@ -216,7 +233,8 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - Progress goes to stderr. Windows PowerShell 5.1 with `2>&1` turns each stderr line into an error
   and exits 1: read `$LASTEXITCODE`, or pass `--progress stdout`.
 - Query views: `summary` `frames` `threads` `gpu` `hotspots` `waits` `alloc` `layout` `style` `shifts`
-  `gc` `heap` `leaks` `memory` `log` `network` `insights` `actions` `sql`; `exp_…` also `progress`.
+  `gc` `heap` `leaks` `memory` `http` `log` `network` `insights` `actions` `sql`; `exp_…` also
+  `progress` and `http`.
   `a..b` and `exp_…` diff `hotspots` `alloc` `layout` `style` `threads` `frames` `summary` `heap`
   `memory`. `query <rec> summary` of a large recording is slow once, then cached.
 - `query <rec|exp> actions [--reveal]`: what a block's hooks sent the target, in order, with the
