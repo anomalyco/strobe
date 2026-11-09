@@ -200,7 +200,13 @@ pub fn run(args: &Args) -> Result<Output> {
         "frames" => frames(&trace, meta, top),
         "threads" if !trace.exists() => Err(Error::usage(format!(
             "this recording kept no thread counters (no trace, no threads.json){}",
-            if dir.join("deep.json.gz").is_file() { format!(": a native stack capture answers strobe query {} hotspots --by package", rec.id) } else { String::new() }
+            if dir.join("timeline.json.gz").is_file() {
+                format!(": its threads over time are in strobe query {} threads --timeline", rec.id)
+            } else if dir.join("deep.json.gz").is_file() {
+                format!(": a native stack capture answers strobe query {} hotspots --by package", rec.id)
+            } else {
+                String::new()
+            }
         ))),
         "threads" => threads(&trace, meta, top),
         "gpu" if !trace.exists() => native_gpu(&dir, meta),
@@ -240,8 +246,13 @@ pub fn run(args: &Args) -> Result<Output> {
             if dir.join("memory.json").exists() {
                 return native_memory(&dir, meta, by, top, args.get("at"));
             }
-            if meta["native"] == true || meta["pid"].is_u64() {
+            if meta["native"] == true || (meta["pid"].is_u64() && meta["script"] != true) {
                 return Err(Error::usage(format!("this native recording has no memory reading: {}", crate::probe::memory::why_empty())));
+            }
+            if meta["script"] == true {
+                return Err(Error::usage(
+                    "a script recording keeps no memory census: the host's memory at the last measured run's end is the block's memory.app.private, and what each run kept js.heap.retained",
+                ));
             }
             memory(&dir, by, top, args.get("at"))
         }
@@ -1344,33 +1355,33 @@ fn read_timeline(dir: &Path) -> Option<crate::probe::wakes::TimelineData> {
 /// from the launch, threads that exited included, with the runs marked, so work that starts late
 /// and stops shows when it ran.
 fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
-    let t = read_timeline(dir).ok_or_else(|| Error::usage("this recording has no thread timeline: native recordings and kept native bench blocks have one (from this strobe on)"))?;
+    let t = read_timeline(dir)
+        .ok_or_else(|| Error::usage("this recording has no thread timeline: native recordings, kept native bench blocks and script attribution recordings have one (from this strobe on)"))?;
+    let meta = store::read_json(&dir.join("meta.json")).unwrap_or(Value::Null);
     let end = t.ticks.last().copied().unwrap_or(t.t0_ns);
     let span_s = end.saturating_sub(t.t0_ns) as f64 / 1e9;
     // One column per second, coarser past 120 s.
     let bin_s = (span_s / 120.0).ceil().max(1.0);
     let cols = ((span_s / bin_s).ceil() as usize).max(1);
     let col = |ns: u64| (((ns.saturating_sub(t.t0_ns)) as f64 / 1e9 / bin_s) as usize).min(cols - 1);
-    let tick_start = |i: usize| if i == 0 { t.t0_ns } else { t.ticks[i - 1] };
-    // Spans to mark: the measured runs (a bench block's frames.json) or the recording's own window.
+    // Spans to mark: the measured runs (a native block's frames.json, a script recording's runs.json) or
+    // the recording's own window.
     let mut marks: Vec<(String, u64, u64)> = t.marks.clone();
-    if let Ok(f) = store::read_json(&dir.join("frames.json")) {
-        for (name, r) in f["runs"].as_object().into_iter().flatten() {
-            marks.push((name.clone(), r["t0_ns"].as_u64().unwrap_or(0), r["t1_ns"].as_u64().unwrap_or(0)));
-        }
+    let runs = store::read_json(&dir.join("frames.json")).ok().and_then(|f| f["runs"].as_object().cloned()).map(|o| o.into_iter().collect::<Vec<_>>()).or_else(|| {
+        store::read_json(&dir.join(crate::probe::cpu::RUNS)).ok().and_then(|f| f["runs"].as_array().cloned()).map(|a| a.into_iter().map(|r| (r["run"].as_str().unwrap_or("").to_string(), r)).collect())
+    });
+    for (name, r) in runs.into_iter().flatten() {
+        marks.push((name, r["t0_ns"].as_u64().unwrap_or(0), r["t1_ns"].as_u64().unwrap_or(0)));
     }
     let n = t.threads.len();
-    let mut cpu = vec![vec![0.0f64; cols]; n];
-    let mut wakes = vec![vec![0u64; cols]; n];
-    for &(tick, th, ms, w) in &t.cells {
-        let i = tick as usize;
-        let c = col(tick_start(i) / 2 + t.ticks[i] / 2);
-        cpu[th as usize][c] += ms as f64;
-        wakes[th as usize][c] += w as u64;
-    }
+    // Each tick spread over the columns it covers: a late tick fills them, never one column at its middle.
+    let (cpu, wakes) = t.binned((bin_s * 1e9) as u64, cols);
+    // Threads whose CPU was not read (all of them where the OS refused it): their cells hold wakes only.
+    let unknown = |i: usize| t.cpu_refused.is_some() || t.cpu_unknown.contains(&(i as u32));
     let total: Vec<f64> = cpu.iter().map(|r| r.iter().sum()).collect();
-    let mut order: Vec<usize> = (0..n).filter(|&i| total[i] > 0.0 || wakes[i].iter().sum::<u64>() > 0).collect();
-    order.sort_by(|&a, &b| total[b].total_cmp(&total[a]));
+    let woke: Vec<f64> = wakes.iter().map(|r| r.iter().sum()).collect();
+    let mut order: Vec<usize> = (0..n).filter(|&i| total[i] > 0.0 || woke[i] > 0.0 || unknown(i)).collect();
+    order.sort_by(|&a, &b| unknown(a).cmp(&unknown(b)).then(total[b].total_cmp(&total[a])).then(woke[b].total_cmp(&woke[a])));
     let ramp = |pct: f64| match pct {
         p if p < 1.0 => ' ',
         p if p < 5.0 => '.',
@@ -1401,18 +1412,29 @@ fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
         "threads over time · one column per {} from the launch (a process recorded from outside: from the start) · CPU of one core: ' ' <1%  . <5%  : <15%  - <30%  = <50%  + <75%  * <95%  # more\n",
         if bin_s == 1.0 { "second".to_string() } else { format!("{bin_s:.0} s") }
     );
-    text += &format!("|{}|\n|{}|  {}\n", axis.iter().collect::<String>(), runs.iter().collect::<String>(), if marks.is_empty() { "" } else { "~ runs" });
+    // Where the OS gave no thread's CPU, no strip: a blank one would read as idle.
+    match &t.cpu_refused {
+        Some(why) => text += &format!("! no thread's CPU: {why}; wakes only\n"),
+        None => text += &format!("|{}|\n|{}|  {}\n", axis.iter().collect::<String>(), runs.iter().collect::<String>(), if marks.is_empty() { "" } else { "~ runs" }),
+    }
     let s = |ns: u64| ns.saturating_sub(t.t0_ns) as f64 / 1e9;
+    // The recorded process's main thread, where the recording names it (`cpu.main`).
+    let main = meta["pid"].as_u64().zip(meta["main_tid"].as_u64().or_else(|| meta["main_thread"].as_u64()));
     let mut rows = Vec::new();
     for &i in order.iter().take(top) {
         let th = &t.threads[i];
-        let strip: String = cpu[i].iter().map(|ms| ramp(100.0 * ms / (bin_s * 1e3))).collect();
+        let strip: String = match (&t.cpu_refused, unknown(i)) {
+            (Some(_), _) => String::new(),
+            (None, true) => format!("|{}|  ", "?".repeat(cols)),
+            (None, false) => format!("|{}|  ", cpu[i].iter().map(|ms| ramp(100.0 * ms / (bin_s * 1e3))).collect::<String>()),
+        };
         let exited = th.last_ns < end;
         let module = th.module.as_deref().map(|m| m.rsplit(['\\', '/']).next().unwrap_or(m));
-        let peak = wakes[i].iter().copied().max().unwrap_or(0) as f64 / bin_s;
+        let peak = wakes[i].iter().copied().fold(0.0, f64::max) / bin_s;
+        let is_main = main == Some((u64::from(th.pid), u64::from(th.tid)));
         text += &format!(
-            "|{strip}|  {:>9}  {:>6} wakes/s peak  {:.1}-{:.1} s{}  {:<6} {}{} {}\n",
-            fmt::value(total[i], "ms"),
+            "{strip}{:>9}  {:>6} wakes/s peak  {:.1}-{:.1} s{}  {:<6} {}{} {}{}\n",
+            if unknown(i) { "?".to_string() } else { fmt::value(total[i], "ms") },
             // macOS counts wakes per process, not per thread.
             if cfg!(target_os = "macos") { "—".to_string() } else { fmt::value(peak, "count") },
             s(th.first_ns),
@@ -1421,22 +1443,32 @@ fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
             th.module.as_deref().map(crate::probe::wakes::origin).unwrap_or("?"),
             th.name.as_deref().unwrap_or("(unnamed)"),
             module.map(|m| format!(" ({m})")).unwrap_or_default(),
-            th.tid
+            th.tid,
+            if is_main { " main thread" } else { "" }
         );
+        let known = !unknown(i);
         rows.push(json!({
-            "pid": th.pid, "tid": th.tid, "name": th.name, "module": module, "first_s": s(th.first_ns), "last_s": s(th.last_ns), "exited": exited,
-            "cpu_ms": total[i], "cpu_ms_per_bin": cpu[i], "wakes_per_bin": wakes[i],
+            "pid": th.pid, "tid": th.tid, "name": th.name, "module": module, "first_s": s(th.first_ns), "last_s": s(th.last_ns), "exited": exited, "main_thread": is_main,
+            "cpu_ms": known.then_some(total[i]), "cpu_ms_per_bin": known.then_some(&cpu[i]), "wakes_per_bin": wakes[i],
         }));
     }
     if order.len() > top {
         text += &format!("… {} more (--top)\n", order.len() - top);
     }
+    // Windows keeps an exited thread's last count through the handle strobe holds; elsewhere the CPU
+    // after its last sample went with it.
+    let windows = meta["env"]["os"].as_str().map_or(cfg!(windows), |os| os.starts_with("Windows"));
     text += &format!(
-        "sampled every {} ms ({} of strobe's own CPU); a thread's CPU between its last sample and its exit is missing\n",
+        "sampled every {} ms ({} of strobe's own CPU){}{}\n",
         t.interval_ms,
-        t.cpu_ms.map(|c| fmt::value(c, "ms")).unwrap_or_else(|| "?".into())
+        t.cpu_ms.map(|c| fmt::value(c, "ms")).unwrap_or_else(|| "?".into()),
+        if windows || t.cpu_refused.is_some() { "" } else { "; a thread's CPU between its last sample and its exit is missing" },
+        if t.cpu_unknown.is_empty() || t.cpu_refused.is_some() { "" } else { "; ? a thread whose CPU strobe could not read" }
     );
-    Ok(Output::new(text, json!({ "bin_s": bin_s, "span_s": span_s, "marks": marks.iter().map(|(n, a, b)| json!({ "name": n, "from_s": s(*a), "to_s": s(*b) })).collect::<Vec<_>>(), "threads": rows })))
+    Ok(Output::new(
+        text,
+        json!({ "bin_s": bin_s, "span_s": span_s, "cpu_refused": t.cpu_refused, "marks": marks.iter().map(|(n, a, b)| json!({ "name": n, "from_s": s(*a), "to_s": s(*b) })).collect::<Vec<_>>(), "threads": rows }),
+    ))
 }
 
 /// A native recording's frames: per measured run, what reached the screen (OS present events), the
@@ -1768,16 +1800,17 @@ pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope
     if sampling.is_some_and(|s| s.coarse()) {
         header += &format!("\n! {COARSE}");
     }
-    let starved = crate::probe::cpu::starved_text(&rec.meta["starved"]);
-    if let Some(t) = &starved {
+    // The measured runs' main-thread CPU the profile holds no sample of (`cpu.main` against the samples).
+    let missed = (scope != Scope::Host && rec.meta["missed"].is_object()).then(|| &rec.meta["missed"]);
+    if let Some(t) = missed.and_then(|m| crate::probe::cpu::missed_text(m, rec.meta["runtime"]["name"].as_str())) {
         header += &format!("\n! {t}");
     }
     if stacks.weights.is_empty() && scope != Scope::Host && named.is_some() {
         header += &format!("\n! no sample in these runs: the host ran no JavaScript there that its sampler saw; strobe query {} hotspots --source host has the whole host process", rec.id);
     }
     let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), Some(sort));
-    if starved.is_some() {
-        out.json["starved"] = rec.meta["starved"].clone();
+    if let Some(m) = missed {
+        out.json["missed"] = m.clone();
     }
     out.json["interval_us"] = json!(sampling.map(|s| s.median_us));
     out.json["sampling"] = json!(sampling);

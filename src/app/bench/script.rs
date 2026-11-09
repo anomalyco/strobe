@@ -1,8 +1,9 @@
 //! Script targets (SPEC §9.6): a variant's Bun or Node module, loaded by strobe's host in a fresh
 //! process per block and called from the bench file (`ctx.call(name, ...args)`). Runs are timed on the
-//! process's own CPU (`cpu.work`) and wall clock; attribution blocks add the runtime's CPU and
-//! allocation profiles (`--cpu-prof`, `--heap-prof`), the CPU profile placed on strobe's clock and cut
-//! to each measured run (`Profiled`).
+//! process's own CPU (`cpu.work`), its main thread's (`cpu.main`) and wall clock; attribution blocks
+//! add the runtime's CPU profile (`--cpu-prof`) and Node's allocation profile (`--heap-prof`), the CPU
+//! profile placed on strobe's clock and cut to each measured run, and the host's thread timeline
+//! (`Profiled`).
 
 use super::*;
 use std::io::{BufRead, BufReader, Write};
@@ -16,6 +17,9 @@ struct Host {
     conn: TcpStream,
     lines: Receiver<String>,
     next: u64,
+    /// The runtime's own process, as it says in its ready message: the child strobe started, or the
+    /// runtime a launcher it started (a version manager's shim) runs.
+    runtime_pid: u32,
 }
 
 /// A profiled host's clocks against strobe's (`probe::cpu::Sync`), and its runtime (`name`, `version`).
@@ -32,7 +36,7 @@ impl Drop for Scratch {
 }
 
 /// A measured run as `runs.json` keeps it: its key, case, span with untimed stretches and phase marks
-/// (strobe's clock), and its wall and CPU ms.
+/// (strobe's clock), its wall and CPU ms, and its main thread's CPU ms (`cpu.main`) or why none.
 struct Measured {
     key: String,
     case: String,
@@ -40,6 +44,7 @@ struct Measured {
     marks: Vec<(String, u64)>,
     ms: f64,
     cpu_ms: f64,
+    main_ms: std::result::Result<f64, host::MainLost>,
 }
 
 /// The harness module for `root`. The entry resolves from the bench file, like everything else in it,
@@ -102,7 +107,15 @@ impl Host {
         // stdin is empty; stdout and stderr go to the experiment's script.log.
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         cmd.env("STROBE_HOST_PORT", listener.local_addr()?.port().to_string());
-        let out = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+        // Owner-only: the module prints what it likes there (SPEC rule 9).
+        let mut o = std::fs::OpenOptions::new();
+        o.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let out = o.open(log)?;
         let err = out.try_clone()?;
         cmd.stdin(Stdio::null()).stdout(out).stderr(err);
         let mut child = host::spawn_owned(&mut cmd, cpus, 0, None).map_err(|e| Error::msg(format!("start the script host: {e}")))?;
@@ -135,10 +148,12 @@ impl Host {
                 }
             }
         });
-        let host = Host { child, conn, lines, next: 1 };
+        let pid = child.pid();
+        let mut host = Host { child, conn, lines, next: 1, runtime_pid: pid };
         loop {
             let line = host.lines.recv_timeout(Duration::from_secs(60)).map_err(|_| failed(log))?;
-            if serde_json::from_str::<Value>(&line).ok().is_some_and(|v| v["ready"] == true) {
+            if let Some(v) = serde_json::from_str::<Value>(&line).ok().filter(|v| v["ready"] == true) {
+                host.runtime_pid = v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 0).unwrap_or(pid);
                 return Ok(host);
             }
         }
@@ -251,11 +266,18 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let mut spawned = Host::spawn(&target, &entry, &root, ctx.pin, profiles.as_ref().map(|p| p.0.as_path()), &log)?;
     life.borrow_mut().push(("startup".into(), started, host::now_ns()));
     let ready = if profiles.is_some() { Some(spawned.clocks()?) } else { None };
-    let host_pid = spawned.pid();
+    let pid = spawned.pid();
+    let runtime_pid = spawned.runtime_pid;
+    // The runtime's main thread: the child's own, bound at its launch, or where a launcher (a version
+    // manager's shim) started the runtime, that process's.
+    let main_thread = if runtime_pid == pid { spawned.child.main_thread() } else { host::MainThread::attach(runtime_pid) };
+    // Each thread of the host's tree over the block, where its recording is kept (attribution).
+    let timeline = profiles.is_some().then(|| probe::wakes::Timeline::start(move || host::tree_pids(pid)));
     let host = RefCell::new(spawned);
     let heap_mb = || -> Result<f64> { Ok(host.borrow_mut().request(json!({ "op": "heap" }), Duration::from_secs(120))?.as_f64().unwrap_or(f64::NAN) / (1024.0 * 1024.0)) };
     steps.push(("launch".into(), launched.elapsed().as_secs_f64() * 1e3));
-    let pid = host.borrow().pid();
+    let main_read = || -> std::result::Result<host::MainCpu, host::MainLost> { main_thread.as_ref().map_err(Clone::clone)?.read() };
+    let main_edges: RefCell<Vec<std::result::Result<host::MainCpu, host::MainLost>>> = RefCell::new(Vec::new());
     let hooks = super::block::Hooks::new(ctx, move || host::tree_pids(pid));
     let cost = SelfCost::new(ctx.runner.pid());
     // The host's CPU at each edge of the run's untimed stretches, with what tells a process of its tree
@@ -273,11 +295,13 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
             "untimed" => hooks.untimed(a, |start, _| {
                 if start {
                     cost.pause();
+                    main_edges.borrow_mut().push(main_read());
                 }
                 let c = cycles(pid).0;
                 let e = ended_of(&c);
                 edges.borrow_mut().push((c, e));
                 if !start {
+                    main_edges.borrow_mut().push(main_read());
                     cost.resume();
                 }
                 Ok(())
@@ -318,6 +342,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // Per run: what processes of the host's tree that ended in a timed part used there (ms), and
                 // whether that is not known (their CPU there gone with them).
                 let mut lost: Vec<(f64, bool)> = Vec::new();
+                // Per run: the share of the timed parts the host's main thread was on a CPU (`cpu.main`), or why none.
+                let mut mains: Vec<std::result::Result<f64, host::MainLost>> = Vec::new();
                 // Who else used the CPUs, from two snapshots outside the runs, for a block with other work.
                 let procs0 = ctx.pin.map(|_| (host::now_ns(), host::all_processes()));
                 // Steady once two runs cost the same CPU (SPEC §9.2).
@@ -328,16 +354,35 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let listed = probe::wakes::wall_us();
                     let k0 = probe::wakes::Counters::take(listed, &host::tree_pids(pid), perf.as_ref());
                     edges.borrow_mut().clear();
+                    main_edges.borrow_mut().clear();
                     // Right before the cycles (nothing read between), so it adds nothing to the run's CPU; a
                     // process that differs between the two is refused, never miscounted (`dead_since`).
                     let ended0 = host::ended_marks(&host::tree_pids(pid), None);
                     let c0 = cycles(pid);
                     let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
+                    let main0 = main_read();
+                    if let Some(tl) = &timeline {
+                        tl.mark_edge();
+                    }
                     cost.start();
                     let t0 = host::now_ns();
                     ctx.runner.call("run", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw or timed out"))?;
                     let t1 = host::now_ns();
                     cost.end();
+                    let main1 = main_read();
+                    if let Some(tl) = &timeline {
+                        tl.mark_edge();
+                    }
+                    let mut m = main_edges.take();
+                    if m.len() % 2 == 1 {
+                        m.push(main1.clone());
+                    }
+                    let main = std::iter::once(main0)
+                        .chain(m)
+                        .chain(std::iter::once(main1))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .and_then(|at| host::main_share(&at).ok_or_else(|| host::MainLost::Gone("the CPU clock gave no rate over the run".into())));
+                    mains.push(main);
                     // Ended before the tree's snapshot, which takes milliseconds: the tree's CPU below spans it.
                     let busy = busy.zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
                     let c1 = cycles(pid);
@@ -405,6 +450,13 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 if heap {
                     extra.insert("js.heap.retained".into(), measured.iter().enumerate().map(|(j, r)| (key(j), r.3)).collect());
                 }
+                let main_lost = mains[local.clone()].iter().find_map(|m| m.as_ref().err()).cloned();
+                if main_lost.is_none() {
+                    let main = &mains[local.clone()];
+                    // The share of the run's timed parts on a CPU (`host::main_share`), and it in ms of them.
+                    extra.insert("cpu.main".into(), main.iter().zip(measured).enumerate().filter_map(|(j, (m, r))| Some((key(j), m.as_ref().ok()? * r.0))).collect());
+                    extra.insert("cpu.main.busy".into(), main.iter().enumerate().filter_map(|(j, m)| Some((key(j), 100.0 * m.as_ref().ok()?))).collect());
+                }
                 let hooked: Vec<super::block::Hooked> = measured.iter().map(|r| (&r.2, r.4.as_slice(), &r.6)).collect();
                 extra.extend(super::block::per_run_hooks(s, &key, &hooked));
                 let counted: Vec<(String, &probe::wakes::Counted)> = measured.iter().enumerate().map(|(j, r)| (key(j), &r.5)).collect();
@@ -423,6 +475,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     values.insert("memory.app.pss".into(), b as f64 / (1024.0 * 1024.0));
                 }
                 let mut refused = uncounted;
+                if let Some(lost) = &main_lost {
+                    for m in declared_metrics(s).into_iter().filter(|m| *m == "cpu.main" || *m == "cpu.main.busy") {
+                        refused.insert(m.clone(), lost.refusal(m));
+                    }
+                }
                 // A process the host started that ended inside a timed part took its CPU with it, where what
                 // it used is not known.
                 let gone = lost[local.clone()].iter().filter(|l| l.1).count();
@@ -460,7 +517,15 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         let what = if i < local.start { "warm" } else { "unmeasured" };
                         life.borrow_mut().push((format!("{what}:{}", base + i), r.6.t0, r.6.t1));
                     }
-                    kept.borrow_mut().extend(measured.iter().enumerate().map(|(j, r)| Measured { key: key(j), case: s.case.clone(), timed: r.6.clone(), marks: r.4.clone(), ms: r.0, cpu_ms: r.1 }));
+                    kept.borrow_mut().extend(measured.iter().zip(&mains[local.clone()]).enumerate().map(|(j, (r, m))| Measured {
+                        key: key(j),
+                        case: s.case.clone(),
+                        timed: r.6.clone(),
+                        marks: r.4.clone(),
+                        ms: r.0,
+                        cpu_ms: r.1,
+                        main_ms: m.clone().map(|share| share * r.0),
+                    }));
                     passed.borrow_mut().push((k, base + local.start..base + local.end));
                 }
                 base += runs.len();
@@ -511,13 +576,28 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         }
         Ok(launch)
     })();
+    // Its last tick while the host still runs: the exit is no part of the block.
+    let timeline = timeline.map(probe::wakes::Timeline::stop);
     let exited = host.into_inner().exit(profiles.is_some());
     let mut launch = result?;
     if let Some(dir) = &profiles
         && launch.cases.iter().any(Result::is_ok)
     {
         let clocks = ready.zip(exited).map(|(r, e)| e.map(|e| (r, e)));
-        let made = Profiled { dir: &dir.0, id: &id, pid: host_pid, cases, v, target: &target, clocks, life: &life.take(), runs: &kept.take(), passed: &passed.take() };
+        let made = Profiled {
+            dir: &dir.0,
+            id: &id,
+            pid: runtime_pid,
+            main_tid: main_thread.as_ref().ok().map(|m| m.tid),
+            cases,
+            v,
+            target: &target,
+            clocks,
+            life: &life.take(),
+            runs: &kept.take(),
+            passed: &passed.take(),
+            timeline: timeline.as_ref(),
+        };
         match made.keep(ctx, &launch) {
             Ok(()) => {
                 for b in launch.cases.iter_mut().flatten() {
@@ -539,8 +619,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
 struct Profiled<'a> {
     dir: &'a Path,
     id: &'a str,
-    /// The host process.
+    /// The runtime's process (the host, or the runtime its launcher started) and its main thread's id.
     pid: u32,
+    main_tid: Option<u32>,
     cases: &'a [Series],
     v: &'a Variant,
     target: &'a Value,
@@ -549,6 +630,8 @@ struct Profiled<'a> {
     life: &'a [(String, u64, u64)],
     runs: &'a [Measured],
     passed: &'a [(usize, std::ops::Range<usize>)],
+    /// The host's threads over the block (`query threads --timeline`).
+    timeline: Option<&'a probe::wakes::TimelineData>,
 }
 
 impl Profiled<'_> {
@@ -603,15 +686,25 @@ impl Profiled<'_> {
         let runs: Vec<Value> = self
             .runs
             .iter()
-            .map(|r| json!({ "run": r.key, "case": r.case, "t0_ns": r.timed.t0, "t1_ns": r.timed.t1, "untimed": r.timed.untimed, "marks": r.marks, "ms": r.ms, "cpu_ms": r.cpu_ms }))
+            .map(|r| {
+                json!({ "run": r.key, "case": r.case, "t0_ns": r.timed.t0, "t1_ns": r.timed.t1, "untimed": r.timed.untimed, "marks": r.marks, "ms": r.ms, "cpu_ms": r.cpu_ms, "main_cpu_ms": r.main_ms.as_ref().ok() })
+            })
             .collect();
         store::write_json(&rec.join(probe::cpu::RUNS), &json!({ "runs": runs }))?;
         super::keep_actions(ctx, &rec)?;
         let segments: Vec<(f64, f64)> = self.runs.iter().flat_map(|r| r.timed.segments()).map(|(a, b)| (us(a), us(b))).collect();
         let sampling = probe::cpu::Sampling::of(probe::cpu::interval_us() as f64, rebased.gaps_in(&segments));
-        let starved = rebased.starved(rt, &profile, &segments).map(|(lost, held)| json!({ "ms": lost / 1e3, "share": if lost + held > 0.0 { lost / (lost + held) } else { 0.0 } }));
-        if let Some(text) = starved.as_ref().and_then(probe::cpu::starved_text) {
+        // The main thread's CPU in the measured runs the profile holds no sample of; not known where
+        // `cpu.main` was refused.
+        let missed = match self.runs.iter().map(|r| r.main_ms.clone()).collect::<std::result::Result<Vec<f64>, _>>() {
+            Ok(main) => probe::cpu::missed(main.iter().sum(), rebased.sampled_in(&profile, &segments) / 1e3),
+            Err(lost) => json!({ "refused": lost.refusal("cpu.main").summary }),
+        };
+        if let Some(text) = probe::cpu::missed_text(&missed, runtime["name"].as_str()) {
             ctx.warnings.push(validity::warn("Attribution", format!("{}: {text}", self.cases[0].label())));
+        }
+        if let Some(t) = self.timeline {
+            crate::symbol::write_gz(&rec.join("timeline.json.gz"), t)?;
         }
         let s = &self.cases[0];
         let batch = ctx.batch.is_some();
@@ -621,12 +714,10 @@ impl Profiled<'_> {
             "target": self.target["entry"], "probes": Set::Attribution, "timing": "perturbed", "runs": self.runs.len(), "measured": self.runs.iter().map(|r| &r.key).collect::<Vec<_>>(),
             "values": if batch { json!({}) } else { json!(blocks.first().map(|b| &b.values)) },
             "created": super::super::record::now_iso(), "valid": true, "env": host::env(), "script": true,
-            "runtime": runtime, "sampling": sampling, "starved": starved, "whole_host": probe::cpu::WHOLE_HOST, "pid": self.pid,
-            // A process's main thread on Linux is the thread whose id is the process's.
-            "main_tid": cfg!(target_os = "linux").then_some(self.pid),
+            "runtime": runtime, "sampling": sampling, "missed": missed, "whole_host": probe::cpu::WHOLE_HOST, "pid": self.pid, "main_tid": self.main_tid,
             "lifecycle_spans": self.life.iter().map(|(name, a, b)| json!({ "name": name, "t0_ns": a, "t1_ns": b })).collect::<Vec<_>>(),
             "clock": { "rtt_ms": [ready.rtt_ns as f64 / 1e6, exit.rtt_ns as f64 / 1e6], "drift_ms": (exit.offset_ns - ready.offset_ns) / 1e6, "cap_ms": rebased.cap_us / 1e3 },
-            "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile (Node): sampled allocations of the whole host process",
+            "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile (Node): sampled allocations of the whole host process; timeline.json.gz: the host's threads over the block (query threads --timeline)",
         });
         if batch {
             meta["batch"] = super::batch::meta(self.passed.iter().zip(&blocks).map(|((k, r), b)| (&self.cases[*k], r.clone(), *b)));

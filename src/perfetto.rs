@@ -277,7 +277,8 @@ struct Builder {
     root: u64,
     /// Child tracks of the root by name.
     tracks: HashMap<String, u64>,
-    thread_tracks: HashMap<(u32, u32), u64>,
+    /// Thread tracks so far, and whether each was described with a name.
+    thread_tracks: HashMap<(u32, u32), (u64, bool)>,
     /// Processes described so far: one descriptor each.
     processes: HashSet<u32>,
     lo: Option<u64>,
@@ -488,11 +489,14 @@ impl Builder {
         }
     }
 
+    /// A thread's track; described again with `name` where it was first described without one (the
+    /// thread list names no thread the recording calls its main thread).
     fn thread_track(&mut self, pid: u32, tid: u32, name: Option<&str>) -> u64 {
-        if let Some(u) = self.thread_tracks.get(&(pid, tid)) {
-            return *u;
-        }
-        let uuid = self.uuid();
+        let uuid = match self.thread_tracks.get(&(pid, tid)) {
+            Some(&(u, named)) if named || name.is_none() => return u,
+            Some(&(u, _)) => u,
+            None => self.uuid(),
+        };
         self.descriptor(|d| {
             d.u(1, uuid).m(4, |t| {
                 t.u(1, u64::from(pid)).u(2, u64::from(tid));
@@ -501,7 +505,7 @@ impl Builder {
                 }
             });
         });
-        self.thread_tracks.insert((pid, tid), uuid);
+        self.thread_tracks.insert((pid, tid), (uuid, name.is_some()));
         uuid
     }
 
@@ -793,9 +797,10 @@ impl Builder {
                 .or_else(|| th.module.as_deref().map(|m| format!("{} thread", m.rsplit(['\\', '/']).next().unwrap_or(m))))
                 .unwrap_or_else(|| "thread".into());
             // The process's main thread (`cpu.main`): the one whose saturation the runs' values say.
-            let name = if main == Some((th.pid, th.tid)) { format!("{name} (main thread)") } else { name };
+            let is_main = main == Some((th.pid, th.tid));
+            let name = if is_main { format!("{name} (main thread)") } else { name };
             // With a Chrome trace its own thread tracks stay its own: these go under strobe's.
-            let parent = if self.built.chrome { None } else { Some(self.thread_track(th.pid, th.tid, th.name.as_deref())) };
+            let parent = if self.built.chrome { None } else { Some(self.thread_track(th.pid, th.tid, if is_main { Some(name.as_str()) } else { th.name.as_deref() })) };
             let group = self.built.chrome.then(|| self.track("threads (CPU and wakes)", 10, None));
             let mut make = |what: String, unit: &str| match parent {
                 Some(parent) => {

@@ -134,7 +134,10 @@ The design and every rule behind this file: SPEC.md.
 - `cpu.main` is the main thread alone beside `cpu.work` (the tree): `cpu.main.busy` near 100% is a
   saturated event loop; a worker or a child process shows in `cpu.work` only.
 - A script's `query <rec> hotspots` is its measured runs; `--source host` the whole host process
-  (start, setup, warmup, resets); `--phase <name>` one phase.
+  (start, setup, warmup, resets); `--phase <name>` one phase. `! Missed` there: the main thread used
+  CPU (`cpu.main`) the profile has no sample of, so rows undercount (Node labels short timer callbacks
+  `(idle)`; Bun's sampler thins out on a loaded machine). `query <rec> threads --timeline`: which
+  thread was busy when, runs marked.
 
 ### Phones
 

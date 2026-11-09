@@ -1284,8 +1284,8 @@ What strobe reads from a native app (§13.7), per run:
   Finder's row reads `os`). The `wakes-while-idle` insight
   counts the app's own threads and names driver and OS threads apart. Every adapter the app used is
   recorded (`ctx.gpu.devices`), each with its own engine use.
-- **A thread timeline** (native `record`, `record pid:`, and native bench blocks that are not timed:
-  `--check` and attribution): a thread of strobe's takes the same system snapshot every second from
+- **A thread timeline** (native `record`, `record pid:`, native bench blocks that are not timed:
+  `--check` and attribution, and script attribution blocks, §9.6): a thread of strobe's takes the same system snapshot every second from
   the launch (or the recording's start) to the last run's end, over the tree (and what runs from
   its home, read every 5 s), and keeps each thread's CPU (exact: Windows from each thread's cycle
   counter, a handle held while the thread lives, so one that exits between two snapshots keeps its
@@ -1335,7 +1335,10 @@ What strobe reads from a native app (§13.7), per run:
   Refused `NotOnThisOs` where no exact per-thread counter exists (Windows: cycles that are not time;
   Linux: no schedstat, decided once from strobe's own main thread, or tickless `nohz_full` CPUs; macOS:
   `EPERM`, `EINVAL`), never read from clock ticks; `RunIncomplete` when the thread or its process
-  ended (a zombie leader too: a launcher that hands over refuses it) or the clock gave no rate. Known
+  ended (a zombie leader too: a launcher that hands over refuses it) or the clock gave no rate. A
+  script host names its runtime's process in its ready message: where that is not the process strobe
+  started (a version manager's shim that runs the runtime as its child), strobe binds that process's
+  main thread instead (attached, as for `record pid:`). Known
   answer: `scripts/dev/main-thread.bench.ts` (a main-thread spin, a worker's, a child process's and a
   timer wait: `cpu.work` high for the first three, `cpu.main` high only for the first).
 - **Presented frames** (`frames.interval.*`, `frames.dropped*`, `frames.discarded`,
@@ -3663,7 +3666,10 @@ experiment's `script.log`.
     Node's profile counts in hrtime (V8's TimeTicks: QPC, `CLOCK_MONOTONIC`, mach); Bun 1.4's in wall µs
     from JSC's `approximateWallTime` at the host's exit (shifted by the wall clock's lead over the
     monotonic one then: 0.28 ms on adais after 11 s), each delta truncated to whole µs (0.5 µs a
-    sample: 0.8 ms early after 20 s on vps); strobe adds both back. `ClockUnsynced`: a reading's round
+    sample on vps: 0.8 ms early after 20 s; 0.37 µs on adais, where the gaps' fractions are not
+    even); strobe adds both back, the truncation as its `endTime` (the last sample's time, whole)
+    says the gaps lost in all, spread over the samples (0.5 µs each without it). A fixed 0.5 µs
+    put the exit's spin 1.1 ms late in a probed 10 s block on adais (`ClockUnsynced`). `ClockUnsynced`: a reading's round
     trip over 2 ms, the monotonic offset moving over 1 ms between start and exit, or a
     `strobeClockMark` sample over 1 ms outside strobe's span around its request (or none in either
     spin). `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms before
@@ -3672,18 +3678,30 @@ experiment's `script.log`.
     a gap over `capUs` weighs `overUs` (the runtime took no sample then). Node: both 50 ms. Bun, which
     takes no sample while its VM is idle: from the median gap m inside `strobeClockMark`'s spins (a
     busy VM), `capUs` 4 m and `overUs` m, so a sample before an idle gap stands for one interval.
-    `starved` (Node only; null on Bun, whose gaps cannot tell an `await` from a starved sampler): the
-    cap-cut time where the same stack is on both sides of a gap, busy JavaScript the sampler missed;
-    over 5% of the measured time `query hotspots` and the bench's `Attribution` warning say its rows
-    undercount (vps, 2 vCPU under load: 40% of a 30 ms spin in such gaps).
+    `missed` (both runtimes): the measured runs' main-thread CPU (`cpu.main`, §7.4) minus the weight
+    of their samples that are not `(root)` or `(idle)` (`(program)` and `(garbage collector)` are the
+    thread on a CPU), at least 0, and its share of that CPU: CPU the profile holds no sample of. Over
+    5% `query hotspots` (measured runs and `--phase`) and the bench's `Attribution` warning say its
+    rows undercount, and why: Node's profiler labels most of a short timer callback `(idle)` (200 ×
+    (2 ms of work, 10 ms timer): 0.35 of 2 ms sampled a run; the fixture's await loop misses 95%);
+    Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work (the
+    await loop on adais misses 20%), and fewer on a loaded machine (vps, 2 vCPU under load: phases of
+    150 ms read 74 and 87 ms). Bun's samples weigh wall time, and its sampler stops the thread to take
+    one, so a busy run's samples can weigh more than `cpu.main` (missed 0). Not known (`missed: {
+    refused }`, no warning) where `cpu.main` was refused.
   - Files: `cpu-<run>.cpuprofile`, one per measured run of a passing case (`<run>` the run's global
     number), integer µs, `startTime` and `endTime` its timed span, each delta the previous sample's
     weight; `whole-host.json.gz` (owner-only), the whole host process on strobe's clock in true µs with
     `capUs` and `overUs`; `runs.json` (`{ runs }`: each measured run's case, span, untimed stretches,
-    phase marks, wall and CPU ms); and in `meta.json` the host's life outside them (`lifecycle_spans`:
-    startup, setup, `warm:<n>`, `unmeasured:<n>`, `reset:<n>`, teardown), `runtime`, `sampling` (the
-    gaps inside timed parts, under the cap), `starved`, `clock` (`rtt_ms`, `drift_ms`, `cap_ms`), `pid`
-    and `main_tid`. Never `frames.json`.
+    phase marks, wall, CPU and main-thread CPU ms); `timeline.json.gz`, the host tree's threads from
+    its ready message to the last run's end (§7.4: a tick at each measured run's edges; `query threads
+    --timeline` marks the runs from `runs.json`); and in `meta.json` the host's life outside them
+    (`lifecycle_spans`: startup, setup, `warm:<n>`, `unmeasured:<n>`, `reset:<n>`, teardown),
+    `runtime`, `sampling` (the gaps inside timed parts, under the cap), `missed`, `clock` (`rtt_ms`,
+    `drift_ms`, `cap_ms`), `pid` and `main_tid` (the runtime's process as its ready message names it
+    and that process's main thread, `host::MainThread`, on every OS; where a launcher such as a
+    version manager's shim started the runtime, the runtime's process, not the launcher's). Never
+    `frames.json`.
   - Views: `query hotspots` reads the measured runs (`scope: measured_runs`), `--source host` the
     whole host process (`scope: whole_host`, never divided by runs), `--phase <name>` that phase's
     stretches of the measured runs from the whole-host profile and `runs.json` (`scope: phase`); `a..b
@@ -7055,11 +7073,12 @@ recordings/rec_3f9a1c/
   presents.json.gz      OS present events: every present (start, screen time or discarded) and vertical blank
   runs.json             native apps: per measured run, wall and CPU time, the main thread's CPU, wakes, IO,
                         counts, accessibility elements; script blocks: `{ runs }`, each measured run's span,
-                        untimed stretches, phase marks, wall and CPU ms (`meta.json` `lifecycle_spans`: the
-                        host's life around them)
+                        untimed stretches, phase marks, wall, CPU and main-thread CPU ms (`meta.json`
+                        `lifecycle_spans`: the host's life around them)
   frames.json           native apps: the app's pids, and per measured run its span, strobe's inputs, phase marks and accessibility change times
   threads.json          native apps: per thread wakes per second, CPU per run, name
-  timeline.json.gz      native apps: each thread's CPU and wakes per second from the launch (§7.4)
+  timeline.json.gz      native apps and script attribution blocks: each thread's CPU and wakes per second
+                        from the launch (§7.4)
   perfetto.pftrace      `strobe open`'s merged trace (§11.4), rebuilt on every open
   gecko-profile.json.gz Firefox: the Gecko profile as Firefox wrote it, owner-only (§8.3)
   gecko.json            Firefox: what strobe read from it: run windows and marks, page threads, each
@@ -7481,6 +7500,13 @@ what was built but not yet run on a device is in §21.
   with an idle control, `http.*` metrics (timeouts right-censor a quantile, errors refuse the
   latencies), probe blocks apart from clean timing blocks, `query http` with stalled cohorts, a
   Perfetto waterfall, and an authorization held in memory only (§8.9, §11.1, §11.4, §19).
+- 2026-11-09 · this change · saturated servers on one recording: `cpu.main` and `cpu.main.busy` from
+  the main thread's own counter (script and native targets, `record pid:`; a script runtime behind a
+  launcher bound by the pid its ready message names); script attribution profiles cut to the measured
+  runs (`--source host` the whole host, `--phase`), `missed` (main-thread CPU the profile holds no
+  sample of) replacing `starved`; the thread timeline in script attribution blocks, cycle-exact on
+  Windows, late ticks spread over the seconds they cover; script.log owner-only (§7.4, §9.6, §11.1,
+  §14.1).
 
 **After 0.22.0**
 

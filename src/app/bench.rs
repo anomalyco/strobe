@@ -5505,7 +5505,20 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         if let Some(report) = &report {
             ctx.reserved.get_or_insert_with(ReserveTotal::default).add(report);
         }
-        let mut launch = launch?;
+        // A launch or block that failed never reaches `http_state`: what its probe sent leaves the
+        // experiment's logs all the same.
+        let unused = |ctx: &mut Ctx, http: Option<crate::runner::HttpTaken>| {
+            if let Some(t) = http {
+                scrub_probe_logs(ctx, &cases[0].label(), &t.secrets);
+            }
+        };
+        let mut launch = match launch {
+            Ok(l) => l,
+            Err(e) => {
+                unused(ctx, http.take());
+                return Err(e);
+            }
+        };
         let taken = std::mem::take(&mut launch.cases);
         for (r, s) in taken.into_iter().zip(cases) {
             let r = r
@@ -5552,6 +5565,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
             }
             launch.cases.push(r);
         }
+        unused(ctx, http.take());
         Ok(launch)
     })
 }
@@ -5937,15 +5951,9 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     // The target got what the probe sent (its authorization, its URL's query, its headers' values): what
     // it or the hooks printed to the experiment's logs keeps none of it. Recordings are never rewritten:
     // a block whose probe carries any takes no dump of the target's memory (`Runner::http_secret`).
-    if let Ok(dir) = store::experiment_dir(&ctx.exp) {
-        let logs: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "log")).collect();
-        let (redacted, failed) = http_probe::scrub_logs(&logs, &secrets);
-        if redacted > 0 {
-            summary["redacted_logs"] = json!(redacted);
-        }
-        for f in failed {
-            ctx.warnings.push(validity::warn("HttpProbe", format!("{}: a log that holds what the probe sent could not be written: {f}", s.label())));
-        }
+    let redacted = scrub_probe_logs(ctx, &s.label(), &secrets);
+    if redacted > 0 {
+        summary["redacted_logs"] = json!(redacted);
     }
     drop(secrets);
     if x.keep || x.untimed || x.set == Set::Attribution {
@@ -5956,6 +5964,18 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     }
     b.http = Some(summary);
     b
+}
+
+/// Takes what an HTTP probe sent the target (`http_probe::Secrets`) out of the experiment's logs, in
+/// place (`http_probe::scrub_logs`), warning of a log it could not rewrite; returns how many it did.
+fn scrub_probe_logs(ctx: &mut Ctx, label: &str, secrets: &http_probe::Secrets) -> usize {
+    let Ok(dir) = store::experiment_dir(&ctx.exp) else { return 0 };
+    let logs: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "log")).collect();
+    let (redacted, failed) = http_probe::scrub_logs(&logs, secrets);
+    for f in failed {
+        ctx.warnings.push(validity::warn("HttpProbe", format!("{label}: a log that holds what the probe sent could not be written: {f}")));
+    }
+    redacted
 }
 
 /// Writes a block's probes (`http_probe.json.gz`, owner-only) into its recording, or into one of their

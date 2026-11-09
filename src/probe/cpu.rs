@@ -100,8 +100,8 @@ impl Sampling {
 /// µs: each sample's monotonic time made wall time as the host exits and writes it (JSC's
 /// `approximateWallTime`), so offset by how far the wall clock led the monotonic one then, and each gap
 /// truncated to whole µs while the time it is taken from moves on exactly (Bun 1.4,
-/// `BunCPUProfiler.cpp`): 0.5 µs a sample on average, which put a run's samples 0.8 ms early after
-/// 20 s on vps. Bun's sampler takes no sample while the VM runs no JavaScript: a 1 s sleep is one 1 s
+/// `BunCPUProfiler.cpp`): 0.5 µs a sample on vps, which put a run's samples 0.8 ms early after 20 s
+/// there, 0.37 µs on adais; its `endTime`, the last sample's time untruncated, says how much in all. Bun's sampler takes no sample while the VM runs no JavaScript: a 1 s sleep is one 1 s
 /// gap, where V8 samples `(idle)` every interval.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,16 +120,34 @@ impl Runtime {
     }
 }
 
-/// Over this share of a script recording's measured time missed for want of a CPU
-/// (`Rebased::starved`, `starved` in meta.json), the recording and every hotspots view say so.
-pub const STARVED_SHARE: f64 = 0.05;
+/// Over this share of a script host's main-thread CPU in its measured runs with no sample of it
+/// (`missed` in meta.json), the recording and every hotspots view say its rows undercount.
+pub const MISSED_SHARE: f64 = 0.05;
 
-/// What a script recording's `starved` costs its rows, when over `STARVED_SHARE`.
-pub fn starved_text(starved: &Value) -> Option<String> {
-    let share = starved["share"].as_f64().filter(|s| *s > STARVED_SHARE)?;
+/// A script recording's `missed` (meta.json): the measured runs' main-thread CPU (`cpu.main`, ms) the
+/// profile holds no sample of: that CPU minus the samples' weight there (`Rebased::sampled_in`), at
+/// least 0, and its share of that CPU.
+pub fn missed(main_ms: f64, sampled_ms: f64) -> Value {
+    let ms = (main_ms - sampled_ms).max(0.0);
+    json!({ "ms": ms, "share": if main_ms > 0.0 { ms / main_ms } else { 0.0 }, "main_ms": main_ms, "sampled_ms": sampled_ms })
+}
+
+/// What a script recording's `missed` costs its rows, when over `MISSED_SHARE`; `runtime` is its
+/// runtime's name (`meta.runtime.name`), which says why.
+pub fn missed_text(missed: &Value, runtime: Option<&str>) -> Option<String> {
+    let share = missed["share"].as_f64().filter(|s| *s > MISSED_SHARE)?;
+    let why = match runtime {
+        Some("node") => "Node's profiler labels most of a short timer callback (idle), so timer-driven work undercounts",
+        Some("bun") => {
+            "Bun's sampler takes a sample only while JavaScript runs (never of its event loop's own work: timers, I/O) and fewer while the machine is loaded: where it is, record where the target's CPUs are not shared"
+        }
+        _ => "the runtime's sampler took no sample of it",
+    };
     Some(format!(
-        "Starved: the runtime's sampler missed {:.0} ms ({:.0}%) of the measured runs while one stack ran on both sides of the gap (its sampler without a CPU); a gap counts only up to the cap, so rows undercount: record where the target's CPUs are not shared",
-        starved["ms"].as_f64().unwrap_or(0.0),
+        "Missed: the main thread ran {:.0} ms on a CPU in the measured runs (cpu.main) and the profile holds samples of {:.0} ms of it: {:.0} ms ({:.0}%) has no sample, so rows undercount. {why}",
+        missed["main_ms"].as_f64().unwrap_or(0.0),
+        missed["sampled_ms"].as_f64().unwrap_or(0.0),
+        missed["ms"].as_f64().unwrap_or(0.0),
         100.0 * share
     ))
 }
@@ -216,10 +234,15 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     let deltas: Vec<f64> = p["timeDeltas"].as_array().into_iter().flatten().map(|d| d.as_f64().unwrap_or(0.0)).collect();
     let samples = p["samples"].as_array().map_or(0, Vec::len);
     let start = p["startTime"].as_f64().ok_or_else(|| Error::msg("the script host's CPU profile has no startTime"))?;
-    let (lead, lost) = match rt {
-        Runtime::Node => (0.0, 0.0),
-        Runtime::Bun => (exit.wall_lead_us, if deltas.iter().all(|d| d.fract() == 0.0) { 0.5 } else { 0.0 }),
+    // Bun's `endTime` is its last sample's time, not truncated: what the truncated gaps lost in all, spread
+    // over the samples (0.37 µs a sample on adais, where gaps are not spread evenly over a µs).
+    let truncated = rt == Runtime::Bun && deltas.iter().all(|d| d.fract() == 0.0);
+    let lost = match p["endTime"].as_f64() {
+        Some(end) if truncated && samples > 0 => Some((end - start - deltas.iter().sum::<f64>()) / samples as f64).filter(|l| (0.0..=1.0).contains(l)).unwrap_or(0.5),
+        _ if truncated => 0.5,
+        _ => 0.0,
     };
+    let lead = if rt == Runtime::Bun { exit.wall_lead_us } else { 0.0 };
     let base = exit.offset_ns / 1e3 - lead;
     let mut t = start;
     let times_us: Vec<f64> = (0..samples)
@@ -343,35 +366,15 @@ impl Rebased {
         Some(json!({ "nodes": pruned(p, &ids), "startTime": us(span.0), "endTime": us(span.1), "samples": ids, "timeDeltas": deltas }))
     }
 
-    /// What the cap left out inside `segments` (µs, strobe's clock) where the samples on both sides of
-    /// a gap are of one stack (the same frame, or one's caller, or both called from one frame; the
-    /// profile's own `(root)`, `(idle)`, `(program)` and `(garbage collector)` never count): busy time
-    /// the sampler missed (its thread without a CPU). With the time the weights hold there (µs). Node
-    /// only: V8 samples an idle thread as `(idle)`, so a gap there is the sampler's; Bun's sampler takes
-    /// no sample while the VM sleeps, and across an `await` the stacks before and after match while
-    /// the VM used no CPU, so its gaps say nothing (None).
-    pub fn starved(&self, rt: Runtime, p: &Value, segments: &[(f64, f64)]) -> Option<(f64, f64)> {
-        if rt != Runtime::Node {
-            return None;
-        }
-        let ids: Vec<u64> = p["samples"].as_array().into_iter().flatten().map(|s| s.as_u64().unwrap_or(0)).collect();
-        let mut parent: HashMap<u64, u64> = HashMap::new();
-        let mut own: BTreeSet<u64> = BTreeSet::new();
-        for n in p["nodes"].as_array().into_iter().flatten() {
-            let id = n["id"].as_u64().unwrap_or(0);
-            if matches!(n["callFrame"]["functionName"].as_str(), Some("(root)" | "(idle)" | "(program)" | "(garbage collector)")) {
-                own.insert(id);
-            }
-            for c in n["children"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
-                parent.insert(c, id);
-            }
-        }
-        let up = |x: u64| parent.get(&x).copied().filter(|u| !own.contains(u));
-        let one = |a: u64, b: u64| !own.contains(&a) && !own.contains(&b) && (a == b || up(a) == Some(b) || up(b) == Some(a) || (up(a).is_some() && up(a) == up(b)));
-        let inside = |a: f64, b: f64| -> f64 { segments.iter().map(|s| (b.min(s.1) - a.max(s.0)).max(0.0)).sum() };
-        let lost = self.times_us.windows(2).zip(ids.windows(2)).filter(|(t, n)| t[1] - t[0] > self.cap_us && one(n[0], n[1])).map(|(t, _)| inside(t[0] + self.cap_us, t[1])).fold(0.0, |a, b| a + b);
-        let held = weights(&self.times_us, self.cap_us, self.over_us, self.last_us, segments, &[]).iter().sum();
-        Some((lost, held))
+    /// The main-thread CPU the profile holds samples of inside `segments` (µs, strobe's clock; sorted and
+    /// apart): every sample's weight there (`weights`) but the profile's own `(root)` and `(idle)`, a
+    /// thread that waited. `(program)` and `(garbage collector)` are the thread on a CPU, rows of their
+    /// own in every view. Against `cpu.main` it is what the sampler missed (`missed`).
+    pub fn sampled_in(&self, p: &Value, segments: &[(f64, f64)]) -> f64 {
+        let idle: BTreeSet<u64> =
+            p["nodes"].as_array().into_iter().flatten().filter(|n| matches!(n["callFrame"]["functionName"].as_str(), Some("(root)" | "(idle)"))).filter_map(|n| n["id"].as_u64()).collect();
+        let ids = p["samples"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        weights(&self.times_us, self.cap_us, self.over_us, self.last_us, segments, &[]).iter().zip(ids).filter(|(_, id)| id.as_u64().is_none_or(|id| !idle.contains(&id))).map(|(w, _)| w).sum()
     }
 
     /// The gaps (µs) between consecutive samples inside one of `segments` (µs, strobe's clock), up to
