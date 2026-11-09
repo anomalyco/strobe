@@ -205,6 +205,8 @@ pub fn run(args: &Args) -> Result<Output> {
             let (pick, sort) = (Pick::of(args), Sort::of(args)?);
             if view == "alloc" {
                 alloc(&rec, by, top)
+            } else if let Some(scope) = Scope::of(&rec, args)? {
+                hotspots_scoped(&rec, by, top, sort, scope)
             } else if args.has("native") || pick.any() {
                 native_hotspots_of(&rec, by, top, pick, sort)
             } else {
@@ -338,6 +340,20 @@ enum Gap {
 
 /// Refuses a view a Firefox or iOS WebKit recording cannot answer (`EngineUnsupported`), with what answers instead.
 fn firefox_gap(rec: &Rec, gap: Gap) -> Result<()> {
+    // A Bun script host: Bun's `--heap-prof` writes a heap snapshot, not sampled allocations (strobe
+    // passes it to Node alone; an older recording kept Bun's snapshot as `alloc-0.heapprofile`).
+    let snapshot = || {
+        let mut head = [0u8; 16];
+        std::fs::File::open(rec.dir.join("alloc-0.heapprofile")).and_then(|mut f| std::io::Read::read(&mut f, &mut head)).is_ok_and(|n| head[..n].starts_with(b"{\"snapshot\""))
+    };
+    if matches!(gap, Gap::Alloc) && rec.meta["script"] == true && (rec.meta["runtime"]["name"] == "bun" || snapshot()) {
+        return Err(crate::model::Refusal::new(
+            crate::model::ValidatorId::EngineUnsupported,
+            "sampled allocation stacks: Bun's --heap-prof writes a heap snapshot at its exit, not allocation samples",
+        )
+        .fix("run a runtime: \"node\" target for sampled allocation stacks, or declare js.heap.retained")
+        .into());
+    }
     if rec.meta["wir"] == true {
         let (summary, fix) = match gap {
             Gap::Heap => return Ok(()),
@@ -539,7 +555,8 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
         let (scripts, mapped) = (h["script_samples"].as_f64().unwrap_or(0.0), h["mapped_samples"].as_f64().unwrap_or(0.0));
-        if scripts > 0.0 && mapped / scripts < 0.95 {
+        // A script target's profile names its own source files: nothing is mapped, and nothing is missing.
+        if scripts > 0.0 && mapped / scripts < 0.95 && meta["script"] != true {
             hit(
                 "unresolved",
                 "info",
@@ -1642,23 +1659,127 @@ fn columns(sort: Sort) -> &'static str {
 
 /// `hotspots_of`, its rows in `sort`'s order.
 pub fn hotspots_sorted(rec: &Rec, by: &str, top: usize, sort: Sort) -> Result<Output> {
-    let stacks = match rec.cpu() {
+    hotspots_scoped(rec, by, top, sort, Scope::Measured)
+}
+
+/// Which samples of a script recording's CPU profile a view reads (SPEC §8.3): its measured runs'
+/// timed spans (`cpu-<run>.cpuprofile`), the whole host process (`--source host`), or one phase's
+/// stretches of the measured runs (`--phase`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scope<'a> {
+    Measured,
+    Host,
+    Phase(&'a str),
+}
+
+impl<'a> Scope<'a> {
+    /// What `--source` and `--phase` ask of a recording's JavaScript profile: a scope for a script
+    /// recording, None for any other (whose `--phase` selects native samples).
+    pub fn of(rec: &Rec, args: &'a Args) -> Result<Option<Scope<'a>>> {
+        let (source, phase) = (args.get("source"), args.get("phase"));
+        let script = rec.meta["script"] == true;
+        match source {
+            Some("host") if !script => return Err(Error::usage(format!("--source host reads a script target's whole host process; {} is no script recording", rec.id))),
+            Some("host") | None => {}
+            Some(other) => return Err(Error::usage(format!("--source for hotspots: host (a script target's whole host process), not {other}"))),
+        }
+        if !script || args.has("native") || args.get("thread").is_some() || args.get("pid").is_some() {
+            return Ok(None);
+        }
+        Ok(Some(match (source, phase) {
+            (Some(_), Some(_)) => return Err(Error::usage("--source host reads the whole host process; --phase reads a phase of the measured runs: one or the other")),
+            (Some(_), None) => Scope::Host,
+            (None, Some(p)) => Scope::Phase(p),
+            (None, None) => Scope::Measured,
+        }))
+    }
+
+    /// The scope as `--json` says it (`scope`) and the header's words for it. A script recording from
+    /// before strobe cut its profile to the runs holds the whole host in its one profile.
+    fn named(self, rec: &Rec) -> (String, String) {
+        match self {
+            Scope::Measured if !rec.dir.join(crate::probe::cpu::RUNS).is_file() => {
+                ("whole_host".into(), "whole host process: recorded before strobe cut script profiles to the runs, so its startup, setup and warmup are in it".into())
+            }
+            Scope::Measured => ("measured_runs".into(), format!("{} measured runs, each its timed span alone (--source host: the whole host process)", rec.runs().unwrap_or(0))),
+            Scope::Host => ("whole_host".into(), format!("{WHOLE_HOST_TEXT}: per recording, not per run")),
+            Scope::Phase(p) => ("phase".into(), format!("phase {p} of the measured runs")),
+        }
+    }
+}
+
+/// How every view names a script recording's whole host profile.
+pub const WHOLE_HOST_TEXT: &str = "Whole host process (startup, setup, warmup, runs, resets)";
+
+/// A script recording's CPU stacks in `scope`; a phase's are computed for the question (`owned`).
+pub(super) fn scoped_cpu<'r>(rec: &'r Rec, scope: Scope, owned: &'r mut Option<Stacks>) -> Result<&'r Stacks> {
+    match scope {
+        Scope::Measured => rec.cpu(),
+        Scope::Host => rec.host_cpu(),
+        Scope::Phase(p) => {
+            let (spans, untimed) = script_phase(rec, p)?;
+            Ok(owned.insert(rec.phase_cpu(&spans, &untimed)?))
+        }
+    }
+}
+
+/// Stretches of time, ns on strobe's clock.
+type Spans = Vec<(u64, u64)>;
+
+/// A phase's stretches in a script recording's measured runs and those runs' untimed stretches (ns on
+/// strobe's clock), from `runs.json`.
+fn script_phase(rec: &Rec, phase: &str) -> Result<(Spans, Spans)> {
+    let f = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS))
+        .map_err(|_| Error::usage(format!("--phase: {} keeps no runs.json (a script recording from before strobe kept its runs' phase marks)", rec.id)))?;
+    let measured = rec::measured_keys(&rec.meta);
+    let (mut spans, mut untimed) = (Vec::new(), Vec::new());
+    for r in f["runs"].as_array().into_iter().flatten().filter(|r| measured.as_ref().is_none_or(|m| m.iter().any(|k| r["run"] == k.as_str()))) {
+        let marks: Vec<(String, u64)> = r["marks"].as_array().into_iter().flatten().filter_map(|m| Some((m[0].as_str()?.to_string(), m[1].as_u64()?))).collect();
+        spans.extend(metrics::phase_stretches(&marks, phase));
+        untimed.extend(r["untimed"].as_array().into_iter().flatten().filter_map(|u| Some((u[0].as_u64()?, u[1].as_u64()?))));
+    }
+    if spans.is_empty() {
+        return Err(Error::usage(format!("no phase {phase:?} in {}'s measured runs", rec.id)));
+    }
+    Ok((spans, untimed))
+}
+
+/// `hotspots_sorted` of one scope of a script recording's profile (any other recording: `Measured`).
+pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope) -> Result<Output> {
+    let mut owned = None;
+    let stacks = match scoped_cpu(rec, scope, &mut owned) {
         Ok(s) => s,
-        Err(_) if rec.dir.join("deep.json.gz").is_file() => return native_hotspots_of(rec, by, top, Pick::default(), sort),
+        Err(_) if scope == Scope::Measured && rec.dir.join("deep.json.gz").is_file() => return native_hotspots_of(rec, by, top, Pick::default(), sort),
         Err(e) => return Err(e),
     };
+    let named = (rec.meta["script"] == true).then(|| scope.named(rec));
     // The interval the sampler kept, not the one asked: Firefox 160 and older on Windows sample every
     // 2 ms when asked for 1 ms (`probe::gecko::interval_us`).
     let sampling = rec.sampling();
     let at = sampling.map(|s| format!(", {}", s.text())).unwrap_or_default();
-    let mut header = format!("hotspots by {by} · {} · {{samples}} samples{at}{{mapped}}", columns(sort));
+    let what = named.as_ref().map(|n| format!(" · {}", n.1)).unwrap_or_default();
+    let mut header = format!("hotspots by {by}{what} · {} · {{samples}} samples{at}{{mapped}}", columns(sort));
     // Each sample weighs the gap it kept, so the times hold; what a coarser sampler loses is the short.
     if sampling.is_some_and(|s| s.coarse()) {
         header += &format!("\n! {COARSE}");
     }
+    let starved = crate::probe::cpu::starved_text(&rec.meta["starved"]);
+    if let Some(t) = &starved {
+        header += &format!("\n! {t}");
+    }
+    if stacks.weights.is_empty() && scope != Scope::Host && named.is_some() {
+        header += &format!("\n! no sample in these runs: the host ran no JavaScript there that its sampler saw; strobe query {} hotspots --source host has the whole host process", rec.id);
+    }
     let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), Some(sort));
+    if starved.is_some() {
+        out.json["starved"] = rec.meta["starved"].clone();
+    }
     out.json["interval_us"] = json!(sampling.map(|s| s.median_us));
     out.json["sampling"] = json!(sampling);
+    if let Some((key, text)) = named {
+        out.json["scope"] = json!(key);
+        out.json["scope_text"] = json!(text);
+    }
     ms_columns(&mut out.json);
     Ok(out)
 }
