@@ -16,7 +16,9 @@
 //                                               callback `(idle)` (raw --cpu-prof: 1.0 of 20 ms; of 2 ms callbacks 365 of
 //                                               400 ms), so tickWork reads about 0.3 ms per run or none; meta.missed about
 //                                               95% of cpu.main, and hotspots say "! Missed"
-//   phases on a busy machine (vps, load 2)      Bun's phases read low (74 and 87 of 150 ms): meta.missed says so
+//   phases with every CPU busy (vps, 2 spinners) Bun's phases read about 75 and 87 of 150 ms: the thread ran only
+//                                               that long (cpu.main 34 ms a run), meta.missed about 2%. Node's rows keep
+//                                               the wall time (samples 314 ms, cpu.main 187 ms): a wait for a CPU counts
 //   strobe record --bench 'scripts/dev/script-profile.bench.ts#fail' --head . --target bun
 //                                               fails (exit 1 or 4); no rec_ folder for it, and no *-prof folder left in
 //                                               strobe's run folder

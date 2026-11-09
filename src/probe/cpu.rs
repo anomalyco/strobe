@@ -138,9 +138,7 @@ pub fn missed_text(missed: &Value, runtime: Option<&str>) -> Option<String> {
     let share = missed["share"].as_f64().filter(|s| *s > MISSED_SHARE)?;
     let why = match runtime {
         Some("node") => "Node's profiler labels most of a short timer callback (idle), so timer-driven work undercounts",
-        Some("bun") => {
-            "Bun's sampler takes a sample only while JavaScript runs (never of its event loop's own work: timers, I/O) and fewer while the machine is loaded: where it is, record where the target's CPUs are not shared"
-        }
+        Some("bun") => "Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work (timers, I/O)",
         _ => "the runtime's sampler took no sample of it",
     };
     Some(format!(

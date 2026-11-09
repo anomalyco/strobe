@@ -3685,10 +3685,12 @@ experiment's `script.log`.
     rows undercount, and why: Node's profiler labels most of a short timer callback `(idle)` (200 ×
     (2 ms of work, 10 ms timer): 0.35 of 2 ms sampled a run; the fixture's await loop misses 95%);
     Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work (the
-    await loop on adais misses 20%), and fewer on a loaded machine (vps, 2 vCPU under load: phases of
-    150 ms read 74 and 87 ms). Bun's samples weigh wall time, and its sampler stops the thread to take
-    one, so a busy run's samples can weigh more than `cpu.main` (missed 0). Not known (`missed: {
-    refused }`, no warning) where `cpu.main` was refused.
+    await loop misses 20% on adais, 25% on vps). Samples weigh the wall time between them, so where
+    the thread waited for a CPU they can weigh more than `cpu.main` (missed 0): Bun's sampler stops
+    the thread to take one (Windows: 307 ms of samples, 279 ms `cpu.main`); on vps with both vCPUs
+    busy Bun's phases read 75 and 87 of 150 ms of wall time, as `cpu.main` (34 ms a run) says the
+    thread ran, while Node's rows held the wall time (314 ms of samples, 187 ms `cpu.main`). Not
+    known (`missed: { refused }`, no warning) where `cpu.main` was refused.
   - Files: `cpu-<run>.cpuprofile`, one per measured run of a passing case (`<run>` the run's global
     number), integer µs, `startTime` and `endTime` its timed span, each delta the previous sample's
     weight; `whole-host.json.gz` (owner-only), the whole host process on strobe's clock in true µs with
