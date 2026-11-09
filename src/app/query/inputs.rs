@@ -116,7 +116,10 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     let (mut counts, mut whys): (BTreeMap<&str, usize>, BTreeMap<&str, usize>) = (BTreeMap::new(), BTreeMap::new());
     let mut needed: Vec<f64> = Vec::new();
     let mut runs = 0usize;
-    for (run, r) in f["runs"].as_object().into_iter().flatten().filter(|(k, _)| only.is_none_or(|o| o.contains(k))) {
+    // Runs in time order (their keys sort as text: run:10 before run:2).
+    let mut ordered: Vec<(&String, &Value)> = f["runs"].as_object().into_iter().flatten().filter(|(k, _)| only.is_none_or(|o| o.contains(k))).collect();
+    ordered.sort_by_key(|(_, r)| r["t0_ns"].as_u64().unwrap_or(0));
+    for (run, r) in ordered {
         runs += 1;
         let (timed, sent, changes) = run_of(r);
         let got = frames::reactions(&sent, &changes, &p.presents, &pids, quiet);
@@ -264,7 +267,7 @@ union all
 select 'lat', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'event_latency.event_type')
   from slice s join track tr on s.track_id = tr.id
   join _wp w on extract_arg(tr.dimension_arg_set_id, 'upid') = w.upid and s.ts >= w.t0 and s.ts < w.t1
-  where s.name = 'EventLatency' and s.dur > 0
+  where s.name = 'EventLatency' and s.dur > 0 and not exists (select 1 from _u u where s.ts >= u.t0 and s.ts < u.t1)
 union all
 select 'frame', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'frame_reporter.state')
   from slice s join track tr on s.track_id = tr.id
@@ -296,10 +299,19 @@ select 'frame', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'frame_reporter.stat
         v.sort_by(f64::total_cmp);
         v.dedup();
     }
-    lats.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    // Runs in time order; in each, the events in time order.
+    lats.sort_by(|a, b| wins.get(&a.0).unwrap_or(&a.1).total_cmp(wins.get(&b.0).unwrap_or(&b.1)).then(a.1.total_cmp(&b.1)));
+    // Only the events `interaction.*` and `scroll.latency.*` read (a key, a mouse button, a touch's
+    // edges, a scroll's updates and wheel turns): pointer moves, characters and the rest are left out,
+    // counted.
+    let read = |ty: &str| {
+        let ty = ty.trim_start_matches("EVENT_TYPE_");
+        COUNTED.contains(&ty) || ty.contains("SCROLL_UPDATE") || ty == "MOUSE_WHEEL"
+    };
+    let other = lats.iter().filter(|l| !read(&l.3)).count();
     let mut rows = Vec::new();
     let mut lines = Vec::new();
-    for (k, ts, dur, kind) in &lats {
+    for (k, ts, dur, kind) in lats.iter().filter(|l| read(&l.3)) {
         let t0 = wins.get(k).copied().unwrap_or(*ts);
         let frames: &[f64] = presented.get(k).map(Vec::as_slice).unwrap_or_default();
         let at = frames.partition_point(|f| *f <= *ts);
@@ -327,8 +339,15 @@ select 'frame', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'frame_reporter.stat
         text += &format!("  … {} more (--json lists every one)\n", total - shown);
     }
     if total == 0 {
-        text += "  the trace holds no input event in the measured runs\n";
+        text += "  the trace holds no key, button, touch or scroll input in the measured runs' timed stretches\n";
+    }
+    if other > 0 {
+        text += &format!("  {other} other input events (pointer moves, characters, a gesture's begin and end) left out: no interaction.* or scroll.latency.* sample comes from them\n");
     }
     text += "Chromium decides which event counts for interaction.* (its own EventLatency); strobe's at-rest rule applies to OS presents only\n";
-    Ok(Output::new(text, json!({ "source": "trace", "runs": wins.len(), "inputs": rows })))
+    Ok(Output::new(text, json!({ "source": "trace", "runs": wins.len(), "inputs": rows, "other_events": other })))
 }
+
+/// The discrete `EventLatency` types a page's `interaction.*` reads (`metrics`: a key, a mouse button,
+/// a touch's edges); `scroll.latency.*` reads scroll updates and wheel turns.
+const COUNTED: [&str; 8] = ["MOUSE_PRESSED", "MOUSE_RELEASED", "KEY_PRESSED", "KEY_RELEASED", "TOUCH_PRESSED", "GESTURE_TAP_DOWN", "TOUCH_RELEASED", "GESTURE_TAP"];

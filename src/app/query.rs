@@ -174,7 +174,6 @@ pub fn run(args: &Args) -> Result<Output> {
                 if !built.is_file() {
                     super::progress(format!("building {}'s Perfetto trace (what strobe open shows) to query", rec.id));
                     crate::perfetto::build(&dir, &built).map_err(|e| {
-                        let _ = std::fs::remove_file(&built);
                         Error::usage(format!(
                             "this recording has no trace to query, and its Perfetto trace could not be built: {}{}",
                             e.message,
@@ -1952,7 +1951,7 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sor
             let capped_ms = stats.map_or(0.0, |s| s.capped as f64 * every_ms);
             let forgone_ms = stats.map_or(0.0, |s| s.forgone_ms);
             let late_ms = stats.map_or(0.0, |s| s.late_ms);
-            let unseen_ms = set.zip(seen).map(|(s, v)| s - v).filter(|d| *d > 0.0);
+            let unseen_ms = set.zip(seen).map(|(s, v)| s - v).filter(|d| *d > 1.0);
             let unopened = stats.map_or(0, |s| s.unopened);
             let lost = deep.as_ref().map_or(0, |d| d.events_lost);
             out.json["cpu_coverage"] = json!({
@@ -1965,10 +1964,10 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sor
                     why.push(format!("{} ran in threads before strobe opened them", fmt::value(late_ms, "ms")));
                 }
                 if let Some(u) = unseen_ms {
-                    why.push(format!("{} ran in threads it never opened (begun and ended between its looks at the set)", fmt::value(u, "ms")));
+                    why.push(format!("{} ran outside the threads strobe followed (begun and ended between its looks, or around the capture's edges)", fmt::value(u, "ms")));
                 }
                 if forgone_ms > 0.5 {
-                    why.push(format!("{} ran while it was late (one sample per look at a thread)", fmt::value(forgone_ms, "ms")));
+                    why.push(format!("{} ran past two intervals between looks at a thread (waking between set refreshes, or a late tick)", fmt::value(forgone_ms, "ms")));
                 }
                 if capped_ms > 0.0 {
                     why.push(format!("{} went over its rate cap", fmt::value(capped_ms, "ms")));

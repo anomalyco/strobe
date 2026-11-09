@@ -9,7 +9,9 @@
 //!   never opens it again. (A per-thread inherited event, CPU -1, cannot be mapped: hence per CPU.)
 //!   Processes that join the set from outside (stamped with its home) are found every 50 ms. A thread
 //!   strobe opened in the moment before its start was announced is sampled twice: its own events'
-//!   samples (by their id, `PERF_SAMPLE_IDENTIFIER`) are dropped and the events disabled.
+//!   samples (by their id, `PERF_SAMPLE_IDENTIFIER`) are dropped and the events disabled. A thread's
+//!   end is announced too (`PERF_RECORD_EXIT`): its number is forgotten, so a thread that takes it
+//!   later is never taken for it. Each CPU's ring is read in one batch put in time order.
 //! - Each sample copies the user registers and the top of the user stack, and strobe unwinds it with
 //!   the modules' DWARF unwind tables (`.eh_frame`, `framehop`): release builds rarely keep frame
 //!   pointers, which is what a kernel frame-pointer walk would need. Kernel frames come from the
@@ -97,6 +99,28 @@ struct Ring {
     fd: i32,
     base: *mut u8,
     len: usize,
+    /// Its event's thread ended and nothing inherits the event: polling it says `POLLHUP` at once from
+    /// then on, though other events may still write into it (`wait_any`).
+    hup: std::cell::Cell<bool>,
+}
+
+/// Waits up to 10 ms for a record in any ring. A ring that polls hung up is left out of the wait from
+/// then on (it is still drained with every ring): polled, it ends every wait at once, and a ring
+/// mapped on a thread that exited (a launcher) spun the reader at 100% of a core. With no ring left
+/// to wait on, the reader sleeps the 10 ms.
+fn wait_any<'a>(rings: impl Iterator<Item = &'a Ring>) {
+    let live: Vec<&Ring> = rings.filter(|r| !r.hup.get()).collect();
+    if live.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        return;
+    }
+    let mut poll: Vec<libc::pollfd> = live.iter().map(|r| libc::pollfd { fd: r.fd, events: libc::POLLIN, revents: 0 }).collect();
+    unsafe { libc::poll(poll.as_mut_ptr(), poll.len() as _, 10) };
+    for (p, r) in poll.iter().zip(&live) {
+        if p.revents & libc::POLLHUP != 0 {
+            r.hup.set(true);
+        }
+    }
 }
 
 unsafe impl Send for Ring {}
@@ -117,6 +141,7 @@ const IOC_DISABLE: libc::c_ulong = 0x2401;
 const IOC_SET_OUTPUT: libc::c_ulong = 0x2405;
 const IOC_ID: libc::c_ulong = 0x8008_2407;
 const RECORD_COMM: u32 = 3;
+const RECORD_EXIT: u32 = 4;
 const RECORD_FORK: u32 = 7;
 const RECORD_SAMPLE: u32 = 9;
 /// `PERF_RECORD_MISC_COMM_EXEC`: the comm changed because the process ran a new executable.
@@ -144,11 +169,11 @@ fn open_event(tid: u32, cpu: i32, kernel: bool) -> std::io::Result<i32> {
 fn map(fd: i32) -> std::io::Result<Ring> {
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
     let mut last = std::io::Error::from_raw_os_error(libc::ENOMEM);
-    for pages in [128, 64, 16] {
+    for pages in [128, 64, 16, 4] {
         let len = page * (1 + pages);
         let base = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0) };
         if base != libc::MAP_FAILED {
-            return Ok(Ring { fd, base: base as *mut u8, len });
+            return Ok(Ring { fd, base: base as *mut u8, len, hup: std::cell::Cell::new(false) });
         }
         last = std::io::Error::last_os_error();
         if !matches!(last.raw_os_error(), Some(libc::EPERM | libc::ENOMEM)) {
@@ -233,6 +258,13 @@ impl Events {
         }
         self.ids.iter().filter(|(_, t)| **t == tid).map(|(id, _)| *id).collect()
     }
+
+    /// `tid` ended: its events stay open (owned by `fds` or a ring, still holding what inherited them)
+    /// but no longer name it, so a thread that takes its number later is never taken for it.
+    fn exited(&mut self, tid: u32) {
+        self.by_tid.remove(&tid);
+        self.ids.retain(|_, t| *t != tid);
+    }
 }
 
 /// One raw sample, before unwinding.
@@ -247,12 +279,23 @@ struct Raw {
 }
 
 /// What a sampling ring holds: a sample (with its event's id), a thread or process started by a
-/// sampled thread (which inherited its events), a thread renamed (or its process running a new
-/// executable).
+/// sampled thread (which inherited its events), a sampled thread that ended, a thread renamed (or its
+/// process running a new executable). Each with its time: each CPU has its own ring, so one batch is
+/// put in time order before it is read.
 enum Rec {
     Sample(u64, Raw),
-    Fork { pid: u32, tid: u32 },
-    Comm { pid: u32, tid: u32, name: String, exec: bool },
+    Fork { ns: u64, pid: u32, tid: u32 },
+    Exit { ns: u64, tid: u32 },
+    Comm { ns: u64, pid: u32, tid: u32, name: String, exec: bool },
+}
+
+impl Rec {
+    fn ns(&self) -> u64 {
+        match self {
+            Rec::Sample(_, r) => r.ns,
+            Rec::Fork { ns, .. } | Rec::Exit { ns, .. } | Rec::Comm { ns, .. } => *ns,
+        }
+    }
 }
 
 impl Ring {
@@ -286,12 +329,14 @@ impl Ring {
                     }
                 }
                 // pid, ppid, tid, ptid, time
-                RECORD_FORK => out.push(Rec::Fork { pid: u32_at(tail + 8), tid: u32_at(tail + 16) }),
-                // pid, tid, the name (NUL-terminated)
+                RECORD_FORK => out.push(Rec::Fork { ns: u64_at(tail + 24), pid: u32_at(tail + 8), tid: u32_at(tail + 16) }),
+                RECORD_EXIT => out.push(Rec::Exit { ns: u64_at(tail + 24), tid: u32_at(tail + 16) }),
+                // pid, tid, the name (NUL-terminated); its time in the sample_id_all trailer (tid, time,
+                // cpu, identifier).
                 RECORD_COMM => {
                     let body = read(tail + 16, len as usize - 16);
                     let name = String::from_utf8_lossy(&body[..body.iter().position(|b| *b == 0).unwrap_or(body.len())]).to_string();
-                    out.push(Rec::Comm { pid: u32_at(tail + 8), tid: u32_at(tail + 12), name, exec: misc & MISC_COMM_EXEC != 0 });
+                    out.push(Rec::Comm { ns: u64_at(tail + len - 24), pid: u32_at(tail + 8), tid: u32_at(tail + 12), name, exec: misc & MISC_COMM_EXEC != 0 });
                 }
                 2 => *lost += u64_at(tail + 16), // PERF_RECORD_LOST: id, lost
                 _ => {}
@@ -580,7 +625,6 @@ impl Capture {
                 // that inherited events already: their samples count it twice and go.
                 let mut sample_ids: Vec<u64> = Vec::new();
                 let mut twice: HashSet<u64> = HashSet::new();
-                let mut inherited: HashSet<u32> = HashSet::new();
                 let mut followed = std::time::Instant::now();
                 loop {
                     let done = match flag.load(Ordering::Relaxed) {
@@ -588,22 +632,30 @@ impl Capture {
                         STOP => true,
                         _ => return Err(Error::msg("the capture was dropped")),
                     };
-                    let mut poll: Vec<libc::pollfd> = events.rings.iter().flatten().map(|r| libc::pollfd { fd: r.fd, events: libc::POLLIN, revents: 0 }).collect();
-                    unsafe { libc::poll(poll.as_mut_ptr(), poll.len() as _, 10) };
+                    wait_any(events.rings.iter().flatten());
                     for r in events.rings.iter().flatten() {
                         r.drain(kernel, &mut recs, &mut lost);
                     }
-                    // Starts first, from every ring: a thread started by a sampled one inherited its
-                    // events, whichever ring its samples are in.
+                    recs.sort_by_key(Rec::ns);
+                    // Starts and ends first, in order, from every ring: a thread started by a sampled one
+                    // inherited its events (whichever ring its samples are in), and one strobe opened
+                    // too, in the moment before its start was read, is sampled twice; an ended thread's
+                    // number may be another's later.
                     for r in &recs {
-                        if let Rec::Fork { pid, tid } = r {
-                            known.insert(*tid);
-                            inherited.insert(*tid);
-                            names.process(*pid);
+                        match *r {
+                            Rec::Fork { pid, tid, .. } => {
+                                known.insert(tid);
+                                if events.by_tid.contains_key(&tid) {
+                                    twice.extend(events.disable(tid));
+                                }
+                                names.process(pid);
+                            }
+                            Rec::Exit { tid, .. } => {
+                                known.remove(&tid);
+                                events.exited(tid);
+                            }
+                            _ => {}
                         }
-                    }
-                    for tid in inherited.iter().filter(|t| events.by_tid.contains_key(t)).copied().collect::<Vec<u32>>() {
-                        twice.extend(events.disable(tid));
                     }
                     for r in recs.drain(..) {
                         if flag.load(Ordering::Relaxed) == DROP {
@@ -611,16 +663,20 @@ impl Capture {
                         }
                         let (id, r) = match r {
                             Rec::Sample(id, r) => (id, r),
-                            Rec::Fork { .. } => continue,
+                            Rec::Fork { .. } | Rec::Exit { .. } => continue,
                             // A new executable: its modules and its name are new (the old ones' addresses
-                            // would unwind its frames wrong).
-                            Rec::Comm { pid, tid, name, exec } => {
-                                names.threads.insert(tid, name);
+                            // would unwind its frames wrong), read while it runs: one already gone keeps
+                            // what strobe had, and the record's name.
+                            Rec::Comm { pid, tid, name, exec, .. } => {
                                 if exec {
-                                    unwind.spaces.remove(&pid);
+                                    if !maps(pid).is_empty() {
+                                        unwind.spaces.remove(&pid);
+                                    }
                                     names.processes.remove(&pid);
                                     names.process(pid);
+                                    names.processes.entry(pid).or_insert_with(|| name.clone());
                                 }
+                                names.threads.insert(tid, name);
                                 continue;
                             }
                         };
@@ -797,7 +853,7 @@ fn open_tracepoint(config: u64, pid: i32, cpu: i32, switches: bool, pages: usize
         unsafe { libc::close(fd) };
         return Err(e);
     }
-    Ok(Ring { fd, base: base as *mut u8, len })
+    Ok(Ring { fd, base: base as *mut u8, len, hup: std::cell::Cell::new(false) })
 }
 
 impl Ring {
@@ -1018,8 +1074,8 @@ fn waits_loop(targets: Targets, switch: Format, waking: Format, wakers: Vec<Ring
             }
             followed = Some(std::time::Instant::now());
         }
-        let mut poll: Vec<libc::pollfd> = rings.values().chain(wakers.iter()).map(|r| libc::pollfd { fd: r.fd, events: libc::POLLIN, revents: 0 }).collect();
-        unsafe { libc::poll(poll.as_mut_ptr(), poll.len() as _, 10) };
+        // A thread that ended leaves its ring hung up (`wait_any`).
+        wait_any(rings.values().chain(wakers.iter()));
         for (&ring_tid, r) in rings.iter() {
             r.records(&mut buf, &mut lost);
             for (kind, misc, body) in buf.drain(..) {

@@ -195,6 +195,14 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
     // Each process's main thread, bound once when strobe first sees the process: its first thread,
     // created with it (within 5 ms). None when that thread is gone by then; a worker is never one.
     let mut mains: HashMap<u32, Option<u32>> = HashMap::new();
+    // A process that joins a launch's job is told as it is created (`jobs::subscribe`, from before the
+    // first look: one created while it was taken is told too), and opened at the next tick with the
+    // threads it has, instead of at the next refresh (up to 100 ms later: a child of 150 ms showed 100
+    // of them). Its threads are looked for again each tick over its first 50 ms (its first thread may
+    // not exist when it is told, the loader starts more). Credit starts at the opening, as for any
+    // thread; its CPU before counts toward coverage.
+    let news = crate::host::jobs::subscribe();
+    let mut fresh: Vec<(u32, std::time::Instant)> = Vec::new();
     // The set as one look saw it (`looker`): the first here, the rest from the looker's thread.
     let mut next_look = Some(look(targets));
     let looks = looker(targets.clone(), next_look.as_ref().map(|l| l.1.iter().map(|p| p.0).collect()).unwrap_or_default())?;
@@ -207,13 +215,6 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
     // of its CPU, each counted as 2 ms (a thread busy the whole capture read as 76% covered).
     let tick = std::time::Duration::from_micros(INTERVAL_US);
     let mut due = std::time::Instant::now() + tick;
-    // A process that joins a launch's job is told as it is created (`jobs::subscribe`), and opened at
-    // the next tick with the threads it has, instead of at the next refresh (up to 100 ms later: a
-    // child of 150 ms showed 100 of them). Its threads are looked for again each tick over its first
-    // 50 ms (its first thread may not exist when it is told, the loader starts more). Credit starts at
-    // the opening, as for any thread; its CPU before counts toward coverage.
-    let news = crate::host::jobs::subscribe();
-    let mut fresh: Vec<(u32, std::time::Instant)> = Vec::new();
     // Samples' worth of CPU the cap of two left out: a thread that ran on while the sampler was late.
     let mut forgone = 0.0f64;
     // Cycles the threads begun during the capture used before strobe opened them.
@@ -307,7 +308,8 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
                 fresh.push((pid, std::time::Instant::now()));
             }
         }
-        fresh.retain(|(_, at)| at.elapsed() < std::time::Duration::from_millis(50));
+        // Over its first 50 ms, while it runs (an exit time set: nothing more to look for).
+        fresh.retain(|(pid, at)| at.elapsed() < std::time::Duration::from_millis(50) && processes.get(pid).and_then(|p| times(p.handle)).is_some_and(|t| t.1 == 0));
         for &(pid, _) in &fresh {
             let Some(p) = processes.get(&pid) else { continue };
             let created = times(p.handle).map_or(0, |t| t.0);
