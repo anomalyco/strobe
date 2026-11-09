@@ -541,7 +541,8 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
         let (scripts, mapped) = (h["script_samples"].as_f64().unwrap_or(0.0), h["mapped_samples"].as_f64().unwrap_or(0.0));
-        if scripts > 0.0 && mapped / scripts < 0.95 {
+        // A script target's profile names its own source files: nothing is mapped, and nothing is missing.
+        if scripts > 0.0 && mapped / scripts < 0.95 && meta["script"] != true {
             hit(
                 "unresolved",
                 "info",

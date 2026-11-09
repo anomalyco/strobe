@@ -248,6 +248,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let mut spawned = Host::spawn(&target, &entry, &root, ctx.pin, profiles.as_ref().map(|p| p.0.as_path()), &log)?;
     life.borrow_mut().push(("startup".into(), started, host::now_ns()));
     let ready = if profiles.is_some() { Some(spawned.clocks()?) } else { None };
+    let host_pid = spawned.pid();
     let host = RefCell::new(spawned);
     let heap_mb = || -> Result<f64> { Ok(host.borrow_mut().request(json!({ "op": "heap" }), Duration::from_secs(120))?.as_f64().unwrap_or(f64::NAN) / (1024.0 * 1024.0)) };
     steps.push(("launch".into(), launched.elapsed().as_secs_f64() * 1e3));
@@ -513,7 +514,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         && launch.cases.iter().any(Result::is_ok)
     {
         let clocks = ready.zip(exited).map(|(r, e)| e.map(|e| (r, e)));
-        let made = Profiled { dir: &dir.0, id: &id, cases, v, target: &target, clocks, life: &life.take(), runs: &kept.take(), passed: &passed.take() };
+        let made = Profiled { dir: &dir.0, id: &id, pid: host_pid, cases, v, target: &target, clocks, life: &life.take(), runs: &kept.take(), passed: &passed.take() };
         match made.keep(ctx, &launch) {
             Ok(()) => {
                 for b in launch.cases.iter_mut().flatten() {
@@ -535,6 +536,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
 struct Profiled<'a> {
     dir: &'a Path,
     id: &'a str,
+    /// The host process.
+    pid: u32,
     cases: &'a [Series],
     v: &'a Variant,
     target: &'a Value,
@@ -590,9 +593,13 @@ impl Profiled<'_> {
                 store::write_json(&rec.join(format!("cpu-{}.cpuprofile", r.key.trim_start_matches("run:"))), &p)?;
             }
         }
-        crate::symbol::write_gz(&rec.join(probe::cpu::WHOLE_HOST), &rebased.whole(&profile))?;
+        // The target's own data, owner-only (SPEC rule 9): Bun's `--heap-prof` writes a whole heap
+        // snapshot, every live string in it.
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&serde_json::to_vec(&rebased.whole(&profile))?)?;
+        owner_only(&rec.join(probe::cpu::WHOLE_HOST), &gz.finish()?)?;
         if let Some(p) = newest("heapprofile") {
-            store::write_atomic(&rec.join("alloc-0.heapprofile"), &std::fs::read(&p)?)?;
+            owner_only(&rec.join("alloc-0.heapprofile"), &std::fs::read(&p)?)?;
         }
         let runs: Vec<Value> = self
             .runs
@@ -616,10 +623,12 @@ impl Profiled<'_> {
             "target": self.target["entry"], "probes": Set::Attribution, "timing": "perturbed", "runs": self.runs.len(), "measured": self.runs.iter().map(|r| &r.key).collect::<Vec<_>>(),
             "values": if batch { json!({}) } else { json!(blocks.first().map(|b| &b.values)) },
             "created": super::super::record::now_iso(), "valid": true, "env": host::env(), "script": true,
-            "runtime": runtime, "sampling": sampling, "starved": starved, "whole_host": probe::cpu::WHOLE_HOST,
+            "runtime": runtime, "sampling": sampling, "starved": starved, "whole_host": probe::cpu::WHOLE_HOST, "pid": self.pid,
+            // A process's main thread on Linux is the thread whose id is the process's.
+            "main_tid": cfg!(target_os = "linux").then_some(self.pid),
             "lifecycle_spans": self.life.iter().map(|(name, a, b)| json!({ "name": name, "t0_ns": a, "t1_ns": b })).collect::<Vec<_>>(),
             "clock": { "rtt_ms": [ready.rtt_ns as f64 / 1e6, exit.rtt_ns as f64 / 1e6], "drift_ms": (exit.offset_ns - ready.offset_ns) / 1e6, "cap_ms": rebased.cap_us / 1e3 },
-            "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile: the whole host process",
+            "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile: the runtime's --heap-prof of the whole host process (Bun's is a heap snapshot at its exit)",
         });
         if batch {
             meta["batch"] = super::batch::meta(self.passed.iter().zip(&blocks).map(|((k, r), b)| (&self.cases[*k], r.clone(), *b)));
@@ -628,4 +637,11 @@ impl Profiled<'_> {
         draft.keep();
         Ok(())
     }
+}
+
+/// Writes `bytes` whole or not at all, readable by its owner alone (`store::create`).
+fn owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut f = store::create(path)?;
+    f.write_all(bytes)?;
+    f.commit().map_err(|e| Error::msg(format!("write {}: {e}", path.display())))
 }

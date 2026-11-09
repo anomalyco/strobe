@@ -349,7 +349,7 @@ impl Rebased {
         let up = |x: u64| parent.get(&x).copied();
         let one = |a: u64, b: u64| a == b || up(a) == Some(b) || up(b) == Some(a) || (up(a).is_some() && up(a) == up(b));
         let inside = |a: f64, b: f64| -> f64 { segments.iter().map(|s| (b.min(s.1) - a.max(s.0)).max(0.0)).sum() };
-        let lost = self.times_us.windows(2).zip(ids.windows(2)).filter(|(t, n)| t[1] - t[0] > self.cap_us && one(n[0], n[1])).map(|(t, _)| inside(t[0] + self.cap_us, t[1])).sum();
+        let lost = self.times_us.windows(2).zip(ids.windows(2)).filter(|(t, n)| t[1] - t[0] > self.cap_us && one(n[0], n[1])).map(|(t, _)| inside(t[0] + self.cap_us, t[1])).fold(0.0, |a, b| a + b);
         let held = weights(&self.times_us, self.cap_us, self.last_us, segments, &[]).iter().sum();
         (lost, held)
     }
