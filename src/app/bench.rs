@@ -2701,7 +2701,7 @@ fn check_output(
         let later = s["measured_run"].as_u64().filter(|r| *r > 0);
         if s["passed"] == true {
             text += &format!(
-                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}\n",
+                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}{}\n",
                 s["label"].as_str().unwrap_or(""),
                 later.map(|r| format!(" · run {}", r + 1)).unwrap_or_default(),
                 s["engine"].as_str().filter(|e| *e != "chromium").map(|e| format!(" · {e}")).unwrap_or_default(),
@@ -2715,13 +2715,24 @@ fn check_output(
                 if s["headless"] == true { " · headless" } else { "" },
                 if s["session_locked"] == true { " · session locked" } else { "" },
                 // The film's capture and encoder ran beside the run: its values are not a clean run's.
-                if s["video"]["head"].is_string() { " · perturbed (filmed)" } else { "" }
+                if s["video"]["head"].is_string() { " · perturbed (filmed)" } else { "" },
+                // So did the HTTP probe: its requests are work the server did in the run.
+                if s["values"]["http.probes"].is_number() { " · probed (its times hold the HTTP probe's requests)" } else { "" }
             );
             if let Some(r) = later {
                 text += &format!("      run  {} measured, not run 1: a process of the target ended in run 1, so these values are a warm run's (from the state the reset left)\n", r + 1);
             }
             if let Some(rec) = s["recording"].as_str() {
-                text += &format!("      rec  {rec} · strobe query {rec} {}\n", if s["target_kind"] == "native" { "threads" } else { "summary" });
+                text += &format!(
+                    "      rec  {rec} · strobe query {rec} {}\n",
+                    if s["values"]["http.probes"].is_number() {
+                        "http"
+                    } else if s["target_kind"] == "native" {
+                        "threads"
+                    } else {
+                        "summary"
+                    }
+                );
             }
             if let Some(n) = s["actions"]["count"].as_u64() {
                 text += &format!("      actions  {n} sent · strobe query {exp} actions\n");
@@ -5845,7 +5856,8 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     b.values.retain(|k, _| !http_probe::metric(k));
     b.refused.retain(|k, _| !http_probe::metric(k));
     if x.http && !x.untimed {
-        b.values.retain(|k, _| matches!(k.as_str(), "untimed.n" | "untimed.ms" | "warmup.unsteady"));
+        // What says whether the block is valid stays: its untimed stretches, warmup, other work on its CPUs.
+        b.values.retain(|k, _| matches!(k.as_str(), "untimed.n" | "untimed.ms" | "warmup.unsteady" | "cpu.foreign" | "cpu.foreign.max"));
         b.refused.clear();
         b.frames.clear();
         b.intervals.clear();
