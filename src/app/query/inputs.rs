@@ -97,17 +97,24 @@ fn first_lines(lines: &[String], top: usize) -> String {
 }
 
 /// The runs an inputs view read, for its header: `in 5 measured runs`, and their range when the first
-/// is not `run:0` (the runs before it were warmup, or another case's with `--case`).
+/// is not `run:0` (the runs before it were warmup, or another case's with `--case`) or some between
+/// were not measured (a batch's cases' warmups between their runs).
 fn runs_text<'a>(keys: impl Iterator<Item = &'a str>, case: bool) -> String {
     let mut n: Vec<u64> = keys.filter_map(|k| k.strip_prefix("run:")?.parse().ok()).collect();
     n.sort_unstable();
     let count = n.len();
     let plural = if count == 1 { "" } else { "s" };
     match (n.first(), n.last()) {
-        (Some(&a), Some(&b)) if a > 0 => {
+        (Some(&a), Some(&b)) if a > 0 || (b - a + 1) as usize != count => {
             let range = if a == b { format!("run:{a}") } else { format!("run:{a}..run:{b}") };
-            let before = if case { format!("runs before run:{a} (warmup, other cases) left out") } else { format!("warmup before run:{a} left out") };
-            format!("in {count} measured run{plural} ({range}; {before})")
+            let left = if case {
+                "warmup and other cases' runs left out".to_string()
+            } else if (b - a + 1) as usize != count {
+                "non-measured runs left out".to_string()
+            } else {
+                format!("warmup before run:{a} left out")
+            };
+            format!("in {count} measured run{plural} ({range}; {left})")
         }
         _ => format!("in {count} measured run{plural}"),
     }

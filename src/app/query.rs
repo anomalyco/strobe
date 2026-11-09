@@ -28,6 +28,10 @@ pub fn run(args: &Args) -> Result<Output> {
     let handle = args.pos.first().ok_or_else(|| Error::usage("query needs a handle: strobe query rec_… <view>"))?;
     let view = args.pos.get(1).map(String::as_str).unwrap_or("summary");
     let top = args.num("top")?.unwrap_or(15.0) as usize;
+    // Only two views read `--source`: one that ignored it would answer a question not asked.
+    if let Some(s) = args.get("source").filter(|_| !matches!(view, "hotspots" | "log")) {
+        return Err(Error::usage(format!("--source {s}: only hotspots (host, startup or setup of a script recording) and log (console, device or crash) take --source, not {view}")));
+    }
     // Tracked history (SPEC §25.5): `query history`, `query changes`, `query <ser_…> history|changes`.
     if handle == "history" || handle == "changes" || handle.starts_with("ser_") {
         return super::history::query(args);
@@ -1744,6 +1748,9 @@ impl<'a> Scope<'a> {
         if let (Some(s), false) = (source, script) {
             return Err(Error::usage(format!("--source {s} reads a script target's host process; {} is no script recording", rec.id)));
         }
+        if let Some(s) = source.filter(|_| args.has("native") || args.get("thread").is_some() || args.get("pid").is_some()) {
+            return Err(Error::usage(format!("--source {s} reads the host's JavaScript profile; --native, --thread and --pid read native samples: one or the other")));
+        }
         if !script || args.has("native") || args.get("thread").is_some() || args.get("pid").is_some() {
             return Ok(None);
         }
@@ -1781,9 +1788,13 @@ impl<'a> Scope<'a> {
                     fmt::value(wall(), "ms")
                 ),
             ),
-            Scope::Setup => {
-                ("setup".into(), format!("the bench file's setup, {} wall (what it called in the target, imports it made among them): per recording, not per run", fmt::value(wall(), "ms")))
-            }
+            Scope::Setup => (
+                "setup".into(),
+                format!(
+                    "the bench file's setup, {} wall (the whole setup hook, which runs in strobe's runner; the samples are the host's: what the hook called in the target, imports it made among them): per recording, not per run",
+                    fmt::value(wall(), "ms")
+                ),
+            ),
             Scope::Phase(p) => ("phase".into(), format!("phase {p} of the measured runs")),
         }
     }
@@ -1892,11 +1903,19 @@ pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope
     Ok(out)
 }
 
-/// Under this share of a part's wall time sampled, a Bun host's part says why the rest has no row.
+/// Under this share of a part's wall time sampled, a host's part says what the rest is.
 const UNSAMPLED: f64 = 0.5;
 
-/// Why a Bun host's part has less JavaScript sampled than its wall time.
-const BUN_UNSAMPLED: &str = "Bun's --cpu-prof samples JavaScript only: its native work (transpiling TypeScript, resolving and reading modules) and the host's waits have no sample";
+/// What a part's wall time without a JavaScript sample is, for the runtime the host ran on: never
+/// work missing from the rows alone.
+fn unsampled_note(rec: &Rec) -> String {
+    let why = match rec.meta["runtime"]["name"].as_str() {
+        Some("bun") => "; Bun's --cpu-prof samples JavaScript only, so its native work (transpiling TypeScript, resolving and loading modules) is in it too",
+        Some("node") => "; Node samples its native work as (program), and its (idle) samples are left out of this count",
+        _ => "",
+    };
+    format!("i wall time with no JavaScript sample is mostly not work missing from the rows: the host waiting (idle, I/O, timers) and the runner's own steps between its calls{why}")
+}
 
 /// The JavaScript a script profile's stacks hold (µs): every weight but the profile's own `(root)`
 /// and `(idle)`, a thread that waited.
@@ -1911,9 +1930,11 @@ fn host_trailer(rec: &Rec, scope: Scope, stacks: &Stacks, out: &mut Output) {
     if let Some(name) = scope.life() {
         let wall = life_spans(rec, name).iter().map(|(a, b)| b.saturating_sub(*a) as f64 / 1e6).sum::<f64>();
         let sampled = sampled_js(stacks) / 1e3;
-        out.text += &format!("{name}: {} of JavaScript sampled in {} wall ({:.0}%)\n", fmt::value(sampled, "ms"), fmt::value(wall, "ms"), 100.0 * sampled / wall.max(1e-9));
-        if rec.meta["runtime"]["name"] == "bun" && sampled < UNSAMPLED * wall {
-            out.text += &format!("! {BUN_UNSAMPLED}, so {} of the {name} is in no row\n", fmt::value(wall - sampled, "ms"));
+        out.text +=
+            &format!("{name}: {} of JavaScript sampled in {} of wall time ({:.0}% of wall time, not CPU)\n", fmt::value(sampled, "ms"), fmt::value(wall, "ms"), 100.0 * sampled / wall.max(1e-9));
+        if sampled < UNSAMPLED * wall {
+            out.text += &unsampled_note(rec);
+            out.text += "\n";
         }
         out.json["wall_ms"] = json!(wall);
         out.json["sampled_ms"] = json!(sampled);
@@ -1940,12 +1961,21 @@ fn host_trailer(rec: &Rec, scope: Scope, stacks: &Stacks, out: &mut Output) {
 }
 
 /// `--source host`: the host's life by part (its startup, the bench file's setup, warmup runs, the
-/// measured runs, resets, teardown, and the time between them), each its wall time on strobe's clock
-/// against the JavaScript the whole host profile sampled in it. Nothing for a recording from before
-/// strobe kept `lifecycle_spans`.
+/// measured runs' timed stretches and their untimed ones, resets, teardown, and the time between
+/// them), each its wall time on strobe's clock against the JavaScript the whole host profile sampled
+/// in it. The measured runs' row is what `hotspots` reads by default (and `meta.missed` counts).
+/// Nothing for a recording from before strobe kept `lifecycle_spans`.
 fn by_lifecycle(rec: &Rec, out: &mut Output) {
-    const ORDER: [(&str, &str); 7] =
-        [("startup", "startup"), ("setup", "setup"), ("warm", "warmup runs"), ("measured", "measured runs"), ("unmeasured", "unmeasured runs"), ("reset", "resets"), ("teardown", "teardown")];
+    const ORDER: [(&str, &str); 8] = [
+        ("startup", "startup"),
+        ("setup", "setup"),
+        ("warm", "warmup runs"),
+        ("measured", "measured runs"),
+        ("untimed", "untimed (in runs)"),
+        ("unmeasured", "unmeasured runs"),
+        ("reset", "resets"),
+        ("teardown", "teardown"),
+    ];
     let mut names: Vec<String> = ORDER.iter().map(|(n, _)| n.to_string()).collect();
     for l in rec.meta["lifecycle_spans"].as_array().into_iter().flatten() {
         let n = l["name"].as_str().unwrap_or("").split(':').next().unwrap_or("");
@@ -1953,36 +1983,44 @@ fn by_lifecycle(rec: &Rec, out: &mut Output) {
             names.push(n.to_string());
         }
     }
-    let measured: Spans = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS))
+    // The measured runs as their own profiles cut them: timed stretches, `ctx.untimed` apart.
+    let runs: Vec<metrics::Timed> = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS))
         .ok()
         .and_then(|f| f["runs"].as_array().cloned())
         .into_iter()
         .flatten()
-        .filter_map(|r| Some((r["t0_ns"].as_u64()?, r["t1_ns"].as_u64()?)))
-        .filter(|(a, b)| b > a)
+        .filter_map(|r| {
+            let (t0, t1) = (r["t0_ns"].as_u64()?, r["t1_ns"].as_u64()?);
+            let untimed = r["untimed"].as_array().into_iter().flatten().filter_map(|u| Some((u[0].as_u64()?.max(t0), u[1].as_u64()?.min(t1)))).filter(|(a, b)| b > a).collect();
+            (t1 > t0).then_some(metrics::Timed { t0, t1, untimed })
+        })
         .collect();
     let parts: Vec<(String, Spans)> = names
         .into_iter()
         .map(|n| {
-            let spans = if n == "measured" { measured.clone() } else { life_spans(rec, &n) };
+            let spans = match n.as_str() {
+                "measured" => runs.iter().flat_map(metrics::Timed::segments).collect(),
+                "untimed" => runs.iter().flat_map(|r| r.untimed.iter().copied()).collect(),
+                _ => life_spans(rec, &n),
+            };
             (n, spans)
         })
         .filter(|(_, s)| !s.is_empty())
         .collect();
-    if !parts.iter().any(|(n, _)| n != "measured") {
+    if !parts.iter().any(|(n, _)| n != "measured" && n != "untimed") {
         return;
     }
     let groups: Vec<Spans> = parts.iter().map(|(_, s)| s.clone()).collect();
     let Ok((sampled, all)) = rec.host_sampled(&groups) else { return };
     let wall_of = |s: &Spans| s.iter().map(|(a, b)| (b - a) as f64 / 1e6).sum::<f64>();
     let label = |n: &str| ORDER.iter().find(|(k, _)| *k == n).map_or(n.to_string(), |(_, l)| l.to_string());
-    out.text += "by lifecycle · each part's wall time on strobe's clock and the JavaScript sampled in it (--source startup or setup ranks one part's rows; --phase a phase of the measured runs):\n";
+    out.text += "by lifecycle · each part's wall time on strobe's clock and the JavaScript sampled in it, as a share of wall time, not CPU (--source startup or setup ranks one part's rows; --phase a phase of the measured runs):\n";
     let mut rows = Vec::new();
     let mut short = false;
     let line = |l: &str, wall: Option<f64>, ms: f64| {
         let w = wall.map(|w| format!("{} wall", fmt::value(w, "ms"))).unwrap_or_default();
         let pct = wall.filter(|w| *w > 0.0).map(|w| format!("{:>4.0}%", 100.0 * ms / w)).unwrap_or_default();
-        format!("  {l:<16} {w:>15}  {:>10} sampled  {pct}\n", fmt::value(ms, "ms"))
+        format!("  {l:<17} {w:>15}  {:>10} sampled  {pct}\n", fmt::value(ms, "ms"))
     };
     for ((n, spans), us) in parts.iter().zip(&sampled) {
         let (wall, ms) = (wall_of(spans), us / 1e3);
@@ -1990,12 +2028,13 @@ fn by_lifecycle(rec: &Rec, out: &mut Output) {
         out.text += &line(&label(n), Some(wall), ms);
         rows.push(json!({ "part": n, "label": label(n), "spans": spans.len(), "wall_ms": wall, "sampled_ms": ms }));
     }
-    // The rest: strobe's clock reads and calls between the parts, and the exit after teardown.
+    // The rest: strobe's clock-sync spins and its calls between the parts and runs, and the exit.
     let rest = (all - sampled.iter().sum::<f64>()).max(0.0) / 1e3;
-    out.text += &format!("{}  (between the parts: strobe's clock reads and calls; the exit)\n", line("other", None, rest).trim_end());
+    out.text += &format!("{}  (between the parts: strobe's clock-sync spins, its calls between runs; the exit)\n", line("other", None, rest).trim_end());
     rows.push(json!({ "part": "other", "label": "between the parts and the exit", "sampled_ms": rest }));
-    if short && rec.meta["runtime"]["name"] == "bun" {
-        out.text += &format!("! {BUN_UNSAMPLED}: a part's wall time past its sampled time is in no row\n");
+    if short {
+        out.text += &unsampled_note(rec);
+        out.text += "\n";
     }
     out.json["lifecycle"] = json!(rows);
 }
@@ -2814,8 +2853,11 @@ impl Driven {
 fn row_key(f: &Frame, by: &str, packages: &mut BTreeMap<String, String>) -> String {
     match by {
         "package" if f.package.is_some() => f.package.clone().unwrap_or_default(),
-        "file" if f.url.is_empty() && !f.file.is_empty() => f.file.clone(),
-        "file" | "package" if f.url.is_empty() => f.name.clone(),
+        // A frame with no script: its file when it has one (the script host's), the profile's own
+        // names (`(program)`, `(garbage collector)`, `(module)`) as themselves, any other one native code.
+        "file" | "package" if f.url.is_empty() && !f.file.is_empty() => f.file.clone(),
+        "file" | "package" if f.url.is_empty() && f.name.starts_with('(') => f.name.clone(),
+        "file" | "package" if f.url.is_empty() => "(native)".into(),
         "file" => f.file.clone(),
         "package" => {
             let at = if f.mapped { &f.file } else { &f.url };
@@ -3000,11 +3042,20 @@ fn short_url(url: &str) -> String {
 
 /// The package a script or file belongs to: the folder after the last `node_modules/` (with its scope),
 /// else for a file on disk the `name` in its nearest `package.json`, else the URL's first path segment.
+/// A runtime's own scripts (`internal:…`) are `(runtime)`.
 pub fn package(url: &str) -> String {
     if url.is_empty() {
         return "(native)".into();
     }
-    let url = &url.replace('\\', "/");
+    if url.starts_with("internal:") {
+        return "(runtime)".into();
+    }
+    let url = url.replace('\\', "/");
+    // A file URL as the path on disk: file:///C:/… is C:/…, file:///… is /….
+    let url = match url.strip_prefix("file://") {
+        Some(rest) => rest.strip_prefix('/').filter(|r| r.as_bytes().get(1) == Some(&b':')).unwrap_or(rest),
+        None => &url,
+    };
     if let Some(i) = url.rfind("node_modules/") {
         let rest = &url[i + 13..];
         let mut parts = rest.split('/');
