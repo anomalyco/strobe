@@ -222,6 +222,8 @@ pub struct Rebased {
     pub over_us: f64,
     /// What the last sample weighs: the median gap under the cap.
     pub last_us: f64,
+    /// Samples of the clock reads' spins over 1 ms outside strobe's spans, within the quarter allowed.
+    pub outliers: usize,
 }
 
 /// Places a script host's CPU profile `p` on strobe's clock from the host's clock readings at its
@@ -284,26 +286,40 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         Runtime::Node => (MAX_GAP_US, MAX_GAP_US),
     };
     let last_us = Sampling::of(0.0, gaps.into_iter().filter(|g| *g <= cap_us).collect()).map_or(0.0, |s| s.median_us);
-    // Each spin's samples, by the reading nearer them: inside strobe's span around it, within SYNC_NS.
-    let mut seen = [0usize; 2];
+    // Each spin's samples, by the reading nearer them: how far each lies outside strobe's span around it.
+    let mut offs: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
     for at in times_us.iter().zip(&marked).filter(|(_, m)| **m).map(|(t, _)| t) {
         let ns = at * 1e3;
         let k = usize::from((ns - exit.mark.0 as f64).abs() < (ns - ready.mark.0 as f64).abs());
         let (a, b) = (readings[k].1.mark.0 as f64, readings[k].1.mark.1 as f64);
-        let off = if ns < a { ns - a } else { (ns - b).max(0.0) };
-        if off.abs() > SYNC_NS {
+        offs[k].push(if ns < a { ns - a } else { (ns - b).max(0.0) });
+    }
+    // The clocks match when each spin's samples sit inside its span within SYNC_NS: their median, and
+    // all but a quarter of them. A Bun sampler kept off a CPU between its clock read and the stack it
+    // takes stamps a sample of the spin up to 2 ms off on a loaded 2-vCPU VM (vps: -1.87, -1.65 and
+    // +1.23 ms), which says nothing of the clocks.
+    let mut outliers = 0;
+    for (k, o) in offs.iter_mut().enumerate() {
+        if o.is_empty() {
+            return Err(unsynced(format!("it holds no sample of the 5 ms the host spent reading its clock {}, so where it puts that moment cannot be checked", readings[k].0)));
+        }
+        o.sort_by(f64::total_cmp);
+        let median = o[o.len() / 2];
+        let out: Vec<f64> = o.iter().copied().filter(|x| x.abs() > SYNC_NS).collect();
+        if median.abs() > SYNC_NS || 4 * out.len() > o.len() {
+            let worst = out.iter().copied().max_by(|a, b| a.abs().total_cmp(&b.abs())).unwrap_or(median);
             return Err(unsynced(format!(
-                "it puts a sample of the 5 ms the host spent reading its clock {} {:+.2} ms outside strobe's span around that: its clock does not match strobe's",
+                "it puts {} of {} samples of the 5 ms the host spent reading its clock {} over 1 ms outside strobe's span around that (median {:+.2} ms, worst {:+.2} ms): its clock does not match strobe's",
+                out.len(),
+                o.len(),
                 readings[k].0,
-                off / 1e6
+                median / 1e6,
+                worst / 1e6
             )));
         }
-        seen[k] += 1;
+        outliers += out.len();
     }
-    if let Some(k) = seen.iter().position(|n| *n == 0) {
-        return Err(unsynced(format!("it holds no sample of the 5 ms the host spent reading its clock {}, so where it puts that moment cannot be checked", readings[k].0)));
-    }
-    Ok(Rebased { start_us, times_us, cap_us, over_us, last_us })
+    Ok(Rebased { start_us, times_us, cap_us, over_us, last_us, outliers })
 }
 
 /// Per sample of `p`: whether its stack holds a function named `name`.

@@ -720,7 +720,7 @@ impl Profiled<'_> {
             "created": super::super::record::now_iso(), "valid": true, "env": host::env(), "script": true,
             "runtime": runtime, "sampling": sampling, "missed": missed, "whole_host": probe::cpu::WHOLE_HOST, "pid": self.pid, "main_tid": self.main_tid,
             "lifecycle_spans": self.life.iter().map(|(name, a, b)| json!({ "name": name, "t0_ns": a, "t1_ns": b })).collect::<Vec<_>>(),
-            "clock": { "rtt_ms": [ready.rtt_ns as f64 / 1e6, exit.rtt_ns as f64 / 1e6], "drift_ms": (exit.offset_ns - ready.offset_ns) / 1e6, "cap_ms": rebased.cap_us / 1e3 },
+            "clock": { "rtt_ms": [ready.rtt_ns as f64 / 1e6, exit.rtt_ns as f64 / 1e6], "drift_ms": (exit.offset_ns - ready.offset_ns) / 1e6, "cap_ms": rebased.cap_us / 1e3, "mark_outliers": rebased.outliers },
             "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile (Node): sampled allocations of the whole host process; timeline.json.gz: the host's threads over the block (query threads --timeline)",
         });
         if batch {

@@ -11,7 +11,7 @@
 //                                               an async loop: 20 × (100 µs in tickWork, then a 10 ms sleep). Bun: tickWork
 //                                               about 2 ms per run (20 × 0.1), never 20 × a sleep; meta.clock.cap_ms about 4
 //                                               sampling intervals (the sleeps in neither it nor meta.sampling); meta.missed
-//                                               about 20% (its event loop's own work, which Bun never samples), and hotspots
+//                                               2-25% (its event loop's own work, which Bun never samples); over 5% hotspots
 //                                               say "! Missed". Node: its own profile labels nearly all of a 100 µs timer
 //                                               callback `(idle)` (raw --cpu-prof: 1.0 of 20 ms; of 2 ms callbacks 365 of
 //                                               400 ms), so tickWork reads about 0.3 ms per run or none; meta.missed about

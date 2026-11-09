@@ -3692,7 +3692,7 @@ experiment's `script.log`.
     (0.1 ms of work, 10 ms timer) a run, kept about 0.3 of its 2 ms of work in samples, and its `missed`
     reads 95% of `cpu.main`; a raw `--cpu-prof` of 200 × (2 ms of work, 10 ms timer) kept 365 of 400
     ms. Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work
-    (the await loop misses 20% on adais, 25% on vps). The other way, `Waited`: samples weigh the
+    (the await loop missed 2% and 20% in two runs on adais, 25% on vps). The other way, `Waited`: samples weigh the
     wall time to the next, so where the thread waited for a CPU they weigh more than `cpu.main`.
     Over 1.2 × `cpu.main` and 5 ms more, the same views warn that hotspot rows include time the
     thread waited for a CPU (sampled against `cpu.main`), never rescaling or refusing them: on vps
