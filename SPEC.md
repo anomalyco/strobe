@@ -3698,7 +3698,7 @@ true (an element focused in a background window gets no OS keys until a click br
 one counted read), and one whose `until` fails checks delivery: keys that never arrived refuse
 `InputMismatch` (`OS input did not reach the page: strobe posted …`, with the focus note when the page
 had none, ending `or pass a selector` only when the call passed none) instead of the wait's error.
-adais (112ef38) `focus.bench.ts --check`: headless Chromium's focused, unfocused and selector cases
+adais (88f6874) `focus.bench.ts --check`: headless Chromium's focused, unfocused and selector cases
 pass and its ignored and unseen ones fail with no note (its DevTools key focuses the page); headless
 Firefox the same, but `unseen` ends `…; the page had no focus (document.hasFocus() is false), so keys
 did not reach it; click the page first or pass a selector`; blade `focus.bench.ts --check` (a popup
@@ -8114,7 +8114,7 @@ what was built but not yet run on a device is in §21.
   refuses them; `a..b hotspots --source startup|setup` per recording; `report` of a `--blocks` run (HTML and
   md), an HTTP probe card, the lifecycle split and modules with the whole host; a Firefox recording's
   `inputs` say why it has none (5.6, 8.9, 11.1, 11.2).
-- 2026-11-10 · 5aca857 7fb5bf1 88f6874 · `--blocks 1` names its primary (`★ <metric> <value> (1 block)`);
+- 2026-11-10 · 112ef38 · `--blocks 1` names its primary (`★ <metric> <value> (1 block)`);
   leak runs on a phone or emulator; the loopback addresses `prepare` returned reversed to a phone; keys
   to no element say they reached no unfocused page only with evidence, and OS keys that never arrived
   refuse `InputMismatch`; Linux's display adapter for `screen.gpu` and `CrossAdapterScanout` (5.4, 5.6,
