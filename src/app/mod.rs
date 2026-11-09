@@ -127,6 +127,11 @@ pub fn dispatch(args: &Args) -> Result<Output> {
         let help = crate::cli::help(&args.command);
         return Ok(Output::new(help.clone(), json!({ "help": help })));
     }
+    if !crate::cli::COMMANDS.contains(&args.command.as_str()) {
+        return Err(Error::usage(format!("unknown command {}; see strobe --help", args.command)));
+    }
+    // A flag of another command: refused before anything runs, from the CLI and MCP alike.
+    args.check_command()?;
     // Strictly read-only: it puts nothing back and makes no state folder.
     if args.command == "config" {
         return config::run(args);

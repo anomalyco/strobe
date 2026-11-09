@@ -958,7 +958,9 @@ pub fn daemon_loop() {
                 Some(t) => vec!["track".into(), file.display().to_string(), "--head".into(), format!("{t}=git:{head}"), "--from-schedule".into(), id.clone()],
                 None => vec!["track".into(), file.display().to_string(), "--ref".into(), head.clone(), "--from-schedule".into(), id.clone()],
             };
-            for (k, v) in s["flags"].as_object().into_iter().flatten() {
+            // A flag an older strobe kept that track never read (it now refuses one) is left out, as it
+            // was ignored.
+            for (k, v) in s["flags"].as_object().into_iter().flatten().filter(|(k, _)| crate::cli::takes("track", k)) {
                 argv.push(format!("--{k}"));
                 if v != "true" {
                     argv.push(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));

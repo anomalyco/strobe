@@ -1437,7 +1437,7 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
             return Err(Error::refused(
                 "LiveChannel",
                 format!("{} is running, and it is an interpreter: strobe cannot tell your app's copy from any other script it runs", app.exe.display()),
-                "launch the script itself as the executable (a shebang line and chmod +x on Linux and macOS, or a small launcher), so the app has an executable of its own",
+                "give the app an executable of its own: copy the runtime binary under its own name for this bench (works on every OS), or launch the script itself (a shebang line and chmod +x on Linux and macOS, or a small launcher)",
             ));
         }
         // A copy strobe launched (stamped) is not the user's: a leftover is ended; one that a

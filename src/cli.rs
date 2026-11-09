@@ -18,8 +18,10 @@ use Kind::{Number, Optional, Switch, Value};
 
 /// Every flag strobe reads, how it takes its value, and the commands that read it (`*`: every
 /// command), which `strobe <command> --help` lists. The parser refuses any other flag (a typo is an
-/// error, not a silently ignored setting), and MCP tool schemas take their types from here (SPEC §17),
-/// so the two cannot drift. A new flag goes here.
+/// error, not a silently ignored setting), a command refuses a flag not listed for it
+/// (`Args::check_command`), and MCP tool schemas take their types from here (SPEC §17), so the two
+/// cannot drift. A new flag goes here, with every command that reads it: one a command passes on to
+/// another (`plan --pilot` and `run` to bench, `record --bench` to bench) is that command's too.
 pub const FLAGS: &[(&str, Kind, &str)] = &[
     // Global.
     ("json", Switch, "*"),
@@ -39,7 +41,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("emulate", Value, "record"),
     ("mobile", Optional, "record bench plan look up"),
     ("channel", Value, "up"),
-    ("style", Switch, "record bench"),
+    ("style", Switch, "record bench plan"),
     ("native", Switch, "record query"),
     ("windowless", Switch, "record"),
     ("app", Value, "record look"),
@@ -53,24 +55,24 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("head", Value, "record bench plan track run"),
     ("base", Value, "bench plan track run"),
     ("aa", Switch, "bench plan run"),
-    ("check", Switch, "bench update run"),
+    ("check", Switch, "bench update run up"),
     ("filter", Value, "bench plan track"),
-    ("target", Value, "record bench top track"),
-    ("params", Value, "record bench track"),
-    ("primary", Value, "bench track run"),
-    ("equivalence", Number, "bench plan track run"),
+    ("target", Value, "record bench plan top track"),
+    ("params", Value, "record bench plan track"),
+    ("primary", Value, "bench plan track run"),
+    ("equivalence", Number, "bench plan track run history"),
     ("noworse", Value, "bench plan run"),
     ("pairs", Value, "bench plan run track"),
     ("runs", Number, "record bench plan track run"),
     ("repeat", Number, "bench"),
-    ("why", Value, "bench plan track"),
-    ("trace", Value, "bench track"),
-    ("power", Value, "record bench run track"),
-    ("pin", Value, "record bench run track"),
-    ("reserve-cpus", Value, "bench run track"),
+    ("why", Value, "bench plan"),
+    ("trace", Value, "bench plan track"),
+    ("power", Value, "record bench plan run track"),
+    ("pin", Value, "record bench plan run track"),
+    ("reserve-cpus", Value, "bench plan run track"),
     ("pixels", Switch, "bench"),
     ("pixels-only", Switch, "bench"),
-    ("bisect", Value, "bench track"),
+    ("bisect", Value, "bench"),
     ("keep", Switch, "bench"),
     ("max-time", Value, "record bench run"),
     ("unlock-wait", Value, "bench"),
@@ -96,7 +98,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("phase", Value, "query"),
     ("timeline", Switch, "query"),
     ("format", Value, "report"),
-    ("out", Value, "report look history"),
+    ("out", Value, "report look"),
     ("open", Switch, "report"),
     ("update-pr", Number, "report"),
     ("repo", Value, "report"),
@@ -160,6 +162,19 @@ const LISTS: &[&str] = &["filter", "target", "metrics", "params", "noworse", "sk
 /// How `--name` takes its value, when strobe has such a flag.
 pub fn kind(name: &str) -> Option<Kind> {
     FLAGS.iter().find(|(n, _, _)| *n == name).map(|(_, k, _)| *k)
+}
+
+/// Every command strobe has (`app::dispatch`).
+pub const COMMANDS: &[&str] =
+    &["record", "bench", "plan", "query", "report", "open", "look", "run", "status", "top", "track", "history", "up", "update", "leave", "helper", "mcp", "daemon", "config", "stats"];
+
+/// Flags a command reads that `FLAGS` does not list for it: only to refuse them in its own typed way
+/// (`look --engine firefox` is `EngineUnsupported`, exit 4, never a page in Chromium).
+const REFUSED_BY_COMMAND: &[(&str, &str)] = &[("look", "engine")];
+
+/// Whether `command` reads `--name`: `FLAGS` lists it for that command or for every one.
+pub fn takes(command: &str, name: &str) -> bool {
+    FLAGS.iter().any(|(n, _, c)| *n == name && (*c == "*" || c.split(' ').any(|c| c == command)))
 }
 
 /// `strobe <command> --help`: that command's lines of the help, then every flag it reads (from
@@ -317,6 +332,22 @@ impl Args {
         }
         let command = if pos.is_empty() { String::new() } else { pos.remove(0) };
         Ok(Args { command, pos, flags })
+    }
+
+    /// Refuses (exit 2) a flag strobe has that this command does not read: a flag given to the wrong
+    /// command is a mistake, never a setting silently ignored (`look --engine` once ran Chromium).
+    pub fn check_command(&self) -> Result<()> {
+        let mut given: Vec<&str> = self.flags.keys().map(String::as_str).collect();
+        given.sort_unstable();
+        let command = self.command.as_str();
+        let Some(name) = given.into_iter().find(|n| !takes(command, n) && !REFUSED_BY_COMMAND.contains(&(command, *n))) else { return Ok(()) };
+        let users: Vec<&str> = FLAGS.iter().filter(|(n, _, _)| *n == name).flat_map(|(_, _, c)| c.split(' ')).filter(|c| !c.is_empty()).collect();
+        let who = match users.as_slice() {
+            [] => "strobe sets it itself; no command takes it from the command line".to_string(),
+            [one] => format!("only {one} takes it"),
+            [rest @ .., last] => format!("{} and {last} take it", rest.join(", ")),
+        };
+        Err(Error::usage(format!("{command} has no flag --{name} ({who})")).hint(format!("strobe {command} --help lists {command}'s flags")))
     }
 
     /// Sets a flag (a derived command line, such as one bisect step).
@@ -485,7 +516,8 @@ Use
        [--mobile[=<serial>]]       (the page in Chrome on an Android phone or emulator, at the phone's own screen)
   look wir:[<selector>] [--until <selector>] [--wait 200ms] [--out <png>] [--chars 4000] [--full | --element <selector>]
                                    (read-only snapshot of an open Safari tab on a USB-cabled iPhone; never navigates)
-  look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>]
+  look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>] [-- <args…>]
+                                   (after --: the app's own arguments, after its profile's)
   look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s] [--home <seed>]
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
                                   console messages and uncaught errors, and a screenshot (exit 124 when it never loads);
@@ -522,7 +554,8 @@ Variants  a directory · a git ref (git:<ref>) · app:<id> · exe:<path> · url:
 Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells that count stderr lines as a failure)
           (-q: no progress lines and no summary; a command that makes a recording or experiment prints its handle)
           (--filter, --target, --params, --metrics, --noworse, --skip given twice add up; any other flag
-          given twice with another value is a usage error)
+          given twice with another value is a usage error; so is a flag the command does not take: strobe
+          <command> --help lists its flags)
 Schema    result.json and --json: schema/result.v1.json (node_modules/@hona/strobe/schema/); strobe.json:
           schema/strobe.v1.json
 Units     KB, MB and GB are binary: 2^10, 2^20 and 2^30 bytes

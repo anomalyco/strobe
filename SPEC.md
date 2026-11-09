@@ -308,7 +308,19 @@ It launches nothing.
 Every flag strobe reads is in one table (`cli::FLAGS`, with whether it takes a value and which
 commands read it); any other
 flag is a usage error (exit 2) that names the closest one, never a setting silently ignored, and
-so is an unknown short flag (`-x`; a negative number stays an argument). A switch takes
+so is an unknown short flag (`-x`; a negative number stays an argument). A flag strobe has that the
+command does not read is a usage error too (exit 2, `status has no flag --runs (record, bench, plan,
+track and run take it)`), checked before the command runs, from the CLI and MCP alike
+(`Args::check_command`): `look --engine firefox` once ran Chromium for 43 s, and `status --runs 5`
+read as nothing. A command that passes flags on to another lists them as its own: `plan --pilot`
+runs a bench with plan's flags (so plan takes `--target`, `--params`, `--primary`, `--pin`,
+`--power`, `--reserve-cpus`, `--trace`, `--style`), `run --base/--head` and `record --bench` run a
+bench with theirs. One flag a command reads only to refuse it in its own typed way is exempt:
+`look --engine` (anything but `chromium` is `EngineUnsupported`, exit 4). Internal flags no command
+takes from the command line (`--gpu-store`, which `record --bench` sets) are refused for every
+command. A schedule an older strobe saved with a flag `track` never read runs without it, as before.
+Everything after `--` is no flag of strobe's (`run -- <command>`, `look exe:<path> -- <args…>`). A
+switch takes
 `--name`, `--name=true` or `--name=false` (off), nothing else. MCP tool schemas take their types
 from the same table (§17). Durations take `500ms`, `10s`, `2m`, `2h`, `1d` (and a bare `0`); a
 negative or non-finite one is refused, and so is a number without its unit (exit 2, `not a
@@ -954,7 +966,8 @@ page's visible text (`innerText`, the first `--chars`), and writes a screenshot 
 page; `--element`: only the first visible element the selector matches, at full size wherever it is
 on the page, so one section of a long report reads; a selector that matches nothing is a usage
 error). A local file opens as `file://`. A page-only flag given to a native look, or an app-only one
-(`--keys`, `--build`, `--app`, `--home`) to a page's, is a usage error rather than ignored. Exit 124 when the load event or `--until` never came; the
+(`--keys`, `--build`, `--app`, `--home`) to a page's, is a usage error rather than ignored, and so is
+a second target or arguments after `--` (a native app's own). Exit 124 when the load event or `--until` never came; the
 page's own errors are listed, not an exit code. It is a CLI command only, not an MCP tool (§17): it
 answers no measurement question. `--mobile[=<serial>]`: the page in Chrome on an Android phone or
 emulator (13.1 "Chrome on a phone"), at the phone's own screen (`--size`, `--scale` and `--headed`
@@ -966,8 +979,9 @@ only, not in firefox") before anything launches, never silently run in Chromium;
 Firefox before 148, not WebKit on Windows).
 
 `look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>] [--timeout
-60s]`: a native app launched in an isolated home as a bench block launches it (its profile from
-`strobe.json`), nothing measured, then closed with its home: after its main window opens (and
+60s] [-- <args…>]`: a native app launched in an isolated home as a bench block launches it (its profile from
+`strobe.json`; everything after `--` goes to the app as its own arguments, after its profile's, as a
+`native(path, { args })` target's do), nothing measured, then closed with its home: after its main window opens (and
 `--until`'s element shows, then `--wait`) it prints the windows' titles, the accessibility tree's
 window names, open dialogs and headings (what a case's `expect: { title, heading }` matches, read the
 same way, §9.6), and the visible elements that carry a key, with role and name; the screen is read
@@ -5535,7 +5549,10 @@ protobuf written by hand (no generated code, no C):
   it, with a note, rather than drawn at the phone's uptime.
 
 Before anything opens it, trace_processor reads the file back: samples per source (a short count is
-printed as a warning), frames with names and source files, tracks, and its error stats.
+printed as a warning), frames with names and source files, tracks, and its error stats. The
+summary's thread count is the distinct threads (pid, tid) any sample stands on, across JavaScript,
+Firefox and native samples: a script recording's samples sit on two tracks (its main thread and the
+whole host), and say 2 threads; one thread with JavaScript and native samples is one.
 
 **Opening**, local only: the UI is the engine release's own `perfetto-ui.zip` (§15), unpacked once
 under the engine folder and served by the daemon at `/perfetto/` (an older daemon or none: by
@@ -6222,7 +6239,8 @@ Strobe launches any Electron app the same way, with no change to the app:
   (below) runs from the app's install folder or a data folder of the same name. The user's own
   app is never the thing to experiment on. An interpreter as the executable (python, node, bun,
   a shell, …) runs any script, so a running one says nothing about the app: the refusal says so and
-  asks for the script itself (shebang and `chmod +x`, or a launcher) as the executable.
+  asks for an executable of the app's own: a copy of the runtime binary under its own name for the
+  bench (works on every OS), or the script itself (shebang and `chmod +x`, or a launcher).
   A running copy that strobe itself launched is not the user's. Every process strobe launches (an
   isolated app, a browser, a command target) carries `STROBE_HOME=<its home or profile>` and
   `STROBE_OWNER=<strobe pid>:<strobe start time>` in its environment, and what it starts inherits
@@ -7445,7 +7463,9 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 - Each tool lists its positional inputs and the CLI flags it takes; each flag's JSON type
   (boolean, number, string) comes from the CLI's flag table (§5), so the schemas cannot drift from
   the CLI. A call with an input the tool lacks, or of the wrong type, is refused (`isError`) naming
-  what it takes; `timeout` must be a whole number of seconds. `record` with `bench`
+  what it takes; `timeout` must be a whole number of seconds. Every flag a tool takes is one its
+  command reads (§5): the call then goes through the same check as the CLI (`Args::check_command`),
+  so a tool can never pass a flag its command would ignore. `record` with `bench`
   (`<file>#<case>`) returns an `exp_…`, and its `target` names one of the bench file's targets
   (`--target`); `bench` with `stop` or `resume` (not both) takes an experiment instead of `file`.
   Through the daemon, whose working folder is strobe's install folder, `bench` and `record` with

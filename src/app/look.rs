@@ -105,7 +105,7 @@ fn missing(app: &crate::target::isolate::App, profile: Option<&str>) -> Error {
 /// shows (the window names, open dialogs and headings a case's `expect` checks, and the keyed
 /// elements selectors name). The tree reads on a locked session too, so an `expect` can be checked
 /// before the next unlock.
-fn native(args: &Args, target: &str) -> Result<Output> {
+fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
     use crate::target::{isolate, native as nt};
     let config = crate::config::load(&crate::config::project_root(&std::env::current_dir()?))?;
     let mut app = match (target.strip_prefix("app:"), target.strip_prefix("exe:"), args.get("app")) {
@@ -114,6 +114,7 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         (_, Some(path), None) => isolate::App::bare(Path::new(path)),
         _ => return Err(Error::usage("look app:<id> or exe:<path>")),
     }
+    .with_extra(app_args, &[])
     .as_kind(isolate::AppKind::Native)
     .with_display(args.has("wayland").then_some(isolate::Display::Wayland));
     for page_only in ["element", "full", "size", "scale", "chars", "headed", "engine"] {
@@ -425,11 +426,18 @@ pub fn run(args: &Args) -> Result<Output> {
         .pos
         .first()
         .ok_or_else(|| Error::usage("look needs a page or an app: strobe look <url | file | wir:[sel] | app:<id> | exe:<path> | tty:<command>> [--until <css>] [--wait 2s] [--out shot.png]"))?;
+    // `look app:<id> | exe:<path> -- <args…>`: the app's own arguments, after the profile's.
+    let app_args: &[String] = match &args.pos[1..] {
+        [] => &[],
+        [dash, rest @ ..] if dash == "--" && (target.starts_with("app:") || target.starts_with("exe:")) => rest,
+        [dash, ..] if dash == "--" => return Err(Error::usage("arguments after -- are a native app's own: look app:<id> | exe:<path> -- <args…>")),
+        [extra, ..] => return Err(Error::usage(format!("look takes one target, not also {extra:?}; a native app's own arguments go after --: look exe:<path> -- <args…>"))),
+    };
     if target == "wir" || target.starts_with("wir:") {
         return ios_wir(args, target);
     }
     if target.starts_with("app:") || target.starts_with("exe:") {
-        return native(args, target);
+        return native(args, target, app_args);
     }
     if let Some(line) = target.strip_prefix("tty:") {
         if args.has("mobile") {

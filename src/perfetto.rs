@@ -145,6 +145,7 @@ pub fn build(dir: &Path, out: &Path) -> Result<Built> {
         b.js(dir, &page, &meta);
     }
     b.native(dir);
+    b.built.sampled_threads = b.sampled.len();
     b.summary(&meta);
     // A trace without Chrome's clock snapshots gets one: strobe's clock is the trace's.
     if !b.built.chrome {
@@ -292,6 +293,9 @@ struct Builder {
     thread_tracks: HashMap<(u32, u32), (u64, bool)>,
     /// Processes described so far: one descriptor each.
     processes: HashSet<u32>,
+    /// The threads (pid, tid) any stack sample stands on (`Built::sampled_threads`): a script's main
+    /// thread and its whole host are two; one thread with JavaScript and native samples is one.
+    sampled: HashSet<(u32, u32)>,
     lo: Option<u64>,
     hi: Option<u64>,
     /// The page's runs in the Chrome trace's own time, when it has them.
@@ -1208,6 +1212,7 @@ impl Builder {
                 js.sample(ts, task, None, stack, (us * 1000.0).round() as u64);
                 self.seen(ts);
                 self.built.js_samples += 1;
+                self.sampled.insert((pid, tid));
             }
         }
         self.built.frames += js.frames.len() as u64;
@@ -1248,9 +1253,6 @@ impl Builder {
             self.built.frames += al.frames.len() as u64;
             self.built.located_frames += al.located;
             self.out.extend_from_slice(&al.out);
-        }
-        if self.built.js_samples > 0 {
-            self.built.sampled_threads += 1;
         }
         if !scripts.is_empty() {
             self.built.notes.push(format!("{} of {} distinct script frames source-mapped to original files", mapped.len(), scripts.len()));
@@ -1335,7 +1337,7 @@ impl Builder {
                 self.built.gecko_samples += 1;
             }
             if !th.samples.is_empty() {
-                self.built.sampled_threads += 1;
+                self.sampled.insert((th.pid, th.tid));
             }
             for (name, a, b, args) in &th.markers {
                 let track = self.track_under(Some(thread), name, 0, None);
@@ -1384,7 +1386,6 @@ impl Builder {
         let mut samples = deep.samples.clone();
         samples.sort_by_key(|s| s.0);
         let mut stacks: HashMap<(u32, u32), Option<u64>> = HashMap::new();
-        let mut sampled: HashSet<(u32, u32)> = HashSet::new();
         for &(ts, pid, tid, cpu, idx) in &samples {
             let stack = *stacks.entry((idx, pid)).or_insert_with(|| {
                 let addrs = deep.stacks.get(idx as usize)?;
@@ -1420,13 +1421,12 @@ impl Builder {
             let task = st.task(pid, tid);
             let exec = st.exec(u32::from(cpu), if leaf_kernel { 2 } else { 1 });
             st.sample(ts, task, Some(exec), stack, weight);
-            sampled.insert((pid, tid));
+            self.sampled.insert((pid, tid));
             self.seen(ts);
             self.built.native_samples += 1;
         }
         self.built.frames += st.frames.len() as u64;
         self.built.located_frames += st.located;
-        self.built.sampled_threads += sampled.len();
         if deep.untimed {
             self.built.notes.push("native samples carry no times (macOS sample): they all stand at the capture's start; the flame graph is whole, the timeline is not".into());
         }
