@@ -120,6 +120,20 @@ impl Runtime {
     }
 }
 
+/// Over this share of a script recording's measured time missed for want of a CPU
+/// (`Rebased::starved`, `starved` in meta.json), the recording and every hotspots view say so.
+pub const STARVED_SHARE: f64 = 0.05;
+
+/// What a script recording's `starved` costs its rows, when over `STARVED_SHARE`.
+pub fn starved_text(starved: &Value) -> Option<String> {
+    let share = starved["share"].as_f64().filter(|s| *s > STARVED_SHARE)?;
+    Some(format!(
+        "Starved: the runtime's sampler missed {:.0} ms ({:.0}%) of the measured runs while one stack ran on both sides of the gap (its sampler without a CPU); a gap counts only up to the cap, so rows undercount: record where the target's CPUs are not shared",
+        starved["ms"].as_f64().unwrap_or(0.0),
+        100.0 * share
+    ))
+}
+
 /// A script recording's whole host profile, on strobe's clock (`Rebased::whole`).
 pub const WHOLE_HOST: &str = "whole-host.json.gz";
 
@@ -316,6 +330,28 @@ impl Rebased {
         }
         let ids: Vec<Value> = picked.iter().map(|(i, _)| all[*i].clone()).collect();
         Some(json!({ "nodes": pruned(p, &ids), "startTime": us(span.0), "endTime": us(span.1), "samples": ids, "timeDeltas": deltas }))
+    }
+
+    /// What the cap left out inside `segments` (µs, strobe's clock) where the samples on both sides of
+    /// a gap are of one stack (the same node, or one's caller, or both called from one frame): the VM
+    /// ran that code throughout, so the gap is busy time the sampler missed (its thread without a CPU:
+    /// on vps, 2 vCPUs, 40% of a 30 ms spin fell in gaps over the cap, up to 8.6 ms), never an idle VM.
+    /// With the time the weights hold there (µs).
+    pub fn starved(&self, p: &Value, segments: &[(f64, f64)]) -> (f64, f64) {
+        let ids: Vec<u64> = p["samples"].as_array().into_iter().flatten().map(|s| s.as_u64().unwrap_or(0)).collect();
+        let mut parent: HashMap<u64, u64> = HashMap::new();
+        for n in p["nodes"].as_array().into_iter().flatten() {
+            let id = n["id"].as_u64().unwrap_or(0);
+            for c in n["children"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
+                parent.insert(c, id);
+            }
+        }
+        let up = |x: u64| parent.get(&x).copied();
+        let one = |a: u64, b: u64| a == b || up(a) == Some(b) || up(b) == Some(a) || (up(a).is_some() && up(a) == up(b));
+        let inside = |a: f64, b: f64| -> f64 { segments.iter().map(|s| (b.min(s.1) - a.max(s.0)).max(0.0)).sum() };
+        let lost = self.times_us.windows(2).zip(ids.windows(2)).filter(|(t, n)| t[1] - t[0] > self.cap_us && one(n[0], n[1])).map(|(t, _)| inside(t[0] + self.cap_us, t[1])).sum();
+        let held = weights(&self.times_us, self.cap_us, self.last_us, segments, &[]).iter().sum();
+        (lost, held)
     }
 
     /// The gaps (µs) between consecutive samples inside one of `segments` (µs, strobe's clock), up to

@@ -1748,7 +1748,14 @@ pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope
     if sampling.is_some_and(|s| s.coarse()) {
         header += &format!("\n! {COARSE}");
     }
+    let starved = crate::probe::cpu::starved_text(&rec.meta["starved"]);
+    if let Some(t) = &starved {
+        header += &format!("\n! {t}");
+    }
     let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), Some(sort));
+    if starved.is_some() {
+        out.json["starved"] = rec.meta["starved"].clone();
+    }
     out.json["interval_us"] = json!(sampling.map(|s| s.median_us));
     out.json["sampling"] = json!(sampling);
     if let Some((key, text)) = named {

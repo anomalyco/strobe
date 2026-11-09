@@ -603,6 +603,11 @@ impl Profiled<'_> {
         super::keep_actions(ctx, &rec)?;
         let segments: Vec<(f64, f64)> = self.runs.iter().flat_map(|r| r.timed.segments()).map(|(a, b)| (us(a), us(b))).collect();
         let sampling = probe::cpu::Sampling::of(probe::cpu::interval_us() as f64, rebased.gaps_in(&segments));
+        let (lost, held) = rebased.starved(&profile, &segments);
+        let starved = json!({ "ms": lost / 1e3, "share": if lost + held > 0.0 { lost / (lost + held) } else { 0.0 } });
+        if let Some(text) = probe::cpu::starved_text(&starved) {
+            ctx.warnings.push(validity::warn("Attribution", format!("{}: {text}", self.cases[0].label())));
+        }
         let s = &self.cases[0];
         let batch = ctx.batch.is_some();
         let blocks: Vec<&Block> = launch.cases.iter().flatten().collect();
@@ -611,7 +616,7 @@ impl Profiled<'_> {
             "target": self.target["entry"], "probes": Set::Attribution, "timing": "perturbed", "runs": self.runs.len(), "measured": self.runs.iter().map(|r| &r.key).collect::<Vec<_>>(),
             "values": if batch { json!({}) } else { json!(blocks.first().map(|b| &b.values)) },
             "created": super::super::record::now_iso(), "valid": true, "env": host::env(), "script": true,
-            "runtime": runtime, "sampling": sampling, "whole_host": probe::cpu::WHOLE_HOST,
+            "runtime": runtime, "sampling": sampling, "starved": starved, "whole_host": probe::cpu::WHOLE_HOST,
             "lifecycle_spans": self.life.iter().map(|(name, a, b)| json!({ "name": name, "t0_ns": a, "t1_ns": b })).collect::<Vec<_>>(),
             "clock": { "rtt_ms": [ready.rtt_ns as f64 / 1e6, exit.rtt_ns as f64 / 1e6], "drift_ms": (exit.offset_ns - ready.offset_ns) / 1e6, "cap_ms": rebased.cap_us / 1e3 },
             "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile: the whole host process",
