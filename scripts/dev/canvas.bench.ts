@@ -4,6 +4,9 @@
 //   strobe bench scripts/dev/canvas.bench.ts --head . --check
 // Expected refusals: `ambiguous` AnchorAmbiguous (two ITEM tiles), `missing` AnchorNotFound, `dirty` ResetIncomplete
 // (resetPixels), and on a locked session `click` SessionLocked (keys still reach the window there).
+// Windows: the app presents each frame through a DXGI flip-model swap chain, so `latency`, `press edge` and
+// `release edge` time pixel waits from real present events; the `gdi` target (canvas-app.exe --gdi) paints with GDI,
+// which makes no present event: its interaction.* is refused PresentsUnmatched.
 import { bench, native, url } from "@hona/strobe"
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs"
@@ -30,10 +33,26 @@ const bars = [40, 270, 500, 40] as [number, number, number, number]
 const counted = { pixels: { region: bars, changed: true } }
 const still = { pixels: { region: bars, stable: 100 } }
 let play: [number, number] = [0, 0]
+// The Windows app's PRESS tile lights on a button's press, RELEASE on its release; R darkens both.
+const pressTile = [40, 330, 160, 60] as [number, number, number, number]
+const releaseTile = [240, 330, 160, 60] as [number, number, number, number]
+const lit = (region: [number, number, number, number]) => ({ until: { pixels: { region, changed: true } } })
+const dark = (region: [number, number, number, number]) => ({ until: { pixels: { region, stable: 100 } } })
+// Cases of the anchors and waits themselves: not the GDI window's, which only shows what its presents lack.
+const drawn = ["app", "page"]
+// A click on a tile, timed from the one frame that showed it lit, and the tile dark again after.
+const edge = (at: [number, number], tile: [number, number, number, number]) => ({
+  targets: ["app", "gdi"],
+  primary: "interaction.p50",
+  metrics: ["driver.pixel_reads", "cpu.work"],
+  run: ({ page }: any) => page.click(at, lit(tile)),
+  reset: ({ page }: any) => page.press("r", dark(tile)),
+})
 
 export default bench({
   targets: {
     app: native(exe, { resetPixels: { region: bars } }),
+    ...(windows ? { gdi: native(exe, { args: ["--gdi"], resetPixels: { region: bars } }) } : {}),
     page: url(new URL("pages/canvas.html", import.meta.url).href, { viewport: { width: 600, height: 360 }, resetPixels: { region: bars } }),
   },
   async setup({ page, target }) {
@@ -51,6 +70,7 @@ export default bench({
   cases: {
     // Every distinct match of a tile drawn twice, in one capture.
     query: {
+      targets: drawn,
       primary: "cpu.work",
       async run({ page, target }) {
         const found = await page.query({ image: target === "page" ? pageTile("item") : tile("item") })
@@ -58,20 +78,37 @@ export default bench({
       },
     },
     // Keys reach the window on a locked session too; the count's bars prove each one's reaction.
-    keys: { primary: "cpu.work", metrics: ["driver.pixel_reads", "driver.pixel_ms"], run: ({ page }) => page.press("Space", { until: counted }), reset: ({ page }) => page.press("r", { until: still }) },
+    keys: {
+      targets: drawn,
+      primary: "cpu.work",
+      metrics: ["driver.pixel_reads", "driver.pixel_ms"],
+      run: ({ page }) => page.press("Space", { until: counted }),
+      reset: ({ page }) => page.press("r", { until: still }),
+    },
     // Each key's latency from the one frame between the last capture without its bar and the first with it
-    // (needs the OS's present events and a presenting window).
-    latency: { primary: "interaction.p50", metrics: ["driver.pixel_reads", "cpu.work"], run: ({ page }) => page.press("Space", { until: counted }), reset: ({ page }) => page.press("r", { until: still }) },
+    // (needs the OS's present events and a presenting window; the GDI window has none: PresentsUnmatched).
+    latency: {
+      targets: windows ? ["app", "gdi", "page"] : drawn,
+      primary: "interaction.p50",
+      metrics: ["driver.pixel_reads", "cpu.work"],
+      run: ({ page }) => page.press("Space", { until: counted }),
+      reset: ({ page }) => page.press("r", { until: still }),
+    },
+    // A click drawn on its press is timed from the press (`1 at a press`), one drawn on its release from the
+    // release: PRESS lights on the button's press, RELEASE on its release.
+    ...(windows ? { "press edge": edge([120, 360], pressTile), "release edge": edge([320, 360], releaseTile) } : {}),
     // An image that shows after the key.
     image: {
+      targets: drawn,
       primary: "cpu.work",
       run: ({ page, target }) => page.press("x", { until: { image: target === "page" ? pageTile("square") : tile("square") } }),
       reset: ({ page }) => page.press("x", { until: still }),
     },
     // A click at the point setup found; on a locked session refused SessionLocked.
-    click: { primary: "cpu.work", run: ({ page }) => page.click(play, { until: counted }), reset: ({ page }) => page.press("r", { until: still }) },
+    click: { targets: drawn, primary: "cpu.work", run: ({ page }) => page.click(play, { until: counted }), reset: ({ page }) => page.press("r", { until: still }) },
     // A click aimed at an image (two reads: the aim and the until).
     "click image": {
+      targets: drawn,
       primary: "cpu.work",
       run: ({ page, target }) => page.click({ image: target === "page" ? pageTile("play") : tile("play") }, { until: counted }),
       reset: ({ page }) => page.press("r", { until: still }),
@@ -85,11 +122,11 @@ export default bench({
         await page.waitFor({ image: tile("play@1.5x"), scale: 1.5, threshold: 0.9 })
       },
     },
-    ambiguous: { primary: "cpu.work", run: ({ page, target }) => page.click({ image: target === "page" ? pageTile("item") : tile("item") }) },
-    missing: { primary: "cpu.work", run: ({ page, target }) => page.waitFor({ image: target === "page" ? pageTile("missing") : tile("missing") }, { timeout: 2000 }) },
+    ambiguous: { targets: drawn, primary: "cpu.work", run: ({ page, target }) => page.click({ image: target === "page" ? pageTile("item") : tile("item") }) },
+    missing: { targets: drawn, primary: "cpu.work", run: ({ page, target }) => page.waitFor({ image: target === "page" ? pageTile("missing") : tile("missing") }, { timeout: 2000 }) },
     // A reset that takes nothing back: the next run starts with a bar more (resetPixels: ResetIncomplete).
-    dirty: { primary: "cpu.work", run: ({ page }) => page.press("Space", { until: counted }), reset: async () => {} },
+    dirty: { targets: drawn, primary: "cpu.work", run: ({ page }) => page.press("Space", { until: counted }), reset: async () => {} },
     // `--pixels-only`: the window's tiles.
-    snapshot: { primary: "cpu.work", run: ({ page }) => page.snapshot("tiles") },
+    snapshot: { targets: drawn, primary: "cpu.work", run: ({ page }) => page.snapshot("tiles") },
   },
 })

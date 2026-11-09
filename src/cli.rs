@@ -485,7 +485,7 @@ Use
        [--mobile[=<serial>]]       (the page in Chrome on an Android phone or emulator, at the phone's own screen)
   look wir:[<selector>] [--until <selector>] [--wait 200ms] [--out <png>] [--chars 4000] [--full | --element <selector>]
                                    (read-only snapshot of an open Safari tab on a USB-cabled iPhone; never navigates)
-  look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40]
+  look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>]
   look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s] [--home <seed>]
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
                                   console messages and uncaught errors, and a screenshot (exit 124 when it never loads);

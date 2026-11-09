@@ -36,6 +36,10 @@ pub(super) struct Screen {
     /// What strobe could not read, and why (a permission, a window that did not draw itself).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
+    /// A native app's main window shows web content in an embedded Chromium view (Windows), whose
+    /// headings its UI Automation tree may leave out.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub web_view: bool,
 }
 
 /// A block's screen before its runs (`start`) and after them (`end`). A launch has only `end`.
@@ -221,6 +225,10 @@ pub(super) fn native(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, at: &s
         Err(why) => screen.missing.push(format!("accessibility: {why}")),
     }
     screen.titles = titles;
+    #[cfg(windows)]
+    {
+        screen.web_view = main.is_some_and(crate::target::a11y::input::hosts_chromium);
+    }
     let img = main.and_then(host::window_image);
     if img.is_none() {
         screen.missing.push(no_pixels());
@@ -618,6 +626,18 @@ pub(super) fn expect(e: &Value, screen: &Screen, at: &str, full: bool, visible: 
     }
     if !e["heading"].is_null() {
         let m = matcher(&e["heading"])?;
+        // Only a tree that was read: one strobe could not read is the screen's own problem.
+        if screen.headings.is_empty() && screen.web_view && !screen.missing.iter().any(|m| m.starts_with("accessibility:")) {
+            return Err(Refusal::new(
+                ValidatorId::NotForTarget,
+                format!(
+                    "{at}, expect.heading {}: the app's window shows web content in an embedded Chromium view, and its UI Automation tree held no heading: Chromium gives a client that is not a screen reader the content's form controls, and its headings only once it turns on its full accessibility tree, if it does",
+                    shown_text(&e["heading"])
+                ),
+            )
+            .fix("check the web content from a webview() or app() target (its headings come from the page), or expect a title (expect.title) or a control (expect.visible) here")
+            .into());
+        }
         if !screen.headings.iter().any(|h| m(h)) {
             return refuse(format!("a dialog or heading matching {}", shown_text(&e["heading"])));
         }

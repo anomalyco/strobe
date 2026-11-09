@@ -100,7 +100,9 @@ impl Grabber {
                 Some(w) => w.grab(self.win, px)?,
                 None => {
                     let full = super::win::window_image(self.win).ok_or_else(|| Error::msg("the window did not draw itself (PrintWindow), and Windows.Graphics.Capture is not available"))?;
-                    (crate::image::crop(&full, px.map(|v| v.max(0) as usize)), super::now_ns(), 0)
+                    // The image is in the window's own pixels (fewer than physical ones for a DPI unaware window).
+                    let k = full.width as f64 / p.client.0.max(1.0);
+                    (crate::image::crop(&full, px.map(|v| (v.max(0) as f64 * k).round() as usize)), super::now_ns(), 0)
                 }
             }
         };
