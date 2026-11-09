@@ -769,6 +769,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     process_set: Some(programs(&host::process_set(pid, Some(&set_home)))),
                     speed_ratio: ratio,
                     background,
+                    spread: super::run_spread(x, &extra),
                     ..Block::default()
                 })
             })();
