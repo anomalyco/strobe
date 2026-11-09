@@ -535,7 +535,13 @@ export type ResetPixels = boolean | { region?: Region; ignore?: Region[]; tolera
 export interface Expect {
   /** A window title of the app (any visible window), or the page's title. */
   title?: string | RegExp
-  /** An open dialog or a heading in the accessibility tree (a page's `h1`/`h2` or dialog). */
+  /**
+   * An open dialog or a heading in the accessibility tree (a page's `h1`/`h2` or dialog). On Windows a native app's
+   * web content in an embedded Chromium view (WebView2, an Electron window) gives UI Automation its form controls, and
+   * its headings only once Chromium turns on its full accessibility tree, if it does: such a window with no heading is
+   * refused `NotForTarget`. Check that content from a `webview()` or `app()` target, or expect a `title` or a `visible`
+   * control.
+   */
   heading?: string | RegExp
   /** A page's address. */
   url?: string | RegExp

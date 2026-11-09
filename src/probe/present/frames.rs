@@ -332,6 +332,8 @@ pub struct Reactions {
     pub busy: (usize, usize),
     /// Of those, no present reached the screen within a second.
     pub unshown: (usize, usize),
+    /// Of the unshown, those whose change was proven by pixels (a capture saw it) rather than a model.
+    pub unshown_pixels: (usize, usize),
     /// Inputs after which the model did not change.
     pub unchanged: usize,
     /// Keys typed in a burst: `interaction.*` is refused when there are any.
@@ -460,6 +462,7 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
                 }
                 [] => {
                     bump(&mut out.unshown);
+                    bump(&mut out.unshown_pixels);
                     Outcome::Unshown
                 }
                 _ => {
@@ -563,6 +566,7 @@ impl Reactions {
         self.tried = (self.tried.0 + o.tried.0, self.tried.1 + o.tried.1);
         self.busy = (self.busy.0 + o.busy.0, self.busy.1 + o.busy.1);
         self.unshown = (self.unshown.0 + o.unshown.0, self.unshown.1 + o.unshown.1);
+        self.unshown_pixels = (self.unshown_pixels.0 + o.unshown_pixels.0, self.unshown_pixels.1 + o.unshown_pixels.1);
         self.unchanged += o.unchanged;
         self.burst += o.burst;
         self.each.extend(o.each);
@@ -579,9 +583,21 @@ impl Reactions {
     /// `interaction.n`, `interaction.n.press`: how many of its samples are a click's press.
     pub fn values(&self, events_lost: u64, out: &mut BTreeMap<String, f64>, refused: &mut BTreeMap<String, String>) {
         let interaction: Vec<f64> = self.interaction.iter().map(|x| x.0).collect();
-        for (prefix, count, v, tried, busy, unshown) in
-            [("interaction", "interaction.n", &interaction, self.tried.0, self.busy.0, self.unshown.0), ("scroll.latency", "scroll.n", &self.scroll, self.tried.1, self.busy.1, self.unshown.1)]
-        {
+        for (prefix, count, v, tried, busy, unshown, pixels) in [
+            ("interaction", "interaction.n", &interaction, self.tried.0, self.busy.0, self.unshown.0, self.unshown_pixels.0),
+            ("scroll.latency", "scroll.n", &self.scroll, self.tried.1, self.busy.1, self.unshown.1, self.unshown_pixels.1),
+        ] {
+            // What the unshown inputs' changes were proven by: the app's tree, the window's pixels, or both.
+            let changed = match (pixels, unshown) {
+                (0, _) => "inputs that changed the app's tree".to_string(),
+                (p, u) if p == u => "inputs whose pixels changed".to_string(),
+                (p, _) => format!("inputs that changed the app's tree or pixels ({p} proven by pixels)"),
+            };
+            let cause = if pixels > 0 {
+                "the window draws without flip-model GPU presents (such as GDI), which the OS's present events do not follow"
+            } else {
+                "the app presents in a way the session does not follow, or reacted only in its tree"
+            };
             let why = if prefix == "interaction" && self.burst > 0 {
                 Some(burst_refusal(self.burst))
             } else if tried == 0 {
@@ -595,12 +611,12 @@ impl Reactions {
                     "AmbiguousInteraction: {prefix}.*: the app was still drawing when {busy} of {tried} inputs were sent (an animation, a caret, or a press's own look still on its way after 300 ms), so the next frame may not be their reaction"
                 ))
             } else if events_lost == 0 && unshown as f64 > UNMATCHED_MAX * (tried - busy) as f64 {
-                Some(format!(
-                    "PresentsUnmatched: {prefix}.*: {unshown} of {} inputs that changed the app's tree showed no frame within a second: the app presents in a way the session does not follow, or reacted only in its tree",
-                    tried - busy
-                ))
+                Some(format!("PresentsUnmatched: {prefix}.*: {unshown} of {} {changed} showed no frame event within a second: {cause}", tried - busy))
             } else if v.is_empty() {
-                Some(format!("NoPresentSource: {prefix}.*: no frame reached the screen within a second of {unshown} inputs"))
+                Some(format!(
+                    "NoPresentSource: {prefix}.*: no frame reached the screen within a second of {unshown} inputs{}",
+                    if pixels > 0 { format!(" ({pixels} of them changed the window's pixels: {cause})") } else { String::new() }
+                ))
             } else {
                 None
             };

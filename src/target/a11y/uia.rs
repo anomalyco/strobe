@@ -239,19 +239,34 @@ impl Worker {
                 }
                 let w = tree.windows.len();
                 tree.windows.push(hwnd);
-                let mut stack = vec![(root, None)];
-                while let Some((e, parent)) = stack.pop() {
+                // Each element with whether an ancestor hides it, and whether it is in Chromium's own
+                // views (a browser's or an embedded web view's frame, not its web content).
+                let mut stack = vec![(root, None, false, false)];
+                while let Some((e, parent, hidden, views)) = stack.pop() {
                     if tree.nodes.len() >= MAX_NODES {
                         break;
                     }
                     let i = tree.nodes.len();
-                    tree.nodes.push(read(&e, parent, w));
+                    let mut n = read(&e, parent, w);
+                    n.offscreen |= hidden;
+                    let views = match n.hwnd {
+                        0 => views,
+                        h => match super::input::class_name(h) {
+                            c if c.starts_with("Chrome_WidgetWin_") => true,
+                            c if c == "Chrome_RenderWidgetHostHWND" => false,
+                            _ => views,
+                        },
+                    };
+                    // A Chromium view with no bounds is not shown, nor anything in it, whatever bounds its
+                    // children report (an embedded view's hidden tab strip reports its tabs' rects).
+                    let hide = n.offscreen || (views && n.hwnd == 0 && (n.rect[2] <= 0.0 || n.rect[3] <= 0.0));
+                    tree.nodes.push(n);
                     if let Ok(kids) = e.GetCachedChildren() {
                         let n = kids.Length().unwrap_or(0);
                         // Reversed onto the stack, so they come off in order: preorder.
                         for k in (0..n).rev() {
                             if let Ok(c) = kids.GetElement(k) {
-                                stack.push((c, Some(i)));
+                                stack.push((c, Some(i), hide, views));
                             }
                         }
                     }

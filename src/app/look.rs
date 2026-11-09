@@ -116,9 +116,9 @@ fn native(args: &Args, target: &str) -> Result<Output> {
     }
     .as_kind(isolate::AppKind::Native)
     .with_display(args.has("wayland").then_some(isolate::Display::Wayland));
-    for page_only in ["element", "full", "size", "scale", "chars", "headed", "out"] {
+    for page_only in ["element", "full", "size", "scale", "chars", "headed"] {
         if args.has(page_only) {
-            return Err(Error::usage(format!("--{page_only} is for a page; a native app's look reads its accessibility tree and takes no screenshot")));
+            return Err(Error::usage(format!("--{page_only} is for a page; a native app's look reads its accessibility tree, and --out <png> its main window's pixels")));
         }
     }
     // `--build`: this checkout's own build of the app (strobe.json `build`), as a bench of it runs.
@@ -186,6 +186,12 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         let windows = crate::host::top_windows(&n.pids());
         let mut titles: Vec<String> =
             windows.iter().filter(|w| Some(w.0) == main).chain(windows.iter().filter(|w| Some(w.0) != main)).map(|w| w.1.trim().to_string()).filter(|t| !t.is_empty()).collect();
+        // A window that shows web content in an embedded Chromium view: its UI Automation tree may have
+        // the content's form controls without its headings.
+        #[cfg(windows)]
+        let web_view = main.is_some_and(crate::target::a11y::input::hosts_chromium);
+        #[cfg(not(windows))]
+        let web_view = false;
         let (mut headings, mut keyed) = (Vec::new(), Vec::new());
         match &session {
             Some(Ok(se)) => {
@@ -204,6 +210,22 @@ fn native(args: &Args, target: &str) -> Result<Output> {
             }
             Some(Err(e)) => problems.push(format!("accessibility: {}", e.message)),
             None => problems.push("the app has no window (a windowless profile): nothing to read".into()),
+        }
+        // `--out`: the main window's pixels, read as a block's screens read them.
+        let mut shot = None;
+        if let (Some(out), Some(m)) = (args.get("out"), main) {
+            match crate::host::window_image(m) {
+                Some(img) => {
+                    let out = PathBuf::from(out);
+                    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+                        std::fs::create_dir_all(dir)?;
+                    }
+                    crate::host::paths::write_owner_only(&out, &crate::png::write(&img)?)?;
+                    shot = Some(out);
+                }
+                None if cfg!(target_os = "macos") => problems.push("pixels: the window gave no image (Screen Recording must be granted to strobe's host app)".into()),
+                None => problems.push("pixels: the window did not draw itself into an image".into()),
+            }
         }
         let locked = crate::host::session_locked();
         let mut text = format!("{} · {}\n", titles.first().map(String::as_str).unwrap_or("(no title)"), app.exe.display());
@@ -226,7 +248,11 @@ fn native(args: &Args, target: &str) -> Result<Output> {
             text += &format!("{}{h}\n", if i == 0 { "headings " } else { "         " });
         }
         if headings.is_empty() && matches!(session, Some(Ok(_))) {
-            text += "headings none: the tree marks no open dialog or heading, so an `expect.heading` would refuse this screen\n";
+            text += if web_view {
+                "headings none: the window shows web content in an embedded Chromium view, which gives a UI Automation client that is not a screen reader the content's form controls, and its headings only once it turns on its full accessibility tree, if it does; an `expect.heading` refuses such a screen NotForTarget: check the content from a webview() or app() target, or expect a title or a visible control\n"
+            } else {
+                "headings none: the tree marks no open dialog or heading, so an `expect.heading` would refuse this screen\n"
+            };
         }
         if !keyed.is_empty() {
             text += &format!("keys     {} visible keyed elements{}\n", keyed.len(), if keyed.len() == keys { format!(" (the first {keys}; --keys N for more)") } else { String::new() });
@@ -237,11 +263,14 @@ fn native(args: &Args, target: &str) -> Result<Output> {
         if let Some((t, _)) = &images {
             text += t;
         }
+        if let Some(p) = &shot {
+            text += &format!("shot     {} (the main window's client area)\n", p.display());
+        }
         text += "expect   a case's `expect: { title, heading }` matches one of the titles, and one of the headings\n";
         let json = json!({
             "target": target, "exe": app.exe, "window_ms": main.map(|_| window_ms), "session_locked": locked, "titles": titles, "headings": headings,
             "keys": keyed.iter().map(|(p, r, n)| json!({ "path": p, "role": r, "name": n })).collect::<Vec<_>>(), "problems": problems,
-            "image": images.map(|(_, all)| all),
+            "image": images.map(|(_, all)| all), "screenshot": shot, "web_view": web_view,
         });
         let mut o = Output::new(text, json);
         if !problems.is_empty() {

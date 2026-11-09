@@ -421,7 +421,8 @@ fn role_matches(n: &Node, r: &str) -> bool {
 
 impl Tree {
     /// The part of node `i` a person could see: its rect clipped by every ancestor with a rect;
-    /// None when empty or offscreen.
+    /// None when empty, or when it or any ancestor is offscreen (a hidden container whose children
+    /// still report rects of their own).
     pub fn visible_rect(&self, i: usize) -> Option<[f64; 4]> {
         let n = &self.nodes[i];
         if n.offscreen || n.rect[2] <= 0.0 || n.rect[3] <= 0.0 {
@@ -431,6 +432,9 @@ impl Tree {
         let [mut x1, mut y1] = [n.rect[0] + n.rect[2], n.rect[1] + n.rect[3]];
         let mut at = n.parent;
         while let Some(p) = at {
+            if self.nodes[p].offscreen {
+                return None;
+            }
             let r = self.nodes[p].rect;
             if r[2] > 0.0 && r[3] > 0.0 {
                 x0 = x0.max(r[0]);

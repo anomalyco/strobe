@@ -722,6 +722,26 @@ mod imp {
                     break;
                 }
             }
+            // Chromium adds an embedded web view's headings to the tree it gives UI Automation only a
+            // moment after a client first read it (a second read a second later had them): such a
+            // window without a heading is read again until it has one, or `t` is up.
+            #[cfg(windows)]
+            let web_view = crate::target::a11y::input::hosts_chromium(self.main.get());
+            #[cfg(not(windows))]
+            let web_view = false;
+            loop {
+                let (names, marks) = Self::screen_of(&tree);
+                if !web_view || tree.nodes.iter().enumerate().any(|(i, n)| n.heading && tree.visible_rect(i).is_some()) || Instant::now() >= deadline {
+                    return Ok((names, marks));
+                }
+                self.a11y.wait_change(seen, (Instant::now() + Duration::from_millis(250)).min(deadline));
+                seen = self.a11y.changes().count;
+                tree = self.snapshot(None)?;
+            }
+        }
+
+        /// The tree's window names, then its visible open dialogs' and headings' names (at most 6).
+        fn screen_of(tree: &Tree) -> (Vec<String>, Vec<String>) {
             let text = |i: usize| {
                 let n = &tree.nodes[i];
                 let s = if n.name.trim().is_empty() { n.value.clone().unwrap_or_default() } else { n.name.clone() };
@@ -741,7 +761,7 @@ mod imp {
                     }
                 }
             }
-            Ok((names, marks))
+            (names, marks)
         }
 
         /// The visible elements that carry a key (an automation id), in tree order, at most `max`:

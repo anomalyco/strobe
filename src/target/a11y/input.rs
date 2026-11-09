@@ -583,9 +583,53 @@ fn target_at(pids: &[u32], x: i32, y: i32) -> Result<Target> {
         let mut c = POINT { x, y };
         windows_sys::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut c);
         // This thread sees physical pixels; the window gets its own DPI's.
-        let f = window_scale(hwnd);
+        let f = if chromium(hwnd) { 1.0 } else { window_scale(hwnd) };
         Ok(Target { hwnd: hwnd as isize, client: ((c.x as f64 * f).round() as i32, (c.y as f64 * f).round() as i32), screen: (x, y) })
     }
+}
+
+/// A window as an error names it: its class and process.
+pub fn describe(hwnd: isize) -> String {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd as HWND, &mut pid) };
+    format!("a {:?} window of process {pid}", class_name(hwnd))
+}
+
+/// A window's class name.
+pub fn class_name(hwnd: isize) -> String {
+    let mut name = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd as HWND, name.as_mut_ptr(), name.len() as i32) }.max(0) as usize;
+    String::from_utf16_lossy(&name[..n])
+}
+
+/// One of Chromium's own windows (`Chrome_WidgetWin_*`, `Chrome_RenderWidgetHostHWND`), in a browser
+/// or in an app's embedded web view. These read a mouse message's point in physical pixels whatever
+/// DPI awareness their process and window report: an embedded view in a DPI-unaware app (process and
+/// window unaware, 96 DPI on a 144 DPI display) put posted points scaled to the window's DPI at 2/3 of
+/// where they aimed, and physical ones (client and wheel screen points) where they aimed, as the OS's
+/// own pointer lands.
+fn chromium(hwnd: HWND) -> bool {
+    class_name(hwnd as isize).starts_with("Chrome_")
+}
+
+/// Whether the top-level window is one of Chromium's or holds one (an embedded web view): web content
+/// there gives a UI Automation client that is not a screen reader its form controls, and its headings
+/// only once Chromium turns on its full accessibility tree, if it does.
+pub fn hosts_chromium(top: isize) -> bool {
+    unsafe extern "system" fn each(h: HWND, found: isize) -> i32 {
+        if chromium(h) {
+            unsafe { *(found as *mut bool) = true };
+            return 0;
+        }
+        1
+    }
+    let top = top as HWND;
+    if chromium(top) {
+        return true;
+    }
+    let mut found = false;
+    unsafe { EnumChildWindows(top, Some(each), &mut found as *mut bool as isize) };
+    found
 }
 
 /// The window's DPI over its monitor's: 1 for a per-monitor aware window, less for one the system
@@ -604,9 +648,11 @@ fn window_scale(hwnd: HWND) -> f64 {
     }
 }
 
-/// A wheel message's lParam: the screen point in the window's own coordinates.
+/// A wheel message's lParam: the screen point in the window's own coordinates (physical for Chromium's).
 fn screen_lparam(t: Target) -> isize {
     let mut p = POINT { x: t.screen.0, y: t.screen.1 };
-    unsafe { windows_sys::Win32::UI::HiDpi::PhysicalToLogicalPointForPerMonitorDPI(t.hwnd as HWND, &mut p) };
+    if !chromium(t.hwnd as HWND) {
+        unsafe { windows_sys::Win32::UI::HiDpi::PhysicalToLogicalPointForPerMonitorDPI(t.hwnd as HWND, &mut p) };
+    }
     point_lparam(p.x, p.y)
 }

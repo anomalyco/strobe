@@ -393,7 +393,12 @@ impl OsInput {
             if t.top() != w.hwnd {
                 return Err(covered_by_own(px, py));
             }
-            self.poster.park(px, py)?;
+            // Windows: the cursor goes beside the point, where the first move is posted, never onto it. The
+            // OS's own move of a parked cursor reaches the app at its next look at its input queue, after
+            // the messages already posted to it: parked on the point, a loaded machine's Chromium saw no
+            // move posted onto it within a second (blade, Chrome 157, 0 of 9 cases at 81% CPU busy;
+            // parked beside it, 9 of 9 twice at 89-100%).
+            let parked = if cfg!(windows) { self.poster.park(px - 3.0, py - 3.0)? } else { self.poster.park(px, py)? };
             // A move onto the point the pointer already sits on sends nothing on X11: come from beside
             // it, let that move arrive, and only then look for the one onto the point.
             page.eval("__strobeOs.moves = [], true")?;
@@ -402,9 +407,13 @@ impl OsInput {
             page.eval("__strobeOs.moves = [], true")?;
             self.poster.move_to(t, 0)?;
             let got = self.wait_move(page, Duration::from_secs(1))?.ok_or_else(|| {
+                #[cfg(windows)]
+                let how = format!(" (window messages posted to {})", input::describe(t.hwnd));
+                #[cfg(not(windows))]
+                let how = String::new();
                 refused(format!(
-                    "OS pointer input did not reach the page: no trusted pointer move came to it within a second of strobe posting one at ({px:.0}, {py:.0}) through the OS{}",
-                    if cfg!(windows) { " (posted window messages)" } else { "" }
+                    "OS pointer input did not reach the page: no trusted pointer move came to it within a second of strobe posting one at ({px:.0}, {py:.0}) through the OS{how}{}",
+                    if parked { "" } else { "; the OS cursor could not be put on that point" }
                 ))
             })?;
             probes.push((px, py));

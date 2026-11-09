@@ -1101,7 +1101,7 @@ pub fn client_in_visual(hwnd: isize) -> Option<(i32, i32)> {
 pub fn window_placement(hwnd: isize) -> Option<super::Placement> {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{MONITORINFO, MonitorFromWindow};
-    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect, IsWindow, IsZoomed};
     let h = hwnd as windows_sys::Win32::Foundation::HWND;
     per_monitor(|| unsafe {
@@ -1121,11 +1121,17 @@ pub fn window_placement(hwnd: isize) -> Option<super::Placement> {
         let [l, t, rr, b] = invisible_borders(h, &r);
         let shown = [frame[0] + l, frame[1] + t, frame[2] - l - rr, frame[3] - t - b];
         let fills = shown.iter().zip(work).all(|(a, w)| (a - w).abs() <= 1.0);
+        // Physical pixels per device-independent one: the monitor's DPI over 96 for every window. A DPI
+        // unaware or system aware window's own DPI is not its monitor's (an unaware one reports 96 on a
+        // 144 DPI display): the OS scales its pixels up to the monitor's.
+        let (mut mx, mut my) = (0u32, 0u32);
+        let monitor = GetDpiForMonitor(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut mx, &mut my);
+        let dpi = if monitor >= 0 && mx > 0 { mx } else { GetDpiForWindow(h) };
         Some(super::Placement {
             frame,
             client: ((c.right - c.left) as f64, (c.bottom - c.top) as f64),
             work,
-            per_dip: GetDpiForWindow(h).max(96) as f64 / 96.0,
+            per_dip: dpi.max(96) as f64 / 96.0,
             maximized: IsZoomed(h) != 0 || fills,
             unseen: [l, t, rr, b],
         })
