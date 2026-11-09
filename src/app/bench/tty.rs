@@ -228,9 +228,9 @@ fn grid_diff(a: &[String], b: &[String]) -> String {
     rows.join("; ")
 }
 
-/// The program's processes' CPU by process and the cycle clock.
-fn cycles(pid: u32, home: &Path) -> (super::super::record::Cycles, Option<u64>) {
-    (super::super::record::per_process(&host::process_set(pid, Some(home))), host::tsc())
+/// The program's processes' CPU by process.
+fn cycles(pid: u32, home: &Path) -> super::super::record::Cycles {
+    super::super::record::per_process(&host::process_set(pid, Some(home)))
 }
 
 /// What tells a process of the program's set that ended (`host::ended_marks`), of the processes a
@@ -356,7 +356,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 if start {
                     cost.pause();
                 }
-                let c = cycles(pid, &set_home).0;
+                let c = cycles(pid, &set_home);
                 let e = ended(pid, Some(&c), &set_home);
                 edges.borrow_mut().push((c, e));
                 host_edges.borrow_mut().push(host_cycles(&tty));
@@ -424,23 +424,34 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // Right before the cycles (nothing read between), so it adds nothing to the run's CPU; a
                     // process that differs between the two is refused, never miscounted (`dead_since`).
                     let ended0 = ended(pid, None, &set_home);
-                    let c0 = cycles(pid, &set_home);
+                    let mut c0 = cycles(pid, &set_home);
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
                     let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
+                    // The listed processes read again right at the run's start, and at its end before the set is
+                    // listed for new ones, each by itself and with the clocks: a listing takes milliseconds, which
+                    // would be on one side of the run (`record::read_known`, `record::Clock`).
+                    let at0 = super::super::record::read_known(c0.keys());
+                    super::super::record::read_at(&mut c0, &at0);
+                    let clock0 = super::super::record::Clock::now();
                     cost.start();
                     let t0 = host::now_ns();
                     let ran = ctx.runner.call("run", json!({ "case": s.case }), rt, serve);
-                    // The run's end and its readings: (t1, the CPUs' busy time, reader, console host, cycles, ended
-                    // children, threads and IO). The busy time is stopped before the process snapshots, which take
-                    // milliseconds: the program's CPU below spans it.
+                    // The run's end and its readings: (t1, the CPUs' busy time, reader, console host, cycles, the
+                    // clocks, ended children, threads and IO). The busy time is stopped after the known
+                    // processes' readings and before the process listing, which takes milliseconds: the
+                    // program's CPU below lies inside it.
                     let read_end = || {
                         let t1 = host::now_ns();
+                        let (r1, h1) = (tty.reader_cycles(), host_cycles(&tty));
+                        let at1 = super::super::record::read_known(c0.keys().chain(edges.borrow().iter().flat_map(|e| e.0.keys())));
+                        let clock1 = super::super::record::Clock::now();
                         let busy = busy.as_ref().zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
-                        let (r1, h1, c1) = (tty.reader_cycles(), host_cycles(&tty), cycles(pid, &set_home));
+                        let mut c1 = cycles(pid, &set_home);
+                        super::super::record::read_at(&mut c1, &at1);
                         // Right after the cycles, of the processes they listed (`dead_since`).
-                        let ended1 = ended(pid, Some(&c1.0), &set_home);
-                        (t1, busy, r1, h1, c1, ended1, probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()))
+                        let ended1 = ended(pid, Some(&c1), &set_home);
+                        (t1, busy, r1, h1, c1, clock1, ended1, probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()))
                     };
                     // A run may return right after its last input (no until), before the program draws its
                     // answer: the run then ends once the answer came and held still, so its time, CPU,
@@ -460,11 +471,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         Some((sent, true)) if driver.await_quiet(sent) => host::now_ns(),
                         _ => end.0,
                     };
-                    let (t1, busy, r1, h1, c1, ended1, k1) = end;
+                    let (t1, busy, r1, h1, c1, clock1, ended1, k1) = end;
                     // Other work on the program's CPUs (`cpu.foreign`): their busy time less the program's (with
                     // what processes of it that ended used, `record::timed_cpu`) and the console host's cycles;
                     // unknown where what ended is not known.
-                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0.0, &c1.0], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total + h1.saturating_sub(h0)));
+                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total + h1.saturating_sub(h0)));
                     hooks.end();
                     ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &screen_note(&tty), "the run threw or timed out"))?;
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
@@ -482,21 +493,20 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let counted = os_span.as_ref().map(|s| s.counted.clone()).unwrap_or_else(|| probe::wakes::span(&k0, &k1).counted);
                     let mut e = edges.take();
                     if e.len() % 2 == 1 {
-                        e.push((c1.0.clone(), ended1.clone()));
+                        e.push((c1.clone(), ended1.clone()));
                     }
-                    let mut at: Vec<&super::super::record::Cycles> = vec![&c0.0];
+                    let mut at: Vec<&super::super::record::Cycles> = vec![&c0];
                     at.extend(e.iter().map(|x| &x.0));
-                    at.push(&c1.0);
+                    at.push(&c1);
                     let mut ended_at: Vec<&host::EndedMarks> = vec![&ended0];
                     ended_at.extend(e.iter().map(|x| &x.1));
                     ended_at.push(&ended1);
                     let timed_cpu = super::super::record::timed_cpu(&at, &ended_at);
                     let cpu_lost = timed_cpu.is_none();
-                    let wall = (t1 - t0) as f64 / 1e6;
-                    let rate = c0.1.zip(c1.1).filter(|(a, b)| b > a).map(|(a, b)| (b - a) as f64 / wall);
+                    let rate = clock0.per_ms(&clock1);
                     // Short CPU is none (warmup falls back to the run's time).
                     let ms = |cycles: u64| match rate {
-                        Some(r) if c1.0.values().any(|c| *c > 0) => cycles as f64 / r,
+                        Some(r) if c1.values().any(|c| *c > 0) => cycles as f64 / r,
                         _ => f64::NAN,
                     };
                     let cpu = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
@@ -519,11 +529,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // with the cycle clock's span over them.
                     let mut re = reader_edges.take();
                     if re.len() % 2 == 1 {
-                        re.push((r1, c1.1));
+                        re.push((r1, clock1.tsc));
                     }
-                    let mut rs = vec![(r0, c0.1)];
+                    let mut rs = vec![(r0, clock0.tsc)];
                     rs.extend(re);
-                    rs.push((r1, c1.1));
+                    rs.push((r1, clock1.tsc));
                     let reader = rs.chunks(2).filter_map(|p| Some((p.get(1)?.0.saturating_sub(p[0].0), p.get(1)?.1?.checked_sub(p[0].1?)?))).fold((0u64, 0u64), |a, p| (a.0 + p.0, a.1 + p.1));
                     // The program's own counts and metrics from its event stream, by when they arrived.
                     let (ev_counts, app) = event_values(&events.between(t0, t1), &timed);

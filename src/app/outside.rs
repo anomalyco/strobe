@@ -202,16 +202,27 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     // The process's main thread (`cpu.main`): the thread it started with, still running.
     let main = host::MainThread::attach(root);
     let read_main = || -> std::result::Result<host::MainCpu, host::MainLost> { main.as_ref().map_err(Clone::clone)?.read() };
+    // The tree's processes, listed (milliseconds) outside the window: those listed are read again right
+    // at its edges, each by itself, with the clocks, and the end's listing only finds those born
+    // meanwhile (`record::read_known`).
+    let mut c0 = cycles();
     timeline.mark_edge();
     // Read just outside the window's edges (on Linux a reading may wait up to a tick), so it never
     // lengthens the window: its share of the time between the two readings is `cpu.main.busy`.
     let m0 = read_main();
-    let (c0, tsc0, t0) = (cycles(), host::tsc(), host::now_ns());
+    let at0 = super::record::read_known(c0.0.keys());
+    super::record::read_at(&mut c0.0, &at0);
+    let clock0 = super::record::Clock::now();
+    let t0 = clock0.ns;
     progress(format!("recording {name} ({root}) for {}", fmt::ms_duration(for_ms)));
     std::thread::sleep(Duration::from_millis(for_ms));
-    let (c1, tsc1, t1) = (cycles(), host::tsc(), host::now_ns());
+    let at1 = super::record::read_known(c0.0.keys());
+    let clock1 = super::record::Clock::now();
+    let t1 = clock1.ns;
     let m1 = read_main();
     timeline.mark_edge();
+    let mut c1 = cycles();
+    super::record::read_at(&mut c1.0, &at1);
     let screen = super::bench::screen_state(&procs0, &(host::now_ns(), host::all_processes()));
     let mut timeline = timeline.stop();
     timeline.marks.push(("recording".into(), t0, t1));
@@ -229,12 +240,10 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     // A process of the tree that ended in the window took its CPU there with it: none then.
     let used = super::record::set_used(&c0, &c1);
     let lost = used.is_none();
-    if let (Some(a), Some(b), Some(used)) = (tsc0, tsc1, used)
-        && b > a
-    {
-        let used = used as f64;
-        values.insert("cpu.app.total".into(), 100.0 * used / (b - a) as f64);
-        values.insert("cpu.work".into(), used / (b - a) as f64 * ms);
+    if let (Some(rate), Some(used)) = (clock0.per_ms(&clock1), used) {
+        let cpu = used as f64 / rate;
+        values.insert("cpu.app.total".into(), 100.0 * cpu / ms);
+        values.insert("cpu.work".into(), cpu);
     }
     let main_lost = match m0.and_then(|a| m1.map(|b| [a, b])) {
         Ok(at) => match host::main_share(&at) {
