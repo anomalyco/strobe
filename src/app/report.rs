@@ -60,13 +60,12 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         None => dir.clone(),
     };
-    // `bench --blocks`: one build's values, nothing compared: the experiment report, its PR block, card
-    // and badge are all about a comparison, so none of them is drawn for it.
+    // `bench --blocks`: one build's values, nothing compared. Its HTML and Markdown show the blocks and
+    // their median with an interval; a PR block, card and badge state a comparison, so none is drawn.
     let compares = data["series"].as_array().is_none_or(|a| a.iter().any(|s| s["kind"] != "blocks"));
-    if experiment && !compares {
-        let format = args.get("format").unwrap_or("html");
-        return Err(Error::usage(format!("{handle} measured one build (bench --blocks): it compares nothing, so there is no {format} report of it"))
-            .hint(format!("strobe query {handle} shows its blocks and their median with an interval ({}); a tracked point shows in strobe history", dir.join("result.json").display())));
+    if let (true, false, Some(format @ ("pr" | "card" | "badge"))) = (experiment, compares, args.get("format")) {
+        return Err(Error::usage(format!("{handle} measured one build (bench --blocks): it compares nothing, so there is no --format {format} of it"))
+            .hint(format!("strobe report experiment {handle} (HTML) or --format md shows its blocks and their median with an interval; a tracked point shows in strobe history")));
     }
     // A check or a pixels run compares no timed pairs: a PR block, card or badge would state a verdict
     // it does not have (rule 1). Its HTML report shows what it did.
@@ -127,6 +126,10 @@ pub fn run(args: &Args) -> Result<Output> {
             if let Ok(o) = query::leaks(&rec, 15, false) {
                 data["leaks"] = o.json;
             }
+        }
+        // What the HTTP probe read beside the runs (`query <rec> http`).
+        if let Some(h) = query::http::recording_json(&dir, 6) {
+            data["http"] = h;
         }
     }
     let format = args.get("format").unwrap_or("html");
@@ -293,6 +296,13 @@ fn attach_series(data: &mut Value) -> Option<Value> {
     let series = data["series"].as_array_mut()?;
     let mut insights = Vec::new();
     for s in series {
+        // The HTTP probe's blocks and recordings, stalled cohorts and all (`query <exp> http`).
+        if let Some(h) = query::http::series_json(s, 6) {
+            s["http"] = h;
+        }
+        if s["kind"] == "blocks" {
+            s["blocks_summary"] = blocks_summary(s);
+        }
         let recs: Vec<(&str, Rec)> = ["base", "head"].into_iter().filter_map(|role| Some((role, Rec::resolve(s["attribution"][role].as_str()?).ok()?))).collect();
         let sides: Vec<(&str, Option<Value>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = recs
@@ -345,6 +355,41 @@ fn attach_series(data: &mut Value) -> Option<Value> {
         }
     }
     (!insights.is_empty()).then(|| json!({ "experiment": id, "series": insights }))
+}
+
+/// A `bench --blocks` series as `bench` prints it: the primary in each block and the blocks' median
+/// with its 95% interval (`stats::median_interval`, two blocks or more), then each declared secondary
+/// the same way or why a block refused it. One build's values: nothing is compared.
+fn blocks_summary(s: &Value) -> Value {
+    let blocks = s["blocks"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let one = |m: &str| {
+        let unit = crate::model::metric(m).map_or("", |d| d.unit);
+        let each: Vec<Option<f64>> = blocks.iter().map(|b| b["values"][m].as_f64().filter(|v| v.is_finite())).collect();
+        let got: Vec<f64> = each.iter().flatten().copied().collect();
+        let refused: Vec<&str> = blocks.iter().filter_map(|b| b["refused"][m].as_str()).collect();
+        let mut j = json!({ "metric": m, "unit": unit, "values": each, "refused_blocks": refused.len(), "refused": refused.first() });
+        if got.len() >= 2 && refused.is_empty() {
+            let (median, lo, hi, conf) = crate::stats::median_interval(&got, 0.95);
+            j["median"] = json!(median);
+            j["lo"] = json!(lo);
+            j["hi"] = json!(hi);
+            j["confidence"] = json!(conf);
+        }
+        j
+    };
+    let metric = s["primary"]["metric"].as_str().unwrap_or("");
+    let mut primary = one(metric);
+    // Refused as the series' primary (a block refused it, too short a tail): no median of it.
+    if let Some(v) = s["primary"]["verdict"].as_str().filter(|_| s["primary"]["refusal"].is_object()) {
+        primary["verdict"] = json!(v);
+        if let Some(o) = primary.as_object_mut() {
+            for k in ["median", "lo", "hi", "confidence"] {
+                o.remove(k);
+            }
+        }
+    }
+    let secondaries: Vec<Value> = s["declared"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| *m != metric).map(one).collect();
+    json!({ "blocks": blocks.len(), "primary": primary, "secondaries": secondaries })
 }
 
 /// One attribution recording for a report: CPU by function and file, allocations by function and

@@ -82,6 +82,13 @@ pub fn inputs(dir: &Path, meta: &Value, top: Option<usize>, only: Option<&[Strin
     if trace.is_file() && meta["engine"].as_str().is_none_or(|e| e == "chromium") {
         return from_trace(&trace, meta, top, only);
     }
+    // Firefox keeps no Chrome trace: its inputs are timed only against the OS's presents of a headed page.
+    if meta["engine"] == "firefox" {
+        return Err(Error::usage(format!(
+            "this Firefox recording has no inputs to show: a Firefox page's inputs are timed against the OS's presents, which only a headed run records (frames.json and presents.json.gz; {})",
+            meta["os_frames"]["refused"].as_str().map_or("run it without --headless, on an unlocked session".to_string(), |r| format!("this one: {r}"))
+        )));
+    }
     Err(Error::usage(
         "this recording has no inputs to show: they come from a block's OS presents (a native app's, or a headed page's where the OS tells them: frames.json and presents.json.gz) or a Chromium page's trace",
     ))

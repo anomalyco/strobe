@@ -1351,6 +1351,33 @@ svg .zeroline { stroke: var(--ink-4); stroke-width: 1; }
   .impl-grid { grid-template-columns: minmax(0, 1fr); }
   .impl-grid > div + div { border-left: 0; border-top: 1px solid var(--border); }
 }
+/* Whole host process by lifecycle part (script targets) */
+.life-block { padding: 12px 24px 16px; border-top: 1px solid var(--border); }
+.life-hd { font: 600 12px/18px var(--sans); color: var(--ink-2); margin-bottom: 6px; }
+.life-hd span { font-weight: 400; color: var(--ink-3); }
+.life-row { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr) 88px 88px 48px; gap: 10px; align-items: center; font: 12px/20px var(--sans); border-bottom: 1px solid var(--hairline); }
+.life-row.hd { color: var(--ink-3); font-weight: 600; }
+.life-row .mono { text-align: right; font-variant-numeric: tabular-nums; }
+.life-note { font: 12px/18px var(--sans); color: var(--ink-3); margin-top: 8px; }
+@media (max-width: 640px) { .life-row { grid-template-columns: minmax(0, 1fr) 70px 70px 40px; } .life-row .share-track { display: none; } }
+/* HTTP probe: stalled cohorts, one bar per probe (its latency; a timeout reaches past the top) */
+.http-sub { padding: 12px 24px 4px; border-top: 1px solid var(--border); font: 600 12px/18px var(--sans); color: var(--ink-2); }
+.http-sub span { font-weight: 400; color: var(--ink-3); }
+.cohort-row { display: grid; grid-template-columns: 170px minmax(80px, 220px) minmax(0, 1fr); gap: 12px; align-items: center; padding: 6px 24px; border-top: 1px solid var(--hairline); font: 12px/18px var(--sans); }
+.cohort-at { font: 11.5px/16px var(--mono); color: var(--ink-3); }
+.cohort-bars { display: flex; align-items: flex-end; gap: 2px; height: 28px; overflow: hidden; }
+.cohort-bars i { flex: 1 1 0; min-width: 3px; max-width: 12px; background: var(--warn); opacity: 0.85; }
+.cohort-bars i.timeout { background: repeating-linear-gradient(45deg, var(--loss), var(--loss) 2px, var(--loss-bg) 2px, var(--loss-bg) 4px); height: 100%; opacity: 1; }
+.cohort-says { color: var(--ink-2); }
+.cohort-says.spans { color: var(--warn-ink); }
+@media (max-width: 720px) { .cohort-row { grid-template-columns: minmax(0, 1fr); } }
+/* bench --blocks: one build's blocks, their median and its interval */
+.blk-strip { position: relative; height: 46px; margin: 4px 0 0; }
+.blk-axis { position: absolute; left: 0; right: 0; top: 22px; height: 1px; background: var(--border-strong); }
+.blk-band { position: absolute; top: 12px; height: 21px; background: var(--accent-bg); border: 1px solid var(--accent); opacity: 0.8; }
+.blk-med { position: absolute; top: 8px; width: 2px; height: 29px; margin-left: -1px; background: var(--accent); }
+.blk-dot { position: absolute; top: 18px; width: 9px; height: 9px; margin-left: -4.5px; border-radius: 50%; background: var(--ink-2); border: 1px solid var(--surface); }
+.blk-tick { position: absolute; top: 34px; font: 10.5px/12px var(--mono); color: var(--ink-4); transform: translateX(-50%); white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -2215,7 +2242,13 @@ function renderExperiment(r) {
   }
 
   if (s.kind === "check") {
-    appendKids(shell, [seriesList.length > 1 ? renderScorecard(seriesList, aa) : null, ...renderCheckSeries(r, s)]);
+    appendKids(shell, [seriesList.length > 1 ? renderScorecard(seriesList, aa) : null, ...renderCheckSeries(r, s), renderHttpSection(seriesHttpEntries(s))]);
+    return;
+  }
+
+  // `bench --blocks`: one build's blocks, nothing compared.
+  if (s.kind === "blocks") {
+    appendKids(shell, [seriesList.length > 1 ? renderScorecard(seriesList, aa) : null, ...renderBlocksSeries(r, s)]);
     return;
   }
 
@@ -2231,6 +2264,7 @@ function renderExperiment(r) {
       gap ? null : renderVideoSection(s.video_player),
       gap ? null : renderEvidenceSection(r, s, aa),
       ...renderImplSeries(r, s, baseVar, headVar),
+      gap ? null : renderHttpSection(seriesHttpEntries(s)),
       gap ? null : renderNextStepsSection(r, s, aa),
       gap || !impactI.hasStream ? null : renderFramePacingSection(r, s, impactI),
       gap || !impactI.hasStream || !state.distOpen ? null : renderDistExplorer(r, s, impactI),
@@ -2256,13 +2290,14 @@ function renderExperiment(r) {
   const liveHeapSection = renderLiveHeapExperimentSection(s, aa);
   const procMemSection = renderProcessMemoryExperimentSection(s);
   const nativeMemSection = renderNativeMemoryDiffSection(s, aa);
+  const httpSection = renderHttpSection(seriesHttpEntries(s));
   const pacingSection = impact.hasStream ? renderFramePacingSection(r, s, impact) : null;
   const distSection = state.distOpen ? renderDistExplorer(r, s, impact) : null;
   const metricsDisclosure = renderAllMetricsDisclosure(s, aa);
   const queriesDisclosure = renderTraceQueriesDisclosure(r, s);
   const planSection = renderPlanVsActual(r, s);
 
-  const hasDeepDive = !!(insightsSection || phaseSection || cpuSection || flameSection || layoutSection || allocGcSection || liveHeapSection || procMemSection || nativeMemSection || pacingSection || metricsDisclosure);
+  const hasDeepDive = !!(insightsSection || phaseSection || cpuSection || flameSection || layoutSection || allocGcSection || liveHeapSection || procMemSection || nativeMemSection || httpSection || pacingSection || metricsDisclosure);
 
   appendKids(shell, [
     seriesList.length > 1 ? renderScorecard(seriesList, aa) : null,
@@ -2281,6 +2316,7 @@ function renderExperiment(r) {
     liveHeapSection,
     procMemSection,
     nativeMemSection,
+    httpSection,
     pacingSection,
     distSection,
     metricsDisclosure,
@@ -2325,6 +2361,20 @@ function renderScorecard(seriesList, aa) {
           h("div", { class: "sc-top" }, h("span", { class: "sc-name" }, capFirst(sr.case || sr.label || `Case ${i + 1}`)), h("span", { class: `sc-dot ${sr.passed ? "neutral" : "loss"}` })),
           h("div", { class: `sc-verdict ${sr.passed ? "neutral" : "loss"}` }, sr.passed ? "Check passed" : "Check failed"),
           h("div", { class: "sc-sub" }, finite(pv) ? `${labelOf(pm)} ${fmtVal(pv, unitOf(pm))} · one run` : "one run, nothing compared")
+        );
+      }
+      // A --blocks case: one build's median over its blocks, nothing compared.
+      if (sr.kind === "blocks") {
+        const p = sr.blocks_summary?.primary || {};
+        const pm = p.metric || sr.primary?.metric || "";
+        const refusedB = !!p.verdict || !!p.refused;
+        const got = (p.values || []).filter(finite);
+        const nb = sr.blocks_summary?.blocks ?? (sr.blocks || []).length;
+        const word = refusedB ? "Refused" : finite(p.median) ? `Median ${fmtVal(p.median, unitOf(pm))}` : got.length === 1 ? fmtVal(got[0], unitOf(pm)) : "No value";
+        return h("button", { type: "button", class: "sc-item", "aria-selected": String(i === state.series), onclick: () => selectSeries(i) },
+          h("div", { class: "sc-top" }, h("span", { class: "sc-name" }, capFirst(sr.case || sr.label || `Case ${i + 1}`)), h("span", { class: `sc-dot ${refusedB ? "loss" : "neutral"}` })),
+          h("div", { class: `sc-verdict ${refusedB ? "loss" : "neutral"}` }, word),
+          h("div", { class: "sc-sub" }, `${labelOf(pm)} · ${nb} block${nb === 1 ? "" : "s"}, nothing compared`)
         );
       }
       const c = sr.primary || {};
@@ -3902,13 +3952,16 @@ function cpuScopeToggle(...sides) {
   );
 }
 
-/* A hotspots card whose measured runs held no sample, with the scope toggle so the whole host stays reachable */
+/* A hotspots card with no row of self time in the scope shown, with the scope toggle so the other stays reachable */
 function cpuEmptySection(scopeToggle) {
+  const host = state.cpuScope === "host";
   return h("section", { class: "card-surface" },
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
         h("h2", { class: "sec-title" }, "CPU self-time hotspots"),
-        h("span", { class: "sec-sub" }, "no sample in the measured runs: the host ran no JavaScript there that its sampler saw")
+        h("span", { class: "sec-sub" }, host
+          ? "no function with self time in the whole host process beyond the runtime's own rows ((program), (idle), (garbage collector), (root))"
+          : "no sample in the measured runs: the host ran no JavaScript there that its sampler saw")
       ),
       h("div", { class: "card-hd-right" }, scopeToggle)
     )
@@ -3949,7 +4002,7 @@ function renderCpuHotspotsSection(s, aa) {
   }).filter(Boolean).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
   const rows = merged.slice(0, 8);
-  if (!rows.length) return scopeToggle && !host ? cpuEmptySection(scopeToggle) : null;
+  if (!rows.length) return scopeToggle ? cpuEmptySection(scopeToggle) : null;
 
   const maxAbs = Math.max(...rows.map((r) => Math.abs(r.delta)), 0.01);
   const scale = Math.max(maxAbs * 1.12, 2.0);
@@ -4061,7 +4114,8 @@ function renderCpuHotspotsSection(s, aa) {
         gcB || gcH ? `V8 GC profiler samples: ${gcB ? shortNum(rowMs(gcB) / runsB) : "—"} → ${gcH ? shortNum(rowMs(gcH) / runsH) : "—"} ${host ? "ms" : "ms/run"}` : null,
         `${hs.base.samples ?? "?"} / ${hs.head.samples ?? "?"} samples (${host ? "whole host process" : `${runsB} runs`}, idle excluded)`,
       ].filter(Boolean).join("  ·  ")
-    )
+    ),
+    host ? renderLifecycleBlock([[sideWord("base", true), s.hotspots.base.whole_host], [sideWord("head", true), s.hotspots.head.whole_host]]) : null
   );
 }
 
@@ -5121,7 +5175,9 @@ function renderRigFooter(r, s, imp) {
       s
         ? s.isLeakRun
           ? h("div", {}, `${s.runs || "?"} sequential runs · ${s.censuses || "?"} post-GC censuses (S0 / S1 / S2)`)
-          : h("div", {}, `${s.pairs || "?"} AB/BA fresh-launch pairs · ${plan.runs_per_block || 5} measured runs/launch`)
+          : s.kind === "blocks"
+            ? h("div", {}, `${s.launches || "?"} blocks of one build, nothing compared · ${plan.runs_per_block || 5} measured runs/block`)
+            : h("div", {}, `${s.pairs || "?"} AB/BA fresh-launch pairs · ${plan.runs_per_block || 5} measured runs/launch`)
         : null,
       s && finite(s.elapsed_ms) ? h("div", {}, `Series runtime: ${fmtDuration(s.elapsed_ms)} · Strobe ${env.strobe || ""}`) : null,
       s && finite(s.untimed?.stretches) ? h("div", {}, `Untimed (ctx.untimed): ${s.untimed.stretches} stretch${s.untimed.stretches === 1 ? "" : "es"} a run, ${fmtVal(s.untimed.ms, "ms")} of each run left out`) : null,
@@ -5505,7 +5561,8 @@ function renderSingleCpuHotspots(side) {
         gc ? `GC samples: ${fmtVal(rowMs(gc) / runs, "ms")}` : null,
         `${fmtCount(att.samples)} samples (idle excluded)`,
       ].filter(Boolean).join("  ·  ")
-    )
+    ),
+    host ? renderLifecycleBlock([["", side.whole_host]]) : null
   );
 }
 
@@ -6156,6 +6213,7 @@ function renderRecording(m) {
     /attribution/.test(String(m.probes || "")) && otherEngine ? ["GC per run", `strobe query ${recId} gc`] : null,
     otherEngine ? ["Memory by process, layer and allocator (about:memory)", `strobe query ${recId} memory`] : null,
     att?.heap ? ["Live heap snapshot & leaks", `strobe query ${recId} heap`] : null,
+    m.http ? ["The HTTP probe beside the runs and its stalled cohorts", `strobe query ${recId} http`] : null,
     // A page in another engine than Chromium has no Chrome trace to query.
     otherEngine ? null : ["Raw Perfetto SQL query", `strobe query ${recId} sql "select name, count(*) n from slice group by 1 order by n desc limit 20"`],
   ].filter(Boolean);
@@ -6167,7 +6225,8 @@ function renderRecording(m) {
   const allocSec = renderSingleAllocGc(att);
   const heapSec = renderLiveHeapSingleSection(att?.heap || m.heap);
   const procMemSec = renderProcessMemorySingleSection(m.memory || att?.memory, m.memory_layers || att?.memory_layers);
-  const hasDeepDive = !!(insSec || phaseSec || cpuSec || laySec || allocSec || heapSec || procMemSec);
+  const httpSec = m.http ? renderHttpSection([{ label: "This recording", http: m.http, rec: m.id }]) : null;
+  const hasDeepDive = !!(insSec || phaseSec || cpuSec || laySec || allocSec || heapSec || procMemSec || httpSec);
 
   const valuesBody = h("div", {},
     perturbed
@@ -6270,12 +6329,288 @@ function renderRecording(m) {
     allocSec,
     heapSec,
     procMemSec,
+    httpSec,
     valuesSection,
     queriesSection,
     renderRigFooter(m, null, { hz, vs }),
   ]);
 
   app.replaceChildren(shell);
+}
+
+/* ---------- Whole host process by lifecycle part (script targets; shown with the Whole host scope) ---------- */
+// Each part's wall time on strobe's clock and the JavaScript sampled in it (`whole_host.lifecycle`), and the
+// modules the host evaluated (`whole_host.modules`). A share of wall time, never CPU.
+function renderLifecycleBlock(sides) {
+  const shown = sides.filter(([, w]) => w?.lifecycle?.length || w?.modules);
+  if (!shown.length) return null;
+  return shown.map(([name, w]) => {
+    const rows = w.lifecycle || [];
+    const maxWall = Math.max(...rows.map((r) => (finite(r.wall_ms) ? r.wall_ms : 0)), 1);
+    const mod = w.modules;
+    return h("div", { class: "life-block" },
+      h("div", { class: "life-hd" }, `By lifecycle${name ? ` · ${name}` : ""} `,
+        h("span", {}, "· each part's wall time on strobe's clock and the JavaScript sampled in it, as a share of wall time, not CPU")),
+      rows.length
+        ? h("div", {},
+            h("div", { class: "life-row hd" },
+              h("span", {}, "Part"), h("span", {}, "Wall time (bar), sampled (fill)"),
+              h("span", { class: "mono" }, "Wall"), h("span", { class: "mono" }, "Sampled"), h("span", { class: "mono" }, "%")),
+            rows.map((r) => {
+              const wall = finite(r.wall_ms) ? r.wall_ms : null;
+              const sampled = finite(r.sampled_ms) ? r.sampled_ms : 0;
+              const pct = wall > 0 ? (100 * sampled) / wall : null;
+              return h("div", {
+                class: "life-row",
+                title: wall === null ? "between the parts: strobe's clock-sync spins, its calls between runs; the exit" : `${r.spans || 0} stretch${r.spans === 1 ? "" : "es"}`,
+              },
+                h("span", {}, capFirst(r.label || r.part)),
+                wall === null
+                  ? h("span", { style: "color:var(--ink-4);font-size:11.5px" }, "strobe's clock-sync spins, its calls between runs; the exit")
+                  : h("div", { class: "share-track", style: "background:none" },
+                      h("div", { style: `height:100%;width:${Math.max(0.5, (100 * wall) / maxWall)}%;background:var(--surface-subtle);box-shadow:inset 0 0 0 1px var(--border);position:relative` },
+                        h("div", { class: "share-fill", style: `width:${Math.min(100, pct || 0)}%` })
+                      )
+                    ),
+                h("span", { class: "mono" }, wall === null ? "" : fmtVal(wall, "ms")),
+                h("span", { class: "mono" }, fmtVal(sampled, "ms")),
+                h("span", { class: "mono", style: "color:var(--ink-3)" }, pct === null ? "" : `${pct.toFixed(0)}%`)
+              );
+            })
+          )
+        : null,
+      mod
+        ? h("div", { class: "life-note", title: cleanPath(mod.max_file || "") },
+            `${mod.count} modules evaluated, each its own stack ((module) at its root): ${fmtVal(mod.ms, "ms")} in all, the most ${fmtVal(mod.max_ms, "ms")} (${baseName(mod.max_file || "") || "?"}); By file sums them.`)
+        : null
+    );
+  });
+}
+
+/* ---------- HTTP probe & stalled cohorts (`strobe query <rec|exp> http`) ---------- */
+const httpConn = (c) => (c?.connection === "keep-alive" ? "kept connections" : "a new connection per probe");
+// A quantile as strobe judged it (`states`, the block's refusals): its value, censored (it falls on a
+// timeout) or unread (—: no probe that counts, an error, missed sends, the probe's CPU in a timed block).
+const httpQ = (m, k) => {
+  const st = m?.states?.[k];
+  if (st === "censored") return "censored";
+  if (st === "unread" || m?.unread) return "—";
+  return finite(m?.[k]) ? fmtVal(m[k], "ms") : "—";
+};
+
+// A cohort's words as `query http` says them (`says`), or, from an older strobe, its held time alone.
+function cohortSays(c) {
+  if (c.says) return c.says;
+  if (!finite(c.held_ms)) return "none of them was answered";
+  return `the server answered none for ${c.held_past_timeout ? "at least " : ""}${fmtVal(c.held_ms, "ms")}`;
+}
+
+function renderCohortRow(c, timeoutMs) {
+  const lat = c.latencies_ms || [];
+  const answered = lat.filter(finite);
+  const top = Math.max(...answered, c.timeouts > 0 && finite(timeoutMs) ? timeoutMs : 0, 1);
+  const at = `${c.run || c.when || ""}${c.run && c.when && c.when !== "measured" ? ` (${c.when === "warmup" ? "not measured" : c.when})` : ""} +${(c.at_s || 0).toFixed(2)} s`;
+  const spans = (c.waves || 1) > 1;
+  return h("div", { class: "cohort-row" },
+    h("span", { class: "cohort-at" }, at, h("br"), `${c.probes} probes`),
+    h("div", { class: "cohort-bars", "aria-label": `latencies: ${lat.map((l) => (finite(l) ? l.toFixed(0) : "timeout")).join(", ")} ms` },
+      lat.map((l) => finite(l)
+        ? h("i", { style: `height:${Math.max(6, (100 * l) / top)}%`, title: `${l.toFixed(0)} ms` })
+        : h("i", { class: "timeout", title: `timed out at ${timeoutMs} ms: its latency is past it, unknown` }))
+    ),
+    h("span", { class: `cohort-says${spans ? " spans" : ""}` }, capFirst(cohortSays(c)))
+  );
+}
+
+// `entries`: [{ label, http }], `http` a recording's probe view (with cohorts) or a timed block's summary.
+function renderHttpSection(entries) {
+  const list = (entries || []).filter((e) => e?.http?.measured);
+  if (!list.length) return null;
+  const cfg = list.find((e) => e.http.config)?.http.config;
+  const cfgLine = cfg
+    ? `${cfg.method || "GET"} ${cfg.url} · every ${cfg.cadence_ms} ms · timeout ${cfg.timeout_ms} ms · ${httpConn(cfg)}${cfg.has_authorization && cfg.authorization_header ? ` · ${cfg.authorization_header} sent, never kept` : ""}`
+    : "";
+  const viewed = list.filter((e) => Array.isArray(e.http.cohorts));
+  const anyCohort = viewed.some((e) => e.http.cohorts.length);
+  return h("section", { class: "card-surface" },
+    h("div", { class: "card-hd" },
+      h("div", { class: "card-hd-left" },
+        h("h2", { class: "sec-title" }, "HTTP probe & stalled cohorts"),
+        h("span", { class: "sec-sub", style: "overflow-wrap:anywhere" }, cfgLine)
+      ),
+      h("div", { class: "card-hd-right" }, anyCohort ? h("span", { class: "status-pill warn" }, "Stalls held probes") : viewed.length ? h("span", { class: "status-pill win" }, "No stall") : null)
+    ),
+    h("div", { style: "padding:0 24px 12px;overflow-x:auto" },
+      h("table", { class: "impl-table" },
+        h("tr", {},
+          ["Block", "p50", "p95", "max", "answered", "timeouts", "errors", "missed", "idle p50", "probe CPU"].map((t, i) => h("th", { style: i ? "text-align:right" : "" }, t))
+        ),
+        list.map((e) => {
+          const m = e.http.measured;
+          const cpu = finite(e.http.probe_cpu_pct) ? e.http.probe_cpu_pct : e.http.cpu_pct;
+          return h("tr", { title: e.rec ? `strobe query ${e.rec} http` : "" },
+            h("td", {}, e.label),
+            h("td", { class: "num" }, httpQ(m, "p50")),
+            h("td", { class: "num" }, httpQ(m, "p95")),
+            h("td", { class: "num" }, httpQ(m, "max")),
+            h("td", { class: "num" }, `${m.ok ?? "—"} of ${m.due ?? "—"}`),
+            h("td", { class: "num", style: m.timeouts > 0 ? "color:var(--loss-ink)" : "" }, String(m.timeouts ?? "—")),
+            h("td", { class: "num", style: m.errors > 0 ? "color:var(--loss-ink)" : "" }, String(m.errors ?? "—")),
+            h("td", { class: "num", style: m.missed > 0 ? "color:var(--warn-ink)" : "" }, String(m.missed ?? "—")),
+            h("td", { class: "num" }, finite(e.http.idle?.p50) ? fmtVal(e.http.idle.p50, "ms") : "—"),
+            h("td", { class: "num" }, finite(cpu) ? `${cpu.toFixed(2)}% of a core` : "—")
+          );
+        })
+      ),
+      h("div", { class: "life-note" }, "A quantile shown censored falls on a timeout: its value is past the timeout, unknown, and refused; — is unread, refused as the block refuses it."),
+      list.filter((e) => e.http.measured.unread_why).map((e) => h("div", { class: "life-note", style: "margin-top:2px" }, `${e.label}: latencies unread (${e.http.measured.unread_why})`))
+    ),
+    viewed.flatMap((e) => [
+      h("div", { class: "http-sub" }, `Stalled cohorts · ${e.label} `,
+        h("span", {}, `· probes in a row over ${fmtVal(e.http.stall_threshold_ms, "ms")} (5× the idle p95, at least 50 ms); a hatched bar timed out`)),
+      e.http.cohorts.length
+        ? e.http.cohorts.map((c) => renderCohortRow(c, e.http.config?.timeout_ms))
+        : h("div", { class: "cohort-row" }, h("span", { class: "cohort-at" }, ""), h("span", {}, ""), h("span", { class: "cohort-says" }, `None: no two probes in a row over ${fmtVal(e.http.stall_threshold_ms, "ms")}`)),
+      (e.http.cohorts_total || 0) > e.http.cohorts.length
+        ? h("div", { class: "cohort-row" }, h("span", { class: "cohort-at" }, ""), h("span", {}, ""),
+            h("span", { class: "cohort-says", style: "color:var(--ink-3)" }, `… ${e.http.cohorts_total - e.http.cohorts.length} more: strobe query ${e.rec || "<rec>"} http --top ${e.http.cohorts_total}`))
+        : null,
+    ])
+  );
+}
+
+// A series' probes (`s.http`): each probe block (its whole view where its recording was kept), then the
+// check's and attribution blocks' recordings.
+function seriesHttpEntries(s) {
+  return (s?.http || []).map((e) => ({
+    label: `${capFirst(e.block || "")}${e.variant ? ` · ${sideWord(e.variant)}` : ""}`,
+    http: e.view || e.http,
+    rec: e.recording || e.http?.recording,
+  }));
+}
+
+/* ---------- bench --blocks: one build's blocks, their median and its interval, nothing compared ---------- */
+// The median's interval over the blocks (order statistics): 95% from 6 blocks; fewer cover the median
+// only 50, 75, 87.5 or 93.8% of the time (2 to 5 blocks), and are named a range with that coverage.
+const blocks95 = (x) => finite(x?.confidence) && x.confidence >= 0.95 - 1e-9;
+const coverageStr = (c) => `${+(100 * c).toFixed(1)}%`;
+function blocksIntervalWords(x, n) {
+  return blocks95(x) ? "95% interval" : `range over ${n} blocks (${finite(x?.confidence) ? coverageStr(x.confidence) : "unknown"} median coverage; 6 blocks needed for 95%)`;
+}
+
+function drawBlocksStrip(vals, p, u, n) {
+  const xs = [...vals, p.lo, p.hi].filter(finite);
+  if (!xs.length) return null;
+  const min = Math.min(...xs), max = Math.max(...xs);
+  const pad = (max - min) * 0.08 || Math.abs(max) * 0.05 || 1;
+  const lo = min - pad, hi = max + pad;
+  const x = (v) => `${(100 * (v - lo)) / (hi - lo)}%`;
+  // Below 95% the band is drawn as an outline, and not at all from 2 blocks (50%: just their range).
+  const band = finite(p.lo) && finite(p.hi) && (blocks95(p) || p.confidence > 0.5);
+  return h("div", { class: "blk-strip" },
+    h("i", { class: "blk-axis" }),
+    band
+      ? h("i", {
+          class: "blk-band",
+          style: `left:${x(p.lo)};width:calc(${x(p.hi)} - ${x(p.lo)})${blocks95(p) ? "" : ";background:none;border-style:dashed"}`,
+          title: `${capFirst(blocksIntervalWords(p, n))}: ${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`,
+        })
+      : null,
+    finite(p.median) ? h("i", { class: "blk-med", style: `left:${x(p.median)}`, title: `median ${fmtVal(p.median, u)}` }) : null,
+    vals.map((v, i) => (finite(v) ? h("i", { class: "blk-dot", style: `left:${x(v)}`, title: `block ${i + 1}: ${fmtVal(v, u)}` }) : null)),
+    h("span", { class: "blk-tick", style: `left:${x(min)}` }, fmtVal(min, u)),
+    min !== max ? h("span", { class: "blk-tick", style: `left:${x(max)}` }, fmtVal(max, u)) : null
+  );
+}
+
+// One metric over the blocks in words: its median and interval, one value, or why a block refused it.
+function blocksText(x, n) {
+  const u = x.unit || unitOf(x.metric);
+  if (x.verdict) return x.verdict;
+  if (x.refused) return `refused in ${x.refused_blocks} of ${n} blocks (${String(x.refused).replace(`: ${x.metric}: `, ": ")})`;
+  const got = (x.values || []).filter(finite);
+  if (finite(x.median)) {
+    return `median ${fmtVal(x.median, u)}  [${fmtVal(x.lo, u)} … ${fmtVal(x.hi, u)}]${blocks95(x) ? "" : ` (range over ${got.length} blocks, ${finite(x.confidence) ? coverageStr(x.confidence) : "unknown"} median coverage)`}`;
+  }
+  if (got.length === 1) return `${fmtVal(got[0], u)} (1 block)`;
+  return "no value (nothing in these blocks measured it)";
+}
+
+function renderBlocksSeries(r, s) {
+  const b = s.blocks_summary || {};
+  const p = b.primary || { metric: s.primary?.metric, values: [] };
+  const m = p.metric || s.primary?.metric || "";
+  const u = p.unit || unitOf(m);
+  const n = b.blocks ?? (s.blocks || []).length;
+  const vals = p.values || [];
+  const refused = !!p.verdict || !!p.refused;
+  const headTag = shortRef((r.variants || [])[0]);
+  const pills = [s.engine && s.engine !== "chromium" ? s.engine : null, s.headless ? "headless" : null, s.session === "locked" ? "session locked" : s.session === "mixed" ? "session mixed" : null].filter(Boolean);
+  const warns = dedupWarnings([...(r.warnings || []), ...(s.warnings || [])]).filter((w) => w.level === "warn" || w.level === "error");
+  const cmds = [
+    ...(s.timing_recordings || []).map((t) => [`Timed block ${(t.pair ?? 0) + 1}'s recording (no profiler)`, `strobe query ${t.recording} ${s.target_kind === "native" ? "threads" : "summary"}`]),
+    s.attribution?.head ? ["Where head spends its time (attribution block)", `strobe query ${s.attribution.head} hotspots --by package`] : null,
+    s.http?.length ? ["The HTTP probe's blocks", `strobe query ${r.id || "<exp_id>"} http`] : null,
+  ].filter(Boolean);
+  const head = s.hotspots?.head;
+  return [
+    h("section", { class: "card-surface" },
+      warns.length ? h("div", { class: "caveat-bar" }, warns.map((w) => h("div", { class: "caveat-item" }, h("span", { class: "caveat-label" }, `Caveat · ${w.id}`), h("span", { class: "caveat-text" }, w.text)))) : null,
+      h("div", { class: "hero-body" },
+        h("div", { class: "hero-header" },
+          h("div", { class: "eyebrow-row" },
+            h("span", { class: `status-pill ${refused ? "loss" : "neutral"}` }, refused ? "Refused" : `${n} block${n === 1 ? "" : "s"} · nothing compared`),
+            h("span", { class: "eyebrow-meta" }, `${s.label || s.case || "Benchmark"} · Primary: ${labelOf(m)}${headTag ? ` · head ${headTag}` : ""}`),
+            pills.map((x) => h("span", { class: "ref-pill" }, x))
+          ),
+          h("h1", { class: "hero-headline" },
+            refused ? `${labelOf(m)} not measured` : finite(p.median) ? `${labelOf(m)}: median ${fmtVal(p.median, u)}` : vals.filter(finite).length === 1 ? `${labelOf(m)}: ${fmtVal(vals.find(finite), u)} (1 block)` : `${labelOf(m)}: no value`
+          ),
+          h("p", { class: "hero-prose" },
+            refused
+              ? blocksText(p, n)
+              : finite(p.median)
+                ? blocks95(p)
+                  ? [`One build measured in ${n} fresh blocks. The median's 95% interval over the blocks is `, h("strong", {}, `${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`), `. Nothing was compared: no better, worse or same is claimed.`]
+                  : [`One build measured in ${n} fresh blocks. The median's ${blocksIntervalWords(p, n)} is `, h("strong", {}, `${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`), `. Nothing was compared: no better, worse or same is claimed.`]
+                : `One build measured in ${n} block${n === 1 ? "" : "s"}: an interval needs two or more. Nothing was compared.`
+          ),
+          renderShown(s)
+        ),
+        h("div", { style: "padding:0 0 4px" },
+          vals.length ? drawBlocksStrip(vals, refused ? {} : p, u, vals.filter(finite).length) : null,
+          h("div", { class: "mono", style: "font-size:12px;color:var(--ink-3);margin-top:8px;overflow-wrap:anywhere" },
+            `Blocks: ${vals.map((v) => (finite(v) ? fmtVal(v, u) : "—")).join(" · ")}`)
+        )
+      )
+    ),
+    (b.secondaries || []).length
+      ? h("section", { class: "card-surface" },
+          h("div", { class: "card-hd" }, h("div", { class: "card-hd-left" },
+            h("h2", { class: "sec-title" }, "Declared metrics over the blocks"),
+            h("span", { class: "sec-sub" }, `median with its interval over the blocks (95% from 6 blocks; ${n < 6 ? `${n} give a range with the coverage shown` : "fewer give a range"}), or why a block refused it · one build, nothing compared`))),
+          h("div", { class: "card-bd" },
+            h("div", { class: "rec-kv-cols", style: "columns:1" },
+              b.secondaries.map((x) => h("div", { class: "rec-kv-row" },
+                h("span", { class: "mono", style: "color:var(--ink-2)" }, x.metric),
+                h("span", { class: "mono", style: `font-weight:500;${x.refused ? "color:var(--loss-ink)" : ""}` }, blocksText(x, n))
+              ))
+            )
+          )
+        )
+      : null,
+    renderVideoSection(s.video_player),
+    cmds.length
+      ? h("section", { class: "card-surface" },
+          h("div", { class: "card-hd" }, h("div", { class: "card-hd-left" }, h("h2", { class: "sec-title" }, "Inspect further"))),
+          h("div", { class: "card-bd" }, h("div", { class: "next-list" }, cmds.map(([lbl, c]) => h("div", { class: "next-item" }, h("div", { class: "next-why" }, lbl), cmdRow(c)))))
+        )
+      : null,
+    head ? h("div", { class: "zone-divider" }, h("span", { class: "zone-divider-label" }, "Attribution block of head · profiled once, apart from the timed blocks")) : null,
+    renderSingleCpuHotspots(head),
+    renderHttpSection(seriesHttpEntries(s)),
+    renderRigFooter(r, s, {}),
+  ];
 }
 
 /* ---------- Insights & Biggest Movers ---------- */
