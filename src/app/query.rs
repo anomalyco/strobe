@@ -485,10 +485,12 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
     }
-    // A native block whose measured runs posted no input: an idle case (an app at rest), as a recording
-    // with no input is.
+    // A native block whose measured runs posted no input and whose app used under a quarter of a core:
+    // an idle case (an app at rest), as a recording with no input is. A busy one (a spin, a compile)
+    // is working, and its threads' switches are preemptions, not wakes for nothing.
     let idle_block = meta["native"] == true
         && meta["kind"] == "block"
+        && v["cpu.app.total"].as_f64().is_some_and(|c| c < 25.0)
         && store::read_json(&dir.join("frames.json"))
             .ok()
             .and_then(|f| f["runs"].as_object().map(|r| !r.is_empty() && r.values().all(|r| r["inputs"].as_array().is_some_and(Vec::is_empty))))
@@ -530,7 +532,10 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     // One thread doing most of the work off the UI (or main) thread: a worker, a pool thread, a
     // driver's compiler, which a UI-thread metric never shows.
     let runs_cpu: Vec<f64> = store::read_json(&dir.join("runs.json")).ok().and_then(|r| r.as_array().map(|a| a.iter().filter_map(|r| r["cpu_ms"].as_f64()).collect())).unwrap_or_default();
-    let total = if runs_cpu.is_empty() { v["cpu.work"].as_f64().unwrap_or(f64::NAN) } else { metrics::median(&runs_cpu) };
+    // The threads' rows average the runs, the processes' total is their median: the larger is the whole,
+    // so no thread reads over 100% of it.
+    let listed: f64 = all_threads.iter().filter_map(|t| t["cpu_ms_per_run"].as_f64()).sum();
+    let total = if runs_cpu.is_empty() { v["cpu.work"].as_f64().unwrap_or(f64::NAN) } else { metrics::median(&runs_cpu) }.max(listed);
     let (ui_name, ui_ms) = match (v["ui.cpu"].as_f64(), v["cpu.main"].as_f64()) {
         (Some(u), _) => ("the UI thread", u),
         (None, Some(m)) => ("the main thread", m),
