@@ -295,7 +295,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let mut steps: Vec<(String, f64)> = Vec::new();
     let launched = Instant::now();
     // `Throttled`: no page to run the speed check in, so strobe's own workload on the target's CPUs.
-    let ratio = validity::native_speed_checked(ctx.pin)?;
+    let ratio = super::native_speed(ctx, s, v)?;
     let Prepared { home, spec, events, guard } = prepare(ctx, s, v, &target, None, x.measures_time())?;
     let stop = isolate::end_on_stop(Some(&home));
     let env = environment(&home, &spec);
@@ -862,7 +862,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
     };
     let label = format!("{}\n{}", s.label(), v.role);
     let home_dir = if warm { Some(ctx.homes.entry(label).or_insert_with(isolate::new_home).clone()) } else { None };
-    let ratio = validity::native_speed_checked(ctx.pin)?;
+    let ratio = super::native_speed(ctx, s, v)?;
     let Prepared { home, spec: tspec, events, guard } = prepare(ctx, s, v, &target, home_dir, timed)?;
     let stop = isolate::end_on_stop(Some(&home));
     let env = environment(&home, &tspec);

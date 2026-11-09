@@ -38,7 +38,7 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
     // Recordings of one executable share its GPU caches, as `record` does.
     b.set("gpu-store", "exe");
     // `--mobile` too, bare (`""`) or naming a serial: the case's phone target on the phone.
-    for k in ["target", "params", "id", "pin", "power", "runs", "style", "headless", "wayland", "engine", "seed", "video", "mobile"] {
+    for k in ["target", "params", "id", "pin", "power", "runs", "style", "headless", "wayland", "engine", "seed", "video", "mobile", "max-time"] {
         if let Some(v) = args.get(k) {
             b.set(k, v);
         }
@@ -63,6 +63,10 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
     let unprofiled = out.json["warnings"].as_array().into_iter().flatten().find(|w| w["id"] == "Attribution" && w["text"].as_str().is_some_and(|t| t.contains("no attribution block")));
     if let (true, Some(w)) = (recordings.is_empty(), unprofiled) {
         return Err(Error::refused("EngineUnsupported", format!("{case}: no recording: {}", w["text"].as_str().unwrap_or("")), "record the case in Chromium (--engine chromium)"));
+    }
+    // Stopped before any recording (a stop, `--max-time` in a wait): that, not a failed case.
+    if recordings.is_empty() && matches!(out.code, 124 | 130) {
+        return super::unless_halted(out);
     }
     if recordings.is_empty() {
         return Err(Error::msg(format!("{case}: no recording (the case failed or matched nothing):\n{}", out.text)));
@@ -104,7 +108,13 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
             format!("next     strobe query {rec} hotspots --by package · strobe query {rec} summary (per run) · strobe query {rec} style · strobe report recording {rec} --open\n")
         };
     }
-    Ok(Output::new(text, json!({ "recordings": recordings })))
+    // Other work on the CPUs (a slow speed check is said, never waited for): the recordings are a loaded
+    // machine's.
+    let busy: Vec<Value> = out.json["warnings"].as_array().into_iter().flatten().filter(|w| matches!(w["id"].as_str(), Some("Background" | "Throttled")) && w["level"] == "warn").cloned().collect();
+    for w in &busy {
+        text += &format!("! {:<24}{}\n", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or(""));
+    }
+    Ok(Output::new(text, json!({ "recordings": recordings, "warnings": busy })))
 }
 
 pub fn run(args: &Args) -> Result<Output> {
@@ -114,6 +124,9 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     if args.has("seed") {
         return Err(Error::usage("--seed seeds a bench file's ctx.random(): record --bench <file>#<case> --seed <n>"));
+    }
+    if args.has("max-time") {
+        return Err(Error::usage("--max-time caps a record --bench's waits; a recording of a target ends at --for"));
     }
     let target = args.pos.first().ok_or_else(|| Error::usage("record needs a target: strobe record https://… [--for 10s], or --bench <file>#<case>"))?.clone();
     if let Some(id) = args.get("id") {
@@ -376,9 +389,13 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let mut cpu1 = cycles();
     read_at(&mut cpu1.0, &at1);
     let video = video.map(|v| v.finish(&dir, &[("run:0".into(), t0, t1, true)], &[], &[])).transpose()?;
-    let os = sampler.map(|s| s.stop().window(t0, t1));
+    let samples = sampler.map(probe::os::Sampler::stop);
+    let os = samples.as_ref().map(|s| s.window(t0, t1));
     // The browser's process set (its tree, what carries its profile's stamp, its job), for the OS frames.
     let tree = browser.pids();
+    // The adapter the page drew on, and the one driving its window's display (`screen.gpu`).
+    let display = host::main_window(&tree).filter(|_| host_screen).and_then(|w| host::display_of(w.hwnd));
+    let drawn_on = samples.as_ref().zip(os.as_ref()).and_then(|(s, o)| super::bench::drawing_gpu(s, &[o], display.as_ref()));
     let os_frames = os_frames.map(|r| r.and_then(|c| c.stop()));
     if host_screen && (awake.locks() > 0 || host::session_locked()) {
         return Err(validity::locked());
@@ -470,6 +487,9 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
         "created": now_iso(), "valid": true, "sampling": sampling, "video": video,
         "headless": !on_screen, "frames_refused": drawn, "emulate": meta_emulate(&emulation), "phone": phone_meta,
     });
+    if let Some(g) = drawn_on {
+        meta["screen"] = json!({ "gpu": g });
+    }
     refuse_background(&mut meta, qos);
     store::write_json(&dir.join("meta.json"), &meta)?;
     draft.keep();
@@ -706,8 +726,12 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     if profiler.is_some() {
         driver.mark("run:0:end")?;
     }
-    let os = sampler.stop().window(t0, t1);
+    let samples = sampler.stop();
+    let os = samples.window(t0, t1);
     let tree = browser.pids();
+    // The adapter the page drew on, and the one driving its window's display (`screen.gpu`).
+    let display = host::main_window(&tree).filter(|_| !headless).and_then(|w| host::display_of(w.hwnd));
+    let drawn_on = super::bench::drawing_gpu(&samples, &[&os], display.as_ref());
     let presents = presents.map(|r| r.and_then(|c| c.stop()));
     if !headless && (awake.locks() > 0 || host::session_locked()) {
         return Err(validity::locked());
@@ -795,6 +819,9 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
         meta["runs"] = json!(1);
         meta["census"] = json!(census);
         meta["sampling"] = json!(sampling);
+    }
+    if let Some(g) = drawn_on {
+        meta["screen"] = json!({ "gpu": g });
     }
     refuse_background(&mut meta, qos);
     store::write_json(&dir.join("meta.json"), &meta)?;
@@ -942,7 +969,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         if let Some(code) = n.exited().filter(|&c| running && (c != 0 || n.processes().is_empty())) {
             return Err(exited(code, "during the recording", last_output(&n, &seen, 5).as_deref()));
         }
-        let screen = super::bench::screen_state(&procs0, &(host::now_ns(), host::all_processes()));
+        let mut screen = super::bench::screen_state(&procs0, &(host::now_ns(), host::all_processes()));
         if let Some(t) = timeline.borrow_mut().take() {
             let mut t = t.stop();
             t.marks.push(("recording".into(), t0, t1));
@@ -951,6 +978,11 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let samples = sampler.stop();
         let gpu_missing = (!super::outside::gpu_read(&samples)).then(|| samples.gpu_unreadable.clone());
         let os = samples.window(t0, t1);
+        // The adapter the app drew on, and the one driving its window's display.
+        let display = n.window.as_ref().and_then(|w| host::display_of(w.hwnd));
+        if let Some(g) = super::bench::drawing_gpu(&samples, &[&os], display.as_ref()) {
+            screen["gpu"] = g;
+        }
         let presents = presents.map(|r| r.and_then(|c| c.stop()));
         let stacks = stacks.map(|r| r.and_then(|c| c.stop()));
         let session_locked = awake.locks() > 0 || host::session_locked();

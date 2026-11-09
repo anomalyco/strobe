@@ -557,12 +557,22 @@ fn idle_now() -> Option<Vec<u64>> {
     host::idle_cycles(&mut v).then_some(v)
 }
 
+/// How long the native speed check (`native_speed_checked`) may take.
+#[derive(Clone, Copy, Debug)]
+pub enum SpeedWait {
+    /// A timed block's: a slow check runs again on quiet CPUs, and other work on the target's CPUs is
+    /// waited out for up to 2 minutes, never past the instant given (`--max-time`).
+    Timed(Option<std::time::Instant>),
+    /// A `--check`'s: one check, after at most 2 s for the CPUs to quiet; nothing is waited out.
+    Once,
+}
+
 /// `Throttled` for targets with no page (SPEC §10.1): the native speed check on `cpus`, run once
 /// they are quiet, against this device's reference for that mask (`<state>/native-speed.json`:
-/// the median of its last 20 passing checks; the first check sets it). A slow check is retried
-/// twice after the CPUs settle again: throttling (power, heat, a power plan) lasts, while an app
-/// that just ended (freeing a large model) or a burst of other work passes. Returns the ratio.
-pub fn native_speed_checked(cpus: Option<u64>) -> Result<Option<f64>> {
+/// the median of its last 20 passing checks; the first check sets it). In a timed block a slow check
+/// is retried twice after the CPUs settle again: throttling (power, heat, a power plan) lasts, while an
+/// app that just ended (freeing a large model) or a burst of other work passes. Returns the ratio.
+pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option<f64>> {
     let path = host::paths::state_dir().join("native-speed.json");
     let mut saved: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}));
     let key = cpus.map_or("all".to_string(), |m| format!("{m:#x}"));
@@ -574,24 +584,30 @@ pub fn native_speed_checked(cpus: Option<u64>) -> Result<Option<f64>> {
     });
     // Up to 3 slow tries on quiet CPUs, and for as long as 2 minutes while other processes keep the
     // target's CPUs busy during the check: that is their work, not this device's speed.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let started = std::time::Instant::now();
+    let patience = started + std::time::Duration::from_secs(120);
+    let (deadline, until, once) = match wait {
+        SpeedWait::Timed(until) => (until.map_or(patience, |u| u.min(patience)), until.filter(|u| *u < patience), false),
+        SpeedWait::Once => (started, None, true),
+    };
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
     let mut best: Option<Try> = None;
     let mut slow = 0;
     let last = loop {
-        wait_quiet(cpus, std::time::Duration::from_secs(10));
+        wait_quiet(cpus, if once { std::time::Duration::from_secs(2) } else { std::time::Duration::from_secs(10).min(left()) });
         let t = timed_check(cpus);
         if t.ms.is_finite() && best.as_ref().is_none_or(|b| t.ms < b.ms) {
             best = Some(t.clone());
         }
-        if reference.is_none_or(|r| t.ms / r <= 1.5) {
+        if once || reference.is_none_or(|r| t.ms / r <= 1.5) {
             break t;
         }
-        if t.foreign_pct > FOREIGN_PCT && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+        if t.foreign_pct > FOREIGN_PCT && !left().is_zero() {
+            std::thread::sleep(std::time::Duration::from_secs(2).min(left()));
             continue;
         }
         slow += 1;
-        if slow >= 3 || std::time::Instant::now() >= deadline {
+        if slow >= 3 || left().is_zero() {
             break t;
         }
     };
@@ -601,12 +617,21 @@ pub fn native_speed_checked(cpus: Option<u64>) -> Result<Option<f64>> {
     if let (Some(ratio), Some(r)) = (ratio, reference)
         && ratio > 1.5
     {
+        // `--max-time` cut the waits short while the check was still slow: neither refusal is shown to
+        // hold (the bench ends there, `bench::out_of_time`).
+        if slow < 3 && until.is_some_and(|u| std::time::Instant::now() >= u) {
+            return Err(Error::timeout(format!(
+                "the native speed check waited {:.0} s for the target's CPUs, still {ratio:.2}× slower than this device's reference ({ms:.1} ms vs {r:.1} ms)",
+                started.elapsed().as_secs_f64()
+            )));
+        }
         let who = |t: &Try| named_work(&t.others, t.steal);
         if last.foreign_pct > FOREIGN_PCT {
+            let how_long = if once { "during the check".to_string() } else { format!("for {:.0} s", started.elapsed().as_secs_f64()) };
             return Err(Refusal::new(
                 ValidatorId::Background,
                 format!(
-                    "the native speed check on the target's CPUs ran {ratio:.2}× slower than this device's reference ({ms:.1} ms vs {r:.1} ms) while other work kept those CPUs {:.0}% of a core busy for 2 minutes",
+                    "the native speed check on the target's CPUs ran {ratio:.2}× slower than this device's reference ({ms:.1} ms vs {r:.1} ms) while other work kept those CPUs {:.0}% of a core busy {how_long}",
                     last.foreign_pct
                 ),
             )
@@ -614,13 +639,15 @@ pub fn native_speed_checked(cpus: Option<u64>) -> Result<Option<f64>> {
             .fix("let that work finish (an antivirus scanning new files, an update, a build), or exclude it from the bench's CPUs")
             .into());
         }
-        return Err(Refusal::new(
-            ValidatorId::Throttled,
-            format!("the native speed check ran {ratio:.2}× slower than this device's reference on these CPUs ({ms:.1} ms vs {r:.1} ms, best of 3 tries on quiet CPUs)"),
-        )
-        .detail(format!("other work during the last: {:.0}% of a core there; busiest processes: {}", last.foreign_pct, who(&last)))
-        .fix("plug in power, leave power saving, let the machine cool down")
-        .into());
+        let tries = match (once, slow) {
+            (true, _) => "one check".to_string(),
+            (false, 0 | 1) => "one try on quiet CPUs".to_string(),
+            (false, n) => format!("best of {n} tries on quiet CPUs"),
+        };
+        return Err(Refusal::new(ValidatorId::Throttled, format!("the native speed check ran {ratio:.2}× slower than this device's reference on these CPUs ({ms:.1} ms vs {r:.1} ms, {tries})"))
+            .detail(format!("other work during the last: {:.0}% of a core there; busiest processes: {}", last.foreign_pct, who(&last)))
+            .fix("plug in power, leave power saving, let the machine cool down")
+            .into());
     }
     kept.push(ms);
     let drop = kept.len().saturating_sub(KEPT);

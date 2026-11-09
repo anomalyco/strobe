@@ -168,7 +168,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     }
     // `Throttled`: there is no page to run the speed check in, so strobe runs a fixed workload of its
     // own on the target's CPUs before the launch, once the last block's app has left them quiet.
-    let ratio = validity::native_speed_checked(ctx.pin)?;
+    let ratio = super::native_speed(ctx, s, v)?;
     let home = isolate::prepare_home(&app, seed_dir(ctx, s, &target).as_deref(), None)?;
     crate::target::a11y::prepare(app.wayland());
     let launched = Instant::now();

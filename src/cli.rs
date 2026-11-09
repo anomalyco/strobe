@@ -72,7 +72,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("pixels-only", Switch, "bench"),
     ("bisect", Value, "bench track"),
     ("keep", Switch, "bench"),
-    ("max-time", Value, "bench run"),
+    ("max-time", Value, "record bench run"),
     ("unlock-wait", Value, "bench"),
     ("require-verdict", Switch, "bench run"),
     ("require-parity", Switch, "bench"),

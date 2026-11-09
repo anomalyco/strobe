@@ -1185,6 +1185,11 @@ fn gpu(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
     );
     let mut out = sql_view(trace, &sql, top)?;
     out.text += &said;
+    // The adapter the page drew on (the OS's per-process GPU statistics), where the recording read it.
+    if let Some(line) = super::bench::gpu_line(&meta["screen"]["gpu"]) {
+        out.text += &format!("adapter  {line}\n");
+        out.json["adapter"] = meta["screen"]["gpu"].clone();
+    }
     Ok(out)
 }
 
@@ -1198,6 +1203,9 @@ fn native_gpu(dir: &Path, meta: &Value) -> Result<Output> {
     }
     let id = meta["id"].as_str().unwrap_or("");
     let mut text = String::from("gpu      the target's processes, from the OS's per-process GPU statistics, over the recording\n");
+    if let Some(line) = super::bench::gpu_line(&meta["screen"]["gpu"]) {
+        text += &format!("adapter  {line}\n");
+    }
     if os["gpu_3d_pct"].is_null() && os["gpu_memory"].is_null() && os["vram_dedicated_mb"].is_null() {
         text += "         unavailable: no per-process GPU statistics opened on this machine (Windows D3DKMT, Linux DRM client statistics, macOS IORegistry)\n";
     }
@@ -1244,7 +1252,7 @@ fn native_gpu(dir: &Path, meta: &Value) -> Result<Output> {
         text += "session  locked: the compositor drew nothing, so engine use describes no screen (GPU memory does not depend on it)\n";
     }
     text += "no trace: a browser GPU process's tasks by name need a Chromium attribution recording\n";
-    Ok(Output::new(text, json!({ "gpu": os, "frames": v["frames.n"], "session_locked": meta["session_locked"] })))
+    Ok(Output::new(text, json!({ "gpu": os, "adapter": meta["screen"]["gpu"], "frames": v["frames.n"], "session_locked": meta["session_locked"] })))
 }
 
 /// A native recording's threads, busiest waker first: context switches per second over the measured
