@@ -133,6 +133,14 @@ impl Grabber {
         }
     }
 
+    /// Whether its window still shows: neither closed, minimized nor hidden (Windows: from the kept view).
+    pub fn shown(&self) -> bool {
+        #[cfg(windows)]
+        return self.view().is_ok_and(|v| !v.unseen);
+        #[cfg(not(windows))]
+        super::window_state(self.win).is_some_and(|w| w.visible && !w.iconic)
+    }
+
     /// The client area's size in device-independent pixels.
     pub fn size(&self) -> Result<(f64, f64)> {
         #[cfg(windows)]
@@ -170,13 +178,13 @@ impl Grabber {
                     match w.grab(origin, px)? {
                         Some(r) => r,
                         // The window grew and held still since: its capture's newest frame is cropped to
-                        // the size before. A fresh capture starts with a whole frame (its open charged).
+                        // the size before. A fresh capture starts with a whole frame: its open runs on this
+                        // thread, inside the read that counts it; the old one's frame events not yet taken
+                        // are kept.
                         None => {
-                            let cpu = crate::probe::video::ThreadCpu::start();
                             let (pending, seen) = (w.take_cpu_ms(), w.seq());
-                            let fresh = wgc::Wgc::open(self.win);
-                            self.open_ms.set(self.open_ms.get() + pending + cpu.ms().unwrap_or(0.0));
-                            *w = fresh?;
+                            self.open_ms.set(self.open_ms.get() + pending);
+                            *w = wgc::Wgc::open(self.win)?;
                             // Its frames count on from the old one's, so a wait for a frame after one of
                             // those still means a newer frame.
                             w.count_from(seen);

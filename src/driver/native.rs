@@ -198,7 +198,7 @@ mod imp {
 
         /// The app's main window (or `window`'s) as `driver::pixels` reads it.
         fn source<'a>(&'a self, window: Option<&str>, presents: &'a RefCell<Option<PresentCapture>>) -> Result<Screen<'a>> {
-            Ok(Screen { s: self, win: self.windows(window)?[0], presents })
+            Ok(Screen { s: self, win: self.one_window(window)?, presents })
         }
 
         /// strobe's captures of the app's pixels since the last call: count, wall ms, CPU ms
@@ -223,6 +223,18 @@ mod imp {
             if !self.pixels.take_used() {
                 self.close_pixels();
             }
+        }
+
+        /// `resetPixels`' read of the main window through the capture the session has open (outside the
+        /// runs, so no read is counted; the capture's frame events are taken before the next run starts),
+        /// so no second capture of the same window opens; None when none is open.
+        pub(crate) fn start_pixels(&self, spec: &pixels::StartPixels) -> Option<Result<crate::png::Image>> {
+            let win = self.main.get();
+            if self.grabber.borrow().as_ref().is_none_or(|g| g.window() != win) {
+                return None;
+            }
+            let presents = RefCell::new(None);
+            Some(spec.read(&Screen { s: self, win, presents: &presents }))
         }
 
         /// Before a measured input whose `until` waits on pixels: what the region shows now.
@@ -424,6 +436,15 @@ mod imp {
             Ok(v)
         }
 
+        /// The one window `window` picks: the main window without listing the app's windows (an input's
+        /// point or a pixel read, each call), else the titled one.
+        fn one_window(&self, window: Option<&str>) -> Result<isize> {
+            match window {
+                None | Some("main") => Ok(self.main.get()),
+                Some(_) => Ok(self.windows(window)?[0]),
+            }
+        }
+
         fn snapshot(&self, window: Option<&str>) -> Result<Tree> {
             let at = Instant::now();
             self.counted(at, self.a11y.snapshot(&self.windows(window)?))
@@ -540,7 +561,7 @@ mod imp {
         }
 
         fn frame_ms(&self, x: f64, y: f64) -> u64 {
-            host::refresh_at(x as i32, y as i32).map_or(16, |hz| (1000 / hz.max(1)).max(4) as u64)
+            host::refresh_at_kept(x as i32, y as i32).map_or(16, |hz| (1000 / hz.max(1)).max(4) as u64)
         }
 
         /// Resolves after an input: a selector shows, the next frame reached the screen, or idle; or each of a
@@ -915,7 +936,7 @@ mod imp {
                 self.pointer_button(b, true, false)?;
             }
             let duration = o["duration"].as_f64().unwrap_or(1000.0).max(1.0);
-            let frame = host::refresh_at(x0 as i32, y0 as i32).map_or(1000.0 / 60.0, |hz| 1000.0 / hz.max(1) as f64);
+            let frame = host::refresh_at_kept(x0 as i32, y0 as i32).map_or(1000.0 / 60.0, |hz| 1000.0 / hz.max(1) as f64);
             let steps = (duration / frame).ceil().max(1.0) as u32;
             let start = Instant::now();
             let mut last = 0;
@@ -983,7 +1004,7 @@ mod imp {
             Some((|| {
                 // Before any pixel is read to aim: on a locked session no point can be aimed at.
                 locked_pointer(&format!("pointer input at {}", if anchor.is_some() { "an image" } else { "a point" }))?;
-                let win = self.windows(o["window"].as_str())?[0];
+                let win = self.one_window(o["window"].as_str())?;
                 let (px, py) = match (point, anchor) {
                     (Some(p), _) => {
                         let size = host::window_placement(win).map(|p| (p.client.0 / p.per_dip, p.client.1 / p.per_dip)).ok_or_else(|| Error::msg("the app's window closed"))?;
@@ -1019,7 +1040,7 @@ mod imp {
             let (x, y, t, top, aimed) = match self.at_point(sel, opts, presents) {
                 Some(p) => {
                     let (x, y, t) = p?;
-                    (x, y, t, self.windows(opts["window"].as_str())?[0], None)
+                    (x, y, t, self.one_window(opts["window"].as_str())?, None)
                 }
                 None => {
                     let selector = parse_sel(sel)?;
@@ -1441,7 +1462,7 @@ mod imp {
                 }
                 "window" => {
                     let o = opts(1);
-                    let w = self.windows(o["window"].as_str())?[0];
+                    let w = self.one_window(o["window"].as_str())?;
                     if w == 0 {
                         return Err(crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "page.window(): the app shows no window (a windowless target)")
                             .fix("drop page.window from a case of a windowless target")
@@ -1467,7 +1488,7 @@ mod imp {
                 "snapshot" => {
                     let Some(dir) = pixels else { return Ok(Value::Bool(false)) };
                     let name: String = s(0).chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect();
-                    let w = self.windows(opts(1)["window"].as_str())?[0];
+                    let w = self.one_window(opts(1)["window"].as_str())?;
                     let img = host::window_image(w).ok_or_else(|| Error::msg(format!("snapshot {name}: the window did not draw itself (PrintWindow)")))?;
                     std::fs::create_dir_all(dir)?;
                     crate::store::write_atomic(&dir.join(format!("{name}.png")), &crate::png::write(&img)?)?;

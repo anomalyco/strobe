@@ -1185,7 +1185,7 @@ pub fn maximize_window(hwnd: isize, work: [f64; 4]) -> crate::model::Result<()> 
 
 /// What says a window's place, state and display are unchanged, read per-monitor DPI aware with calls
 /// that stay inside user32 (no DWM or display driver round trip): its frame and client size, minimized,
-/// shown and zoomed, and its display (handle, rectangle and DPI). Equal keys: `window_placement`,
+/// shown and zoomed, and its display (handle, rectangle, work area and DPI). Equal keys: `window_placement`,
 /// `client_in_visual` and the display's refresh rate read before still hold.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowKey {
@@ -1196,6 +1196,7 @@ pub struct WindowKey {
     zoomed: bool,
     monitor: isize,
     monitor_rect: [i32; 4],
+    work: [i32; 4],
     dpi: u32,
 }
 
@@ -1223,23 +1224,28 @@ pub fn window_key(hwnd: isize) -> Option<WindowKey> {
             return None;
         }
         let (mut r, mut c): (RECT, RECT) = (zeroed(), zeroed());
-        GetWindowRect(h, &mut r);
-        GetClientRect(h, &mut c);
+        // A rectangle not read (the window went between the calls) is no key.
+        if GetWindowRect(h, &mut r) == 0 || GetClientRect(h, &mut c) == 0 {
+            return None;
+        }
         let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
         let mut info: MONITORINFO = zeroed();
         info.cbSize = size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(mon, &mut info);
+        if GetMonitorInfoW(mon, &mut info) == 0 {
+            return None;
+        }
         let (mut dx, mut dy) = (0u32, 0u32);
         GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
-        let m = info.rcMonitor;
+        let rect = |m: RECT| [m.left, m.top, m.right, m.bottom];
         Some(WindowKey {
-            frame: [r.left, r.top, r.right, r.bottom],
+            frame: rect(r),
             client: (c.right - c.left, c.bottom - c.top),
             iconic: IsIconic(h) != 0,
             visible: IsWindowVisible(h) != 0,
             zoomed: IsZoomed(h) != 0,
             monitor: mon as isize,
-            monitor_rect: [m.left, m.top, m.right, m.bottom],
+            monitor_rect: rect(info.rcMonitor),
+            work: rect(info.rcWork),
             dpi: dx,
         })
     })
@@ -1247,6 +1253,34 @@ pub fn window_key(hwnd: isize) -> Option<WindowKey> {
 
 pub fn refresh_at(x: i32, y: i32) -> Option<u32> {
     refresh_of(unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// `refresh_at`, the mode read once per display (its handle, rectangle and DPI, read through user32):
+/// for what runs inside a run (an input's pacing), where reading the mode would cost milliseconds. A
+/// display whose refresh rate changes at the same size and DPI keeps the rate read first.
+pub fn refresh_at_kept(x: i32, y: i32) -> Option<u32> {
+    use windows_sys::Win32::Graphics::Gdi::MONITORINFO;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    static KEPT: std::sync::Mutex<Vec<([i64; 6], Option<u32>)>> = std::sync::Mutex::new(Vec::new());
+    let key = unsafe {
+        let mon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(mon, &mut info) == 0 {
+            return refresh_of(mon);
+        }
+        let (mut dx, mut dy) = (0u32, 0u32);
+        GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        let m = info.rcMonitor;
+        [mon as i64, m.left as i64, m.top as i64, m.right as i64, m.bottom as i64, dx as i64]
+    };
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, hz)) = kept.iter().find(|(k, _)| *k == key) {
+        return *hz;
+    }
+    let hz = refresh_of(key[0] as windows_sys::Win32::Graphics::Gdi::HMONITOR);
+    kept.push((key, hz));
+    hz
 }
 
 /// The display mode's refresh rate (Hz) of a monitor (`EnumDisplaySettingsW`, which asks the display

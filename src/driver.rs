@@ -2090,7 +2090,7 @@ impl WindowShots<'_> {
         let mut g = self.d.grabber.borrow_mut();
         // The window the capture follows while it still shows (finding the browser's window lists every
         // window on the desktop, a read's cost each time).
-        let open = g.as_ref().map(|g| g.window()).filter(|w| crate::host::window_state(*w).is_some_and(|s| s.visible && !s.iconic));
+        let open = g.as_ref().filter(|g| g.shown()).map(|g| g.window());
         let w = match open {
             Some(w) => w,
             None => self.d.browser_window()?.hwnd,
@@ -2130,7 +2130,10 @@ impl WindowShots<'_> {
 }
 
 impl pixels::Source for WindowShots<'_> {
+    /// The viewport's size; the window's capture opens here when it is not open yet, before the read
+    /// that counts its CPU (the open's own CPU is the capture's `open_ms`, counted once).
     fn size(&self) -> Result<(f64, f64)> {
+        self.with(|_| Ok(()))?;
         self.d.prime_viewport().map(|v| (v[0], v[1]))
     }
 

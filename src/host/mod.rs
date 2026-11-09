@@ -1721,6 +1721,19 @@ pub fn refresh_at(x: i32, y: i32) -> Option<u32> {
     }
 }
 
+/// `refresh_at` for calls inside a run (an input's pacing): Windows reads each display's mode once
+/// (`win::refresh_at_kept`), elsewhere it is read each time.
+pub fn refresh_at_kept(x: i32, y: i32) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        win::refresh_at_kept(x, y)
+    }
+    #[cfg(not(windows))]
+    {
+        os::refresh_at(x, y)
+    }
+}
+
 /// A display, in device-independent pixels on the desktop (from the main display's top left): its
 /// bounds, and its work area, what a window may cover (less the menu bar and the Dock on macOS, the
 /// taskbar on Windows, panels the window manager keeps on X11).

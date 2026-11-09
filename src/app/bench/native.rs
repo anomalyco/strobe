@@ -511,11 +511,15 @@ fn runs(
         Some(se) => se.wait_change(changes_seen.get(), t),
         None => std::thread::sleep(t),
     };
-    // `resetPixels`: what each run starts from in the main window's pixels, read from outside (no
-    // driving session needed).
+    // `resetPixels`: what each run starts from in the main window's pixels, read from outside: through
+    // the session's capture when it has one open (never a second capture of the window), else a
+    // capture of its own, closed before the run.
     let mut pixel_starts = shown::PixelStarts::new(s, x)?;
     let start_window = RefCell::new(None);
     let read_pixels = |spec: &crate::driver::pixels::StartPixels| {
+        if let Some(read) = drive.session.get().and_then(|se| se.start_pixels(spec)) {
+            return read.ok();
+        }
         let win = drive.main.get();
         (win != 0).then(|| spec.read(&crate::driver::pixels::Window { cell: &start_window, win }).ok()).flatten()
     };
