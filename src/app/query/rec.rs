@@ -275,43 +275,45 @@ impl Rec {
     }
 
     /// A script recording's samples inside `spans` and outside `untimed` (ns on strobe's clock, as
-    /// `runs.json` keeps them): one phase's stretches of the measured runs.
+    /// `runs.json` and `lifecycle_spans` keep them): one phase's stretches of the measured runs, or one
+    /// part of the host's life (`--source startup`, `--source setup`).
     pub(super) fn phase_cpu(&self, spans: &[(u64, u64)], untimed: &[(u64, u64)]) -> Result<Stacks> {
-        let us = |v: &[(u64, u64)]| {
-            let mut v: Vec<(f64, f64)> = v.iter().map(|&(a, b)| (a as f64 / 1e3, b as f64 / 1e3)).collect();
-            v.sort_by(|a, b| a.0.total_cmp(&b.0));
-            v
-        };
         self.load_script(&us(spans), &us(untimed), HostFrames::Fold)
     }
 
-    /// The whole host profile's samples inside `spans` and outside `untimed` (µs, sorted), as
-    /// `probe::cpu::weights` weighs them.
-    fn load_script(&self, spans: &[(f64, f64)], untimed: &[(f64, f64)], host: HostFrames) -> Result<Stacks> {
+    /// The JavaScript the whole host profile sampled inside each group of `spans` (ns on strobe's
+    /// clock), µs, and in all of it: every sample's weight there but the profile's own `(root)` and
+    /// `(idle)`, as `probe::cpu::Rebased::sampled_in` counts it. One read of the profile for every group.
+    pub(super) fn host_sampled(&self, groups: &[Vec<(u64, u64)>]) -> Result<(Vec<f64>, f64)> {
+        let bytes = self.host_bytes()?;
+        let prof: CpuProfile = parse(&bytes)?;
+        let t = HostTimes::of(&prof);
+        let idle: std::collections::HashSet<u64> = prof.nodes.iter().filter(|n| matches!(n.call_frame.name.as_ref(), "(root)" | "(idle)")).map(|n| n.id).collect();
+        let sum = |spans: &[(f64, f64)]| -> f64 { t.weights(spans, &[]).iter().zip(&prof.samples).filter(|(_, id)| !idle.contains(*id)).map(|(w, _)| w).sum() };
+        let all = sum(&[(f64::NEG_INFINITY, f64::INFINITY)]);
+        Ok((groups.iter().map(|g| sum(&us(g))).collect(), all))
+    }
+
+    /// The whole host profile's bytes (`whole-host.json.gz`), uncompressed.
+    fn host_bytes(&self) -> Result<Vec<u8>> {
         let path = self.dir.join(crate::probe::cpu::WHOLE_HOST);
         if !path.is_file() {
             return Err(Error::usage(format!(
-                "{} has no whole host profile: --source host and a script's --phase read a script target's attribution recording, and one from before strobe cut its profile to the runs covers the whole host already (strobe query {} hotspots)",
+                "{} has no whole host profile: --source host|startup|setup and a script's --phase read a script target's attribution recording, and one from before strobe cut its profile to the runs covers the whole host already (strobe query {} hotspots)",
                 self.id, self.id
             )));
         }
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(std::fs::File::open(&path)?), &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// The whole host profile's samples inside `spans` and outside `untimed` (µs, sorted), as
+    /// `probe::cpu::weights` weighs them.
+    fn load_script(&self, spans: &[(f64, f64)], untimed: &[(f64, f64)], host: HostFrames) -> Result<Stacks> {
+        let bytes = self.host_bytes()?;
         let prof: CpuProfile = parse(&bytes)?;
-        let mut t = prof.start_time;
-        let times: Vec<f64> = prof
-            .samples
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                t += prof.time_deltas.get(i).copied().unwrap_or(0.0);
-                t
-            })
-            .collect();
-        let cap = prof.cap_us.unwrap_or(crate::probe::cpu::MAX_GAP_US);
-        let gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0 && *g <= cap).collect();
-        let last = Sampling::of(0.0, gaps).map_or(0.0, |s| s.median_us);
-        let w = crate::probe::cpu::weights(&times, cap, prof.over_us.unwrap_or(cap), last, spans, untimed);
+        let w = HostTimes::of(&prof).weights(spans, untimed);
         let mut out = Stacks::default();
         self.add_profile(&mut out, &prof, host, |i| w.get(i).copied().filter(|w| *w > 0.0));
         if host == HostFrames::Name {
@@ -453,6 +455,46 @@ fn files(dir: &Path, ext: &str) -> Result<Vec<PathBuf>> {
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == ext)).collect();
     v.sort();
     Ok(v)
+}
+
+/// Stretches in ns on strobe's clock as µs, sorted by start.
+fn us(v: &[(u64, u64)]) -> Vec<(f64, f64)> {
+    let mut v: Vec<(f64, f64)> = v.iter().map(|&(a, b)| (a as f64 / 1e3, b as f64 / 1e3)).collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    v
+}
+
+/// The whole host profile's sample times (µs on strobe's clock) and what its samples weigh: the gap
+/// to the next, one over the file's `capUs` its `overUs`, the last the median gap.
+struct HostTimes {
+    times: Vec<f64>,
+    cap: f64,
+    over: f64,
+    last: f64,
+}
+
+impl HostTimes {
+    fn of(prof: &CpuProfile) -> HostTimes {
+        let mut t = prof.start_time;
+        let times: Vec<f64> = prof
+            .samples
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                t += prof.time_deltas.get(i).copied().unwrap_or(0.0);
+                t
+            })
+            .collect();
+        let cap = prof.cap_us.unwrap_or(crate::probe::cpu::MAX_GAP_US);
+        let gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0 && *g <= cap).collect();
+        let last = Sampling::of(0.0, gaps).map_or(0.0, |s| s.median_us);
+        HostTimes { over: prof.over_us.unwrap_or(cap), times, cap, last }
+    }
+
+    /// Each sample's weight inside `spans` and outside `untimed` (µs, sorted and apart).
+    fn weights(&self, spans: &[(f64, f64)], untimed: &[(f64, f64)]) -> Vec<f64> {
+        crate::probe::cpu::weights(&self.times, self.cap, self.over, self.last, spans, untimed)
+    }
 }
 
 /// A profile from JSON: profiles nest one level per stack frame, past serde_json's default limit.
