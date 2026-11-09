@@ -315,7 +315,8 @@ fn machine_file() -> Option<File> {
 /// another user or state folder holds it, whose registration this one cannot read, and every bench
 /// here waits for it. None when it is free, or a bench of this folder (listed by `list`) holds it.
 pub fn machine_busy() -> Option<String> {
-    let machine = machine_file()?;
+    // Read-only: a status creates no lock file (none means no bench ever held it).
+    let machine = File::open(machine_path()?).ok()?;
     match machine.try_lock() {
         Ok(()) => {
             let _ = machine.unlock();

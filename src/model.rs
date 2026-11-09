@@ -160,16 +160,16 @@ impl ValidatorId {
     }
 
     /// The machine or the phone, not the series that met it: every series after it would meet it too,
-    /// so a bench stops on it rather than refuse each series in turn. Any other refusal is the series'
-    /// own: a bench lists it refused and runs the rest.
+    /// so a bench stops on it rather than refuse each series in turn (a CPU that runs slow: `Throttled`).
+    /// Any other refusal is the series' own: a bench lists it refused and runs the rest.
     pub fn machine_wide(self) -> bool {
         use ValidatorId::*;
         match self {
-            SessionLocked | Background | BackgroundPriority | Thermal | DeviceAsleep | ConcurrentBench | PowerSave | LowBattery | Emulator | WirelessTransport => true,
+            SessionLocked | Background | BackgroundPriority | Thermal | DeviceAsleep | ConcurrentBench | PowerSave | LowBattery | Emulator | WirelessTransport | Throttled => true,
             SoftwareGpu | DevBuild | DebuggerAttached | WindowHidden | WrongScreen | UnpacedSpin | NoPresentSource | AmbiguousInteraction | PatternInput | VariantMismatch | RunIncomplete
-            | Throttled | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter | NotOnThisOs
-            | NotForTarget | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent | Untimed
-            | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | NotProfileable | MouseNotEnabled | AnchorNotFound | AnchorAmbiguous => false,
+            | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter | NotOnThisOs | NotForTarget
+            | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent | Untimed | OutOfView | Covered
+            | DisplayTooSmall | DeviceMismatch | NotProfileable | MouseNotEnabled | AnchorNotFound | AnchorAmbiguous => false,
         }
     }
 }

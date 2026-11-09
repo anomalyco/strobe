@@ -105,6 +105,9 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
         let native = meta["native"] == true;
         text += &if native {
             format!("next     strobe query {rec} threads · strobe query {rec} hotspots --by package · strobe query {rec} gpu · strobe query {rec} summary\n")
+        } else if meta["script"] == true {
+            // A script host: its profile and threads, no page to lay out or style.
+            format!("next     strobe query {rec} hotspots --by package · strobe query {rec} threads --timeline · strobe query {rec} summary (per run)\n")
         } else if meta["engine"].as_str().is_some_and(|e| e != "chromium") {
             // No style invalidation tracking outside Chromium's trace.
             format!("next     strobe query {rec} hotspots --by package · strobe query {rec} layout · strobe query {rec} summary (per run) · strobe report recording {rec} --open\n")
@@ -148,6 +151,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let target = match local {
         Some(path) if page_file(path) => super::look::address(path),
         Some(_) if args.has("video") => return Err(Error::usage("--video films a target as it runs; file:<trace> imports a capture taken already")),
+        Some(_) if args.has("max-time") => return Err(Error::usage("--max-time caps a recording's wait for the bench slot; file:<trace> imports a capture taken already, waiting for nothing")),
         Some(path) => return super::query::import(path),
         None if !target.contains(':') || std::path::Path::new(&target).is_file() => {
             if page_file(&target) {

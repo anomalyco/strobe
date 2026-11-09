@@ -1342,13 +1342,15 @@ fn counting(s: &Series) -> Counting {
     }
 }
 
-/// Copies what `from` measured of the metrics `pick` names (values and refusals) into `into`: a
-/// counter block's counts into its timing block, or the other way round.
+/// Copies what `from` measured of the metrics `pick` names (values, refusals and a check's spread) into
+/// `into`: a counter block's counts into its timing block, or the other way round.
 fn take_metrics(into: &mut Block, from: &Block, pick: impl Fn(&str) -> bool) {
     into.values.retain(|k, _| !pick(k));
     into.refused.retain(|k, _| !pick(k));
+    into.spread.retain(|k, _| !pick(k));
     into.values.extend(from.values.iter().filter(|(k, _)| pick(k)).map(|(k, v)| (k.clone(), *v)));
     into.refused.extend(from.refused.iter().filter(|(k, _)| pick(k)).map(|(k, r)| (k.clone(), r.clone())));
+    into.spread.extend(from.spread.iter().filter(|(k, _)| pick(k)).map(|(k, s)| (k.clone(), *s)));
 }
 
 /// A counter metric that only a counter block measures on this OS.
@@ -1970,6 +1972,9 @@ pub fn run(args: &Args) -> Result<Output> {
     let busy = host::system_busy(1000);
     isolate::prune_gpu_caches();
     let runner = Runner::spawn(&file, dir.join("runner.log"), runner_pin)?;
+    // `--max-time` from here: every wait counts, the slot's before the first block too (`fit_answer`).
+    let started = Instant::now();
+    let max_time = args.get("max-time").map(duration_ms).transpose()?.map(Duration::from_millis);
     let mut ctx = Ctx {
         args,
         exp: exp.clone(),
@@ -2039,7 +2044,7 @@ pub fn run(args: &Args) -> Result<Output> {
         phone: None,
         locked_out: false,
         active_out: false,
-        deadline: None,
+        deadline: max_time.map(|t| started + t),
         ran_out: false,
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
@@ -2265,9 +2270,6 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         ctx.reg.set_eta(estimate["blocks_ms"].as_f64().unwrap_or(0.0));
     }
-    let started = Instant::now();
-    let max_time = args.get("max-time").map(duration_ms).transpose()?.map(Duration::from_millis);
-    ctx.deadline = max_time.map(|t| started + t);
     let mut series_out = Vec::new();
     let mut all_decided = true;
     let pixels_only = args.has("pixels-only");
@@ -2388,14 +2390,6 @@ pub fn run(args: &Args) -> Result<Output> {
                 out_of_time.push(s.label());
                 continue;
             }
-            // A headless Chromium page's wall-time primary met the display off mid-bench (`dark_state`):
-            // that series is refused, and the rest of the file (CPU, counts, network) runs on.
-            Err(e) if e.refusal.as_ref().is_some_and(|r| r.validator == ValidatorId::Throttled) && dark_page(&ctx, s) && dark_metric(&s.primary) => {
-                let r = e.refusal.map(|r| *r).unwrap_or_else(|| dark_refusal(&s.primary));
-                progress(format!("\n{}  refused: {}", s.label(), refused_text(&json!(r))));
-                series_out.push(refused_series(&ctx, s, &r));
-                continue;
-            }
             // The session stayed locked past `--unlock-wait` and this series needs a presenting window: it
             // is not run (`--resume` runs it), and the series that need none run on.
             Err(e) if screened_out(&e) && !stop_requested() => {
@@ -2407,7 +2401,7 @@ pub fn run(args: &Args) -> Result<Output> {
             Err(e) => {
                 // The series' own refusal (OverheadBudget, a target's engine, …): it is listed refused,
                 // and the rest of the file runs on.
-                if let Some(r) = series_refusal(&ctx, &e) {
+                if let Some(r) = series_refusal(&ctx, s, &e) {
                     progress(format!("\n{}  refused: {}", s.label(), refused_text(&json!(r))));
                     let out = refused_series(&ctx, s, &r);
                     checkpoint(&mut ctx, &s.label(), json!({ "done": out }));
@@ -2429,7 +2423,7 @@ pub fn run(args: &Args) -> Result<Output> {
             if screened_out(&e) && !stop_requested() {
                 screened = Some(e);
                 partial = true;
-            } else if let Some(r) = series_refusal(&ctx, &e) {
+            } else if let Some(r) = series_refusal(&ctx, s, &e) {
                 progress(format!("\n{}  refused: {}", s.label(), refused_text(&json!(r))));
                 if out["not_run"] == true {
                     out = refused_series(&ctx, s, &r);
@@ -4925,12 +4919,14 @@ fn refused_series(ctx: &Ctx, s: &Series, r: &Refusal) -> Value {
 }
 
 /// The series' own refusal, which ends that series alone: an exit-4 refusal that is not the machine's
-/// (`ValidatorId::machine_wide`), outside a stop, a wait `--max-time` cut, or a phone that went away. The
-/// user's state disturbed, a launch that kept failing and strobe's own errors are no refusal: they stop
-/// the bench.
-fn series_refusal(ctx: &Ctx, e: &Error) -> Option<Refusal> {
+/// (`ValidatorId::machine_wide`), outside a stop, a wait `--max-time` cut, or a phone that went away. One
+/// machine-wide refusal is a series' own: a headless Chromium page's wall-time primary that met the display
+/// off (`Throttled`, `dark_state`), where the rest of the file (CPU, counts, network) runs on. The user's
+/// state disturbed, a launch that kept failing and strobe's own errors are no refusal: they stop the bench.
+fn series_refusal(ctx: &Ctx, s: &Series, e: &Error) -> Option<Refusal> {
     let r = e.refusal.as_deref().filter(|_| e.code == 4 && !stop_requested() && !ctx.ran_out && phone_lost(ctx).is_none())?;
-    (!r.validator.machine_wide()).then(|| r.clone())
+    let dark = r.validator == ValidatorId::Throttled && dark_page(ctx, s) && dark_metric(&s.primary);
+    (!r.validator.machine_wide() || dark).then(|| r.clone())
 }
 
 /// A series that met its own refusal (`series_refusal`) after some of its blocks: they are kept, and
@@ -4946,10 +4942,18 @@ fn refused_after(out: &mut Value, r: &Refusal) {
         }
         return;
     }
-    out["primary"]["verdict"] = json!(format!("refused ({}): {}", r.validator, r.summary));
-    out["primary"]["verdict_kind"] = json!(VerdictKind::Refused);
-    out["primary"]["refusal"] = json!(r);
-    out["primary"]["decided"] = json!(false);
+    let p = &mut out["primary"];
+    // A comparison's numbers too, as `Comparison::refuse` leaves them: a refused primary is no measurement.
+    if p.get("base").is_some() {
+        for k in ["base", "head", "estimate", "lo", "hi", "p", "confidence", "needed_pairs"] {
+            p[k] = Value::Null;
+        }
+        p["exact"] = json!(false);
+    }
+    p["verdict"] = json!(format!("refused ({}): {}", r.validator, r.summary));
+    p["verdict_kind"] = json!(VerdictKind::Refused);
+    p["refusal"] = json!(r);
+    p["decided"] = json!(false);
     out["decided"] = json!(false);
     out["stopped"] = json!("refused");
 }
@@ -5889,12 +5893,16 @@ fn screened_out(e: &Error) -> bool {
 
 /// A series' `halt` as its result keeps it, with the validator of a typed one (`screened_out`).
 fn halt_json(e: &Error) -> Value {
-    json!({ "code": e.code, "message": e.message, "validator": e.validator() })
+    json!({ "code": e.code, "message": e.message, "validator": e.validator(), "refusal": e.refusal })
 }
 
-/// A `halt_json` read back.
+/// A `halt_json` read back: its refusal whole (summary, detail, fix), else (older results) from its
+/// validator and message.
 fn halt_error(h: &Value) -> Error {
     let e = Error::new(h["code"].as_i64().unwrap_or(1) as i32, h["message"].as_str().unwrap_or(""));
+    if let Ok(r) = serde_json::from_value::<Refusal>(h["refusal"].clone()) {
+        return Error { hint: r.fix.clone(), refusal: Some(Box::new(r)), ..e };
+    }
     match h["validator"].as_str().and_then(ValidatorId::from_name) {
         // The message is already the refusal's (`Refusal::message`).
         Some(v) => Error { refusal: Some(Box::new(Refusal::new(v, e.message.split_once(": ").map_or(e.message.as_str(), |(_, rest)| rest)))), ..e },
@@ -11661,8 +11669,10 @@ pub(crate) fn render(r: &Value) -> String {
     if let Some(t) = store::ledger::line(r) {
         out += &format!("ledger  {t}\n");
     }
-    // `--blocks` compares nothing, so it has no report: its blocks are in its result.json.
-    if r["series"].as_array().is_some_and(|a| a.iter().any(|s| s["kind"] == "blocks") && a.iter().all(|s| s["kind"] == "blocks" || s["kind"] == "refused")) {
+    // `--blocks` compares nothing, so it has no report: its blocks are in its result.json (every series
+    // refused too: the command line says it was `--blocks`).
+    let blocks_run = !r["args"]["flags"]["blocks"].is_null() || r["series"].as_array().is_some_and(|a| a.iter().any(|s| s["kind"] == "blocks"));
+    if blocks_run && r["series"].as_array().is_some_and(|a| a.iter().all(|s| s["kind"] == "blocks" || s["kind"] == "refused")) {
         out += &format!("{id} · strobe query {id}\n");
     } else {
         out += &format!("{id} · strobe report experiment {id} --open\n");

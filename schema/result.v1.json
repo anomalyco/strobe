@@ -456,7 +456,7 @@
         "halt": {
           "type": ["object", "null"],
           "description": "Why the series stopped part way or did not run; validator: SessionLocked or WindowHidden when --unlock-wait ran out (the rest of the file ran on, and --resume runs it).",
-          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] } }
+          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] }, "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "The refusal that stopped it, whole (summary, detail, fix); absent in older results." } }
         },
         "not_run": { "type": "boolean" },
         "passed": { "type": "boolean", "description": "check: the case ran." },
