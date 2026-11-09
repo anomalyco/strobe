@@ -44,7 +44,8 @@ const target = url(`http://127.0.0.1:${port}/`, {
   },
 })
 
-const metrics = ["cpu.work", "cpu.renderer", "cpu.app.total"]
+// cpu.gpu and cpu.browser: a renderer strobe had read that ends is never "role unread" under them (swap).
+const metrics = ["cpu.work", "cpu.renderer", "cpu.gpu", "cpu.browser", "cpu.app.total"]
 
 export default bench({
   targets: { ended: target },

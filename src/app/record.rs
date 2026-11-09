@@ -395,7 +395,7 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let tree = browser.pids();
     // The adapter the page drew on, and the one driving its window's display (`screen.gpu`).
     let display = host::main_window(&tree).filter(|_| host_screen).and_then(|w| host::display_of(w.hwnd));
-    let drawn_on = samples.as_ref().zip(os.as_ref()).and_then(|(s, o)| super::bench::drawing_gpu(s, std::slice::from_ref(o), display.as_ref()));
+    let drawn_on = samples.as_ref().zip(os.as_ref()).and_then(|(s, o)| super::bench::drawing_gpu(s, &[o], display.as_ref()));
     let os_frames = os_frames.map(|r| r.and_then(|c| c.stop()));
     if host_screen && (awake.locks() > 0 || host::session_locked()) {
         return Err(validity::locked());
@@ -731,7 +731,7 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     let tree = browser.pids();
     // The adapter the page drew on, and the one driving its window's display (`screen.gpu`).
     let display = host::main_window(&tree).filter(|_| !headless).and_then(|w| host::display_of(w.hwnd));
-    let drawn_on = super::bench::drawing_gpu(&samples, std::slice::from_ref(&os), display.as_ref());
+    let drawn_on = super::bench::drawing_gpu(&samples, &[&os], display.as_ref());
     let presents = presents.map(|r| r.and_then(|c| c.stop()));
     if !headless && (awake.locks() > 0 || host::session_locked()) {
         return Err(validity::locked());
@@ -980,7 +980,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let os = samples.window(t0, t1);
         // The adapter the app drew on, and the one driving its window's display.
         let display = n.window.as_ref().and_then(|w| host::display_of(w.hwnd));
-        if let Some(g) = super::bench::drawing_gpu(&samples, std::slice::from_ref(&os), display.as_ref()) {
+        if let Some(g) = super::bench::drawing_gpu(&samples, &[&os], display.as_ref()) {
             screen["gpu"] = g;
         }
         let presents = presents.map(|r| r.and_then(|c| c.stop()));

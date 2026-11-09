@@ -186,7 +186,7 @@ noisy discovery evidence, or leave them out.
   - A `--check` never waits on the speed check: a slow one is a `! Background` or `! Throttled` line and
     the case runs at once. Its values are then a loaded machine's.
   - `RunIncomplete` on `cpu.renderer`/`cpu.gpu`/`cpu.browser` names why: a process of that role ended
-    in the run, or processes whose role was never read ended and used over 1% of it. `cpu.work` keeps
+    in the run, or ended processes (their CPU pooled) used over 1% of it. `cpu.work` keeps
     their CPU: compare that.
   - `RunIncomplete`: a run threw, timed out, its `until` never came, or the app exited.
   - `ResetIncomplete`: a run started from another state than run 1 (`the reset did not restore …`).

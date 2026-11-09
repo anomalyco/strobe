@@ -443,6 +443,16 @@ fn quiet_within(ctx: &mut Ctx, max: Duration, waiting: &str) -> Result<()> {
     }
 }
 
+/// What is left of `--max-time` (no limit without it).
+fn time_left(ctx: &Ctx) -> Duration {
+    ctx.deadline.map_or(Duration::MAX, |d| d.saturating_duration_since(Instant::now()))
+}
+
+/// `--max-time` has passed: no block starts that the bench could do without.
+fn past_deadline(ctx: &Ctx) -> bool {
+    ctx.deadline.is_some_and(|d| Instant::now() >= d)
+}
+
 /// A wait ran into `--max-time`: the block it held up is not run, and the bench ends as when the time
 /// runs out between series (a comparison keeps its pairs; anything else stops, exit 124).
 fn out_of_time(ctx: &mut Ctx, waiting: &str) -> Error {
@@ -550,19 +560,20 @@ struct Run {
 enum RoleLost {
     /// A process of that role ended in a timed part of the run.
     Ended,
-    /// Processes whose role strobe never read (they ended first) used `ms` in the run's timed parts,
-    /// `pct` % of the role's own CPU there (None: the role used none): over the 1% that could be the
-    /// role's and leave its value standing.
-    Unread { ms: f64, pct: Option<f64> },
+    /// Processes that ended used `ms` in the run's timed parts, `pct` % of the role's own CPU there (None:
+    /// the role used none): over the 1% that could be the role's and leave its value standing. What ended
+    /// is pooled, so it cannot be split by process: `known` is the role of a process strobe had read that
+    /// ended among them (another role's), None when every one was born and ended unread in the run.
+    Pooled { ms: f64, pct: Option<f64>, known: Option<usize> },
 }
 
 /// Why `cpu.<role>` (`m`) is refused, by cause, over the `lost` runs of `runs` measured ones.
 fn role_lost_text(m: &str, role: &str, lost: &[RoleLost], runs: usize) -> String {
     let ended = lost.iter().filter(|l| matches!(l, RoleLost::Ended)).count();
-    let unread: Vec<(f64, Option<f64>)> = lost
+    let pooled: Vec<(f64, Option<f64>, Option<usize>)> = lost
         .iter()
         .filter_map(|l| match l {
-            RoleLost::Unread { ms, pct } => Some((*ms, *pct)),
+            RoleLost::Pooled { ms, pct, known } => Some((*ms, *pct, *known)),
             RoleLost::Ended => None,
         })
         .collect();
@@ -570,17 +581,22 @@ fn role_lost_text(m: &str, role: &str, lost: &[RoleLost], runs: usize) -> String
     if ended > 0 {
         parts.push(format!("in {ended} of {runs} measured runs a {role} process ended inside the run: what it used there counts in cpu.work, but as no role's"));
     }
-    if !unread.is_empty() {
-        let ms = unread.iter().map(|u| u.0).fold(0.0, f64::max);
-        let pct = unread.iter().filter_map(|u| u.1).reduce(f64::max);
-        let (most, in_a_run) = if unread.len() > 1 { ("up to ", " in a run") } else { ("", "") };
+    if !pooled.is_empty() {
+        let ms = pooled.iter().map(|u| u.0).fold(0.0, f64::max);
+        let pct = pooled.iter().filter_map(|u| u.1).reduce(f64::max);
+        let (most, in_a_run) = if pooled.len() > 1 { ("up to ", " in a run") } else { ("", "") };
         let share = match pct {
             Some(p) => format!("{most}{} of {m}", fmt::value(p, "%")),
             None => format!("while {m} read none"),
         };
+        // A process of another role strobe had read ended too: what ended is not all unread.
+        let whose = match pooled.iter().find_map(|u| u.2) {
+            Some(k) => format!(", a {} process among them,", PROCESS_ROLES[k].0),
+            None => " (role unread)".to_string(),
+        };
         parts.push(format!(
-            "in {} of {runs} measured runs processes that ended inside the run (role unread) used {most}{}{in_a_run}, {share} (over the 1% limit): it counts in cpu.work, but may have been the {role} processes'",
-            unread.len(),
+            "in {} of {runs} measured runs processes that ended inside the run{whose} used {most}{}{in_a_run}, {share} (over the 1% limit): it counts in cpu.work, but strobe cannot tell how much of it was the {role} processes'",
+            pooled.len(),
             fmt::value(ms, "ms")
         ));
     }
@@ -2242,6 +2258,8 @@ pub fn run(args: &Args) -> Result<Output> {
             not_run.push(s.label());
             continue;
         }
+        // A wait that ran into `--max-time` is said of the series it held up only.
+        ctx.ran_out = false;
         // A resumed experiment keeps the series it had finished.
         if let Some(done) = ctx.saved["series"][s.label()].get("done").filter(|d| d.is_object()).cloned() {
             progress(format!("\n{}  finished before the resume: kept", s.label()));
@@ -2390,7 +2408,8 @@ pub fn run(args: &Args) -> Result<Output> {
             ctx.warnings.push(validity::warn("Rerun", RERUN));
         }
     }
-    if let Some(h) = halted.as_ref().filter(|_| check || pixels_only) {
+    // Every run but a comparison (whose result says it stopped in its own line) says why it stopped.
+    if let Some(h) = halted.as_ref().filter(|_| mode != Mode::Compare) {
         let rest = if not_run.is_empty() { String::new() } else { format!("; not run: {}", not_run.join(", ")) };
         ctx.warnings.push(validity::warn("Stopped", format!("{}{rest}", h.message)));
     }
@@ -3611,6 +3630,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         progress(format!("  {} blocks: {k} pairs (Linux perf events never run in a timing block)", if main_counters { "timing" } else { "counter" }));
         match pass_pairs(ctx, s, variants, (!main_counters, false), k) {
             Ok(p) => pass = Some(p),
+            // `--max-time` in one of its waits: the comparison stands; the pass's metrics are missing.
+            Err(e) if ctx.ran_out && !stop_requested() => counters_note = Some(format!("the {} blocks were not finished: {}", if main_counters { "timing" } else { "counter" }, e.message)),
             Err(e) if e.code == 130 || e.code == 124 || stop_requested() => halted = Some(if e.code == 124 { e } else { stop_error() }),
             Err(e) => counters_note = Some(format!("the {} blocks failed: {}", if main_counters { "timing" } else { "counter" }, e.message)),
         }
@@ -3628,6 +3649,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         progress(format!("  {} blocks: {k} pairs (the HTTP probe never runs in a clean timing block)", if main_http { "timing" } else { "probe" }));
         match pass_pairs(ctx, s, variants, (false, !main_http), k) {
             Ok(p) => pass = Some(p),
+            Err(e) if ctx.ran_out && !stop_requested() => http_note = Some(format!("the {} blocks were not finished: {}", if main_http { "timing" } else { "probe" }, e.message)),
             Err(e) if e.code == 130 || e.code == 124 || stop_requested() => halted = Some(if e.code == 124 { e } else { stop_error() }),
             Err(e) => http_note = Some(format!("the {} blocks failed: {}", if main_http { "timing" } else { "probe" }, e.message)),
         }
@@ -3840,6 +3862,11 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let unprofiled: Vec<(usize, String)> = side_targets.iter().enumerate().filter_map(|(i, t)| Some((i, no_profiler(t, s.launch.is_object())?))).collect();
     let why = match ctx.args.get("why").unwrap_or(if ctx.args.get("probes") == Some("timing") { "never" } else { "auto" }) {
         _ if halted.is_some() => false,
+        // `--max-time` ran out with the pairs: no untimed block starts after it.
+        "always" | "auto" if past_deadline(ctx) && (differs || ctx.args.get("why") == Some("always")) => {
+            warnings.push(validity::warn("MaxTime", format!("{}: --max-time ran out after its pairs: no attribution blocks", s.label())));
+            false
+        }
         // A command ends inside each run: there is nothing to profile it with.
         _ if side_targets.iter().all(|t| t["kind"] == "cli") => false,
         "always" | "auto" if unprofiled.len() == variants.len() => {
@@ -3920,6 +3947,11 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                     }
                     recordings[v.role] = json!(b.recording);
                 }
+                // `--max-time` in its wait: the comparison stands, without this profile.
+                Err(e) if ctx.ran_out && !stop_requested() => {
+                    warnings.push(validity::warn("MaxTime", format!("{}: {} attribution block not run: {}", s.label(), side_of(ctx, v), e.message)));
+                    break;
+                }
                 // A stop or an unlock wait that ran out ends the bench here, as in the pairs.
                 Err(e) if e.code == 130 || e.code == 124 || stop_requested() => {
                     halted = Some(if e.code == 124 { e } else { stop_error() });
@@ -3932,7 +3964,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // `--video` (SPEC §8.8): after every timed pair, one untimed block per variant films a warmed run,
     // through the same OS capture (or renderer) on both sides. Its numbers join no verdict.
     let mut videos = json!({});
-    if ctx.args.has("video") && halted.is_none() {
+    if ctx.args.has("video") && halted.is_none() && (ctx.ran_out || past_deadline(ctx)) {
+        warnings.push(validity::warn("MaxTime", format!("{}: --max-time ran out after its pairs: no video blocks", s.label())));
+    } else if ctx.args.has("video") && halted.is_none() {
         if s.launch.is_object() {
             warnings.push(validity::info(
                 "Video",
@@ -3951,6 +3985,10 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                         Some(r) => videos[v.role] = json!(r),
                         None => warnings.push(validity::warn("Video", format!("{} video block kept no video", side_of(ctx, v)))),
                     },
+                    Err(e) if ctx.ran_out && !stop_requested() => {
+                        warnings.push(validity::warn("MaxTime", format!("{}: {} video block not run: {}", s.label(), side_of(ctx, v), e.message)));
+                        break;
+                    }
                     Err(e) if e.code == 130 || e.code == 124 || stop_requested() => {
                         halted = Some(if e.code == 124 { e } else { stop_error() });
                         break;
@@ -3972,7 +4010,24 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         }
     }
     let timing_recordings: Vec<Value> = blocks.iter().filter_map(|b| b.recording.clone().map(|r| json!({ "variant": b.variant, "pair": b.pair, "recording": r }))).collect();
-    let pixels = if ctx.args.has("pixels") && variants.len() > 1 && halted.is_none() { pixels_series(ctx, s, variants)? } else { Value::Null };
+    let pixels = if ctx.args.has("pixels") && variants.len() > 1 && halted.is_none() {
+        // `--max-time`: the pairs and their verdicts stand without the snapshots.
+        if ctx.ran_out || past_deadline(ctx) {
+            warnings.push(validity::warn("MaxTime", format!("{}: --max-time ran out after its pairs: no pixel snapshots", s.label())));
+            Value::Null
+        } else {
+            match pixels_series(ctx, s, variants) {
+                Ok(p) => p,
+                Err(e) if ctx.ran_out && !stop_requested() => {
+                    warnings.push(validity::warn("MaxTime", format!("{}: pixel snapshots not finished: {}", s.label(), e.message)));
+                    Value::Null
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    } else {
+        Value::Null
+    };
     if pixels.as_array().is_some_and(|a| a.iter().any(|p| p["state"] != "same")) {
         warnings.push(validity::warn("PixelsDiffer", "base and head drew different pixels at a snapshot: see pixels"));
     }
@@ -5027,7 +5082,11 @@ fn check_slow(label: &str, side: &str, e: &Error) -> Warning {
 /// `--max-time`) and refuses a slow check; a `--check` runs it once and says a slow one (`check_slow`).
 fn native_speed(ctx: &mut Ctx, s: &Series, v: &Variant) -> Result<Option<f64>> {
     if ctx.mode != Mode::Check {
-        return validity::native_speed_checked(ctx.pin, validity::SpeedWait::Timed(ctx.deadline));
+        return match validity::native_speed_checked(ctx.pin, validity::SpeedWait::Timed(ctx.deadline)) {
+            // `--max-time` cut its waits short while it was still slow.
+            Err(e) if e.code == 124 && e.validator().is_none() => Err(out_of_time(ctx, &e.message)),
+            r => r,
+        };
     }
     match validity::native_speed_checked(ctx.pin, validity::SpeedWait::Once) {
         Err(e) if matches!(e.validator(), Some(ValidatorId::Background | ValidatorId::Throttled)) => {
@@ -5077,13 +5136,13 @@ pub(crate) fn screen_state(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::P
     })
 }
 
-/// The adapters a target's processes drew on over `windows` (a block's whole span, a recording's), from the OS's
-/// per-process GPU statistics: those with 3D engine time, busiest first (else the one with any engine
-/// time, else the one it holds the most GPU memory on: `by` says which); and the adapter the OS names for
-/// its window's display (`display`), which on a machine with an
-/// integrated and a discrete GPU need not be one of them: then each frame crosses between adapters
-/// (`cross`, `CrossAdapterScanout`). `screen.gpu` of a block or recording; None when no adapter was read.
-pub(crate) fn drawing_gpu(samples: &probe::os::Samples, windows: &[probe::os::Summary], display: Option<&host::DisplayPath>) -> Option<Value> {
+/// The adapters a target's processes drew on over `windows` (a case's measured runs, a recording's span),
+/// from the OS's per-process GPU statistics: those with 3D engine time, busiest first (else the one with
+/// any engine time, else the one they hold the most GPU memory on as the last window ends, as `gpu.vram`
+/// reads it: `by` says which); and the adapter the OS names for its window's display (`display`), which
+/// on a machine with an integrated and a discrete GPU need not be one of them: then each frame crosses
+/// between adapters (`cross`, `CrossAdapterScanout`). `screen.gpu`; None when no adapter was read.
+pub(crate) fn drawing_gpu(samples: &probe::os::Samples, windows: &[&probe::os::Summary], display: Option<&host::DisplayPath>) -> Option<Value> {
     let n = windows.len().max(1) as f64;
     let mut by: BTreeMap<String, (f64, f64)> = BTreeMap::new();
     for w in windows {
@@ -5095,9 +5154,9 @@ pub(crate) fn drawing_gpu(samples: &probe::os::Samples, windows: &[probe::os::Su
     }
     let mut drawing: Vec<(&String, f64)> = by.iter().filter(|(_, u)| u.0 > 0.0).map(|(a, u)| (a, u.0)).collect();
     drawing.sort_by(|a, b| b.1.total_cmp(&a.1));
-    // A static page can draw nothing for a whole block: its processes still hold their GPU memory where
-    // they drew (an integrated GPU's is all shared memory).
-    let held = || windows.iter().flat_map(|w| w.gpu_memory.iter()).filter(|(_, m)| m.0 + m.1 > 0.0).max_by(|a, b| (a.1.0 + a.1.1).total_cmp(&(b.1.0 + b.1.1))).map(|(a, _)| (a.clone(), "memory"));
+    // A static page draws nothing in its runs: its processes still hold their GPU memory where they drew
+    // (an integrated GPU's is all shared memory).
+    let held = || windows.last()?.gpu_memory.iter().filter(|(_, m)| m.0 + m.1 > 0.0).max_by(|a, b| (a.1.0 + a.1.1).total_cmp(&(b.1.0 + b.1.1))).map(|(a, _)| (a.clone(), "memory"));
     let (adapter, by_what) =
         drawing.first().map(|d| (d.0.clone(), "3d")).or_else(|| by.iter().filter(|(_, u)| u.1 > 0.0).max_by(|a, b| a.1.1.total_cmp(&b.1.1)).map(|(a, _)| (a.clone(), "engines"))).or_else(held)?;
     // An adapter the OS does not name for the display (id 0, or none of the sampled ones) is unknown.
@@ -6364,7 +6423,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // air every block waited the full 10 s).
     let settled = Instant::now();
     if x.measures_time() && ctx.pin.is_some() && phone.is_none() {
-        validity::wait_quiet(ctx.pin, Duration::from_secs(10));
+        validity::wait_quiet(ctx.pin, Duration::from_secs(10).min(time_left(ctx)));
     }
     let quiet_ms = settled.elapsed().as_secs_f64() * 1e3;
     let launched = Instant::now();
@@ -6982,9 +7041,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             };
             progress(format!("  the {side} speed check ran slow ({}): it runs once more after the CPUs settle", e.message));
             if on_phone.is_none() {
-                validity::wait_quiet(pin, Duration::from_secs(10));
+                validity::wait_quiet(pin, Duration::from_secs(10).min(time_left(ctx)));
             }
-            std::thread::sleep(Duration::from_secs(2));
+            nap_within(ctx, Duration::from_secs(2), "a slow page speed check waited to run again")?;
             (checked, other) = check()?;
             first_slow = Some(first);
         }
@@ -7476,7 +7535,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             };
             let role_lost: [Option<RoleLost>; 3] = std::array::from_fn(|i| match &timed_cpu {
                 Some(c) if c.gone.iter().any(|p| roles.get(p) == Some(&i)) => Some(RoleLost::Ended),
-                Some(c) if c.ended.saturating_mul(100) > role_cycles[i] => Some(RoleLost::Unread { ms: ended_ms, pct: (role_cycles[i] > 0).then(|| 100.0 * c.ended as f64 / role_cycles[i] as f64) }),
+                Some(c) if c.ended.saturating_mul(100) > role_cycles[i] => Some(RoleLost::Pooled {
+                    ms: ended_ms,
+                    pct: (role_cycles[i] > 0).then(|| 100.0 * c.ended as f64 / role_cycles[i] as f64),
+                    known: c.gone.iter().find_map(|p| roles.get(p).copied().filter(|r| *r != i)),
+                }),
                 Some(_) => None,
                 None => Some(RoleLost::Ended),
             });
@@ -7805,15 +7868,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let procs1 = snapshot_procs();
             let background = busiest_others(&procs0, &procs1);
             // A phone's page reaches none of this computer's screens.
-            let mut screen = if on_phone.is_some() { Value::Null } else { screen_state(&procs0, &procs1) };
-            // The adapter the page drew on over the block (its load, setup and runs: a run that only runs script
-            // draws nothing), and the one driving its window's display: on a machine with two GPUs, `gpu.*` is
-            // read with it.
+            let screen = if on_phone.is_some() { Value::Null } else { screen_state(&procs0, &procs1) };
+            // The adapter the page drew on over the measured runs, and the one driving its window's display: on a
+            // machine with two GPUs, `gpu.*` is read with it. Each case's block over its own runs (below), the
+            // recording over all of them.
+            let display = if on_phone.is_some() || headless { None } else { host::main_window(&browser.pids()).and_then(|w| host::display_of(w.hwnd)) };
+            let mut meta_screen = screen.clone();
             if on_phone.is_none() {
-                let display = if headless { None } else { host::main_window(&browser.pids()).and_then(|w| host::display_of(w.hwnd)) };
-                if let Some(g) = drawing_gpu(&samples, &[samples.window(0, u64::MAX)], display.as_ref()) {
-                    cross_adapter_note(&mut ctx.warnings, &format!("{} · {side} block", s0.label()), &g);
-                    screen["gpu"] = g;
+                let windows: Vec<probe::os::Summary> = page_cases.iter().flat_map(|(_, c)| c.runs[measured_of(c).0].iter().map(|r| samples.window(r.t0, r.t1)).collect::<Vec<_>>()).collect();
+                if let Some(g) = drawing_gpu(&samples, &windows.iter().collect::<Vec<_>>(), display.as_ref()) {
+                    meta_screen["gpu"] = g;
                 }
             }
             // The window must have stayed visible for the whole block, and the browser strobe's alone.
@@ -8000,6 +8064,14 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     .collect();
                 let gpu_3d: BTreeMap<String, f64> = gpu_runs.iter().filter_map(|(k, s)| Some((k.clone(), s.gpu_3d_pct?))).collect();
                 let vram = gpu_runs.last().and_then(|(_, s)| s.vram_dedicated_mb);
+                // This case's adapter, over its own measured runs (`drawing_gpu`).
+                let mut case_screen = screen.clone();
+                if on_phone.is_none()
+                    && let Some(g) = drawing_gpu(&samples, &gpu_runs.iter().map(|(_, w)| w).collect::<Vec<_>>(), display.as_ref())
+                {
+                    cross_adapter_note(&mut ctx.warnings, &format!("{} · {side} block", s.label()), &g);
+                    case_screen["gpu"] = g;
+                }
                 // The processes' memory as the last measured run left it, before its reset; a leak run's after
                 // its runs (it reads between them, after each reset).
                 let (private_mb, pss) = match measured.last().and_then(|r| r.end.private_mb.map(|m| (m, r.end.pss))) {
@@ -8380,7 +8452,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     refused,
                     locked: false,
                     display: None,
-                    screen: Some(screen.clone()),
+                    screen: Some(case_screen),
                     reserve: None,
                     shown: Some(shown::Shown { start: c.start.clone(), end }),
                     overhead: Some(Overhead {
@@ -8449,7 +8521,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 "id": id, "kind": "block", "experiment": ctx.exp, "seed": ctx.seed, "series": s0.label(), "variant": v.role,
                 "variant_label": if fixed_page { url.clone() } else { v.label.clone() }, "variant_git": if fixed_page { Value::Null } else { variant_git(v) },
                 "target": url, "probes": set, "token": token, "runs": measured_runs, "measured": measured_keys, "values": if batch { json!({}) } else { json!(blocks[0].values) }, "duration_ms": duration as u64,
-                "created": super::record::now_iso(), "valid": true, "env": host::env(), "browser": browser.version(), "engine": engine, "headless": headless, "input": input, "background": background, "screen": screen,
+                "created": super::record::now_iso(), "valid": true, "env": host::env(), "browser": browser.version(), "engine": engine, "headless": headless, "input": input, "background": background, "screen": meta_screen,
                 // Rule 3: a block with profilers, a census or a video describes the profiled (filmed) page;
                 // one that traced the full timeline set (`--trace full`) cost the page its main-thread time.
                 "timing": match set {
