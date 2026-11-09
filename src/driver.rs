@@ -1426,9 +1426,17 @@ impl Driver {
         self.mouse(if down { "mousePressed" } else { "mouseReleased" }, (x, y), Some(b), mask, 1, 0)
     }
 
-    /// The display's frame period (ms) from ten of the page's animation frames, once per block.
+    /// The display's frame period (ms) from ten of the page's animation frames, once per block. A headless
+    /// page has no display: its moves are paced at 60 Hz on strobe's clock, never by its animation frames,
+    /// which the OS slows with the display off (a locked session's), so `input.rate` and `input.gap.p95`
+    /// stay strobe's own pacing either way.
     fn frame_period(&self) -> Result<f64> {
         if let Some(ms) = self.frame_ms.get() {
+            return Ok(ms);
+        }
+        if self.headless {
+            let ms = 1000.0 / 60.0;
+            self.frame_ms.set(Some(ms));
             return Ok(ms);
         }
         let t = self.wait("new Promise((r) => { const raf = window.__strobeRaf ?? requestAnimationFrame.bind(window); const t = []; const f = (ts) => { t.push(ts); if (t.length < 11) raf(f); else r(t) }; raf(f) })", Duration::from_secs(5))?;

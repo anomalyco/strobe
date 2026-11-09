@@ -40,10 +40,11 @@ const target = url(`http://127.0.0.1:${port}/`, {
   },
 })
 
-// CPU time (ms) of the browser this strobe drives, from the OS; null off Windows or when none is found.
-// Only its tree: the processes whose command line names this strobe's profile (`run\profile-<strobe pid>-…`,
-// strobe being the runner's parent) and their descendants, never a person's browser running beside it.
-function osCpuMs(): number | null {
+// CPU time (ms) of each process of the browser this strobe drives, from the OS, keyed by pid and start time;
+// null off Windows or when none is found. Only its tree: the processes whose command line names this
+// strobe's profile (`run\profile-<strobe pid>-…`, strobe being the runner's parent) and their descendants,
+// never a person's browser running beside it.
+function osCpu(): Map<string, number> | null {
   if (process.platform !== "win32") return null
   // The profile reaches PowerShell in its environment, not its command line, which it would match itself.
   const profile = `\\strobe\\run\\profile-${process.ppid}-`.toLowerCase()
@@ -51,10 +52,16 @@ function osCpuMs(): number | null {
     "$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CommandLine,CreationDate,KernelModeTime,UserModeTime)",
     "$set = @{}; foreach ($p in $all) { if ($p.ProcessId -ne $PID -and $p.CommandLine -and $p.CommandLine.ToLower().Contains($env:STROBE_PROFILE)) { $set[$p.ProcessId] = $p } }",
     "do { $n = $set.Count; foreach ($p in $all) { $up = $set[$p.ParentProcessId]; if (-not $set.ContainsKey($p.ProcessId) -and $up -and $p.CreationDate -ge $up.CreationDate) { $set[$p.ProcessId] = $p } } } while ($set.Count -ne $n)",
-    "if ($set.Count) { ($set.Values | ForEach-Object { $_.KernelModeTime + $_.UserModeTime } | Measure-Object -Sum).Sum }",
+    "($set.Values | ForEach-Object { [string]$_.ProcessId + '@' + $_.CreationDate.Ticks + '=' + ($_.KernelModeTime + $_.UserModeTime) }) -join ';'",
   ].join("; ")
   const out = Bun.spawnSync(["powershell", "-NoProfile", "-Command", ps], { env: { ...process.env, STROBE_PROFILE: profile } }).stdout.toString().trim()
-  return out ? Number(out) / 1e4 : null
+  if (!out) return null
+  const ms = new Map<string, number>()
+  for (const entry of out.split(";")) {
+    const [key, ticks] = entry.split("=")
+    if (key && ticks) ms.set(key, Number(ticks) / 1e4)
+  }
+  return ms.size ? ms : null
 }
 
 const main = ["main.work", "main.busy", "main.script", "main.tasks.long", "run.duration", "cpu.renderer", "cpu.app.total", "cpu.browser", "cpu.gpu"]
@@ -130,15 +137,24 @@ export default bench({
       },
     },
     // A 2 s spin, with the browser's CPU read by the OS around it (Windows: the kernel and user time of
-    // strobe's browser tree, 15.6 ms ticks): count.os_cpu_ms is the truth for cpu.work.
+    // strobe's browser tree, 15.6 ms ticks): count.os_cpu_ms, each process still running against its own
+    // first read (one born in the run from 0), is the truth for cpu.work. A process that ended in the run
+    // (a utility process) is in no second read, so its CPU there is left out: count.os_cpu_ended counts
+    // those (one born and ended inside the run is in neither read), and a run with any reads short; compare
+    // only runs with none that the recording's ended_runs does not list either (`strobe query <rec>
+    // summary`, `ended` lines), as strobe's cpu.work counts them.
     cpu2s: {
       primary: "cpu.work",
-      metrics: ["count.os_cpu_ms", "cpu.renderer", "cpu.app.total", "run.duration"],
+      metrics: ["count.os_cpu_ms", "count.os_cpu_ended", "cpu.renderer", "cpu.app.total", "run.duration"],
       async run({ page, count }) {
-        const before = osCpuMs()
+        const before = osCpu()
         await page.eval(() => (window as any).known.spin(2000))
-        const after = osCpuMs()
-        if (before != null && after != null) count("os_cpu_ms", Math.round(after - before))
+        const after = osCpu()
+        if (before == null || after == null) return
+        let used = 0
+        for (const [p, ms] of after) used += ms - (before.get(p) ?? 0)
+        count("os_cpu_ms", Math.round(used))
+        count("os_cpu_ended", [...before.keys()].filter((p) => !after.has(p)).length)
       },
     },
     // Writes 2,000 cells' styles and returns without reading them: a headless run's frame after it lays

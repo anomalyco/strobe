@@ -7,12 +7,12 @@
 //! verdicts, result and report as any bench.
 
 use super::{Output, bench, progress};
-use crate::cli::Args;
+use crate::cli::{Args, duration_ms};
 use crate::host;
 use crate::model::{Error, Result};
 use serde_json::json;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub fn run(args: &Args) -> Result<Output> {
     if args.get("base").is_some() || args.get("head").is_some() || args.has("aa") {
@@ -29,9 +29,11 @@ pub fn run(args: &Args) -> Result<Output> {
     let (pin, _, label) = bench::pinning(args.get("pin").unwrap_or("auto"), &host::topology())?;
     let pin_label = label.replace(" · runner on the other CPUs", "");
     let id = crate::store::new_id("run");
-    // Takes turns with benches: a harness and a timed block never share the CPUs.
+    // Takes turns with benches: a harness and a timed block never share the CPUs. `--max-time` caps the
+    // wait for its turn (exit 124, `ConcurrentBench`), not the harness.
+    let deadline = args.get("max-time").map(duration_ms).transpose()?.map(|ms| Instant::now() + Duration::from_millis(ms));
     let reg = bench::slot::Registration::new(&id, &cmd.join(" "));
-    let (slot, waited) = reg.acquire(&format!("strobe run {program}"))?;
+    let (slot, waited) = reg.acquire_until(&format!("strobe run {program}"), deadline)?;
     let power = bench::power_for(args)?;
     let reserve = match (args.get("reserve-cpus").unwrap_or("on"), pin) {
         ("off", _) | (_, None) => None,

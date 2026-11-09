@@ -98,6 +98,9 @@ pub fn run(args: &Args) -> Result<Output> {
     // Benches on this device and what each does: running a block, queued for the slot, waiting for an
     // unlock, building.
     let benches = super::bench::slot::list();
+    // A bench this state folder cannot list (another user's, another LOCALAPPDATA or XDG_DATA_HOME)
+    // holding the machine-wide slot: every bench here waits for it.
+    let slot_elsewhere = super::bench::slot::machine_busy();
     let daemon = super::mcp::running();
     let autostart = super::up::autostart::state();
     let skill = super::up::skill_state();
@@ -137,7 +140,7 @@ pub fn run(args: &Args) -> Result<Output> {
         "calibration": calibration, "recordings": recordings.iter().map(|r| &r.0).collect::<Vec<_>>(),
         "experiments": experiments.iter().map(|r| &r.0).collect::<Vec<_>>(), "disk_bytes": disk,
         "session_locked": locked, "background_priority": qos, "timer_coalescing": timers, "valid": problems.is_empty(), "problems": problems,
-        "daemon": { "running": daemon, "port": super::mcp::port(), "autostart": { "registered": autostart.0, "detail": autostart.1 } }, "skill": skill, "benches": benches,
+        "daemon": { "running": daemon, "port": super::mcp::port(), "autostart": { "registered": autostart.0, "detail": autostart.1 } }, "skill": skill, "benches": benches, "slot_elsewhere": slot_elsewhere,
         "deep": { "access": deep, "presents": deep.presents(), "detail": deep_text },
         "native": { "ready": native_ok, "detail": native_text },
         "cycle_clock": { "detail": cycle_clock, "refused": cycles_refused },
@@ -250,6 +253,9 @@ pub fn run(args: &Args) -> Result<Output> {
     );
     if benches.is_empty() {
         t += "    benches    none running\n";
+    }
+    if let Some(held) = &slot_elsewhere {
+        t += &format!("    slot       {held}\n");
     }
     for (i, b) in benches.iter().enumerate() {
         let file = b["file"].as_str().unwrap_or("").trim_start_matches(r"\\?\");

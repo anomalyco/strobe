@@ -331,6 +331,7 @@
         "reserve_pct": { "type": "number", "description": "The reserved-CPU sweep (budget 5%, on strobe's own CPUs)." },
         "terminal_pct": { "type": "number", "description": "A tty() target's terminal reader: reading, parsing and answering the program's output (budget 0.5%)." },
         "pixel_pct": { "type": "number", "description": "strobe's pixel reads inside the runs (captures and image matching for image locators and pixel waits, opening the window's capture and decoding a template included), CPU as % of the runs' wall time (budget 0.5%; over 2% refuses timing and latency metrics)." },
+        "pixel_cpu_ms": { "type": "number", "description": "The same pixel reads' CPU in ms per measured run (the mean over the runs): their absolute cost, which compares across builds whose runs differ in length where pixel_pct does not." },
         "encoder_pct": { "type": "number", "description": "A filmed block's (--video) video encoder process, its CPU over the video's span as % of one core. No budget: a filmed block is never timed." },
         "http_probe_pct": { "type": "number", "description": "The HTTP probe's scheduler and workers (ctx.httpProbe, SPEC 8.9), their CPU over the probe's span as % of one core (budget 1%; over 2% refuses http.latency.* in a timed block)." }
       }
@@ -401,7 +402,7 @@
           "description": "A launch series: what each launch was timed until. end is visible, painted or settled (the window), milestone (with milestone, its name), state (with state: a tty() program's own state on its STROBE_EVENTS stream) or selector (with selector, the case's until). Null for other series; absent in older results (readers then infer it from the launches' values).",
           "properties": { "end": { "enum": ["visible", "painted", "settled", "milestone", "state", "selector"] }, "milestone": { "type": "string" }, "state": { "type": "string" }, "selector": {} }
         },
-        "stopped": { "type": "string", "description": "Why the series ended: primary decided, max pairs, max time, …" },
+        "stopped": { "type": "string", "description": "Why the series ended: primary decided, max pairs, max time, refused (a refusal of the series' own ended it after some blocks: its primary is refused with why, and the rest of the file ran on), …" },
         "bound": { "type": "number" },
         "noworse": { "type": "object", "additionalProperties": { "type": "number" } },
         "holm_pairs": { "type": ["integer", "null"] },
@@ -455,14 +456,21 @@
         "halt": {
           "type": ["object", "null"],
           "description": "Why the series stopped part way or did not run; validator: SessionLocked or WindowHidden when --unlock-wait ran out (the rest of the file ran on, and --resume runs it).",
-          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] } }
+          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] }, "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "The refusal that stopped it, whole (summary, detail, fix); absent in older results." } }
         },
         "not_run": { "type": "boolean" },
         "passed": { "type": "boolean", "description": "check: the case ran." },
-        "state": { "enum": ["pass", "fail", "refused", "gap"], "description": "check: the case's outcome in one field (refused: before it ran; fail: it ran and failed, or its journey differs)." },
+        "state": { "enum": ["pass", "fail", "refused", "gap"], "description": "check: the case's outcome in one field (refused: before it ran, or a refusal of its own that ended it as it ran, the rest of the file running on; fail: it ran and failed, or its journey differs)." },
         "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "check: the refusal behind a refused or failed case, when a validator gave one." },
         "declared": { "type": "array", "items": { "type": "string" }, "description": "check: the metrics the case declared." },
-        "values": { "type": ["object", "null"], "description": "check: one run's values." },
+        "values": { "type": ["object", "null"], "description": "check: one run's values; with --runs N the median over the launch's N runs; with --repeat R the median over the R launches." },
+        "runs": { "type": "integer", "description": "check: the runs measured in each launch (--runs N, no warmup; 1 by default and with --why always). Absent in older results (then 1)." },
+        "spread": { "type": ["object", "null"], "additionalProperties": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }, "description": "check --runs N: each per-run metric's lowest and highest measured run, beside its median in values. Null with one run and with --repeat." },
+        "repeat": {
+          "type": ["object", "null"],
+          "description": "check --repeat R: the case's R fresh launches. values: each metric's value in each launch, in order (null where a launch has none); recordings: each launch's recording; measured_run: each launch's measured run. Absent without --repeat.",
+          "properties": { "launches": { "type": "integer" }, "values": { "type": "object" }, "recordings": { "type": "array" }, "measured_run": { "type": "array" } }
+        },
         "measured_run": { "type": ["integer", "null"], "description": "check: the run values came from, from 0: 1 when a process of the target ended in run 0 and the case has a reset with resetCheck on, so the values are a warm run's from the state the reset left (SPEC 9.1); null when the case failed. Absent in older results (then 0)." },
         "refused": { "type": ["object", "null"], "description": "check: metrics the run refused, \"<validator>: <why>\"." },
         "error": { "type": ["string", "null"] },
