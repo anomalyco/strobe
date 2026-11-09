@@ -2327,7 +2327,8 @@ case without a leak `no growth`; the array case read `+104 KB/run` on air too.
 DevTools as on a desktop: post-GC JS heap and DOM counters, heap snapshots S0/S1/S2 and Chrome's
 memory-infra dump, all the phone's; its census names no process of this computer's (`processes:
 null`). Heap censuses time nothing, so no phone refusal of timed runs applies (an emulator, Wi-Fi,
-Battery Saver, a low battery). adais emulator (Android 15 Chrome, `prepared-servers.bench.ts --probes
+Battery Saver, a low battery), nor the primary's phone refusal: the run reads the page's heap and DOM,
+never the primary (`prepared-servers.bench.ts` case `keeps host`, primary `cpu.work`). adais emulator (Android 15 Chrome, `prepared-servers.bench.ts --probes
 memory --repeat 3 --mobile=emulator-5590`, exp_72e42f): `keeps` (25,000 references a run, 4 bytes each
 with V8's compressed pointers = 97.7 KiB) `js heap leaks +98 KB/run · +98 KB [+98 KB … +98 KB]`,
 suspects 3 Arrays 293 KB; `clean` `no growth (within ±16 KB/run)`; DOM no growth on both. `record
@@ -3679,17 +3680,29 @@ click goes there).
 **Keys that reached no page.** A `press`, `type` or key `down`/`up` with no selector whose `until`
 fails (a wait in the page that ran out, an image that never showed) adds `the page had no focus
 (document.hasFocus() is false), so keys did not reach it; click the page first or pass a selector`
-only when both hold, read within 1 s: no trusted key went down or up in the document since the call
-(`driver::KEYS_SEEN`, an init script in every bench page that keeps the last key's `Date.now()`), and
-`document.hasFocus()` is false. Not for a document that began after the call (a key that navigated),
-and not on a phone (its clock is not this computer's). `hasFocus()` alone would be wrong: headless
-Chromium reads false until a key or click and takes DevTools keys anyway, headless Firefox reads
-false throughout and takes keys, and Chromium's DevTools keys focus the page they go to (after a popup
-took the focus too, headed). Through the OS (a page measured from outside) a key call whose `until`
-fails first checks delivery: keys that never arrived refuse `InputMismatch` (`OS input did not reach
-the page: strobe posted …`, with the same focus note when the page had none) instead of the wait's
-error. adais headless Firefox, a page that wipes the key stamp: `… timed out waiting for {…}; the page
-had no focus …`; blade `focus.bench.ts --check` (a popup took the focus, headed): passes.
+only when the evidence says so, read within 1 s. The evidence (`driver::KEYS_SEEN`) is an init script
+(`//# sourceURL=strobe-driver.js`) only where strobe drives the page itself: not through OS input, not
+on a phone, and not in attribution or memory blocks, whose census counts the page's listeners (a page
+with none read 8). It keeps the last trusted key's time on the document's own `performance.now`
+(bound before the page's scripts; -1 before any key); the check reads `document.hasFocus()`, that
+time, the bound `now()` and whether the active element is a frame, and compares them with strobe's
+monotonic time since the call (read after the page answered): no note when focus is in a frame, when
+a key came since the call (`at ≥ 0` and `now − at` ≤ the elapsed time + 5 ms), or when the document
+began after the call (`now` ≤ the elapsed time + 5 ms: a key that navigated); else the note when
+`hasFocus()` is false. No wall clock anywhere, so a page's fake timers change nothing. `hasFocus()`
+alone would be wrong: headless Chromium reads false until a key or click and takes DevTools keys
+anyway, headless Firefox reads false throughout and takes keys, and Chromium's DevTools keys focus the
+page they go to (after a popup took the focus too, headed). Through the OS (a page measured from
+outside) a key call clicks into its element first unless it is `:focus` and `document.hasFocus()` is
+true (an element focused in a background window gets no OS keys until a click brings its window back;
+one counted read), and one whose `until` fails checks delivery: keys that never arrived refuse
+`InputMismatch` (`OS input did not reach the page: strobe posted …`, with the focus note when the page
+had none, ending `or pass a selector` only when the call passed none) instead of the wait's error.
+adais (112ef38) `focus.bench.ts --check`: headless Chromium's focused, unfocused and selector cases
+pass and its ignored and unseen ones fail with no note (its DevTools key focuses the page); headless
+Firefox the same, but `unseen` ends `…; the page had no focus (document.hasFocus() is false), so keys
+did not reach it; click the page first or pass a selector`; blade `focus.bench.ts --check` (a popup
+took the focus, headed): passes.
 
 **Touch on an emulated phone** (`driver::touch`; a page target's `emulate: "mobile"`, 13.1): a phone
 is driven by a finger. Chromium gets touches over CDP (`Input.dispatchTouchEvent`), Firefox a WebDriver
@@ -6199,8 +6212,10 @@ Wi-Fi adb, a channel given to strobe, its touch slop and timing) is designed, no
   the fixture, and every `http(s)://` or `ws(s)://` loopback address in what the target's `prepare`
   returned, `ctx.prepared`: a second server, an API or WebSocket the page talks to) is reversed to the
   same port on the phone (`adb reverse`), so the page loads the same address (the runner's `prepare`
-  reply is `{ url, reach }`, `reach` the strings in `ctx.prepared` that start with a web scheme, through
-  plain objects and arrays 4 levels deep, at most 64, a `URL` by its href; adais emulator
+  reply is `{ url, reach }`, `reach` one `http://127.0.0.1:<port>` per loopback address (127.0.0.1,
+  `localhost`, `[::1]`, any case, an explicit port) among the strings in `ctx.prepared`, parsed with
+  `URL`, through plain objects and arrays 4 levels deep, at most 64: no path, query, token, user or
+  outside address leaves the runner; adais emulator
   `prepared-servers.bench.ts --check --mobile=emulator-5590 --filter clean`: the page's API on a second
   port, never reached before (exp_7840d0), passes now (exp_df2707)); a local page (`file://…`) is served from its folder on a loopback port strobe reverses
   (`http::serve_folder`, one server per folder per process); a run's `page.goto` to either is served or
@@ -8099,7 +8114,7 @@ what was built but not yet run on a device is in §21.
   refuses them; `a..b hotspots --source startup|setup` per recording; `report` of a `--blocks` run (HTML and
   md), an HTTP probe card, the lifecycle split and modules with the whole host; a Firefox recording's
   `inputs` say why it has none (5.6, 8.9, 11.1, 11.2).
-- 2026-11-10 · 5aca857 7fb5bf1 · `--blocks 1` names its primary (`★ <metric> <value> (1 block)`);
+- 2026-11-10 · 5aca857 7fb5bf1 88f6874 · `--blocks 1` names its primary (`★ <metric> <value> (1 block)`);
   leak runs on a phone or emulator; the loopback addresses `prepare` returned reversed to a phone; keys
   to no element say they reached no unfocused page only with evidence, and OS keys that never arrived
   refuse `InputMismatch`; Linux's display adapter for `screen.gpu` and `CrossAdapterScanout` (5.4, 5.6,
