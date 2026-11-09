@@ -11,6 +11,7 @@
 //                     timeouts, and http.latency.* refused OverheadBudget, never a slow server.
 //   status-500        the server answers 500 for 300 ms: http.errors, and http.latency.* refused.
 //   wrong-json        the server answers {"status":"degraded"} for 300 ms where expect asks for "ok": the same.
+//   mixed             cpu.work from clean timing pairs, http.* from a probe pass after them (timed runs only).
 import { bench, script } from "@hona/strobe"
 
 const all = ["http.latency.p50", "http.latency.p95", "http.latency.max", "http.timeouts", "http.errors", "http.missed_sends", "http.probes", "http.idle.p50"]
@@ -51,5 +52,8 @@ export default bench({
     "driver-delayed": { ...declare("http.missed_sends"), run: ({ call }: any) => call("idle", 1500) },
     "status-500": { ...declare("http.errors"), run: answering("500") },
     "wrong-json": { ...declare("http.errors"), run: answering("wrong-json") },
+    // Timed only (the orchestrator's A/A, `--aa --pairs 6`): clean pairs for cpu.work, then a probe pass for
+    // http.* (`pass.http`, `i HttpProbe`); stall-750ms-long alone pairs probe blocks only.
+    mixed: { primary: "cpu.work", metrics: ["http.latency.p50", "http.timeouts"], run: stall },
   },
 })
