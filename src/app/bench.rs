@@ -5077,9 +5077,10 @@ pub(crate) fn screen_state(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::P
     })
 }
 
-/// The adapters a target's processes drew on over `windows` (its measured runs), from the OS's
+/// The adapters a target's processes drew on over `windows` (a block's whole span, a recording's), from the OS's
 /// per-process GPU statistics: those with 3D engine time, busiest first (else the one with any engine
-/// time); and the adapter the OS names for its window's display (`display`), which on a machine with an
+/// time, else the one it holds the most GPU memory on: `by` says which); and the adapter the OS names for
+/// its window's display (`display`), which on a machine with an
 /// integrated and a discrete GPU need not be one of them: then each frame crosses between adapters
 /// (`cross`, `CrossAdapterScanout`). `screen.gpu` of a block or recording; None when no adapter was read.
 pub(crate) fn drawing_gpu(samples: &probe::os::Samples, windows: &[probe::os::Summary], display: Option<&host::DisplayPath>) -> Option<Value> {
@@ -5094,13 +5095,18 @@ pub(crate) fn drawing_gpu(samples: &probe::os::Samples, windows: &[probe::os::Su
     }
     let mut drawing: Vec<(&String, f64)> = by.iter().filter(|(_, u)| u.0 > 0.0).map(|(a, u)| (a, u.0)).collect();
     drawing.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let adapter = drawing.first().map(|d| d.0.clone()).or_else(|| by.iter().filter(|(_, u)| u.1 > 0.0).max_by(|a, b| a.1.1.total_cmp(&b.1.1)).map(|(a, _)| a.clone()))?;
+    // A static page can draw nothing for a whole block: its processes still hold their GPU memory where
+    // they drew (an integrated GPU's is all shared memory).
+    let held = || windows.iter().flat_map(|w| w.gpu_memory.iter()).filter(|(_, m)| m.0 + m.1 > 0.0).max_by(|a, b| (a.1.0 + a.1.1).total_cmp(&(b.1.0 + b.1.1))).map(|(a, _)| (a.clone(), "memory"));
+    let (adapter, by_what) =
+        drawing.first().map(|d| (d.0.clone(), "3d")).or_else(|| by.iter().filter(|(_, u)| u.1 > 0.0).max_by(|a, b| a.1.1.total_cmp(&b.1.1)).map(|(a, _)| (a.clone(), "engines"))).or_else(held)?;
     // An adapter the OS does not name for the display (id 0, or none of the sampled ones) is unknown.
     let scanout = display.filter(|d| d.adapter_luid != 0).and_then(|d| samples.adapters.iter().find(|a| a.luid == d.adapter_luid));
     let luid = |name: &str| samples.adapters.iter().find(|a| a.name == name).map(|a| a.luid);
     let cross = scanout.is_some_and(|s| !drawing.is_empty() && !drawing.iter().any(|(a, _)| luid(a) == Some(s.luid)));
     Some(json!({
         "adapter": adapter,
+        "by": by_what,
         "drawing": drawing.iter().map(|(a, pct)| json!({ "adapter": a, "3d_pct": pct })).collect::<Vec<_>>(),
         "display_adapter": scanout.map(|s| s.name.clone()),
         "display": display.map(|d| d.device.clone()),
@@ -5142,9 +5148,13 @@ pub(crate) fn screen_line(s: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// `drawn on <adapter>`, and `shown by <adapter> (frames cross adapters)` when its display is another's.
+/// `drawn on <adapter>`, and `shown by <adapter> (frames cross adapters)` when its display is another's;
+/// `GPU memory on <adapter>` when it drew nothing the OS counted.
 pub(crate) fn gpu_line(g: &Value) -> Option<String> {
     let adapter = g["adapter"].as_str()?;
+    if g["by"] == "memory" {
+        return Some(format!("GPU memory on {adapter} (it drew nothing the OS counted)"));
+    }
     let drawing: Vec<&str> = g["drawing"].as_array().into_iter().flatten().filter_map(|d| d["adapter"].as_str()).collect();
     let mut line = format!("drawn on {}", if drawing.is_empty() { adapter.to_string() } else { drawing.join(" and ") });
     if g["cross"] == true {
@@ -7796,12 +7806,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let background = busiest_others(&procs0, &procs1);
             // A phone's page reaches none of this computer's screens.
             let mut screen = if on_phone.is_some() { Value::Null } else { screen_state(&procs0, &procs1) };
-            // The adapter the page drew on over the measured runs, and the one driving its window's display:
-            // on a machine with two GPUs, `gpu.*` is read with it.
+            // The adapter the page drew on over the block (its load, setup and runs: a run that only runs script
+            // draws nothing), and the one driving its window's display: on a machine with two GPUs, `gpu.*` is
+            // read with it.
             if on_phone.is_none() {
-                let windows: Vec<probe::os::Summary> = page_cases.iter().flat_map(|(_, c)| c.runs[measured_of(c).0].iter().map(|r| samples.window(r.t0, r.t1)).collect::<Vec<_>>()).collect();
                 let display = if headless { None } else { host::main_window(&browser.pids()).and_then(|w| host::display_of(w.hwnd)) };
-                if let Some(g) = drawing_gpu(&samples, &windows, display.as_ref()) {
+                if let Some(g) = drawing_gpu(&samples, &[samples.window(0, u64::MAX)], display.as_ref()) {
                     cross_adapter_note(&mut ctx.warnings, &format!("{} · {side} block", s0.label()), &g);
                     screen["gpu"] = g;
                 }

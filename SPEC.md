@@ -4750,8 +4750,13 @@ their diff hash, kept in every block recording) and whether the launch found GPU
 
 **The adapter it drew on.** A page block (any engine, headed or headless; not a phone's), a page
 `record` and a native `record` keep `screen.gpu` (`bench::drawing_gpu`), from the OS sampler's
-per-process GPU statistics over the measured runs (a record's whole span): `adapter` (the busiest
-adapter with 3D engine time, else with any engine time), `drawing` (every adapter with 3D time, busiest
+per-process GPU statistics over the block's whole span, its load and setup too (a run that only runs
+script draws nothing: a headed 110 ms spin read no engine time at all), and over a record's
+window: `adapter` (the busiest
+adapter with 3D engine time, else with any engine time, else the one its processes hold the most GPU
+memory on: a static headed page on a laptop's integrated GPU showed no engine time for a whole check
+block; `by`: `3d`, `engines` or `memory`, the line then `GPU memory on <adapter> (it drew nothing the OS
+counted)`), `drawing` (every adapter with 3D time, busiest
 first, `{ adapter, 3d_pct }`), `display_adapter` and `display` (the adapter the OS names for the
 window's display and the display itself; Windows only, null headless), and `cross` (the window shows
 on an adapter it drew on none of). The screen line ends `drawn on <adapter>` (`drawn on A and B` for
