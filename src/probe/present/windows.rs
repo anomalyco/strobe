@@ -123,10 +123,13 @@ pub struct Capture {
 
 impl Capture {
     /// Starts tracking presents in this process (needs admin or Performance Log Users). Buffers
-    /// flush every 10 ms, so a wait on the next frame hears of it within a frame or two.
+    /// flush every 10 ms, so a wait on the next frame hears of it within a frame or two. The
+    /// providers' manifests are read first, once per process (`Schema::read_manifests`).
     pub fn start() -> Result<Capture> {
         etw::reap();
         let cfg = etw::Config { kind: "presents", kernel: 0, providers: providers(), buffer_kb: 64, buffers: (32, 256), flush_ms: 10 };
+        // Before the session: its consumer then never waits on TDH's first read of a manifest.
+        Schema::read_manifests(&cfg.providers);
         let t0 = crate::host::now_ns();
         let armed = Arc::new(AtomicU64::new(0));
         let tracker_armed = armed.clone();
@@ -311,6 +314,7 @@ impl Handler for Tracker {
     }
 
     fn finish(mut self) -> Self::Out {
+        std::mem::take(&mut self.schema).keep();
         self.drain(true);
         self.out.sort_by_key(|p| p.start_ns);
         (std::mem::take(&mut self.out), std::mem::take(&mut self.vsyncs))
@@ -331,7 +335,7 @@ impl Tracker {
     pub fn with_armed(armed: Arc<AtomicU64>, live: Option<std::sync::Arc<super::Live>>) -> Tracker {
         Tracker {
             armed,
-            schema: Schema::default(),
+            schema: Schema::shared(),
             freq: etw::qpc_freq(),
             guids: [etw::guid(DXGI), etw::guid(DXGKRNL), etw::guid(WIN32K), etw::guid(DWM)],
             serial: 0,
@@ -842,6 +846,9 @@ impl Tracker {
                     }
                 }
             }
+            // Every GPU packet of every process: only one a present on its thread waits for is read.
+            id::QUEUE_START | id::QUEUE_START_2 if !self.by_thread.get(&tid).is_some_and(|p| p.borrow().submit_seq == 0) => {}
+            id::QUEUE_STOP if self.by_submit.is_empty() => {}
             id::QUEUE_START => {
                 let [packet, seq, ctx, present] = self.schema.fields(e, ["PacketType", "SubmitSequence", "hContext", "bPresent"]);
                 self.queue_submit(tid, uint(e, &ctx), uint(e, &seq) as u32, uint(e, &packet), uint(e, &present) != 0);
