@@ -363,9 +363,10 @@ fn runs(
     let pixels_before = Cell::new((0u64, 0.0f64, 0.0f64));
     let edge = |start: bool| {
         if start {
-            // The main thread first at a stretch's start and last at its end: the nearest to its edges.
-            main_edges.borrow_mut().push(main_read());
             cost.pause();
+            // The main thread first at a stretch's start and last at its end: the nearest to its edges
+            // (strobe's own cost paused: on Linux a reading may wait up to a tick).
+            main_edges.borrow_mut().push(main_read());
             if let Some(se) = drive.session.get() {
                 let (n, ms) = se.take_reads();
                 reads_before.set((reads_before.get().0 + n, reads_before.get().1 + ms));

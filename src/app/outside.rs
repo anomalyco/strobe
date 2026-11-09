@@ -203,13 +203,14 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let main = host::MainThread::attach(root);
     let read_main = || -> std::result::Result<host::MainCpu, host::MainLost> { main.as_ref().map_err(Clone::clone)?.read() };
     timeline.mark_edge();
-    let (c0, tsc0, t0) = (cycles(), host::tsc(), host::now_ns());
-    // Read inside the window's edges: its share of the time between the two readings is `cpu.main.busy`.
+    // Read just outside the window's edges (on Linux a reading may wait up to a tick), so it never
+    // lengthens the window: its share of the time between the two readings is `cpu.main.busy`.
     let m0 = read_main();
+    let (c0, tsc0, t0) = (cycles(), host::tsc(), host::now_ns());
     progress(format!("recording {name} ({root}) for {}", fmt::ms_duration(for_ms)));
     std::thread::sleep(Duration::from_millis(for_ms));
-    let m1 = read_main();
     let (c1, tsc1, t1) = (cycles(), host::tsc(), host::now_ns());
+    let m1 = read_main();
     timeline.mark_edge();
     let screen = super::bench::screen_state(&procs0, &(host::now_ns(), host::all_processes()));
     let mut timeline = timeline.stop();

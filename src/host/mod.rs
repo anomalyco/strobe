@@ -534,15 +534,11 @@ impl MainThread {
             if let Some(cpus) = tickless {
                 return Err(MainLost::NotOnThisOs(format!("CPUs {cpus} are tickless (nohz_full): a busy thread's CPU count moves there once a second, so no reading of it is exact at a run's edge")));
             }
-            let mut buf = [0u8; 96];
-            let n = file.read_at(&mut buf, 0).map_err(|e| gone(format!("its main thread could not be read ({e})")))?;
-            // A kernel that keeps no scheduler info answers "0 0 0" for a thread that has run (one that
-            // keeps it counts the thread's switches in at least once).
-            if std::str::from_utf8(&buf[..n]).unwrap_or("").split_whitespace().all(|f| f == "0") {
-                return Err(MainLost::NotOnThisOs(
-                    "this kernel keeps no scheduler info (schedstat reads 0): a thread's exact CPU time is not readable, and strobe never reads 10 ms clock ticks".into(),
-                ));
+            if let Some(why) = thread_cpu_refused() {
+                return Err(MainLost::NotOnThisOs(why));
             }
+            let mut buf = [0u8; 96];
+            file.read_at(&mut buf, 0).map_err(|e| gone(format!("its main thread could not be read ({e})")))?;
             Ok(MainThread { pid, tid: pid, schedstat: std::sync::Arc::new(file), stat: std::sync::Arc::new(stat) })
         }
         #[cfg(target_os = "macos")]
@@ -589,9 +585,11 @@ impl MainThread {
     }
 
     /// Linux: its CPU ns and the moment that count is exact at. A thread not on a CPU was counted
-    /// when it left one: exact now. One that is running (state R) is read again every 50 µs until its
-    /// count moves, at its CPU's next tick, and is exact then (within the 50 µs); a count that does not
-    /// move in 25 ms (two ticks at 100 Hz) is of a thread waiting for a CPU, exact all along.
+    /// when it left one: exact now (read once more, in case it left a CPU between the two reads). One
+    /// that is running (state R) is read again every 50 µs until its count moves, at its CPU's next
+    /// tick or when it leaves the CPU, and is exact then (within the 50 µs); a count that does not move
+    /// in 25 ms (two ticks at 100 Hz) is of a thread waiting for a CPU, exact all along. A main thread
+    /// that ended while others run (a zombie leader) is gone.
     #[cfg(target_os = "linux")]
     fn exact(&self) -> Option<(u64, u64)> {
         use std::os::unix::fs::FileExt;
@@ -601,12 +599,21 @@ impl MainThread {
             let n = read(&self.schedstat, buf)?;
             std::str::from_utf8(&buf[..n]).ok()?.split_whitespace().next()?.parse::<u64>().ok()
         };
+        // Its state (`stat` field 3); None once it is a zombie or dead.
+        let state = |buf: &mut [u8]| -> Option<u8> {
+            let n = read(&self.stat, buf)?;
+            let s = *std::str::from_utf8(&buf[..n]).ok()?.rsplit_once(')')?.1.trim_start().as_bytes().first()?;
+            (!matches!(s, b'Z' | b'X' | b'x')).then_some(s)
+        };
         let first = cpu(&mut buf)?;
         let at = now_ns();
-        let n = read(&self.stat, &mut buf)?;
-        let running = std::str::from_utf8(&buf[..n]).ok()?.rsplit_once(')')?.1.split_whitespace().next() == Some("R");
-        if !running {
-            return Some((first, at));
+        // Off a CPU: its count was added when it left. Read again: it may have left between the reads.
+        let settled = |buf: &mut [u8]| -> Option<(u64, u64)> {
+            let c = cpu(buf)?;
+            Some(if c != first { (c, now_ns()) } else { (first, at) })
+        };
+        if state(&mut buf)? != b'R' {
+            return settled(&mut buf);
         }
         let until = at + 25_000_000;
         loop {
@@ -615,6 +622,9 @@ impl MainThread {
             let now = now_ns();
             if c != first {
                 return Some((c, now));
+            }
+            if state(&mut buf)? != b'R' {
+                return settled(&mut buf);
             }
             if now > until {
                 return Some((first, at));
@@ -636,7 +646,8 @@ fn macos_lost(pid: u32, errno: i32) -> MainLost {
 /// is one timed part, over the time between the pair's own readings (each exact at its `at_ns`; on
 /// Linux up to a tick past the run's edge, `MainThread::read`); cycles to ns at the cycle clock's
 /// rate from the first reading to the last. `cpu.main` is it times the run's timed time. None
-/// without a rate or a pair.
+/// without a rate or a pair. At most 1: one thread runs on one CPU at a time, so more is the cycle
+/// clock's rate measured over a span a few µs off the counter's (rounding, never a reading).
 pub fn main_share(at: &[MainCpu]) -> Option<f64> {
     let (first, last) = (at.first()?, at.last()?);
     let (t0, t1) = (first.tsc?, last.tsc?);
@@ -646,7 +657,7 @@ pub fn main_share(at: &[MainCpu]) -> Option<f64> {
     let per_ns = (t1 - t0) as f64 / (last.at_ns - first.at_ns) as f64;
     let cpu: u64 = at.chunks(2).map(|p| p[1].cpu.saturating_sub(p[0].cpu)).sum();
     let span: u64 = at.chunks(2).map(|p| p[1].at_ns.saturating_sub(p[0].at_ns)).sum();
-    (span > 0).then(|| cpu as f64 / per_ns / span as f64)
+    (span > 0).then(|| (cpu as f64 / per_ns / span as f64).min(1.0))
 }
 
 /// A top-level window: its screen rect (x, y, width, height) and client size in physical pixels, its
@@ -1235,9 +1246,14 @@ pub fn thread_cpu_refused() -> Option<String> {
     }
     #[cfg(target_os = "linux")]
     {
-        // "0 0 0" where the kernel keeps none. Kept, the calling thread has been switched in (a count of
-        // at least 1), though its CPU may still read 0 (it is added at switches and ticks).
-        let kept = std::fs::read_to_string("/proc/thread-self/schedstat").ok().is_some_and(|s| s.split_whitespace().any(|f| f != "0"));
+        // Decided once, from strobe's own main thread, which has run and switched for a while: "0 0 0"
+        // there is a kernel that keeps none. A fresh thread or child legitimately reads "0 0 0" before
+        // its first switch (with sched_schedstats off), so it is never the one asked.
+        static KEPT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let kept = *KEPT.get_or_init(|| {
+            let me = std::process::id();
+            std::fs::read_to_string(format!("/proc/{me}/task/{me}/schedstat")).ok().is_some_and(|s| s.split_whitespace().any(|f| f != "0"))
+        });
         (!kept).then(|| "this kernel keeps no schedstat (CONFIG_SCHED_INFO): a thread's exact CPU time is not readable, and strobe never reads 10 ms clock ticks".to_string())
     }
     #[cfg(target_os = "macos")]
