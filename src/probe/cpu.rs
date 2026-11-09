@@ -222,8 +222,10 @@ pub struct Rebased {
     pub over_us: f64,
     /// What the last sample weighs: the median gap under the cap.
     pub last_us: f64,
-    /// Samples of the clock reads' spins over 1 ms outside strobe's spans, within the quarter allowed.
+    /// Samples of the clock reads' spins over 1 ms outside strobe's spans (their median is inside), and
+    /// the farthest one's distance (ns, signed).
     pub outliers: usize,
+    pub worst_ns: f64,
 }
 
 /// Places a script host's CPU profile `p` on strobe's clock from the host's clock readings at its
@@ -294,32 +296,29 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         let (a, b) = (readings[k].1.mark.0 as f64, readings[k].1.mark.1 as f64);
         offs[k].push(if ns < a { ns - a } else { (ns - b).max(0.0) });
     }
-    // The clocks match when each spin's samples sit inside its span within SYNC_NS: their median, and
-    // all but a quarter of them. A Bun sampler kept off a CPU between its clock read and the stack it
-    // takes stamps a sample of the spin up to 2 ms off on a loaded 2-vCPU VM (vps: -1.87, -1.65 and
-    // +1.23 ms), which says nothing of the clocks.
-    let mut outliers = 0;
+    // The clocks match when each spin's samples sit inside its span: their median within SYNC_NS. Single
+    // samples may lie further: a sampler kept off a CPU between its clock read and the stack it takes
+    // stamps that sample early (vps, 2 vCPUs, the probe's threads beside a Bun host: 3 of a spin's 9
+    // samples up to 1.68 ms early, its median inside the span), which is the sample's time, not the
+    // clocks'. They are counted (`outliers`, the farthest in `worst_ns`), never hidden.
+    let (mut outliers, mut worst_ns) = (0, 0.0f64);
     for (k, o) in offs.iter_mut().enumerate() {
         if o.is_empty() {
             return Err(unsynced(format!("it holds no sample of the 5 ms the host spent reading its clock {}, so where it puts that moment cannot be checked", readings[k].0)));
         }
         o.sort_by(f64::total_cmp);
         let median = o[o.len() / 2];
-        let out: Vec<f64> = o.iter().copied().filter(|x| x.abs() > SYNC_NS).collect();
-        if median.abs() > SYNC_NS || 4 * out.len() > o.len() {
-            let worst = out.iter().copied().max_by(|a, b| a.abs().total_cmp(&b.abs())).unwrap_or(median);
+        if median.abs() > SYNC_NS {
             return Err(unsynced(format!(
-                "it puts {} of {} samples of the 5 ms the host spent reading its clock {} over 1 ms outside strobe's span around that (median {:+.2} ms, worst {:+.2} ms): its clock does not match strobe's",
-                out.len(),
-                o.len(),
+                "it puts the samples of the 5 ms the host spent reading its clock {} {:+.2} ms (their median) outside strobe's span around that: its clock does not match strobe's",
                 readings[k].0,
-                median / 1e6,
-                worst / 1e6
+                median / 1e6
             )));
         }
-        outliers += out.len();
+        outliers += o.iter().filter(|x| x.abs() > SYNC_NS).count();
+        worst_ns = o.iter().copied().fold(worst_ns, |w, x| if x.abs() > w.abs() { x } else { w });
     }
-    Ok(Rebased { start_us, times_us, cap_us, over_us, last_us, outliers })
+    Ok(Rebased { start_us, times_us, cap_us, over_us, last_us, outliers, worst_ns })
 }
 
 /// Per sample of `p`: whether its stack holds a function named `name`.
