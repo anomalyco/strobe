@@ -515,7 +515,9 @@ Not built: `--ring` (the flight recorder, below) and `--name`. `--pin` is the CP
   case, any WebKit case) runs its check and then refuses `EngineUnsupported` (exit 4) with why: there is
   no recording. `--max-time` caps it as a check's (§9.1 "Stop rule"): a wait that reaches it ends the
   record with exit 124 and no recording. Without `--bench`, `--max-time` caps a timed recording's wait
-  for the bench slot (exit 124, `ConcurrentBench`, §10.1), not the recording (`--for` ends it).
+  for the bench slot (exit 124, `ConcurrentBench`, §10.1), not the recording (`--for` ends it); on an
+  import (`file:<trace>`), which waits for nothing, it is a usage error. A script recording's `next`
+  line names `hotspots --by package · threads --timeline · summary (per run)` (no page views).
   Its check block's slow speed check is a warning, never a wait (§10.1 `Throttled`): it prints the
   run's `Background` and `Throttled` warnings under the recordings (JSON `warnings`), since they were
   taken on a loaded machine, and the bench's `Attribution` (with `Missed:`), `ProbeOverhead`,
@@ -678,7 +680,8 @@ a check's series not run are in no `series` entry; bisect, track and MCP get suc
 error (exit 124 with its validator).
 **More runs in a check:** `--check --runs N` runs N runs in each case's one launch, still no warmup
 (a reset's extra run after them as before); each value is their median, and the check line adds
-`[lowest … highest run]` (result `runs`, `spread`). With `--why always`, `--runs` stays the
+`[lowest … highest run]` (result `runs`, `spread`; on Linux a counter block of its own adds its spread
+to the check's). With `--why always`, `--runs` stays the
 attribution block's and the check runs once. A launch case's one run is its launch: `--runs` does not
 repeat it (`LaunchRuns`, info). `--check --repeat R` (from 2) runs R fresh cold launches per case:
 `values` is the median over the launches, `repeat.values` each launch's (the check line lists them)
@@ -810,15 +813,20 @@ the first series' refusal, its label in front.
 cannot run here, …) ends alone, in every mode (comparison, `--check`, `--blocks N`, leak runs): it is
 listed refused (kind `refused`; or, after some blocks, its kind with `stopped: refused`, its primary
 refused with the validator and its finished blocks kept) and the rest of the file runs. A primary a
-look already decided keeps its verdict; the refusal is a `Stopped` warning on the series. Refusals of
-the machine stop the bench as before (`ValidatorId::machine_wide`: `SessionLocked`, `Background`,
-`BackgroundPriority`, `Thermal`, `DeviceAsleep`, `ConcurrentBench`, `PowerSave`, `LowBattery`,
-`Emulator`, `WirelessTransport`), as do a stop, `--max-time`, a lost phone (exit 255) and the user's
-state disturbed (no refusal). Exit 4 when every series that is not a gap is refused (a check: when
-every case that could run was refused), or with `--require-verdict` when any is. A refused series is
-checkpointed done: `--resume` keeps it. A bench in which nothing ran (no series finished, nothing
-saved) ends with its error and `stopped: nothing ran`, never a `--resume` hint. The check's summary
-counts them `N refused`. The engine, the browser's version and headless go into the rerun ledger's
+look already decided keeps its verdict; the refusal is a `Stopped` warning on the series. A series
+refused after some blocks drops its primary's numbers as a refused comparison does (`base`, `head`,
+`estimate`, `lo`, `hi`, `p`, `confidence`, `needed_pairs` null; `exact` false), and its `halt` keeps
+the refusal whole (summary, detail, fix). Refusals of the machine stop the bench as before
+(`ValidatorId::machine_wide`: `SessionLocked`, `Background`, `BackgroundPriority`, `Thermal`,
+`Throttled`, `DeviceAsleep`, `ConcurrentBench`, `PowerSave`, `LowBattery`, `Emulator`,
+`WirelessTransport`), except a headless Chromium page's wall-time primary refused `Throttled` with
+the display off, which ends that series alone (§10.1), as do a stop, `--max-time`, a lost phone (exit
+255) and the user's state disturbed (no refusal). Exit 4 when every series that is not a gap is
+refused (a check: when every case that could run was refused), or with `--require-verdict` when any
+is. A refused series is checkpointed done: `--resume` keeps it. A `--blocks` run whose every series
+was refused still ends with `<exp> · strobe query <exp>`. A bench in which nothing ran (no series
+finished, nothing saved) ends with its error and `stopped: nothing ran`, never a `--resume` hint. The
+check's summary counts them `N refused`. The engine, the browser's version and headless go into the rerun ledger's
 identity (§14.2) and track's fingerprints (§25): a run in another engine, version or mode is another
 experiment and another series.
 `--blocks N` measures `--head` alone: N timed blocks, each warmed until steady as a bench's, and
@@ -4644,7 +4652,7 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
 | `AmbiguousInteraction` | over half of a block's inputs were sent while the target was drawing (a present begun before the input began or reached the screen in the 2 refreshes before it: an animation, a caret, a press's look still settling after 300 ms), so the next frame may not be their reaction (refuses `interaction.*` or `scroll.latency.*`, §7.4); or the block's runs typed in a burst (`type(…, { burst: true })`: each key before the last one showed), in any engine or app, which refuses `interaction.*` with a fix naming the totals that measure burst typing (`cpu.work`, `main.work`, `ui.cpu`, `run.duration`, a phase) |
 | `PatternInput` | `interaction.*` of runs whose only inputs were accessibility actions, which skip hit testing and pointer handling |
 | `SessionLocked` | the session showed the lock screen during a recording (polled every 500 ms). `bench` never refuses for it: a series that needs a presenting window waits for an unlock and redoes the block, deleting what the locked block wrote. Bench and record keep the display on and the machine awake while they run. See §10.5 for series that run through a lock |
-| `ConcurrentBench` | on this computer benches take turns (below), so it only types a wait for the slot that `--max-time` cut short (exit 124, a timeout typed by it); it refuses a launch on an Android phone that another strobe (on this computer or another) still holds after 10 minutes of waiting, naming its owner, host and what it runs (`PhoneSlot::take`, §13.1). The device's turns: one device slot, which a bench takes for a block (`--check`, attribution and launch blocks too) and keeps for its next block until it builds, waits for an unlock, or another bench queues (then it hands the slot over after the block), so two blocks never run at once and a bench waiting for a person blocks no other. A `--check` keeps the slot from one of its short untimed blocks to the next (its builds and waits still hand it over). Benches queue for it in the order they asked; one that just ran asks again behind those waiting. Each running bench registers what it does (`<run>/benches/<pid>-<exp>.json`, with `daemon: true` when the daemon runs it), and `strobe status` lists them: running a block, queued behind whom, waiting for an unlock, preparing. Time queued is waiting, not run time. A wait has no deadline but `--max-time` (bench, a timed `record`, `strobe run --`: then `ConcurrentBench`, exit 124, naming what held the slot; a comparison keeps the pairs it has, `MaxTime`, and any other bench stops): once a minute it prints how long it has waited and what ends it (the holder's pid releasing the slot or exiting; stop it if it is stuck). A registration or old `bench.lock` whose pid is gone or no longer a strobe is dropped. The slot is a lock in the user's state folder, so a second lock across the machine is taken with it: `%ProgramData%\strobe-bench-v1.lock` or `/tmp/strobe-bench-v1.lock`, a file lock (it belongs to the open file, not to a thread, and dies with its holder), opened read-only when the file exists (another user's file in a sticky `/tmp`; `fs.protected_regular`), else created; benches of other users or state folders wait for it ("waiting for a bench of another user or state folder"), and `strobe status` says when another user or state folder holds it (a `slot` line; `slot_elsewhere` in `--json`). Before it, two benches with different `LOCALAPPDATA` ran their blocks at once on adais and flagged each other's target in every block. A timed `strobe record` (not `--ring`) takes the slot too, before its power plan |
+| `ConcurrentBench` | on this computer benches take turns (below), so it only types a wait for the slot that `--max-time` cut short (exit 124, a timeout typed by it); it refuses a launch on an Android phone that another strobe (on this computer or another) still holds after 10 minutes of waiting, naming its owner, host and what it runs (`PhoneSlot::take`, §13.1). The device's turns: one device slot, which a bench takes for a block (`--check`, attribution and launch blocks too) and keeps for its next block until it builds, waits for an unlock, or another bench queues (then it hands the slot over after the block), so two blocks never run at once and a bench waiting for a person blocks no other. A `--check` keeps the slot from one of its short untimed blocks to the next (its builds and waits still hand it over). Benches queue for it in the order they asked; one that just ran asks again behind those waiting. Each running bench registers what it does (`<run>/benches/<pid>-<exp>.json`, with `daemon: true` when the daemon runs it), and `strobe status` lists them: running a block, queued behind whom, waiting for an unlock, preparing. Time queued is waiting, not run time. A wait has no deadline but `--max-time` (bench, a timed `record`, `strobe run --`: then `ConcurrentBench`, exit 124, naming what held the slot; a comparison keeps the pairs it has, `MaxTime`, and any other bench stops; a bench's `--max-time` counts from its start, after the runner starts, so the slot wait of the display fit before the first block counts too; `record file:<trace> --max-time` is a usage error, an import waits for nothing): once a minute it prints how long it has waited and what ends it (the holder's pid releasing the slot or exiting; stop it if it is stuck). A registration or old `bench.lock` whose pid is gone or no longer a strobe is dropped. The slot is a lock in the user's state folder, so a second lock across the machine is taken with it: `%ProgramData%\strobe-bench-v1.lock` or `/tmp/strobe-bench-v1.lock`, a file lock (it belongs to the open file, not to a thread, and dies with its holder), opened read-only when the file exists (another user's file in a sticky `/tmp`; `fs.protected_regular`), else created; benches of other users or state folders wait for it ("waiting for a bench of another user or state folder"), and `strobe status` says when another user or state folder holds it (a `slot` line; `slot_elsewhere` in `--json`), reading the machine-wide lock read-only (it creates no lock file). Before it, two benches with different `LOCALAPPDATA` ran their blocks at once on adais and flagged each other's target in every block. A timed `strobe record` (not `--ring`) takes the slot too, before its power plan |
 | `VariantMismatch` | variants differ in build command, env, flags or window setup; native apps that draw with a different GPU backend, adapter or scale. Implementation comparisons (§9.10): the sides' declared viewport, scale or `gpuCache` differ (before anything builds), or their windows' client areas (over 2 DIP) or scales, or native sides' adapters (after a block), or
 what their pages emulate (`emulate`, before anything builds), or the motion they ask for (`motion`, §13.1 "Reduced motion", before anything builds); builds of a target that runs a fixed
 thing (a `url()`'s address, a fixed executable or an app profile's, §9.5), refused per series before
