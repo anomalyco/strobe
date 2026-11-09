@@ -224,6 +224,53 @@ const TOOLS: &[Tool] = &[
         required: &["handle"],
         long: false,
     },
+    Tool {
+        name: "look",
+        description: "Look at a target without measuring it, as strobe sees it: a page in a headless Chromium (title, address, headings, visible text, console messages and uncaught errors, a screenshot), a native app in an isolated home (window titles, its accessibility tree's headings and keyed elements, what a case's expect matches), a windowless app (whether it kept running, how it ended, what it printed), a terminal program on strobe's own terminal (its grid and the modes it set), or an open Safari tab on a USB-cabled iPhone. Exit 124 (a result with problems) when it never loaded or --until never showed.",
+        args: &[("target", "https://…, a local page.html, app:<id>, exe:<absolute path>, tty:<command> or wir:[<selector>]")],
+        flags: &[
+            ("until", "wait for this selector (a page's CSS, a native app's accessibility selector, text=… on a terminal; image=<png> an image anchor)"),
+            ("wait", "settle time after the load or --until (page 1s, app 2s: a windowless app is watched that long)"),
+            ("timeout", "how long the load, the window or --until may take (page 30s, app 30s)"),
+            ("out", "the screenshot's path (absolute through the daemon): a page, a native app's main window, a terminal's grid"),
+            ("size", "a page's viewport WIDTHxHEIGHT (default 1280x800), or a terminal's COLSxROWS (120x40)"),
+            ("scale", "a page's device scale factor"),
+            ("chars", "a page's visible text, at most this many characters (default 4000)"),
+            ("full", "a page: shoot the whole page"),
+            ("element", "a page: shoot only the first visible element this selector matches"),
+            ("headed", "a page in a visible browser window instead of headless"),
+            ("mobile", "true, or an adb serial: the page in Chrome on an Android phone or emulator"),
+            ("app", "exe:<path>: the strobe.json app profile it borrows"),
+            ("build", "app:<id>: build this checkout with strobe.json's build first and look at that executable (not through the daemon)"),
+            ("keys", "a native app: list at most this many keyed elements (default 40)"),
+            ("windowless", "a native app that shows no window (a tray app, a service, a command): no window waited for; whether it kept running over wait, how it ended, the last lines it printed"),
+            ("wayland", "Linux: the native app on a headless Wayland compositor strobe starts"),
+            ("home", "a seed folder copied into the app's or program's isolated home"),
+            ("type", "tty: text to type once --until showed"),
+            ("press", "tty: a key or chord to press once --until showed"),
+        ],
+        required: &["target"],
+        long: false,
+    },
+    Tool {
+        name: "config",
+        description: "Check a project's strobe.json (over the user's own) without a bench, read-only: where it is, each app profile resolved for this OS (its executable, guards, window), and the build and serve commands with the folders they run in. A problem is an error naming it.",
+        args: &[("dir", "the project folder, absolute (default: the folder strobe runs in; required through the daemon)")],
+        flags: &[],
+        required: &[],
+        long: false,
+    },
+    Tool {
+        name: "init",
+        description: "Write a project's first bench from what its files say (package.json scripts, main and bin; a Cargo.toml's binaries; an index.html): a strobe.json linked to its schema and a runnable perf/smoke.bench.ts (with perf/serve.ts for a web app, perf/server.ts for a server), then the commands that check them (config, bench --check). Never replaces a file that is there without force.",
+        args: &[("dir", "the project folder, absolute (default: the folder strobe runs in; required through the daemon)")],
+        flags: &[
+            ("target", "what to bench: web, server, native, electron, tty or cli (default: guessed from the folder's files)"),
+            ("force", "replace strobe.json and the bench files when they are there"),
+        ],
+        required: &[],
+        long: false,
+    },
 ];
 
 fn tools() -> Value {
@@ -358,6 +405,21 @@ fn to_args(name: &str, input: &Value) -> Result<(Vec<String>, u64, Option<String
             a.push(view);
             a.push(h);
         }
+        "look" => {
+            let target = get("target").ok_or_else(|| Error::usage("look needs target"))?;
+            if super::in_daemon() {
+                daemon_look(&target, obj)?;
+            }
+            a.push(target);
+        }
+        "config" | "init" => match get("dir") {
+            Some(d) if super::in_daemon() && std::path::Path::new(&d).is_relative() => {
+                return Err(Error::usage(format!("{name}: dir {d:?} is relative, which the daemon would read from its own working folder: give the absolute path")));
+            }
+            Some(d) => a.push(d),
+            None if super::in_daemon() => return Err(Error::usage(format!("{name} needs dir through the daemon: the project folder, absolute; the daemon's working folder is not your project"))),
+            None => {}
+        },
         _ => {}
     }
     a.extend(flags);
@@ -387,6 +449,27 @@ fn need_head(obj: &serde_json::Map<String, Value>) -> Result<()> {
         if let Some(path) = relative_variant(spec) {
             return Err(Error::usage(format!("{side} {spec:?} names {path:?}, a relative path the daemon would read from its own working folder: give the absolute path")));
         }
+    }
+    Ok(())
+}
+
+/// A look through the daemon, whose working folder is strobe's install folder: a relative file or
+/// executable, a relative screenshot path, a terminal program and a build of "this checkout" would all be
+/// read from there. An `app:<id>` resolves from the user's own strobe.json.
+fn daemon_look(target: &str, obj: &serde_json::Map<String, Value>) -> Result<()> {
+    let relative = |p: &str| std::path::Path::new(p).is_relative();
+    let local = !target.contains("://") && !["app:", "tty:", "wir", "about:", "data:"].iter().any(|p| target.starts_with(p));
+    let path = target.strip_prefix("exe:").or(local.then_some(target)).map(|p| p.strip_prefix("file:").unwrap_or(p));
+    if let Some(p) = path.filter(|p| relative(p)) {
+        return Err(Error::usage(format!("look: {p:?} is relative, which the daemon would read from its own working folder: give the absolute path")));
+    }
+    if let Some(out) = obj.get("out").and_then(Value::as_str).filter(|o| relative(o)) {
+        return Err(Error::usage(format!("look: out {out:?} is relative, which the daemon would write in its own working folder: give the absolute path")));
+    }
+    if target.starts_with("tty:") || obj.get("build").is_some_and(|b| *b == Value::Bool(true)) {
+        return Err(Error::usage(
+            "look: tty: and build run in the folder strobe runs in, and the daemon's is not your project: use the strobe CLI (or the stdio MCP server, strobe mcp) from the project",
+        ));
     }
     Ok(())
 }

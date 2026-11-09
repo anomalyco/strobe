@@ -117,6 +117,16 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
     .with_extra(app_args, &[])
     .as_kind(isolate::AppKind::Native)
     .with_display(args.has("wayland").then_some(isolate::Display::Wayland));
+    // `--windowless`: an app that shows no window (a tray app, a service, a command), as a profile's `window:
+    // false`: nothing to wait for or read, so look says whether it kept running and what it printed.
+    if args.has("windowless") {
+        app.windowless = true;
+    }
+    if app.windowless
+        && let Some(f) = ["until", "out", "keys"].iter().find(|f| args.has(f))
+    {
+        return Err(Error::usage(format!("--{f} reads a window, and {target} shows none (--windowless or its profile's window: false)")));
+    }
     for page_only in ["element", "full", "size", "scale", "chars", "headed", "engine", "mobile"] {
         if args.has(page_only) {
             return Err(Error::usage(format!("--{page_only} is for a page; a native app's look reads its accessibility tree, and --out <png> its main window's pixels")));
@@ -138,7 +148,7 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
         return Err(missing(&app, target.strip_prefix("app:").or(args.get("app"))));
     }
     let wait = Duration::from_millis(args.get("wait").map(duration_ms).transpose()?.unwrap_or(2000));
-    let timeout = Duration::from_millis(args.get("timeout").map(duration_ms).transpose()?.unwrap_or(60_000));
+    let timeout = Duration::from_millis(args.get("timeout").map(duration_ms).transpose()?.unwrap_or(30_000));
     let keys = args.num("keys")?.unwrap_or(40.0).max(0.0) as usize;
     for l in crate::target::isolate::reap_dead_owners() {
         progress(l);
@@ -150,7 +160,8 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
         progress(format!("look: on {what}, a Wayland compositor strobe started for this launch"));
     }
     progress(format!("look: launching {} in an isolated home", app.exe.display()));
-    let (mut n, guard) = match nt::launch(&app, &home, &[], false, None) {
+    // A windowless app's output is what there is to read of it.
+    let (mut n, guard) = match nt::launch(&app, &home, &[], app.windowless, None) {
         Ok(x) => x,
         Err(e) => {
             drop(stop);
@@ -162,14 +173,24 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
         }
     };
     let result = (|| -> Result<Output> {
+        if app.windowless {
+            return Ok(windowless(&mut n, &guard, target, wait));
+        }
         let started = Instant::now();
         let mut problems: Vec<String> = Vec::new();
-        let main = if app.windowless {
-            None
-        } else {
-            let w = n.wait_window(timeout, &guard)?;
-            Some(w.hwnd)
-        };
+        // No window in the timeout, or the app exited first: say how to look at an app that shows none.
+        let w = n.wait_window(timeout, &guard).map_err(|e| {
+            if e.code != 255 && !e.message.contains("before it opened a window") {
+                return e;
+            }
+            let profile = target.strip_prefix("app:").or(args.get("app"));
+            let windowless = match profile {
+                Some(id) => format!("--windowless (or window: false in its profile {id})"),
+                None => "--windowless, or --app <id> of a profile with window: false".to_string(),
+            };
+            e.hint(format!("an app that shows no window (a tray app, a service, a command): look at it with {windowless}; one that starts slowly: --timeout 2m"))
+        })?;
+        let main = Some(w.hwnd);
         let window_ms = started.elapsed().as_secs_f64() * 1e3;
         let session = main.map(|m| crate::driver::native::Session::open(&n.pids(), m));
         let until = args.get("until").map(|u| image_until(u).unwrap_or_else(|| Value::String(u.to_string())));
@@ -215,7 +236,7 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
                 keyed = se.keys(keys).unwrap_or_default();
             }
             Some(Err(e)) => problems.push(format!("accessibility: {}", e.message)),
-            None => problems.push("the app has no window (a windowless profile): nothing to read".into()),
+            None => {}
         }
         // `--out`: the main window's pixels, read as a block's screens read them.
         let mut shot = None;
@@ -290,6 +311,81 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
     result
 }
 
+/// A windowless look (`--windowless`, a profile's `window: false`): there is no window to read, so it watches
+/// the app over `wait`: whether it kept running, how it ended if it did (exit 0 is an end, not a failure: a
+/// command that did its work), the guards, and the last lines it printed. Exit 124 for a nonzero exit or
+/// a guard that stopped it.
+fn windowless(n: &mut crate::target::native::Native, guard: &crate::target::isolate::Guard, target: &str, wait: Duration) -> Output {
+    const KEEP: usize = 20;
+    let started = Instant::now();
+    let mut problems: Vec<String> = Vec::new();
+    let mut lines: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut printed = 0usize;
+    let mut take = |n: &crate::target::native::Native, until: Instant| {
+        let Some(rx) = &n.output else { return };
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+                Ok((_, _, l)) => {
+                    printed += 1;
+                    lines.push_back(l);
+                    if lines.len() > KEEP {
+                        lines.pop_front();
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < until => {}
+                Err(_) => return,
+            }
+        }
+    };
+    let mut ended = None;
+    while started.elapsed() < wait {
+        take(&*n, Instant::now() + Duration::from_millis(100));
+        // A launcher that exits cleanly and leaves the app running is not the app ending.
+        if let Some(code) = n.exited().filter(|&c| c != 0 || n.processes().is_empty()) {
+            ended = Some((code, started.elapsed()));
+            break;
+        }
+        if let Err(e) = guard.check("while the app ran") {
+            problems.push(format!("{}{}", e.message, e.hint.map(|h| format!(" ({h})")).unwrap_or_default()));
+            break;
+        }
+    }
+    // What it printed before it ended, read to the end of its pipes (at most half a second more).
+    take(&*n, Instant::now() + if ended.is_some() { Duration::from_millis(500) } else { Duration::ZERO });
+    let processes = n.pids().len();
+    if let Some((code, _)) = ended.filter(|(c, _)| *c != 0) {
+        problems.push(format!("the app exited with code {code}"));
+    }
+    let name = n.exe.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut text = format!("{name} · {}\nwindow   none (windowless)\n", n.exe.display());
+    text += &match ended {
+        Some((code, at)) => format!("exited   with code {code} after {}\n", fmt::value(at.as_secs_f64() * 1e3, "ms")),
+        None => format!("running  after {} · {processes} process{}\n", fmt::value(wait.as_secs_f64() * 1e3, "ms"), if processes == 1 { "" } else { "es" }),
+    };
+    for p in &problems {
+        text += &format!("!        {p}\n");
+    }
+    if printed > 0 {
+        text += &format!("output   {printed} line{}{}\n", if printed == 1 { "" } else { "s" }, if printed > KEEP { format!(" (the last {KEEP})") } else { String::new() });
+        for l in &lines {
+            text += &format!("  │{l}\n");
+        }
+    } else {
+        text += "output   none\n";
+    }
+    let json = json!({
+        "target": target, "exe": n.exe, "windowless": true, "window_ms": null, "running": ended.is_none(), "exit_code": ended.map(|(c, _)| c),
+        "ended_ms": ended.map(|(_, at)| at.as_secs_f64() * 1e3), "processes": processes, "output_lines": printed, "output": lines, "problems": problems,
+        "titles": [], "headings": [], "keys": [],
+    });
+    let mut o = Output::new(text, json);
+    if !problems.is_empty() {
+        o.code = 124;
+    }
+    o
+}
+
 /// `strobe look tty:<command>`: the program on strobe's own terminal (`target::tty`) in an isolated
 /// home, as a tty() target's block starts it, nothing measured: its grid once it showed `--until` and
 /// held still, the modes it set (mouse, keyboard protocol), and when it first drew. `--press` and
@@ -297,7 +393,7 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
 fn terminal(args: &Args, line: &str) -> Result<Output> {
     use crate::driver::tty as drv;
     use crate::target::{isolate, tty};
-    for page_only in ["element", "full", "scale", "chars", "headed", "keys", "build", "app", "wayland", "engine"] {
+    for page_only in ["element", "full", "scale", "chars", "headed", "keys", "build", "app", "wayland", "engine", "windowless"] {
         if args.has(page_only) {
             return Err(Error::usage(format!("--{page_only} is not a terminal's: look tty:<command> takes --size COLSxROWS, --until, --press, --type, --wait, --timeout, --home, --out <png>")));
         }
@@ -458,7 +554,7 @@ pub fn run(args: &Args) -> Result<Output> {
     if args.has("full") && args.has("element") {
         return Err(Error::usage("--full shoots the whole page and --element one element of it: give one"));
     }
-    for app_only in ["keys", "build", "app", "home", "wayland"] {
+    for app_only in ["keys", "build", "app", "home", "wayland", "windowless"] {
         if args.has(app_only) {
             return Err(Error::usage(format!("--{app_only} is for a native app (look app:<id> or exe:<path>), not a page")));
         }
@@ -768,7 +864,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             return Err(Error::usage(format!("--{bad} sends input; look wir: is strictly read-only")));
         }
     }
-    for bad in ["keys", "build", "app", "home", "wayland"] {
+    for bad in ["keys", "build", "app", "home", "wayland", "windowless"] {
         if args.has(bad) {
             return Err(Error::usage(format!("--{bad} is for a native app (look app:<id> or exe:<path>), not wir:")));
         }

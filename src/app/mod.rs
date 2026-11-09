@@ -8,6 +8,7 @@ pub mod family;
 pub mod fmt;
 pub mod helper;
 pub mod history;
+pub mod init;
 pub mod look;
 pub mod mcp;
 pub mod open;
@@ -135,6 +136,10 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     // Strictly read-only: it puts nothing back and makes no state folder.
     if args.command == "config" {
         return config::run(args);
+    }
+    // Writes the project's first files and nothing of strobe's own.
+    if args.command == "init" {
+        return init::run(args);
     }
     if args.command == "stats" {
         return statcheck::run(args);

@@ -43,7 +43,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("channel", Value, "up"),
     ("style", Switch, "record bench plan"),
     ("native", Switch, "record query"),
-    ("windowless", Switch, "record"),
+    ("windowless", Switch, "record look"),
     ("app", Value, "record look"),
     ("home", Value, "record look"),
     ("os-frames", Switch, "record"),
@@ -57,7 +57,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("aa", Switch, "bench plan run"),
     ("check", Switch, "bench update run up"),
     ("filter", Value, "bench plan track"),
-    ("target", Value, "record bench plan top track"),
+    ("target", Value, "record bench plan top track init"),
     ("params", Value, "record bench plan track"),
     ("primary", Value, "bench plan track run"),
     ("equivalence", Number, "bench plan track run history"),
@@ -102,7 +102,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("open", Switch, "report"),
     ("update-pr", Number, "report"),
     ("repo", Value, "report"),
-    ("force", Switch, "report update"),
+    ("force", Switch, "report update init"),
     ("no-card", Switch, "report"),
     ("theme", Value, "report"),
     ("badge-url", Switch, "report"),
@@ -166,7 +166,7 @@ pub fn kind(name: &str) -> Option<Kind> {
 
 /// Every command strobe has (`app::dispatch`).
 pub const COMMANDS: &[&str] =
-    &["record", "bench", "plan", "query", "report", "open", "look", "run", "status", "top", "track", "history", "up", "update", "leave", "helper", "mcp", "daemon", "config", "stats"];
+    &["record", "bench", "plan", "query", "report", "open", "look", "run", "status", "top", "track", "history", "up", "update", "leave", "helper", "mcp", "daemon", "config", "init", "stats"];
 
 /// Flags a command reads that `FLAGS` does not list for it: only to refuse them in its own typed way
 /// (`look --engine firefox` is `EngineUnsupported`, exit 4, never a page in Chromium).
@@ -535,7 +535,10 @@ Use
   look wir:[<selector>] [--until <selector>] [--wait 200ms] [--out <png>] [--chars 4000] [--full | --element <selector>]
                                    (read-only snapshot of an open Safari tab on a USB-cabled iPhone; never navigates)
   look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>] [-- <args…>]
-                                   (after --: the app's own arguments, after its profile's)
+                                   (after --: the app's own arguments, after its profile's; the window waited for 30 s,
+                                   --timeout for longer)
+       [--windowless]              (an app that shows no window, as a profile's window: false: whether it kept
+                                   running over --wait, how it ended, and the last lines it printed)
   look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s] [--home <seed>]
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
                                   console messages and uncaught errors, and a screenshot (exit 124 when it never loads);
@@ -554,6 +557,10 @@ Use
                                   metric.<name> from `strobe:metric <name>=<value>` lines it prints (--aa --head: an A/A)
 
 Setup
+  init [<dir>] [--target web|server|native|electron|tty|cli] [--force]
+                                  a project's first bench from its package.json, Cargo.toml or index.html: strobe.json
+                                  (its schema linked) and a runnable perf/smoke.bench.ts; never replaces a file
+                                  without --force; prints the commands that check them
   up [--skip deep,daemon,mcp,calibrate]  install, download the engine, deep mode (one UAC prompt), start the daemon,
                                   register MCP and the skill (--check: only what it finds, cpu to bun; nothing changes)
   up --mobile[=<serial>] --channel canary|dev|beta
