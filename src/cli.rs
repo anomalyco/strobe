@@ -488,7 +488,8 @@ Use
                                   native samples, or a script recording's profile; --source host: a script target's whole
                                   host process (its measured runs by default), by lifecycle part at the end; --source
                                   startup|setup: the host's startup (the runtime's boot, the target's static imports) or
-                                  the bench file's setup alone (a server's dynamic imports);
+                                  the bench file's setup alone (a server's dynamic imports); not with --native, --thread,
+                                  --pid or --phase;
                                   --case <name>: one case of a --batch recording)
                                   (http: a bench block's HTTP probe (ctx.httpProbe): idle against the runs, timeouts,
                                   errors, missed sends, stalled cohorts; --phase <name>; exp_… its probe blocks, a..b too)

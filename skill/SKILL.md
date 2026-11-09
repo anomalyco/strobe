@@ -78,6 +78,7 @@ The design and every rule behind this file: SPEC.md.
 - `query <rec> threads`: wakes/s and CPU per thread, the module each started in, whose (app, driver,
   os, `unknown (?)`); `--timeline` per second. Idle wake-ups: `query <rec> insights`.
 - Native hotspots of a tree pool every process: read `by process`, then `--pid <pid|exe>`.
+  A native attribution recording (`record --bench`, `--why`) keeps frames too: `query <rec> inputs`.
   `! Coverage`: samples cover under 80% of the CPU (read shares, not totals); it names what the
   sampler counted of the rest (`late_ms` before a thread was opened, `forgone_ms`, unopened threads,
   lost events). A launched app's children are sampled from their start. Two resolved shares
@@ -161,14 +162,15 @@ export default bench({
   A 500 or a failed `expect` refuses the latencies. `http.missed_sends` is strobe's lag, not the server's.
 - `authorization` stays in strobe's memory: never in a file, report, trace or answer. Loopback only.
 - `cpu.main` is the main thread alone beside `cpu.work` (the tree): `cpu.main.busy` near 100% is a
-  saturated event loop; a worker or a child process shows in `cpu.work` only.
+  saturated event loop; a worker or a child process shows in `cpu.work` only. A script's (or a
+  windowless native app's) check line shows both even when the case does not declare them.
 - A script's `query <rec> hotspots` is its measured runs; `--source host` the whole host process
   (start, setup, warmup, resets), its `by lifecycle` lines each part's wall time against the JavaScript
   sampled in it; `--source startup` the host's start and the target's static imports, `--source setup`
   the bench file's setup (a server's dynamic imports); `--phase <name>` one phase.
   - Slow startup with few rows: `N modules evaluated` (each module is a stack of its own: `--by file`
-    sums them); on Bun little sampled of a part is native work (transpiling, module loading),
-    which `--cpu-prof` never samples.
+    sums them). Lifecycle shares are of wall time: unsampled wall is mostly waiting, and on Bun
+    native work (transpiling, module loading) too, which `--cpu-prof` never samples.
   - `! Missed`: the main thread used CPU (`cpu.main`) the profile has no sample of, so rows
     undercount (Node labels short timer callbacks `(idle)`; Bun never samples its event loop's own
     work). `! Waited`: rows include time the thread waited for a CPU (samples weigh wall time).
@@ -222,7 +224,8 @@ noisy discovery evidence, or leave them out.
   - `RunIncomplete` on `cpu.renderer`/`cpu.gpu`/`cpu.browser` names why: a process of that role ended
     in the run, or ended processes (their CPU pooled) used over 1% of it. `cpu.work` keeps
     their CPU: compare that.
-  - `RunIncomplete`: a run threw, timed out, its `until` never came, or the app exited.
+  - `RunIncomplete`: a run threw, timed out, its `until` never came, or the app exited. "The host
+    wrote none": a script host's profile never came; it says how the host ended and ends `script.log`.
   - `ResetIncomplete`: a run started from another state than run 1 (`the reset did not restore …`).
   - `TailTooShort`: a percentile lacks its minimum n (`interaction.p95` needs 20 samples a block).
   - `AmbiguousInteraction`: over half the inputs came while the target was drawing.
@@ -457,7 +460,8 @@ export default bench({
   refuse `EngineUnsupported`: use `native()`.
 - `tty(["my-tui"])`: a program on strobe's own terminal; look first with
   `strobe look tty:"my-tui" --until text=Ready`. Metrics `tty.latency.*`, `tty.settle.*`,
-  `tty.frames`, `tty.bytes`, `cpu.work`; mouse calls need the program's mouse mode
+  `tty.frames`, `tty.bytes`, `cpu.work` (a check line counts the latencies' inputs: `(10 inputs, 2 busy)`;
+  busy and silent ones are left out); mouse calls need the program's mouse mode
   (`MouseNotEnabled`). Events: the program appends JSON lines to `STROBE_EVENTS`
   (`{"strobe":"state","name":"done"}` for `until: { state: "done" }`). Wait in setup for what arrives
   late (a status line), and leave a clock out of the reset check with `ignore: [[col, row, cols, rows]]`.
@@ -508,6 +512,8 @@ export default bench({
 - Everything about the app under test lives in its repo: `build` and `serve` for web targets, `apps`
   profiles (`kind`, `exe` per OS, `env`, `unset`, `files`, `guard`, `protocols`, `extends`).
   `build.windows|macos|linux` overlay `build` (`env` merged). Strobe itself names no product.
+- A relative `exe` (`./app.exe`, `build/app`) is the project's build, from strobe.json's folder;
+  `exe:<path>` resolves from the current folder. `strobe config` shows where each resolves.
 - The nearest strobe.json upward from the bench file wins; `build.cwd` and `serve.cwd` resolve
   from the checkout's root. `//` comments and trailing commas are fine; an unknown key exits 2.
 - `"$schema": "./node_modules/@hona/strobe/schema/strobe.v1.json"`. `strobe config` checks it.
