@@ -870,7 +870,10 @@ impl Driver {
             }
             other => return Err(Error::msg(format!("internal: page.{other}() is no OS input"))),
         };
-        self.os_until(os, &o, at)?;
+        // Keys whose wait ran out: one that never reached the page says so (`InputMismatch`, with whether it
+        // had focus), not the wait it left waiting.
+        let keyed = matches!(call, "type" | "press") || (matches!(call, "down" | "up") && keys::mouse_button(&s(0)).is_none());
+        self.os_until(os, &o, at).map_err(|e| if keyed && (matches!(e.code, 1 | 124) || e.validator() == Some(ValidatorId::AnchorNotFound)) { self.undelivered(os, e) } else { e })?;
         Ok(Value::Bool(true))
     }
 
@@ -886,6 +889,17 @@ impl Driver {
             self.until_one(u).map(drop)
         })
         .map(drop)
+    }
+
+    /// A key call's wait that ran out: when what strobe posted did not reach the page (`delivered`), that
+    /// refusal instead, saying so when the page had no focus (`document.hasFocus()`, read within 1 s);
+    /// else the wait's own error.
+    fn undelivered(&self, os: &OsInput, e: Error) -> Error {
+        let Err(r) = os.delivered(&self.page) else { return e };
+        if r.validator() != Some(ValidatorId::InputMismatch) {
+            return e;
+        }
+        if self.page.eval_timeout("document.hasFocus()", Duration::from_secs(1)).ok() == Some(Value::Bool(false)) { super::noted(r, super::UNFOCUSED) } else { r }
     }
 
     /// The element's centre (scrolled into view) as a screen point, and the browser window the OS

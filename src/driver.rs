@@ -960,6 +960,21 @@ fn no_selector(sel: &Value) -> bool {
     sel.is_null() || sel.as_str() == Some("")
 }
 
+/// What a key call's failure adds when its keys reached no page that had no focus.
+const UNFOCUSED: &str = "the page had no focus (document.hasFocus() is false), so keys did not reach it; click the page first or pass a selector";
+
+/// `e` with `note` after what it says (a refusal's detail, so its validator and fix stay).
+fn noted(mut e: Error, note: &str) -> Error {
+    match e.refusal.as_deref_mut() {
+        Some(r) => {
+            r.detail = Some(r.detail.take().map_or(note.to_string(), |d| format!("{d}; {note}")));
+            e.message = r.message();
+        }
+        None => e.message = format!("{}; {note}", e.message),
+    }
+    e
+}
+
 pub struct Driver {
     pub page: Page,
     pub token: String,
@@ -1914,31 +1929,25 @@ impl Driver {
     }
 
     /// The `until` of keys sent to no element (a press, typing or a key down or up with no selector) that
-    /// ran out (a timeout, an image that never showed): when no key reached the document since the call
-    /// (`KEYS_SEEN`) and it had no focus (`document.hasFocus()`), both read within 1 s, the error says so.
-    /// Focus alone proves nothing: a headless page reads no focus until a click, and takes keys all the same.
-    /// Not on a phone, whose clock is not this computer's.
-    fn unfocused(&self, mut e: Error) -> Error {
-        const NOTE: &str = "the page had no focus (document.hasFocus() is false), so keys did not reach it; click the page first or pass a selector";
-        if (e.code != 124 && e.validator() != Some(ValidatorId::AnchorNotFound)) || self.phone {
+    /// failed (a wait in the page or one that ran out, an image that never showed): when no key reached
+    /// the document since the call (`KEYS_SEEN`) and it had no focus (`document.hasFocus()`), both read
+    /// within 1 s, the error says so. Focus alone proves nothing: a headless page reads no focus until a
+    /// click, and takes keys all the same. Nothing is said of a document that began after the call (a key
+    /// that navigated reached the one before), nor on a phone, whose clock is not this computer's.
+    fn unfocused(&self, e: Error) -> Error {
+        if !(matches!(e.code, 1 | 124) || e.validator() == Some(ValidatorId::AnchorNotFound)) || self.phone {
             return e;
         }
-        let Ok(seen) = self.page.eval_timeout("[document.hasFocus(), window.__strobeKeys?.at ?? null]", Duration::from_secs(1)) else { return e };
+        let Ok(seen) = self.page.eval_timeout("[document.hasFocus(), window.__strobeKeys?.at ?? null, performance.timeOrigin]", Duration::from_secs(1)) else { return e };
         // The call's start on the wall clock the page's `Date.now()` reads.
         let ago = Duration::from_nanos(crate::host::now_ns().saturating_sub(self.call_at.get()));
         let called_ms = std::time::SystemTime::now().checked_sub(ago).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_millis() as f64);
         let reached = seen[1].as_f64().is_none_or(|at| at + 1.0 >= called_ms);
-        if seen[0] != false || reached {
+        let later = seen[2].as_f64().is_none_or(|origin| origin + 1.0 >= called_ms);
+        if seen[0] != false || reached || later {
             return e;
         }
-        match e.refusal.as_deref_mut() {
-            Some(r) => {
-                r.detail = Some(r.detail.take().map_or(NOTE.to_string(), |d| format!("{d}; {NOTE}")));
-                e.message = r.message();
-            }
-            None => e.message = format!("{}; {NOTE}", e.message),
-        }
-        e
+        noted(e, UNFOCUSED)
     }
 
     /// One wait of a call's `until` (`each_until` runs a list's in turn).

@@ -1,11 +1,13 @@
 // Dev bench for keys sent to a page with no focus (not shipped). A page that writes each key it gets, and a
 // button that opens a popup window, which takes the focus from it on a desktop. Run from the repo root:
 //   strobe bench scripts/dev/focus.bench.ts --head . --check            (headed)
-//   strobe bench scripts/dev/focus.bench.ts --head . --check --headless
-// Expected: `focused` and `selector` pass (the press clicks its field first). `ignored` fails at its until (it waits
-// for a key it never sends) with no word on focus: its key reached the page, even headless, where the page reads no
-// focus (document.hasFocus() is false) until a click. `unfocused` passes where the page takes the keys anyway, and
-// otherwise fails saying the page had no focus, so keys did not reach it.
+//   strobe bench scripts/dev/focus.bench.ts --head . --check --headless [--engine firefox]
+// Expected: `focused`, `unfocused` and `selector` pass (the press clicks its field first; Chromium's DevTools keys
+// focus the page they go to, so they reach it after the popup too). `ignored` fails at its until (it waits for a key
+// it never sends) with no word on focus: its key reached the page, even where the page reads no focus
+// (document.hasFocus() is false: headless Firefox throughout, headless Chromium until a key or click). `unseen` is
+// `ignored` on a page that wipes strobe's record of its keys: in headless Firefox it fails saying the page had no
+// focus, so keys did not reach it; in Chromium it says nothing (the key gave the page focus).
 import { bench, url } from "@hona/strobe"
 
 const page = `<!doctype html><title>focus</title>
@@ -13,6 +15,8 @@ const page = `<!doctype html><title>focus</title>
 <button id="pop">pop</button> <input id="field"> <p id="got">keys:</p>
 <script>
 addEventListener("keydown", (e) => { got.textContent += " " + e.key })
+// #unseen: the page wipes what strobe saw of its keys, as if none had come (the report's own check).
+if (location.hash === "#unseen") addEventListener("keyup", () => { window.__strobeKeys.at = 0 })
 pop.addEventListener("click", () => { window.open("about:blank", "_blank", "popup,width=200,height=200") })
 </script>`
 
@@ -24,7 +28,7 @@ const unfocus = async ({ page }: any) => {
 }
 
 export default bench({
-  targets: { page: url(`data:text/html,${encodeURIComponent(page)}`) },
+  targets: { page: url(`data:text/html,${encodeURIComponent(page)}`), unseen: url(`data:text/html,${encodeURIComponent(page)}#unseen`) },
   // What a run typed goes, so the next starts as it did.
   async reset({ page }) {
     await page.eval(() => {
@@ -33,9 +37,12 @@ export default bench({
     })
   },
   cases: {
-    focused: { primary: "run.duration", run: async ({ page }) => void (await page.press("a", keyed("a"))) },
-    ignored: { primary: "run.duration", run: async ({ page }) => void (await page.press("a", keyed("b"))) },
+    focused: { targets: ["page"], primary: "run.duration", run: async ({ page }) => void (await page.press("a", keyed("a"))) },
+    ignored: { targets: ["page"], primary: "run.duration", run: async ({ page }) => void (await page.press("a", keyed("b"))) },
+    // The page hides that its key came: headless (no focus until a click), the failure says no key reached it.
+    unseen: { targets: ["unseen"], primary: "run.duration", run: async ({ page }) => void (await page.press("a", keyed("b"))) },
     unfocused: {
+      targets: ["page"],
       primary: "run.duration",
       async run(ctx) {
         await unfocus(ctx)
@@ -43,6 +50,7 @@ export default bench({
       },
     },
     selector: {
+      targets: ["page"],
       primary: "run.duration",
       async run(ctx) {
         await unfocus(ctx)
