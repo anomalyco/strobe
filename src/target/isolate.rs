@@ -241,11 +241,21 @@ pub fn no_motion_contract(id: &str) -> crate::model::Refusal {
 /// kept as it is would name nothing there. A bare name of nothing in `dir` stays as it is: the OS
 /// finds it on PATH.
 pub fn from_dir(exe: &Path, dir: &Path) -> PathBuf {
+    use std::path::Component;
     if !exe.is_relative() || exe.as_os_str().is_empty() {
         return exe.to_path_buf();
     }
-    let rel: PathBuf = exe.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect();
-    let joined = dir.join(&rel);
+    // `.` and `..` resolved by name, so the path reads as the file it is.
+    let mut joined = PathBuf::new();
+    for c in dir.join(exe).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(joined.components().next_back(), Some(Component::Normal(_))) => {
+                joined.pop();
+            }
+            c => joined.push(c),
+        }
+    }
     if exe.components().count() > 1 || joined.exists() { joined } else { exe.to_path_buf() }
 }
 
