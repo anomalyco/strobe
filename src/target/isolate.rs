@@ -237,9 +237,8 @@ pub fn no_motion_contract(id: &str) -> crate::model::Refusal {
 }
 
 /// A relative executable from `dir`: one that names a folder (`./app`, `build/app`), or a bare name
-/// of something in `dir` (an app bundle is a folder). A launch runs in its home, so a relative path
-/// kept as it is would name nothing there. A bare name of nothing in `dir` stays as it is: the OS
-/// finds it on PATH.
+/// of a file in `dir`; a bare name of none there is the one on PATH (`on_path`). A launch runs in its
+/// home, so a relative path kept as it is would name nothing there.
 pub fn from_dir(exe: &Path, dir: &Path) -> PathBuf {
     use std::path::Component;
     if !exe.is_relative() || exe.as_os_str().is_empty() {
@@ -256,7 +255,22 @@ pub fn from_dir(exe: &Path, dir: &Path) -> PathBuf {
             c => joined.push(c),
         }
     }
-    if exe.components().count() > 1 || joined.exists() { joined } else { exe.to_path_buf() }
+    if exe.components().count() > 1 || joined.is_file() { joined } else { on_path(exe) }
+}
+
+/// A bare executable name as the file on PATH it names (Windows: `.exe` added to a name without an
+/// extension), so what is launched is a file strobe can read; unchanged when PATH has none.
+fn on_path(exe: &Path) -> PathBuf {
+    let found = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|d| {
+            let p = d.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+            Some(p.with_extension("exe")).filter(|p| cfg!(windows) && exe.extension().is_none() && p.is_file())
+        })
+    });
+    found.unwrap_or_else(|| exe.to_path_buf())
 }
 
 /// `from_dir` from the current folder (unchanged when it cannot be read).
@@ -332,9 +346,12 @@ pub fn app(id: &str, config: &Value) -> Result<App> {
     let p = Value::Object(merged);
     let exe = per_os(&p["exe"]).map(str::to_string).ok_or_else(|| Error::usage(format!("app profile \"{id}\" has no exe for {}", os())))?;
     let exe = expand(&exe).map_err(|e| Error::usage(format!("app profile \"{id}\" exe: {}", e.message)))?;
-    // A project's profile: a relative executable is its own build, from the project's root.
-    let exe = match p[crate::config::ROOT].as_str() {
+    // A project's profile (the one of the chain that gave the exe): a relative executable is its own build,
+    // from the project's root. A user's profile has no root: a bare name is the one on PATH.
+    let root = chain.iter().find(|c| per_os(&c["exe"]).is_some()).and_then(|c| c[crate::config::ROOT].as_str());
+    let exe = match root {
         Some(root) => from_dir(&exe, Path::new(root)),
+        None if exe.is_relative() && exe.components().count() == 1 => on_path(&exe),
         None => exe,
     };
     let strings = |k: &str| p[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();

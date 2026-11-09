@@ -1138,11 +1138,12 @@ fn runs(
             if let Some(r) = &presents_err {
                 // Said once for the bench, so frames that never show are not mistaken for none being drawn.
                 let why = if r.validator == ValidatorId::NoPresentSource { format!("OS present events: {}", r.summary) } else { r.summary.clone() };
-                if !ctx.warnings.iter().any(|w| w.id == r.validator.name()) {
+                // An attribution block's frames are its recording's alone: the timed blocks may have them.
+                if set != Set::Attribution && !ctx.warnings.iter().any(|w| w.id == r.validator.name()) {
                     ctx.warnings.push(validity::info(r.validator.name(), format!("frames refused ({why}); frames.* and interaction.* are missing from every block")));
                 }
                 for m in declared_metrics(s).into_iter().filter(|m| frame_metric(m)) {
-                    refused.entry(m.clone()).or_insert_with(|| Refusal::new(r.validator, format!("{m}: {why}")));
+                    refused.entry(m.clone()).or_insert_with(|| Refusal { summary: format!("{m}: {why}"), ..r.clone() });
                 }
             }
             // Inputs given through accessibility actions skip hit testing and pointer handling: they are

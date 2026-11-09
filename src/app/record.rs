@@ -1316,7 +1316,7 @@ pub fn attribution_presents(home: &isolate::Home, stacks: Option<&Result<probe::
         if probe::present::access().token == "none" {
             return Err(crate::model::Refusal::new(
                 crate::model::ValidatorId::NoPresentSource,
-                "present events: the native stacks hold the deep helper's one connection, and this logon may not run a present session itself",
+                "the native stacks hold the deep helper's one connection, and this logon may not run a present session itself",
             )
             .fix("sign in as a member of Performance Log Users (strobe up adds you; sign out and in once), or read frames from a timing block")
             .into());

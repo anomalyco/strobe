@@ -122,10 +122,7 @@ impl Host {
         let err = out.try_clone()?;
         cmd.stdin(Stdio::null()).stdout(out).stderr(err);
         let mut child = host::spawn_owned(&mut cmd, cpus, 0, None).map_err(|e| Error::msg(format!("start the script host: {e}")))?;
-        let failed = |log: &Path| {
-            let tail: Vec<String> = std::fs::read_to_string(log).unwrap_or_default().lines().rev().take(12).map(str::to_string).collect::<Vec<_>>().into_iter().rev().collect();
-            Error::msg(format!("the script host did not load {}:\n{}", entry.display(), tail.join("\n")))
-        };
+        let failed = |log: &Path| Error::msg(format!("the script host did not load {}:\n{}", entry.display(), log_tail(log, 12).join("\n")));
         // The host connects once its runtime is up; a module that fails to import ends it first.
         listener.set_nonblocking(true)?;
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -266,7 +263,9 @@ impl std::fmt::Display for ExitState {
     }
 }
 
-/// The last `n` lines of the experiment's script.log (of its last 8 KB), each at most 200 characters.
+/// The last `n` lines of the experiment's script.log (of its last 8 KB), each with its secrets redacted
+/// (cookies, authorization, bearer tokens, URL secrets: `redact_text`) and at most 200 characters. What
+/// an HTTP probe sent is scrubbed from the file first (`Runner::scrub_log`), where the caller has a runner.
 fn log_tail(log: &Path, n: usize) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut buf = Vec::new();
@@ -276,7 +275,8 @@ fn log_tail(log: &Path, n: usize) -> Vec<String> {
             let _ = f.read_to_end(&mut buf);
         }
     }
-    let lines: Vec<String> = String::from_utf8_lossy(&buf).lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| l.chars().take(200).collect()).collect();
+    let lines: Vec<String> =
+        String::from_utf8_lossy(&buf).lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| crate::host::ios::logs::redact_text(l, false).chars().take(200).collect()).collect();
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
@@ -752,6 +752,8 @@ impl Profiled<'_> {
                 .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
         };
         let raw = newest("cpuprofile").ok_or_else(|| -> Error {
+            // What the probe sent leaves the log before its tail goes into the refusal.
+            ctx.runner.scrub_log(self.log);
             let tail = log_tail(self.log, 6);
             let r = Refusal::new(ValidatorId::RunIncomplete, format!("the script host's CPU profile: the host wrote none: {}", self.ended));
             let r = if tail.is_empty() { r.detail("script.log is empty") } else { r.detail(format!("script.log ends: {}", tail.join(" | "))) };
