@@ -165,7 +165,25 @@ impl Grabber {
         let (img, at, seq) = {
             let px = px.map(|v| v as i32);
             match self.os.as_mut() {
-                Some(w) => w.grab(v.origin.ok_or_else(|| Error::msg("the app's window closed"))?, px)?,
+                Some(w) => {
+                    let origin = v.origin.ok_or_else(|| Error::msg("the app's window closed"))?;
+                    match w.grab(origin, px)? {
+                        Some(r) => r,
+                        // The window grew and held still since: its capture's newest frame is cropped to
+                        // the size before. A fresh capture starts with a whole frame (its open charged).
+                        None => {
+                            let cpu = crate::probe::video::ThreadCpu::start();
+                            let (pending, seen) = (w.take_cpu_ms(), w.seq());
+                            let fresh = wgc::Wgc::open(self.win);
+                            self.open_ms.set(self.open_ms.get() + pending + cpu.ms().unwrap_or(0.0));
+                            *w = fresh?;
+                            // Its frames count on from the old one's, so a wait for a frame after one of
+                            // those still means a newer frame.
+                            w.count_from(seen);
+                            w.grab(origin, px)?.ok_or_else(|| Error::msg("Windows.Graphics.Capture's frames of the window are smaller than the window"))?
+                        }
+                    }
+                }
                 None => {
                     let full = super::win::window_image(self.win).ok_or_else(|| Error::msg("the window did not draw itself (PrintWindow), and Windows.Graphics.Capture is not available"))?;
                     // The image is in the window's own pixels (fewer than physical ones for a DPI unaware window).
@@ -397,6 +415,15 @@ mod wgc {
             self.shared.latest.lock().unwrap_or_else(|e| e.into_inner()).count
         }
 
+        /// Numbers its frames on from `seen` (a capture it replaces had that many).
+        pub fn count_from(&self, seen: u64) {
+            let mut l = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner());
+            l.count += seen;
+            if let Some(h) = l.held.as_mut() {
+                h.n += seen;
+            }
+        }
+
         /// The frame events' CPU (ms) since the last call.
         pub fn take_cpu_ms(&self) -> f64 {
             self.shared.cpu_ns.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6
@@ -416,14 +443,15 @@ mod wgc {
         }
 
         /// `[x, y, w, h]` (physical pixels in the client area, which starts at `origin` in the captured
-        /// frame) of the newest frame: its pixels, time and number. The frame stays out of the frame
-        /// event's reach until its region is read back.
-        pub fn grab(&mut self, origin: (i32, i32), px: [i32; 4]) -> Result<(crate::png::Image, u64, u64)> {
+        /// frame) of the newest frame: its pixels, time and number; None when that frame was cropped to
+        /// a smaller window's size (a fresh capture's first frame is whole). The frame stays out of the
+        /// frame event's reach until its region is read back.
+        pub fn grab(&mut self, origin: (i32, i32), px: [i32; 4]) -> Result<Option<(crate::png::Image, u64, u64)>> {
             let held = {
                 let mut l = self.shared.latest.lock().unwrap_or_else(|e| e.into_inner());
                 let h = l.held.as_ref().ok_or_else(|| Error::msg("Windows.Graphics.Capture has no frame of the window"))?;
                 if let Some(last) = self.last.as_ref().filter(|x| x.n == h.n && x.req == (origin, px)) {
-                    return Ok((copy(&last.img), h.t_ns, h.n));
+                    return Ok(Some((copy(&last.img), h.t_ns, h.n)));
                 }
                 l.held.take().ok_or_else(|| Error::msg("internal: the held frame"))?
             };
@@ -439,12 +467,18 @@ mod wgc {
             read
         }
 
-        fn read(&mut self, held: &Held, (ox, oy): (i32, i32), [x, y, w, h]: [i32; 4]) -> Result<(crate::png::Image, u64, u64)> {
+        fn read(&mut self, held: &Held, (ox, oy): (i32, i32), [x, y, w, h]: [i32; 4]) -> Result<Option<(crate::png::Image, u64, u64)>> {
             let tex: ID3D11Texture2D =
                 held.frame.Surface().and_then(|s| s.cast::<IDirect3DDxgiInterfaceAccess>()).and_then(|a| unsafe { a.GetInterface() }).map_err(|e| win(e, "the frame's surface"))?;
             let mut d = D3D11_TEXTURE2D_DESC::default();
             unsafe { tex.GetDesc(&mut d) };
             let content = (held.content.0.min(d.Width), held.content.1.min(d.Height));
+            // The window grew past the pool's buffers: its newest frame was cropped to them, and a window
+            // that holds still sends no other.
+            let want = (((ox + x + w).max(0) as u32).min(held.content.0), ((oy + y + h).max(0) as u32).min(held.content.1));
+            if want.0 > content.0 || want.1 > content.1 {
+                return Ok(None);
+            }
             let (left, top) = ((ox + x).max(0) as u32, (oy + y).max(0) as u32);
             let (right, bottom) = (((ox + x + w).max(0) as u32).min(content.0), ((oy + y + h).max(0) as u32).min(content.1));
             if right <= left || bottom <= top {
@@ -494,7 +528,7 @@ mod wgc {
             }
             let img = crate::png::Image { width: rw as usize, height: rh as usize, rgba };
             self.last = Some(Last { n: held.n, req: ((ox, oy), [x, y, w, h]), img: copy(&img) });
-            Ok((img, held.t_ns, held.n))
+            Ok(Some((img, held.t_ns, held.n)))
         }
     }
 
@@ -507,15 +541,16 @@ mod wgc {
                 let mut l = self.latest.lock().unwrap_or_else(|e| e.into_inner());
                 let content = f.ContentSize().map(|s| (s.Width.max(1) as u32, s.Height.max(1) as u32)).unwrap_or(l.pool);
                 l.count += 1;
-                let old = l.held.replace(Held { frame: f, content, t_ns: t, n: l.count });
+                let n = l.count;
+                let old = l.held.replace(Held { frame: f, content, t_ns: t, n });
                 let resize = content != l.pool;
                 if resize {
                     l.pool = content;
                 }
                 drop(l);
                 self.cv.notify_all();
-                // Outside the lock: giving a buffer back synchronizes with the GPU (about 0.6 ms of CPU
-                // on a busy hybrid laptop), which a read waiting for the frame need not wait out.
+                // Outside the lock: giving a buffer back synchronizes with the GPU, which a read waiting
+                // for the frame need not wait out.
                 if let Some(old) = old {
                     let _ = old.frame.Close();
                 }

@@ -335,7 +335,10 @@ pub(crate) fn device(video: bool) -> Result<(ID3D11Device, ID3D11DeviceContext, 
     };
     let (device, ctx) = unsafe {
         let (mut d, mut c) = (std::ptr::null_mut(), std::ptr::null_mut());
-        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | if video { D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0 } else { 0 };
+        // A device for pixel reads only (no video) keeps the driver's work on the calling thread: with its
+        // own worker threads each read's flush and map cost about 1.3 and 0.4 ms of CPU on a hybrid laptop
+        // drawing on its integrated GPU, without them 0.05 and 0.03 ms.
+        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | if video { D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0 } else { D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS.0 };
         create(
             std::ptr::null_mut(),
             windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE.0,
