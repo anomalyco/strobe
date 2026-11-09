@@ -26,6 +26,10 @@ const SEQ_ALLOC: u32 = 0x7374_0003;
 const SEQ_NATIVE: u32 = 0x7374_0004;
 const SEQ_GECKO: u32 = 0x7374_0005;
 const UUID_BASE: u64 = 0x5354_524F_0000_0000;
+/// A script attribution recording's whole-host profile (`probe::cpu`), and the thread id its samples
+/// stand on: no thread's, so they never mix with the measured runs' on the host's main thread.
+const WHOLE_HOST: &str = "whole-host.json.gz";
+const WHOLE_HOST_TID: u32 = u32::MAX - 1;
 
 /// A protobuf message being written.
 #[derive(Default)]
@@ -119,10 +123,10 @@ pub fn build(dir: &Path, out: &Path) -> Result<Built> {
     // they would land at the phone's uptime instead (any distance from the page's events).
     let host_clock = !(b.built.chrome && meta["phone"].is_object());
     if host_clock {
-        b.native_runs(dir);
+        b.native_runs(dir, &meta);
         b.http_probe(dir);
         b.actions(dir);
-        b.timeline(dir, &threads);
+        b.timeline(dir, &threads, &meta);
         b.presents(dir, &meta);
         b.memory(dir);
     } else {
@@ -516,12 +520,20 @@ impl Builder {
         }
     }
 
-    /// A native recording's runs, phases, marks, strobe's inputs and the accessibility tree's changes.
-    fn native_runs(&mut self, dir: &Path) {
+    /// A native or script recording's runs, phases, marks, strobe's inputs and the accessibility tree's
+    /// changes, and a script host's life around its measured runs (`lifecycle_spans`: startup, setup,
+    /// warmup and unmeasured runs, resets, teardown).
+    fn native_runs(&mut self, dir: &Path, meta: &Value) {
         type Args = Vec<(String, Value)>;
-        let runs_info: HashMap<String, Value> =
-            store::read_json(&dir.join("runs.json")).ok().and_then(|v| v.as_array().cloned()).into_iter().flatten().filter_map(|r| Some((r["run"].as_str()?.to_string(), r))).collect();
+        let info = store::read_json(&dir.join("runs.json")).ok();
+        // A native block's `runs.json` is its runs' readings beside `frames.json`'s spans; a script
+        // block's is `{ runs }`, each run with its own span, untimed stretches and phase marks.
+        let scripted: Vec<(String, Value)> = info.as_ref().and_then(|v| v["runs"].as_array().cloned()).into_iter().flatten().filter_map(|r| Some((r["run"].as_str()?.to_string(), r))).collect();
+        let runs_info: HashMap<String, Value> = info.and_then(|v| v.as_array().cloned()).into_iter().flatten().filter_map(|r| Some((r["run"].as_str()?.to_string(), r))).collect();
         let mut runs: Vec<(String, Value)> = store::read_json(&dir.join("frames.json")).ok().and_then(|f| f["runs"].as_object().cloned()).into_iter().flatten().collect();
+        if runs.is_empty() {
+            runs = scripted;
+        }
         runs.sort_by_key(|(_, r)| r["t0_ns"].as_u64().unwrap_or(0));
         let mut spans: Vec<(String, u64, u64, Args)> = Vec::new();
         let mut marks: Vec<(String, u64)> = Vec::new();
@@ -531,10 +543,16 @@ impl Builder {
             let (Some(a), Some(b)) = (r["t0_ns"].as_u64(), r["t1_ns"].as_u64()) else { continue };
             self.runs.push((a, b));
             let mut args = Vec::new();
-            if let Some(info) = runs_info.get(name) {
-                flatten("", info, &["run"], &mut args);
+            match runs_info.get(name) {
+                Some(info) => flatten("", info, &["run"], &mut args),
+                None => flatten("", r, &["run", "t0_ns", "t1_ns", "marks", "untimed", "inputs", "changes"], &mut args),
             }
             spans.push((name.clone(), a, b, args));
+            for u in r["untimed"].as_array().into_iter().flatten() {
+                if let (Some(ua), Some(ub)) = (u[0].as_u64(), u[1].as_u64()) {
+                    spans.push(("untimed".into(), ua, ub, Vec::new()));
+                }
+            }
             let edges: Vec<(String, u64)> = r["marks"].as_array().into_iter().flatten().filter_map(|m| Some((m[0].as_str()?.to_string(), m[1].as_u64()?))).collect();
             // Phases as `metrics::mark_windows` pairs them; an edge of a key that never closed, or a mark
             // of no window, an instant.
@@ -553,6 +571,13 @@ impl Builder {
                 inputs.push((i["kind"].as_str().unwrap_or("input").to_string(), t, args));
             }
             changes.extend(r["changes"].as_array().into_iter().flatten().filter_map(Value::as_u64));
+        }
+        // A script host's life outside its measured runs, on the same track: where a whole-host profile's
+        // samples that are no measured run's went.
+        for l in meta["lifecycle_spans"].as_array().into_iter().flatten() {
+            if let (Some(n), Some(a), Some(b)) = (l["name"].as_str(), l["t0_ns"].as_u64(), l["t1_ns"].as_u64()) {
+                spans.push((n.to_string(), a, b.max(a), vec![("host".into(), json!("lifecycle (not measured)"))]));
+            }
         }
         // A recording without runs of its own keeps its span on the thread timeline.
         if spans.is_empty()
@@ -730,10 +755,19 @@ impl Builder {
     }
 
     /// Each thread's CPU (% of one core) and wakes per second over the recording, under its thread.
-    fn timeline(&mut self, dir: &Path, threads: &Threads) {
+    fn timeline(&mut self, dir: &Path, threads: &Threads, meta: &Value) {
         let Some(t) = read_gz::<crate::probe::wakes::TimelineData>(&dir.join("timeline.json.gz")) else { return };
+        let main = meta["pid"].as_u64().map(|p| p as u32).zip(main_tid(meta));
         if t.ticks.is_empty() {
             return;
+        }
+        // Threads whose CPU strobe could not read (`cpu_unknown`; every thread with `cpu_refused`): their
+        // cells hold wakes only, so they get no CPU counter (never a 0% line).
+        let raw: Value = read_gz(&dir.join("timeline.json.gz")).unwrap_or(Value::Null);
+        let no_cpu: HashSet<u32> = raw["cpu_unknown"].as_array().into_iter().flatten().filter_map(|i| i.as_u64().map(|i| i as u32)).collect();
+        let cpu_refused = raw["cpu_refused"].is_string();
+        if cpu_refused {
+            self.built.notes.push(format!("threads' CPU is not drawn: {}", raw["cpu_refused"].as_str().unwrap_or("")));
         }
         let start = |i: usize| if i == 0 { t.t0_ns } else { t.ticks[i - 1] };
         let mut cells: HashMap<u32, BTreeMap<usize, (f32, u32)>> = HashMap::new();
@@ -751,6 +785,8 @@ impl Builder {
                 .or_else(|| threads.names.get(&(th.pid, th.tid)).cloned())
                 .or_else(|| th.module.as_deref().map(|m| format!("{} thread", m.rsplit(['\\', '/']).next().unwrap_or(m))))
                 .unwrap_or_else(|| "thread".into());
+            // The process's main thread (`cpu.main`): the one whose saturation the runs' values say.
+            let name = if main == Some((th.pid, th.tid)) { format!("{name} (main thread)") } else { name };
             // With a Chrome trace its own thread tracks stay its own: these go under strobe's.
             let parent = if self.built.chrome { None } else { Some(self.thread_track(th.pid, th.tid, th.name.as_deref())) };
             let group = self.built.chrome.then(|| self.track("threads (CPU and wakes)", 10, None));
@@ -766,19 +802,24 @@ impl Builder {
                 }
                 None => self.track_under(group, &format!("{what} ({})", th.tid), 0, Some(unit)),
             };
-            let cpu = make(format!("{name} · CPU % of a core"), "%");
+            let cpu = (!cpu_refused && !no_cpu.contains(&(i as u32))).then(|| make(format!("{name} · CPU % of a core"), "%"));
             let wakes = wakes_per_thread.then(|| make(format!("{name} · wakes/s"), "/s"));
             let last = last.min(t.ticks.len() - 1);
+            // Each tick over the span it covers (a run's edge takes a short one, a late one covers more).
             for k in first..=last {
                 let (ms, w) = c.get(&k).copied().unwrap_or((0.0, 0));
                 let span = t.ticks[k].saturating_sub(start(k)).max(1) as f64;
-                self.counter(cpu, MONOTONIC, start(k), 100.0 * f64::from(ms) * 1e6 / span);
+                if let Some(cpu) = cpu {
+                    self.counter(cpu, MONOTONIC, start(k), 100.0 * f64::from(ms) * 1e6 / span);
+                }
                 if let Some(wk) = wakes {
                     self.counter(wk, MONOTONIC, start(k), f64::from(w) * 1e9 / span);
                 }
                 self.seen(start(k));
             }
-            self.counter(cpu, MONOTONIC, t.ticks[last], 0.0);
+            if let Some(cpu) = cpu {
+                self.counter(cpu, MONOTONIC, t.ticks[last], 0.0);
+            }
             if let Some(wk) = wakes {
                 self.counter(wk, MONOTONIC, t.ticks[last], 0.0);
             }
@@ -1011,30 +1052,47 @@ impl Builder {
         profiles.sort();
         let mut allocs: Vec<std::path::PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "heapprofile")).collect();
         allocs.sort();
-        if profiles.is_empty() && allocs.is_empty() {
+        // A script host's whole profile (startup, setup, warmup, runs, resets, teardown), kept apart from its
+        // measured runs' (`cpu-<run>.cpuprofile`): on a thread track of its own, never mixed into theirs.
+        let whole: Option<Value> = read_gz(&dir.join(WHOLE_HOST));
+        if profiles.is_empty() && allocs.is_empty() && whole.is_none() {
             return;
         }
         let sym = Symbolizer::open(dir);
-        // Without a Chrome trace (a script target) the samples need a thread of their own.
+        // Without a Chrome trace (a script target) the samples need a thread of their own: the host's
+        // process and main thread where the recording names them.
         let own = (!self.built.chrome).then(|| {
             let name = meta["target"].as_str().map(|s| s.rsplit(['\\', '/']).next().unwrap_or(s).to_string()).unwrap_or_else(|| "script".into());
-            let uuid = self.uuid();
-            self.descriptor(|d| {
-                d.u(1, uuid).m(3, |p| {
-                    p.u(1, 1).s(6, &name);
+            let pid = meta["pid"].as_u64().map_or(1, |p| p as u32);
+            let tid = main_tid(meta).unwrap_or(pid);
+            if !self.thread_tracks.contains_key(&(pid, tid)) {
+                let uuid = self.uuid();
+                self.descriptor(|d| {
+                    d.u(1, uuid).m(3, |p| {
+                        p.u(1, u64::from(pid)).s(6, &name);
+                    });
                 });
-            });
-            self.thread_track(1, 1, Some("main"));
-            (1u32, 1u32)
+            }
+            self.thread_track(pid, tid, Some("main"));
+            (pid, tid)
         });
         let page_thread = page.page.or(own).unwrap_or((0, 0));
         let mut js = Stacks::new(SEQ_JS, "javascript", "time", 1);
         let mut first_ts: Option<u64> = None;
         let (mut scripts, mut mapped) = (HashSet::new(), HashSet::new());
-        for path in &profiles {
-            let Ok(prof) = store::read_json(path) else { continue };
-            let main = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("cpu-main"));
-            let (pid, tid) = if main { page.browser.unwrap_or(page_thread) } else { page_thread };
+        let mut sources: Vec<(Value, (u32, u32))> = profiles
+            .iter()
+            .filter_map(|path| {
+                let main = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("cpu-main"));
+                Some((store::read_json(path).ok()?, if main { page.browser.unwrap_or(page_thread) } else { page_thread }))
+            })
+            .collect();
+        if let Some(w) = whole {
+            let at = (page_thread.0, WHOLE_HOST_TID);
+            self.thread_track(at.0, at.1, Some("whole host process (startup, setup, warmup, runs, resets; not measured)"));
+            sources.push((w, at));
+        }
+        for (prof, (pid, tid)) in sources {
             let nodes = prof["nodes"].as_array().cloned().unwrap_or_default();
             let parent: HashMap<u64, u64> = nodes
                 .iter()
@@ -1303,6 +1361,11 @@ impl Builder {
         }
         self.out.extend_from_slice(&st.out);
     }
+}
+
+/// The recorded process's main thread (`cpu.main`, `host::MainThread`), where the recording names it.
+fn main_tid(meta: &Value) -> Option<u32> {
+    meta["main_tid"].as_u64().or_else(|| meta["main_thread"].as_u64()).or_else(|| meta["main_thread"]["tid"].as_u64()).map(|t| t as u32)
 }
 
 /// A mark's key as a slice name: `strobe:<token>:run:3:phase:down` → `run 3 · phase down`.

@@ -2894,8 +2894,9 @@ fn leak_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Val
 /// The secondaries a series tests: its declared metrics and the defaults. A script's or native app's CPU
 /// per run is its main.work, so it is tested as main.busy is for a page. `cpu.app.total` is CPU over run
 /// time: once runs get shorter or longer (`rate_context`), its move says nothing about the CPU they spent
-/// (a run 84% shorter for 80% less CPU reads +28%), so it is then context.
-fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> {
+/// (a run 84% shorter for 80% less CPU reads +28%), so it is then context, as is `cpu.main.busy` (the
+/// main thread's CPU over run time). `extra`: this target's own defaults (`target_defaults`).
+fn secondary_names(s: &Series, extra: &[&str], rate_context: bool) -> Vec<String> {
     // `s.metrics` holds each declared metric once, never the primary (`case_metrics`).
     let mut names: Vec<String> = s.metrics.clone();
     // A metric with a no-worse margin is declared: it is tested.
@@ -2904,8 +2905,12 @@ fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> 
             names.push(m.clone());
         }
     }
-    for m in DEFAULT_SECONDARIES.iter().copied().chain(script.then_some("cpu.work")) {
-        let skip = names.iter().any(|n| n == m) || m == s.primary || (s.primary == "cpu.process.total" && m == "cpu.app.total") || (m == "cpu.app.total" && rate_context) || s.per_side(m);
+    for m in DEFAULT_SECONDARIES.iter().chain(extra).copied() {
+        let skip = names.iter().any(|n| n == m)
+            || m == s.primary
+            || (s.primary == "cpu.process.total" && m == "cpu.app.total")
+            || (matches!(m, "cpu.app.total" | "cpu.main.busy") && rate_context)
+            || s.per_side(m);
         if !skip {
             names.push(m.to_string());
         }
@@ -2913,12 +2918,23 @@ fn secondary_names(s: &Series, script: bool, rate_context: bool) -> Vec<String> 
     names
 }
 
+/// A target's own default secondaries: `cpu.work` where it is measured from outside (a script, a
+/// command, a native app, a page in an engine without the renderer's task time, either side of an
+/// implementation comparison), and the main thread's (`cpu.main`, `cpu.main.busy`) where that is the
+/// event loop a person waits on with no window to time: a script's host, a windowless native app.
+fn target_defaults(ctx: &Ctx, s: &Series, target: &Value) -> Vec<&'static str> {
+    let outside = matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) || is_native(target) || s.sides.is_some() || engine_of(target) != WebEngine::Chromium;
+    let windowless = target["window"] == false || profile_of(target).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
+    let main = target["kind"] == "script" || (is_native(target) && windowless);
+    outside.then_some("cpu.work").into_iter().chain(if main { ["cpu.main", "cpu.main.busy"].as_slice() } else { &[] }.iter().copied()).collect()
+}
+
 /// The secondaries that will be tested after these pairs: those every block has a value of, but a
 /// stable exact counter, which is compared exactly outside Holm (as the Holm family after the pairs
 /// counts them, so the pairs a series runs on for Holm are the ones that family needs).
-fn tested_names(s: &Series, script: bool, blocks: &[Block], pairs: &[(usize, usize)], bound: f64) -> Vec<String> {
+fn tested_names(s: &Series, extra: &[&str], blocks: &[Block], pairs: &[(usize, usize)], bound: f64) -> Vec<String> {
     let rate_context = !same(blocks, pairs, "run.duration", bound);
-    secondary_names(s, script, rate_context)
+    secondary_names(s, extra, rate_context)
         .into_iter()
         .filter(|n| model::metric(n).is_some() && !s.per_side(n) && blocks.iter().all(|b| b.values.get(n).is_some_and(|v| v.is_finite())) && !stable_exact(n, blocks, pairs))
         .collect()
@@ -3263,10 +3279,10 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     if !pairs.is_empty() {
         progress(format!("  resumed with the {} pairs it had finished{}", pairs.len(), decided_n.map(|n| format!(" (the primary was decided at pair {n})")).unwrap_or_default()));
     }
-    // Outside-in CPU (`cpu.work`) is a tested secondary where the target is measured from outside: a
-    // script, a command, a native app, both sides of an implementation comparison, and a page in an
-    // engine without the renderer's task time.
-    let script = matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) || is_native(&target) || s.sides.is_some() || engine_of(&target) != WebEngine::Chromium;
+    // Outside-in CPU (`cpu.work`) and the main thread's are tested secondaries where they measure the
+    // target (`target_defaults`).
+    let extra = target_defaults(ctx, s, &target);
+    let script = extra.as_slice();
     // Why the series ended early (a stop, or an error after some pairs), as the error to report.
     let mut halted: Option<Error> = None;
     // The look, the run-on and the stop (SPEC §9.1): `sequential::Driver`, which `strobe stats
@@ -3562,7 +3578,12 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         .map(|b| {
             b.values
                 .keys()
-                .filter(|k| k.starts_with("launch.") || k.starts_with("metric.") || *k == "memory.peak" || *k == "cpu.work" || *k == "cli.launch" || (*k == "cpu.app.total" && rate_context))
+                .filter(|k| {
+                    k.starts_with("launch.")
+                        || k.starts_with("metric.")
+                        || matches!(k.as_str(), "memory.peak" | "cpu.work" | "cli.launch" | "cpu.main")
+                        || (matches!(k.as_str(), "cpu.app.total" | "cpu.main.busy") && rate_context)
+                })
                 .cloned()
                 .collect()
         })
