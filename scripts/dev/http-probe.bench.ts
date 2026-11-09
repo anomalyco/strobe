@@ -10,8 +10,10 @@
 //   stalls-100ms-apart  two 550 ms stalls of the thread 100 ms apart, a 1000 ms timeout: the server answers what
 //                     the first held in the gap, so query http shows two cohorts, each "answered none for" ≈550 ms
 //                     (a probe that connects as the second begins may wait it out too: it opens the second).
-//   stalls-back-to-back  the same with no gap: the loop reads no request between the stalls, so the server answers
-//                     none for ≈1.1 s, one cohort that says so; the first probe times out at 1000 ms, first in it.
+//   stalls-back-to-back  the same with no gap. Whether the loop answers anything between the two calls is the
+//                     runtime's: on Windows it read no request, so one cohort "answered none for" ≈1.03 s, its first
+//                     probe timed out at 1000 ms and said so; on Linux it answered the first stall's probes, so two
+//                     cohorts. Never one "answered none for" a span the server answered in.
 // The held cases' server holds each request in the bench file's own process until the window it came in ends (a
 // stall without a busy thread), two 550 ms windows 150 ms apart, so the next two say exactly what a stalled loop
 // does to a client that connects as a stall ends (accept and read in separate turns: it waits out the next one):
