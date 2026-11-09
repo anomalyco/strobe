@@ -461,6 +461,15 @@ pub struct SuspendStats {
     pub capped: u64,
     /// Threads that could not be opened for sampling (another user's, protected, 32-bit).
     pub unopened: usize,
+    /// CPU left unsampled because a thread ran more than two samples' worth between two of the
+    /// sampler's looks at it (a late tick, or a thread a refresh did not list as busy): each look takes
+    /// one sample at most (ms).
+    #[serde(default)]
+    pub forgone_ms: f64,
+    /// CPU of threads begun during the capture before strobe opened them (ms): in `cpu_ms`, sampled
+    /// by nothing.
+    #[serde(default)]
+    pub late_ms: f64,
     /// The CPU the set's threads used over the capture as the sampler saw them (ms): what its
     /// samples cover a share of (`query hotspots` coverage).
     #[serde(default, skip_serializing_if = "Option::is_none")]

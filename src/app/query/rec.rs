@@ -271,7 +271,7 @@ impl Rec {
     /// A script recording's whole host process (`whole-host.json.gz`): startup, setup, warmup, the
     /// runs, resets and teardown. Each sample weighs its gap; one over the file's `capUs`, its `overUs`.
     pub(super) fn host_cpu(&self) -> Result<&Stacks> {
-        cached(self.host_cpu.get_or_init(|| self.load_script(&[(f64::NEG_INFINITY, f64::INFINITY)], &[])))
+        cached(self.host_cpu.get_or_init(|| self.load_script(&[(f64::NEG_INFINITY, f64::INFINITY)], &[], HostFrames::Name)))
     }
 
     /// A script recording's samples inside `spans` and outside `untimed` (ns on strobe's clock, as
@@ -282,12 +282,12 @@ impl Rec {
             v.sort_by(|a, b| a.0.total_cmp(&b.0));
             v
         };
-        self.load_script(&us(spans), &us(untimed))
+        self.load_script(&us(spans), &us(untimed), HostFrames::Fold)
     }
 
     /// The whole host profile's samples inside `spans` and outside `untimed` (µs, sorted), as
     /// `probe::cpu::weights` weighs them.
-    fn load_script(&self, spans: &[(f64, f64)], untimed: &[(f64, f64)]) -> Result<Stacks> {
+    fn load_script(&self, spans: &[(f64, f64)], untimed: &[(f64, f64)], host: HostFrames) -> Result<Stacks> {
         let path = self.dir.join(crate::probe::cpu::WHOLE_HOST);
         if !path.is_file() {
             return Err(Error::usage(format!(
@@ -313,7 +313,14 @@ impl Rec {
         let last = Sampling::of(0.0, gaps).map_or(0.0, |s| s.median_us);
         let w = crate::probe::cpu::weights(&times, cap, prof.over_us.unwrap_or(cap), last, spans, untimed);
         let mut out = Stacks::default();
-        self.add_profile(&mut out, &prof, |i| w.get(i).copied().filter(|w| *w > 0.0));
+        self.add_profile(&mut out, &prof, host, |i| w.get(i).copied().filter(|w| *w > 0.0));
+        if host == HostFrames::Name {
+            for f in out.frames.iter_mut().filter(|f| is_host(f)) {
+                f.file = SCRIPT_HOST.into();
+                f.url = SCRIPT_HOST.into();
+                f.mapped = false;
+            }
+        }
         Ok(out)
     }
 
@@ -338,13 +345,15 @@ impl Rec {
             if p.file_stem().is_some_and(|s| s != "cpu-main") {
                 self.gaps.lock().unwrap_or_else(|e| e.into_inner()).extend(gaps);
             }
-            self.add_profile(&mut out, &prof, |i| Some(prof.time_deltas.get(i + 1).copied().unwrap_or(last).max(0.0)));
+            let host = if self.meta["script"] == true { HostFrames::Fold } else { HostFrames::Keep };
+            self.add_profile(&mut out, &prof, host, |i| Some(prof.time_deltas.get(i + 1).copied().unwrap_or(last).max(0.0)));
         }
         Ok(out)
     }
 
-    /// One profile's samples into `out`, sample i weighing `weight(i)` µs (none: left out).
-    fn add_profile(&self, out: &mut Stacks, prof: &CpuProfile, weight: impl Fn(usize) -> Option<f64>) {
+    /// One profile's samples into `out`, sample i weighing `weight(i)` µs (none: left out), with the
+    /// script host's own frames as `host` says.
+    fn add_profile(&self, out: &mut Stacks, prof: &CpuProfile, host: HostFrames, weight: impl Fn(usize) -> Option<f64>) {
         // Parsing runs beside other loads; symbolizing shares the recording's source maps.
         let sym = self.sym.lock().unwrap_or_else(|e| e.into_inner());
         let index: HashMap<u64, usize> = prof.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
@@ -366,8 +375,25 @@ impl Rec {
             e.2 += dt * dt;
         }
         let mut frames = Symbolized::new(&sym, prof.nodes.len());
+        // Stacks the fold made the same weigh as one.
+        let mut folded: HashMap<Vec<u32>, usize> = HashMap::new();
         for (k, (w, n, var)) in at {
-            let stack = frames.chain(k, &parent, |i| &prof.nodes[i].call_frame, out);
+            let mut stack = frames.chain(k, &parent, |i| &prof.nodes[i].call_frame, out);
+            // The host's dispatch below the script's own code (its line reader, the hook call) is the
+            // same on every stack: what the script called from it stays, a sample in the host alone is
+            // one frame for it.
+            if host == HostFrames::Fold {
+                if let Some(k) = stack.iter().rposition(|&i| is_host(&out.frames[i as usize])) {
+                    let rest = stack.split_off(k + 1);
+                    stack = if rest.is_empty() { vec![out.intern(host_frame())] } else { rest };
+                }
+                if let Some(&j) = folded.get(&stack) {
+                    let x = &mut out.weights[j];
+                    (x.w, x.n, x.var) = (x.w + w, x.n + n, x.var + var);
+                    continue;
+                }
+                folded.insert(stack.clone(), out.weights.len());
+            }
             out.weights.push(Weight { stack, w, n, var });
         }
     }
@@ -506,6 +532,29 @@ struct AllocSample {
     node_id: u64,
     #[serde(default)]
     size: f64,
+}
+
+/// What a script recording's profile keeps of its host's own frames (strobe's `host.mjs`, which reads
+/// the runner's requests and calls the script's hooks): all (a page's profile has none), none below
+/// the script's code (the measured runs and phases: the same dispatch on every stack), or all with
+/// their file named for what it is (the whole host profile: its path is strobe's install folder under
+/// the user's profile).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostFrames {
+    Keep,
+    Fold,
+    Name,
+}
+
+const SCRIPT_HOST: &str = "(strobe script host)";
+
+fn is_host(f: &Frame) -> bool {
+    [&f.url, &f.file].iter().any(|s| s.ends_with("/host.mjs") || s.ends_with("\\host.mjs"))
+}
+
+/// A sample inside the host itself, below no code of the script's.
+fn host_frame() -> Frame {
+    Frame { name: SCRIPT_HOST.into(), file: SCRIPT_HOST.into(), line: -1, column: -1, url: String::new(), mapped: false, name_from: None, package: None }
 }
 
 /// Profile nodes to interned frames, each node and each distinct call frame resolved once.

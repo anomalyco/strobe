@@ -1,10 +1,15 @@
 //! Native CPU samples on Linux (attribution blocks only, SPEC rule 3): the kernel's `perf_event_open`
 //! in strobe's own process, no `perf` binary.
 //!
-//! - One software `cpu-clock` event per thread of the target tree (on-CPU time, so a sample is a
-//!   thread that was running, as the Windows profile interrupt), timestamps on `CLOCK_MONOTONIC`
-//!   (`host::now_ns`). An inherited event cannot have a ring buffer of its own, so threads and
-//!   processes that start later are found every 50 ms and sampled from then.
+//! - One software `cpu-clock` event per thread of the target's set and CPU (on-CPU time, so a sample
+//!   is a thread that was running, as the Windows profile interrupt), timestamps on `CLOCK_MONOTONIC`
+//!   (`host::now_ns`), each CPU's events writing into one ring. The events are inherited: a thread or
+//!   process a sampled thread starts samples into the same rings from its first instruction, each
+//!   sample naming its own pid and tid, and its start is announced (`PERF_RECORD_FORK`), so strobe
+//!   never opens it again. (A per-thread inherited event, CPU -1, cannot be mapped: hence per CPU.)
+//!   Processes that join the set from outside (stamped with its home) are found every 50 ms. A thread
+//!   strobe opened in the moment before its start was announced is sampled twice: its own events'
+//!   samples (by their id, `PERF_SAMPLE_IDENTIFIER`) are dropped and the events disabled.
 //! - Each sample copies the user registers and the top of the user stack, and strobe unwinds it with
 //!   the modules' DWARF unwind tables (`.eh_frame`, `framehop`): release builds rarely keep frame
 //!   pointers, which is what a kernel frame-pointer walk would need. Kernel frames come from the
@@ -105,29 +110,129 @@ impl Drop for Ring {
     }
 }
 
-fn open(tid: u32, kernel: bool, pages: usize) -> std::io::Result<Ring> {
+const SAMPLE_IDENTIFIER: u64 = 1 << 16;
+/// `PERF_EVENT_IOC_DISABLE`, `PERF_EVENT_IOC_SET_OUTPUT` (`_IO('$', 5)`), `PERF_EVENT_IOC_ID`
+/// (`_IOR('$', 7, u64 *)`).
+const IOC_DISABLE: libc::c_ulong = 0x2401;
+const IOC_SET_OUTPUT: libc::c_ulong = 0x2405;
+const IOC_ID: libc::c_ulong = 0x8008_2407;
+const RECORD_COMM: u32 = 3;
+const RECORD_FORK: u32 = 7;
+const RECORD_SAMPLE: u32 = 9;
+/// `PERF_RECORD_MISC_COMM_EXEC`: the comm changed because the process ran a new executable.
+const MISC_COMM_EXEC: u16 = 1 << 13;
+
+/// The sampling event on one thread and CPU: inherited, with the starts and renames of what inherits
+/// it announced.
+fn open_event(tid: u32, cpu: i32, kernel: bool) -> std::io::Result<i32> {
     let mut a = Attr { kind: 1, size: 136, config: 0, sample_period: INTERVAL_NS, ..Attr::default() }; // PERF_TYPE_SOFTWARE, CPU_CLOCK
-    a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_CPU | SAMPLE_REGS_USER | SAMPLE_STACK_USER | if kernel { SAMPLE_CALLCHAIN } else { 0 };
-    // exclude_hv, sample_id_all, exclude_callchain_user, use_clockid; exclude_kernel without access. Enabled at once.
-    a.flags = (1 << 6) | (1 << 18) | (1 << 22) | (1 << 25) | if kernel { 0 } else { 1 << 5 };
+    a.sample_type = SAMPLE_IDENTIFIER | SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_CPU | SAMPLE_REGS_USER | SAMPLE_STACK_USER | if kernel { SAMPLE_CALLCHAIN } else { 0 };
+    // inherit, exclude_hv, comm, task (fork and exit records), sample_id_all, exclude_callchain_user,
+    // comm_exec, use_clockid; exclude_kernel without access. Enabled at once.
+    a.flags = (1 << 1) | (1 << 6) | (1 << 9) | (1 << 13) | (1 << 18) | (1 << 22) | (1 << 24) | (1 << 25) | if kernel { 0 } else { 1 << 5 };
     a.wakeup = 1;
     a.sample_regs_user = REGS;
     a.sample_stack_user = STACK_BYTES;
     a.clockid = libc::CLOCK_MONOTONIC;
     // PERF_FLAG_FD_CLOEXEC
-    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &a as *const Attr, tid as libc::pid_t, -1, -1, 8 as libc::c_ulong) } as i32;
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &a as *const Attr, tid as libc::pid_t, cpu, -1, 8 as libc::c_ulong) } as i32;
+    if fd < 0 { Err(std::io::Error::last_os_error()) } else { Ok(fd) }
+}
+
+/// A ring mapped on `fd` (which it then owns): the largest the perf mlock budget allows (without
+/// CAP_IPC_LOCK a user may lock only `perf_event_mlock_kb` per CPU), then smaller ones.
+fn map(fd: i32) -> std::io::Result<Ring> {
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
-    let len = page * (1 + pages);
-    let base = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0) };
-    if base == libc::MAP_FAILED {
-        let e = std::io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(e);
+    let mut last = std::io::Error::from_raw_os_error(libc::ENOMEM);
+    for pages in [128, 64, 16] {
+        let len = page * (1 + pages);
+        let base = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0) };
+        if base != libc::MAP_FAILED {
+            return Ok(Ring { fd, base: base as *mut u8, len });
+        }
+        last = std::io::Error::last_os_error();
+        if !matches!(last.raw_os_error(), Some(libc::EPERM | libc::ENOMEM)) {
+            break;
+        }
     }
-    Ok(Ring { fd, base: base as *mut u8, len })
+    unsafe { libc::close(fd) };
+    Err(last)
+}
+
+/// Every sampling event strobe opened: one ring per CPU, mapped on the first event opened there, which
+/// every later event on that CPU writes into (`PERF_EVENT_IOC_SET_OUTPUT`), and which what inherits an
+/// event writes into too.
+struct Events {
+    kernel: bool,
+    cpus: Vec<i32>,
+    rings: Vec<Option<Ring>>,
+    /// The events that own no ring, closed with the set.
+    fds: Vec<i32>,
+    /// Each event's id (`PERF_EVENT_IOC_ID`, what its samples and its inherited copies' carry) and the
+    /// thread strobe opened it on.
+    ids: HashMap<u64, u32>,
+    /// The events of each thread strobe opened itself.
+    by_tid: HashMap<u32, Vec<i32>>,
+}
+
+impl Drop for Events {
+    fn drop(&mut self) {
+        for &fd in &self.fds {
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+impl Events {
+    fn new(kernel: bool) -> Events {
+        let mut cpus = online_cpus();
+        if cpus.is_empty() {
+            cpus = (0..unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }.max(1) as i32).collect();
+        }
+        let rings = cpus.iter().map(|_| None).collect();
+        Events { kernel, cpus, rings, fds: Vec::new(), ids: HashMap::new(), by_tid: HashMap::new() }
+    }
+
+    /// Opens a thread's events, one per CPU. False when it is gone.
+    fn open(&mut self, tid: u32) -> std::io::Result<bool> {
+        let mut mine = Vec::new();
+        for i in 0..self.cpus.len() {
+            let fd = match open_event(tid, self.cpus[i], self.kernel) {
+                Ok(fd) => fd,
+                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+                    self.by_tid.entry(tid).or_default().extend(mine);
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+            };
+            let mut id = 0u64;
+            unsafe { libc::ioctl(fd, IOC_ID as _, &mut id as *mut u64) };
+            self.ids.insert(id, tid);
+            match &self.rings[i] {
+                Some(r) => {
+                    if unsafe { libc::ioctl(fd, IOC_SET_OUTPUT as _, r.fd) } != 0 {
+                        let e = std::io::Error::last_os_error();
+                        unsafe { libc::close(fd) };
+                        return Err(e);
+                    }
+                    self.fds.push(fd);
+                }
+                None => self.rings[i] = Some(map(fd)?),
+            }
+            mine.push(fd);
+        }
+        self.by_tid.entry(tid).or_default().extend(mine);
+        Ok(true)
+    }
+
+    /// Stops the events strobe opened on `tid` (it inherited events already), and their inherited
+    /// copies; their ids, whose samples are dropped.
+    fn disable(&mut self, tid: u32) -> Vec<u64> {
+        for fd in self.by_tid.remove(&tid).unwrap_or_default() {
+            unsafe { libc::ioctl(fd, IOC_DISABLE as _, 0) };
+        }
+        self.ids.iter().filter(|(_, t)| **t == tid).map(|(id, _)| *id).collect()
+    }
 }
 
 /// One raw sample, before unwinding.
@@ -141,9 +246,18 @@ struct Raw {
     stack: Vec<u8>,
 }
 
+/// What a sampling ring holds: a sample (with its event's id), a thread or process started by a
+/// sampled thread (which inherited its events), a thread renamed (or its process running a new
+/// executable).
+enum Rec {
+    Sample(u64, Raw),
+    Fork { pid: u32, tid: u32 },
+    Comm { pid: u32, tid: u32, name: String, exec: bool },
+}
+
 impl Ring {
     /// Every complete record since the last call; the reader hands the space back to the kernel.
-    fn drain(&self, kernel: bool, out: &mut Vec<Raw>, lost: &mut u64) {
+    fn drain(&self, kernel: bool, out: &mut Vec<Rec>, lost: &mut u64) {
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
         let meta = self.base;
         let head = unsafe { std::ptr::read_volatile(meta.add(1024) as *const u64) };
@@ -158,17 +272,26 @@ impl Ring {
         while tail + 8 <= head {
             let hdr = read(tail, 8);
             let kind = u32::from_le_bytes(hdr[0..4].try_into().unwrap_or_default());
+            let misc = u16::from_le_bytes(hdr[4..6].try_into().unwrap_or_default());
             let len = u16::from_le_bytes(hdr[6..8].try_into().unwrap_or_default()) as u64;
             if len == 0 {
                 break;
             }
+            let u32_at = |off: u64| u32::from_le_bytes(read(off, 4).try_into().unwrap_or_default());
             match kind {
-                9 => {
-                    // PERF_RECORD_SAMPLE
+                RECORD_SAMPLE => {
                     let body = read(tail + 8, len as usize - 8);
                     if let Some(r) = parse(&body, kernel) {
                         out.push(r);
                     }
+                }
+                // pid, ppid, tid, ptid, time
+                RECORD_FORK => out.push(Rec::Fork { pid: u32_at(tail + 8), tid: u32_at(tail + 16) }),
+                // pid, tid, the name (NUL-terminated)
+                RECORD_COMM => {
+                    let body = read(tail + 16, len as usize - 16);
+                    let name = String::from_utf8_lossy(&body[..body.iter().position(|b| *b == 0).unwrap_or(body.len())]).to_string();
+                    out.push(Rec::Comm { pid: u32_at(tail + 8), tid: u32_at(tail + 12), name, exec: misc & MISC_COMM_EXEC != 0 });
                 }
                 2 => *lost += u64_at(tail + 16), // PERF_RECORD_LOST: id, lost
                 _ => {}
@@ -180,13 +303,14 @@ impl Ring {
     }
 }
 
-fn parse(b: &[u8], kernel: bool) -> Option<Raw> {
+fn parse(b: &[u8], kernel: bool) -> Option<Rec> {
     let mut at = 0usize;
     let mut u64n = || -> Option<u64> {
         let v = u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?);
         at += 8;
         Some(v)
     };
+    let id = u64n()?;
     let _ip = u64n()?;
     let pt = u64n()?;
     let ns = u64n()?;
@@ -218,7 +342,7 @@ fn parse(b: &[u8], kernel: bool) -> Option<Raw> {
     } else {
         Vec::new()
     };
-    Some(Raw { ns, pid: (pt & 0xffff_ffff) as u32, tid: (pt >> 32) as u32, cpu, kernel: kframes, regs, stack })
+    Some(Rec::Sample(id, Raw { ns, pid: (pt & 0xffff_ffff) as u32, tid: (pt >> 32) as u32, cpu, kernel: kframes, regs, stack }))
 }
 
 /// One executable mapping of a file in a process.
@@ -378,30 +502,33 @@ struct Names {
     processes: std::collections::BTreeMap<u32, String>,
 }
 
-/// Opens a sampling event on every thread of the target's process set that has none yet, naming
-/// each new thread and process.
-fn follow(targets: &Targets, kernel: bool, rings: &mut Vec<Ring>, opened: &mut HashSet<u32>, names: &mut Names) -> std::io::Result<()> {
-    for pid in targets.pids() {
-        if let std::collections::btree_map::Entry::Vacant(e) = names.processes.entry(pid) {
+impl Names {
+    /// A process's executable's name, read once while it runs (its comm when the link is unreadable).
+    fn process(&mut self, pid: u32) {
+        if let std::collections::btree_map::Entry::Vacant(e) = self.processes.entry(pid) {
             let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
             if let Some(n) = exe.or_else(|| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|c| c.trim_end().to_string())).filter(|n| !n.is_empty()) {
                 e.insert(n);
             }
         }
+    }
+}
+
+/// Opens sampling events on every thread of the target's process set that has none of its own and
+/// inherited none (`known`: those strobe opened, and those whose start a ring announced), naming each
+/// new thread and process. Only the set's pids are read (`process_set_pids`: no memory reads).
+fn follow(targets: &Targets, events: &mut Events, known: &mut HashSet<u32>, names: &mut Names) -> std::io::Result<()> {
+    for pid in crate::host::process_set_pids(targets.root, targets.home.as_deref()) {
+        names.process(pid);
         for e in std::fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
             let Some(tid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
-            if !opened.insert(tid) {
+            if !known.insert(tid) {
                 continue;
             }
             if let Ok(c) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/comm")) {
                 names.threads.insert(tid, c.trim_end().to_string());
             }
-            // A big buffer first; the unprivileged mlock budget (perf_event_mlock_kb) may only allow small ones.
-            match open(tid, kernel, 128).or_else(|_| open(tid, kernel, 16)) {
-                Ok(r) => rings.push(r),
-                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
-                Err(e) => return Err(e),
-            }
+            events.open(tid)?;
         }
     }
     Ok(())
@@ -430,10 +557,12 @@ impl Capture {
         if targets.pids().is_empty() {
             return Err(Error::msg(format!("process {} is not running", targets.root)));
         }
-        let mut rings: Vec<Ring> = Vec::new();
-        let mut opened: HashSet<u32> = HashSet::new();
+        // A ring per CPU and an event per thread and CPU: past the default soft limit of 1024 descriptors on a big app.
+        raise_fd_limit();
+        let mut events = Events::new(kernel);
+        let mut known: HashSet<u32> = HashSet::new();
         let mut names = Names::default();
-        if let Err(e) = follow(&targets, kernel, &mut rings, &mut opened, &mut names) {
+        if let Err(e) = follow(&targets, &mut events, &mut known, &mut names) {
             return Err(Error::msg(format!("perf_event_open: {e}")));
         }
         let state = Arc::new(AtomicU8::new(RUN));
@@ -443,11 +572,15 @@ impl Capture {
             .name("strobe-perf".into())
             .spawn(move || {
                 let mut unwind = Unwind { spaces: HashMap::new(), files: HashMap::new(), cache: framehop::CacheNative::new() };
-                let mut raw = Vec::new();
+                let mut recs = Vec::new();
                 let mut lost = 0u64;
                 let mut index: HashMap<Vec<u64>, u32> = HashMap::new();
                 let mut deep = Deep { interval_us: INTERVAL_NS as f64 / 1e3, t0_ns: t0, ..Deep::default() };
-                let mut seen_pids: HashSet<u32> = HashSet::new();
+                // Each sample's event id (as `deep.samples`), and the ids of events opened on a thread
+                // that inherited events already: their samples count it twice and go.
+                let mut sample_ids: Vec<u64> = Vec::new();
+                let mut twice: HashSet<u64> = HashSet::new();
+                let mut inherited: HashSet<u32> = HashSet::new();
                 let mut followed = std::time::Instant::now();
                 loop {
                     let done = match flag.load(Ordering::Relaxed) {
@@ -455,40 +588,74 @@ impl Capture {
                         STOP => true,
                         _ => return Err(Error::msg("the capture was dropped")),
                     };
-                    if followed.elapsed().as_millis() >= 50 {
-                        let _ = follow(&targets, kernel, &mut rings, &mut opened, &mut names);
-                        followed = std::time::Instant::now();
-                    }
-                    let mut poll: Vec<libc::pollfd> = rings.iter().map(|r| libc::pollfd { fd: r.fd, events: libc::POLLIN, revents: 0 }).collect();
+                    let mut poll: Vec<libc::pollfd> = events.rings.iter().flatten().map(|r| libc::pollfd { fd: r.fd, events: libc::POLLIN, revents: 0 }).collect();
                     unsafe { libc::poll(poll.as_mut_ptr(), poll.len() as _, 10) };
-                    for r in &rings {
-                        r.drain(kernel, &mut raw, &mut lost);
+                    for r in events.rings.iter().flatten() {
+                        r.drain(kernel, &mut recs, &mut lost);
                     }
-                    for r in raw.drain(..) {
+                    // Starts first, from every ring: a thread started by a sampled one inherited its
+                    // events, whichever ring its samples are in.
+                    for r in &recs {
+                        if let Rec::Fork { pid, tid } = r {
+                            known.insert(*tid);
+                            inherited.insert(*tid);
+                            names.process(*pid);
+                        }
+                    }
+                    for tid in inherited.iter().filter(|t| events.by_tid.contains_key(t)).copied().collect::<Vec<u32>>() {
+                        twice.extend(events.disable(tid));
+                    }
+                    for r in recs.drain(..) {
                         if flag.load(Ordering::Relaxed) == DROP {
                             return Err(Error::msg("the capture was dropped"));
                         }
+                        let (id, r) = match r {
+                            Rec::Sample(id, r) => (id, r),
+                            Rec::Fork { .. } => continue,
+                            // A new executable: its modules and its name are new (the old ones' addresses
+                            // would unwind its frames wrong).
+                            Rec::Comm { pid, tid, name, exec } => {
+                                names.threads.insert(tid, name);
+                                if exec {
+                                    unwind.spaces.remove(&pid);
+                                    names.processes.remove(&pid);
+                                    names.process(pid);
+                                }
+                                continue;
+                            }
+                        };
+                        // A process started by a sampled one: its name and modules read as its first
+                        // sample comes, while it runs.
+                        names.process(r.pid);
                         let mut frames = r.kernel.clone();
                         frames.extend(unwind.frames(&r));
                         if frames.is_empty() {
                             continue;
                         }
-                        seen_pids.insert(r.pid);
                         let next = deep.stacks.len() as u32;
                         let at = *index.entry(frames.clone()).or_insert_with(|| {
                             deep.stacks.push(frames);
                             next
                         });
                         deep.samples.push((r.ns, r.pid, r.tid, r.cpu, at));
+                        sample_ids.push(id);
                     }
                     if done {
                         break;
                     }
+                    if followed.elapsed().as_millis() >= 50 {
+                        let _ = follow(&targets, &mut events, &mut known, &mut names);
+                        followed = std::time::Instant::now();
+                    }
                 }
-                drop(rings);
+                drop(events);
+                if !twice.is_empty() {
+                    let mut ids = sample_ids.iter();
+                    deep.samples.retain(|_| ids.next().is_none_or(|id| !twice.contains(id)));
+                }
                 deep.t1_ns = crate::host::now_ns();
                 deep.events_lost = lost;
-                let mut pids: Vec<u32> = seen_pids.into_iter().collect();
+                let mut pids: Vec<u32> = deep.samples.iter().map(|s| s.1).collect::<HashSet<u32>>().into_iter().collect();
                 pids.sort_unstable();
                 for &pid in &pids {
                     let list = unwind.spaces.get(&pid).map(|s| s.maps.clone()).unwrap_or_else(|| maps(pid));

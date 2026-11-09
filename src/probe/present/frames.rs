@@ -351,10 +351,55 @@ pub enum Outcome {
     Scroll(f64),
     /// The model did not change after it.
     Unchanged,
-    /// The target was still drawing, or still answering an earlier input.
-    Busy,
+    /// The target was still drawing, or still answering an earlier input: why.
+    Busy(BusyWhy),
     /// No frame showed its change within a second.
     Unshown,
+}
+
+/// Why an input that changed the target gave no sample though a frame may have shown it (`Busy`).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum BusyWhy {
+    /// The target was still drawing when it came: its latest frame before it ended (reached the screen,
+    /// or began when it never did) this long before it (negative: still on its way), inside the quiet
+    /// the target must rest for before an input (`quiet_ns`).
+    MidDrawing { prev_frame_ago_ms: f64, quiet_ms: f64 },
+    /// An earlier input's reaction reached the screen only after it came: that input (when it was
+    /// sent, host clock) and how long after this one its frame showed.
+    Behind { prev_input: u64, showed_after_ms: f64 },
+    /// A click whose change came between its press and release while an earlier input's change was
+    /// still to come: the change may be that input's, announced late.
+    AmbiguousPress,
+    /// Its pixels changed across this many of the target's frames between the two captures that
+    /// proved it: which one showed it is unknown.
+    MultiFramePixel { frames: usize },
+}
+
+impl BusyWhy {
+    /// How much later the input had to come for its sample to count (ms), given the quiet the target
+    /// rests for (`quiet_ms`): past the drawing's quiet, or past the earlier reaction's frame and its
+    /// quiet. None where no wait decides it.
+    pub fn needed_ms(&self, quiet_ms: f64) -> Option<f64> {
+        match *self {
+            BusyWhy::MidDrawing { prev_frame_ago_ms, quiet_ms } => Some((quiet_ms - prev_frame_ago_ms).max(0.0)),
+            BusyWhy::Behind { showed_after_ms, .. } => Some(showed_after_ms + quiet_ms),
+            BusyWhy::AmbiguousPress | BusyWhy::MultiFramePixel { .. } => None,
+        }
+    }
+
+    /// As a view says it.
+    pub fn text(&self) -> String {
+        match *self {
+            BusyWhy::MidDrawing { prev_frame_ago_ms, quiet_ms } if prev_frame_ago_ms < 0.0 => {
+                format!("mid-drawing: a frame begun before it showed {:.1} ms after it (the app must rest {quiet_ms:.1} ms)", -prev_frame_ago_ms)
+            }
+            BusyWhy::MidDrawing { prev_frame_ago_ms, quiet_ms } => format!("mid-drawing: its last frame ended {prev_frame_ago_ms:.1} ms before it (the app must rest {quiet_ms:.1} ms)"),
+            BusyWhy::Behind { showed_after_ms, .. } => format!("behind: an earlier input's reaction showed {showed_after_ms:.1} ms after it"),
+            BusyWhy::AmbiguousPress => "ambiguous press: its change may be an earlier input's, announced late".into(),
+            BusyWhy::MultiFramePixel { frames } => format!("{frames} frames between the captures that proved its pixels: which showed it is unknown"),
+        }
+    }
 }
 
 impl Outcome {
@@ -366,7 +411,7 @@ impl Outcome {
             Outcome::Timed(Edge::Sent, ms) => (SampleEdge::Sent, Some(ms)),
             Outcome::Scroll(ms) => (SampleEdge::Scroll, Some(ms)),
             Outcome::Unchanged => (SampleEdge::Unchanged, None),
-            Outcome::Busy => (SampleEdge::Busy, None),
+            Outcome::Busy(_) => (SampleEdge::Busy, None),
             Outcome::Unshown => (SampleEdge::Unmatched, None),
         };
         Sample { edge, latency_ms }
@@ -410,13 +455,21 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
         let at = mine.partition_point(|p| p.start_ns <= t);
         mine[at..].iter().take_while(|p| p.start_ns <= t + HORIZON_NS).find(|p| p.state == "displayed" && p.screen_ns > t && p.start_ns >= bound).copied()
     };
-    let drawing = |t: u64| {
+    // The target still drawing at `t`: the latest end (screen time, or start when later) of its frames
+    // begun by then that ended inside the quiet before `t`, or not by `t`.
+    let drawing = |t: u64| -> Option<BusyWhy> {
         let at = mine.partition_point(|p| p.start_ns <= t);
-        mine[..at].iter().rev().take_while(|p| p.start_ns + HORIZON_NS > t).any(|p| p.start_ns.max(p.screen_ns) + quiet_ns > t)
+        let end = mine[..at].iter().rev().take_while(|p| p.start_ns + HORIZON_NS > t).map(|p| p.start_ns.max(p.screen_ns)).filter(|e| e + quiet_ns > t).max()?;
+        Some(BusyWhy::MidDrawing { prev_frame_ago_ms: (t as f64 - end as f64) / 1e6, quiet_ms: quiet_ns as f64 / 1e6 })
     };
-    // When each earlier input's reaction reached the screen: an input sent before one did came while the
-    // target still answered that one (its frame not yet begun, so `drawing` cannot see it), not at rest.
-    let mut answered: Vec<u64> = Vec::new();
+    // When each earlier input was sent and its reaction reached the screen: an input sent before one did
+    // came while the target still answered that one (its frame not yet begun, so `drawing` cannot see
+    // it), not at rest. The latest such reaction says it.
+    let mut answered: Vec<(u64, u64)> = Vec::new();
+    let behind = |answered: &[(u64, u64)], t: u64| -> Option<BusyWhy> {
+        let &(prev, at) = answered.iter().filter(|a| a.1 > t).max_by_key(|a| a.1)?;
+        Some(BusyWhy::Behind { prev_input: prev, showed_after_ms: (at - t) as f64 / 1e6 })
+    };
     out.burst = sent.iter().filter(|s| s.burst).count();
     for (k, s) in sent.iter().enumerate() {
         // A key typed in a burst is no one's sample (`interaction.*` refuses the block) and claims nothing.
@@ -435,18 +488,18 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
             let bump = |x: &mut (usize, usize)| if kind == 1 { x.1 += 1 } else { x.0 += 1 };
             bump(&mut out.tried);
             let shown: Vec<&&Present> = mine.iter().filter(|p| p.state == "displayed" && p.screen_ns > lacked.max(from) && p.screen_ns <= had).collect();
-            let behind = answered.iter().any(|&at| at > from);
-            answered.extend(shown.first().filter(|_| shown.len() == 1).map(|p| p.screen_ns));
-            let o = match shown.as_slice() {
-                _ if drawing(from) || behind => {
+            let busy = drawing(from).or_else(|| behind(&answered, from));
+            answered.extend(shown.first().filter(|_| shown.len() == 1).map(|p| (s.t_ns, p.screen_ns)));
+            let o = match (busy, shown.as_slice()) {
+                (Some(why), _) => {
                     bump(&mut out.busy);
-                    Outcome::Busy
+                    Outcome::Busy(why)
                 }
-                [p] if p.start_ns <= from => {
+                (None, [p]) if p.start_ns <= from => {
                     bump(&mut out.busy);
-                    Outcome::Busy
+                    Outcome::Busy(BusyWhy::MidDrawing { prev_frame_ago_ms: (from as f64 - p.screen_ns as f64) / 1e6, quiet_ms: quiet_ns as f64 / 1e6 })
                 }
-                [p] => {
+                (None, [p]) => {
                     // A frame begun before the release shows what the press did (the same rule as an
                     // accessibility tree's `pressed`: by when the frame began, not when it reached the
                     // screen); one begun after it is the release's.
@@ -460,14 +513,14 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
                         Outcome::Timed(edge, ms)
                     }
                 }
-                [] => {
+                (None, []) => {
                     bump(&mut out.unshown);
                     bump(&mut out.unshown_pixels);
                     Outcome::Unshown
                 }
-                _ => {
+                (None, many) => {
                     bump(&mut out.busy);
-                    Outcome::Busy
+                    Outcome::Busy(BusyWhy::MultiFramePixel { frames: many.len() })
                 }
             };
             out.each.push((s.t_ns, o));
@@ -498,7 +551,7 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
                 }
             };
             let bound = i.map_or(p, |i| changes[i].0);
-            if !drawing(p) && frame(p, bound).is_none_or(|f| f.start_ns >= s.t_ns) {
+            if drawing(p).is_none() && frame(p, bound).is_none_or(|f| f.start_ns >= s.t_ns) {
                 return None;
             }
             Some(Pick::At(p, i, Edge::Press))
@@ -515,7 +568,7 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
                 claimed[i] = true;
                 bump(&mut out.tried);
                 bump(&mut out.busy);
-                out.each.push((s.t_ns, Outcome::Busy));
+                out.each.push((s.t_ns, Outcome::Busy(BusyWhy::AmbiguousPress)));
                 seen.push((s.t_ns, Some(changes[i].1)));
                 continue;
             }
@@ -532,11 +585,11 @@ pub fn reactions(sent: &[Sent], changes: &[Change], presents: &[Present], pids: 
         seen.push((s.t_ns, i.map(|i| changes[i].1)));
         bump(&mut out.tried);
         let shown = frame(t, i.map_or(t, |i| changes[i].0));
-        let behind = answered.iter().any(|&at| at > t);
-        answered.extend(shown.map(|p| p.screen_ns));
-        if drawing(t) || behind {
+        let busy = drawing(t).or_else(|| behind(&answered, t));
+        answered.extend(shown.map(|p| (s.t_ns, p.screen_ns)));
+        if let Some(why) = busy {
             bump(&mut out.busy);
-            out.each.push((s.t_ns, Outcome::Busy));
+            out.each.push((s.t_ns, Outcome::Busy(why)));
             continue;
         }
         match shown {
