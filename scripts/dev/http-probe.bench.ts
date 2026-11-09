@@ -23,6 +23,9 @@
 //   held-edge-carried also a request in the first window's last 100 ms waits for the second's end, with a 700 ms
 //                     timeout: one cohort that "spanned 2 stalls" (longest silence ≈700 ms; 1 probe, the edge one,
 //                     waited across a brief drain), which timed out in its middle and is said so.
+//   held-hung         one window of 1200 ms with a timeout no longer than the cadence (100 ms): every probe in it
+//                     times out before the next is sent, yet they are one cohort of ≈12 timeouts, "answered none
+//                     for at least" ≈1.2 s, never "stalled none".
 //   driver-delayed    no stall: strobe's own scheduler is held 400 ms (STROBE_PROBE_PAUSE): missed sends, no
 //                     timeouts, and http.latency.* refused OverheadBudget, never a slow server.
 //   status-500        the server answers 500 for 300 ms: http.errors, and http.latency.* refused.
@@ -95,16 +98,21 @@ const serveHeld = () => {
   })
   return `http://127.0.0.1:${heldServer.port}/health`
 }
-const held = (gap: boolean, edge: boolean) => async () => {
+// Windows from the run's start (ms): [start, end] pairs.
+const held = (spans: [number, number][], gap: boolean, edge: boolean) => async () => {
   const t = performance.now()
   carry = { gap, edge }
-  windows = [
-    [t + 300, t + 850],
-    [t + 1000, t + 1550],
-  ]
-  await Bun.sleep(2050)
-  windows = []
+  windows = spans.map(([a, b]) => [t + a, t + b])
+  try {
+    await Bun.sleep(Math.max(...spans.map(([, b]) => b)) + 500)
+  } finally {
+    windows = []
+  }
 }
+const twoWindows: [number, number][] = [
+  [300, 850],
+  [1000, 1550],
+]
 
 export default bench({
   targets: { server: script("./http-probe-server.ts"), page: url(new URL("pages/click.html", import.meta.url).href) },
@@ -118,7 +126,7 @@ export default bench({
       url: `${url}?key=${token}`,
       authorization: `Bearer ${token}`,
       cadenceMs: 100,
-      timeoutMs: { "stall-750ms-long": 1500, "stalls-100ms-apart": 1000, "stalls-back-to-back": 1000, "held-gap-carried": 1000, "held-edge-carried": 700 }[ctx.case ?? ""] ?? 400,
+      timeoutMs: { "stall-750ms-long": 1500, "stalls-100ms-apart": 1000, "stalls-back-to-back": 1000, "held-gap-carried": 1000, "held-edge-carried": 700, "held-hung": 100 }[ctx.case ?? ""] ?? 400,
       expect: ctx.case === "wrong-json" ? { jsonPath: { path: "$.status", equals: "ok" } } : undefined,
     })
   },
@@ -128,8 +136,9 @@ export default bench({
     "stall-750ms-long": { ...declare("http.latency.p50"), run: stall },
     "stalls-100ms-apart": { ...declare("http.timeouts"), run: stalls(100) },
     "stalls-back-to-back": { ...declare("http.timeouts"), run: stalls(0) },
-    "held-gap-carried": { ...declare("http.timeouts"), run: held(true, false) },
-    "held-edge-carried": { ...declare("http.timeouts"), run: held(true, true) },
+    "held-gap-carried": { ...declare("http.timeouts"), run: held(twoWindows, true, false) },
+    "held-edge-carried": { ...declare("http.timeouts"), run: held(twoWindows, true, true) },
+    "held-hung": { ...declare("http.timeouts"), run: held([[300, 1500]], false, false) },
     "driver-delayed": { ...declare("http.missed_sends"), run: ({ call }: any) => call("idle", 1500) },
     "status-500": { ...declare("http.errors"), run: answering("500") },
     "wrong-json": { ...declare("http.errors"), run: answering("wrong-json") },

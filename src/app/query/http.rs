@@ -114,14 +114,17 @@ impl View {
 
     /// Probes in a row, by slot, that were slow (over `threshold`) or timed out: a stall the server held
     /// them through. A missed send or an error ends one, and so does a probe sent after every probe
-    /// before it had its answer (nothing out bridged the gap: the server answered in between).
+    /// before it had its answer (nothing out bridged the gap: the server answered in between). A probe
+    /// that timed out was never answered, so it bridges on (a timeout no longer than the cadence ends
+    /// before the next is sent) unless one of the cohort's probes was answered after it was sent.
     fn cohorts(&self) -> Vec<Vec<&Sample>> {
         let mut out: Vec<Vec<&Sample>> = Vec::new();
         let mut cur: Vec<&Sample> = Vec::new();
         for s in self.data.samples.iter().filter(|s| self.in_scope(s)) {
             let stalled = s.outcome == Outcome::Timeout || s.latency_ms().is_some_and(|l| l > self.threshold);
             let sent = s.dispatch_ns.unwrap_or(s.scheduled_ns);
-            let bridged = cur.iter().any(|p| self.end_ns(p).is_none_or(|e| e > sent));
+            let answered_after = |p: &Sample| cur.iter().any(|q| q.outcome == Outcome::Ok && q.completed_ns.zip(p.dispatch_ns).is_some_and(|(c, d)| c > d));
+            let bridged = cur.iter().any(|p| self.end_ns(p).is_none_or(|e| e > sent) || (p.outcome == Outcome::Timeout && !answered_after(p)));
             if stalled && cur.last().is_none_or(|l| l.seq + 1 == s.seq && bridged) {
                 cur.push(s);
             } else {
@@ -149,15 +152,30 @@ impl View {
         let began = first.dispatch_ns.unwrap_or(first.scheduled_ns);
         let mut answers: Vec<u64> = c.iter().filter(|s| s.outcome != Outcome::Timeout).filter_map(|s| s.completed_ns).collect();
         answers.sort_unstable();
-        let deadline = c.iter().filter(|s| s.outcome == Outcome::Timeout).filter_map(|s| self.end_ns(s)).max();
+        let deadlines: Vec<u64> = c.iter().filter(|s| s.outcome == Outcome::Timeout).filter_map(|s| self.end_ns(s)).collect();
+        let deadline = deadlines.iter().copied().max();
         let last = answers.last().copied();
-        // Past the last answer only a timeout's deadline says how long one was held, and only at least.
-        let past_timeout = deadline.is_some_and(|d| last.is_none_or(|a| d > a));
-        let ended = if past_timeout { deadline } else { last };
+        // Every answer the server gave from the first dispatch to the cohort's end, its own probes' and
+        // any other's in scope (a response read, whatever it said): a silence is none of them.
+        let horizon = last.max(deadline).unwrap_or(began);
+        let mut heard: Vec<u64> = self
+            .data
+            .samples
+            .iter()
+            .filter(|s| self.in_scope(s) && matches!(s.outcome, Outcome::Ok | Outcome::Bad { .. }))
+            .filter_map(|s| s.completed_ns)
+            .filter(|t| *t > began && *t <= horizon)
+            .collect();
+        heard.sort_unstable();
+        // Past the cohort's last answer only a timeout's deadline says how long one was held, and only
+        // at least, so long as no other probe was answered before that deadline.
+        let after = last.unwrap_or(began);
+        let past_timeout = deadline.is_some_and(|d| d > after && !heard.iter().any(|t| *t > after && *t <= d));
+        let ended = if past_timeout { deadline } else { last.or_else(|| heard.iter().copied().find(|t| *t > began)) };
         // Silences: from the first dispatch to each answer, answer to answer, and the last answer to a
         // later deadline, longer than the stall threshold. Each is a stall the server held probes
         // through; more than one is stalls back to back with probes still out between them.
-        let mut points: Vec<u64> = std::iter::once(began).chain(answers.iter().copied()).collect();
+        let mut points: Vec<u64> = std::iter::once(began).chain(heard.iter().copied().filter(|t| ended.is_some_and(|e| *t <= e))).collect();
         if past_timeout && let Some(d) = deadline {
             points.push(d);
         }
@@ -168,7 +186,9 @@ impl View {
         let timeouts = c.iter().filter(|s| s.outcome == Outcome::Timeout).count();
         json!({
             "run": first.run, "when": first.when, "at_s": self.rel_s(first.scheduled_ns), "probes": c.len(),
-            "timeouts": timeouts, "any_timeout": timeouts > 0,
+            "timeouts": timeouts, "any_timeout": timeouts > 0, "answered": answers.len(),
+            // Timeouts whose deadline ran past every answer of the cohort (when it held past one).
+            "timeouts_past_answers": if past_timeout && last.is_some() { deadlines.iter().filter(|d| **d > after).count() } else { 0 },
             "latencies_ms": c.iter().map(|s| s.latency_ms()).collect::<Vec<_>>(),
             // From the first one's dispatch until the last answer, or a later timeout's deadline.
             "held_ms": ended.map(|e| e.saturating_sub(began) as f64 / 1e6),
@@ -189,7 +209,8 @@ impl View {
         let iq = |p: f64| http_probe::censored_quantile(&self.idle, 0, p).filter(|v| v.is_finite());
         let wall = self.data.end_ns.saturating_sub(self.data.start_ns) as f64 / 1e6;
         let cohorts = self.cohorts();
-        json!({
+        let cpu_pct = self.data.cpu_ms.filter(|_| wall > 0.0).map(|c| 100.0 * c / wall);
+        let mut j = json!({
             "recording": self.id, "config": self.data.config,
             "idle": { "n": self.idle.len(), "p50": iq(0.5), "p95": iq(0.95), "max": iq(1.0) },
             "measured": {
@@ -197,7 +218,7 @@ impl View {
                 "errors": self.count(|o| matches!(o, Outcome::Bad { .. } | Outcome::Error { .. } | Outcome::Pending)), "missed": self.count(Outcome::missed), "statuses": statuses,
                 "p50": self.quantile(0.5), "p95": self.quantile(0.95), "max": self.quantile(1.0),
             },
-            "probe_cpu_ms": self.data.cpu_ms, "probe_cpu_pct": self.data.cpu_ms.filter(|_| wall > 0.0).map(|c| 100.0 * c / wall),
+            "probe_cpu_ms": self.data.cpu_ms, "probe_cpu_pct": cpu_pct,
             "stall_threshold_ms": self.threshold,
             "cohorts_total": cohorts.len(),
             "cohorts": cohorts.iter().take(top).map(|c| {
@@ -205,14 +226,21 @@ impl View {
                 j["says"] = json!(self.says(&j));
                 j
             }).collect::<Vec<_>>(),
-        })
+        });
+        // A recording's own view: a check's or attribution block's, whose probe CPU refuses nothing (a timed
+        // block's entry judges it again with its CPU: `entries`).
+        judge(&mut j["measured"], cpu_pct, false);
+        j
     }
 
     /// The setup line, the idle and measured lines, the probe's CPU.
     fn text(&self, j: &Value) -> String {
         let c = &self.data.config;
         let ms = |v: &Value| v.as_f64().map_or("—".to_string(), |x| fmt::value(x, "ms"));
-        let censored = |v: &Value| if v.is_null() && self.timeouts() > 0 { format!("censored ({} timeouts at {} ms)", self.timeouts(), c.timeout_ms) } else { ms(v) };
+        let censored = |k: &str| match j["measured"]["states"][k].as_str() {
+            Some("censored") => format!("censored ({} timeouts at {} ms)", self.timeouts(), c.timeout_ms),
+            _ => ms(&j["measured"][k]),
+        };
         let auth = match (&c.authorization_header, c.has_authorization) {
             (Some(h), true) => format!(" · {h} sent, never kept"),
             _ => String::new(),
@@ -242,7 +270,7 @@ impl View {
             m["missed"],
             if statuses.is_empty() { String::new() } else { format!(" · {}", statuses.join(", ")) }
         );
-        t += &format!("          p50 {} · p95 {} · max {}\n", censored(&m["p50"]), censored(&m["p95"]), censored(&m["max"]));
+        t += &format!("          p50 {} · p95 {} · max {}{}\n", censored("p50"), censored("p95"), censored("max"), m["unread_why"].as_str().map(|w| format!("  (unread: {w})")).unwrap_or_default());
         if let Some(p) = j["probe_cpu_pct"].as_f64() {
             t += &format!("probe     CPU {p:.2}% of a core over {} (budget {}%)\n", fmt::ms_duration(self.data.end_ns.saturating_sub(self.data.start_ns) / 1_000_000), http_probe::CPU_BUDGET_PCT);
         }
@@ -292,7 +320,14 @@ impl View {
         };
         // Their latencies are past the timeout, unknown.
         if let Some(n) = c["timeouts"].as_u64().filter(|n| *n > 0) {
-            held += &format!(" · {n} timed out at {} ms{}", self.data.config.timeout_ms, if past { ", one of them still out after every answer" } else { "" });
+            let still = match c["timeouts_past_answers"].as_u64().unwrap_or(0) {
+                0 => String::new(),
+                k if k == n && n == 1 => ", still out after every answer".to_string(),
+                k if k == n => ", all still out after every answer".to_string(),
+                1 => ", one of them still out after every answer".to_string(),
+                k => format!(", {k} of them still out after every answer"),
+            };
+            held += &format!(" · {n} timed out at {} ms{still}", self.data.config.timeout_ms);
         }
         held
     }
@@ -322,6 +357,45 @@ fn pair(a: &Path, b: &Path, phase: Option<&str>, top: usize) -> Result<Output> {
     Ok(Output::new(text, json!({ "a": ja, "b": jb })))
 }
 
+/// Whether each latency quantile of a `measured` summary reads, as `http_probe::reading` and the block
+/// refuse it: unread when no probe counted (none due, or none answered or timed out), any got an error
+/// or a bad answer, strobe missed more than max(1, due / 20) sends, or, in a timed block, the probe used
+/// over `CPU_REFUSE_PCT` of a core; else censored where it falls on a timeout. A quantile that does not
+/// read is null; `states` names each one's state and `unread_why` the reasons.
+fn judge(m: &mut Value, cpu_pct: Option<f64>, timed: bool) {
+    let n = |k: &str| m[k].as_u64().unwrap_or(0);
+    let (due, ok, timeouts, errors, missed) = (n("due"), n("ok"), n("timeouts"), n("errors"), n("missed"));
+    let mut why: Vec<String> = Vec::new();
+    if due == 0 || ok + timeouts == 0 {
+        why.push("no probe that counts".into());
+    }
+    if errors > 0 {
+        why.push(format!("{errors} error{} or bad answer{}", if errors == 1 { "" } else { "s" }, if errors == 1 { "" } else { "s" }));
+    }
+    if missed > 1.max(due / 20) {
+        why.push(format!("strobe missed {missed} of {due} sends"));
+    }
+    if let Some(p) = cpu_pct.filter(|p| timed && *p > http_probe::CPU_REFUSE_PCT) {
+        why.push(format!("the probe used {p:.1}% of a core (refused over {}%)", http_probe::CPU_REFUSE_PCT));
+    }
+    let mut states = serde_json::Map::new();
+    for k in ["p50", "p95", "max"] {
+        let state = match (why.is_empty(), m[k].is_number()) {
+            (false, _) => "unread",
+            (true, true) => "ok",
+            (true, false) if timeouts > 0 => "censored",
+            (true, false) => "unread",
+        };
+        if state != "ok" {
+            m[k] = Value::Null;
+        }
+        states.insert(k.into(), json!(state));
+    }
+    m["states"] = Value::Object(states);
+    m["unread"] = json!(!why.is_empty());
+    m["unread_why"] = if why.is_empty() { Value::Null } else { json!(why.join("; ")) };
+}
+
 /// One series' probes: each probe block's summary (`views`: with its whole view, stalled cohorts and
 /// all, where its recording was kept), then the check's and attribution blocks' recordings.
 fn entries(s: &Value, phase: Option<&str>, top: usize, views: bool) -> Vec<Value> {
@@ -333,11 +407,15 @@ fn entries(s: &Value, phase: Option<&str>, top: usize, views: bool) -> Vec<Value
         for b in list.as_array().into_iter().flatten().filter(|b| b["http"].is_object()) {
             let what = format!("{kind}{unit} {}", b["pair"].as_u64().map_or("—".to_string(), |p| (p + 1).to_string()));
             let mut e = json!({ "series": label, "variant": b["variant"], "block": what, "http": b["http"] });
+            // A timed block: its probe's CPU over budget refuses its latencies too.
+            let cpu = b["http"]["cpu_pct"].as_f64();
+            judge(&mut e["http"]["measured"], cpu, true);
             if views
                 && let Some(r) = b["http"]["recording"].as_str()
                 && let Ok(v) = store::resolve(r).and_then(|d| View::open(&d, phase))
             {
                 e["view"] = v.json(top);
+                judge(&mut e["view"]["measured"], cpu, true);
             }
             out.push(e);
         }

@@ -1365,13 +1365,13 @@ svg .zeroline { stroke: var(--ink-4); stroke-width: 1; }
 .http-sub span { font-weight: 400; color: var(--ink-3); }
 .cohort-row { display: grid; grid-template-columns: 170px minmax(80px, 220px) minmax(0, 1fr); gap: 12px; align-items: center; padding: 6px 24px; border-top: 1px solid var(--hairline); font: 12px/18px var(--sans); }
 .cohort-at { font: 11.5px/16px var(--mono); color: var(--ink-3); }
-.cohort-bars { display: flex; align-items: flex-end; gap: 2px; height: 28px; }
+.cohort-bars { display: flex; align-items: flex-end; gap: 2px; height: 28px; overflow: hidden; }
 .cohort-bars i { flex: 1 1 0; min-width: 3px; max-width: 12px; background: var(--warn); opacity: 0.85; }
 .cohort-bars i.timeout { background: repeating-linear-gradient(45deg, var(--loss), var(--loss) 2px, var(--loss-bg) 2px, var(--loss-bg) 4px); height: 100%; opacity: 1; }
 .cohort-says { color: var(--ink-2); }
 .cohort-says.spans { color: var(--warn-ink); }
 @media (max-width: 720px) { .cohort-row { grid-template-columns: minmax(0, 1fr); } }
-/* bench --blocks: one build's blocks, their median and 95% interval */
+/* bench --blocks: one build's blocks, their median and its interval */
 .blk-strip { position: relative; height: 46px; margin: 4px 0 0; }
 .blk-axis { position: absolute; left: 0; right: 0; top: 22px; height: 1px; background: var(--border-strong); }
 .blk-band { position: absolute; top: 12px; height: 21px; background: var(--accent-bg); border: 1px solid var(--accent); opacity: 0.8; }
@@ -2368,10 +2368,13 @@ function renderScorecard(seriesList, aa) {
         const p = sr.blocks_summary?.primary || {};
         const pm = p.metric || sr.primary?.metric || "";
         const refusedB = !!p.verdict || !!p.refused;
+        const got = (p.values || []).filter(finite);
+        const nb = sr.blocks_summary?.blocks ?? (sr.blocks || []).length;
+        const word = refusedB ? "Refused" : finite(p.median) ? `Median ${fmtVal(p.median, unitOf(pm))}` : got.length === 1 ? fmtVal(got[0], unitOf(pm)) : "No value";
         return h("button", { type: "button", class: "sc-item", "aria-selected": String(i === state.series), onclick: () => selectSeries(i) },
           h("div", { class: "sc-top" }, h("span", { class: "sc-name" }, capFirst(sr.case || sr.label || `Case ${i + 1}`)), h("span", { class: `sc-dot ${refusedB ? "loss" : "neutral"}` })),
-          h("div", { class: `sc-verdict ${refusedB ? "loss" : "neutral"}` }, refusedB ? "Refused" : finite(p.median) ? `Median ${fmtVal(p.median, unitOf(pm))}` : "No interval"),
-          h("div", { class: "sc-sub" }, `${labelOf(pm)} · ${sr.blocks_summary?.blocks ?? (sr.blocks || []).length} blocks, nothing compared`)
+          h("div", { class: `sc-verdict ${refusedB ? "loss" : "neutral"}` }, word),
+          h("div", { class: "sc-sub" }, `${labelOf(pm)} · ${nb} block${nb === 1 ? "" : "s"}, nothing compared`)
         );
       }
       const c = sr.primary || {};
@@ -3949,13 +3952,16 @@ function cpuScopeToggle(...sides) {
   );
 }
 
-/* A hotspots card whose measured runs held no sample, with the scope toggle so the whole host stays reachable */
+/* A hotspots card with no row of self time in the scope shown, with the scope toggle so the other stays reachable */
 function cpuEmptySection(scopeToggle) {
+  const host = state.cpuScope === "host";
   return h("section", { class: "card-surface" },
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
         h("h2", { class: "sec-title" }, "CPU self-time hotspots"),
-        h("span", { class: "sec-sub" }, "no sample in the measured runs: the host ran no JavaScript there that its sampler saw")
+        h("span", { class: "sec-sub" }, host
+          ? "no function with self time in the whole host process beyond the runtime's own rows ((program), (idle), (garbage collector), (root))"
+          : "no sample in the measured runs: the host ran no JavaScript there that its sampler saw")
       ),
       h("div", { class: "card-hd-right" }, scopeToggle)
     )
@@ -3996,7 +4002,7 @@ function renderCpuHotspotsSection(s, aa) {
   }).filter(Boolean).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
   const rows = merged.slice(0, 8);
-  if (!rows.length) return scopeToggle && !host ? cpuEmptySection(scopeToggle) : null;
+  if (!rows.length) return scopeToggle ? cpuEmptySection(scopeToggle) : null;
 
   const maxAbs = Math.max(...rows.map((r) => Math.abs(r.delta)), 0.01);
   const scale = Math.max(maxAbs * 1.12, 2.0);
@@ -6383,8 +6389,14 @@ function renderLifecycleBlock(sides) {
 
 /* ---------- HTTP probe & stalled cohorts (`strobe query <rec|exp> http`) ---------- */
 const httpConn = (c) => (c?.connection === "keep-alive" ? "kept connections" : "a new connection per probe");
-// A quantile: its value, else censored (it falls on a timeout) or unread.
-const httpQ = (m, k) => (finite(m?.[k]) ? fmtVal(m[k], "ms") : (m?.timeouts || 0) > 0 ? "censored" : "—");
+// A quantile as strobe judged it (`states`, the block's refusals): its value, censored (it falls on a
+// timeout) or unread (—: no probe that counts, an error, missed sends, the probe's CPU in a timed block).
+const httpQ = (m, k) => {
+  const st = m?.states?.[k];
+  if (st === "censored") return "censored";
+  if (st === "unread" || m?.unread) return "—";
+  return finite(m?.[k]) ? fmtVal(m[k], "ms") : "—";
+};
 
 // A cohort's words as `query http` says them (`says`), or, from an older strobe, its held time alone.
 function cohortSays(c) {
@@ -6450,7 +6462,8 @@ function renderHttpSection(entries) {
           );
         })
       ),
-      h("div", { class: "life-note" }, "A quantile shown censored falls on a timeout: its value is past the timeout, unknown, and refused; — is unread (a bad answer, missed sends, no probe due).")
+      h("div", { class: "life-note" }, "A quantile shown censored falls on a timeout: its value is past the timeout, unknown, and refused; — is unread, refused as the block refuses it."),
+      list.filter((e) => e.http.measured.unread_why).map((e) => h("div", { class: "life-note", style: "margin-top:2px" }, `${e.label}: latencies unread (${e.http.measured.unread_why})`))
     ),
     viewed.flatMap((e) => [
       h("div", { class: "http-sub" }, `Stalled cohorts · ${e.label} `,
@@ -6476,17 +6489,33 @@ function seriesHttpEntries(s) {
   }));
 }
 
-/* ---------- bench --blocks: one build's blocks, their median and its 95% interval, nothing compared ---------- */
-function drawBlocksStrip(vals, p, u) {
+/* ---------- bench --blocks: one build's blocks, their median and its interval, nothing compared ---------- */
+// The median's interval over the blocks (order statistics): 95% from 6 blocks; fewer cover the median
+// only 50, 75, 87.5 or 93.8% of the time (2 to 5 blocks), and are named a range with that coverage.
+const blocks95 = (x) => finite(x?.confidence) && x.confidence >= 0.95 - 1e-9;
+const coverageStr = (c) => `${+(100 * c).toFixed(1)}%`;
+function blocksIntervalWords(x, n) {
+  return blocks95(x) ? "95% interval" : `range over ${n} blocks (${finite(x?.confidence) ? coverageStr(x.confidence) : "unknown"} median coverage; 6 blocks needed for 95%)`;
+}
+
+function drawBlocksStrip(vals, p, u, n) {
   const xs = [...vals, p.lo, p.hi].filter(finite);
   if (!xs.length) return null;
   const min = Math.min(...xs), max = Math.max(...xs);
   const pad = (max - min) * 0.08 || Math.abs(max) * 0.05 || 1;
   const lo = min - pad, hi = max + pad;
   const x = (v) => `${(100 * (v - lo)) / (hi - lo)}%`;
+  // Below 95% the band is drawn as an outline, and not at all from 2 blocks (50%: just their range).
+  const band = finite(p.lo) && finite(p.hi) && (blocks95(p) || p.confidence > 0.5);
   return h("div", { class: "blk-strip" },
     h("i", { class: "blk-axis" }),
-    finite(p.lo) && finite(p.hi) ? h("i", { class: "blk-band", style: `left:${x(p.lo)};width:calc(${x(p.hi)} - ${x(p.lo)})`, title: `95% interval ${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}` }) : null,
+    band
+      ? h("i", {
+          class: "blk-band",
+          style: `left:${x(p.lo)};width:calc(${x(p.hi)} - ${x(p.lo)})${blocks95(p) ? "" : ";background:none;border-style:dashed"}`,
+          title: `${capFirst(blocksIntervalWords(p, n))}: ${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`,
+        })
+      : null,
     finite(p.median) ? h("i", { class: "blk-med", style: `left:${x(p.median)}`, title: `median ${fmtVal(p.median, u)}` }) : null,
     vals.map((v, i) => (finite(v) ? h("i", { class: "blk-dot", style: `left:${x(v)}`, title: `block ${i + 1}: ${fmtVal(v, u)}` }) : null)),
     h("span", { class: "blk-tick", style: `left:${x(min)}` }, fmtVal(min, u)),
@@ -6500,7 +6529,9 @@ function blocksText(x, n) {
   if (x.verdict) return x.verdict;
   if (x.refused) return `refused in ${x.refused_blocks} of ${n} blocks (${String(x.refused).replace(`: ${x.metric}: `, ": ")})`;
   const got = (x.values || []).filter(finite);
-  if (finite(x.median)) return `median ${fmtVal(x.median, u)}  [${fmtVal(x.lo, u)} … ${fmtVal(x.hi, u)}]`;
+  if (finite(x.median)) {
+    return `median ${fmtVal(x.median, u)}  [${fmtVal(x.lo, u)} … ${fmtVal(x.hi, u)}]${blocks95(x) ? "" : ` (range over ${got.length} blocks, ${finite(x.confidence) ? coverageStr(x.confidence) : "unknown"} median coverage)`}`;
+  }
   if (got.length === 1) return `${fmtVal(got[0], u)} (1 block)`;
   return "no value (nothing in these blocks measured it)";
 }
@@ -6539,13 +6570,15 @@ function renderBlocksSeries(r, s) {
             refused
               ? blocksText(p, n)
               : finite(p.median)
-                ? [`One build measured in ${n} fresh blocks. The median's 95% interval over the blocks is `, h("strong", {}, `${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`), `${finite(p.confidence) ? ` (${(100 * p.confidence).toFixed(0)}% over the blocks)` : ""}. Nothing was compared: no better, worse or same is claimed.`]
+                ? blocks95(p)
+                  ? [`One build measured in ${n} fresh blocks. The median's 95% interval over the blocks is `, h("strong", {}, `${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`), `. Nothing was compared: no better, worse or same is claimed.`]
+                  : [`One build measured in ${n} fresh blocks. The median's ${blocksIntervalWords(p, n)} is `, h("strong", {}, `${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`), `. Nothing was compared: no better, worse or same is claimed.`]
                 : `One build measured in ${n} block${n === 1 ? "" : "s"}: an interval needs two or more. Nothing was compared.`
           ),
           renderShown(s)
         ),
         h("div", { style: "padding:0 0 4px" },
-          vals.length ? drawBlocksStrip(vals, refused ? {} : p, u) : null,
+          vals.length ? drawBlocksStrip(vals, refused ? {} : p, u, vals.filter(finite).length) : null,
           h("div", { class: "mono", style: "font-size:12px;color:var(--ink-3);margin-top:8px;overflow-wrap:anywhere" },
             `Blocks: ${vals.map((v) => (finite(v) ? fmtVal(v, u) : "—")).join(" · ")}`)
         )
@@ -6555,7 +6588,7 @@ function renderBlocksSeries(r, s) {
       ? h("section", { class: "card-surface" },
           h("div", { class: "card-hd" }, h("div", { class: "card-hd-left" },
             h("h2", { class: "sec-title" }, "Declared metrics over the blocks"),
-            h("span", { class: "sec-sub" }, "median with its 95% interval over the blocks, or why a block refused it · one build, nothing compared"))),
+            h("span", { class: "sec-sub" }, `median with its interval over the blocks (95% from 6 blocks; ${n < 6 ? `${n} give a range with the coverage shown` : "fewer give a range"}), or why a block refused it · one build, nothing compared`))),
           h("div", { class: "card-bd" },
             h("div", { class: "rec-kv-cols", style: "columns:1" },
               b.secondaries.map((x) => h("div", { class: "rec-kv-row" },
