@@ -1667,7 +1667,10 @@ Every page, native and script block records what strobe itself cost inside its m
 (`overhead`, §19), and the budgets in §19 warn or refuse on it (`OverheadBudget`, `ObserverCost`).
 The probes' own cost on the target is kept small by the probe sets above: timing blocks trace lean,
 and what costs more (profilers, perf counters, waits) runs in blocks of its own. `ProbeOverhead`
-(§10.2) warns where a timing block paid for more than the lean set (`--trace full`). Not built: an
+(§10.2) warns where a timing block paid for more than the lean set (`--trace full`). Reading a
+window's pixels from outside (§9.6) costs what it does inside the runs only: the capture opens before
+them when the case reads pixels, copies no frame it does not read, and reads the window's place and
+display again only when they changed (`pixel_pct`, §19). Not built: an
 empty-probe block per variant that would measure the timing probes' own cost against OS counters
 alone.
 
@@ -3869,10 +3872,25 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   held long enough, reading nothing while nothing changes; `matches`: an image shows in the region. An image
   `until` resolves once it shows anywhere (`matches` over the whole area).
 - **Where pixels come from**: a native app's window from outside (`host::capture::Grabber`, opened on a
-  call's first need and kept for the block): Windows.Graphics.Capture (a free-threaded pool of one buffer;
-  its frame event copies each frame into a texture strobe keeps, a read copies only the region out of it
-  and maps that; frames carry the compositor's time on the QPC clock and wake waiters; it captures on a
-  locked session, and Direct3D 12 and Vulkan flip-model windows), else `PrintWindow` cropped; macOS
+  call's first need and kept for the block): Windows.Graphics.Capture (a free-threaded pool of two
+  buffers; its frame event keeps the newest frame and gives the one before back, copying nothing, so the
+  compositor always has a buffer for the next; a read takes the held frame out of the event's reach,
+  copies only the region out of it (`CopySubresourceRegion`, a staging texture kept per region size for
+  the last 4 sizes), maps that and gives the frame back, or closes it when a newer one came meanwhile;
+  the same region of the same frame read again is the last read's pixels, nothing copied (a wait's
+  baseline, of the frame the reset's wait last read); the capture's Direct3D device keeps the driver's
+  work on the reading thread (`PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`); a window that grew and held
+  still sends only a frame cropped to the old buffers, so a read that reaches past it opens a fresh
+  capture, whose first frame is whole, its open charged to the reads and its frames numbered on from the
+  old one's; frames carry the compositor's time on the QPC clock and wake waiters; it captures on a
+  locked session, and Direct3D 12 and Vulkan flip-model windows), else `PrintWindow` cropped. On
+  Windows the window's placement, where its client area starts in the captured frame and its display's
+  refresh period (a read's lateness) are read when the capture opens and again only when a cheap key
+  read per call through user32 changed (`win::WindowKey`: the frame rectangle, client size, minimized,
+  shown and zoomed state, and the display's handle, rectangle and DPI): a move, resize, state change or
+  another display or DPI reads them again; a refresh-rate change of the same display at the same size
+  and DPI is seen when the capture opens again. Reading the display's mode alone (`EnumDisplaySettings`)
+  took milliseconds on a hybrid laptop. macOS
   `CGWindowListCreateImage` of the region's screen rect, this window only (no Screen Recording, or a
   window the app keeps from capture: `NoPresentSource`); X11 `GetImage` of the region once the window is
   viewable and on top at its centre (else `WindowHidden`: the server copies what covers it); a window of
@@ -3905,16 +3923,21 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   `driver.pixel_ms` per run (inside the runs' timed stretches only; 0 for runs that read none) and
   `ObserverCost` past 2% of a run's wall time or 8 reads a run, or (two implementations) one side read
   at least 4 more times a run and over 4 times as often as the other; strobe's CPU in them over the
-  runs' wall time (its thread's, and Windows.Graphics.Capture's frame events copying each frame) is
+  runs' wall time (its thread's, and Windows.Graphics.Capture's frame events giving each frame back) is
   `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns). Past 2% the block's times and rates over
   the runs' wall time (`run.duration`, `frames.*`, `interaction.*`, `scroll.*`, `phase.*`,
   `cpu.app.total`, wakes per second, `input.*`) leave a timed block's values, and the series' declared
   ones are refused `OverheadBudget`; a `--check` warns `OverheadBudget` instead, naming the declared
   metrics a timed block would refuse (a check is one untimed run: it says what the bench would refuse,
   and passes); totals of the app's own work (`cpu.work`, memory, IO) stay. A native
-  launch timed to pixels counts its captures over the launch the same way. A window's capture is closed
-  before each case's runs (a capture setup opened would copy every frame through them) and opened again
-  by the first read a run makes.
+  launch timed to pixels counts its captures over the launch the same way. Before each case's runs (after
+  setup; a batch's later case after the case before) a window's capture opens or stays open only when
+  pixels were read since the last such point: a native app's capture setup or the case before read
+  through stays open, a headed page's window capture is opened there for a timing block's timed reads
+  (setup read the page's pixels through the browser); otherwise it is closed, so no capture follows the
+  window's frames through runs that read none. Its open then lands outside every run; a case whose setup
+  read no pixels opens it in the first run that reads, which pays for it. A timed page read follows the
+  open capture's window while it shows, and looks for the browser's window again only when it does not.
 - **`resetPixels`** (`true` or `{ region?, ignore?, tolerance? }`, on a target or a case, the case's
   winning): every run must start from the pixels the first run (a batch's: the launch's first) started
   from, read where `resetCheck` reads (outside the runs; a native app's window from outside with no
@@ -7467,7 +7490,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | Firefox's profiler (attribution only, §8.3) | the browser's own samplers, in the target's processes: on Windows 1 ms through Firefox 160, where any shorter interval makes every process's sampler busy-wait a core (bug 1349801; 10.2 cores for a page's Firefox 159 on adais at 200 µs or 500 µs, 0.3-0.4 cores at 1 ms, 0.25 with no profiler), and 500 µs from Firefox 161, whose sampler waits on a high-resolution timer (bug 2082760; Nightly 162: 0.65 cores at 500 µs, 0.3 with no profiler); 200 µs on macOS and Linux (air 0.3-0.6 cores and vps 0.1-0.5 at any interval, no profiler alike) |
 | `cli()` targets (§9.6) | nothing in the command; per command run strobe spawns it, reads its output on two threads (started before it) and, after its exit, the OS's accounting and one list of the system's processes for what it left (Linux also scans `/proc` for its process group), on strobe's CPUs; while the command runs, strobe only waits and reads its output (adais: 0.16% of a core beside a 300 ms command, 3–6% beside a 6 ms one) |
 | `tty()` targets' terminal reader (§13.9) | ≤ 0.5% of one core over the measured runs' timed parts (`terminal_pct`: the reader thread's own CPU reading, parsing and answering the program's output, read at each untimed edge too; not warmup runs or untimed stretches, whose output stamps nothing kept, and which once refused the latencies of a program that printed a lot while untimed); over it warns `OverheadBudget`, over 2% a timed block's `tty.latency.*`, `tty.settle.*` and `tty.frame.*` are refused (a `--check` keeps them and warns, naming the declared ones a timed bench refuses; an attribution block neither). Measured on a production TUI's typing, command palette and list scrolling: 0.2–0.35% on adais, 0.13–0.19% on vps |
-| Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches, opening the window's capture included: a run whose first pixel read opens it pays for it; Windows makes the capture's Direct3D device once per process, 118 of the 126 ms of CPU an open took on adais); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run |
+| Pixel reads in runs (image locators, pixel waits, §9.6) | ≤ 0.5% of one core over the measured runs (`pixel_pct`: strobe's thread CPU capturing and matching inside the runs' timed stretches, opening the window's capture included: a run whose first pixel read opens it pays for it; Windows makes the capture's Direct3D device once per process, 118 of the 126 ms of CPU an open took on adais); over it warns `OverheadBudget`, over 2% refuses the series' timing and latency metrics. Inside a run each read is also `driver.pixel_reads` (`ObserverCost` past 8 a run or 2% of its wall time). Measured on adais (Windows.Graphics.Capture, a 600 × 360 window): a key's `changed` wait on a 500 × 40 region, 2 reads and 4.8 ms a run. On a hybrid laptop (integrated GPU drawing a 240 Hz panel at 150%, strobe on the slower cores), after the frame pool held its newest frame, the window's place was cached, captures opened before the runs and the driver's threads were kept out (2026-11-09): the canvas fixture's pixel waits cost 0.9–1.4 ms of CPU a run where they cost 3.4–4.9 ms (a read's flush 1.3 → 0.05 ms, its map 0.4 → 0.03 ms); timed blocks: a click's `changed` wait 1.6% → 0.7–1.0%, its press and release edges 0.6%, a key's 9–16% → 2.3–3.8% (runs of about 30 ms), a headed page's key 7.0% → 3.3%. A one-key run still exceeds 2%: each read flushes the GPU's queue once and each frame the window shows gives a buffer back once |
 | HTTP probe (`ctx.httpProbe`, §8.9; never in a clean timing block) | ≤ 1% of one core over the probe's span (`http_probe_pct`: its scheduler's and workers' own CPU, on strobe's CPUs; a new connection per probe at 100 ms: vps 0.29%, adais 0.58%); over it a timed probe block warns `OverheadBudget`, over 2% refuses `http.latency.*` (a `--check` warns) |
 | binary (viewer embedded) | ≤ 25 MB |
 | `strobe status` (no calibration) | ≤ 4 s, 3 of them the idle-load sample |
@@ -7661,6 +7684,11 @@ what was built but not yet run on a device is in §21.
 
 **After 0.23.0**
 
+- 2026-11-09 · this change · pixel reads' cost: the Windows capture holds its newest frame and copies
+  only a read's region, keeps the driver's work on the reading thread, reads the window's place and
+  display again only when a user32 key changed, reuses the last read of an unchanged frame, and opens a
+  fresh capture when a grown window's frame was cropped; captures open before a case's runs when
+  setup read pixels; timed page reads follow the open capture's window (8.2, 9.6, 19).
 - 2026-11-09 · this change · a `--check` never waits for a speed check (`Background` and `Throttled`
   are warnings there, the block runs at once); `--max-time` is the deadline of every mode and of
   every wait, and reaches `record --bench`; `cpu.<role>` refusals say which cause; the adapter a page
