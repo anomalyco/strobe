@@ -3677,9 +3677,10 @@ experiment's `script.log`.
     `ClockUnsynced`: a reading's round trip over 2 ms, the monotonic offset moving over 1 ms between
     start and exit, or the median of a spin's `strobeClockMark` samples over 1 ms outside strobe's
     span around its request (or none in either spin). A single sample may lie further: a sampler kept
-    off a CPU between its clock read and the stack it takes stamps it early (vps, a probed Bun host:
-    3 of a spin's 9 samples up to 1.68 ms early, the median inside), which is that sample's time, not
-    the clocks'; `meta.clock.mark_outliers` and `mark_worst_ms` count them. `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms before
+    off a CPU between its clock read and the stack it takes stamps it off (vps, a probed Bun host: up
+    to 3 of a spin's 9 samples, -1.68 to +1.69 ms, the median inside; 3 of 3 blocks kept, where a
+    per-sample 1 ms check refused 3 of 4), which is that sample's time, not the clocks';
+    `meta.clock.mark_outliers` and `mark_worst_ms` count them. `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms before
     the last measured run's end, or the exit's reading failing.
   - Weights, as Firefox's (§8.3): a sample weighs its gap, cut to the run, its untimed stretches out;
     a gap over `capUs` weighs `overUs` (the runtime took no sample then). Node: both 50 ms. Bun, which

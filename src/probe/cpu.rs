@@ -298,8 +298,8 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     }
     // The clocks match when each spin's samples sit inside its span: their median within SYNC_NS. Single
     // samples may lie further: a sampler kept off a CPU between its clock read and the stack it takes
-    // stamps that sample early (vps, 2 vCPUs, the probe's threads beside a Bun host: 3 of a spin's 9
-    // samples up to 1.68 ms early, its median inside the span), which is the sample's time, not the
+    // stamps that sample off (vps, 2 vCPUs, the probe's threads beside a Bun host: up to 3 of a spin's
+    // 9 samples, -1.68 to +1.69 ms, its median inside the span), which is the sample's time, not the
     // clocks'. They are counted (`outliers`, the farthest in `worst_ns`), never hidden.
     let (mut outliers, mut worst_ns) = (0, 0.0f64);
     for (k, o) in offs.iter_mut().enumerate() {
