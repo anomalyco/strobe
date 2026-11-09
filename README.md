@@ -29,6 +29,18 @@ Ask your agent: *"did this branch make scrolling faster?"*
 
 **Agent quick start:** read [skill/SKILL.md](skill/SKILL.md). `strobe up` installs it as the `strobe` skill.
 
+Start in about two minutes, from your project's folder:
+
+```sh
+bun add -d @hona/strobe                                   # pins strobe for the project
+bunx strobe init                                          # strobe.json and a runnable perf/smoke.bench.ts
+bunx strobe bench perf/smoke.bench.ts --head . --check    # each case once: does it work?
+```
+
+`strobe init` reads your package.json, Cargo.toml or index.html and writes a bench for a web app, a
+server, a native app, an Electron app, a terminal program or a command-line tool (`--target` picks
+one). It never replaces a file without `--force`, and prints what to run next.
+
 What your agent runs:
 
 ```sh

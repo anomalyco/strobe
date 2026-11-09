@@ -84,7 +84,7 @@ impl Project {
     }
 
     /// A path of the folder as the variant's root sees it.
-    fn from_root(&self, path: &str) -> String {
+    fn rooted(&self, path: &str) -> String {
         if self.rel.is_empty() { path.to_string() } else { format!("{}/{path}", self.rel) }
     }
 
@@ -100,7 +100,7 @@ impl Project {
         let file = file.trim_start_matches("./").to_string();
         let first = std::fs::read_to_string(self.dir.join(&file)).ok().and_then(|t| t.lines().next().map(str::to_string)).unwrap_or_default();
         let runtime = if first.starts_with("#!") && first.contains("node") { "node" } else { "bun" };
-        Some((name, format!("{runtime} {}", self.from_root(&file))))
+        Some((name, format!("{runtime} {}", self.rooted(&file))))
     }
 
     /// The server's entry: package.json `main` or `module`, else the file its `start` script runs, else a
@@ -347,7 +347,7 @@ struct Plan {
 /// A Cargo binary's path from the variant's root (`./` first off Windows), its build into `target`, and the
 /// TypeScript constant the bench names it by.
 fn cargo_exe(p: &Project, bin: &str) -> (String, String) {
-    let dir = p.from_root("target/release");
+    let dir = p.rooted("target/release");
     let build = if p.rel.is_empty() { "cargo build --release --target-dir target".to_string() } else { format!("cargo build --release --manifest-path {0}/Cargo.toml --target-dir {0}/target", p.rel) };
     let exe = format!(
         "// The binary Cargo builds into {dir} (`build` below), once per variant.\nconst exe = process.platform === \"win32\" ? {} : {}\n\n",

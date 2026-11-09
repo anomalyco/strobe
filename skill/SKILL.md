@@ -11,10 +11,22 @@ The design and every rule behind this file: SPEC.md.
 
 ## Playbooks
 
+### No bench yet: start one
+
+1. `bun add -d @hona/strobe` pins strobe for the project (`bunx strobe …` then runs that version).
+2. `strobe init` writes `strobe.json` (its `$schema` linked) and a runnable `perf/smoke.bench.ts` from
+   the folder's package.json (`build`, `preview`, `start`, `main`, `bin`, an electron dependency),
+   Cargo.toml binaries or index.html. `--target web|server|native|electron|tty|cli` overrides the guess:
+   web serves the build with `perf/serve.ts`, server hosts it in `perf/server.ts` (`PORT`), native
+   builds and launches the Cargo app, cli runs the command to its exit. It never replaces a file
+   without `--force`.
+3. Run what it prints: `strobe config`, then `strobe bench perf/smoke.bench.ts --head . --check`
+   (`--headless` with no display or a locked session). Then edit the cases to what users do.
+
 ### Did my change make it faster?
 
-1. Write or find a bench file (below). Check it first: `strobe bench <file> --head . --check`
-   (each case once, pass or fail with a screenshot; nothing is decided).
+1. Write or find a bench file (below; `strobe init` writes a first one). Check it first:
+   `strobe bench <file> --head . --check` (each case once, pass or fail with a screenshot).
 2. `strobe plan <file> --base origin/dev --head .` says pairs and minutes per series.
 3. `strobe bench <file> --base origin/dev --head .`: a verdict per series (case × target × params).
    - Read the ★ primary's verdict: `faster`/`slower` (`less`/`more`, `fewer`), `same (±2%)`,
@@ -73,7 +85,8 @@ The design and every rule behind this file: SPEC.md.
 ### A native app, or any process from outside
 
 - `record app:<id> --for 10s` (a strobe.json profile) or `record exe:<path> --native`: CPU, thread
-  wakes, IO, GPU, memory, the UI thread and what reached the screen. `--windowless` for a tray app.
+  wakes, IO, GPU, memory, the UI thread and what reached the screen. `--windowless` for a tray app
+  (`look … --windowless` first: does it stay up, what does it print?).
   `record pid:<n>` or `proc:<name>` for a process strobe did not start.
 - `query <rec> threads`: wakes/s and CPU per thread, the module each started in, whose (app, driver,
   os, `unknown (?)`); `--timeline` per second. Idle wake-ups: `query <rec> insights`.
@@ -275,6 +288,8 @@ strobe report <exp_…|rec_…|ser_…|result.json> [--format html|md|pr|card|ba
 strobe report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
 strobe open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
 strobe look <url|file|wir:…|app:<id>|exe:<path>|tty:<command>> [--until <selector>] [--out shot.png]
+strobe look app:<id>|exe:<path> [--windowless] [--wait 2s] [--timeout 30s] [-- <args…>]
+strobe init [<dir>] [--target web|server|native|electron|tty|cli] [--force]
 strobe track <file> [--ref <rev> | --range a..b [--every N]] [--schedule commits|nightly|6h]
 strobe history [<ser_…|file>]
 strobe config [<dir>]
@@ -312,11 +327,16 @@ strobe update [<version>] [--from <path>] [--check] [--force]
   pixels; `look exe:<path> -- <args…>` passes the app its own arguments. A native window holding a
   Chromium web view may show no headings through UI Automation: check its content from a
   `webview()` or `app()` target, or expect a title or a visible control.
+- A native look waits 30 s for the window (`--timeout`). An app with none (a tray app, a service, a
+  command): `--windowless`, or a profile's `window: false`. It prints `window none (windowless)`,
+  whether the app kept running over `--wait` or how it ended, and its last 20 output lines; exit 0,
+  or 124 for a nonzero exit or a guard that stopped it.
 - On a laptop with two GPUs, read `gpu.*` with the adapter the target drew on: the `screen` line
   (`drawn on …`), `query <rec> gpu` and `screen.gpu` in the JSON; `CrossAdapterScanout` says when
   another adapter drives the window's display.
-- MCP tools `status`, `record`, `bench`, `query`, `report`: the CLI's names, arguments and JSON.
-  Through the daemon, `bench` needs an absolute file and `head`.
+- MCP tools `status`, `record`, `bench`, `query`, `report`, `look`, `config`, `init`: the CLI's names,
+  arguments and JSON. Through the daemon, `bench` needs an absolute file and `head`; `config` and `init`
+  an absolute `dir`; `look` absolute paths, and no `tty:` or `build` (use the CLI or `strobe mcp`).
 - Exit codes: `0` · `1` error · `2` usage · `3` needs a human · `4` refused · `5` inconclusive
   (with `--require-verdict`) · `124` timeout or an unlock wait that ran out · `130` stopped ·
   `255` unreachable.
@@ -524,5 +544,6 @@ export default bench({
   folder. `strobe config` shows the file each resolves to.
 - The nearest strobe.json upward from the bench file wins; `build.cwd` and `serve.cwd` resolve
   from the checkout's root. `//` comments and trailing commas are fine; an unknown key exits 2.
-- `"$schema": "./node_modules/@hona/strobe/schema/strobe.v1.json"`. `strobe config` checks it.
+- `"$schema": "./node_modules/@hona/strobe/schema/strobe.v1.json"`. `strobe config` checks it;
+  `strobe init` writes a first one.
 - If an isolated launch disturbs your own state, strobe stops: add what leaked to the profile.

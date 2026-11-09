@@ -6,7 +6,14 @@ benches, people, agents and CI alike.
 
 ```sh
 bun add -d @hona/strobe
+bunx strobe init                                          # strobe.json and a runnable perf/smoke.bench.ts
+bunx strobe bench perf/smoke.bench.ts --head . --check    # each case once: does it work?
 ```
+
+`strobe init` reads the folder's package.json (`build`, `preview`, `start`, `main`, `bin`, an `electron`
+dependency), Cargo.toml binaries or index.html, and writes a bench that passes `--check` as written:
+`--target web|server|native|electron|tty|cli` picks the kind. It never replaces a file without `--force`.
+Then edit its cases to what your users do, or write your own:
 
 ```ts
 import { bench, web } from "@hona/strobe"

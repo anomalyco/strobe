@@ -273,7 +273,7 @@ host/           paths, processes (spawn.rs, jobs.rs, cgroup.rs), the cycle clock
 ```
 strobe <command> [flags]
 
-Setup      up · update · leave
+Setup      init · up · update · leave
 Use        status · record · bench · plan · run (§5.13) · config · query · report · open (§11.4)
            · look (§5.12) · top · track · history (§25)
 Internal   daemon · mcp · helper · stats (hidden, §5.11)
@@ -305,6 +305,51 @@ path from the project root, the folder of the nearest strobe.json, a bare name e
 commands for this OS with the folders they run in: those are from the checkout's root (§9.5), whichever
 folder of it holds strobe.json; a `build.output` given per OS without this OS is a problem.
 It launches nothing.
+
+`strobe init [<dir>] [--target web|server|native|electron|tty|cli] [--force]` starts a project's
+first bench from what its own files say, and names no product (rule 15): it reads generic markers
+only, package.json's `scripts` (`build`, `preview`, `start`), `main`, `module`, `bin` and an
+`electron` dependency, a Cargo.toml's `[[bin]]` names (else `[package]` `name` with `src/main.rs`),
+and an `index.html`. Without `--target` it guesses in that order: an Electron dependency is
+`electron`, a build script or an index.html `web`, a `bin` `cli`, a `main`/`start` entry `server`,
+a Cargo binary `cli` (a binary that opens a window is `--target native`, one in a terminal `tty`);
+a folder with none of them is a usage error that names the flag. It writes `strobe.json` with its
+`$schema` (the path to the `@hona/strobe` package's `schema/strobe.v1.json` in the folder's or an
+ancestor's `node_modules`, else `./node_modules/…`) and `perf/smoke.bench.ts`, a bench that passes
+`--check` as written, with the helper it needs:
+
+- **web:** `build` from the build script (run with the package manager the lockfile names, Bun
+  without one) and `serve` `bun perf/serve.ts {port}`: a static server of the first of `dist`,
+  `build`, `out` and `public` that holds an index.html (else the folder; a path without a file gets
+  index.html), with a comment naming the project's own `preview` or `start` server as the other
+  choice (never a dev server). Cases: a launch to `body *` (`launch.ready`) and a reload
+  (`main.work`).
+- **server:** a `script("./server.ts")` harness whose `start()` sets `PORT` to a free port, imports
+  the entry (`main`, `module`, the file `start` runs, else `server`/`src/index` and the like; a
+  stand-in that answers when there is none) and waits until it answers; setup probes it
+  (`ctx.httpProbe`, any status below 500) and the case makes 1000 requests from four clients 10 ms
+  apart from the runner: `cpu.main` with `http.latency.p95` and `http.timeouts`.
+- **native:** `build` `cargo build --release` into `{cache}/cargo-target` with the line-table, no-strip
+  release settings (§9.5) and an `apps` profile of kind `native` whose `exe` is the folder's own
+  `target/release` build; the case leaves the app open for a second (`cpu.work`, `cpu.wakes`).
+- **electron:** `command("bunx electron . --remote-debugging-port={port}")` with the install (and
+  build) as its `build`; an idle second (`main.work`, `cpu.work`).
+- **tty:** the package's `bin` (with the runtime its first line names, Bun otherwise) or the Cargo
+  binary (built into the folder's `target`) on strobe's terminal; an idle second (`cpu.work`,
+  `cpu.wakes`, `tty.updates`).
+- **cli:** the same program with `--help`, run to its exit (`run.duration`, `cpu.work`,
+  `memory.peak`).
+
+A folder below its checkout's root gets every path from the root (`build.cwd`, `serve.cwd`, a
+command's path), as a folder variant builds there (§9.5). A file that is there is kept (`kept`),
+never replaced without `--force`. It then prints the commands to run from the folder: `strobe config`,
+`strobe bench perf/smoke.bench.ts --head . --check` (with `--headless` for a web bench where no page
+can show: Linux without a display, a locked session) and a timed comparison against the branch the
+checkout's `origin/HEAD` names, else `main` or `master`, else `--aa` outside git; `bunx strobe` where
+the folder resolves the package. Like `config` it runs before the restores other commands do and
+writes nothing of strobe's own; it builds and launches nothing. JSON: `dir`, `root`, `target`,
+`what`, `wrote`, `kept`, `schema`, `headless`, `next`. Checked on adais (Windows 11; web headless,
+server, cli and tty folders, each `config` then `--check` passing as written):
 
 Every flag strobe reads is in one table (`cli::FLAGS`, with whether it takes a value and which
 commands read it); any other
@@ -1029,15 +1074,15 @@ page's visible text (`innerText`, the first `--chars`), and writes a screenshot 
 page; `--element`: only the first visible element the selector matches, at full size wherever it is
 on the page, so one section of a long report reads; a selector that matches nothing is a usage
 error). A local file opens as `file://`. A page-only flag given to a native look, or an app-only one
-(`--keys`, `--build`, `--app`, `--home`) to a page's, is a usage error rather than ignored, and so is
+(`--keys`, `--build`, `--app`, `--home`, `--windowless`) to a page's, a `tty:` look's or a `wir:` look's, is a usage error rather than ignored, and so is
 a second target or arguments after `--` (a native app's own). Each mode refuses the others' flags
 (exit 2): a native look `--element`, `--full`, `--size`, `--scale`, `--chars`, `--headed`,
 `--engine`, `--mobile`, `--type`, `--press`; a `tty:` look the page's and the app's flags,
 `--engine` and `--mobile`; a `wir:` look `--size`, `--scale`, `--headed`, `--engine`, `--mobile`,
 `--type`, `--press` and the app's flags. Only a page look takes `--engine` (anything but `chromium`
 refused `EngineUnsupported`, exit 4). Exit 124 when the load event or `--until` never came; the
-page's own errors are listed, not an exit code. It is a CLI command only, not an MCP tool (§17): it
-answers no measurement question. `--mobile[=<serial>]`: the page in Chrome on an Android phone or
+page's own errors are listed, not an exit code. The MCP tool `look` (§17) is this command, so an
+agent checks a screen without a shell. `--mobile[=<serial>]`: the page in Chrome on an Android phone or
 emulator (13.1 "Chrome on a phone"), at the phone's own screen (`--size`, `--scale` and `--headed`
 are usage errors); a local file is served to the phone from its folder; the load line names the
 phone, its viewport and device pixel ratio, and the JSON keeps `phone`. A page look opens Chromium
@@ -1046,8 +1091,8 @@ only, not in firefox") before anything launches, never silently run in Chromium;
 `strobe record --engine <engine>` only where that engine's page runs here (`web::refusal`: not a
 Firefox before 148, not WebKit on Windows).
 
-`look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>] [--timeout
-60s] [-- <args…>]`: a native app launched in an isolated home as a bench block launches it (its profile from
+`look app:<id> | exe:<path> [--app <id>] [--build] [--windowless] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>]
+[--timeout 30s] [-- <args…>]`: a native app launched in an isolated home as a bench block launches it (its profile from
 `strobe.json`; everything after `--` goes to the app as its own arguments, after its profile's, as a
 `native(path, { args })` target's do), nothing measured, then closed with its home: after its main window opens (and
 `--until`'s element shows, then `--wait`) it prints the windows' titles, the accessibility tree's
@@ -1078,6 +1123,21 @@ SIGTERM), of a page or an app, ends every launch it owns (each one's tree, then 
 never race), what still runs stamped with the app's home, and removes a home strobe made, before it
 exits 130 (`isolate::end_on_stop`; the watcher ends before the look closes what it launched). A
 browser profile left by a stop goes with the next strobe's `reap_dead_owners`.
+
+The window (and `--until`) is waited for 30 s (`--timeout`). One that never shows, or an app that
+exits before it opened one, is said with how to look at an app that shows none: `--windowless`, or
+`window: false` in its profile (`--app <id>` of such a profile for an `exe:`). `--windowless` (and a
+profile's `window: false`): a tray app, a service or a command, launched as a windowless bench target
+is, with its stdout and stderr read through a pipe; nothing is waited for or read of a window
+(`--until`, `--out` and `--keys` are usage errors). It watches the app for `--wait` (2 s): whether it
+kept running (`running  after 2 s · N processes`), else how it ended (`exited   with code 0 after
+10 ms`; a launcher that exits 0 and leaves the app running is no end), and the guards; then
+`window   none (windowless)` and its last 20 output lines (`output`, with the count). Exit 0, also
+for a command that did its work and exited 0; 124 for a nonzero exit or a guard that stopped it
+(said on a `!` line). JSON `windowless: true`, `running`, `exit_code`, `ended_ms`, `processes`,
+`output`, `output_lines`, `problems`. Checked on adais with a console program that prints its
+arguments: `look app:<id>` of a `window: false` profile and `look exe:<path> --windowless -- a b`
+exit 0 with its lines, `--exit=3` exits 124, and without the flag the error's fix names it.
 
 `look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s]
 [--timeout 30s] [--home <seed>]`: the command on strobe's own terminal (§13.9) in an isolated home, as
@@ -7654,6 +7714,9 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 | `bench` | `file` (not with `stop`/`resume`), `head?`, `base?`, `aa?`, `check?`, `batch?`, `headless?`, `engine?`, `wayland?`, `mobile?`, `blocks?`, `filter?`, `target?`, `params?`, `primary?`, `equivalence?`, `noworse?`, `plan?`, `effect?`, `pilot?`, `pairs?`, `runs?`, `probes?`, `repeat?`, `seed?`, `bisect?`, `pin?`, `power?`, `reserve-cpus?`, `why?`, `trace?`, `keep?`, `pixels?`, `pixels-only?`, `video?`, `style?`, `max-time?`, `unlock-wait?`, `require-verdict?`, `require-parity?`, `stop?`, `resume?`, `timeout?` | result (§5.6) or `{ id, state: "running", progress }` |
 | `query` | `handle`, `view?`, `sql?`, `by?`, `source?`, `top?`, `reveal?`, `at?`, `native?`, `thread?`, `pid?`, `sort?`, `case?`, `phase?`, `timeline?`; `history`, `changes` or `ser_…` for tracked history (§25.5) | view JSON |
 | `report` | `handle` (or a `result.json`/`meta.json` path), `view?`, `format?`, `out?`, `theme?`, `update-pr?`, `repo?`, `force?`, `no-card?`, `badge-url?`, `scoreboard?` | `{ path, bytes }` |
+| `look` | `target`, `until?`, `wait?`, `timeout?`, `out?`, `size?`, `scale?`, `chars?`, `full?`, `element?`, `headed?`, `mobile?`, `app?`, `build?`, `keys?`, `windowless?`, `wayland?`, `home?`, `type?`, `press?`; no arguments after `--` (a native app's own) | §5.12 JSON (exit 124: problems, still a result) |
+| `config` | `dir?` | §5 JSON (a problem: `isError`) |
+| `init` | `dir?`, `target?`, `force?` | §5 JSON: `wrote`, `kept`, `next` |
 
 - `timeout` (default 600 s): a call that runs longer returns `{ id, state: "running" }`; the
   work continues; `query <id> progress` follows it.
@@ -7667,7 +7730,11 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
   (`--target`); `bench` with `stop` or `resume` (not both) takes an experiment instead of `file`.
   Through the daemon, whose working folder is strobe's install folder, `bench` and `record` with
   `bench` need `head`, and a relative bench file or head folder is refused (usage, naming the
-  absolute path to give): `.` would have built the install folder.
+  absolute path to give): `.` would have built the install folder. For the same reason `config` and
+  `init` need an absolute `dir` there, and `look` an absolute file, `exe:` path and `out`; a `tty:`
+  look and `build` (which run in the folder strobe runs in) are refused there with a pointer to the
+  CLI or the stdio server (`strobe mcp`, which runs in the agent's folder); an `app:<id>` resolves
+  from the user's own strobe.json.
 - The MCP token and `strobe open`'s session tokens come from the OS's secure random source
   (`host::paths::csprng_hex`); the token file and each session file (the key to its trace)
   are 0600, in folders only the user can enter, on Unix.
@@ -7902,9 +7969,17 @@ describe it now. The sections above say what strobe does; this list only dates i
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
 
-**After 0.25.0**
+**After 0.26.0**
 
-- 2026-11-10 · this change · a build's commit stamp follows a linked worktree's branch (moved from
+- 2026-11-10 · this change · `strobe init`: a first strobe.json and runnable smoke bench from a
+  folder's generic markers (web, server, native, electron, tty, cli) and the commands that check
+  them; `look --windowless` (and a `window: false` profile) watches the app over `--wait` and exits 0,
+  the native window waited 30 s with a fix that names it; MCP tools `look`, `config` and `init` (5,
+  5.12, 17).
+
+**0.26.0** (6dbb3ea, 2026-11-10)
+
+- 2026-11-10 · 84ee050 869e9fc 77b2eae f6f4223 · a build's commit stamp follows a linked worktree's branch (moved from
   another checkout, packed or not); the server example (`script()`, `ctx.httpProbe`,
   `http.latency.p95` beside `cpu.main`) in the package README, the skill, `bench --help` and the MCP
   `bench` tool, runnable as `scripts/dev/http-probe-example.bench.ts`; the README lists all six
