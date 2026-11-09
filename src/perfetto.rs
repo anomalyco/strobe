@@ -30,6 +30,8 @@ const UUID_BASE: u64 = 0x5354_524F_0000_0000;
 /// stand on: no thread's, so they never mix with the measured runs' on the host's main thread.
 const WHOLE_HOST: &str = "whole-host.json.gz";
 const WHOLE_HOST_TID: u32 = u32::MAX - 1;
+/// Its label, as `query hotspots --source host` and the report say it.
+const WHOLE_HOST_TEXT: &str = "Whole host process (startup, setup, warmup, runs, resets)";
 
 /// A protobuf message being written.
 #[derive(Default)]
@@ -1085,19 +1087,55 @@ impl Builder {
         let mut js = Stacks::new(SEQ_JS, "javascript", "time", 1);
         let mut first_ts: Option<u64> = None;
         let (mut scripts, mut mapped) = (HashSet::new(), HashSet::new());
-        let mut sources: Vec<(Value, (u32, u32))> = profiles
+        // A script host's measured runs (µs on strobe's clock, untimed stretches out), from `runs.json`: its
+        // main thread shows the whole profile's samples there, at their true times (each `cpu-<run>` profile
+        // is cut and closed up for the views, so it is not drawn).
+        let segments: Vec<(f64, f64)> = store::read_json(&dir.join("runs.json"))
+            .ok()
+            .and_then(|v| v["runs"].as_array().cloned())
+            .into_iter()
+            .flatten()
+            .flat_map(|r| {
+                let (a, b) = (r["t0_ns"].as_u64().unwrap_or(0), r["t1_ns"].as_u64().unwrap_or(0));
+                let mut cut: Vec<(u64, u64)> = r["untimed"].as_array().into_iter().flatten().filter_map(|u| Some((u[0].as_u64()?, u[1].as_u64()?))).collect();
+                cut.sort_unstable();
+                let (mut out, mut from) = (Vec::new(), a);
+                for (ua, ub) in cut {
+                    if ua > from {
+                        out.push((from as f64 / 1e3, ua.min(b) as f64 / 1e3));
+                    }
+                    from = from.max(ub);
+                }
+                if b > from {
+                    out.push((from as f64 / 1e3, b as f64 / 1e3));
+                }
+                out
+            })
+            .collect();
+        let script_runs = whole.is_some() && !segments.is_empty();
+        // Each profile, the thread it is drawn on, and the spans it is cut to.
+        type Source = (Value, (u32, u32), Option<Vec<(f64, f64)>>);
+        let mut sources: Vec<Source> = profiles
             .iter()
+            .filter(|_| !script_runs)
             .filter_map(|path| {
                 let main = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("cpu-main"));
-                Some((store::read_json(path).ok()?, if main { page.browser.unwrap_or(page_thread) } else { page_thread }))
+                Some((store::read_json(path).ok()?, if main { page.browser.unwrap_or(page_thread) } else { page_thread }, None))
             })
             .collect();
         if let Some(w) = whole {
+            if script_runs {
+                sources.push((w.clone(), page_thread, Some(segments)));
+            }
             let at = (page_thread.0, WHOLE_HOST_TID);
-            self.thread_track(at.0, at.1, Some("whole host process (startup, setup, warmup, runs, resets; not measured)"));
-            sources.push((w, at));
+            self.thread_track(at.0, at.1, Some(WHOLE_HOST_TEXT));
+            sources.push((w, at, None));
         }
-        for (prof, (pid, tid)) in sources {
+        for (prof, (pid, tid), cut) in sources {
+            // A whole-host profile's weights: a gap over `capUs` weighs `overUs` (the runtime took no
+            // sample then: an idle VM, a paused process).
+            let cap = prof["capUs"].as_f64();
+            let over = prof["overUs"].as_f64().or(cap);
             let nodes = prof["nodes"].as_array().cloned().unwrap_or_default();
             let parent: HashMap<u64, u64> = nodes
                 .iter()
@@ -1128,13 +1166,27 @@ impl Builder {
                 if frames.get(&id).is_some_and(|f| f.name == "(idle)") || t <= 0.0 {
                     continue;
                 }
+                // Cut to the measured runs' timed parts: a sample outside them is none of theirs, one near an
+                // edge weighs up to it.
+                let room = match &cut {
+                    Some(c) => match c.iter().find(|(a, b)| t >= *a && t < *b) {
+                        Some((_, b)) => b - t,
+                        None => continue,
+                    },
+                    None => f64::INFINITY,
+                };
                 let stack = *stacks.entry(id).or_insert_with(|| {
                     let chain = js_chain(id, &frames, &parent);
                     (!chain.is_empty()).then(|| js.callstack_of(&chain))
                 });
                 let Some(stack) = stack else { continue };
                 // A sample stands for the time to the next one (the profile's own weighting).
-                let us = deltas.get(i + 1).copied().filter(|d| *d > 0.0).unwrap_or(last);
+                let gap = deltas.get(i + 1).copied().filter(|d| *d > 0.0).unwrap_or(last);
+                let us = match (cap, over) {
+                    (Some(c), Some(o)) if gap > c => o,
+                    _ => gap,
+                }
+                .min(room);
                 let ts = (t * 1000.0).round() as u64;
                 first_ts = Some(first_ts.map_or(ts, |f| f.min(ts)));
                 js.sample(ts, task, None, stack, (us * 1000.0).round() as u64);

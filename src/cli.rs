@@ -438,8 +438,9 @@ Use
   query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash|host] [--reveal] [--native] [--thread <name>]
                                   views: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network
                                   insights actions sql
-                                  (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe> --phase <name>;
-                                  a script: its measured runs, --phase <name>, --source host for the whole host process;
+                                  (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe>; --phase <name>:
+                                  native samples, or a script recording's profile; --source host: a script target's whole
+                                  host process (its measured runs by default);
                                   --case <name>: one case of a --batch recording)
                                   (http: a bench block's HTTP probe (ctx.httpProbe): idle against the runs, timeouts,
                                   errors, missed sends, stalled cohorts; --phase <name>; exp_… its probe blocks, a..b too)

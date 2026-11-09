@@ -1054,7 +1054,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::PerSide,
-        about: "script targets and windowless native apps: CPU time per run of the process's main thread alone (the runtime's event loop, not its workers or children), from that one thread's OS counter at the run's edges, over its timed parts; NotOnThisOs where the OS has no exact per-thread counter",
+        about: "script and native targets, and record pid:: CPU time per run of the main thread (the thread the target's process started with), from that thread's own counter read at the run's edges and each untimed stretch's: cpu.main.busy times the run's timed time",
     },
     MetricDef {
         name: "cpu.main.busy",
@@ -1064,7 +1064,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::PerSide,
-        about: "cpu.main over run.duration, % of one core: how saturated the main thread was (100% means nothing else could run on it); tested only while run.duration compares, else context",
+        about: "the share of the run's timed time the main thread was on a CPU (100% is an event loop that never waited)",
     },
     MetricDef {
         name: "ui.cpu",

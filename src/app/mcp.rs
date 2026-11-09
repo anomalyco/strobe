@@ -169,7 +169,7 @@ const TOOLS: &[Tool] = &[
         ],
         flags: &[
             ("by", "hotspots, waits and alloc: function, file, package; memory: process, layer, allocator"),
-            ("source", "log: console, device or crash; hotspots of a script attribution recording: host (the whole host process: start, setup, warmup, runs, resets) instead of its measured runs"),
+            ("source", "log: console, device or crash; hotspots: host (a script target's whole host process: startup, setup, warmup, runs, resets; its measured runs by default)"),
             ("top", "rows (default 15)"),
             (
                 "reveal",
