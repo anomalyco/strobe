@@ -234,7 +234,8 @@ strobe config [<dir>]
 strobe update [<version>] [--from <path>] [--check] [--force]
 ```
 
-- `strobe <command> --help` lists that command's flags. An unknown flag exits 2 naming the closest.
+- `strobe <command> --help` lists that command's flags. An unknown flag exits 2 naming the closest;
+  so does another command's flag (`status --runs 5`: which commands take it), never ignored.
 - `--max-time` is the run's deadline, `--check` and `record --bench` too: no series starts and no wait
   (busy CPUs, a locked session, a launch retried) runs past it. A comparison keeps its verdicts; a
   check stops with exit 124 and `--resume` runs the rest.
@@ -255,8 +256,9 @@ strobe update [<version>] [--from <path>] [--check] [--force]
   measured: titles, headings (what `expect` checks), visible text or keyed elements, console errors
   and a screenshot. Use it to check a UI loads; it works on a locked session. A page look is Chromium
   only (`--engine firefox` is refused); `look app:<id> --out shot.png` writes the native window's
-  pixels. A native window holding a Chromium web view may show no headings through UI Automation:
-  check its content from a `webview()` or `app()` target, or expect a title or a visible control.
+  pixels; `look exe:<path> -- <args…>` passes the app its own arguments. A native window holding a
+  Chromium web view may show no headings through UI Automation: check its content from a
+  `webview()` or `app()` target, or expect a title or a visible control.
 - On a laptop with two GPUs, read `gpu.*` with the adapter the target drew on: the `screen` line
   (`drawn on …`), `query <rec> gpu` and `screen.gpu` in the JSON; `CrossAdapterScanout` says when
   another adapter drives the window's display.
