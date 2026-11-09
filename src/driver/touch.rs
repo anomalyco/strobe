@@ -66,10 +66,13 @@ const LEAD: f64 = 16.0;
 /// the page. Passive listeners at the window's capture phase; none on touch or pointer moves, which
 /// would send a scroll's every move to the page's main thread. A Firefox drag arms a one-shot move
 /// listener (`arm`) to read afterwards whether the page prevented its touch's default (`prevented`),
-/// and asks first whether the browser could pan where it starts (`pans`).
+/// and asks first whether the browser could pan where it starts (`pans`). Only in the top document,
+/// each lasting listener counted in `window.__strobeListeners`, which a memory census takes off the
+/// page's listeners (`probe::census`).
 pub(super) const SCRIPT: &str = r#"window.__strobeTouch ??= (() => {
+  if (window !== window.top) return
   const s = { n: [0, 0, 0, 0, 0] }
-  const on = (e, f) => addEventListener(e, (ev) => { if (ev.isTrusted) f(ev) }, { capture: true, passive: true })
+  const on = (e, f) => { addEventListener(e, (ev) => { if (ev.isTrusted) f(ev) }, { capture: true, passive: true }); window.__strobeListeners = (window.__strobeListeners ?? 0) + 1 }
   let armed = null
   on("touchstart", (e) => { s.n[0]++; if (armed && !armed[0]) armed[0] = e })
   on("touchend", () => s.n[1]++)

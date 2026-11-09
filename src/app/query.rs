@@ -485,13 +485,22 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
     }
-    // Wakes while idle: a native app recorded with no input whose threads keep waking (a polling loop,
-    // a short timer) costs power and CPU all day; the threads that wake most are named.
+    // A native block whose measured runs posted no input: an idle case (an app at rest), as a recording
+    // with no input is.
+    let idle_block = meta["native"] == true
+        && meta["kind"] == "block"
+        && store::read_json(&dir.join("frames.json"))
+            .ok()
+            .and_then(|f| f["runs"].as_object().map(|r| !r.is_empty() && r.values().all(|r| r["inputs"].as_array().is_some_and(Vec::is_empty))))
+            .unwrap_or(false);
+    let all_threads: Vec<Value> = store::read_json(&dir.join("threads.json")).ok().and_then(|t| t.as_array().cloned()).unwrap_or_default();
+    // Wakes while idle: a native app recorded with no input, or a block whose runs gave it none, whose
+    // threads keep waking (a polling loop, a short timer) costs power and CPU all day; the threads that
+    // wake most are named.
     let wakes = v["cpu.wakes"].as_f64().unwrap_or(0.0);
-    if meta["native"] == true && meta["kind"] == "record" && wakes >= 50.0 {
+    if meta["native"] == true && (meta["kind"] == "record" || idle_block) && wakes >= 50.0 {
         // Rows with a wake count: macOS counts wakes per process, and its thread rows carry none.
-        let threads: Vec<Value> =
-            store::read_json(&dir.join("threads.json")).ok().and_then(|t| t.as_array().cloned()).unwrap_or_default().into_iter().filter(|t| t["wakes_per_s"].is_number()).collect();
+        let threads: Vec<Value> = all_threads.iter().filter(|t| t["wakes_per_s"].is_number()).cloned().collect();
         let line = |t: &Value| {
             let module = t["module"].as_str().map(|m| format!(" ({m})")).unwrap_or_default();
             format!("{}{module} {}", t["name"].as_str().unwrap_or("(unnamed)"), fmt::value(t["wakes_per_s"].as_f64().unwrap_or(0.0), "/s"))
@@ -504,7 +513,8 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         let (app, other) = (sum(true), sum(false));
         let top: Vec<String> = threads.iter().filter(mine).take(3).map(line).collect();
         let theirs: Vec<String> = threads.iter().filter(|t| !mine(t)).take(3).map(line).collect();
-        let mut title = format!("the app's threads woke {} with nothing to do; most: {}", fmt::value(app, "/s"), if top.is_empty() { "none".into() } else { top.join(", ") });
+        let idle = if idle_block { "in runs that gave it no input" } else { "with nothing to do" };
+        let mut title = format!("the app's threads woke {} {idle}; most: {}", fmt::value(app, "/s"), if top.is_empty() { "none".into() } else { top.join(", ") });
         if other > 0.0 {
             title += &format!("; driver and OS threads in its processes woke {} more: {}", fmt::value(other, "/s"), theirs.join(", "));
         }
@@ -512,8 +522,105 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             "wakes-while-idle",
             if app >= 200.0 { "warn" } else { "info" },
             title,
-            json!({ "wakes_per_s": wakes, "app_wakes_per_s": app, "driver_os_wakes_per_s": other, "top": top, "driver_os_top": theirs }),
+            json!({ "wakes_per_s": wakes, "app_wakes_per_s": app, "driver_os_wakes_per_s": other, "top": top, "driver_os_top": theirs, "idle_block": idle_block }),
             vec![q("threads")],
+        );
+    }
+    let per = if meta["kind"] == "record" { "over the recording" } else { "per run" };
+    // One thread doing most of the work off the UI (or main) thread: a worker, a pool thread, a
+    // driver's compiler, which a UI-thread metric never shows.
+    let runs_cpu: Vec<f64> = store::read_json(&dir.join("runs.json")).ok().and_then(|r| r.as_array().map(|a| a.iter().filter_map(|r| r["cpu_ms"].as_f64()).collect())).unwrap_or_default();
+    let total = if runs_cpu.is_empty() { v["cpu.work"].as_f64().unwrap_or(f64::NAN) } else { metrics::median(&runs_cpu) };
+    let (ui_name, ui_ms) = match (v["ui.cpu"].as_f64(), v["cpu.main"].as_f64()) {
+        (Some(u), _) => ("the UI thread", u),
+        (None, Some(m)) => ("the main thread", m),
+        (None, None) => ("", f64::NAN),
+    };
+    let busiest = all_threads.iter().filter(|t| t["cpu_ms_per_run"].is_number()).max_by(|a, b| a["cpu_ms_per_run"].as_f64().unwrap_or(0.0).total_cmp(&b["cpu_ms_per_run"].as_f64().unwrap_or(0.0)));
+    if let Some(t) = busiest
+        && total > 0.0
+        && ui_ms.is_finite()
+    {
+        let ms = t["cpu_ms_per_run"].as_f64().unwrap_or(0.0);
+        let (share, ui_share) = (ms / total, ui_ms / total);
+        if share >= 0.5 && ms >= 50.0 && ui_share < 0.25 {
+            let name = t["name"].as_str().unwrap_or("(unnamed)");
+            let module = t["module"].as_str().map(|m| format!(" in {m}")).unwrap_or_default();
+            let origin = t["origin"].as_str().unwrap_or("?");
+            let whose = match origin {
+                "app" => "the app's own thread",
+                "driver" => "a driver's thread in the app's process",
+                "os" => "an OS thread in the app's process",
+                _ => "a thread strobe could not place",
+            };
+            hit(
+                "dominant-thread",
+                if share >= 0.75 { "warn" } else { "info" },
+                format!(
+                    "one thread did {:.0}% of the processes' CPU ({} {per}): {name} (thread {}{module}), {whose}, while {ui_name} used {:.0}% ({}): the work is off it, where {ui_name}'s metrics never show it",
+                    100.0 * share,
+                    fmt::value(ms, "ms"),
+                    t["tid"],
+                    100.0 * ui_share,
+                    fmt::value(ui_ms, "ms")
+                ),
+                json!({ "thread": name, "tid": t["tid"], "pid": t["pid"], "module": t["module"], "origin": origin, "cpu_ms": ms, "share": share, "processes_cpu_ms": total, "ui_thread": ui_name, "ui_cpu_ms": ui_ms, "ui_share": ui_share }),
+                vec![q("threads"), q(&format!("hotspots --thread {}", t["tid"]))],
+            );
+        }
+    }
+    // Off-CPU: runs that took their time waiting (on a server, the network, a timer, a lock, I/O) rather
+    // than computing; an idle native block waits by design.
+    let (duration, cpu) = (v["run.duration"].as_f64().unwrap_or(f64::NAN), v["cpu.work"].as_f64().unwrap_or(f64::NAN));
+    if duration >= 100.0 && cpu.is_finite() && cpu < 0.25 * duration && !idle_block {
+        let mut handles = Vec::new();
+        if crate::probe::http_probe::read(dir).is_some() {
+            handles.push(q("http"));
+        }
+        if dir.join(crate::probe::webkit_inspector::NETWORK_FILE).is_file() {
+            handles.push(q("network"));
+        }
+        // Where the threads waited and who woke them comes with a native capture; a page's trace shows
+        // its requests and timers.
+        if meta["native"] == true || dir.join("deep.json.gz").is_file() {
+            handles.push(q("waits"));
+        } else if handles.is_empty() && dir.join("trace.pftrace").is_file() {
+            handles.push(format!("strobe open {id}"));
+        } else if handles.is_empty() {
+            handles.push(q("waits"));
+        }
+        hit(
+            "off-cpu-bound",
+            "info",
+            format!(
+                "off-CPU: each run took {} while the target's processes used {} of CPU ({:.0}%): most of the run waited (on a server, the network, a timer, a lock or I/O), so faster code alone would not shorten it",
+                fmt::value(duration, "ms"),
+                fmt::value(cpu, "ms"),
+                100.0 * cpu / duration
+            ),
+            json!({ "run_duration_ms": duration, "cpu_work_ms": cpu, "cpu_share": cpu / duration }),
+            handles,
+        );
+    }
+    // Style and layout over script: the page's time goes to the browser's rendering of what script
+    // changed (many elements, costly selectors), not to the script itself.
+    let (style, layout_ms, script) = (v["main.style"].as_f64(), v["main.layout"].as_f64(), v["main.script"].as_f64().unwrap_or(0.0));
+    if let Some(sl) = style.zip(layout_ms).map(|(s, l)| s + l).or(style).or(layout_ms)
+        && sl >= 20.0
+        && sl > script
+    {
+        hit(
+            "style-layout-dominant",
+            if sl >= 2.0 * script.max(1.0) && sl >= 50.0 { "warn" } else { "info" },
+            format!(
+                "style and layout: {} {per} ({} style, {} layout) against {} of script: the page's time is the browser restyling and laying out what script changed",
+                fmt::value(sl, "ms"),
+                fmt::value(style.unwrap_or(f64::NAN), "ms"),
+                fmt::value(layout_ms.unwrap_or(f64::NAN), "ms"),
+                fmt::value(script, "ms")
+            ),
+            json!({ "style_ms": style, "layout_ms": layout_ms, "script_ms": script }),
+            vec![q("style"), q("layout")],
         );
     }
     // Long tasks: one task over 50 ms blocks input for that long.
@@ -711,7 +818,9 @@ fn path_tail(path: &Value) -> String {
 /// estimate, since shared memory and the OS account differently.
 pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Output> {
     let (c, label) = census_at(dir, at)?;
-    let procs = c["processes"].as_array().cloned().unwrap_or_default();
+    let (procs, from_dump) = census_processes(&c);
+    // A phone's page: no process of this computer's is its, so only Chromium's dump names them.
+    let phone = c["processes"].is_null();
     let alloc = &c["allocators"];
     let mb = |b: f64| fmt::bytes(b);
     // The trace that took the dump allocates its own buffers: strobe's memory, not the target's.
@@ -762,7 +871,20 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
         c["taken"].as_str().map(|t| format!(" · taken {t}")).unwrap_or_default(),
         if alloc.is_object() && alloc.get("error").is_none() { "" } else { " · no allocator dump" }
     );
-    let json = match by {
+    let note = match (phone, from_dump) {
+        (false, _) => None,
+        (true, true) => {
+            Some("the page's processes are on the phone: listed from Chromium's memory dump, with no OS private bytes or working set (strobe reads no process memory of the phone's)".to_string())
+        }
+        (true, false) => Some(format!(
+            "the page's processes are on the phone, and this census has no Chromium memory dump to list them{}: strobe reads no process memory of the phone's, so only the page's JS heap and DOM are here",
+            alloc["error"].as_str().map(|e| format!(" ({e})")).unwrap_or_default()
+        )),
+    };
+    if let Some(n) = &note {
+        text += &format!("{n}\n");
+    }
+    let mut json = match by {
         "layer" => {
             let mut sums: BTreeMap<String, f64> = BTreeMap::new();
             for p in &target_procs {
@@ -820,7 +942,9 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
             json!({ "census": label, "allocators": rows.iter().take(top).map(|(t, p, e, s)| json!({ "process": t, "path": p, "effective_bytes": e, "size_bytes": s })).collect::<Vec<_>>() })
         }
         _ => {
-            text += "  process               pid      private  working set    allocators  unexplained\n";
+            if !procs.is_empty() || !phone {
+                text += "  process               pid      private  working set    allocators  unexplained\n";
+            }
             let mut rows = Vec::new();
             let mut over = false;
             for p in &procs {
@@ -896,7 +1020,42 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
             json!({ "census": label, "processes": rows, "page": { "pid": page_pid.as_deref().and_then(|p| p.parse::<u64>().ok()), "js_heap_bytes": c["js_heap_bytes"], "js_heap_total_bytes": c["js_heap_total_bytes"], "dom": c["dom"] }, "os_after_snapshot": inflated })
         }
     };
+    if phone {
+        json["phone"] = json!(true);
+        json["processes_from"] = json!(if from_dump { "dump" } else { "none" });
+        json["note"] = json!(note);
+    }
     Ok(Output::new(text, json))
+}
+
+/// A census's processes (pid, name, Chromium type, OS private bytes and working set), and whether they
+/// come from Chromium's memory dump: a phone's census reads no process of this computer's
+/// (`processes: null`), so its processes are the dump's, typed from the names its trace gives them,
+/// with no OS reading. Pid 0 is the dump's global part, no process.
+fn census_processes(c: &Value) -> (Vec<Value>, bool) {
+    if let Some(p) = c["processes"].as_array() {
+        return (p.clone(), false);
+    }
+    let Some(dump) = c["allocators"].as_object().filter(|a| a.get("error").is_none()) else { return (Vec::new(), false) };
+    let procs: Vec<Value> = dump
+        .iter()
+        .filter_map(|(pid, a)| {
+            let pid: u64 = pid.parse().ok().filter(|p| *p > 0)?;
+            let name = a["name"].as_str().unwrap_or("");
+            let ty = match name {
+                "Browser" => "browser".to_string(),
+                "Renderer" => "renderer".to_string(),
+                "GPU Process" => "GPU".to_string(),
+                n if n.starts_with("Service: ") => n["Service: ".len()..].to_string(),
+                // A census from before the dump kept names: a renderer by its V8 heap.
+                "" if a["layers"]["v8"].is_number() => "renderer".to_string(),
+                "" => "other".to_string(),
+                n => n.to_lowercase(),
+            };
+            Some(json!({ "pid": pid, "name": name, "type": ty, "private_bytes": Value::Null, "working_set_bytes": Value::Null }))
+        })
+        .collect();
+    (procs, true)
 }
 
 /// A native recording's memory by what holds it (`memory.json`): one reading (`--at`, default the last).
@@ -924,13 +1083,16 @@ fn reading_at(dir: &Path, at: Option<&str>) -> Result<(Value, String)> {
 /// Memory of `b` against `a` by process type and layer, at each recording's last census (native
 /// recordings: by what holds it, at each one's last reading).
 pub fn memory_diff(a: &Path, b: &Path, top: usize) -> Result<Output> {
+    // A phone's census (no OS reading: its processes are the dump's) is named under the table.
+    let phone = std::cell::Cell::new(false);
     let totals = |dir: &Path| -> Result<BTreeMap<String, f64>> {
         if dir.join("memory.json").exists() {
             return Ok(crate::probe::memory::totals(&reading_at(dir, None)?.0).into_iter().collect());
         }
         let (c, _) = census_at(dir, None)?;
+        phone.set(phone.get() || c["processes"].is_null());
         let mut m: BTreeMap<String, f64> = BTreeMap::new();
-        for p in c["processes"].as_array().into_iter().flatten() {
+        for p in &census_processes(&c).0 {
             let ty = p["type"].as_str().unwrap_or("other");
             let ty = match ty.split_once(".mojom.") {
                 // strobe's own tracing service (rule 2).
@@ -958,7 +1120,10 @@ pub fn memory_diff(a: &Path, b: &Path, top: usize) -> Result<Output> {
     for (k, x, y) in rows.iter().take(top) {
         text += &format!("  {:>10}  {:>10}  {:>9}  {k}\n", fmt::bytes(*x), fmt::bytes(*y), format!("{}{}", if y < x { "−" } else { "+" }, fmt::bytes((y - x).abs())));
     }
-    Ok(Output::new(text, json!({ "rows": rows.iter().map(|(k, x, y)| json!({ "layer": k, "base_bytes": x, "head_bytes": y, "delta_bytes": y - x })).collect::<Vec<_>>() })))
+    if phone.get() {
+        text += "a phone's page: its processes are on the phone, from Chromium's memory dump, with no OS private bytes (strobe reads no process memory of the phone's)\n";
+    }
+    Ok(Output::new(text, json!({ "rows": rows.iter().map(|(k, x, y)| json!({ "layer": k, "base_bytes": x, "head_bytes": y, "delta_bytes": y - x })).collect::<Vec<_>>(), "phone": phone.get() })))
 }
 
 /// A recording's census by index (`--at 0`, negative from the end) or its last, with a label.
