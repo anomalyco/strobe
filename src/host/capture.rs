@@ -81,6 +81,8 @@ impl Grabber {
             if super::window_state(win).is_some_and(|w| w.iconic) {
                 return Err(hidden("the window is minimized, so the compositor draws none of it"));
             }
+            // Inputs paced by the window's display read its refresh rate again (`win::refresh_at_kept`).
+            super::win::forget_kept_refresh();
             // Without Windows.Graphics.Capture (or a frame of the window from it): PrintWindow.
             Grabber { win, open_ms: Default::default(), os: wgc::Wgc::open(win).ok(), view: Default::default() }
         };
@@ -99,7 +101,8 @@ impl Grabber {
 
     /// The window's placement, state and display now. Windows: read again only when its `WindowKey`
     /// changed (it moved, resized, minimized, hid, or went to another display, or its display's size or
-    /// DPI changed); the display's refresh rate is that display's when the key last changed.
+    /// DPI changed, or a display's mode did: a refresh rate at the same size and DPI); the display's
+    /// refresh rate is that display's when the key last changed.
     fn view(&self) -> Result<View> {
         let closed = || Error::msg("the app's window closed");
         #[cfg(windows)]

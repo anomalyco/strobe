@@ -375,13 +375,17 @@ pub fn win_error(rc: u32) -> String {
     }
 }
 
-/// Field layouts of manifest events, from TDH once per (provider, id, version).
+/// Field layouts of manifest events, from TDH once per (provider, id, version) per process: a session's
+/// consumer takes what earlier sessions learned (`Schema::shared`) and gives it back when it ends
+/// (`Schema::keep`), so a session's first events cost a lookup, not a TDH call each.
 #[derive(Default)]
 pub struct Schema {
     cache: HashMap<(u128, u16, u8), Option<Vec<Prop>>>,
     /// (provider, id, version, call site, 64-bit) → field offsets, for fixed layouts.
     fixed: HashMap<(u128, u16, u8, usize, bool), Vec<Field>>,
 }
+
+static SHARED: std::sync::Mutex<Option<Schema>> = std::sync::Mutex::new(None);
 
 struct Prop {
     name: String,
@@ -406,6 +410,23 @@ fn key(g: &GUID) -> u128 {
 }
 
 impl Schema {
+    /// What this process's sessions learned so far (taken: a session running beside it starts empty).
+    pub fn shared() -> Schema {
+        SHARED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+    }
+
+    /// Gives what this session learned back to the process's sessions.
+    pub fn keep(self) {
+        let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        match shared.as_mut() {
+            Some(s) => {
+                s.cache.extend(self.cache);
+                s.fixed.extend(self.fixed);
+            }
+            None => *shared = Some(self),
+        }
+    }
+
     fn layout(&mut self, e: &EVENT_RECORD) -> Option<&Vec<Prop>> {
         let h = &e.EventHeader;
         let k = (key(&h.ProviderId), h.EventDescriptor.Id, h.EventDescriptor.Version);
@@ -454,8 +475,8 @@ impl Schema {
     }
 
     /// Finds `names` in the event's payload. Missing names (another version) stay `found: false`.
-    /// Where every field up to the last one asked for has a fixed size, the offsets are cached per
-    /// event and call site, so most events cost a hash lookup.
+    /// Where every field found has a fixed offset and size and fits the payload, the result is cached
+    /// per event and call site (names the layout lacks included), so most events cost a hash lookup.
     pub fn fields<const N: usize>(&mut self, e: &EVENT_RECORD, names: [&str; N]) -> [Field; N] {
         let h = &e.EventHeader;
         let ptr64 = h.Flags as u32 & EVENT_HEADER_FLAG_64_BIT_HEADER != 0;
@@ -469,8 +490,8 @@ impl Schema {
         let data = payload(e);
         let Some(props) = self.layout(e) else { return out };
         let mut off = 0usize;
-        let mut values: Vec<u64> = Vec::with_capacity(props.len());
-        let (mut fixed, mut left) = (true, N);
+        let mut values = Values::default();
+        let (mut fixed, mut cacheable, mut left) = (true, true, N);
         for p in props.iter().take_while(|p| !p.name.starts_with('\u{1}')) {
             if left == 0 {
                 break;
@@ -488,27 +509,56 @@ impl Schema {
             };
             values.push(value.unwrap_or(0));
             if let Some(i) = names.iter().position(|n| *n == p.name) {
-                out[i] = Field { off, size, count, found: off + size * count.max(1) <= data.len() || count == 0 };
+                let inside = off + size * count.max(1) <= data.len() || count == 0;
+                out[i] = Field { off, size, count, found: inside };
+                // A field cut short in this event says nothing of the next one.
+                cacheable &= fixed && inside;
                 left -= 1;
             }
             off += size * count;
         }
-        if fixed && out.iter().all(|f| f.found) {
+        if cacheable {
             self.fixed.insert(site, out.to_vec());
         }
         out
     }
 }
 
+/// The values of the properties walked so far (counts and lengths of later ones name them): the first
+/// 32 on the stack.
+#[derive(Default)]
+struct Values {
+    head: [u64; 32],
+    n: usize,
+    rest: Vec<u64>,
+}
+
+impl Values {
+    fn push(&mut self, v: u64) {
+        match self.head.get_mut(self.n) {
+            Some(slot) => *slot = v,
+            None => self.rest.push(v),
+        }
+        self.n += 1;
+    }
+
+    fn get(&self, i: usize) -> Option<u64> {
+        if i >= self.n {
+            return None;
+        }
+        self.head.get(i).or_else(|| self.rest.get(i - self.head.len())).copied()
+    }
+}
+
 /// Size of one element and the element count of property `p` at `off`.
-fn prop_size(props: &[Prop], p: &Prop, data: &[u8], off: usize, ptr64: bool, values: &[u64]) -> (usize, usize) {
-    let count = if p.flags & PropertyParamCount != 0 { values.get(p.count as usize).copied().unwrap_or(0) as usize } else { (p.count as usize).max(1) };
+fn prop_size(props: &[Prop], p: &Prop, data: &[u8], off: usize, ptr64: bool, values: &Values) -> (usize, usize) {
+    let count = if p.flags & PropertyParamCount != 0 { values.get(p.count as usize).unwrap_or(0) as usize } else { (p.count as usize).max(1) };
     if p.flags & PropertyStruct != 0 {
         let (start, n) = p.members;
         let size = (start..start + n).filter_map(|i| props.get(i as usize)).map(|m| m.length as usize * (m.count as usize).max(1)).sum();
         return (size, count);
     }
-    let length = if p.flags & PropertyParamLength != 0 { values.get(p.length as usize).copied().unwrap_or(0) as usize } else { p.length as usize };
+    let length = if p.flags & PropertyParamLength != 0 { values.get(p.length as usize).unwrap_or(0) as usize } else { p.length as usize };
     let size = match p.in_type as i32 {
         TDH_INTYPE_UNICODESTRING => {
             if length > 0 {

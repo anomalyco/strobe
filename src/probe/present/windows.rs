@@ -311,6 +311,7 @@ impl Handler for Tracker {
     }
 
     fn finish(mut self) -> Self::Out {
+        std::mem::take(&mut self.schema).keep();
         self.drain(true);
         self.out.sort_by_key(|p| p.start_ns);
         (std::mem::take(&mut self.out), std::mem::take(&mut self.vsyncs))
@@ -331,7 +332,7 @@ impl Tracker {
     pub fn with_armed(armed: Arc<AtomicU64>, live: Option<std::sync::Arc<super::Live>>) -> Tracker {
         Tracker {
             armed,
-            schema: Schema::default(),
+            schema: Schema::shared(),
             freq: etw::qpc_freq(),
             guids: [etw::guid(DXGI), etw::guid(DXGKRNL), etw::guid(WIN32K), etw::guid(DWM)],
             serial: 0,
@@ -842,6 +843,9 @@ impl Tracker {
                     }
                 }
             }
+            // Every GPU packet of every process: only one a present on its thread waits for is read.
+            id::QUEUE_START | id::QUEUE_START_2 if !self.by_thread.get(&tid).is_some_and(|p| p.borrow().submit_seq == 0) => {}
+            id::QUEUE_STOP if self.by_submit.is_empty() => {}
             id::QUEUE_START => {
                 let [packet, seq, ctx, present] = self.schema.fields(e, ["PacketType", "SubmitSequence", "hContext", "bPresent"]);
                 self.queue_submit(tid, uint(e, &ctx), uint(e, &seq) as u32, uint(e, &packet), uint(e, &present) != 0);
