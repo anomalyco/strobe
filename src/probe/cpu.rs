@@ -179,7 +179,7 @@ const MAX_RTT_NS: u64 = 2_000_000;
 /// How far apart two placements of one moment may be (SPEC §6).
 const SYNC_NS: f64 = 1_000_000.0;
 
-/// The farthest a single sample of a clock-reading spin may lie outside strobe's span around it, as one
+/// The farthest a single sample of a clock-reading spin may lie outside the spin's span, as one
 /// of the few `rebase` lets through: the most a run's edge may then be off for the samples near it.
 const MAX_STRAY_NS: f64 = 2_500_000.0;
 
@@ -237,20 +237,20 @@ pub struct Rebased {
     pub over_us: f64,
     /// What the last sample weighs: the median gap under the cap.
     pub last_us: f64,
-    /// Samples of the clock reads' spins over 1 ms outside strobe's spans (at most one past each edge of
-    /// a spin, under `MAX_STRAY_NS`), and the farthest one's distance (ns, signed).
+    /// Samples of the clock reads' spins over 1 ms outside the spins' spans (at most one past each edge
+    /// of a spin, under `MAX_STRAY_NS`), and the farthest one's distance (ns, signed).
     pub outliers: usize,
     pub worst_ns: f64,
-    /// Per spin (start, exit): the shifts (ms) that would put all its samples inside strobe's span.
+    /// Per spin (start, exit): the shifts (ms) that would put all its samples inside the spin's span.
     pub fit_ms: [(f64, f64); 2],
 }
 
 /// Places a script host's CPU profile `p` on strobe's clock from the host's clock readings at its
 /// start and before its exit (`Runtime` says how each runtime keeps time). Refuses `ClockUnsynced` a
 /// reading that took over 2 ms, a monotonic clock that moved over 1 ms against strobe's between the
-/// two, and a profile that puts the samples of either reading's spin more than 1 ms outside strobe's
-/// span around it (one stray past each edge of a spin of four or more, under 2.5 ms, aside), or has
-/// none of them.
+/// two, a spin that lies outside strobe's request around it, and a profile that puts the samples of
+/// either spin more than 1 ms outside the spin's span (one stray past each edge of a spin of four or
+/// more, under 2.5 ms, aside), or has none of them.
 pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebased> {
     let unsynced = |what: String| -> Error { Refusal::new(ValidatorId::ClockUnsynced, format!("the script host's CPU profile: {what}")).fix("run it again on a machine with CPUs to spare").into() };
     let readings = [("at its start", ready), ("before its exit", exit)];
@@ -311,9 +311,9 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         Runtime::Node => (MAX_GAP_US, MAX_GAP_US),
     };
     let last_us = Sampling::of(0.0, gaps.into_iter().filter(|g| *g <= cap_us).collect()).map_or(0.0, |s| s.median_us);
-    // Each spin's samples, by the reading nearer them: how far each lies outside strobe's span around it.
+    // Each spin's samples, by the reading nearer them: how far each lies outside the spin.
     let mut offs: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
-    // Per spin: the shifts (ms) that would put all its samples inside strobe's span, `(a - first, b - last)`.
+    // Per spin: the shifts (ms) that would put all its samples inside it, `(a - first, b - last)`.
     let mut fit_ms = [(f64::NEG_INFINITY, f64::INFINITY); 2];
     // Each spin's span: its own (the host's monotonic readings at its ends), which must lie inside strobe's
     // request around it, else strobe's request.
@@ -340,16 +340,16 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         fit_ms[k] = (fit_ms[k].0.max((a - ns) / 1e6), fit_ms[k].1.min((b - ns) / 1e6));
     }
     let fits = format!(
-        "its spins' samples fit inside strobe's spans moved {:+.2} to {:+.2} ms (start) and {:+.2} to {:+.2} ms (exit); {samples} samples, {lost:.3} µs truncated a sample, the wall clock's lead moved {:+.3} ms from the start to the exit",
+        "its spins' samples fit inside the spins moved {:+.2} to {:+.2} ms (start) and {:+.2} to {:+.2} ms (exit); {samples} samples, {lost:.3} µs truncated a sample, the wall clock's lead moved {:+.3} ms from the start to the exit",
         fit_ms[0].0,
         fit_ms[0].1,
         fit_ms[1].0,
         fit_ms[1].1,
         (exit.wall_lead_us - ready.wall_lead_us) / 1e3
     );
-    // The clocks match when each spin's samples sit inside strobe's span around it, within SYNC_NS. The
-    // spin fills the span, so a clock off by d puts its samples within d of one edge past it: the first
-    // and last samples are what can see it, never a median (a uniform +2.6 ms leaves most samples inside).
+    // The clocks match when each spin's samples sit inside the spin, within SYNC_NS. The samples fill the
+    // spin, so a clock off by d puts them within d of one edge past it: the first and last samples are
+    // what can see it, never a median (a uniform +2.6 ms leaves most samples inside).
     // One sample past each edge is let through when the spin holds four or more and they are at most a
     // quarter of it, and none past `MAX_STRAY_NS`: a sampler that stamps a sample and then waits for a
     // CPU before it takes the stack. They are counted (`outliers`, the farthest in `worst_ns`).
@@ -364,7 +364,7 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         let tolerated = early + late == 0 || (o.len() >= 4 && early <= 1 && late <= 1 && 4 * (early + late) <= o.len());
         if !tolerated || worst.abs() > MAX_STRAY_NS {
             return Err(unsynced(format!(
-                "it puts {} of the {} samples of the spin in which the host read its clock {when} over 1 ms outside strobe's span around that ({early} early, {late} late; the farthest {:+.2} ms; {fits}): its clock does not match strobe's",
+                "it puts {} of the {} samples of the spin in which the host read its clock {when} over 1 ms outside the spin ({early} early, {late} late; the farthest {:+.2} ms; {fits}): its clock does not match strobe's",
                 early + late,
                 o.len(),
                 worst / 1e6
