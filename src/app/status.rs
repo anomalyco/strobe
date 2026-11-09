@@ -64,6 +64,16 @@ pub fn run(args: &Args) -> Result<Output> {
     let disk: u64 = dir_size(&host::paths::recordings()) + dir_size(&host::paths::experiments());
     let vcache = topo.vcache().map(|g| format!("{} MB L3 on {} CPUs", g.l3_mb, g.cpus));
     let groups: Vec<String> = topo.groups.iter().enumerate().map(|(i, g)| format!("CCD{i} {} MB L3 ({} CPUs)", g.l3_mb, g.cpus)).collect();
+    // The cpu line: one L3 group is no CCD (an Intel CPU, a single-CCD Ryzen); a hybrid CPU says its kinds of core.
+    let mut shape: Vec<String> = match topo.groups.as_slice() {
+        [g] => vec![format!("{} MB L3", g.l3_mb)],
+        _ => groups.clone(),
+    };
+    let fastest = topo.cores.iter().map(|c| c.class).max().unwrap_or(0);
+    let fast = topo.cores.iter().filter(|c| c.class == fastest).count();
+    if fast < topo.cores.len() {
+        shape.push(format!("{fast} fast and {} slower cores", topo.cores.len() - fast));
+    }
     let mut problems: Vec<String> = Vec::new();
     if busy > 0.10 {
         problems.push(format!("background load {:.0}% of all CPUs", busy * 100.0));
@@ -158,7 +168,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let mark = |ok: bool| if ok { "✓" } else { "!" };
     let mut t = String::new();
     t += &format!("  {} os         {}\n", mark(true), env.os);
-    t += &format!("  {} cpu        {} · {} logical{}\n", mark(true), env.cpu, env.logical_cpus, if groups.is_empty() { String::new() } else { format!(" · {}", groups.join(", ")) });
+    t += &format!("  {} cpu        {} · {} logical{}\n", mark(true), env.cpu, env.logical_cpus, if shape.is_empty() { String::new() } else { format!(" · {}", shape.join(", ")) });
     t += &format!("  {} power      {}{}\n", mark(!env.on_battery), env.power_plan, if env.on_battery { " · on battery" } else { "" });
     t += &format!("  {} load       {:.0}% of all CPUs busy\n", mark(busy <= 0.10), busy * 100.0);
     t += &format!("  {} cycles     {cycle_clock}\n", mark(cycles_refused.is_none()));

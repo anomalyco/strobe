@@ -90,10 +90,14 @@ class Canvas : Form
     bool square;
     readonly float scale;
 
+    [DllImport("user32.dll")]
+    static extern uint GetDpiForWindow(IntPtr hwnd);
+
     public Canvas()
     {
         Text = "Canvas fixture";
-        scale = DeviceDpi / 96f;
+        // The window's own DPI: the .NET Framework's DeviceDpi stays 96 in a per-monitor aware process.
+        scale = GetDpiForWindow(Handle) / 96f;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         ClientSize = new Size((int)(600 * scale), (int)(360 * scale));
         DoubleBuffered = true;

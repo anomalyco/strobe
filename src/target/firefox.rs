@@ -378,6 +378,14 @@ impl Browser {
 
     pub fn chrome_eval_timeout(&self, expression: &str, timeout: Duration) -> Result<Value> {
         let tree = self.bidi.send("browsingContext.getTree", json!({ "maxDepth": 0, "moz:scope": "chrome" }))?;
+        // Before Firefox 148 BiDi has no chrome scope: the tree is the content tabs, where an expression
+        // would fail for want of Gecko's APIs (`Cc is not defined`).
+        if !tree["contexts"][0]["url"].as_str().is_some_and(|u| u.starts_with("chrome://")) {
+            return Err(Error::msg(format!(
+                "{} gave no chrome context over WebDriver BiDi (moz:scope \"chrome\" needs Firefox 148 or later): update Firefox, or set STROBE_FIREFOX to a newer one",
+                self.version
+            )));
+        }
         let context = tree["contexts"][0]["context"].as_str().ok_or_else(|| Error::msg("Firefox gave no chrome context"))?.to_string();
         Page { bidi: self.bidi.clone(), context }.eval_timeout(expression, timeout)
     }
