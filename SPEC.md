@@ -1365,9 +1365,15 @@ What strobe reads from a native app (§13.7), per run:
   ended (a zombie leader too: a launcher that hands over refuses it) or the clock gave no rate. A
   script host names its runtime's process in its ready message: where that is not the process strobe
   started (a version manager's shim that runs the runtime as its child), strobe binds that process's
-  main thread instead (attached, as for `record pid:`). Known
+  main thread instead (attached, as for `record pid:`). `record pid:` lists the tree before its
+  window, reads its processes again one by one at the window's edges with the clocks (§9.6 **CPU**),
+  and the end's listing only adds processes born in the window; the main thread is read between the
+  listings and the window (it used to be read outside both listings, so `cpu.main.busy`'s span held
+  them). `record` of a launched native app and of a browser (Chromium `cpu.app.total`; Firefox
+  `cpu.work` and `cpu.app.total`) read the same edges, at the paired clocks' rate. Known
   answer: `scripts/dev/main-thread.bench.ts` (a main-thread spin, a worker's, a child process's and a
-  timer wait: `cpu.work` high for the first three, `cpu.main` high only for the first).
+  timer wait: `cpu.work` high for the first three, `cpu.main` high only for the first); `main-spin-30`
+  (30 ms, then the host idles) checks the run edges: `cpu.work` never below `cpu.main`.
 - **Presented frames** (`frames.interval.*`, `frames.dropped*`, `frames.discarded`,
   `frames.presented.count`, `display.hz`) on Windows from the OS's present events (§7.2) of the
   app's processes; on macOS from ScreenCaptureKit and on Linux X11 from X Present (§13.6), which tell
@@ -3144,7 +3150,18 @@ CPU.
 - **CPU:** per edge, each process's cycles by pid and start time and the cycle clock (native: the
   app's process set, and per thread the system snapshot of `cpu.wakes`; pages: the browser's
   processes and Chromium's Performance counters, with what a departed document carried; script: the
-  host's tree), and the fixture's. The run's readings at its start and end and the stretches' edges
+  host's tree), and the fixture's. At a run's edges (native, script and tty targets) strobe lists the
+  target's processes outside the run, then reads each listed process again by itself right before
+  `t0` (`host::process_cycles_at`, by pid and start time: microseconds each), with the cycle clock and
+  the host clock read together (`record::Clock`); right after `t1` it reads the processes known at the
+  start and at the stretches' edges the same way, with the clocks, and only then lists the set, which
+  finds the processes born during the run (read in that listing; `record::read_known`, `read_at`).
+  Cycles are ms at the cycle clock's rate between its two readings, over their own span (Linux and
+  macOS: ns). Before, the rate was the cycle clock read after each listing over `t1 − t0`, and the
+  end's listing (3–15 ms on Windows) lay inside it: a run that ended idle read short by the listing's
+  share of the run (`main-spin-30` on adais: `cpu.work` 26.6–27.2 ms against `cpu.main` 29.4–31.2 ms,
+  now 32.9–34.2 ms; vps 27.1–29.6 ms, now 31.9–34.6 ms). A page block reads its edges this way already
+  (`fast_read`). The run's readings at its start and end and the stretches' edges
   make its timed parts `[t0, a0), [b0, a1), …, [bk, t1)`, and `cpu.work`, `cpu.app.total`, the
   browser's `cpu.<role>`, `ui.cpu`, `ui.wakes`, `cpu.wakes`, `io.*`, `main.work` and its parts are
   sums over the parts, each process and thread against its own readings in that part: one born in a
@@ -7631,6 +7648,8 @@ what was built but not yet run on a device is in §21.
   every wait, and reaches `record --bench`; `cpu.<role>` refusals say which cause; the adapter a page
   or recording drew on (`screen.gpu`, the screen line, `query gpu`) and `CrossAdapterScanout` for
   pages (5.5, 5.6, 9.1, 9.6, 10.1, 10.2, 11.1).
+- 2026-11-09 · 758dc27 · `cpu.work`'s run edges: known processes read at `t0`/`t1`, cycles to ms at
+  the paired clocks' rate (7.4, 9.6).
 - 2026-11-09 · 5e1b949 ba68125 · headed input on Windows: `Chrome_*` windows take physical points;
   pixel regions in the monitor's DIPs; the page map parks the cursor beside its probes; web view
   headings read again, Chromium's hidden views left out, `expect.heading` `NotForTarget` there;
