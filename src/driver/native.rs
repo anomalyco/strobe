@@ -724,18 +724,26 @@ mod imp {
             }
             // Chromium adds an embedded web view's headings to the tree it gives UI Automation only a
             // moment after a client first read it (a second read a second later had them): such a
-            // window without a heading is read again until it has one, or `t` is up.
+            // window without a heading is read again, for at most a second, and no more once a wait
+            // brought no change: a page with no heading at all cost 0.3-0.6 s on blade, not `t` (3-5 s).
             #[cfg(windows)]
             let web_view = crate::target::a11y::input::hosts_chromium(self.main.get());
             #[cfg(not(windows))]
             let web_view = false;
+            let web_deadline = (Instant::now() + Duration::from_secs(1)).min(deadline);
+            let mut reads = 0;
             loop {
                 let (names, marks) = Self::screen_of(&tree);
-                if !web_view || tree.nodes.iter().enumerate().any(|(i, n)| n.heading && tree.visible_rect(i).is_some()) || Instant::now() >= deadline {
+                if !web_view || tree.nodes.iter().enumerate().any(|(i, n)| n.heading && tree.visible_rect(i).is_some()) || Instant::now() >= web_deadline {
                     return Ok((names, marks));
                 }
-                self.a11y.wait_change(seen, (Instant::now() + Duration::from_millis(250)).min(deadline));
-                seen = self.a11y.changes().count;
+                self.a11y.wait_change(seen, (Instant::now() + Duration::from_millis(250)).min(web_deadline));
+                let now = self.a11y.changes().count;
+                if reads > 0 && now == seen {
+                    return Ok((names, marks));
+                }
+                seen = now;
+                reads += 1;
                 tree = self.snapshot(None)?;
             }
         }

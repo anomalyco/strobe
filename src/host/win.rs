@@ -852,8 +852,22 @@ pub fn top_windows(pids: &[u32]) -> Vec<(isize, String, bool)> {
 }
 
 /// What a window draws now, its client area at its own pixels, through the window's own rendering
-/// (`PrintWindow` with full content, which composition and flip-model windows answer), as RGBA.
+/// (`PrintWindow` with full content, which composition and flip-model windows answer), as RGBA. Read
+/// in the window's own DPI awareness, so its client rect is in the pixels it draws: in strobe's own
+/// unaware context a per-monitor aware window's rect came back scaled down and the image clipped to
+/// it (600×420 of 900×630 at 150%); per-monitor aware, an unaware window's came back scaled up and
+/// two thirds of it black.
 pub fn window_image(hwnd: isize) -> Option<crate::png::Image> {
+    use windows_sys::Win32::UI::HiDpi::{GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext};
+    let before = unsafe { SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(hwnd as windows_sys::Win32::Foundation::HWND)) };
+    let out = window_image_now(hwnd);
+    if !before.is_null() {
+        unsafe { SetThreadDpiAwarenessContext(before) };
+    }
+    out
+}
+
+fn window_image_now(hwnd: isize) -> Option<crate::png::Image> {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,

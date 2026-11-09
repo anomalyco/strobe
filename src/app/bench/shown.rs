@@ -626,7 +626,8 @@ pub(super) fn expect(e: &Value, screen: &Screen, at: &str, full: bool, visible: 
     }
     if !e["heading"].is_null() {
         let m = matcher(&e["heading"])?;
-        if screen.headings.is_empty() && screen.web_view {
+        // Only a tree that was read: one strobe could not read is the screen's own problem.
+        if screen.headings.is_empty() && screen.web_view && !screen.missing.iter().any(|m| m.starts_with("accessibility:")) {
             return Err(Refusal::new(
                 ValidatorId::NotForTarget,
                 format!(

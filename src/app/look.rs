@@ -116,7 +116,7 @@ fn native(args: &Args, target: &str) -> Result<Output> {
     }
     .as_kind(isolate::AppKind::Native)
     .with_display(args.has("wayland").then_some(isolate::Display::Wayland));
-    for page_only in ["element", "full", "size", "scale", "chars", "headed"] {
+    for page_only in ["element", "full", "size", "scale", "chars", "headed", "engine"] {
         if args.has(page_only) {
             return Err(Error::usage(format!("--{page_only} is for a page; a native app's look reads its accessibility tree, and --out <png> its main window's pixels")));
         }

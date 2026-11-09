@@ -249,7 +249,9 @@ impl Worker {
                     let i = tree.nodes.len();
                     let mut n = read(&e, parent, w);
                     n.offscreen |= hidden;
+                    // Web content (a document) is no longer Chromium's views, whatever window holds it.
                     let views = match n.hwnd {
+                        _ if n.role == UIA_DocumentControlTypeId.0 => false,
                         0 => views,
                         h => match super::input::class_name(h) {
                             c if c.starts_with("Chrome_WidgetWin_") => true,

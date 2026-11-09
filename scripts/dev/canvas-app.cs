@@ -68,7 +68,8 @@ static class Tiles
     {
         return g =>
         {
-            g.FillRectangle(new SolidBrush(lit ? Color.FromArgb(250, 180, 40) : Color.FromArgb(70, 76, 84)), 0, 0, 160, 60);
+            using (var fill = new SolidBrush(lit ? Color.FromArgb(250, 180, 40) : Color.FromArgb(70, 76, 84)))
+                g.FillRectangle(fill, 0, 0, 160, 60);
             Text(g, label, 30, 20, lit ? Color.Black : Color.White);
         };
     }
