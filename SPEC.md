@@ -2241,7 +2241,11 @@ to the lateness allowed below of strobe's own lag never counts as the server's.
   counts them. No probe due in a timed part refuses the latencies `TailTooShort`. `http.*` declared
   where setup never called `ctx.httpProbe`: `NoMetric`.
 - **Cost.** The probe's threads read their own CPU (`overhead.http_probe_pct`, % of one core over the
-  probe's span; §19: 0.5%, over 2% refuses `http.latency.*` `OverheadBudget`).
+  probe's span; §19: 0.5%, over 2% refuses `http.latency.*` `OverheadBudget`). Measured at the default
+  100 ms (2026-11-09): vps (2 vCPU, unpinned) 0.27–0.29% of a core with a new connection per probe and
+  no missed send; adais (Windows 11) 0.56–0.58% with a new connection per probe (Windows' loopback
+  connect and close, about 0.55 ms of CPU a probe: over the budget, so a timed probe block warns
+  `OverheadBudget`) and 0.23% with `keep-alive`.
 - **Data.** `http_probe.json.gz` (owner-only) in the block's recording, or in one of its own when the
   block kept none (a script's `--check`, a probe pass's first pair; `probes: http-probe`): the setup
   without secrets (`config`), the probe's span and CPU, the idle window, each run's span with its
@@ -7373,8 +7377,8 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   renderer's perf refusal, X11 video, a headed WebKitGTK under a desktop's settings daemon.
 - macOS: screen video (ScreenCaptureKit into AVAssetWriter), GPU time against a GPU-bound app,
   `ri_child_*_time` in ns, `interaction.*` from a pixel proof under the 2% budget, a visible Dock's
-  work area, Safari Technology Preview, plain `bun` under the terminal bench with its cache, and an
-  app bundle that needs a permission its parent had.
+  work area, Safari Technology Preview, plain `bun` under the terminal bench with its cache, an
+  app bundle that needs a permission its parent had, and the HTTP probe (§8.9).
 - Phones: everything on a real Android phone (thermal and battery readings, a PIN lock, Wi-Fi adb,
   a channel given to strobe, touch slop and timing, a fixture through `adb reverse`, the 10-pair
   `--aa` and calibration); a headed phone's touch `interaction.*`; on an iPhone, driven Safari
@@ -7385,7 +7389,9 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   a one-L3 machine with 4 or more cores, a ScreenCaptureKit start that times out, the helper's
   `hello` refusal and restored interval after a forced error, the daemon's restart after an update,
   a comparison's `--require-verdict` exit on a refused series, a bisect's one seed and a track's
-  derived seed in timed runs, a page launch timed to an image (refused `NotForTarget` today).
+  derived seed in timed runs, a page launch timed to an image (refused `NotForTarget` today), the
+  HTTP probe's timed probe blocks and probe pass (§8.9: checked in `--check` and attribution blocks
+  only).
 - Known gaps by design: load on CPUs outside the target's mask is not refused, and a target
   suspended from outside reads as slow wall time.
 

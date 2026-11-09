@@ -98,43 +98,66 @@ pub fn scrub(paths: &[std::path::PathBuf], secrets: &Secrets) -> usize {
             Err(_) => {}
         }
     }
+    let needles: Vec<&[u8]> = secrets.0.iter().map(|s| s.0.as_slice()).collect();
+    // A file read as a stream (a heap snapshot or a trace can be gigabytes unpacked), gzipped or not.
+    let open = |path: &std::path::Path| -> std::io::Result<(Box<dyn Read>, bool)> {
+        let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
+        let gz = std::io::BufRead::fill_buf(&mut f)?.starts_with(&[0x1f, 0x8b]);
+        Ok((if gz { Box::new(flate2::read::GzDecoder::new(f)) } else { Box::new(f) }, gz))
+    };
     let mut n = 0;
     for path in files {
-        let Ok(raw) = std::fs::read(&path) else { continue };
-        let gz = raw.starts_with(&[0x1f, 0x8b]);
-        let mut bytes = if gz {
-            let mut out = Vec::new();
-            if flate2::read::GzDecoder::new(raw.as_slice()).read_to_end(&mut out).is_err() {
-                continue;
-            }
-            out
-        } else {
-            raw
-        };
-        let mut hit = false;
-        for s in &secrets.0 {
-            hit |= redact(&mut bytes, &s.0);
-        }
-        if !hit {
+        let Ok((r, gz)) = open(&path) else { continue };
+        if !pass(r, None, &needles).unwrap_or(false) {
             continue;
         }
-        let body = if gz {
-            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-            if e.write_all(&bytes).is_err() {
-                continue;
+        let written = (|| -> std::io::Result<()> {
+            let (r, _) = open(&path)?;
+            let mut f = crate::store::create(&path).map_err(|e| std::io::Error::other(e.message))?;
+            if gz {
+                let mut e = flate2::write::GzEncoder::new(&mut f, flate2::Compression::fast());
+                pass(r, Some(&mut e), &needles)?;
+                e.finish()?;
+            } else {
+                pass(r, Some(&mut f), &needles)?;
             }
-            e.finish().unwrap_or_default()
-        } else {
-            bytes
-        };
-        let written = crate::store::create(&path).ok().is_some_and(|mut f| f.write_all(&body).is_ok() && f.commit().is_ok());
+            f.commit()
+        })();
         // A file that cannot be written again goes: it never keeps the secret.
-        if !written {
+        if written.is_err() {
             let _ = std::fs::remove_file(&path);
         }
         n += 1;
     }
     n
+}
+
+/// Reads `r` through, every occurrence of `needles` made `*`s (across its chunks' edges too), writing
+/// what it read to `w` when given; whether it held one.
+fn pass(mut r: impl Read, mut w: Option<&mut dyn Write>, needles: &[&[u8]]) -> std::io::Result<bool> {
+    let keep = needles.iter().map(|n| n.len()).max().unwrap_or(1).saturating_sub(1);
+    let (mut buf, mut chunk) = (Vec::with_capacity(1 << 20), vec![0u8; 1 << 20]);
+    let mut hit = false;
+    loop {
+        let n = match r.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        for nd in needles {
+            hit |= redact(&mut buf, nd);
+        }
+        // The last bytes stay for the next chunk: an occurrence may run across the edge.
+        let out = if n == 0 { buf.len() } else { buf.len().saturating_sub(keep) };
+        if let Some(w) = w.as_deref_mut() {
+            w.write_all(&buf[..out])?;
+        }
+        buf.drain(..out);
+        if n == 0 {
+            return Ok(hit);
+        }
+    }
 }
 
 /// Every occurrence of `needle` in `hay` made `*`s; whether there was one.
