@@ -252,6 +252,14 @@ impl Runner {
         Error::msg(format!("the bench runner {what}\n{}", tail.join("\n")))
     }
 
+    /// Takes what an HTTP probe sent the target out of a target's own log (a script host's), in place,
+    /// before its tail goes into an error (as `died` does for the runner's).
+    pub fn scrub_log(&self, log: &Path) {
+        if let Some(s) = &self.http.secrets {
+            http_probe::scrub_logs(&[log.to_path_buf()], s);
+        }
+    }
+
     fn write(&mut self, v: &Value) -> Result<()> {
         writeln!(self.conn, "{v}").map_err(|e| Error::msg(format!("runner: {e}")))?;
         self.conn.flush().ok();

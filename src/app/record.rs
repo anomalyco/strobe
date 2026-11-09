@@ -51,10 +51,11 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
         Some(p) => return Err(Error::usage(format!("record --bench records the case's attribution block; --probes {p} does not apply (waits adds off-CPU waits to a native case)"))),
     }
     let out = super::bench::run(&b)?;
-    let recordings: Vec<Value> = out.json["series"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let attributed = || out.json["series"].as_array().into_iter().flatten().filter(|s| s["attribution"].is_string());
+    // The main thread's CPU each check line shows after its declared metrics (`bench::main_thread_shown`).
+    let mains: Vec<Vec<&'static str>> =
+        attributed().map(|s| super::bench::main_thread_shown(s, &s["declared"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>())).collect();
+    let recordings: Vec<Value> = attributed()
         .filter_map(|s| {
             // The attribution block's recording (`kind`), beside the check run's own (`check_recording`).
             Some(json!({
@@ -76,10 +77,11 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
         return Err(Error::msg(format!("{case}: no recording (the case failed or matched nothing):\n{}", out.text)));
     }
     let mut text = String::new();
-    for r in &recordings {
+    for (r, main) in recordings.iter().zip(&mains) {
         let rec = r["recording"].as_str().unwrap_or("");
         text += &format!("{rec} · {} · attribution{}\n", r["case"].as_str().unwrap_or(""), if r["headless"] == true { " · headless: frames and input latency refused" } else { "" });
-        // The check run before it (one cold run, timed): its launch milestones and declared metrics.
+        // The check run before it (one cold run, timed): its launch milestones and declared metrics, then
+        // the main thread's CPU of a target with no window.
         text += &launch_line(&r["values"]);
         let declared: Vec<String> = r["declared"]
             .as_array()
@@ -87,6 +89,7 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
             .flatten()
             .filter_map(Value::as_str)
             .filter(|m| !m.starts_with("launch."))
+            .chain(main.iter().copied())
             .filter_map(|m| match r["values"][m].as_f64() {
                 Some(v) => Some(format!("{m} {}", fmt::value(v, crate::model::metric(m).map_or("", |d| d.unit)))),
                 None => r["refused"][m].is_string().then(|| format!("{m} refused")),
@@ -181,10 +184,9 @@ pub fn run(args: &Args) -> Result<Output> {
     // deep, memory and attached phone (`wir:`, `--mobile`) recordings do not switch this host's plan.
     let timed = args.get("probes").unwrap_or("timing") == "timing" && !args.has("mobile") && !is_wir;
     // A timed recording takes turns with benches for the device's slot (SPEC §10.1 `ConcurrentBench`),
-    // before its power plan: its numbers and a timed block never share the machine. Not a flight
-    // recorder (`--ring`), which runs for as long as the daemon keeps it.
+    // before its power plan: its numbers and a timed block never share the machine.
     // `--max-time` caps that wait (exit 124, `ConcurrentBench`); a recording that takes no slot ends at --for.
-    let slotted = timed && !args.has("ring");
+    let slotted = timed;
     let deadline = match args.get("max-time") {
         Some(_) if !slotted => return Err(Error::usage("--max-time caps a record --bench's waits, and a timed recording's wait for the bench slot; this recording takes no slot and ends at --for")),
         Some(t) => Some(std::time::Instant::now() + Duration::from_millis(duration_ms(t)?)),
@@ -935,16 +937,17 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let (id, draft) = claim(args)?;
         let dir = draft.dir().to_path_buf();
         let sampler = probe::os::Sampler::start(n.pid, Some(n.home.clone()));
-        // What reached the screen (OS present events), or in attribution, native stacks (the helper).
-        let presents = (set != Set::Attribution && !windowless).then(|| {
-            home.presents().map(|mut c| {
+        // In attribution, native stacks first; what reached the screen (OS present events) beside them.
+        let waits = args.get("probes") == Some("waits");
+        let stacks =
+            (set == Set::Attribution && crate::probe::stacks::stacks_available()).then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), waits));
+        let presents = (!windowless).then(|| {
+            let c = if set == Set::Attribution { attribution_presents(&home, stacks.as_ref()) } else { home.presents() };
+            c.map(|mut c| {
                 c.track(&n.pids());
                 c
             })
         });
-        let waits = args.get("probes") == Some("waits");
-        let stacks =
-            (set == Set::Attribution && crate::probe::stacks::stacks_available()).then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), waits));
         let cycles = || read_set(&n.processes(), Some(&n.home));
         progress(match &stop {
             Some(re) => format!("recording {id} until the app prints a line matching {re}"),
@@ -1301,6 +1304,28 @@ pub fn cpu_lost(metric: &str, runs: usize, of: usize, what: &str) -> crate::mode
     } else {
         "wrap processes the run starts but does not measure in ctx.untimed, keep the processes running until the run's end (warm up what the app starts and ends, or end it in the reset), or compare run.duration"
     })
+}
+
+/// What reached the screen in an attribution recording, beside its native stacks (`stacks`, started
+/// first). Windows' deep helper serves one connection at a time: while the stacks hold it, present
+/// events come only from a session in this process, else they are refused rather than left waiting
+/// on the helper.
+pub fn attribution_presents(home: &isolate::Home, stacks: Option<&Result<probe::stacks::StackCapture>>) -> Result<probe::present::PresentCapture> {
+    #[cfg(windows)]
+    if let Some(Ok(probe::stacks::StackCapture::Helper(_))) = stacks {
+        if probe::present::access().token == "none" {
+            return Err(crate::model::Refusal::new(
+                crate::model::ValidatorId::NoPresentSource,
+                "the native stacks hold the deep helper's one connection, and this logon may not run a present session itself",
+            )
+            .fix("sign in as a member of Performance Log Users (strobe up adds you; sign out and in once), or read frames from a timing block")
+            .into());
+        }
+        return probe::present::windows::Capture::start().map(probe::present::PresentCapture::Local);
+    }
+    #[cfg(not(windows))]
+    let _ = stacks;
+    home.presents()
 }
 
 /// A new recording's id and folder, held as a draft until its meta.json is written: `--id` (a handle

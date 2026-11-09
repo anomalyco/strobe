@@ -165,6 +165,16 @@ pub struct Owned {
     cgroup: Option<super::cgroup::Launch>,
 }
 
+/// How an `Owned` child ended (`Owned::ended`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ended {
+    /// It exited with this code (Windows: a process ended from outside has the code it was given).
+    Code(i32),
+    /// Unix: a signal ended it (its number).
+    #[cfg(unix)]
+    Signal(i32),
+}
+
 /// Linux: what a child's `ru_maxrss` starts from. The kernel folds the resident high-water mark of the
 /// address space a child had before its exec into its `ru_maxrss` (`exec_mmap`). A child forked (a
 /// `pre_exec` closure makes Rust fork) has a copy of strobe's resident pages, its high-water mark set
@@ -356,9 +366,18 @@ impl Owned {
     /// The child's exit code once it has exited (-1: ended by a signal). On Unix the child stays a
     /// zombie (`waitid` with `WNOWAIT`): its pid stays its own until `end` reaps it.
     pub fn exited(&mut self) -> Option<i32> {
+        self.ended().map(|e| match e {
+            Ended::Code(c) => c,
+            #[cfg(unix)]
+            Ended::Signal(_) => -1,
+        })
+    }
+
+    /// How the child ended, once it has (`exited`, with the signal that ended it on Unix).
+    pub fn ended(&mut self) -> Option<Ended> {
         #[cfg(windows)]
         {
-            self.child.try_wait().ok().flatten().map(|s| s.code().unwrap_or(-1))
+            self.child.try_wait().ok().flatten().map(|s| Ended::Code(s.code().unwrap_or(-1)))
         }
         #[cfg(unix)]
         unsafe {
@@ -367,7 +386,8 @@ impl Owned {
             if r != 0 || info.si_pid() == 0 {
                 return None;
             }
-            Some(if info.si_code == libc::CLD_EXITED { info.si_status() } else { -1 })
+            // Killed or dumped: `si_status` is the signal.
+            Some(if info.si_code == libc::CLD_EXITED { Ended::Code(info.si_status()) } else { Ended::Signal(info.si_status()) })
         }
     }
 

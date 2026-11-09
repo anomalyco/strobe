@@ -52,9 +52,16 @@ pub fn load(root: &Path) -> Result<Value> {
         return Err(p.error(&more));
     }
     let mut apps = out.remove("apps").and_then(|a| a.as_object().cloned()).unwrap_or_default();
+    // A project profile's relative executable is the project's own build, from its root (`isolate::app`).
+    let at = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
     for (k, v) in project {
         if k == "apps" {
-            apps.extend(v.as_object().cloned().unwrap_or_default());
+            for (id, mut p) in v.as_object().cloned().unwrap_or_default() {
+                if let Some(o) = p.as_object_mut() {
+                    o.insert(ROOT.into(), Value::String(at.display().to_string()));
+                }
+                apps.insert(id, p);
+            }
             continue;
         }
         out.insert(k, v);
@@ -65,6 +72,8 @@ pub fn load(root: &Path) -> Result<Value> {
 
 /// Where `load` keeps a user profile's problem until the profile is used.
 const INVALID: &str = "$invalid";
+/// Where `load` keeps the root of the project whose strobe.json holds a profile.
+pub const ROOT: &str = "$root";
 
 /// Fails when app profile `id`, or one it extends, came from the user's strobe.json with a problem.
 pub fn check_app(config: &Value, id: &str) -> Result<()> {

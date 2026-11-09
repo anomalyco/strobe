@@ -133,9 +133,10 @@ struct GuardSpec {
 }
 
 impl App {
-    /// An executable with no profile: generic isolation only.
+    /// An executable with no profile: generic isolation only. A relative one is from the current folder
+    /// (`from_dir`).
     pub fn bare(exe: &Path) -> App {
-        App { id: exe.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), exe: exe.to_path_buf(), ..App::default() }
+        App { id: exe.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), exe: from_cwd(exe), ..App::default() }
     }
 
     /// The same profile reached another way (`exe:<path> --native`, a `webview(path)` target).
@@ -144,9 +145,10 @@ impl App {
         self
     }
 
-    /// The same profile with another build of the app, such as a variant's `exe:<path>`.
+    /// The same profile with another build of the app, such as a variant's `exe:<path>` (a relative one
+    /// from the current folder, `from_dir`).
     pub fn with_exe(mut self, exe: &Path) -> App {
-        self.exe = exe.to_path_buf();
+        self.exe = from_cwd(exe);
         self
     }
 
@@ -234,6 +236,48 @@ pub fn no_motion_contract(id: &str) -> crate::model::Refusal {
     ))
 }
 
+/// A relative executable from `dir`: one that names a folder (`./app`, `build/app`), or a bare name
+/// of a file in `dir`; a bare name of none there is the one on PATH (`on_path`). A launch runs in its
+/// home, so a relative path kept as it is would name nothing there.
+pub fn from_dir(exe: &Path, dir: &Path) -> PathBuf {
+    use std::path::Component;
+    if !exe.is_relative() || exe.as_os_str().is_empty() {
+        return exe.to_path_buf();
+    }
+    // `.` and `..` resolved by name, so the path reads as the file it is.
+    let mut joined = PathBuf::new();
+    for c in dir.join(exe).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(joined.components().next_back(), Some(Component::Normal(_))) => {
+                joined.pop();
+            }
+            c => joined.push(c),
+        }
+    }
+    if exe.components().count() > 1 || joined.is_file() { joined } else { on_path(exe) }
+}
+
+/// A bare executable name as the file on PATH it names (Windows: `.exe` added to a name without an
+/// extension), so what is launched is a file strobe can read; unchanged when PATH has none.
+fn on_path(exe: &Path) -> PathBuf {
+    let found = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|d| {
+            let p = d.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+            Some(p.with_extension("exe")).filter(|p| cfg!(windows) && exe.extension().is_none() && p.is_file())
+        })
+    });
+    found.unwrap_or_else(|| exe.to_path_buf())
+}
+
+/// `from_dir` from the current folder (unchanged when it cannot be read).
+fn from_cwd(exe: &Path) -> PathBuf {
+    std::env::current_dir().map_or_else(|_| exe.to_path_buf(), |d| from_dir(exe, &d))
+}
+
 /// This OS's key in a per-OS value (`exe`, a build's `output`).
 pub fn os() -> &'static str {
     if cfg!(windows) {
@@ -302,6 +346,14 @@ pub fn app(id: &str, config: &Value) -> Result<App> {
     let p = Value::Object(merged);
     let exe = per_os(&p["exe"]).map(str::to_string).ok_or_else(|| Error::usage(format!("app profile \"{id}\" has no exe for {}", os())))?;
     let exe = expand(&exe).map_err(|e| Error::usage(format!("app profile \"{id}\" exe: {}", e.message)))?;
+    // A project's profile (the one of the chain that gave the exe): a relative executable is its own build,
+    // from the project's root. A user's profile has no root: a bare name is the one on PATH.
+    let root = chain.iter().find(|c| per_os(&c["exe"]).is_some()).and_then(|c| c[crate::config::ROOT].as_str());
+    let exe = match root {
+        Some(root) => from_dir(&exe, Path::new(root)),
+        None if exe.is_relative() && exe.components().count() == 1 => on_path(&exe),
+        None => exe,
+    };
     let strings = |k: &str| p[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     let mut guards = Vec::new();
     for g in p["guard"].as_array().into_iter().flatten() {

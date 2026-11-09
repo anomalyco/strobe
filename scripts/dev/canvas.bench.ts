@@ -25,9 +25,12 @@ if ((windows || mac) && (!existsSync(exe) || statSync(exe).mtimeMs < statSync(so
 }
 if (!existsSync(path.join(dir, "play.png"))) execFileSync(windows || mac ? exe : "python3", windows || mac ? ["--anchors", dir] : [exe, "--anchors", dir])
 
-// A tile of the window's, and one of the page's (written by its setup).
+// A tile of the window's, and one of the page's (written by its setup at the page's devicePixelRatio, `pageScale`).
 const tile = (name: string) => path.join(dir, `${name}.png`)
 const pageTile = (name: string) => path.join(dir, `page-${name}.png`)
+let pageScale = 1
+// The locator of a target's tile: the page's says the scale it was written at.
+const image = (target: string, name: string) => (target === "page" ? { image: pageTile(name), scale: pageScale } : { image: tile(name) })
 // Where the count's bars are drawn.
 const bars = [40, 270, 500, 40] as [number, number, number, number]
 const counted = { pixels: { region: bars, changed: true } }
@@ -57,13 +60,17 @@ export default bench({
   },
   async setup({ page, target }) {
     if (target === "page") {
-      for (const [name, scale] of [["play", 1], ["item", 1], ["square", 1], ["missing", 1]] as const) {
-        const url = await page.eval((n: string, s: number) => (window as any).anchor(n, s), name, scale)
+      // Keys reach a page only once it has the focus: a click on the canvas's empty corner gives it.
+      await page.click([590, 350])
+      // At the page's own scale, as its canvas draws them (a 1x tile scaled up matches no sharp one).
+      pageScale = await page.eval(() => devicePixelRatio)
+      for (const name of ["play", "item", "square", "missing"]) {
+        const url = await page.eval((n: string, s: number) => (window as any).anchor(n, s), name, pageScale)
         writeFileSync(pageTile(name), Buffer.from(url.split(",")[1], "base64"))
       }
     }
     // Found once, outside the runs: the runs click the point (no pixel read to aim).
-    const [m] = await page.query({ image: target === "page" ? pageTile("play") : tile("play") })
+    const [m] = await page.query(image(target, "play"))
     if (!m?.point) throw new Error(`PLAY not found: ${JSON.stringify(m)}`)
     play = m.point
   },
@@ -73,7 +80,7 @@ export default bench({
       targets: drawn,
       primary: "cpu.work",
       async run({ page, target }) {
-        const found = await page.query({ image: target === "page" ? pageTile("item") : tile("item") })
+        const found = await page.query(image(target, "item"))
         if (found.length !== 2) throw new Error(`ITEM: ${found.length} matches, not 2: ${JSON.stringify(found)}`)
       },
     },
@@ -101,7 +108,7 @@ export default bench({
     image: {
       targets: drawn,
       primary: "cpu.work",
-      run: ({ page, target }) => page.press("x", { until: { image: target === "page" ? pageTile("square") : tile("square") } }),
+      run: ({ page, target }) => page.press("x", { until: image(target, "square") }),
       reset: ({ page }) => page.press("x", { until: still }),
     },
     // A click at the point setup found; on a locked session refused SessionLocked.
@@ -110,7 +117,7 @@ export default bench({
     "click image": {
       targets: drawn,
       primary: "cpu.work",
-      run: ({ page, target }) => page.click({ image: target === "page" ? pageTile("play") : tile("play") }, { until: counted }),
+      run: ({ page, target }) => page.click(image(target, "play"), { until: counted }),
       reset: ({ page }) => page.press("r", { until: still }),
     },
     // PLAY exported at @2x and @1.5x, found at the window's own scale.
@@ -122,8 +129,8 @@ export default bench({
         await page.waitFor({ image: tile("play@1.5x"), scale: 1.5, threshold: 0.9 })
       },
     },
-    ambiguous: { targets: drawn, primary: "cpu.work", run: ({ page, target }) => page.click({ image: target === "page" ? pageTile("item") : tile("item") }) },
-    missing: { targets: drawn, primary: "cpu.work", run: ({ page, target }) => page.waitFor({ image: target === "page" ? pageTile("missing") : tile("missing") }, { timeout: 2000 }) },
+    ambiguous: { targets: drawn, primary: "cpu.work", run: ({ page, target }) => page.click(image(target, "item")) },
+    missing: { targets: drawn, primary: "cpu.work", run: ({ page, target }) => page.waitFor(image(target, "missing"), { timeout: 2000 }) },
     // A reset that takes nothing back: the next run starts with a bar more (resetPixels: ResetIncomplete).
     dirty: { targets: drawn, primary: "cpu.work", run: ({ page }) => page.press("Space", { until: counted }), reset: async () => {} },
     // `--pixels-only`: the window's tiles.

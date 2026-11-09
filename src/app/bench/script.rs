@@ -122,10 +122,7 @@ impl Host {
         let err = out.try_clone()?;
         cmd.stdin(Stdio::null()).stdout(out).stderr(err);
         let mut child = host::spawn_owned(&mut cmd, cpus, 0, None).map_err(|e| Error::msg(format!("start the script host: {e}")))?;
-        let failed = |log: &Path| {
-            let tail: Vec<String> = std::fs::read_to_string(log).unwrap_or_default().lines().rev().take(12).map(str::to_string).collect::<Vec<_>>().into_iter().rev().collect();
-            Error::msg(format!("the script host did not load {}:\n{}", entry.display(), tail.join("\n")))
-        };
+        let failed = |log: &Path| Error::msg(format!("the script host did not load {}:\n{}", entry.display(), log_tail(log, 12).join("\n")));
         // The host connects once its runtime is up; a module that fails to import ends it first.
         listener.set_nonblocking(true)?;
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -210,17 +207,77 @@ impl Host {
         Ok((probe::cpu::Sync::of((a, b, &marked), &trips)?, json!({ "name": marked["runtime"], "version": marked["version"] })))
     }
 
-    /// A normal exit (profiles are written), then its group, whatever is left of it (the drop). A
-    /// profiled host's clocks are read first (`clocks`).
-    fn exit(mut self, profiled: bool) -> Option<Result<Clocks>> {
+    /// A normal exit (profiles are written), waited for up to `wait` (`cut`: what shortened it), then
+    /// its group, whatever is left of it (the drop). A profiled host's clocks are read first (`clocks`).
+    fn exit(mut self, profiled: bool, wait: Duration, cut: Option<&'static str>) -> (Option<Result<Clocks>>, ExitState) {
         let clocks = profiled.then(|| self.clocks());
         let _ = self.request(json!({ "op": "exit" }), Duration::from_secs(5));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline && self.child.exited().is_none() {
+        // The connection closed too: a host whose event loop had not read the request yet exits on that
+        // (`host.mjs`), a normal exit as well. Its write side only: the host's late reply is then no reset.
+        let _ = self.conn.shutdown(std::net::Shutdown::Write);
+        let began = Instant::now();
+        let state = loop {
+            match self.child.ended() {
+                Some(host::spawn::Ended::Code(c)) => break ExitState::Exited(c),
+                #[cfg(unix)]
+                Some(host::spawn::Ended::Signal(s)) => break ExitState::Signaled(s),
+                None => {}
+            }
+            if stop_requested() {
+                break ExitState::TimedOut(began.elapsed(), Some("a stop"));
+            }
+            if began.elapsed() >= wait {
+                break ExitState::TimedOut(began.elapsed(), cut);
+            }
             std::thread::sleep(Duration::from_millis(50));
-        }
-        clocks
+        };
+        (clocks, state)
     }
+}
+
+/// How the host ended after strobe asked it to exit (`Host::exit`).
+#[derive(Clone, Debug)]
+enum ExitState {
+    /// It exited by itself, with this code.
+    Exited(i32),
+    /// Unix: a signal ended it (its number).
+    #[cfg(unix)]
+    Signaled(i32),
+    /// It still ran this long after the request, and strobe ended it; with what cut the wait short.
+    TimedOut(Duration, Option<&'static str>),
+}
+
+impl std::fmt::Display for ExitState {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ExitState::Exited(c) => write!(f, "it exited (code {c}) without writing one"),
+            #[cfg(unix)]
+            ExitState::Signaled(s) => write!(f, "signal {s} ended it before it wrote one"),
+            ExitState::TimedOut(d, cut) => write!(
+                f,
+                "it still ran {:.0} s after strobe asked it to exit, and strobe ended it (a runtime writes its profile as it exits, which takes long for a long block on a busy machine){}",
+                d.as_secs_f64(),
+                cut.map(|c| format!("; {c} cut the wait short")).unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// The last `n` lines of the experiment's script.log (of its last 8 KB), each with its secrets redacted
+/// (cookies, authorization, bearer tokens, URL secrets: `redact_text`) and at most 200 characters. What
+/// an HTTP probe sent is scrubbed from the file first (`Runner::scrub_log`), where the caller has a runner.
+fn log_tail(log: &Path, n: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut buf = Vec::new();
+    if let Ok(mut f) = std::fs::File::open(log) {
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if f.seek(SeekFrom::Start(len.saturating_sub(8192))).is_ok() {
+            let _ = f.read_to_end(&mut buf);
+        }
+    }
+    let lines: Vec<String> =
+        String::from_utf8_lossy(&buf).lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| crate::host::ios::logs::redact_text(l, false).chars().take(200).collect()).collect();
+    lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
 /// CPU ms between two readings over `wall_ms`, from cycles (exact). Never from process times, which
@@ -600,7 +657,13 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     })();
     // Its last tick while the host still runs: the exit is no part of the block.
     let timeline = timeline.map(probe::wakes::Timeline::stop);
-    let exited = host.into_inner().exit(profiles.is_some());
+    // A profiled host writes its profiles as it exits: tens of MB for a long block, which took over 30 s
+    // on a 2-vCPU VM at 100%. A minute and half the block's time, at most 3, within `--max-time` but
+    // never under the 30 s an unprofiled host gets.
+    let wait = if profiles.is_some() { (Duration::from_secs(60) + launched.elapsed() / 2).min(Duration::from_secs(180)) } else { Duration::from_secs(30) };
+    let left = time_left(ctx).max(Duration::from_secs(30));
+    let (wait, cut) = if left < wait { (left, Some("--max-time")) } else { (wait, None) };
+    let (exited, ended) = host.into_inner().exit(profiles.is_some(), wait, cut);
     let mut launch = result?;
     if let Some(dir) = &profiles
         && launch.cases.iter().any(Result::is_ok)
@@ -615,6 +678,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
             v,
             target: &target,
             clocks,
+            ended,
+            log: &log,
             life: &life.take(),
             runs: &kept.take(),
             passed: &passed.take(),
@@ -649,6 +714,9 @@ struct Profiled<'a> {
     target: &'a Value,
     /// The host's clocks at its start and before its exit; an error where the exit's could not be read.
     clocks: Option<Result<(Clocks, Clocks)>>,
+    /// How the host ended, and the experiment's script.log (its output): why it wrote no profile.
+    ended: ExitState,
+    log: &'a Path,
     life: &'a [(String, u64, u64)],
     runs: &'a [Measured],
     passed: &'a [(usize, std::ops::Range<usize>)],
@@ -683,7 +751,18 @@ impl Profiled<'_> {
                 .filter(|p| p.extension().is_some_and(|x| x == ext))
                 .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
         };
-        let raw = newest("cpuprofile").ok_or_else(|| incomplete("the host wrote none (it did not exit normally)".into()))?;
+        let raw = newest("cpuprofile").ok_or_else(|| -> Error {
+            // What the probe sent leaves the log before its tail goes into the refusal.
+            ctx.runner.scrub_log(self.log);
+            let tail = log_tail(self.log, 6);
+            let r = Refusal::new(ValidatorId::RunIncomplete, format!("the script host's CPU profile: the host wrote none: {}", self.ended));
+            let r = if tail.is_empty() { r.detail("script.log is empty") } else { r.detail(format!("script.log ends: {}", tail.join(" | "))) };
+            match self.ended {
+                ExitState::TimedOut(..) => r.fix("run it again on a quieter machine (nothing else busy on its CPUs), or with fewer or shorter runs; see the experiment's script.log"),
+                _ => r.fix("see why the host ended in the experiment's script.log; run it again"),
+            }
+            .into()
+        })?;
         let bytes = std::fs::read(&raw)?;
         let mut de = serde_json::Deserializer::from_slice(&bytes);
         de.disable_recursion_limit();

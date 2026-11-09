@@ -1,18 +1,20 @@
 <!doctype html>
 <!-- A page drawn on one canvas, for strobe's image anchors and pixel waits (dev fixture): the same tiles as
      canvas-app.cs. A click on PLAY or Space counts (one bar each), a click on STOP or R resets, X shows or hides
-     a square. `anchor(name, scale)` returns a tile as a PNG data URL, for the bench's setup to write. -->
+     a square. The canvas holds a pixel per device pixel (600×360 CSS pixels at devicePixelRatio), so its tiles
+     are as sharp as the window's at any display scale. `anchor(name, scale)` returns a tile as a PNG data URL,
+     for the bench's setup to write. -->
 <html>
   <head>
     <meta charset="utf-8" />
     <title>Canvas fixture</title>
     <style>
       html, body { margin: 0; background: #202830; }
-      canvas { display: block; }
+      canvas { display: block; width: 600px; height: 360px; }
     </style>
   </head>
   <body>
-    <canvas id="c" width="600" height="360"></canvas>
+    <canvas id="c"></canvas>
     <script>
       const tiles = {
         play: [160, 60, (g) => {
@@ -41,7 +43,12 @@
       }
       const at = { play: [40, 40], stop: [240, 40], itemA: [40, 160], itemB: [240, 160], square: [440, 160] }
       const state = { count: 0, square: false }
-      const g = document.getElementById("c").getContext("2d")
+      const canvas = document.getElementById("c")
+      const dpr = devicePixelRatio || 1
+      canvas.width = Math.round(600 * dpr); canvas.height = Math.round(360 * dpr)
+      const g = canvas.getContext("2d")
+      // Drawn in CSS pixels: save and restore in draw() keep this scale.
+      g.scale(dpr, dpr)
       function draw() {
         g.fillStyle = "#202830"; g.fillRect(0, 0, 600, 360)
         for (const [k, name] of [["play", "play"], ["stop", "stop"], ["itemA", "item"], ["itemB", "item"]].concat(state.square ? [["square", "square"]] : [])) {

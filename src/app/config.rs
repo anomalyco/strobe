@@ -28,9 +28,10 @@ pub fn run(args: &Args) -> Result<Output> {
     for id in config["apps"].as_object().map(|a| a.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
         match isolate::app(&id, &config) {
             Ok(a) => {
-                // A relative executable is the project's own build, from its root.
-                let path = if a.exe.is_relative() { root.join(&a.exe) } else { a.exe.clone() };
-                let exe = if path.is_file() { a.exe.display().to_string() } else { format!("{} (not there yet: built, or installed, before a launch)", a.exe.display()) };
+                // A project profile's relative executable is the project's own build, from its root, and a
+                // bare name of nothing there the one on PATH (`isolate::app` resolves both to a file).
+                let found = a.exe.is_file();
+                let exe = if found { a.exe.display().to_string() } else { format!("{} (not there yet: built, or installed, before a launch)", a.exe.display()) };
                 // Where a native app shows its windows on Linux: its profile's display, else as this session decides.
                 let display = (cfg!(target_os = "linux") && a.kind == isolate::AppKind::Native).then(|| if a.wayland() { "wayland" } else { "x11" });
                 let extra = [
@@ -42,7 +43,7 @@ pub fn run(args: &Args) -> Result<Output> {
                 .flatten()
                 .collect::<Vec<_>>();
                 text += &format!("app      {id} · {} · {exe}{}\n", a.kind, extra.iter().map(|e| format!(" · {e}")).collect::<String>());
-                apps.push(json!({ "id": id, "kind": a.kind, "exe": a.exe, "exe_found": path.is_file(), "window": !a.windowless, "gpu_cache": a.gpu_cache_mode, "display": display }));
+                apps.push(json!({ "id": id, "kind": a.kind, "exe": a.exe, "exe_found": found, "window": !a.windowless, "gpu_cache": a.gpu_cache_mode, "display": display }));
             }
             Err(e) => {
                 failed += 1;
