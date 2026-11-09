@@ -52,6 +52,10 @@ The design and every rule behind this file: SPEC.md.
   macOS refuses `NoWaits`).
 - A slow page frame in the renderer or the GPU process: `frames.renderer.p95` against `frames.viz.p95`,
   and `query <rec> frames` (each worst frame's stages).
+- Inputs with no latency sample (`busy`), or one that looks wrong: `query <rec> inputs [--case <c>]`:
+  each input's run and time, what proved its change, the frames around it, its latency or why it
+  was busy (`mid_drawing`, `behind`, `ambiguous_press`, `multi_frame_pixel`) and how much later it
+  had to come. Give the case that wait before such inputs.
 - A profiled launch is slower than a timed one: compare totals only from the timed pairs.
 
 ### Where is the memory? Does it leak?
@@ -73,7 +77,9 @@ The design and every rule behind this file: SPEC.md.
 - `query <rec> threads`: wakes/s and CPU per thread, the module each started in, whose (app, driver,
   os, `unknown (?)`); `--timeline` per second. Idle wake-ups: `query <rec> insights`.
 - Native hotspots of a tree pool every process: read `by process`, then `--pid <pid|exe>`.
-  `! Coverage`: samples cover under 80% of the CPU (read shares, not totals). Two resolved shares
+  `! Coverage`: samples cover under 80% of the CPU (read shares, not totals); it names what the
+  sampler counted of the rest (`late_ms` before a thread was opened, `forgone_ms`, unopened threads,
+  lost events). A launched app's children are sampled from their start. Two resolved shares
   (leaf, all frames): a low all-frame share means the app's own binary has no symbols.
   macOS samples are untimed snapshots: counts, never ms.
 - `record pid:… --probes deep|waits` prints `cost`; `! CaptureCost`: the capture slowed a
@@ -253,9 +259,10 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - `-q`: stdout holds only the handles (`rec_…`, `exp_…`); a failure says why on stderr.
 - Progress goes to stderr. Windows PowerShell 5.1 with `2>&1` turns each stderr line into an error
   and exits 1: read `$LASTEXITCODE`, or pass `--progress stdout`.
-- Query views: `summary` `frames` `threads` `gpu` `hotspots` `waits` `alloc` `layout` `style` `shifts`
-  `gc` `heap` `leaks` `memory` `http` `log` `network` `insights` `actions` `sql`; `exp_…` also
-  `progress` and `http`.
+- Query views: `summary` `frames` `inputs` `threads` `gpu` `hotspots` `waits` `alloc` `layout` `style`
+  `shifts` `gc` `heap` `leaks` `memory` `http` `log` `network` `insights` `actions` `sql`; `exp_…` also
+  `progress` and `http`. `sql` works on any recording (a script's or a native one's: on the trace
+  `strobe open` builds). A script's hotspots leave out strobe's host frames (`--source host` keeps them).
   `a..b` and `exp_…` diff `hotspots` `alloc` `layout` `style` `threads` `frames` `summary` `heap`
   `memory`. `query <rec> summary` of a large recording is slow once, then cached.
 - `query <rec|exp> actions [--reveal]`: what a block's hooks sent the target, in order, with the

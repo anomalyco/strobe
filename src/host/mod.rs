@@ -1721,8 +1721,8 @@ pub fn refresh_at(x: i32, y: i32) -> Option<u32> {
     }
 }
 
-/// `refresh_at` for calls inside a run (an input's pacing): Windows reads each display's mode once
-/// (`win::refresh_at_kept`), elsewhere it is read each time.
+/// `refresh_at` for calls inside a run (an input's pacing): Windows reads each display's mode once per
+/// display until its mode changes (`win::refresh_at_kept`), elsewhere it is read each time.
 pub fn refresh_at_kept(x: i32, y: i32) -> Option<u32> {
     #[cfg(windows)]
     {

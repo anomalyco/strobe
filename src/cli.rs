@@ -474,8 +474,12 @@ Use
   config [<dir>]                  check the project's strobe.json (and your own) without a bench: where it is, each
                                   app profile resolved for this OS (its executable, guards, window), build and serve
   query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash|host] [--reveal] [--native] [--thread <name>]
-                                  views: summary frames threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network
-                                  insights actions sql
+                                  views: summary frames inputs threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log
+                                  network insights actions sql
+                                  (inputs [--case <c>]: each measured input: its run and time, what proved its change, the
+                                  frames around it, its latency or why it gave none (and how much later it had to come))
+                                  (sql: a recording without a Chrome trace: the Perfetto trace strobe open builds, built on
+                                  first use)
                                   (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe>; --phase <name>:
                                   native samples, or a script recording's profile; --source host: a script target's whole
                                   host process (its measured runs by default);
