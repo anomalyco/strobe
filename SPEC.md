@@ -3687,13 +3687,16 @@ experiment's `script.log`.
     over 1 ms outside the spin (or none in either spin). The samples fill the spin, so a clock off by
     d puts them within d of one edge past it: the check reads each sample, never a median (a uniform
     +2.6 ms leaves most of them inside; `STROBE_DEV_PROFILE_SHIFT_US=±2600`, dev only, refuses: the start
-    spin's samples 5 of 14 late, 3 of 14 early, each fitting the spin only moved back 2.4 ms). A spin of four or more samples may have one past each edge, together at most a
+    spin's samples 4 to 6 of 12 to 16 past one edge, on adais and vps). A spin of four or more
+    samples may have one past each edge, together at most a
     quarter of it, none over 2.5 ms (a sampler that stamps a sample and waits for a CPU before it takes
     the stack); `meta.clock.mark_outliers` counts them, `mark_worst_ms` the farthest and `mark_fit_ms`
     the shifts each spin's samples would fit. Where outliers are not 0, `mark_worst_ms` is also how far
     a sample near a run's edge may be from where the profile puts it: per-run clipping, `--phase` and
     the untimed stretches are that uncertain at their edges. Bun alone, 16 spins of 4 ms between
-    750 ms busy spins (27,600 samples): every spin's samples inside it, the last as the first.
+    750 ms busy spins (27,600 samples adais, 39,400 vps): every spin's samples inside it, the last as
+    the first. A probed Bun attribution block (about 12,000 to 17,000 samples): kept 3 of 3 on adais
+    (a game using its CPUs) and on vps, no sample over 0.5 ms outside its spin.
     `RunIncomplete`: no profile written (an abnormal exit), its last sample over 5 ms before the last
     measured run's end, or the exit's reading failing.
   - Weights, as Firefox's (§8.3): a sample weighs its gap, cut to the run, its untimed stretches out;
