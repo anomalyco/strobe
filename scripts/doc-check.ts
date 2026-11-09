@@ -5,7 +5,7 @@
 //   (b) every warning id the code makes (`validity::warn` / `validity::info`, the only constructors) and its
 //       levels are a row of SPEC 10.2, and every row is one
 //   (c) every user-facing `cli::FLAGS` entry appears as `--name` in SPEC.md; every MCP tool's inputs
-//       (`app/mcp.rs` TOOLS) are its SPEC 17 row's
+//       (`app/mcp.rs` TOOLS) are its SPEC 17 row's, and each of its flags is one FLAGS lists for its command
 //   (d) the runner's key lists (`KEYS`, `TARGET_KEYS` in sdk/bench/src/runner.ts) are the SDK's option types
 //       (sdk/bench/src/index.ts)
 //   (e) the skill's lines are at most 110 columns (its frontmatter's one-line description aside)
@@ -107,11 +107,15 @@ for (const [id, lv] of levels) {
 const cli = read("src/cli.rs")
 const specFlags = new Set([...spec.matchAll(/--([a-z][a-z-]*)/g)].map((m) => m[1]))
 let flagCount = 0
+// Each flag's commands (`cli::FLAGS`; `*`: every command), for `cli::takes`.
+const takers = new Map<string, string[]>()
 for (const m of cli.matchAll(/^\s+\("([a-z-]+)",\s*(?:Switch|Value|Number|Optional),\s*"([^"]*)"\)/gm)) {
   flagCount++
+  takers.set(m[1], m[2].split(" ").filter(Boolean))
   const users = m[2].split(" ").filter((c) => c && c !== "helper")
   if (users.length && !specFlags.has(m[1])) fail(`flags: --${m[1]} (${m[2]}) appears nowhere in SPEC.md`)
 }
+const takes = (command: string, flag: string) => takers.get(flag)?.some((c) => c === "*" || c === command) ?? false
 if (!flagCount) fail("flags: no cli::FLAGS entry read")
 if (!validators.size || !levels.size) fail("catalogs: no validator or warning read")
 const mcp = read("src/app/mcp.rs")
@@ -122,6 +126,8 @@ for (const t of tools) {
   const name = t.match(/name: "(\w+)"/)?.[1] ?? "?"
   const part = (key: string) => t.match(new RegExp(`${key}: &\\[([\\s\\S]*?)\\n\\s*\\],?\\n`))?.[1] ?? t.match(new RegExp(`${key}: &\\[([^\\n]*?)\\],`))?.[1] ?? ""
   const names = (s: string) => [...s.matchAll(/\(\s*"([a-z][a-z-]*)",\s*"/g)].map((m) => m[1])
+  // A tool's flags go through its command's check (`Args::check_command`): each must be one the command reads.
+  for (const f of names(part("flags"))) if (!takes(name, f)) fail(`mcp ${name}: flag ${f} is not one cli::FLAGS lists for ${name}`)
   const code = new Set([...names(part("args")), ...names(part("flags")), ...(/long: true/.test(t) ? ["timeout"] : [])])
   const row = s17.find((r) => r.ids[0] === name)
   if (!row) {

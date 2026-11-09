@@ -117,9 +117,14 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
     .with_extra(app_args, &[])
     .as_kind(isolate::AppKind::Native)
     .with_display(args.has("wayland").then_some(isolate::Display::Wayland));
-    for page_only in ["element", "full", "size", "scale", "chars", "headed", "engine"] {
+    for page_only in ["element", "full", "size", "scale", "chars", "headed", "engine", "mobile"] {
         if args.has(page_only) {
             return Err(Error::usage(format!("--{page_only} is for a page; a native app's look reads its accessibility tree, and --out <png> its main window's pixels")));
+        }
+    }
+    for tty_only in ["type", "press"] {
+        if args.has(tty_only) {
+            return Err(Error::usage(format!("--{tty_only} is for a terminal program (look tty:<command>); a native app's look sends no input")));
         }
     }
     // `--build`: this checkout's own build of the app (strobe.json `build`), as a bench of it runs.
@@ -292,7 +297,7 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
 fn terminal(args: &Args, line: &str) -> Result<Output> {
     use crate::driver::tty as drv;
     use crate::target::{isolate, tty};
-    for page_only in ["element", "full", "scale", "chars", "headed", "keys", "build", "app", "wayland"] {
+    for page_only in ["element", "full", "scale", "chars", "headed", "keys", "build", "app", "wayland", "engine"] {
         if args.has(page_only) {
             return Err(Error::usage(format!("--{page_only} is not a terminal's: look tty:<command> takes --size COLSxROWS, --until, --press, --type, --wait, --timeout, --home, --out <png>")));
         }
@@ -751,6 +756,9 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
         if args.has(bad) {
             return Err(Error::usage(format!("--{bad} sizes a desktop browser's window; look wir: reads the phone's own Safari tab")));
         }
+    }
+    if args.has("engine") {
+        return Err(Error::usage("--engine picks a desktop browser for a page; look wir: reads the phone's own Safari tab"));
     }
     if args.has("mobile") {
         return Err(Error::usage("--mobile opens a page in Chrome on an Android phone; wir: reads an open Safari tab on an iPhone"));

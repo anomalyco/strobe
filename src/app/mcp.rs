@@ -87,7 +87,10 @@ const TOOLS: &[Tool] = &[
             ("pin", "with bench: auto, none, ccdN or a CPU list"),
             ("power", "high (default for timed recordings) or keep"),
             ("video", "also film the recording (timing perturbed): the window's screen (headed) or a Chromium page's renderer (headless); report recording <rec> plays it with its input markers"),
-            ("max-time", "e.g. 10m: with bench, no wait (the bench slot, a locked session, a launch that runs again) runs past it; a timed recording's wait for the bench slot ends there (exit 124, ConcurrentBench)"),
+            (
+                "max-time",
+                "e.g. 10m: with bench, no wait (the bench slot, a locked session, a launch that runs again) runs past it; a timed recording's wait for the bench slot ends there (exit 124, ConcurrentBench)",
+            ),
         ],
         required: &[],
         long: true,
@@ -131,7 +134,10 @@ const TOOLS: &[Tool] = &[
             ("pairs", "auto (default) or a number"),
             ("runs", "measured runs per block (default 5); with check: N runs in each case's one launch, no warmup, its value their median with the lowest and highest run"),
             ("probes", "timing skips attribution blocks; memory runs a leak run per variant (no base needed); waits adds off-CPU waits to native attribution blocks (with why always)"),
-            ("repeat", "leak run: N runs to the middle snapshot and N more to the last (default 10); with check: R fresh cold launches per case (from 2), the median over them and each launch's value (not with batch or video)"),
+            (
+                "repeat",
+                "leak run: N runs to the middle snapshot and N more to the last (default 10); with check: R fresh cold launches per case (from 2), the median over them and each launch's value (not with batch or video)",
+            ),
             ("seed", "the seed of the bench file's ctx.seed and ctx.random() (a 32-bit unsigned integer): replays a seeded workload; default: drawn, kept in result.json plan.seed and printed"),
             ("bisect", "good..bad: find the commit on the first-parent line that moved the primary (one series)"),
             (

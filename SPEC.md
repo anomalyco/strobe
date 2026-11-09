@@ -1011,7 +1011,12 @@ page; `--element`: only the first visible element the selector matches, at full 
 on the page, so one section of a long report reads; a selector that matches nothing is a usage
 error). A local file opens as `file://`. A page-only flag given to a native look, or an app-only one
 (`--keys`, `--build`, `--app`, `--home`) to a page's, is a usage error rather than ignored, and so is
-a second target or arguments after `--` (a native app's own). Exit 124 when the load event or `--until` never came; the
+a second target or arguments after `--` (a native app's own). Each mode refuses the others' flags
+(exit 2): a native look `--element`, `--full`, `--size`, `--scale`, `--chars`, `--headed`,
+`--engine`, `--mobile`, `--type`, `--press`; a `tty:` look the page's and the app's flags,
+`--engine` and `--mobile`; a `wir:` look `--size`, `--scale`, `--headed`, `--engine`, `--mobile`,
+`--type`, `--press` and the app's flags. Only a page look takes `--engine` (anything but `chromium`
+refused `EngineUnsupported`, exit 4). Exit 124 when the load event or `--until` never came; the
 page's own errors are listed, not an exit code. It is a CLI command only, not an MCP tool (§17): it
 answers no measurement question. `--mobile[=<serial>]`: the page in Chrome on an Android phone or
 emulator (13.1 "Chrome on a phone"), at the phone's own screen (`--size`, `--scale` and `--headed`
@@ -7811,14 +7816,14 @@ what was built but not yet run on a device is in §21.
 
 **After 0.24.0**
 
-- 2026-11-10 · cleanup/w2a · a series' own refusal ends it alone and the rest of the file runs (in
+- 2026-11-10 · c045d95 · a series' own refusal ends it alone and the rest of the file runs (in
   every mode; a target no series uses never stops the bench); `--max-time` caps the wait for the
   bench slot (bench, a timed `record`, `run --`), and `status` names a slot held from another user or
   state folder; `driver.pixel_cpu_ms`; `screen.gpu` and the screen line on native blocks and `record
   pid:`; `--check --runs N` and `--check --repeat R`; per-run `ended_runs` and `query summary`'s
   `ended` lines; a headless page's drags paced at 60 Hz (`input.rate` stands with the display off);
   `record --bench` prints the bench's warnings (5.4, 5.5, 5.6, 5.13, 9.6, 10.1, 10.2, 19).
-- 2026-11-10 · cleanup/w2b · the Windows present consumer: event layouts read from the providers'
+- 2026-11-10 · 48f5cbf e997102 · the Windows present consumer: event layouts read from the providers'
   manifests before the session and kept per process, GPU packet events no present waits on skipped
   unread; a refresh-rate change at the same size and DPI is heard (`WM_DISPLAYCHANGE`) and reads the
   window's view and the kept rate again (9.6, 13.4, 19).
@@ -7826,9 +7831,10 @@ what was built but not yet run on a device is in §21.
   the sampler's thread, Linux perf events inherited per CPU, `Coverage` naming what it missed
   (`late_ms`, `forgone_ms`, `unseen_ms`); `query <rec> inputs` with `BusyWhy`; `sql` on the Perfetto
   trace `strobe open` builds; script stacks fold strobe's host frames (7.4, 11.1, 13.4).
-- 2026-11-10 · cleanup/w2d · a flag strobe has that the command does not read is refused (exit 2),
-  from the CLI and MCP (`Args::check_command`; `plan` takes the flags its `--pilot` passes on); `look
-  app:|exe: -- <args…>`; `up --check` documented; `open` counts the distinct threads its samples stand
+- 2026-11-10 · this change · a flag strobe has that the command does not read is refused (exit 2),
+  from the CLI and MCP (`Args::check_command`; `plan` takes the flags its `--pilot` passes on;
+  doc-check holds each MCP tool's flags to its command); every `look` mode refuses another mode's
+  flags; `look app:|exe: -- <args…>`; `up --check` documented; `open` counts the distinct threads its samples stand
   on; `LiveChannel`'s interpreter fix names a copy of the runtime under its own name (5, 5.3, 5.12,
   11.4, 13.2, 17).
 

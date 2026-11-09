@@ -1247,6 +1247,7 @@ impl Builder {
                     if let Some(stack) = stack {
                         al.sample(at, task, None, stack, size);
                         self.built.alloc_samples += 1;
+                        self.sampled.insert(page_thread);
                     }
                 }
             }
