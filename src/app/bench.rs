@@ -5015,7 +5015,7 @@ fn slow_check(e: Error, other: &OtherWork, again: &str) -> Error {
 /// times nothing it compares, so its block runs at once. A timed block waits that work out, or refuses.
 fn check_slow(label: &str, side: &str, e: &Error) -> Warning {
     let why = match &e.refusal {
-        Some(r) => format!("{}{}", r.summary, r.detail.as_ref().map(|d| format!(" ({d})")).unwrap_or_default()),
+        Some(r) => format!("{}{}", r.summary, r.detail.as_ref().map(|d| format!("; {d}")).unwrap_or_default()),
         None => e.message.clone(),
     };
     let text = format!("{label} · {side} block: {why}; the check ran at once (a timed block would wait that out, or refuse)");
