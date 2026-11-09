@@ -180,9 +180,14 @@ noisy discovery evidence, or leave them out.
 
 - Exit 4 names the validator and the fix: fix the setup, never work around it. Common ones:
   - `WindowHidden`, `SessionLocked`: the window must show; wait or unlock.
-  - `Background`: other work on the target's CPUs (named); a bench waits it out before refusing.
+  - `Background`: other work on the target's CPUs (named); a timed bench waits it out before refusing.
   - `Throttled`: the speed check stayed slow on quiet CPUs, a Linux CPU quota throttled the runs,
     or a headless page ran with the display off.
+  - A `--check` never waits on the speed check: a slow one is a `! Background` or `! Throttled` line and
+    the case runs at once. Its values are then a loaded machine's.
+  - `RunIncomplete` on `cpu.renderer`/`cpu.gpu`/`cpu.browser` names why: a process of that role ended
+    in the run, or processes whose role was never read ended and used over 1% of it. `cpu.work` keeps
+    their CPU: compare that.
   - `RunIncomplete`: a run threw, timed out, its `until` never came, or the app exited.
   - `ResetIncomplete`: a run started from another state than run 1 (`the reset did not restore …`).
   - `TailTooShort`: a percentile lacks its minimum n (`interaction.p95` needs 20 samples a block).
@@ -206,7 +211,7 @@ strobe record <target> [--probes timing|attribution|memory] [--for 10s] [--headl
 strobe record app:<id>|exe:<path> [--native] [--windowless] [--until-line "<re>"] [--stop-line "<re>"]
 strobe record pid:<n>|proc:<name> [--probes timing|deep|waits|stacks-unprivileged] [--for 10s]
 strobe record wir:[<selector>] [--probes attribution|memory] [--for 10s]
-strobe record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>]
+strobe record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--max-time 10m]
 strobe bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check [--batch N] | --blocks N]
              [--filter <cases>] [--target <names>] [--params k=v|all] [--primary <metric>]
              [--pairs auto|N] [--runs 5] [--noworse 2%] [--why auto|always|never] [--trace lean|full]
@@ -230,6 +235,9 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 ```
 
 - `strobe <command> --help` lists that command's flags. An unknown flag exits 2 naming the closest.
+- `--max-time` is the run's deadline, `--check` and `record --bench` too: no series starts and no wait
+  (busy CPUs, a locked session, a launch retried) runs past it. A comparison keeps its verdicts; a
+  check stops with exit 124 and `--resume` runs the rest.
 - Every duration needs its unit (`500ms`, `10s`, `2m`, `2h`, `1d`): `--for 2000` exits 2.
 - `--filter`, `--target`, `--params`, `--metrics` and `--noworse` given twice add up; any other flag
   given twice with another value exits 2. `--params n=1,n=3` runs both values.
@@ -245,7 +253,13 @@ strobe update [<version>] [--from <path>] [--check] [--force]
   element hit and the latency sample.
 - `look`: a page in a headless browser, a native app, an iPhone tab or a terminal program, nothing
   measured: titles, headings (what `expect` checks), visible text or keyed elements, console errors
-  and a screenshot. Use it to check a UI loads; it works on a locked session.
+  and a screenshot. Use it to check a UI loads; it works on a locked session. A page look is Chromium
+  only (`--engine firefox` is refused); `look app:<id> --out shot.png` writes the native window's
+  pixels. A native window holding a Chromium web view may show no headings through UI Automation:
+  check its content from a `webview()` or `app()` target, or expect a title or a visible control.
+- On a laptop with two GPUs, read `gpu.*` with the adapter the target drew on: the `screen` line
+  (`drawn on …`), `query <rec> gpu` and `screen.gpu` in the JSON; `CrossAdapterScanout` says when
+  another adapter drives the window's display.
 - MCP tools `status`, `record`, `bench`, `query`, `report`: the CLI's names, arguments and JSON.
   Through the daemon, `bench` needs an absolute file and `head`.
 - Exit codes: `0` · `1` error · `2` usage · `3` needs a human · `4` refused · `5` inconclusive
@@ -259,7 +273,8 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 ## Targets
 
 - `https://…` or `page.html`: Chromium (`STROBE_BROWSER`, else Chrome/Edge/Chromium, else
-  Playwright's), `--engine firefox` (stock Firefox), `--engine webkit` (Safari headed on macOS;
+  Playwright's), `--engine firefox` (stock Firefox 148 or later; an older one is refused
+  `EngineUnsupported` before it launches), `--engine webkit` (Safari headed on macOS;
   WebKitGTK on Linux, headed, or `--headless` under `xvfb-run`; WPE headless sees a touch device and
   refuses `DeviceMismatch`; never Windows).
 - `app:<id>`: a strobe.json profile (Electron, `kind: "native"` or `kind: "webview"`), launched in an
