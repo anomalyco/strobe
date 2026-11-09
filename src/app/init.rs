@@ -88,8 +88,21 @@ impl Project {
         if self.rel.is_empty() { path.to_string() } else { format!("{}/{path}", self.rel) }
     }
 
-    /// The package's command-line program: its `bin` (the first, when it names several), run by the
-    /// runtime its first line names (Bun otherwise).
+    /// `<runtime> <file>` (`bin`) with the file from the variant's root.
+    fn rooted_line(&self, line: &str) -> String {
+        match line.split_once(' ') {
+            Some((runtime, file)) => format!("{runtime} {}", self.rooted(file)),
+            None => self.rooted(line),
+        }
+    }
+
+    /// A command line run from the variant's root (a target's `build`) that must run in this folder.
+    fn in_dir(&self, line: &str) -> String {
+        if self.rel.is_empty() { line.to_string() } else { format!("cd {} && {line}", self.rel) }
+    }
+
+    /// The package's command-line program: its `bin` (the first, when it names several) and the runtime
+    /// its first line names (Bun otherwise), from this folder.
     fn bin(&self) -> Option<(String, String)> {
         let p = self.package.as_ref()?;
         let (name, file) = match &p["bin"] {
@@ -100,22 +113,33 @@ impl Project {
         let file = file.trim_start_matches("./").to_string();
         let first = std::fs::read_to_string(self.dir.join(&file)).ok().and_then(|t| t.lines().next().map(str::to_string)).unwrap_or_default();
         let runtime = if first.starts_with("#!") && first.contains("node") { "node" } else { "bun" };
-        Some((name, format!("{runtime} {}", self.rooted(&file))))
+        Some((name, format!("{runtime} {file}")))
     }
 
-    /// The server's entry: package.json `main` or `module`, else the file its `start` script runs, else a
-    /// usual name, when the file is there.
+    /// The server's entry: package.json `main` or `module`, else the file its `start` script runs (either
+    /// may be the build's output, made before the first block), else a usual name, when the file is there.
     fn server_entry(&self) -> Option<String> {
         let p = self.package.as_ref();
-        let mut found: Vec<String> = ["main", "module"].iter().filter_map(|k| p?[k].as_str().map(str::to_string)).collect();
+        let mut declared: Vec<String> = ["main", "module"].iter().filter_map(|k| p?[k].as_str().map(str::to_string)).collect();
         if let Some(start) = self.script("start") {
             let words: Vec<&str> = start.split_whitespace().collect();
             if let Some(i) = words.iter().position(|w| matches!(*w, "bun" | "node" | "tsx" | "ts-node" | "deno")) {
-                found.extend(words[i + 1..].iter().find(|w| !w.starts_with('-') && *w != &"run").map(|w| w.to_string()));
+                declared.extend(words[i + 1..].iter().find(|w| !w.starts_with('-') && *w != &"run").map(|w| w.to_string()));
             }
         }
-        found.extend(["server.ts", "server.js", "src/server.ts", "src/server.js", "src/index.ts", "src/index.js", "index.ts", "index.js"].map(String::from));
-        found.into_iter().map(|f| f.trim_start_matches("./").to_string()).find(|f| self.dir.join(f).is_file() && [".ts", ".js", ".mjs", ".mts", ".tsx", ".jsx"].iter().any(|x| f.ends_with(x)))
+        let code = |f: &String| [".ts", ".js", ".mjs", ".cjs", ".mts", ".tsx", ".jsx"].iter().any(|x| f.ends_with(x));
+        let built = self.script("build").is_some();
+        let usual = ["server.ts", "server.js", "src/server.ts", "src/server.js", "src/index.ts", "src/index.js", "index.ts", "index.js"].map(String::from);
+        declared
+            .into_iter()
+            .map(|f| f.trim_start_matches("./").to_string())
+            .find(|f| code(f) && (built || self.dir.join(f).is_file()))
+            .or_else(|| usual.into_iter().find(|f| self.dir.join(f).is_file()))
+    }
+
+    /// Whether the folder holds a page: an index.html where a web app keeps it, or a preview script.
+    fn web_page(&self) -> bool {
+        self.index_html || ["public", "src", "app", "static"].iter().any(|d| self.dir.join(d).join("index.html").is_file()) || self.script("preview").is_some()
     }
 
     /// The kind to bench when `--target` names none, from the folder's markers.
@@ -123,7 +147,7 @@ impl Project {
         if self.depends_on("electron") {
             return Ok(Kind::Electron);
         }
-        if self.script("build").is_some() || self.index_html {
+        if self.web_page() {
             return Ok(Kind::Web);
         }
         if self.bin().is_some() {
@@ -131,6 +155,9 @@ impl Project {
         }
         if self.package.is_some() && self.server_entry().is_some() {
             return Ok(Kind::Server);
+        }
+        if self.script("build").is_some() {
+            return Ok(Kind::Web);
         }
         if !self.bins.is_empty() {
             return Ok(Kind::Cli);
@@ -234,7 +261,7 @@ let url = ""
 
 export default bench({
   // The harness runs the server in a process of its own, which strobe measures; the runs load it from here.
-  targets: { server: script("./server.ts") },
+  targets: { server: script("./server.ts"@OPTS@) },
   async setup(ctx) {
     url = await ctx.call<string>("start")
     // A request every 100 ms from strobe's own threads: how long another client waited while the runs loaded
@@ -344,8 +371,9 @@ struct Plan {
     what: String,
 }
 
-/// A Cargo binary's path from the variant's root (`./` first off Windows), its build into `target`, and the
-/// TypeScript constant the bench names it by.
+/// A Cargo binary's path from the variant's root (`./` first off Windows), its build into the folder's
+/// `target` (from the root too, where a target's `build` runs), and the TypeScript constant the bench names
+/// it by.
 fn cargo_exe(p: &Project, bin: &str) -> (String, String) {
     let dir = p.rooted("target/release");
     let build = if p.rel.is_empty() { "cargo build --release --target-dir target".to_string() } else { format!("cargo build --release --manifest-path {0}/Cargo.toml --target-dir {0}/target", p.rel) };
@@ -362,7 +390,7 @@ fn plan(kind: Kind, p: &Project) -> Result<Plan> {
     match kind {
         Kind::Web => {
             let build = p.script("build").map(|_| p.run("build"));
-            if build.is_none() && !p.index_html {
+            if build.is_none() && !p.web_page() {
                 return Err(Error::usage(format!("a web bench serves the project's build, and {} has no package.json build script and no index.html", p.dir.display()))
                     .hint("add a build script that writes the page (with an index.html), or point init at the folder that holds it"));
             }
@@ -396,11 +424,14 @@ fn plan(kind: Kind, p: &Project) -> Result<Plan> {
                 Some(e) => format!("  // The project's server (package.json main or start); it must listen on process.env.PORT.\n  await import({})", lit(&format!("../{e}"))),
                 None => "  // No server entry found (package.json main or start): a stand-in that answers. Import yours instead:\n  // await import(\"../src/server.ts\"), a server that listens on process.env.PORT.\n  Bun.serve({ hostname: \"127.0.0.1\", port, fetch: () => Response.json({ status: \"ok\" }) })".to_string(),
             };
+            // A build (TypeScript to JavaScript, a bundle) runs once per variant before its first block.
+            let build = p.script("build").map(|_| p.in_dir(&p.run("build")));
+            let opts = build.as_ref().map(|b| format!(", {{ build: {} }}", lit(b))).unwrap_or_default();
             let what = match &entry {
-                Some(e) => format!("a server: {e}, hosted by perf/server.ts"),
+                Some(e) => format!("a server: {e}{}, hosted by perf/server.ts", build.as_ref().map(|b| format!(" (after {b})")).unwrap_or_default()),
                 None => "a server: a stand-in in perf/server.ts (no entry found)".to_string(),
             };
-            Ok(Plan { config: Vec::new(), bench: head + SERVER_BENCH, helper: Some(("server.ts", SERVER_TS.replace("@START@", &start))), what })
+            Ok(Plan { config: Vec::new(), bench: head + &SERVER_BENCH.replace("@OPTS@", &opts), helper: Some(("server.ts", SERVER_TS.replace("@START@", &start))), what })
         }
         Kind::Native => {
             let bin = p.bins.first().ok_or_else(|| {
@@ -432,24 +463,29 @@ fn plan(kind: Kind, p: &Project) -> Result<Plan> {
                     .hint("an installed Electron app: strobe record exe:<path>, or an app profile in strobe.json apps"));
             }
             let install = format!("{} install", p.pm);
-            let build = match p.script("build") {
+            let build = p.in_dir(&match p.script("build") {
                 Some(_) => format!("{install} && {}", p.run("build")),
                 None => install,
-            };
+            });
             let run = format!("{} electron . --remote-debugging-port={{port}}", if p.pm == "bun" { "bunx" } else { "npx" });
+            let cwd = if p.rel.is_empty() { String::new() } else { format!(", cwd: {}", lit(&p.rel)) };
             let what = format!("an Electron app: {run}");
-            Ok(Plan { config: Vec::new(), bench: head + &ELECTRON_BENCH.replace("@RUN@", &run).replace("@BUILD@", &lit(&build)), helper: None, what })
+            Ok(Plan { config: Vec::new(), bench: head + &ELECTRON_BENCH.replace("@RUN@", &run).replace("@BUILD@", &format!("{}{cwd}", lit(&build))), helper: None, what })
         }
         Kind::Tty | Kind::Cli => {
+            // Both run in the variant's root, so their paths are from there.
+            let cli = kind == Kind::Cli;
+            let opts = |build: Option<String>| build.map(|b| format!(", {{ build: {} }}", lit(&b))).unwrap_or_default();
             let (exe, run, opts, what) = if let Some((name, line)) = p.bin() {
-                let line = if kind == Kind::Cli { format!("{line} --help") } else { line };
-                (String::new(), lit(&line), String::new(), format!("the package's program {name}"))
+                let line = p.rooted_line(&line);
+                let line = if cli { format!("{line} --help") } else { line };
+                (String::new(), lit(&line), opts(None), format!("the package's program {name}"))
             } else if let Some(bin) = p.bins.first() {
                 let (exe, build) = cargo_exe(p, bin);
-                let run = if kind == Kind::Cli { "`${exe} --help`".to_string() } else { "exe".to_string() };
-                (exe, run, format!(", {{ build: {} }}", lit(&build)), format!("the Cargo binary {bin}"))
-            } else if kind == Kind::Tty && p.script("start").is_some() {
-                (String::new(), lit(&p.run("start")), String::new(), "the package's start script".to_string())
+                let run = if cli { "`${exe} --help`".to_string() } else { "exe".to_string() };
+                (exe, run, opts(Some(build)), format!("the Cargo binary {bin}"))
+            } else if !cli && p.script("start").is_some() {
+                (String::new(), lit(&p.in_dir(&p.run("start"))), opts(None), "the package's start script".to_string())
             } else {
                 return Err(Error::usage(format!("a {} bench runs the project's program, and {} names none (package.json bin, a Cargo.toml binary)", kind.name(), p.dir.display()))
                     .hint("write the command in the bench yourself: cli(\"<command> <args>\") or tty(\"<command>\")"));

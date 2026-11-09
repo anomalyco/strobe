@@ -59,11 +59,12 @@ fn simple(line: &str) -> bool {
     !line.contains([';', '&', '|', '<', '>', '(', ')', '`', '\n']) && !line.contains("$(") && !first.contains('=') && !SHELL_WORDS.contains(&first)
 }
 
-/// The command for `line`. Unix: `sh -c`, as `exec <line>` when the line is one simple command, so the
-/// command is the child, not a shell around it. Windows: the line's first word as the program, so the
-/// child is the program itself; `shell` (a `.cmd` or `.bat`, or a word that is no executable) runs the
+/// The command for `line`, run in `root`. Unix: `sh -c`, as `exec <line>` when the line is one simple
+/// command, so the command is the child, not a shell around it. Windows: the line's first word as the
+/// program, so the child is the program itself (a relative path from `root`: Windows would resolve it
+/// from strobe's own folder); `shell` (a `.cmd` or `.bat`, or a word that is no executable) runs the
 /// line under cmd.
-fn command(line: &str, shell: bool) -> Command {
+fn command(line: &str, shell: bool, root: &Path) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -76,6 +77,8 @@ fn command(line: &str, shell: bool) -> Command {
         if shell || script {
             return crate::target::command::shell(line);
         }
+        let path = Path::new(&program);
+        let program = if path.is_relative() && program.contains(['/', '\\']) && root.join(path).is_file() { root.join(path).display().to_string() } else { program };
         let mut c = Command::new(program);
         if !rest.trim().is_empty() {
             c.raw_arg(rest.trim());
@@ -84,7 +87,7 @@ fn command(line: &str, shell: bool) -> Command {
     }
     #[cfg(not(windows))]
     {
-        let _ = shell;
+        let _ = (shell, root);
         if simple(line) { crate::target::command::shell(&format!("exec {line}")) } else { crate::target::command::shell(line) }
     }
 }
@@ -142,7 +145,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
     // The launch's CPU on this thread (`cli.launch`): the OS creating the process, which Windows does
     // in the launcher. NaN where thread cycles are not time.
     let start = |shell: bool| -> std::io::Result<(host::spawn::Owned, Instant, f64)> {
-        let mut cmd = command(line, shell);
+        let mut cmd = command(line, shell, at.root);
         for (k, val) in at.target["env"].as_object().into_iter().flatten() {
             cmd.env(k, val.as_str().unwrap_or(""));
         }
