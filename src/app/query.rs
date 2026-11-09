@@ -2,6 +2,7 @@
 
 mod actions;
 mod diff;
+mod http;
 mod rec;
 pub(crate) use rec::windows_sql;
 mod waits;
@@ -29,6 +30,10 @@ pub fn run(args: &Args) -> Result<Output> {
     // Tracked history (SPEC §25.5): `query history`, `query changes`, `query <ser_…> history|changes`.
     if handle == "history" || handle == "changes" || handle.starts_with("ser_") {
         return super::history::query(args);
+    }
+    // The HTTP probe (SPEC §8.9) of a recording, an experiment's blocks, or two recordings.
+    if view == "http" {
+        return http::run(args, top);
     }
     if let Some(dir) = store::resolve(handle).ok().filter(|d| store::is_experiment(d)) {
         if !dir.join("result.json").exists() {
