@@ -2087,8 +2087,14 @@ struct WindowShots<'a> {
 
 impl WindowShots<'_> {
     fn with<T>(&self, f: impl FnOnce(&mut crate::host::capture::Grabber) -> Result<T>) -> Result<T> {
-        let w = self.d.browser_window()?.hwnd;
         let mut g = self.d.grabber.borrow_mut();
+        // The window the capture follows while it still shows (finding the browser's window lists every
+        // window on the desktop, a read's cost each time).
+        let open = g.as_ref().map(|g| g.window()).filter(|w| crate::host::window_state(*w).is_some_and(|s| s.visible && !s.iconic));
+        let w = match open {
+            Some(w) => w,
+            None => self.d.browser_window()?.hwnd,
+        };
         if g.as_ref().is_none_or(|g| g.window() != w) {
             // The capture it replaces has CPU of its own not yet taken (its open, its frame events).
             if let Some(old) = g.take() {
