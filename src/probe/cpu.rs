@@ -132,22 +132,38 @@ pub fn missed(main_ms: f64, sampled_ms: f64) -> Value {
     json!({ "ms": ms, "share": if main_ms > 0.0 { ms / main_ms } else { 0.0 }, "main_ms": main_ms, "sampled_ms": sampled_ms })
 }
 
-/// What a script recording's `missed` costs its rows, when over `MISSED_SHARE`; `runtime` is its
-/// runtime's name (`meta.runtime.name`), which says why.
-pub fn missed_text(missed: &Value, runtime: Option<&str>) -> Option<String> {
-    let share = missed["share"].as_f64().filter(|s| *s > MISSED_SHARE)?;
-    let why = match runtime {
-        Some("node") => "Node's profiler labels most of a short timer callback (idle), so timer-driven work undercounts",
-        Some("bun") => "Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work (timers, I/O)",
-        _ => "the runtime's sampler took no sample of it",
-    };
-    Some(format!(
-        "Missed: the main thread ran {:.0} ms on a CPU in the measured runs (cpu.main) and the profile holds samples of {:.0} ms of it: {:.0} ms ({:.0}%) has no sample, so rows undercount. {why}",
-        missed["main_ms"].as_f64().unwrap_or(0.0),
-        missed["sampled_ms"].as_f64().unwrap_or(0.0),
-        missed["ms"].as_f64().unwrap_or(0.0),
-        100.0 * share
-    ))
+/// Samples weighing more than this many times the main thread's CPU (and `WAITED_MS` more) hold time
+/// it waited for one: a sample weighs the wall time to the next, and V8 samples a thread that is off a
+/// CPU on the stack it left (vps, both vCPUs busy: Node's samples 314 ms, `cpu.main` 187 ms). Bun's
+/// sampler stops the thread to take one, which adds about 10% on Windows.
+pub const WAITED_RATIO: f64 = 1.2;
+pub const WAITED_MS: f64 = 5.0;
+
+/// What a script recording's `missed` says of its rows (`runtime`: `meta.runtime.name`, which says
+/// why): that they undercount, the main thread's CPU with no sample over `MISSED_SHARE`, or that they
+/// hold time the thread waited for a CPU, over `WAITED_RATIO`. Never a rescaling: rows keep their
+/// samples' weights.
+pub fn missed_texts(missed: &Value, runtime: Option<&str>) -> Vec<String> {
+    let (main, sampled) = (missed["main_ms"].as_f64().unwrap_or(0.0), missed["sampled_ms"].as_f64().unwrap_or(0.0));
+    let mut out = Vec::new();
+    if let Some(share) = missed["share"].as_f64().filter(|s| *s > MISSED_SHARE) {
+        let why = match runtime {
+            Some("node") => "Node's profiler labels most of a short timer callback (idle), and a gap between samples over 50 ms counts as 50 ms (a sampler kept off a CPU, a paused process)",
+            Some("bun") => "Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work (timers, I/O), and a gap over its cap counts as one interval",
+            _ => "the runtime's sampler took no sample of it, or its gaps were cut to the cap",
+        };
+        out.push(format!(
+            "Missed: the main thread ran {main:.0} ms on a CPU in the measured runs (cpu.main) and the profile holds samples of {sampled:.0} ms of it: {:.0} ms ({:.0}%) has no sample, so rows undercount. {why}",
+            missed["ms"].as_f64().unwrap_or(0.0),
+            100.0 * share
+        ));
+    }
+    if main > 0.0 && sampled > WAITED_RATIO * main && sampled - main > WAITED_MS {
+        out.push(format!(
+            "Waited: hotspot rows include time the main thread waited for a CPU (sampled {sampled:.0} ms vs cpu.main {main:.0} ms in the measured runs): a sample weighs the wall time to the next; record where the target's CPUs are not shared"
+        ));
+    }
+    out
 }
 
 /// A script recording's whole host profile, on strobe's clock (`Rebased::whole`).
@@ -236,7 +252,7 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     // over the samples (0.37 µs a sample on adais, where gaps are not spread evenly over a µs).
     let truncated = rt == Runtime::Bun && deltas.iter().all(|d| d.fract() == 0.0);
     let lost = match p["endTime"].as_f64() {
-        Some(end) if truncated && samples > 0 => Some((end - start - deltas.iter().sum::<f64>()) / samples as f64).filter(|l| (0.0..=1.0).contains(l)).unwrap_or(0.5),
+        Some(end) if truncated && samples > 0 => Some((end - start - deltas.iter().take(samples).map(|d| d.max(0.0)).sum::<f64>()) / samples as f64).filter(|l| (0.0..=1.0).contains(l)).unwrap_or(0.5),
         _ if truncated => 0.5,
         _ => 0.0,
     };

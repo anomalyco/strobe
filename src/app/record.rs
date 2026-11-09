@@ -1545,6 +1545,56 @@ pub(crate) fn phone_line(p: &Value) -> Option<String> {
     Some(parts.join(" · "))
 }
 
+/// A script attribution block's recording, or an HTTP probe block's of its own: no page, so no frames;
+/// its values, what its profile missed or over-weighed, and the views that read it.
+fn script_summary(meta: &Value) -> String {
+    let id = meta["id"].as_str().unwrap_or("");
+    let v = &meta["values"];
+    let get = |k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
+    let runtime = match (meta["runtime"]["name"].as_str(), meta["runtime"]["version"].as_str()) {
+        (Some(n), Some(ver)) => format!(" · {n} {ver}"),
+        (Some(n), None) => format!(" · {n}"),
+        _ => String::new(),
+    };
+    let mut s = format!(
+        "{id} · {} · {}{runtime} · {} · timing {}\n",
+        meta["series"].as_str().or(meta["target"].as_str()).unwrap_or(""),
+        meta["variant"].as_str().unwrap_or(""),
+        meta["probes"].as_str().unwrap_or(""),
+        meta["timing"].as_str().unwrap_or("?")
+    );
+    let shown: Vec<String> = [("run.duration", "ms"), ("cpu.work", "ms"), ("cpu.main", "ms"), ("cpu.main.busy", "%")]
+        .iter()
+        .filter(|(k, _)| get(k).is_finite())
+        .map(|(k, u)| format!("{k} {}", fmt::value(get(k), u)))
+        .collect();
+    if !shown.is_empty() {
+        let note = if meta["script"] == true { "a run's median; the profilers ran, so not compared" } else { "a run's median" };
+        s += &format!("values   {} ({note})\n", shown.join(" · "));
+    }
+    let http: Vec<String> = [("http.latency.p50", "ms"), ("http.timeouts", "count"), ("http.errors", "count"), ("http.missed_sends", "count")]
+        .iter()
+        .filter(|(k, _)| get(k).is_finite())
+        .map(|(k, u)| format!("{k} {}", fmt::value(get(k), u)))
+        .collect();
+    if meta["http_probe"].is_object() {
+        s += &format!("http     {}\n", if http.is_empty() { "the block's probes".to_string() } else { http.join(" · ") });
+    }
+    for t in crate::probe::cpu::missed_texts(&meta["missed"], meta["runtime"]["name"].as_str()) {
+        s += &format!("! {t}\n");
+    }
+    let mut next = Vec::new();
+    if meta["script"] == true {
+        next.extend([format!("strobe query {id} hotspots"), format!("strobe query {id} hotspots --source host"), format!("strobe query {id} threads --timeline")]);
+    }
+    if meta["http_probe"].is_object() {
+        next.push(format!("strobe query {id} http"));
+    }
+    next.push(format!("strobe open {id}"));
+    s += &format!("next     {}\n", next.join(" · "));
+    s
+}
+
 fn summary_body(meta: &Value) -> String {
     let v = &meta["values"];
     let get = |k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
@@ -1580,6 +1630,9 @@ fn summary_body(meta: &Value) -> String {
             fmt::bytes(l["retained_size"].as_f64().unwrap_or(0.0)),
             refused_lines(meta),
         );
+    }
+    if meta["script"] == true || meta["probes"] == "http-probe" {
+        return script_summary(meta);
     }
     if meta["native"] == true {
         return native_summary(meta);

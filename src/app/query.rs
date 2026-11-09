@@ -585,15 +585,19 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         let busy: f64 = rows.iter().filter(|r| r["name"] != "(idle)").map(|r| r["weight"].as_f64().unwrap_or(0.0)).sum();
         let program = rows.iter().find(|r| r["name"] == "(program)").and_then(|r| r["weight"].as_f64()).unwrap_or(0.0);
         if busy > 0.0 && program / busy >= 0.3 {
+            // A script host has no browser: its (program) is the runtime's own work, and its threads are
+            // in the timeline (no trace).
+            let (whose, next) = if meta["script"] == true {
+                ("the runtime's own work outside JavaScript (its event loop, I/O, parsing, compiling)", q("threads --timeline"))
+            } else {
+                ("the browser's own work outside JavaScript (rendering, IPC, parsing)", q("threads"))
+            };
             hit(
                 "native-time",
                 "info",
-                format!(
-                    "native time: {:.0}% of busy samples are (program), the browser's own work outside JavaScript (rendering, IPC, parsing); naming it needs native stacks",
-                    100.0 * program / busy
-                ),
+                format!("native time: {:.0}% of busy samples are (program), {whose}; naming it needs native stacks", 100.0 * program / busy),
                 json!({ "program_share": program / busy }),
-                vec![q("threads")],
+                vec![next],
             );
         }
     }
@@ -1802,7 +1806,7 @@ pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope
     }
     // The measured runs' main-thread CPU the profile holds no sample of (`cpu.main` against the samples).
     let missed = (scope != Scope::Host && rec.meta["missed"].is_object()).then(|| &rec.meta["missed"]);
-    if let Some(t) = missed.and_then(|m| crate::probe::cpu::missed_text(m, rec.meta["runtime"]["name"].as_str())) {
+    for t in missed.map(|m| crate::probe::cpu::missed_texts(m, rec.meta["runtime"]["name"].as_str())).unwrap_or_default() {
         header += &format!("\n! {t}");
     }
     if stacks.weights.is_empty() && scope != Scope::Host && named.is_some() {

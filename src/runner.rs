@@ -243,6 +243,10 @@ impl Runner {
     }
 
     fn died(&mut self, what: &str) -> Error {
+        // What the probe sent leaves the log before its tail goes into the error.
+        if let Some(s) = &self.http.secrets {
+            http_probe::scrub_logs(std::slice::from_ref(&self.log), s);
+        }
         let log = std::fs::read_to_string(&self.log).unwrap_or_default();
         let tail: Vec<&str> = log.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
         Error::msg(format!("the bench runner {what}\n{}", tail.join("\n")))

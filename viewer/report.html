@@ -2042,11 +2042,13 @@ function allComparisons(s) {
 
 // The blocks that measured `metric`: a series that counts cpu.instructions apart from its times (Linux
 // perf events never run in a timing block, SPEC §7.5) keeps the other kind's blocks in `pass`
-// (`counters`: whether they are the counter blocks).
+// (`counters`: whether they are the counter blocks), and so does one that probes HTTP apart from its
+// times (SPEC §8.9; `http`: whether they are the probe blocks), as pr.rs `blocks_for`.
 function blocksFor(s, metric) {
   const pass = s?.pass;
   if (!pass || !Array.isArray(pass.blocks) || !pass.blocks.length) return s?.blocks || [];
-  return (metric === "cpu.instructions") === !!pass.counters ? pass.blocks : s.blocks || [];
+  const theirs = typeof pass.http === "boolean" ? metric.startsWith("http.") === pass.http : (metric === "cpu.instructions") === !!pass.counters;
+  return theirs ? pass.blocks : s.blocks || [];
 }
 
 function pairsOf(s, metric) {

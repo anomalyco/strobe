@@ -5907,6 +5907,13 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     }
     let asked = taken.is_some();
     let (data, secrets) = taken.map_or((None, http_probe::Secrets::default()), |t| (t.data, t.secrets));
+    // The target got what the probe sent (its authorization, its URL's query, its headers' values): what
+    // it or the hooks printed to the experiment's logs keeps none of it, whether or not the probe ran in
+    // this block (a clean timing, video, pixels or batch block whose setup asked for one). Recordings are
+    // never rewritten: a block whose probe carries any takes no dump of the target's memory
+    // (`Runner::http_secret`).
+    let redacted = scrub_probe_logs(ctx, &s.label(), &secrets);
+    drop(secrets);
     let Some(mut data) = data else {
         if x.probes_http() {
             let why = if !asked { "the case's setup never called ctx.httpProbe" } else { "the HTTP probe did not run in this block" };
@@ -5948,14 +5955,9 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
             }
         }
     }
-    // The target got what the probe sent (its authorization, its URL's query, its headers' values): what
-    // it or the hooks printed to the experiment's logs keeps none of it. Recordings are never rewritten:
-    // a block whose probe carries any takes no dump of the target's memory (`Runner::http_secret`).
-    let redacted = scrub_probe_logs(ctx, &s.label(), &secrets);
     if redacted > 0 {
         summary["redacted_logs"] = json!(redacted);
     }
-    drop(secrets);
     if x.keep || x.untimed || x.set == Set::Attribution {
         match keep_probes(ctx, s, v, x, &mut b, &data, &summary) {
             Ok(rec) => summary["recording"] = json!(rec),

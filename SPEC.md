@@ -2229,13 +2229,17 @@ to the lateness allowed below of strobe's own lag never counts as the server's.
   and the headers' names. The target gets all of them, so strobe never writes a dump of the target's
   memory in a block whose probe carries one (`Runner::http_secret`: the authorization, any extra
   header's value, a query value of 8 characters or more): an attribution block takes no heap snapshot
-  and says so (`Attribution`, info), and a script host runs without `--heap-prof`; `--probes memory`
-  still takes them, owner-only (rule 9). Recordings are never rewritten. The experiment's text logs
-  (what the target and the hooks printed: `runner.log` and `script.log`, owner-only) have each
-  occurrence of those values, as sent and percent-decoded, made as many `*`s in place after the block
-  (`http_probe::scrub_logs`; a log it cannot write is said, `HttpProbe`, never removed).
-  `scripts/dev/http-probe-check.ts` reads every file strobe wrote (a Chromium attribution block's
-  too), and every answer it printed, for a fresh random token sent both ways.
+  and says so (`Attribution`, info), and a Bun script host never runs `--heap-prof` (a heap snapshot;
+  Node's is a sampling profile of allocation stacks, which keeps no value); `--probes memory` still
+  takes them, owner-only (rule 9). Recordings are never rewritten. The experiment's text logs (what
+  the target and the hooks printed: `runner.log` and `script.log`, owner-only) have each occurrence of
+  those values, as sent and percent-decoded, made as many `*`s in place after every block whose setup
+  asked for the probe, whether the probe ran in it or not (a clean timing, `--video`, `--pixels` or
+  batch block) and whether the block passed or failed, and before a runner that died puts its log's
+  tail in the error (`http_probe::scrub_logs`; a log it cannot write is said, `HttpProbe`, never
+  removed). `scripts/dev/http-probe-check.ts` reads every file strobe wrote (a Chromium attribution
+  block's too, and a quick timed `mixed` A/A with its report), and every answer it printed, for a
+  fresh random token sent both ways.
 - **Idle control.** Once setup has settled (100 ms) and before warmup, the probe runs alone for
   `idleMs` (default 500; 0 skips it). Every probe due then must answer as `expect` asks, else the
   block is refused `RunIncomplete` before any run (a server that fails a probe idle fails it in
@@ -3682,15 +3686,21 @@ experiment's `script.log`.
     of their samples that are not `(root)` or `(idle)` (`(program)` and `(garbage collector)` are the
     thread on a CPU), at least 0, and its share of that CPU: CPU the profile holds no sample of. Over
     5% `query hotspots` (measured runs and `--phase`) and the bench's `Attribution` warning say its
-    rows undercount, and why: Node's profiler labels most of a short timer callback `(idle)` (200 ×
-    (2 ms of work, 10 ms timer): 0.35 of 2 ms sampled a run; the fixture's await loop misses 95%);
-    Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work (the
-    await loop misses 20% on adais, 25% on vps). Samples weigh the wall time between them, so where
-    the thread waited for a CPU they can weigh more than `cpu.main` (missed 0): Bun's sampler stops
-    the thread to take one (Windows: 307 ms of samples, 279 ms `cpu.main`); on vps with both vCPUs
-    busy Bun's phases read 75 and 87 of 150 ms of wall time, as `cpu.main` (34 ms a run) says the
-    thread ran, while Node's rows held the wall time (314 ms of samples, 187 ms `cpu.main`). Not
-    known (`missed: { refused }`, no warning) where `cpu.main` was refused.
+    rows undercount, and why: samples the profiler never took, and gaps cut to the cap (Node: a gap
+    over 50 ms counts as 50 ms, a sampler kept off a CPU or a paused process; Bun: one interval).
+    Node's profiler labels most of a short timer callback `(idle)`: the fixture's await loop, 20 ×
+    (0.1 ms of work, 10 ms timer) a run, kept about 0.3 of its 2 ms of work in samples, and its `missed`
+    reads 95% of `cpu.main`; a raw `--cpu-prof` of 200 × (2 ms of work, 10 ms timer) kept 365 of 400
+    ms. Bun's sampler takes a sample only while JavaScript runs, never of its event loop's own work
+    (the await loop misses 20% on adais, 25% on vps). The other way, `Waited`: samples weigh the
+    wall time to the next, so where the thread waited for a CPU they weigh more than `cpu.main`.
+    Over 1.2 × `cpu.main` and 5 ms more, the same views warn that hotspot rows include time the
+    thread waited for a CPU (sampled against `cpu.main`), never rescaling or refusing them: on vps
+    with both vCPUs busy Node's rows held the wall time (314 ms of samples, 187 ms `cpu.main`),
+    while Bun's matched (its phases read 75 and 87 of 150 ms of wall time, as `cpu.main`, 34 ms a
+    run, says the thread ran). Bun's sampler stops the thread to take a sample, which adds about 10%
+    on Windows (307 ms of samples, 279 ms `cpu.main`), under the warning. Not known (`missed: {
+    refused }`, no warning) where `cpu.main` was refused.
   - Files: `cpu-<run>.cpuprofile`, one per measured run of a passing case (`<run>` the run's global
     number), integer µs, `startTime` and `endTime` its timed span, each delta the previous sample's
     weight; `whole-host.json.gz` (owner-only), the whole host process on strobe's clock in true µs with
@@ -7055,7 +7065,7 @@ recordings/rec_3f9a1c/
   meta.json             target, probes, blocks, environment, validity, clock map, census, values and refusals
   trace.pftrace         Perfetto proto: Chrome trace + strobe packets (§15)
   cpu-<n>.cpuprofile    CPU profiles (plain JSON; a script block's: one per measured run, cut to its timed
-                        parts on strobe's clock, §9.6); alloc-<n>.heapprofile sampled allocations
+                        parts on strobe's clock, §9.6, owner-only); alloc-<n>.heapprofile sampled allocations
   whole-host.json.gz    a script block's whole host profile on strobe's clock (`--source host`), owner-only
   heap-<n>.heapsnapshot.gz  heap snapshots (heap-s0, heap-s1 … for memory recordings), owner-only
   leaks.json            a memory recording's suspects
@@ -7506,7 +7516,8 @@ what was built but not yet run on a device is in §21.
   the main thread's own counter (script and native targets, `record pid:`; a script runtime behind a
   launcher bound by the pid its ready message names); script attribution profiles cut to the measured
   runs (`--source host` the whole host, `--phase`), `missed` (main-thread CPU the profile holds no
-  sample of) replacing `starved`; the thread timeline in script attribution blocks, cycle-exact on
+  sample of) replacing `starved`, and `Waited` (samples over 1.2 × `cpu.main`: rows hold time the
+  thread waited for a CPU); the thread timeline in script attribution blocks, cycle-exact on
   Windows, late ticks spread over the seconds they cover; script.log owner-only (§7.4, §9.6, §11.1,
   §14.1).
 

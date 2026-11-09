@@ -267,10 +267,14 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     life.borrow_mut().push(("startup".into(), started, host::now_ns()));
     let ready = if profiles.is_some() { Some(spawned.clocks()?) } else { None };
     let pid = spawned.pid();
-    let runtime_pid = spawned.runtime_pid;
     // The runtime's main thread: the child's own, bound at its launch, or where a launcher (a version
-    // manager's shim) started the runtime, that process's.
-    let main_thread = if runtime_pid == pid { spawned.child.main_thread() } else { host::MainThread::attach(runtime_pid) };
+    // manager's shim) started the runtime, that process's, only when it is of the child's tree (a pid
+    // the ready message names is the host's word, never a process strobe did not start).
+    let (runtime_pid, main_thread) = match spawned.runtime_pid {
+        p if p == pid => (pid, spawned.child.main_thread()),
+        p if host::tree_pids(pid).contains(&p) => (p, host::MainThread::attach(p)),
+        p => (pid, Err(host::MainLost::Gone(format!("the script host named process {p} as its runtime, which is not of the process tree strobe started ({pid})")))),
+    };
     // Each thread of the host's tree over the block, where its recording is kept (attribution).
     let timeline = profiles.is_some().then(|| probe::wakes::Timeline::start(move || host::tree_pids(pid)));
     let host = RefCell::new(spawned);
@@ -670,13 +674,13 @@ impl Profiled<'_> {
         let us = |ns: u64| ns as f64 / 1e3;
         let draft = store::claim_recording(self.id)?;
         let rec = draft.dir().to_path_buf();
+        // The target's own data, owner-only (SPEC rule 9).
         for r in self.runs {
             let untimed: Vec<(f64, f64)> = r.timed.untimed.iter().map(|&(a, b)| (us(a), us(b))).collect();
             if let Some(p) = rebased.clip(&profile, (us(r.timed.t0), us(r.timed.t1)), &untimed) {
-                store::write_json(&rec.join(format!("cpu-{}.cpuprofile", r.key.trim_start_matches("run:"))), &p)?;
+                owner_only(&rec.join(format!("cpu-{}.cpuprofile", r.key.trim_start_matches("run:"))), &serde_json::to_vec(&p)?)?;
             }
         }
-        // The target's own data, owner-only (SPEC rule 9).
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         gz.write_all(&serde_json::to_vec(&rebased.whole(&profile))?)?;
         owner_only(&rec.join(probe::cpu::WHOLE_HOST), &gz.finish()?)?;
@@ -700,7 +704,7 @@ impl Profiled<'_> {
             Ok(main) => probe::cpu::missed(main.iter().sum(), rebased.sampled_in(&profile, &segments) / 1e3),
             Err(lost) => json!({ "refused": lost.refusal("cpu.main").summary }),
         };
-        if let Some(text) = probe::cpu::missed_text(&missed, runtime["name"].as_str()) {
+        for text in probe::cpu::missed_texts(&missed, runtime["name"].as_str()) {
             ctx.warnings.push(validity::warn("Attribution", format!("{}: {text}", self.cases[0].label())));
         }
         if let Some(t) = self.timeline {

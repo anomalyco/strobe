@@ -1,6 +1,7 @@
 // The HTTP probe's known answers (http-probe.bench.ts, SPEC §8.9) and its secret hygiene, dev only, not shipped:
 // runs every case as a --check with a fresh random token (the probe's bearer token, also in its URL's query),
-// checks what strobe read against the truth, records one case (record --bench: its attribution block probes too),
+// checks what strobe read against the truth, times `mixed` briefly (A/A: clean pairs, then a probe pass), records
+// one case (record --bench: its attribution block probes too),
 // builds each recording's Perfetto trace and the experiments' reports, then reads every file strobe wrote for them
 // (gzipped ones unpacked), every answer it printed, for the token. Exit 0 only when every check held.
 //   bun scripts/dev/http-probe-check.ts [path/to/strobe]
@@ -84,6 +85,12 @@ check((val(d, "http.missed_sends") ?? 0) >= 2, `driver-delayed: missed sends (${
 check(val(d, "http.timeouts") === 0 && val(d, "http.errors") === 0, `driver-delayed: no timeout, no error: not the server (${val(d, "http.timeouts")}, ${val(d, "http.errors")})`)
 check(/^OverheadBudget: .*missed/.test(refusal(d, "http.latency.p50")), `driver-delayed: latencies refused as strobe's (${refusal(d, "http.latency.p50") || val(d, "http.latency.p50")})`)
 
+// A quick timed run of `mixed` (A/A): clean timing pairs whose setup still asks for the probe, then a probe pass.
+const mixed = run(["bench", bench, "--head", ".", "--aa", "--pairs", "6", "--runs", "2", "--filter", "mixed"])
+const mx = series(mixed, "mixed")
+check(!!mx && !mx.error && (mx.pairs ?? 0) > 0, `mixed: clean timing pairs ran (${mx?.pairs ?? 0} pairs${mx?.error ? `: ${mx.error}` : ""})`)
+check(mx?.pass?.http === true && (mx.pass.pairs?.length ?? 0) > 0, `mixed: a probe pass after them (${mx?.pass?.pairs?.length ?? 0} probe pairs)`)
+
 // record --bench: the check and the attribution block, both probed.
 const rec = run(["record", "--bench", `${bench}#stall-750ms`, "--head", "."])
 const recs: string[] = (rec.recordings ?? []).map((r: any) => r.recording).filter((r: any) => typeof r === "string")
@@ -106,7 +113,7 @@ for (const r of recs) {
 
 // Every file strobe wrote for these, and every answer it printed.
 const out = mkdtempSync(join(tmpdir(), "http-probe-check-"))
-for (const e of [exp.id, late.id]) run(["report", e, "--out", join(out, `${e}.html`)])
+for (const e of [exp.id, late.id, mixed.id]) run(["report", e, "--out", join(out, `${e}.html`)])
 const state = stateDir
 // Every recording and experiment written since this check began (record --bench's experiment and check block
 // too), the reports, and the run folder strobe's runner and hosts use.

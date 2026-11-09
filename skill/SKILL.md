@@ -136,7 +136,8 @@ The design and every rule behind this file: SPEC.md.
 - A script's `query <rec> hotspots` is its measured runs; `--source host` the whole host process
   (start, setup, warmup, resets); `--phase <name>` one phase. `! Missed` there: the main thread used
   CPU (`cpu.main`) the profile has no sample of, so rows undercount (Node labels short timer callbacks
-  `(idle)`; Bun never samples its event loop's own work). `query <rec> threads --timeline`: which
+  `(idle)`; Bun never samples its event loop's own work). `! Waited`: rows include time the thread
+  waited for a CPU (samples weigh wall time). `query <rec> threads --timeline`: which
   thread was busy when, runs marked.
 
 ### Phones

@@ -264,6 +264,17 @@ impl Threads {
                 t.processes.entry(*p).or_insert(e.clone());
             }
         }
+        // The recorded process itself: `record pid:`'s by the name it ran under, a script host's by its
+        // runtime and entry.
+        if let Some(pid) = meta["pid"].as_u64().map(|p| p as u32) {
+            let name = meta["process"].as_str().map(str::to_string).or_else(|| match (meta["runtime"]["name"].as_str(), &exe) {
+                (Some(rt), Some(e)) if meta["script"] == true => Some(format!("{rt} {e}")),
+                _ => exe.clone(),
+            });
+            if let Some(n) = name {
+                t.processes.entry(pid).or_insert(n);
+            }
+        }
         t
     }
 }
