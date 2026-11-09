@@ -421,6 +421,16 @@ pub fn run(args: &Args) -> Result<Output> {
             return Err(Error::usage(format!("--{app_only} is for a native app (look app:<id> or exe:<path>), not a page")));
         }
     }
+    // look opens a page in Chromium only: another engine is refused, never silently swapped for Chromium.
+    if let Some(engine) = args.get("engine").map(crate::model::WebEngine::parse).transpose()?
+        && engine != crate::model::WebEngine::Chromium
+    {
+        return Err(crate::target::web::refusal(engine, true).unwrap_or_else(|| {
+            crate::model::Refusal::new(crate::model::ValidatorId::EngineUnsupported, format!("look opens a page in Chromium only, not in {engine}"))
+                .fix(format!("look at the page without --engine, or load it in {engine} with strobe record --engine {engine}"))
+                .into()
+        }));
+    }
     // `--mobile`: the page in Chrome on a phone, at the phone's own screen.
     let mobile = args.get("mobile").map(str::to_string);
     if mobile.is_some()
