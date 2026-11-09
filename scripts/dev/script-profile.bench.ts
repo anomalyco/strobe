@@ -7,6 +7,11 @@
 //   strobe query <rec> hotspots --phase a       burnRunPhaseA alone
 //   strobe query <rec> hotspots --source host   all of them: moduleLoadWork about 200 ms (100 modules × 2 ms, as the
 //                                               host loads), burnSetup 40 ms per block, burnReset 40 ms per run
+//   strobe record --bench 'scripts/dev/script-profile.bench.ts#await-loop' --head . --target bun
+//                                               an async loop: 20 × (100 µs in tickWork, then a 10 ms sleep). hotspots:
+//                                               tickWork about 2 ms per run (20 × 0.1), never 20 × a sleep; meta.clock.cap_ms
+//                                               about 4 sampling intervals and meta.sampling's median one interval (the sleeps
+//                                               in neither); meta.starved null on Bun, near 0 on Node
 //   strobe record --bench 'scripts/dev/script-profile.bench.ts#fail' --head . --target bun
 //                                               fails (exit 1 or 4); no rec_ folder for it, and no *-prof folder left in
 //                                               strobe's run folder
@@ -30,6 +35,7 @@ export default bench({
         await ctx.call("idle", 20)
       },
     },
+    "await-loop": { primary: "run.duration", run: ({ call }: any) => call("awaitLoop", 20) },
     fail: { primary: "cpu.work", run: ({ call }: any) => call("failMidRun", 30) },
   },
 })

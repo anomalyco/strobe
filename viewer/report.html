@@ -3900,11 +3900,24 @@ function cpuScopeToggle(...sides) {
   );
 }
 
+/* A hotspots card whose measured runs held no sample, with the scope toggle so the whole host stays reachable */
+function cpuEmptySection(scopeToggle) {
+  return h("section", { class: "card-surface" },
+    h("div", { class: "card-hd" },
+      h("div", { class: "card-hd-left" },
+        h("h2", { class: "sec-title" }, "CPU self-time hotspots"),
+        h("span", { class: "sec-sub" }, "no sample in the measured runs: the host ran no JavaScript there that its sampler saw")
+      ),
+      h("div", { class: "card-hd-right" }, scopeToggle)
+    )
+  );
+}
+
 function renderCpuHotspotsSection(s, aa) {
   const scopeToggle = cpuScopeToggle(s.hotspots?.base, s.hotspots?.head);
   const host = !!scopeToggle && state.cpuScope === "host";
   const hs = host ? { base: cpuScoped(s.hotspots.base, true), head: cpuScoped(s.hotspots.head, true) } : s.hotspots;
-  if (!hs?.base?.rows?.length || !hs?.head?.rows?.length) return null;
+  if (!hs?.base?.rows?.length || !hs?.head?.rows?.length) return scopeToggle ? cpuEmptySection(scopeToggle) : null;
 
   const canFiles = !!(hs.base.files?.length && hs.head.files?.length);
   const byFile = state.whyBy === "file" && canFiles;
@@ -3934,7 +3947,7 @@ function renderCpuHotspotsSection(s, aa) {
   }).filter(Boolean).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
   const rows = merged.slice(0, 8);
-  if (!rows.length) return null;
+  if (!rows.length) return scopeToggle && !host ? cpuEmptySection(scopeToggle) : null;
 
   const maxAbs = Math.max(...rows.map((r) => Math.abs(r.delta)), 0.01);
   const scale = Math.max(maxAbs * 1.12, 2.0);
@@ -5227,7 +5240,7 @@ function renderDiffFlameSection(s, aa) {
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
         h("h2", { class: "sec-title" }, "Diff flame"),
-        h("span", { class: "sec-sub" }, `${tree.what} · base and head call trees merged · ${tree.per_run ? `per run (${runs.join(" and ")} runs)` : tree.untimed ? "whole capture: these samples carry no times (launch and warmup included)" : "per recording (a run count is unknown)"} · click to zoom`)
+        h("span", { class: "sec-sub" }, `${tree.what}${state.cpuScope === "host" && cpuScopeToggle(s.hotspots?.base, s.hotspots?.head) ? " of the measured runs (not the whole host)" : ""} · base and head call trees merged · ${tree.per_run ? `per run (${runs.join(" and ")} runs)` : tree.untimed ? "whole capture: these samples carry no times (launch and warmup included)" : "per recording (a run count is unknown)"} · click to zoom`)
       ),
       h("div", { class: "card-hd-right" }, toggle)
     ),
@@ -5404,7 +5417,7 @@ function renderSingleCpuHotspots(side) {
   const scopeToggle = cpuScopeToggle(side);
   const host = !!scopeToggle && state.cpuScope === "host";
   const att = cpuScoped(side, host);
-  if (!att?.rows?.length) return null;
+  if (!att?.rows?.length) return scopeToggle ? cpuEmptySection(scopeToggle) : null;
   const canFiles = !!att.files?.length;
   const byFile = state.whyBy === "file" && canFiles;
   const runs = att.runs || 1;
@@ -5415,7 +5428,7 @@ function renderSingleCpuHotspots(side) {
 
   // Self time only: a row that only calls (self 0, listed by its total) is left out.
   const activeRows = list.filter((r) => !isSys(r.name) && (r.weight ?? r.self_ms ?? 0) > 0).slice(0, 8);
-  if (!activeRows.length) return null;
+  if (!activeRows.length) return scopeToggle ? cpuEmptySection(scopeToggle) : null;
   const maxMs = Math.max(...activeRows.map((r) => rowMs(r) / runs), 0.1);
   const activeTotalMs = list.filter((r) => r.name !== "(idle)").reduce((s, r) => s + rowMs(r) / runs, 0) || 1;
 
@@ -5435,7 +5448,7 @@ function renderSingleCpuHotspots(side) {
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
         h("h2", { class: "sec-title" }, "CPU self-time hotspots"),
-        h("span", { class: "sec-sub" }, `Sampled V8 self-time${host ? ` · ${side.whole_host.label}, per recording` : perRun ? ` (${runs} runs)` : ""}${mappedPct} · click rows for stacks & full paths`)
+        h("span", { class: "sec-sub" }, `Sampled JS self-time${host ? ` · ${side.whole_host.label}, per recording` : perRun ? ` (${runs} runs)` : ""}${mappedPct} · click rows for stacks & full paths`)
       ),
       h("div", { class: "card-hd-right" }, scopeToggle, toggle)
     ),

@@ -51,6 +51,19 @@ export function idle(ms) {
   return new Promise((resolve) => setTimeout(() => resolve(true), ms))
 }
 
+function tickWork(ms) {
+  return burn(ms)
+}
+
+/** An async handler loop: `n` times, 100 µs of work, then a 10 ms timer sleep. */
+export async function awaitLoop(n) {
+  for (let i = 0; i < n; i++) {
+    tickWork(0.1)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return n
+}
+
 let calls = 0
 
 /** Burns `ms`, and throws on its fourth call: after warmup, in a measured run. */

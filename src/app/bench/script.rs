@@ -86,9 +86,12 @@ impl Host {
         }
         if let Some(dir) = profiles {
             // The whole process's profiles, written on a normal exit; samples at the interval pages get.
-            cmd.args(["--cpu-prof", &format!("--cpu-prof-interval={}", probe::cpu::interval_us()), "--heap-prof"])
-                .arg(format!("--cpu-prof-dir={}", dir.display()))
-                .arg(format!("--heap-prof-dir={}", dir.display()));
+            cmd.args(["--cpu-prof", &format!("--cpu-prof-interval={}", probe::cpu::interval_us())]).arg(format!("--cpu-prof-dir={}", dir.display()));
+            // Sampled allocations from Node only: Bun's `--heap-prof` writes a whole heap snapshot at
+            // its exit (every live string in it), which no allocation view can read.
+            if runtime == "node" {
+                cmd.arg("--heap-prof").arg(format!("--heap-prof-dir={}", dir.display()));
+            }
         }
         cmd.arg(crate::runner::sdk_dir()?.join("host.mjs")).arg(entry).current_dir(root);
         for (k, v) in target["env"].as_object().into_iter().flatten() {
@@ -580,11 +583,8 @@ impl Profiled<'_> {
         let profile: Value = serde::Deserialize::deserialize(&mut de).map_err(|e: serde_json::Error| incomplete(format!("{}: {e}", raw.display())))?;
         let rt = runtime["name"].as_str().and_then(probe::cpu::Runtime::of).ok_or_else(|| incomplete(format!("an unknown runtime {}", runtime["name"])))?;
         let rebased = probe::cpu::rebase(&profile, rt, &ready, &exit)?;
+        // `rebase` found samples of the spin before the exit, after every run: the profile covers them.
         let us = |ns: u64| ns as f64 / 1e3;
-        let end = self.runs.iter().map(|r| r.timed.t1).max().unwrap_or(0);
-        if rebased.times_us.last().is_none_or(|t| *t < us(end) - 5_000.0) {
-            return Err(incomplete(format!("its last sample is {:.1} ms before the last measured run ended", rebased.times_us.last().map_or(f64::NAN, |t| (us(end) - t) / 1e3))));
-        }
         let draft = store::claim_recording(self.id)?;
         let rec = draft.dir().to_path_buf();
         for r in self.runs {
@@ -593,8 +593,7 @@ impl Profiled<'_> {
                 store::write_json(&rec.join(format!("cpu-{}.cpuprofile", r.key.trim_start_matches("run:"))), &p)?;
             }
         }
-        // The target's own data, owner-only (SPEC rule 9): Bun's `--heap-prof` writes a whole heap
-        // snapshot, every live string in it.
+        // The target's own data, owner-only (SPEC rule 9).
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         gz.write_all(&serde_json::to_vec(&rebased.whole(&profile))?)?;
         owner_only(&rec.join(probe::cpu::WHOLE_HOST), &gz.finish()?)?;
@@ -610,9 +609,8 @@ impl Profiled<'_> {
         super::keep_actions(ctx, &rec)?;
         let segments: Vec<(f64, f64)> = self.runs.iter().flat_map(|r| r.timed.segments()).map(|(a, b)| (us(a), us(b))).collect();
         let sampling = probe::cpu::Sampling::of(probe::cpu::interval_us() as f64, rebased.gaps_in(&segments));
-        let (lost, held) = rebased.starved(&profile, &segments);
-        let starved = json!({ "ms": lost / 1e3, "share": if lost + held > 0.0 { lost / (lost + held) } else { 0.0 } });
-        if let Some(text) = probe::cpu::starved_text(&starved) {
+        let starved = rebased.starved(rt, &profile, &segments).map(|(lost, held)| json!({ "ms": lost / 1e3, "share": if lost + held > 0.0 { lost / (lost + held) } else { 0.0 } }));
+        if let Some(text) = starved.as_ref().and_then(probe::cpu::starved_text) {
             ctx.warnings.push(validity::warn("Attribution", format!("{}: {text}", self.cases[0].label())));
         }
         let s = &self.cases[0];
@@ -628,7 +626,7 @@ impl Profiled<'_> {
             "main_tid": cfg!(target_os = "linux").then_some(self.pid),
             "lifecycle_spans": self.life.iter().map(|(name, a, b)| json!({ "name": name, "t0_ns": a, "t1_ns": b })).collect::<Vec<_>>(),
             "clock": { "rtt_ms": [ready.rtt_ns as f64 / 1e6, exit.rtt_ns as f64 / 1e6], "drift_ms": (exit.offset_ns - ready.offset_ns) / 1e6, "cap_ms": rebased.cap_us / 1e3 },
-            "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile: the runtime's --heap-prof of the whole host process (Bun's is a heap snapshot at its exit)",
+            "note": "cpu-<run>.cpuprofile: each measured run's timed span alone (query hotspots, --phase); whole-host.json.gz: the whole host process (startup, setup, warmup, runs, resets, teardown: query hotspots --source host); alloc-0.heapprofile (Node): sampled allocations of the whole host process",
         });
         if batch {
             meta["batch"] = super::batch::meta(self.passed.iter().zip(&blocks).map(|((k, r), b)| (&self.cases[*k], r.clone(), *b)));

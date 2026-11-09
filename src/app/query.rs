@@ -340,6 +340,20 @@ enum Gap {
 
 /// Refuses a view a Firefox or iOS WebKit recording cannot answer (`EngineUnsupported`), with what answers instead.
 fn firefox_gap(rec: &Rec, gap: Gap) -> Result<()> {
+    // A Bun script host: Bun's `--heap-prof` writes a heap snapshot, not sampled allocations (strobe
+    // passes it to Node alone; an older recording kept Bun's snapshot as `alloc-0.heapprofile`).
+    let snapshot = || {
+        let mut head = [0u8; 16];
+        std::fs::File::open(rec.dir.join("alloc-0.heapprofile")).and_then(|mut f| std::io::Read::read(&mut f, &mut head)).is_ok_and(|n| head[..n].starts_with(b"{\"snapshot\""))
+    };
+    if matches!(gap, Gap::Alloc) && rec.meta["script"] == true && (rec.meta["runtime"]["name"] == "bun" || snapshot()) {
+        return Err(crate::model::Refusal::new(
+            crate::model::ValidatorId::EngineUnsupported,
+            "sampled allocation stacks: Bun's --heap-prof writes a heap snapshot at its exit, not allocation samples",
+        )
+        .fix("run a runtime: \"node\" target for sampled allocation stacks, or declare js.heap.retained")
+        .into());
+    }
     if rec.meta["wir"] == true {
         let (summary, fix) = match gap {
             Gap::Heap => return Ok(()),
@@ -1752,6 +1766,9 @@ pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope
     let starved = crate::probe::cpu::starved_text(&rec.meta["starved"]);
     if let Some(t) = &starved {
         header += &format!("\n! {t}");
+    }
+    if stacks.weights.is_empty() && scope != Scope::Host && named.is_some() {
+        header += &format!("\n! no sample in these runs: the host ran no JavaScript there that its sampler saw; strobe query {} hotspots --source host has the whole host process", rec.id);
     }
     let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), Some(sort));
     if starved.is_some() {

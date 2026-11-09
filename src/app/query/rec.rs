@@ -269,7 +269,7 @@ impl Rec {
     }
 
     /// A script recording's whole host process (`whole-host.json.gz`): startup, setup, warmup, the
-    /// runs, resets and teardown. Each sample weighs its gap up to the cap strobe placed it with.
+    /// runs, resets and teardown. Each sample weighs its gap; one over the file's `capUs`, its `overUs`.
     pub(super) fn host_cpu(&self) -> Result<&Stacks> {
         cached(self.host_cpu.get_or_init(|| self.load_script(&[(f64::NEG_INFINITY, f64::INFINITY)], &[])))
     }
@@ -311,7 +311,7 @@ impl Rec {
         let cap = prof.cap_us.unwrap_or(crate::probe::cpu::MAX_GAP_US);
         let gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0 && *g <= cap).collect();
         let last = Sampling::of(0.0, gaps).map_or(0.0, |s| s.median_us);
-        let w = crate::probe::cpu::weights(&times, cap, last, spans, untimed);
+        let w = crate::probe::cpu::weights(&times, cap, prof.over_us.unwrap_or(cap), last, spans, untimed);
         let mut out = Stacks::default();
         self.add_profile(&mut out, &prof, |i| w.get(i).copied().filter(|w| *w > 0.0));
         Ok(out)
@@ -319,6 +319,10 @@ impl Rec {
 
     fn load_cpu(&self) -> Result<Stacks> {
         let profiles = files(&self.dir, "cpuprofile")?;
+        // A script recording whose measured runs held no sample: none (the whole host has them).
+        if profiles.is_empty() && self.dir.join(crate::probe::cpu::WHOLE_HOST).is_file() {
+            return Ok(Stacks::default());
+        }
         if profiles.is_empty() {
             return Err(super::no_profile(&self.meta, "CPU profile", "hotspots"));
         }
@@ -471,6 +475,9 @@ struct CpuProfile<'a> {
     /// What a sample of a script's whole host profile weighs at most (`probe::cpu::Rebased::cap_us`).
     #[serde(default, rename = "capUs")]
     cap_us: Option<f64>,
+    /// What a sample before a gap over the cap weighs (`probe::cpu::Rebased::over_us`).
+    #[serde(default, rename = "overUs")]
+    over_us: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]

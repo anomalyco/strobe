@@ -183,9 +183,11 @@ pub struct Rebased {
     pub start_us: f64,
     pub times_us: Vec<f64>,
     /// What a sample weighs at most (µs): `MAX_GAP_US`; for a sampler that skips an idle VM (Bun) four
-    /// of its median gaps, past which the VM was idle, not running the sampled function (busy gaps on
-    /// adais: p99.9 1.5× the median).
+    /// of its median gaps while busy (in `strobeClockMark`'s spins), past which the VM was idle, not
+    /// running the sampled function (busy gaps on adais: p99.9 1.5× the median).
     pub cap_us: f64,
+    /// What a sample before a gap over the cap weighs: the cap (V8), one busy interval (Bun).
+    pub over_us: f64,
     /// What the last sample weighs: the median gap under the cap.
     pub last_us: f64,
 }
@@ -228,15 +230,24 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         .collect();
     // Bun read its start as wall time when the profiler started, with the wall clock's lead then.
     let start_us = start - if rt == Runtime::Bun { ready.wall_lead_us } else { 0.0 } + ready.offset_ns / 1e3;
-    let mut gaps: Vec<f64> = times_us.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0 && *g <= MAX_GAP_US).collect();
-    gaps.sort_by(f64::total_cmp);
-    let cap_us = match (rt, gaps.get(gaps.len() / 2)) {
-        (Runtime::Bun, Some(m)) => (4.0 * m).min(MAX_GAP_US),
-        _ => MAX_GAP_US,
+    let gaps: Vec<f64> = times_us.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0 && *g <= MAX_GAP_US).collect();
+    let marked = under(p, MARK);
+    // Bun's interval, from the gaps inside `strobeClockMark`'s spins, where the VM is busy throughout:
+    // the gaps of the whole profile hold every short await (a handler that works 100 µs every 10 ms
+    // has a median gap of 10 ms). Without two marked samples in a row, gaps up to four asked intervals.
+    let busy = |mut g: Vec<f64>| {
+        g.sort_by(f64::total_cmp);
+        g.get(g.len() / 2).copied()
+    };
+    let spun = times_us.windows(2).zip(marked.windows(2)).filter(|(_, m)| m[0] && m[1]).map(|(t, _)| t[1] - t[0]).filter(|g| *g > 0.0 && *g <= MAX_GAP_US).collect();
+    // A Bun gap over the cap is a VM that went idle: its sample stands for one interval, as a sample
+    // does (four, the cap, put a 100 µs handler's sample at 1.7 ms). A V8 gap over 50 ms is cut to it.
+    let (cap_us, over_us) = match rt {
+        Runtime::Bun => busy(spun).or_else(|| busy(gaps.iter().copied().filter(|g| *g <= 4.0 * interval_us() as f64).collect())).map_or((MAX_GAP_US, MAX_GAP_US), |m| ((4.0 * m).min(MAX_GAP_US), m)),
+        Runtime::Node => (MAX_GAP_US, MAX_GAP_US),
     };
     let last_us = Sampling::of(0.0, gaps.into_iter().filter(|g| *g <= cap_us).collect()).map_or(0.0, |s| s.median_us);
     // Each spin's samples, by the reading nearer them: inside strobe's span around it, within SYNC_NS.
-    let marked = under(p, MARK);
     let mut seen = [0usize; 2];
     for at in times_us.iter().zip(&marked).filter(|(_, m)| **m).map(|(t, _)| t) {
         let ns = at * 1e3;
@@ -255,7 +266,7 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     if let Some(k) = seen.iter().position(|n| *n == 0) {
         return Err(unsynced(format!("it holds no sample of the 5 ms the host spent reading its clock {}, so where it puts that moment cannot be checked", readings[k].0)));
     }
-    Ok(Rebased { start_us, times_us, cap_us, last_us })
+    Ok(Rebased { start_us, times_us, cap_us, over_us, last_us })
 }
 
 /// Per sample of `p`: whether its stack holds a function named `name`.
@@ -305,18 +316,18 @@ impl Rebased {
                 d
             })
             .collect();
-        json!({ "nodes": p["nodes"], "startTime": start, "endTime": last, "samples": p["samples"], "timeDeltas": deltas, "capUs": self.cap_us })
+        json!({ "nodes": p["nodes"], "startTime": start, "endTime": last, "samples": p["samples"], "timeDeltas": deltas, "capUs": self.cap_us, "overUs": self.over_us })
     }
 
     /// The samples of one span (a measured run, µs on strobe's clock) as a profile of their own
-    /// (`cpu-<run>.cpuprofile`): each weighs its time inside the span and outside `untimed`, its gap
-    /// cut to `cap_us` (`weights`), the sample before the span for the span's first moments. Its
+    /// (`cpu-<run>.cpuprofile`): each weighs its time inside the span and outside `untimed`, a gap over
+    /// `cap_us` weighing `over_us` (`weights`), the sample before the span for the span's first moments. Its
     /// timeline starts at the span's start and its gaps are those weights, so where a gap was cut the
     /// timeline closes it and never runs past the span, as Firefox's per-run profiles do
     /// (`gecko::convert`). Nodes the samples do not reach are left out, and so are `hitCount` and
     /// `positionTicks`, which count the whole profile. None without a sample there.
     pub fn clip(&self, p: &Value, span: (f64, f64), untimed: &[(f64, f64)]) -> Option<Value> {
-        let w = weights(&self.times_us, self.cap_us, self.last_us, &[span], untimed);
+        let w = weights(&self.times_us, self.cap_us, self.over_us, self.last_us, &[span], untimed);
         let picked: Vec<(usize, f64)> = w.into_iter().enumerate().filter(|x| x.1 > 0.0).collect();
         let (&(first, _), all) = (picked.first()?, p["samples"].as_array()?);
         let us = |x: f64| x.round() as i64;
@@ -333,25 +344,34 @@ impl Rebased {
     }
 
     /// What the cap left out inside `segments` (µs, strobe's clock) where the samples on both sides of
-    /// a gap are of one stack (the same node, or one's caller, or both called from one frame): the VM
-    /// ran that code throughout, so the gap is busy time the sampler missed (its thread without a CPU:
-    /// on vps, 2 vCPUs, 40% of a 30 ms spin fell in gaps over the cap, up to 8.6 ms), never an idle VM.
-    /// With the time the weights hold there (µs).
-    pub fn starved(&self, p: &Value, segments: &[(f64, f64)]) -> (f64, f64) {
+    /// a gap are of one stack (the same frame, or one's caller, or both called from one frame; the
+    /// profile's own `(root)`, `(idle)`, `(program)` and `(garbage collector)` never count): busy time
+    /// the sampler missed (its thread without a CPU). With the time the weights hold there (µs). Node
+    /// only: V8 samples an idle thread as `(idle)`, so a gap there is the sampler's; Bun's sampler takes
+    /// no sample while the VM sleeps, and across an `await` the stacks before and after match while
+    /// the VM used no CPU, so its gaps say nothing (None).
+    pub fn starved(&self, rt: Runtime, p: &Value, segments: &[(f64, f64)]) -> Option<(f64, f64)> {
+        if rt != Runtime::Node {
+            return None;
+        }
         let ids: Vec<u64> = p["samples"].as_array().into_iter().flatten().map(|s| s.as_u64().unwrap_or(0)).collect();
         let mut parent: HashMap<u64, u64> = HashMap::new();
+        let mut own: BTreeSet<u64> = BTreeSet::new();
         for n in p["nodes"].as_array().into_iter().flatten() {
             let id = n["id"].as_u64().unwrap_or(0);
+            if matches!(n["callFrame"]["functionName"].as_str(), Some("(root)" | "(idle)" | "(program)" | "(garbage collector)")) {
+                own.insert(id);
+            }
             for c in n["children"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
                 parent.insert(c, id);
             }
         }
-        let up = |x: u64| parent.get(&x).copied();
-        let one = |a: u64, b: u64| a == b || up(a) == Some(b) || up(b) == Some(a) || (up(a).is_some() && up(a) == up(b));
+        let up = |x: u64| parent.get(&x).copied().filter(|u| !own.contains(u));
+        let one = |a: u64, b: u64| !own.contains(&a) && !own.contains(&b) && (a == b || up(a) == Some(b) || up(b) == Some(a) || (up(a).is_some() && up(a) == up(b)));
         let inside = |a: f64, b: f64| -> f64 { segments.iter().map(|s| (b.min(s.1) - a.max(s.0)).max(0.0)).sum() };
         let lost = self.times_us.windows(2).zip(ids.windows(2)).filter(|(t, n)| t[1] - t[0] > self.cap_us && one(n[0], n[1])).map(|(t, _)| inside(t[0] + self.cap_us, t[1])).fold(0.0, |a, b| a + b);
-        let held = weights(&self.times_us, self.cap_us, self.last_us, segments, &[]).iter().sum();
-        (lost, held)
+        let held = weights(&self.times_us, self.cap_us, self.over_us, self.last_us, segments, &[]).iter().sum();
+        Some((lost, held))
     }
 
     /// The gaps (µs) between consecutive samples inside one of `segments` (µs, strobe's clock), up to
@@ -362,9 +382,10 @@ impl Rebased {
 }
 
 /// What each sample at `times` weighs inside `spans` and outside `untimed` (µs on one clock; spans
-/// sorted and apart, untimed too): a sample stands for the time to the next one (the last: `last`), at
-/// most `cap`, and only the part of that inside a span and not in an untimed stretch counts.
-pub fn weights(times: &[f64], cap: f64, last: f64, spans: &[(f64, f64)], untimed: &[(f64, f64)]) -> Vec<f64> {
+/// sorted and apart, untimed too): a sample stands for the time to the next one (the last: `last`); a
+/// gap over `cap` stands for `over` instead; and only the part of that inside a span and not in an
+/// untimed stretch counts.
+pub fn weights(times: &[f64], cap: f64, over: f64, last: f64, spans: &[(f64, f64)], untimed: &[(f64, f64)]) -> Vec<f64> {
     let overlap = |a: f64, b: f64, list: &[(f64, f64)]| -> f64 {
         let from = list.partition_point(|s| s.1 <= a);
         list[from..].iter().take_while(|s| s.0 < b).map(|s| (b.min(s.1) - a.max(s.0)).max(0.0)).sum()
@@ -373,7 +394,8 @@ pub fn weights(times: &[f64], cap: f64, last: f64, spans: &[(f64, f64)], untimed
         .iter()
         .enumerate()
         .map(|(i, &a)| {
-            let b = a + times.get(i + 1).map_or(last, |n| (n - a).max(0.0)).min(cap);
+            let gap = times.get(i + 1).map_or(last, |n| (n - a).max(0.0));
+            let b = a + if gap > cap { over } else { gap };
             let from = spans.partition_point(|s| s.1 <= a);
             spans[from..].iter().take_while(|s| s.0 < b).map(|s| (a.max(s.0), b.min(s.1))).filter(|(x, y)| y > x).map(|(x, y)| (y - x) - overlap(x, y, untimed)).sum::<f64>().max(0.0)
         })
