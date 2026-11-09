@@ -68,27 +68,24 @@ export default bench({
     // The server gets the token's hash only; strobe keeps `authorization` in memory, never in a file.
     const token = crypto.randomUUID()
     const url = await ctx.call<string>("start", new Bun.CryptoHasher("sha256").update(`Bearer ${token}`).digest("hex"))
-    await ctx.httpProbe({
-      url,
-      authorization: `Bearer ${token}`,
-      // A probe every 40 ms: about 22 in one 900 ms run, enough for a p95 in a --check.
-      cadenceMs: 40,
-      connection: "keep-alive",
-      expect: { jsonPath: { path: "$.status", equals: "ok" } },
-    })
+    // A probe every 100 ms, a new connection each (the defaults): a backlog stall shows too.
+    await ctx.httpProbe({ url, authorization: `Bearer ${token}`, expect: { jsonPath: { path: "$.status", equals: "ok" } } })
   },
   cases: {
     "slow handler": {
       primary: "http.latency.p95",
       metrics: ["cpu.main", "cpu.main.busy", "http.timeouts"],
-      run: (ctx) => ctx.call("stall", 900),
+      // Four slow requests: about 22 probes in a run, enough for a p95 in a --check.
+      run: async (ctx) => {
+        for (let i = 0; i < 4; i++) await ctx.call("stall", 550)
+      },
     },
   },
 })
 ```
 
 ```sh
-bunx strobe bench perf/server.bench.ts --head . --check     # http.latency.p95 ≈ 850 ms: the held cohort
+bunx strobe bench perf/server.bench.ts --head . --check     # http.latency.p95 ≈ 500 ms: the held cohorts
 bunx strobe record --bench "perf/server.bench.ts#slow handler" --head .   # then: strobe query <rec> http
 ```
 

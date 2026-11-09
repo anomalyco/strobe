@@ -134,6 +134,8 @@ The design and every rule behind this file: SPEC.md.
   The whole runnable example (`server.ts` too): `node_modules/@hona/strobe/README.md`.
 
 ```ts
+import { bench, script } from "@hona/strobe"
+
 export default bench({
   targets: { server: script("./server.ts") }, // exports start(tokenHash) and stall(ms)
   async setup(ctx) {
@@ -141,13 +143,15 @@ export default bench({
     const hash = new Bun.CryptoHasher("sha256").update(`Bearer ${token}`).digest("hex")
     const url = await ctx.call<string>("start", hash)
     const expect = { jsonPath: { path: "$.status", equals: "ok" } }
-    await ctx.httpProbe({ url, authorization: `Bearer ${token}`, cadenceMs: 40, expect })
+    await ctx.httpProbe({ url, authorization: `Bearer ${token}`, expect }) // every 100 ms, new connections
   },
   cases: {
     "slow handler": {
-      primary: "http.latency.p95", // one 900 ms run: ~22 probes, enough for a p95 in a --check
+      primary: "http.latency.p95", // 4 × 550 ms: ~22 probes a run, enough for a p95 in a --check
       metrics: ["cpu.main", "cpu.main.busy", "http.timeouts"],
-      run: (ctx) => ctx.call("stall", 900),
+      run: async (ctx) => {
+        for (let i = 0; i < 4; i++) await ctx.call("stall", 550)
+      },
     },
   },
 })
