@@ -69,7 +69,12 @@ pub(super) fn run_of(r: &Value) -> (Timed, Vec<Sent>, Vec<Change>) {
     (timed, sent, changes)
 }
 
-pub fn inputs(dir: &Path, meta: &Value, top: usize, only: Option<&[String]>) -> Result<Output> {
+/// The lines an inputs view shows without `--top`.
+const SHOWN: usize = 100;
+
+/// `top`: the lines to show (`--top`; all of them are in `--json`), `SHOWN` when not asked.
+pub fn inputs(dir: &Path, meta: &Value, top: Option<usize>, only: Option<&[String]>) -> Result<Output> {
+    let top = top.unwrap_or(SHOWN);
     if dir.join("frames.json").is_file() && dir.join("presents.json.gz").is_file() {
         return from_presents(dir, top, only);
     }
@@ -80,6 +85,32 @@ pub fn inputs(dir: &Path, meta: &Value, top: usize, only: Option<&[String]>) -> 
     Err(Error::usage(
         "this recording has no inputs to show: they come from a block's OS presents (a native app's, or a headed page's where the OS tells them: frames.json and presents.json.gz) or a Chromium page's trace",
     ))
+}
+
+/// The first `top` of `lines`, and a line for the rest.
+fn first_lines(lines: &[String], top: usize) -> String {
+    let mut text: String = lines.iter().take(top).map(String::as_str).collect();
+    if lines.len() > top {
+        text += &format!("  … {} more (--top N shows more; --json lists every one)\n", lines.len() - top);
+    }
+    text
+}
+
+/// The runs an inputs view read, for its header: `in 5 measured runs`, and their range when the first
+/// is not `run:0` (the runs before it were warmup, or another case's with `--case`).
+fn runs_text<'a>(keys: impl Iterator<Item = &'a str>, case: bool) -> String {
+    let mut n: Vec<u64> = keys.filter_map(|k| k.strip_prefix("run:")?.parse().ok()).collect();
+    n.sort_unstable();
+    let count = n.len();
+    let plural = if count == 1 { "" } else { "s" };
+    match (n.first(), n.last()) {
+        (Some(&a), Some(&b)) if a > 0 => {
+            let range = if a == b { format!("run:{a}") } else { format!("run:{a}..run:{b}") };
+            let before = if case { format!("runs before run:{a} (warmup, other cases) left out") } else { format!("warmup before run:{a} left out") };
+            format!("in {count} measured run{plural} ({range}; {before})")
+        }
+        _ => format!("in {count} measured run{plural}"),
+    }
 }
 
 /// What an input was, for its line.
@@ -115,12 +146,12 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     let mut lines: Vec<String> = Vec::new();
     let (mut counts, mut whys): (BTreeMap<&str, usize>, BTreeMap<&str, usize>) = (BTreeMap::new(), BTreeMap::new());
     let mut needed: Vec<f64> = Vec::new();
-    let mut runs = 0usize;
     // Runs in time order (their keys sort as text: run:10 before run:2).
     let mut ordered: Vec<(&String, &Value)> = f["runs"].as_object().into_iter().flatten().filter(|(k, _)| only.is_none_or(|o| o.contains(k))).collect();
     ordered.sort_by_key(|(_, r)| r["t0_ns"].as_u64().unwrap_or(0));
+    let runs = ordered.len();
+    let runs_said = runs_text(ordered.iter().map(|(k, _)| k.as_str()), only.is_some());
     for (run, r) in ordered {
-        runs += 1;
         let (timed, sent, changes) = run_of(r);
         let got = frames::reactions(&sent, &changes, &p.presents, &pids, quiet);
         let outcome: BTreeMap<u64, Outcome> = got.each.iter().copied().collect();
@@ -218,20 +249,13 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     }
     let total = rows.len();
     let mut text = format!(
-        "inputs · {total} measured inputs in {runs} run{} · the app rests {} before an input counts (two refreshes{}) · {}\n",
-        if runs == 1 { "" } else { "s" },
+        "inputs · {total} measured inputs {runs_said} · the app rests {} before an input counts (two refreshes{}) · {}\n",
         fmt::value(quiet_ms, "ms"),
         refresh.map(|r| format!(" of {}", fmt::value(r, "ms"))).unwrap_or_else(|| ", refresh unknown: 60 Hz assumed".into()),
         counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
     );
     text += "  run      at (in run)  input          proved by       frames (screen time from the input; ^ begun before it)  outcome\n";
-    let shown_rows = total.min(top.max(100));
-    for l in lines.iter().take(shown_rows) {
-        text += l;
-    }
-    if total > shown_rows {
-        text += &format!("  … {} more (--json lists every one)\n", total - shown_rows);
-    }
+    text += &first_lines(&lines, top);
     needed.sort_by(f64::total_cmp);
     if !needed.is_empty() {
         text += &format!(
@@ -327,17 +351,10 @@ select 'frame', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'frame_reporter.stat
     }
     let total = rows.len();
     let mut text = format!(
-        "inputs · {total} input events in {} run{}, as Chromium's trace saw them (each event's latency to the frame that presented it; frames: presented, from the event)\n",
-        wins.len(),
-        if wins.len() == 1 { "" } else { "s" }
+        "inputs · {total} input events {}, as Chromium's trace saw them (each event's latency to the frame that presented it; frames: presented, from the event)\n",
+        runs_text(wins.keys().map(String::as_str), only.is_some())
     );
-    let shown = total.min(top.max(100));
-    for l in lines.iter().take(shown) {
-        text += l;
-    }
-    if total > shown {
-        text += &format!("  … {} more (--json lists every one)\n", total - shown);
-    }
+    text += &first_lines(&lines, top);
     if total == 0 {
         text += "  the trace holds no key, button, touch or scroll input in the measured runs' timed stretches\n";
     }
