@@ -129,6 +129,28 @@ The design and every rule behind this file: SPEC.md.
 
 - Host the server in a `script()` target. In `setup`, `await ctx.httpProbe({ url, authorization })`:
   strobe probes it every `cadenceMs` (100) from its own threads on fixed deadlines, `timeoutMs` 1000.
+  The whole runnable example (`server.ts` too): `node_modules/@hona/strobe/README.md`.
+
+```ts
+export default bench({
+  targets: { server: script("./server.ts") }, // exports start(tokenHash) and stall(ms)
+  async setup(ctx) {
+    const token = crypto.randomUUID() // the server gets its hash only
+    const hash = new Bun.CryptoHasher("sha256").update(`Bearer ${token}`).digest("hex")
+    const url = await ctx.call<string>("start", hash)
+    const expect = { jsonPath: { path: "$.status", equals: "ok" } }
+    await ctx.httpProbe({ url, authorization: `Bearer ${token}`, cadenceMs: 20, expect })
+  },
+  cases: {
+    "slow handler": {
+      primary: "http.latency.p95", // one 500 ms run: ~25 probes, enough for a p95 in a --check
+      metrics: ["cpu.main", "cpu.main.busy", "http.timeouts"],
+      run: (ctx) => ctx.call("stall", 500),
+    },
+  },
+})
+```
+
 - `record --bench <file>#<case>` (or `--check`, `--why always`): stacks, the threads' timeline and the
   probe on one recording. `query <rec> http`: idle against the runs, timeouts, errors and the stalled
   cohorts; `strobe open <rec>` draws the probes beside the runs and threads.

@@ -7,9 +7,9 @@ let server: ReturnType<typeof Bun.serve> | undefined
 
 const sha256 = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex")
 
-/** Starts the server; its address. */
-export function start() {
-  const expected = process.env.HTTP_PROBE_TOKEN_SHA256
+/** Starts the server; its address. The token's hash comes from the bench file (http-probe-example.bench.ts), else the environment. */
+export function start(tokenHash?: string) {
+  const expected = tokenHash ?? process.env.HTTP_PROBE_TOKEN_SHA256
   if (!expected) throw new Error("set HTTP_PROBE_TOKEN_SHA256 (http-probe-check.ts does)")
   server ??= Bun.serve({
     hostname: "127.0.0.1",

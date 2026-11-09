@@ -969,7 +969,11 @@ shared). `--once` prints one view and exits. Not built: the focused target's fra
   the CLI. The id sits in the executable behind a `strobe-build-id:` marker, so `up` and `update` read
   an installed copy's id without running it. `strobe --version` prints `strobe 0.6.0 (a1b2c3d4e5,
   build 0123456789abcdef)`, `/health` the daemon's id, `status` whether the daemon is this build, and
-  every bench's first line its version and commit. `--check` says what is installed and what is available. `--on all` (every mesh
+  every bench's first line its version and commit. The commit (`STROBE_COMMIT`) is read again whenever
+  HEAD moves: `build.rs` watches the checkout's `HEAD` and its log and, in the folder a linked
+  worktree shares (`git rev-parse --git-common-dir`), the branch HEAD names and `packed-refs`, so a
+  commit in a worktree, or a branch moved from another, stamps the next build (only paths that exist:
+  a missing one would rerun the script on every build). `--check` says what is installed and what is available. `--on all` (every mesh
   device) is not built. Without a version or `--from`, an installed copy newer than the release, or
   a local build of the same version (other bytes), stays, with a usage error that says so: an
   update once put 0.4.0 over the main build another session's bench used, which then failed on an
@@ -2401,6 +2405,14 @@ to the lateness allowed below of strobe's own lag never counts as the server's.
   or a wrong JSON answer is counted and refuses the latencies, and strobe's own scheduler held 400 ms
   (`STROBE_PROBE_PAUSE=<at_ms>,<for_ms>`, calibration only: holds it once) is missed sends with no
   timeout or error.
+- **Example.** The package README (`sdk/bench/README.md`) and the skill show a whole server bench:
+  a `script("./server.ts")` harness whose `start(tokenHash)` serves `/health` to the bearer token
+  with that SHA-256 only (the bench file makes the token in `setup` and passes the hash, so neither
+  the harness's heap nor an action's arguments hold it), `ctx.httpProbe({ url, authorization,
+  cadenceMs: 20, expect })`, and a case holding the server's thread 500 ms with `http.latency.p95`
+  as its primary beside `cpu.main` and `cpu.main.busy`: one run is about 25 probes, enough for a
+  p95 in a `--check`. `scripts/dev/http-probe-example.bench.ts` is that file, run against
+  `http-probe-server.ts`; its snippets type-check against the SDK (`tsc` with the SDK's types).
 
 ## 9. Experiments (`bench`)
 

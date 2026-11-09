@@ -97,7 +97,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "bench",
-        description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups; a series refused on its own (exit 4: its engine, an overhead budget) ends alone and the rest of the file runs. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
+        description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups; a series refused on its own (exit 4: its engine, an overhead budget) ends alone and the rest of the file runs. A server hosted in a script() target is probed from strobe's own threads when setup calls ctx.httpProbe({ url, authorization, expect }): declare http.latency.p95 or http.timeouts, and cpu.main for its main thread alone (the runnable example: node_modules/@hona/strobe/README.md). Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
         args: &[("file", "absolute path to the .bench.ts file (not with stop or resume)")],
         flags: &[
             (

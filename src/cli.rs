@@ -461,6 +461,9 @@ Use
         [--unlock-wait 2h]             (a series that needs a presenting window waits at most that long for an unlock, or on macOS for nobody to use the Mac)
         [--seed <n>]                   (ctx.seed and ctx.random(): replay a seeded workload; without it strobe draws one
                                         and prints it)
+        a server: host it in a script() target and probe it in setup, ctx.httpProbe({ url, authorization, expect });
+                                       declare http.latency.p95 or http.timeouts, cpu.main for its main thread (the
+                                       runnable example: node_modules/@hona/strobe/README.md)
         --filter: case names, comma-separated (or --filter given again); exact unless a name holds * (a glob)
         --base <target>[=<variant>] --head <target>[=<variant>]: two targets of the file compared (two
                                   implementations of one app); target:<name> when a folder or ref has that name

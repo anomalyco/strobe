@@ -36,10 +36,25 @@ fn main() {
     let git = |args: &[&str]| Command::new("git").args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     let commit = git(&["rev-parse", "--short=10", "HEAD"]).unwrap_or_default();
     println!("cargo:rustc-env=STROBE_COMMIT={commit}");
-    // Rebuild when HEAD moves: a commit, a checkout or a rebase writes the worktree's HEAD log.
+    // Rebuild when HEAD moves: a commit, a checkout or a rebase writes the worktree's HEAD and its log.
+    // A linked worktree's branch lives in the common folder (`refs/heads/<branch>`, or `packed-refs`
+    // once packed), which a commit or a fetch into the branch moves without this worktree's HEAD. A
+    // path that does not exist is left out: cargo would rerun this script on every build.
+    let watch = |path: String| {
+        if Path::new(&path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    };
     if let Some(dir) = git(&["rev-parse", "--git-dir"]) {
-        println!("cargo:rerun-if-changed={dir}/HEAD");
-        println!("cargo:rerun-if-changed={dir}/logs/HEAD");
+        watch(format!("{dir}/HEAD"));
+        watch(format!("{dir}/logs/HEAD"));
+    }
+    if let Some(common) = git(&["rev-parse", "--git-common-dir"]) {
+        if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+            watch(format!("{common}/{branch}"));
+            watch(format!("{common}/logs/{branch}"));
+        }
+        watch(format!("{common}/packed-refs"));
     }
     let mut files = Vec::new();
     for s in SOURCES {
