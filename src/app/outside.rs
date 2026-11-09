@@ -199,10 +199,18 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let snap0 = wakes::Snapshot::take(&pids_now());
     let timeline = wakes::Timeline::start(pids_now);
     let procs0 = (host::now_ns(), host::all_processes());
+    // The process's main thread (`cpu.main`): the thread it started with, still running.
+    let main = host::MainThread::attach(root);
+    let read_main = || -> std::result::Result<host::MainCpu, host::MainLost> { main.as_ref().map_err(Clone::clone)?.read() };
+    timeline.mark_edge();
     let (c0, tsc0, t0) = (cycles(), host::tsc(), host::now_ns());
+    // Read inside the window's edges: its share of the time between the two readings is `cpu.main.busy`.
+    let m0 = read_main();
     progress(format!("recording {name} ({root}) for {}", fmt::ms_duration(for_ms)));
     std::thread::sleep(Duration::from_millis(for_ms));
+    let m1 = read_main();
     let (c1, tsc1, t1) = (cycles(), host::tsc(), host::now_ns());
+    timeline.mark_edge();
     let screen = super::bench::screen_state(&procs0, &(host::now_ns(), host::all_processes()));
     let mut timeline = timeline.stop();
     timeline.marks.push(("recording".into(), t0, t1));
@@ -227,6 +235,17 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         values.insert("cpu.app.total".into(), 100.0 * used / (b - a) as f64);
         values.insert("cpu.work".into(), used / (b - a) as f64 * ms);
     }
+    let main_lost = match m0.and_then(|a| m1.map(|b| [a, b])) {
+        Ok(at) => match host::main_share(&at) {
+            Some(share) => {
+                values.insert("cpu.main".into(), share * ms);
+                values.insert("cpu.main.busy".into(), 100.0 * share);
+                None
+            }
+            None => Some(host::MainLost::Gone("the CPU clock gave no rate over the window".into())),
+        },
+        Err(lost) => Some(lost),
+    };
     if !span.threads.is_empty() {
         if span.uncounted.is_none() {
             values.insert("cpu.wakes".into(), span.wakes_per_s());
@@ -309,11 +328,17 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         }
     }
     wakes_refused(&span, &mut os_refused);
+    if let Some(lost) = &main_lost {
+        for m in ["cpu.main", "cpu.main.busy"] {
+            os_refused.insert(m.into(), json!(lost.refusal(m).message()));
+        }
+    }
     let meta = json!({
         "id": id, "kind": "record", "target": target, "pid": root, "process": name, "probes": "timing", "token": "", "duration_ms": for_ms,
         "env": host::env(), "values": values, "refused": os_refused, "os": os, "presents": session, "presents_refused": refused, "session_locked": session_locked, "ui_thread": ui_tid,
         "display_settings_hz": host::refresh_at(0, 0), "timing": "clean", "created": super::record::now_iso(), "valid": true, "screen": screen,
         "unpaced": unpaced.map(|(fps, hz)| json!({ "fps": fps, "hz": hz })), "threads_top": threads_top,
+        "main_thread": main.as_ref().ok().map(|m| m.tid),
     });
     store::write_json(&dir.join("meta.json"), &meta)?;
     draft.keep();
@@ -396,6 +421,9 @@ pub fn text(meta: &Value) -> String {
     }
     if get("cpu.app.total").is_finite() {
         s += &format!("cpu      {} of one core · {} in the window, process tree\n", fmt::value(get("cpu.app.total"), "%"), fmt::value(get("cpu.work"), "ms"));
+    }
+    if get("cpu.main").is_finite() {
+        s += &format!("main     {} busy · {} on a CPU, the thread the process started with\n", fmt::value(get("cpu.main.busy"), "%"), fmt::value(get("cpu.main"), "ms"));
     }
     if get("cpu.wakes").is_finite() {
         s += &format!("wakes    {} context switches of its threads\n", fmt::value(get("cpu.wakes"), "/s"));

@@ -430,6 +430,225 @@ pub fn thread_name(tid: u32) -> Option<String> {
     }
 }
 
+/// Why a process's main thread has no CPU reading (`MainThread`), typed so its refusal names the
+/// cause.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MainLost {
+    /// This OS, kernel or user gives no exact CPU count of another process's thread: refused
+    /// (`NotOnThisOs`), never read from clock ticks.
+    NotOnThisOs(String),
+    /// The thread or its process is gone, or none could be bound (`RunIncomplete`).
+    Gone(String),
+}
+
+impl MainLost {
+    /// The refusal of `metric` for it.
+    pub fn refusal(&self, metric: &str) -> crate::model::Refusal {
+        use crate::model::{Refusal, ValidatorId};
+        match self {
+            MainLost::NotOnThisOs(why) => Refusal::new(ValidatorId::NotOnThisOs, format!("{metric}: {why}")),
+            MainLost::Gone(why) => Refusal::new(ValidatorId::RunIncomplete, format!("{metric}: {why}")).fix("keep the process and its main thread running through the runs"),
+        }
+    }
+}
+
+/// One process's main thread (the thread it started with), bound to that thread for good: a reading
+/// is never of another thread that took its id. Reading it costs one system call (about 1 µs), so it
+/// is read at the edges of runs in clean timing blocks.
+///
+/// - Windows: a handle held open (a launch's suspended first thread, `NtGetNextThread`; a running
+///   process's oldest thread when it was created with the process, within 5 ms); its cycle counter
+///   (`QueryThreadCycleTime`), exact, refused where cycles are not time (`cycles_refused`).
+/// - Linux: the thread whose id is the pid, its `/proc/<pid>/task/<pid>/schedstat` and `stat` held
+///   open (the kernel answers an open file only for its own task); schedstat's first field, CPU ns,
+///   which the kernel adds at each switch and scheduler tick, so a thread on a CPU reads short by up to
+///   one tick (4 ms at 250 Hz: a busy share of 101% on a 2-vCPU VM). A reading of a running thread
+///   waits for its count to move (the next tick), exact then, so a reading is exact at its `at_ns`.
+///   A kernel without schedstat, or with tickless CPUs (`nohz_full`, where a busy thread's count
+///   moves once a second), is refused, never read from 10 ms clock ticks.
+/// - macOS: the lowest 64-bit thread id when it is bound (ids only grow), read by that id
+///   (`PROC_PIDTHREADID64INFO`), which no other thread ever gets.
+#[derive(Clone)]
+pub struct MainThread {
+    pub pid: u32,
+    /// Its id as strobe's views key threads (`ThreadInfo::tid`).
+    pub tid: u32,
+    #[cfg(windows)]
+    thread: std::sync::Arc<win::ThreadHandle>,
+    #[cfg(target_os = "linux")]
+    schedstat: std::sync::Arc<std::fs::File>,
+    #[cfg(target_os = "linux")]
+    stat: std::sync::Arc<std::fs::File>,
+    #[cfg(target_os = "macos")]
+    id: u64,
+}
+
+/// A main thread's CPU so far (`tsc` units: cycles on Windows, ns elsewhere), with the cycle clock
+/// and the host clock read right after it.
+#[derive(Clone, Copy, Debug)]
+pub struct MainCpu {
+    pub cpu: u64,
+    pub tsc: Option<u64>,
+    pub at_ns: u64,
+}
+
+impl MainThread {
+    /// The main thread of a running process strobe did not start suspended.
+    pub fn attach(pid: u32) -> Result<MainThread, MainLost> {
+        let gone = |why: String| MainLost::Gone(format!("process {pid}: {why}"));
+        #[cfg(windows)]
+        {
+            let create = start_time(pid).ok_or_else(|| gone("not running".into()))?;
+            let (threads, _) = win::threads(&[pid]);
+            let first = threads.iter().min_by_key(|t| t.born).ok_or_else(|| gone("has no threads".into()))?;
+            // Created with the process (as `probe::suspend` binds one): else its first thread exited and
+            // the oldest left is a worker, never the main thread.
+            if first.born.abs_diff(create) > 50_000 {
+                return Err(gone("the thread it started with has exited".into()));
+            }
+            let thread = win::ThreadHandle::open(pid, first.tid, first.born).ok_or_else(|| gone("its main thread could not be opened".into()))?;
+            Ok(MainThread::of_handle(pid, thread))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::FileExt;
+            let start = start_time(pid).ok_or_else(|| gone("not running".into()))?;
+            let file = match std::fs::File::open(format!("/proc/{pid}/task/{pid}/schedstat")) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && std::path::Path::new(&format!("/proc/{pid}/stat")).exists() => {
+                    return Err(MainLost::NotOnThisOs(
+                        "this kernel keeps no schedstat (CONFIG_SCHED_INFO): a thread's exact CPU time is not readable, and strobe never reads 10 ms clock ticks".into(),
+                    ));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Err(MainLost::NotOnThisOs(format!("process {pid}'s schedstat may not be read ({e}): /proc hides other users' processes")));
+                }
+                Err(e) => return Err(gone(format!("its main thread could not be read ({e})"))),
+            };
+            let stat = std::fs::File::open(format!("/proc/{pid}/task/{pid}/stat")).map_err(|e| gone(format!("its main thread could not be read ({e})")))?;
+            // Opened for the process that started then: a pid taken again in between is another one.
+            if start_time(pid) != Some(start) {
+                return Err(gone("exited".into()));
+            }
+            let tickless = std::fs::read_to_string("/sys/devices/system/cpu/nohz_full").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "(null)");
+            if let Some(cpus) = tickless {
+                return Err(MainLost::NotOnThisOs(format!("CPUs {cpus} are tickless (nohz_full): a busy thread's CPU count moves there once a second, so no reading of it is exact at a run's edge")));
+            }
+            let mut buf = [0u8; 96];
+            let n = file.read_at(&mut buf, 0).map_err(|e| gone(format!("its main thread could not be read ({e})")))?;
+            // A kernel that keeps no scheduler info answers "0 0 0" for a thread that has run (one that
+            // keeps it counts the thread's switches in at least once).
+            if std::str::from_utf8(&buf[..n]).unwrap_or("").split_whitespace().all(|f| f == "0") {
+                return Err(MainLost::NotOnThisOs(
+                    "this kernel keeps no scheduler info (schedstat reads 0): a thread's exact CPU time is not readable, and strobe never reads 10 ms clock ticks".into(),
+                ));
+            }
+            Ok(MainThread { pid, tid: pid, schedstat: std::sync::Arc::new(file), stat: std::sync::Arc::new(stat) })
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = gone;
+            let id = macos::first_thread_id(pid).map_err(|e| macos_lost(pid, e))?;
+            Ok(MainThread { pid, tid: macos::short_tid(id), id })
+        }
+    }
+
+    /// The first thread of a process strobe created suspended (Windows).
+    #[cfg(windows)]
+    pub fn of_handle(pid: u32, thread: win::ThreadHandle) -> MainThread {
+        MainThread { pid, tid: thread.tid, thread: std::sync::Arc::new(thread) }
+    }
+
+    /// Its CPU so far, with the clocks. An exited thread is gone.
+    pub fn read(&self) -> Result<MainCpu, MainLost> {
+        let gone = || MainLost::Gone(format!("process {}'s main thread ended", self.pid));
+        #[cfg(windows)]
+        let cpu = {
+            if let Some(why) = cycles_refused() {
+                return Err(MainLost::NotOnThisOs(format!("{why} (thread times move in 15.6 ms ticks, too coarse to use)")));
+            }
+            if self.thread.exited() {
+                return Err(gone());
+            }
+            self.thread.cycles().ok_or_else(gone)?
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let (cpu, at_ns) = self.exact().ok_or_else(gone)?;
+            Ok(MainCpu { cpu, tsc: Some(at_ns), at_ns })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            #[cfg(target_os = "macos")]
+            let cpu = {
+                let _ = gone;
+                macos::thread_cpu(self.pid, self.id).map_err(|e| macos_lost(self.pid, e))?
+            };
+            Ok(MainCpu { cpu, tsc: tsc(), at_ns: now_ns() })
+        }
+    }
+
+    /// Linux: its CPU ns and the moment that count is exact at. A thread not on a CPU was counted
+    /// when it left one: exact now. One that is running (state R) is read again every 50 µs until its
+    /// count moves, at its CPU's next tick, and is exact then (within the 50 µs); a count that does not
+    /// move in 25 ms (two ticks at 100 Hz) is of a thread waiting for a CPU, exact all along.
+    #[cfg(target_os = "linux")]
+    fn exact(&self) -> Option<(u64, u64)> {
+        use std::os::unix::fs::FileExt;
+        let read = |f: &std::fs::File, buf: &mut [u8]| -> Option<usize> { f.read_at(buf, 0).ok().filter(|n| *n > 0) };
+        let mut buf = [0u8; 512];
+        let cpu = |buf: &mut [u8]| -> Option<u64> {
+            let n = read(&self.schedstat, buf)?;
+            std::str::from_utf8(&buf[..n]).ok()?.split_whitespace().next()?.parse::<u64>().ok()
+        };
+        let first = cpu(&mut buf)?;
+        let at = now_ns();
+        let n = read(&self.stat, &mut buf)?;
+        let running = std::str::from_utf8(&buf[..n]).ok()?.rsplit_once(')')?.1.split_whitespace().next() == Some("R");
+        if !running {
+            return Some((first, at));
+        }
+        let until = at + 25_000_000;
+        loop {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            let c = cpu(&mut buf)?;
+            let now = now_ns();
+            if c != first {
+                return Some((c, now));
+            }
+            if now > until {
+                return Some((first, at));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_lost(pid: u32, errno: i32) -> MainLost {
+    match errno {
+        libc::EPERM | libc::EINVAL => MainLost::NotOnThisOs(format!("macOS lets strobe read no thread of process {pid} ({})", std::io::Error::from_raw_os_error(errno))),
+        _ => MainLost::Gone(format!("process {pid}'s main thread ended")),
+    }
+}
+
+/// The share of its time a main thread was on a CPU (0 to 1) over a run's timed parts: `at` its
+/// readings at the run's start, at each untimed stretch's start and end, and at its end, so each pair
+/// is one timed part, over the time between the pair's own readings (each exact at its `at_ns`; on
+/// Linux up to a tick past the run's edge, `MainThread::read`); cycles to ns at the cycle clock's
+/// rate from the first reading to the last. `cpu.main` is it times the run's timed time. None
+/// without a rate or a pair.
+pub fn main_share(at: &[MainCpu]) -> Option<f64> {
+    let (first, last) = (at.first()?, at.last()?);
+    let (t0, t1) = (first.tsc?, last.tsc?);
+    if at.len() % 2 == 1 || t1 <= t0 || last.at_ns <= first.at_ns {
+        return None;
+    }
+    let per_ns = (t1 - t0) as f64 / (last.at_ns - first.at_ns) as f64;
+    let cpu: u64 = at.chunks(2).map(|p| p[1].cpu.saturating_sub(p[0].cpu)).sum();
+    let span: u64 = at.chunks(2).map(|p| p[1].at_ns.saturating_sub(p[0].at_ns)).sum();
+    (span > 0).then(|| cpu as f64 / per_ns / span as f64)
+}
+
 /// A top-level window: its screen rect (x, y, width, height) and client size in physical pixels, its
 /// DPI, and whether a person could see it (visible, not minimized, not cloaked by the compositor).
 #[derive(Clone, Debug, Default, Serialize)]
@@ -1001,6 +1220,27 @@ pub fn cycles_refused() -> Option<String> {
         cycle_clock::clock().unit.as_ref().err().map(|why| format!("{os}: {why}"))
     }
     #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Why threads' CPU cannot be read here as exact time, so a per-thread view of it is refused rather
+/// than read from clock ticks: Windows where cycles are not time (`cycles_refused`), a Linux kernel
+/// without schedstat (strobe's own thread reads 0 there). None where it can.
+pub fn thread_cpu_refused() -> Option<String> {
+    #[cfg(windows)]
+    {
+        cycles_refused()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // "0 0 0" where the kernel keeps none. Kept, the calling thread has been switched in (a count of
+        // at least 1), though its CPU may still read 0 (it is added at switches and ticks).
+        let kept = std::fs::read_to_string("/proc/thread-self/schedstat").ok().is_some_and(|s| s.split_whitespace().any(|f| f != "0"));
+        (!kept).then(|| "this kernel keeps no schedstat (CONFIG_SCHED_INFO): a thread's exact CPU time is not readable, and strobe never reads 10 ms clock ticks".to_string())
+    }
+    #[cfg(target_os = "macos")]
     {
         None
     }

@@ -148,6 +148,8 @@ pub struct Owned {
     /// The child's start time, read at the launch: what roots its leftovers once it exited (macOS
     /// gives no information of an exited, unreaped process).
     start: Option<u64>,
+    /// The child's main thread, bound at the launch (Windows: before it first ran).
+    main: Result<super::MainThread, super::MainLost>,
     #[cfg(windows)]
     started: Started,
     /// Windows: the OS creating the process (`CreateProcessW`), apart from strobe's setup of it.
@@ -339,6 +341,11 @@ impl Owned {
         {
             None
         }
+    }
+
+    /// The child's main thread (`super::MainThread`), bound when it was launched.
+    pub fn main_thread(&self) -> Result<super::MainThread, super::MainLost> {
+        self.main.clone()
     }
 
     /// The child's output pipes, when it was started with them.
@@ -851,7 +858,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
     #[cfg(windows)]
     {
         let job = new_job();
-        let (child, assigned, started, spawned) = match windows(cmd, cpus, flags, job) {
+        let (child, assigned, started, spawned, first) = match windows(cmd, cpus, flags, job) {
             Ok(x) => x,
             Err(e) => {
                 if let Some(j) = job {
@@ -871,7 +878,11 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         if let Some(j) = job {
             JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((child.id(), home.map(home_key), j));
         }
-        Ok(Owned { child, group: Some(Group { job }), unattributed: None, start: None, started, spawned })
+        let main = match first {
+            Some(t) => Ok(super::MainThread::of_handle(child.id(), t)),
+            None => super::MainThread::attach(child.id()),
+        };
+        Ok(Owned { child, group: Some(Group { job }), unattributed: None, start: None, main, started, spawned })
     }
     #[cfg(not(windows))]
     {
@@ -901,6 +912,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
             group: Some(Group { pgid }),
             unattributed,
             start: super::start_time(pgid),
+            main: super::MainThread::attach(pgid),
             #[cfg(target_os = "linux")]
             floor,
             #[cfg(target_os = "linux")]
@@ -964,6 +976,7 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
         group: Some(Group { pgid }),
         unattributed: None,
         start,
+        main: super::MainThread::attach(pgid),
         #[cfg(target_os = "linux")]
         floor,
         #[cfg(target_os = "linux")]
@@ -1041,10 +1054,11 @@ fn nt_resume() -> Option<unsafe extern "system" fn(*mut std::ffi::c_void) -> i32
 }
 
 /// Created suspended, put in `job` and given the mask, then resumed: its first instruction already
-/// runs there. Returns whether the job took it, the clocks just before it ran, and the OS's creation
-/// of it (`Spawned`). A child with neither runs from its creation: its clocks are read right after it.
+/// runs there. Returns whether the job took it, the clocks just before it ran, the OS's creation
+/// of it (`Spawned`), and its first thread, held open before it ran (its main thread). A child with
+/// neither runs from its creation: its clocks are read right after it, and it has no thread held.
 #[cfg(windows)]
-fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>) -> std::io::Result<(Child, bool, Started, Spawned)> {
+fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>) -> std::io::Result<(Child, bool, Started, Spawned, Option<super::win::ThreadHandle>)> {
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -1053,7 +1067,7 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
     let clocks = || (super::tsc(), std::time::Instant::now());
     if cpus.is_none() && job.is_none() {
         let (child, spawned) = Spawned::around(|| cmd.creation_flags(flags).spawn());
-        return Ok((child?, false, clocks(), spawned));
+        return Ok((child?, false, clocks(), spawned, None));
     }
     let (child, spawned) = Spawned::around(|| cmd.creation_flags(flags | CREATE_SUSPENDED).spawn());
     let mut child = child?;
@@ -1076,6 +1090,9 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
                 }
             }
         }
+        // Its one thread, the main thread, held before it runs: no thread of its own can be mistaken
+        // for it.
+        let first = super::win::ThreadHandle::first_of(h as isize);
         // A process created suspended has its one thread: resume it. `NtResumeProcess` takes
         // microseconds, where a system-wide thread snapshot to find that thread took milliseconds,
         // which a launch's time would count.
@@ -1103,6 +1120,6 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
             let _ = child.wait();
             return Err(std::io::Error::other("could not resume the child"));
         }
-        Ok((child, assigned, started, spawned))
+        Ok((child, assigned, started, spawned, first))
     }
 }

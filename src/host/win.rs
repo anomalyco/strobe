@@ -1424,6 +1424,77 @@ pub fn thread_cycles_of(tid: u32) -> Option<u64> {
     }
 }
 
+/// What strobe opens a thread it follows with: its counters and whether it ended.
+const THREAD_READ: u32 = windows_sys::Win32::System::Threading::THREAD_QUERY_LIMITED_INFORMATION | windows_sys::Win32::System::Threading::THREAD_SYNCHRONIZE;
+
+/// One thread held open, closed when dropped: while it is held its id names no other thread, so
+/// every reading is of the thread it was opened for.
+pub struct ThreadHandle {
+    handle: isize,
+    pub tid: u32,
+}
+
+// A kernel handle: any thread may query it.
+unsafe impl Send for ThreadHandle {}
+unsafe impl Sync for ThreadHandle {}
+
+impl ThreadHandle {
+    /// Thread `tid` of process `pid`, when it is still the thread created at `born` (100 ns units, as
+    /// a snapshot gives it; 0: unknown, not checked).
+    pub fn open(pid: u32, tid: u32, born: u64) -> Option<ThreadHandle> {
+        use windows_sys::Win32::System::Threading::{GetProcessIdOfThread, GetThreadTimes, OpenThread};
+        let h = unsafe { OpenThread(THREAD_READ, 0, tid) };
+        if h.is_null() {
+            return None;
+        }
+        let t = ThreadHandle { handle: h as isize, tid };
+        let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = unsafe { (zeroed(), zeroed(), zeroed(), zeroed()) };
+        let created = (unsafe { GetThreadTimes(h, &mut c, &mut e, &mut k, &mut u) } != 0).then_some((c.dwHighDateTime as u64) << 32 | c.dwLowDateTime as u64);
+        (unsafe { GetProcessIdOfThread(h) } == pid && (born == 0 || created == Some(born))).then_some(t)
+    }
+
+    /// The first thread of a process created suspended (`NtGetNextThread` on its handle `process`): its
+    /// only thread, the one it starts with.
+    pub fn first_of(process: isize) -> Option<ThreadHandle> {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        use windows_sys::Win32::System::Threading::GetThreadId;
+        type Next = unsafe extern "system" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, u32, u32, u32, *mut *mut std::ffi::c_void) -> i32;
+        static F: OnceLock<Option<Next>> = OnceLock::new();
+        let next = (*F.get_or_init(|| {
+            let ntdll: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+            let f = unsafe { GetProcAddress(GetModuleHandleW(ntdll.as_ptr()), c"NtGetNextThread".as_ptr() as *const u8) }?;
+            Some(unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, Next>(f) })
+        }))?;
+        let mut h: *mut std::ffi::c_void = std::ptr::null_mut();
+        if unsafe { next(process as _, std::ptr::null_mut(), THREAD_READ, 0, 0, &mut h) } < 0 || h.is_null() {
+            return None;
+        }
+        let tid = unsafe { GetThreadId(h) };
+        Some(ThreadHandle { handle: h as isize, tid })
+    }
+
+    /// Its CPU cycles so far (`super::tsc` units), exact: a running thread's count includes its
+    /// current quantum. An exited thread keeps its last count.
+    pub fn cycles(&self) -> Option<u64> {
+        use windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime;
+        let mut c = 0u64;
+        (unsafe { QueryThreadCycleTime(self.handle as _, &mut c) } != 0).then_some(c)
+    }
+
+    /// Whether the thread has ended (its handle is signaled).
+    pub fn exited(&self) -> bool {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        unsafe { WaitForSingleObject(self.handle as _, 0) == WAIT_OBJECT_0 }
+    }
+}
+
+impl Drop for ThreadHandle {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.handle as _) };
+    }
+}
+
 /// The loaded modules of a process: (base, size, path).
 fn process_modules(pid: u32) -> Vec<(u64, u64, String)> {
     use windows_sys::Win32::System::ProcessStatus::{K32EnumProcessModulesEx, K32GetModuleFileNameExW, K32GetModuleInformation, LIST_MODULES_ALL, MODULEINFO};

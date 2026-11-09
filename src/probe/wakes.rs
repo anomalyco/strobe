@@ -176,8 +176,11 @@ pub struct TimelineThread {
 }
 
 /// What a timeline sampler saw. `cells` are (tick, thread, CPU ms, wakes) for the ticks a thread ran
-/// in, CPU from the thread's kernel and user times (Windows counts them in clock ticks of 15.6 ms:
-/// within a few percent over a second); tick `i` covers `(ticks[i - 1], ticks[i]]` (tick 0 from `t0_ns`). A thread's CPU between its
+/// in; tick `i` covers `(ticks[i - 1], ticks[i]]` (tick 0 from `t0_ns`): a second, or less where a
+/// run's edge took a tick (`Timeline::mark_edge`), or more where the sampler was late (spread it over
+/// the time it covers: `binned`). CPU is exact: Windows' from each thread's cycle counter (a handle
+/// held while the thread lives, so a thread that exits between two ticks keeps its last CPU), Linux's
+/// from schedstat, macOS's from the thread's own times. On Linux and macOS a thread's CPU between its
 /// last sighting and its exit is not in it (at most one interval).
 #[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
 pub struct TimelineData {
@@ -191,38 +194,156 @@ pub struct TimelineData {
     /// Spans to show on it (name, start, end), when the recording keeps no runs of its own.
     #[serde(default)]
     pub marks: Vec<(String, u64, u64)>,
+    /// Why no thread's CPU is in it (`host::thread_cpu_refused`): the cells hold wakes only. From
+    /// this strobe on; an older timeline read Windows' CPU from 15.6 ms clock ticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_refused: Option<String>,
+    /// Threads (indexes into `threads`) whose CPU could not be read (Windows: one strobe may not open):
+    /// their cells hold wakes only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_unknown: Vec<u32>,
+}
+
+impl TimelineData {
+    /// Each thread's CPU (ms) and wakes in `cols` columns of `bin_ns` from `t0_ns`: a tick's counts
+    /// spread over the columns its span covers, in proportion to the overlap, so a tick that came late
+    /// (2.6 s instead of 1) fills each second it covers rather than one column at its middle (a 0% gap
+    /// beside a 260% spike). What lies past the last column goes into it.
+    pub fn binned(&self, bin_ns: u64, cols: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let cols = cols.max(1);
+        let bin = bin_ns.max(1) as f64;
+        let n = self.threads.len();
+        let (mut cpu, mut wakes) = (vec![vec![0.0f64; cols]; n], vec![vec![0.0f64; cols]; n]);
+        // Each tick's share of each column it covers.
+        let shares: Vec<Vec<(usize, f64)>> = (0..self.ticks.len())
+            .map(|i| {
+                let from = if i == 0 { self.t0_ns } else { self.ticks[i - 1] };
+                let (a, b) = (from.saturating_sub(self.t0_ns) as f64, self.ticks[i].saturating_sub(self.t0_ns) as f64);
+                let col = |x: f64| ((x / bin) as usize).min(cols - 1);
+                if b <= a {
+                    return vec![(col(b), 1.0)];
+                }
+                let mut out: Vec<(usize, f64)> = Vec::new();
+                for c in (a / bin) as usize..=((b / bin) as usize) {
+                    let overlap = ((c + 1) as f64 * bin).min(b) - (c as f64 * bin).max(a);
+                    if overlap > 0.0 {
+                        let c = c.min(cols - 1);
+                        match out.last_mut() {
+                            Some(last) if last.0 == c => last.1 += overlap / (b - a),
+                            _ => out.push((c, overlap / (b - a))),
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+        for &(tick, th, ms, w) in &self.cells {
+            for &(c, share) in shares.get(tick as usize).into_iter().flatten() {
+                cpu[th as usize][c] += ms as f64 * share;
+                wakes[th as usize][c] += w as f64 * share;
+            }
+        }
+        (cpu, wakes)
+    }
+}
+
+/// What the sampler is told: take a tick now (a run's edge), or a last one and stop.
+enum Tick {
+    Edge,
+    Stop,
 }
 
 /// Samples a process set's threads on a background thread until `stop`.
 pub struct Timeline {
-    stop: std::sync::mpsc::Sender<()>,
+    tell: std::sync::mpsc::Sender<Tick>,
     thread: std::thread::JoinHandle<TimelineData>,
+}
+
+/// One thread at a tick: when it started, its context switches, and its CPU so far (ns; Windows:
+/// cycles), None where it cannot be read.
+type TickThreads = BTreeMap<(u32, u32), (u64, Option<u64>, Option<u64>)>;
+
+/// A thread that ended since the last tick: (pid, tid), when it started, its last CPU (`TickThreads`'
+/// units).
+type Ended = ((u32, u32), u64, u64);
+
+/// Dev only: the sampler sleeps this long before its second tick (`STROBE_DEV_TIMELINE_STALL_MS`), a
+/// late tick to check `binned` with (`scripts/dev/main-thread.bench.ts`).
+fn dev_stall() -> Option<std::time::Duration> {
+    std::env::var("STROBE_DEV_TIMELINE_STALL_MS").ok()?.parse::<u64>().ok().filter(|ms| *ms > 0).map(std::time::Duration::from_millis)
 }
 
 impl Timeline {
     /// `pids` names the processes at each tick (a tree and what runs from its home).
     pub fn start(pids: impl Fn() -> Vec<u32> + Send + 'static) -> Timeline {
-        let (stop, rx) = std::sync::mpsc::channel::<()>();
+        let (tell, rx) = std::sync::mpsc::channel::<Tick>();
         let thread = std::thread::Builder::new()
             .name("strobe-timeline".into())
             .spawn(move || {
                 let (k0, tsc0, ns0) = (host::thread_cycles(), host::tsc(), host::now_ns());
-                // One system snapshot a tick, its threads' context switches and CPU time (no handle per
-                // thread: the cycle counters cost more than the snapshot). Which processes: read again
-                // every few ticks (finding what runs from a home opens every process).
-                type Threads = BTreeMap<(u32, u32), (u64, Option<u64>, u64)>;
-                let read = |set: &[u32]| -> (u64, Threads) {
+                let refused = host::thread_cpu_refused();
+                // Windows: each thread held open from its first sighting, its cycle counter read at each
+                // tick (the snapshot's times move in 15.6 ms clock ticks).
+                #[cfg(windows)]
+                let held: std::cell::RefCell<std::collections::HashMap<(u32, u32), (u64, host::win::ThreadHandle)>> = Default::default();
+                // One system snapshot a tick, its threads' context switches and CPU. Which processes: read
+                // again every few ticks (finding what runs from a home opens every process).
+                // Also the threads that ended since the last tick, with their last CPU where it is kept
+                // (Windows: the handle held keeps it).
+                let read = |set: &[u32]| -> (u64, TickThreads, Vec<Ended>) {
                     let mut sorted = set.to_vec();
                     sorted.sort_unstable();
                     sorted.dedup();
                     let at = host::now_ns();
-                    (at, host::threads(&sorted).0.into_iter().map(|t| ((t.pid, t.tid), (t.born, t.switches, t.cpu_ns))).collect())
+                    let threads = host::threads(&sorted).0;
+                    #[cfg(not(windows))]
+                    let ended = Vec::new();
+                    #[cfg(windows)]
+                    let mut ended = Vec::new();
+                    #[cfg(windows)]
+                    let threads: TickThreads = {
+                        let mut held = held.borrow_mut();
+                        held.retain(|k, (born, h)| {
+                            let alive = threads.iter().any(|t| (t.pid, t.tid) == *k && t.born == *born);
+                            if !alive && let Some(c) = h.cycles() {
+                                ended.push((*k, *born, c));
+                            }
+                            alive
+                        });
+                        threads
+                            .into_iter()
+                            .map(|t| {
+                                let cycles = match (&refused, held.get(&(t.pid, t.tid))) {
+                                    (Some(_), _) => None,
+                                    (None, Some((_, h))) => h.cycles(),
+                                    (None, None) => host::win::ThreadHandle::open(t.pid, t.tid, t.born).and_then(|h| {
+                                        let c = h.cycles();
+                                        held.insert((t.pid, t.tid), (t.born, h));
+                                        c
+                                    }),
+                                };
+                                ((t.pid, t.tid), (t.born, t.switches, cycles))
+                            })
+                            .collect()
+                    };
+                    #[cfg(not(windows))]
+                    let threads: TickThreads = threads.into_iter().map(|t| ((t.pid, t.tid), (t.born, t.switches, refused.is_none().then_some(t.cpu_ns)))).collect();
+                    (at, threads, ended)
                 };
                 let mut set = pids();
-                let (t0, mut prev) = read(&set);
-                let mut out = TimelineData { t0_ns: t0, interval_ms: TIMELINE_EVERY.as_millis() as u64, ..TimelineData::default() };
+                let (t0, mut prev, _) = read(&set);
+                let mut out = TimelineData { t0_ns: t0, interval_ms: TIMELINE_EVERY.as_millis() as u64, cpu_refused: refused.clone(), ..TimelineData::default() };
+                // CPU units to ms: Windows' cycles at the cycle clock's rate since the start, ns elsewhere.
+                let to_ms = |units: u64| -> f64 {
+                    if cfg!(windows) {
+                        let rate = tsc0.zip(host::tsc()).map(|(a, b)| b.saturating_sub(a) as f64 / (host::now_ns().saturating_sub(ns0) as f64 / 1e6)).filter(|r| *r > 0.0);
+                        rate.map_or(f64::NAN, |r| units as f64 / r)
+                    } else {
+                        units as f64 / 1e6
+                    }
+                };
                 let mut index: BTreeMap<(u32, u32), u32> = BTreeMap::new();
-                let mut seen = |out: &mut TimelineData, at: u64, threads: &Threads| {
+                let mut seen = |out: &mut TimelineData, at: u64, threads: &TickThreads| {
                     let mut new = Vec::new();
                     for &(pid, tid) in threads.keys() {
                         let i = *index.entry((pid, tid)).or_insert_with(|| {
@@ -241,43 +362,92 @@ impl Timeline {
                     index.clone()
                 };
                 seen(&mut out, t0, &prev);
+                let mut unknown: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+                // Ticks on a grid of a second from the start; a run's edge takes one in between.
+                let mut due = std::time::Instant::now() + TIMELINE_EVERY;
+                let mut stall = dev_stall();
                 loop {
-                    if !matches!(rx.recv_timeout(TIMELINE_EVERY), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
-                        break;
-                    }
+                    let last = match rx.recv_timeout(due.saturating_duration_since(std::time::Instant::now())) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if out.ticks.len() == 1
+                                && let Some(d) = stall.take()
+                            {
+                                std::thread::sleep(d);
+                            }
+                            // A late tick (a busy machine) covers the time since the last; the next keeps the grid.
+                            let now = std::time::Instant::now();
+                            while due <= now {
+                                due += TIMELINE_EVERY;
+                            }
+                            false
+                        }
+                        Ok(Tick::Edge) => false,
+                        Ok(Tick::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                    };
                     let tick = out.ticks.len() as u32;
                     if tick % 5 == 4 {
                         set = pids();
                     }
-                    let (at, now) = read(&set);
+                    let (at, now, ended) = read(&set);
                     let index = seen(&mut out, at, &now);
-                    for (key, &(born, switches, cpu_ns)) in &now {
+                    for (key, &(born, switches, cpu)) in &now {
                         // A thread born in the tick (new, or under a reused id) counts from zero; a count the
                         // OS stopped keeping adds no wakes.
                         // Where a start is unknown (0), a count below the earlier one is the new thread.
-                        let same = |p: &&(u64, Option<u64>, u64)| {
-                            if born != 0 && p.0 != 0 { p.0 == born } else { p.1.zip(switches).is_none_or(|(s0, s)| s0 <= s) && p.2 <= cpu_ns }
+                        let same = |p: &&(u64, Option<u64>, Option<u64>)| {
+                            if born != 0 && p.0 != 0 { p.0 == born } else { p.1.zip(switches).is_none_or(|(s0, s)| s0 <= s) && p.2.zip(cpu).is_none_or(|(c0, c)| c0 <= c) }
                         };
-                        let (s0, c0) = prev.get(key).filter(same).map_or((Some(0), 0), |p| (p.1, p.2));
+                        let (s0, c0) = prev.get(key).filter(same).map_or((Some(0), Some(0)), |p| (p.1, p.2));
                         let wakes = switches.zip(s0).map_or(0, |(s, s0)| host::switches_since(s0, s)).min(u64::from(u32::MAX)) as u32;
-                        let cpu = cpu_ns.saturating_sub(c0) as f64 / 1e6;
-                        if wakes > 0 || cpu > 0.0 {
-                            out.cells.push((tick, index[key], cpu as f32, wakes));
+                        let ms = match cpu.zip(c0) {
+                            Some((c, c0)) => to_ms(c.saturating_sub(c0)),
+                            None => {
+                                if refused.is_none() {
+                                    unknown.insert(index[key]);
+                                }
+                                0.0
+                            }
+                        };
+                        if wakes > 0 || ms > 0.0 {
+                            out.cells.push((tick, index[key], ms as f32, wakes));
+                        }
+                    }
+                    // A thread that ended since the last tick: what it ran after that tick, from the count it
+                    // left (no wakes: the snapshot no longer lists it).
+                    for (key, born, c) in ended {
+                        if let (Some(&i), Some(&(b0, _, Some(c0)))) = (index.get(&key), prev.get(&key))
+                            && b0 == born
+                        {
+                            let ms = to_ms(c.saturating_sub(c0));
+                            if ms > 0.0 {
+                                out.cells.push((tick, i, ms as f32, 0));
+                            }
                         }
                     }
                     out.ticks.push(at);
                     prev = now;
+                    if last {
+                        break;
+                    }
                 }
+                out.cpu_unknown = unknown.into_iter().collect();
                 let hz = tsc0.zip(host::tsc()).map(|(a, b)| (b - a) as f64 / ((host::now_ns() - ns0) as f64 / 1e9)).filter(|&hz| hz > 0.0 && k0 > 0);
                 out.cpu_ms = hz.map(|hz| (host::thread_cycles() - k0) as f64 / hz * 1e3);
                 out
             })
             .expect("spawn the timeline thread");
-        Timeline { stop, thread }
+        Timeline { tell, thread }
     }
 
+    /// A run's edge now (its start or its end): the sampler takes a tick at once, so no tick spans
+    /// both sides of it and a run's CPU stays in the run's columns. Costs the caller a channel send.
+    pub fn mark_edge(&self) {
+        let _ = self.tell.send(Tick::Edge);
+    }
+
+    /// The last tick (from the one before to now), then what it saw.
     pub fn stop(self) -> TimelineData {
-        let _ = self.stop.send(());
+        let _ = self.tell.send(Tick::Stop);
         self.thread.join().unwrap_or_default()
     }
 }

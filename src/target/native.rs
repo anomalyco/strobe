@@ -96,6 +96,11 @@ impl Native {
         self.child.as_ref()?.own_cycles()
     }
 
+    /// The launched process's main thread (`Owned::main_thread`).
+    pub fn main_thread(&self) -> std::result::Result<host::MainThread, host::MainLost> {
+        self.child.as_ref().ok_or_else(|| host::MainLost::Gone("the launch has ended".into()))?.main_thread()
+    }
+
     /// The process's exit code, once it has exited (it is not reaped before `close`).
     pub fn exited(&mut self) -> Option<i32> {
         self.child.as_mut()?.exited()

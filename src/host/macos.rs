@@ -727,6 +727,25 @@ fn known_thread(tid: u32) -> Option<(u32, u64)> {
     THREADS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.get(&tid).copied()
 }
 
+/// The thread a process started with: thread ids only grow, so its lowest is the oldest (a later one
+/// when that thread exited). Err: `proc_pidinfo`'s errno (ESRCH: no such process; EPERM: another
+/// user's).
+pub fn first_thread_id(pid: u32) -> Result<u64, i32> {
+    thread_ids(pid).into_iter().min().ok_or_else(|| std::io::Error::last_os_error().raw_os_error().filter(|e| *e != 0).unwrap_or(libc::ESRCH))
+}
+
+/// One thread's CPU ns (µs resolution) by its process and 64-bit id. Err: `proc_pidinfo`'s errno
+/// (ESRCH: the thread or its process is gone).
+pub fn thread_cpu(pid: u32, id: u64) -> Result<u64, i32> {
+    let mut t: libc::proc_threadinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_threadinfo>() as i32;
+    if unsafe { libc::proc_pidinfo(pid as i32, PROC_PIDTHREADID64INFO, id, &mut t as *mut _ as *mut c_void, size) } == size {
+        Ok(t.pth_user_time + t.pth_system_time)
+    } else {
+        Err(std::io::Error::last_os_error().raw_os_error().filter(|e| *e != 0).unwrap_or(libc::ESRCH))
+    }
+}
+
 /// A thread's CPU ns (µs resolution), for a thread the last `threads` call listed.
 pub fn thread_cycles_of(tid: u32) -> Option<u64> {
     let (pid, id) = known_thread(tid)?;

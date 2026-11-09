@@ -104,6 +104,9 @@ struct Run {
     /// Its timed time and CPU (ms), without its untimed stretches.
     ms: f64,
     cpu: f64,
+    /// The share of the same timed parts the launched process's main thread was on a CPU
+    /// (`host::main_share`; `cpu.main` is it times `ms`), or why it has none.
+    main: std::result::Result<f64, host::MainLost>,
     /// Its whole span's CPU (ms), untimed stretches too: what other work on its CPUs is told apart from.
     cpu_whole: f64,
     /// A process of the app's set ended in a timed part of the run (a launcher, a helper) and what it
@@ -198,7 +201,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         wakes::Timeline::start(move || host::process_set(root, Some(&dir)).iter().map(|p| p.pid).collect())
     });
     let mut steps = vec![("launch".to_string(), launched.elapsed().as_secs_f64() * 1e3)];
-    let result = runs(ctx, cases, v, pair, x, &target, &app, &home, &mut n, &guard, &drive, &mut steps, ratio);
+    let result = runs(ctx, cases, v, pair, x, &target, &app, &home, &mut n, &guard, &drive, &mut steps, ratio, timeline.as_ref());
     if let (Some(t), Ok(l)) = (timeline, &result) {
         let t = t.stop();
         if let Some(dir) = l.recordings().first().and_then(|id| store::resolve(id).ok()) {
@@ -277,6 +280,7 @@ fn runs(
     drive: &Drive,
     steps: &mut Vec<(String, f64)>,
     ratio: Option<f64>,
+    timeline: Option<&wakes::Timeline>,
 ) -> Result<Launch> {
     let s = &cases[0];
     let batch = ctx.batch.is_some();
@@ -350,10 +354,17 @@ fn runs(
     // The run's untimed stretches: the app's cycles and threads at each edge, read inside the stretch
     // (`Hooks::untimed`), and strobe's reads of its tree before the first (those inside one are not the run's).
     let edges: RefCell<Vec<Edge>> = RefCell::new(Vec::new());
+    // The launched process's main thread (`cpu.main`), read at each edge of a run's timed parts: one
+    // system call, so clean timing blocks read it too.
+    let main_thread = n.main_thread();
+    let main_read = || -> std::result::Result<host::MainCpu, host::MainLost> { main_thread.as_ref().map_err(Clone::clone)?.read() };
+    let main_edges: RefCell<Vec<std::result::Result<host::MainCpu, host::MainLost>>> = RefCell::new(Vec::new());
     let reads_before = Cell::new((0u64, 0.0f64));
     let pixels_before = Cell::new((0u64, 0.0f64, 0.0f64));
     let edge = |start: bool| {
         if start {
+            // The main thread first at a stretch's start and last at its end: the nearest to its edges.
+            main_edges.borrow_mut().push(main_read());
             cost.pause();
             if let Some(se) = drive.session.get() {
                 let (n, ms) = se.take_reads();
@@ -375,6 +386,7 @@ fn runs(
                 se.take_reads();
                 se.take_pixel_reads();
             }
+            main_edges.borrow_mut().push(main_read());
             cost.resume();
         }
     };
@@ -623,6 +635,7 @@ fn runs(
                     se.take_pixel_reads();
                 }
                 edges.borrow_mut().clear();
+                main_edges.borrow_mut().clear();
                 reads_before.set((0, 0.0));
                 pixels_before.set((0, 0.0, 0.0));
                 hooks.begin(&format!("run:{g}"));
@@ -634,11 +647,19 @@ fn runs(
                 // Listed again: one that ended during the snapshot would mark every run skewed.
                 let ended0 = host::ended_marks(&n.pids(), Some(&n.home));
                 let c0 = cycles(n);
+                let main0 = main_read();
+                if let Some(t) = timeline {
+                    t.mark_edge();
+                }
                 cost.start();
                 let t0 = host::now_ns();
                 let ran = ctx.runner.call("run", json!({ "case": s.case }), run_timeout, &serve);
                 let t1 = host::now_ns();
                 cost.end();
+                let main1 = main_read();
+                if let Some(t) = timeline {
+                    t.mark_edge();
+                }
                 let procs1 = n.processes();
                 let c1 = (per_process(&procs1), host::tsc());
                 let ended1 = host::ended_marks(&procs1.iter().map(|p| p.pid).collect::<Vec<_>>(), Some(&n.home));
@@ -672,6 +693,16 @@ fn runs(
                 let start: Edge = (c0.0.clone(), snap0.clone(), ended0);
                 edge_list.insert(0, &start);
                 edge_list.push(&end);
+                // The main thread's CPU over the same timed parts.
+                let mut m = main_edges.take();
+                if m.len() % 2 == 1 {
+                    m.push(main1.clone());
+                }
+                let main = std::iter::once(main0)
+                    .chain(m)
+                    .chain(std::iter::once(main1))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .and_then(|at| host::main_share(&at).ok_or_else(|| host::MainLost::Gone("the CPU clock gave no rate over the run".into())));
                 let cycles_at: Vec<&Cycles> = edge_list.iter().map(|x| &x.0).collect();
                 let parts: Vec<Span> = edge_list.as_chunks::<2>().0.iter().map(|[a, b]| wakes::span(&a.1, &b.1)).collect();
                 let whole_ms = (t1 - t0) as f64 / 1e6;
@@ -683,6 +714,7 @@ fn runs(
                 let whole_cpu = super::super::record::timed_cpu(&[&c0.0, &c1.0], &[&start.2, &end.2]);
                 let (cpu_lost, whole_lost) = (timed_cpu.is_none(), timed_cpu.is_none() || whole_cpu.is_none());
                 runs.push(Run {
+                    main,
                     cpu_lost,
                     whole_lost,
                     ended_ms: timed_cpu.as_ref().map_or(0.0, |c| cpu_ms(c.ended, &c0, &c1, whole_ms)),
@@ -936,6 +968,13 @@ fn runs(
             extra.insert("run.duration".into(), per_run(&|r| r.ms));
             extra.insert("cpu.work".into(), per_run(&|r| r.cpu));
             extra.insert("cpu.app.total".into(), per_run(&|r| if r.ms > 0.0 { 100.0 * r.cpu / r.ms } else { f64::NAN }));
+            // The launched process's main thread over the timed parts, and its share of the run's time;
+            // one run without it leaves both unread.
+            let main_lost = measured.iter().find_map(|r| r.main.as_ref().err()).cloned();
+            if main_lost.is_none() {
+                extra.insert("cpu.main".into(), per_run(&|r| r.main.as_ref().map_or(f64::NAN, |share| share * r.ms)));
+                extra.insert("cpu.main.busy".into(), per_run(&|r| r.main.as_ref().map_or(f64::NAN, |share| 100.0 * share)));
+            }
             if measured.iter().all(|r| !r.span.threads.is_empty()) {
                 extra.insert("cpu.wakes".into(), per_run(&|r| r.span.wakes_per_s()));
                 extra.insert("io.read".into(), per_run(&|r| r.span.io_read as f64));
@@ -972,6 +1011,11 @@ fn runs(
             let counted: Vec<(String, &wakes::Counted)> = measured.iter().enumerate().map(|(j, r)| (key(j), &r.span.counted)).collect();
             let (counts, mut refused) = wakes::counter_metrics(&counted, declared_metrics(s));
             extra.extend(counts);
+            if let Some(lost) = &main_lost {
+                for m in declared_metrics(s).into_iter().filter(|m| *m == "cpu.main" || *m == "cpu.main.busy") {
+                    refused.insert(m.clone(), lost.refusal(m));
+                }
+            }
             // On the headless Wayland compositor strobe runs (`target::wayland`): nothing reaches a display
             // (frames are refused `Headless` with the present source), and without a GPU it all draws in software.
             if let Some((what, software)) = &n.headless {
@@ -1271,7 +1315,7 @@ fn runs(
         store::write_json(&dir.join("threads.json"), &json!(wakes::by_thread(&spans, &names, &wakes::modules(&spans))))?;
         let run_rows: Vec<Value> = all
             .iter()
-            .map(|(key, r)| json!({ "run": key, "ms": r.ms, "cpu_ms": r.cpu, "switches": r.span.uncounted.is_none().then_some(r.span.switches), "wakes_per_s": r.span.wakes_per_s(), "io_read": r.span.io_read, "io_write": r.span.io_write, "counts": r.counts, "elements": r.elements }))
+            .map(|(key, r)| json!({ "run": key, "ms": r.ms, "cpu_ms": r.cpu, "main_cpu_ms": r.main.as_ref().ok().map(|share| share * r.ms), "switches": r.span.uncounted.is_none().then_some(r.span.switches), "wakes_per_s": r.span.wakes_per_s(), "io_read": r.span.io_read, "io_write": r.span.io_write, "counts": r.counts, "elements": r.elements }))
             .collect();
         store::write_json(&dir.join("runs.json"), &json!(run_rows))?;
         let per: serde_json::Map<String, Value> =
@@ -1452,6 +1496,7 @@ fn missing(metric: &str, have: &Have) -> Refusal {
         _ => match metric {
             "gpu.process.3d" | "gpu.vram" | "gpu.shared" if have.gpu.is_some() => super::super::outside::gpu_unread(metric, have.gpu.as_deref().unwrap_or(&[])),
             "cpu.fixture" => refuse(ValidatorId::NotForTarget, " is a fixture's CPU, and the bench file starts no fixture()".into()),
+            "cpu.main" | "cpu.main.busy" => refuse(ValidatorId::RunIncomplete, ": the launched process's main thread could not be read in every run".into()),
             "memory.app.pss" => refuse(ValidatorId::RunIncomplete, ": a process's smaps_rollup could not be read".into()),
             "cpu.foreign" | "cpu.foreign.max" if !have.pinned => refuse(ValidatorId::NotForTarget, " is other work on the CPUs the target is pinned to, and this bench pins it to none (--pin none)".into()),
             "cpu.work" | "cpu.app.total" | "cpu.process.total" | "cpu.wakes" | "io.read" | "io.write" | "memory.app.private" | "memory.app.host" | "gpu.process.3d" | "gpu.vram" | "gpu.shared"
