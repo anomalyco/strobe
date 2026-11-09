@@ -28,9 +28,10 @@ pub fn run(args: &Args) -> Result<Output> {
     for id in config["apps"].as_object().map(|a| a.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
         match isolate::app(&id, &config) {
             Ok(a) => {
-                // A relative executable is the project's own build, from its root.
-                let path = if a.exe.is_relative() { root.join(&a.exe) } else { a.exe.clone() };
-                let exe = if path.is_file() { a.exe.display().to_string() } else { format!("{} (not there yet: built, or installed, before a launch)", a.exe.display()) };
+                // A project profile's relative executable is the project's own build, from its root
+                // (`isolate::app` resolves it); a bare name of nothing there is one on PATH.
+                let path = if a.exe.is_relative() { crate::host::find_exe(a.exe.to_string_lossy().trim_end_matches(".exe"), &[]).unwrap_or_else(|| a.exe.clone()) } else { a.exe.clone() };
+                let exe = if path.exists() { a.exe.display().to_string() } else { format!("{} (not there yet: built, or installed, before a launch)", a.exe.display()) };
                 // Where a native app shows its windows on Linux: its profile's display, else as this session decides.
                 let display = (cfg!(target_os = "linux") && a.kind == isolate::AppKind::Native).then(|| if a.wayland() { "wayland" } else { "x11" });
                 let extra = [

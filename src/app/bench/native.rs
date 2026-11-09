@@ -320,13 +320,17 @@ fn runs(
     drive.follow(n);
     guard.check("after the app opened its window")?;
     lap("attach", steps);
+    // Native stacks in attribution blocks, first: on Windows through the helper when it is installed.
+    let stacks = (set == Set::Attribution && crate::probe::stacks::stacks_available())
+        .then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), ctx.args.get("probes") == Some("waits")));
     // What reached the screen, from the OS's present events, for the whole block: page waits
-    // (`until: "frame"`, idle) read it live, and frame metrics read the measured runs. Native stacks
-    // in attribution blocks, through the helper.
+    // (`until: "frame"`, idle) read it live, frame metrics read the measured runs, and an attribution
+    // block keeps them for `query inputs` (beside the stacks, `attribution_presents`).
     let presents: RefCell<Option<PresentCapture>> = RefCell::new(None);
     let mut presents_err: Option<Refusal> = None;
-    if !windowless && set != Set::Attribution && set != Set::Memory && !x.counters {
-        match home.presents() {
+    if !windowless && set != Set::Memory && !x.counters {
+        let started = if set == Set::Attribution { super::super::record::attribution_presents(home, stacks.as_ref()) } else { home.presents() };
+        match started {
             Ok(mut c) => {
                 c.track(&n.pids());
                 *presents.borrow_mut() = Some(c);
@@ -334,8 +338,6 @@ fn runs(
             Err(e) => presents_err = Some(present_refusal(e)),
         }
     }
-    let stacks = (set == Set::Attribution && crate::probe::stacks::stacks_available())
-        .then(|| crate::probe::stacks::StackCapture::start(crate::probe::stacks::Targets::new(n.pid, Some(&n.home)), ctx.args.get("probes") == Some("waits")));
     let (root, dir) = (n.pid, home.dir.clone());
     let hooks = super::block::Hooks::new(ctx, move || host::process_set(root, Some(&dir)).iter().map(|p| p.pid).collect());
     let pixels = x.pixels.clone();
@@ -1229,7 +1231,8 @@ fn runs(
             for m in refused.keys() {
                 values.remove(m);
             }
-            if let Some(why) = refused.get(&s.primary) {
+            // An attribution or memory block is kept for its recording, its primary refused or not (as a page's).
+            if let Some(why) = refused.get(&s.primary).filter(|_| set != Set::Attribution && set != Set::Memory) {
                 // Most refusals already begin with the metric they refuse; the rest (a whole block's frames) get it.
                 let named = why.summary.starts_with(&format!("{}:", s.primary)) || why.summary.starts_with(&format!("{} ", s.primary));
                 let summary = if named { why.summary.clone() } else { format!("{}: {}", s.primary, why.summary) };

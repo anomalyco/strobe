@@ -2886,6 +2886,17 @@ fn check_spread(s: &Value, name: &str) -> String {
     out
 }
 
+/// The main thread's CPU (`cpu.main`, `cpu.main.busy`) a case's line shows after its declared metrics
+/// when it declared them not: a script's or a windowless native app's, read in every block, and with
+/// no window the line has little else of the app's own. On the line only: the JSON holds them either way.
+pub(super) fn main_thread_shown(s: &Value, declared: &[&str]) -> Vec<&'static str> {
+    let kind = s["target_kind"].as_str();
+    if kind != Some("script") && !(kind == Some("native") && s["windowless"] == true) {
+        return Vec::new();
+    }
+    ["cpu.main", "cpu.main.busy"].into_iter().filter(|m| !declared.contains(m)).collect()
+}
+
 /// `seeded`: the experiment's seed, and whether a hook used it. `ran`: the machine (`env`) and, for a
 /// check that stopped, why and what it did not run (`stopped`, as an experiment's).
 #[allow(clippy::too_many_arguments)]
@@ -2971,6 +2982,15 @@ fn check_output(
                 .map(|t| match (name, s["values"]["interaction.n"].as_f64(), s["values"]["interaction.n.press"].as_f64()) {
                     ("interaction.p50" | "interaction.p95", Some(n), Some(p)) if !t.contains('—') => format!("{t} ({n:.0} inputs, {p:.0} at a press)"),
                     ("interaction.p95", _, Some(p)) => format!("{t} ({p:.0} at a press)"),
+                    // The inputs a terminal's latency is of, and those it left out: written while the program
+                    // still drew (busy), or followed by no change (silent).
+                    ("tty.latency.p50" | "tty.latency.p95", ..) if !t.contains('—') => match s["values"]["tty.latency.n"].as_f64() {
+                        Some(n) => {
+                            let left = |k: &str, what: &str| s["values"][k].as_f64().filter(|x| *x > 0.0).map(|x| format!(", {x:.0} {what}")).unwrap_or_default();
+                            format!("{t} ({n:.0} inputs{}{})", left("tty.latency.busy", "busy"), left("tty.latency.silent", "silent"))
+                        }
+                        None => t,
+                    },
                     _ => t,
                 })
                 .map(|t| if t.contains('—') { t } else { t + &check_spread(s, name) })
@@ -2980,9 +3000,15 @@ fn check_output(
         let declared: Vec<&str> = s["declared"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         let milestones = s["values"].as_object().into_iter().flatten().map(|(k, _)| k.as_str()).filter(|k| k.starts_with("launch.") && !declared.contains(k));
         // Every declared metric, with its value, its refusal, or that it got none: a metric left out
-        // read as measured and fine.
-        let value =
-            declared.iter().map(|n| shown(n).unwrap_or_else(|| format!("{n} no value (nothing in this block measured it)"))).chain(milestones.filter_map(shown)).collect::<Vec<_>>().join(" · ");
+        // read as measured and fine. Then the main thread's CPU of a target with no window, read by default
+        // (`main_thread_shown`).
+        let value = declared
+            .iter()
+            .map(|n| shown(n).unwrap_or_else(|| format!("{n} no value (nothing in this block measured it)")))
+            .chain(main_thread_shown(s, &declared).into_iter().filter_map(shown))
+            .chain(milestones.filter_map(shown))
+            .collect::<Vec<_>>()
+            .join(" · ");
         let secs = s["elapsed_ms"].as_f64().unwrap_or(0.0) / 1e3;
         // Which of a batch's launches ran the case, and its place there.
         let launch = s["batch_id"].as_u64().map(|id| format!(" · launch {id}.{}", s["batch_seq"])).unwrap_or_default();
@@ -11321,11 +11347,16 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     // The declared secondaries: each one's median over the blocks, or why a block refused it.
     let all = s["blocks"].as_array().map(Vec::as_slice).unwrap_or_default();
     let declared: Vec<&str> = s["declared"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| *m != metric).collect();
-    let width = declared.iter().map(|m| m.len()).max().unwrap_or(0);
-    for m in &declared {
+    // Then the main thread's CPU of a target with no window, read by default (`main_thread_shown`).
+    let main: Vec<&str> = main_thread_shown(s, &declared).into_iter().filter(|m| *m != metric).collect();
+    let width = declared.iter().chain(&main).map(|m| m.len()).max().unwrap_or(0);
+    for m in declared.iter().chain(&main) {
         let unit = model::metric(m).map_or("", |d| d.unit);
         let got: Vec<f64> = all.iter().filter_map(|b| b["values"][*m].as_f64()).filter(|v| v.is_finite()).collect();
         let refused: Vec<&str> = all.iter().filter_map(|b| b["refused"][*m].as_str()).collect();
+        if got.is_empty() && refused.is_empty() && main.contains(m) {
+            continue;
+        }
         let text = match (refused.first(), got.len()) {
             (Some(why), _) => format!("refused in {} of {blocks} blocks ({})", refused.len(), why.replacen(&format!(": {m}: "), ": ", 1)),
             (None, 0) => "no value (nothing in these blocks measured it)".to_string(),

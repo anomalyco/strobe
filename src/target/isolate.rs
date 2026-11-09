@@ -133,9 +133,10 @@ struct GuardSpec {
 }
 
 impl App {
-    /// An executable with no profile: generic isolation only.
+    /// An executable with no profile: generic isolation only. A relative one is from the current folder
+    /// (`from_dir`).
     pub fn bare(exe: &Path) -> App {
-        App { id: exe.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), exe: exe.to_path_buf(), ..App::default() }
+        App { id: exe.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), exe: from_cwd(exe), ..App::default() }
     }
 
     /// The same profile reached another way (`exe:<path> --native`, a `webview(path)` target).
@@ -144,9 +145,10 @@ impl App {
         self
     }
 
-    /// The same profile with another build of the app, such as a variant's `exe:<path>`.
+    /// The same profile with another build of the app, such as a variant's `exe:<path>` (a relative one
+    /// from the current folder, `from_dir`).
     pub fn with_exe(mut self, exe: &Path) -> App {
-        self.exe = exe.to_path_buf();
+        self.exe = from_cwd(exe);
         self
     }
 
@@ -234,6 +236,24 @@ pub fn no_motion_contract(id: &str) -> crate::model::Refusal {
     ))
 }
 
+/// A relative executable from `dir`: one that names a folder (`./app`, `build/app`), or a bare name
+/// of something in `dir` (an app bundle is a folder). A launch runs in its home, so a relative path
+/// kept as it is would name nothing there. A bare name of nothing in `dir` stays as it is: the OS
+/// finds it on PATH.
+pub fn from_dir(exe: &Path, dir: &Path) -> PathBuf {
+    if !exe.is_relative() || exe.as_os_str().is_empty() {
+        return exe.to_path_buf();
+    }
+    let rel: PathBuf = exe.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect();
+    let joined = dir.join(&rel);
+    if exe.components().count() > 1 || joined.exists() { joined } else { exe.to_path_buf() }
+}
+
+/// `from_dir` from the current folder (unchanged when it cannot be read).
+fn from_cwd(exe: &Path) -> PathBuf {
+    std::env::current_dir().map_or_else(|_| exe.to_path_buf(), |d| from_dir(exe, &d))
+}
+
 /// This OS's key in a per-OS value (`exe`, a build's `output`).
 pub fn os() -> &'static str {
     if cfg!(windows) {
@@ -302,6 +322,11 @@ pub fn app(id: &str, config: &Value) -> Result<App> {
     let p = Value::Object(merged);
     let exe = per_os(&p["exe"]).map(str::to_string).ok_or_else(|| Error::usage(format!("app profile \"{id}\" has no exe for {}", os())))?;
     let exe = expand(&exe).map_err(|e| Error::usage(format!("app profile \"{id}\" exe: {}", e.message)))?;
+    // A project's profile: a relative executable is its own build, from the project's root.
+    let exe = match p[crate::config::ROOT].as_str() {
+        Some(root) => from_dir(&exe, Path::new(root)),
+        None => exe,
+    };
     let strings = |k: &str| p[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     let mut guards = Vec::new();
     for g in p["guard"].as_array().into_iter().flatten() {
