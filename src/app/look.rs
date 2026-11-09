@@ -425,11 +425,11 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some(engine) = args.get("engine").map(crate::model::WebEngine::parse).transpose()?
         && engine != crate::model::WebEngine::Chromium
     {
-        return Err(crate::target::web::refusal(engine, true).unwrap_or_else(|| {
-            crate::model::Refusal::new(crate::model::ValidatorId::EngineUnsupported, format!("look opens a page in Chromium only, not in {engine}"))
-                .fix(format!("look at the page without --engine, or load it in {engine} with strobe record --engine {engine}"))
-                .into()
-        }));
+        // `record` is offered only where that engine's page would run here.
+        let record = if crate::target::web::refusal(engine, !args.has("headed")).is_none() { format!(", or load it in {engine} with strobe record --engine {engine}") } else { String::new() };
+        return Err(crate::model::Refusal::new(crate::model::ValidatorId::EngineUnsupported, format!("look opens a page in Chromium only, not in {engine}"))
+            .fix(format!("look at the page without --engine{record}"))
+            .into());
     }
     // `--mobile`: the page in Chrome on a phone, at the phone's own screen.
     let mobile = args.get("mobile").map(str::to_string);

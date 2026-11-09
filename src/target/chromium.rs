@@ -581,11 +581,19 @@ impl Browser {
         let mut list: Vec<&Value> = info["gpu"]["devices"].as_array().map(|a| a.iter().filter(|d| d["deviceString"].as_str().is_some_and(|s| !s.is_empty())).collect()).unwrap_or_default();
         // Chromium lists the primary adapter first, which on a machine with two (a laptop's integrated and
         // discrete GPUs) need not be the one it draws with: that one is the adapter its GL renderer names
-        // (ANGLE's "NVIDIA GeForce RTX … (0x00002C05) Direct3D11"), by device id, else by name.
+        // (ANGLE's "NVIDIA GeForce RTX … (0x00002C05) Direct3D11"), by device id, else by name, else (Linux
+        // OpenGL, whose device names come from pci.ids: "GA104 [GeForce RTX 3070]") by the marketing name in
+        // the brackets, or its first alternative ("Navi 23 [Radeon RX 6600/6600 XT/6600M]").
         let renderer = info["gpu"]["auxAttributes"]["glRenderer"].as_str().unwrap_or("").to_lowercase();
         let by_id = |d: &&Value| d["deviceId"].as_u64().is_some_and(|id| id != 0 && renderer.contains(&format!("(0x{id:08x})")));
         let by_name = |d: &&Value| d["deviceString"].as_str().is_some_and(|s| renderer.contains(&s.to_lowercase()));
-        if let Some(i) = list.iter().position(by_id).or_else(|| list.iter().position(by_name)) {
+        let by_bracket = |d: &&Value| {
+            let Some(inside) = d["deviceString"].as_str().and_then(|s| s.split_once('[')).and_then(|(_, r)| r.split_once(']')).map(|(m, _)| m.trim().to_lowercase()) else {
+                return false;
+            };
+            [inside.as_str(), inside.split('/').next().unwrap_or("").trim()].iter().any(|m| m.len() >= 4 && renderer.contains(m))
+        };
+        if let Some(i) = list.iter().position(by_id).or_else(|| list.iter().position(by_name)).or_else(|| list.iter().position(by_bracket)) {
             let d = list.remove(i);
             list.insert(0, d);
         }

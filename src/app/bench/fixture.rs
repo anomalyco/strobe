@@ -67,7 +67,7 @@ impl Spec {
         if let Some(seed) = self.seed_dir(params) {
             if !seed.is_dir() {
                 let _ = std::fs::remove_dir_all(&home);
-                return Err(Error::usage(format!("fixture seed {} is no folder", seed.display())));
+                return Err(Error::usage(format!("fixture seed {} is no folder", host::paths::plain(&seed))));
             }
             for f in walk(&seed) {
                 let to = home.join(f.strip_prefix(&seed).unwrap_or(&f));

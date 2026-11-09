@@ -45,14 +45,15 @@ const target = url(`http://127.0.0.1:${port}/`, {
 // strobe being the runner's parent) and their descendants, never a person's browser running beside it.
 function osCpuMs(): number | null {
   if (process.platform !== "win32") return null
+  // The profile reaches PowerShell in its environment, not its command line, which it would match itself.
   const profile = `\\strobe\\run\\profile-${process.ppid}-`.toLowerCase()
   const ps = [
     "$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CommandLine,CreationDate,KernelModeTime,UserModeTime)",
-    `$set = @{}; foreach ($p in $all) { if ($p.CommandLine -and $p.CommandLine.ToLower().Contains('${profile}')) { $set[$p.ProcessId] = $p } }`,
+    "$set = @{}; foreach ($p in $all) { if ($p.ProcessId -ne $PID -and $p.CommandLine -and $p.CommandLine.ToLower().Contains($env:STROBE_PROFILE)) { $set[$p.ProcessId] = $p } }",
     "do { $n = $set.Count; foreach ($p in $all) { $up = $set[$p.ParentProcessId]; if (-not $set.ContainsKey($p.ProcessId) -and $up -and $p.CreationDate -ge $up.CreationDate) { $set[$p.ProcessId] = $p } } } while ($set.Count -ne $n)",
     "if ($set.Count) { ($set.Values | ForEach-Object { $_.KernelModeTime + $_.UserModeTime } | Measure-Object -Sum).Sum }",
   ].join("; ")
-  const out = Bun.spawnSync(["powershell", "-NoProfile", "-Command", ps]).stdout.toString().trim()
+  const out = Bun.spawnSync(["powershell", "-NoProfile", "-Command", ps], { env: { ...process.env, STROBE_PROFILE: profile } }).stdout.toString().trim()
   return out ? Number(out) / 1e4 : null
 }
 
