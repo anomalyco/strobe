@@ -2791,6 +2791,8 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         out["repeat"] = rep;
     }
     if let Some((b, counters)) = base {
+        // `base_values` beside head's `values`, as reports read them (`report --format summary`).
+        out["base_values"] = b["values"].clone();
         out["base"] = b;
         if let Some(head) = held {
             noworse_state(s, &noworse, counters.as_deref(), &head, &mut out);
@@ -2870,9 +2872,8 @@ fn check_noworse(args: &Args, s: &Series) -> Result<BTreeMap<String, f64>> {
     Ok(m)
 }
 
-/// Each `--noworse` counter's values on one side of a check, from every launch (and with `--runs N`
-/// its lowest and highest run): one value when it held, else every one seen, or none when it was not
-/// measured (refused, or no number).
+/// Each `--noworse` counter's values on one side of a check: every launch's (with `--runs N` its lowest
+/// and highest run beside it), none when a launch did not measure it (refused, or no number).
 fn side_counters(launches: &[Block], noworse: &BTreeMap<String, f64>) -> BTreeMap<String, Vec<f64>> {
     noworse
         .keys()
@@ -2882,13 +2883,20 @@ fn side_counters(launches: &[Block], noworse: &BTreeMap<String, f64>) -> BTreeMa
                 let Some(v) = b.values.get(m).copied().filter(|v| v.is_finite() && !b.refused.contains_key(m)) else { return (m.clone(), Vec::new()) };
                 seen.extend(std::iter::once(v).chain(b.spread.get(m).into_iter().flatten().copied()));
             }
-            seen.dedup();
-            let mut held = seen.clone();
-            held.sort_by(f64::total_cmp);
-            held.dedup();
-            (m.clone(), if held.len() == 1 { held } else { seen })
+            (m.clone(), seen)
         })
         .collect()
+}
+
+/// The distinct values of `v`, in order: one when a counter held.
+fn distinct(v: &[f64]) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    for x in v {
+        if !out.contains(x) {
+            out.push(*x);
+        }
+    }
+    out
 }
 
 /// A two-build check's base: what its line shows (`check_output`), and its `--noworse` counters'
@@ -2918,34 +2926,42 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
     let mut rows = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     for (m, &margin) in noworse {
-        let h = head.get(m).cloned().unwrap_or_default();
-        let b = base.as_ref().map(|b| b.get(m).cloned().unwrap_or_default());
+        let h_runs = head.get(m).cloned().unwrap_or_default();
+        let b_runs = base.as_ref().map(|b| b.get(m).cloned().unwrap_or_default());
         // A counter neither side measured is not this case's: nothing to say of it.
-        if h.is_empty() && b.as_ref().is_none_or(Vec::is_empty) {
+        if h_runs.is_empty() && b_runs.as_ref().is_none_or(Vec::is_empty) {
             continue;
         }
+        let (h, b) = (distinct(&h_runs), b_runs.as_deref().map(distinct));
         let (state, text) = match (&b, h.as_slice()) {
             (None, _) => ("not_compared", format!("{m}: the base failed: nothing to compare")),
             (_, []) => ("missing", format!("{m}: head measured no value, where base did")),
-            (_, [_, _, ..]) => ("unstable", format!("{m}: head did not hold one value ({}), so no difference of it holds", list(&h, m))),
+            (_, [_, _, ..]) => ("unstable", format!("{m}: head did not hold one value ({}), so no difference of it holds", list(&h_runs, m))),
             (Some(b), _) if b.is_empty() => ("not_compared", format!("{m}: base measured no value")),
-            (Some(b), _) if b.len() > 1 => ("unstable", format!("{m}: base did not hold one value ({}), so no difference of it holds", list(b, m))),
+            (Some(b), _) if b.len() > 1 => ("unstable", format!("{m}: base did not hold one value ({}), so no difference of it holds", list(b_runs.as_deref().unwrap_or_default(), m))),
             (Some(b), [hv]) => {
                 let def = model::metric(m).map_or(&model::METRICS[0], model::as_counter);
-                // Each side held one value (`side_counters`): the exact comparison a bench makes of a counter
-                // that held through `EXACT_MIN_PAIRS` pairs, its difference the answer.
+                // Each side held one value: the exact comparison a bench makes of a counter that held through
+                // `EXACT_MIN_PAIRS` pairs, its difference the answer.
                 let c = stats::compare_noworse(m, def, &[(b[0], *hv); stats::EXACT_MIN_PAIRS], margin, 0.95);
                 let worse = c.kind == VerdictKind::Worse;
                 (if worse { "worse" } else { "no_worse" }, format!("{m} {} → {} · {}", fmt::value(b[0], unit(m)), fmt::value(*hv, unit(m)), c.verdict))
             }
         };
-        if matches!(state, "worse" | "unstable" | "missing") {
+        let passed = matches!(state, "no_worse" | "not_compared");
+        if !passed {
             failed.push(text.clone());
         }
-        rows.push(json!({ "metric": m, "margin": margin, "state": state, "base": b, "head": h, "text": text }));
+        let median = |v: &[f64]| (!v.is_empty()).then(|| metrics::median(v));
+        rows.push(json!({
+            "metric": m, "margin": margin, "state": state, "passed": passed,
+            "stable": b.as_ref().is_none_or(|b| b.len() <= 1) && h.len() <= 1,
+            "base": b_runs.as_deref().and_then(median), "head": median(&h_runs), "base_runs": b_runs, "head_runs": h_runs,
+            "why": (!passed).then(|| text.clone()), "text": text,
+        }));
     }
     if !rows.is_empty() {
-        out["noworse"] = json!(rows);
+        out["counters"] = json!(rows);
     }
     if !failed.is_empty() && out["passed"] == true {
         out["passed"] = json!(false);
@@ -3372,9 +3388,8 @@ fn check_output(
         if s["base"].is_object() {
             text += &format!("      base  {}\n", base_line(&s["base"], &declared));
         }
-        for n in s["noworse"].as_array().into_iter().flatten() {
-            let ok = matches!(n["state"].as_str(), Some("no_worse" | "not_compared"));
-            text += &format!("      {} noworse  {}\n", if ok { " " } else { "!" }, n["text"].as_str().unwrap_or(""));
+        for n in s["counters"].as_array().into_iter().flatten() {
+            text += &format!("      {} noworse  {}\n", if n["passed"] == true { " " } else { "!" }, n["text"].as_str().unwrap_or(""));
         }
         for (why, names) in &reasons {
             text += &format!("      refused  {}: {why}\n", names.join(", "));
@@ -3422,7 +3437,7 @@ fn check_output(
         1 => "; 1 case measured run 2 instead, since a process of the target ended in its run 1".to_string(),
         n => format!("; {n} cases measured run 2 instead, since a process of the target ended in their run 1"),
     };
-    let compared = if series.iter().any(|s| s["noworse"].is_array()) {
+    let compared = if series.iter().any(|s| s["counters"].is_array()) {
         "base and head each checked; only the --noworse counters compared, exactly"
     } else if series.iter().any(|s| s["base"].is_object()) {
         "base and head each checked; nothing compared"
