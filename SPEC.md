@@ -509,7 +509,9 @@ Steps (each checks first, prints ✓ / ! / ✗):
 1. **Preflight** — OS, CPU and topology (CCDs, V-Cache by L3 size, P/E cores), power plan,
    GPUs (adapters, NVML), displays and refresh rates, `opencode`, browsers, installed apps.
 2. **Binary and engine** — copy this build into the install folder and put that folder on the
-   user's PATH (`--skip self`: neither; the line names where this copy runs from); download the
+   user's PATH (`--skip self`: neither; the line names where this copy runs from; a copy under
+   another name than `strobe` is a usage error, since it once set the installed copy aside and
+   installed nothing while saying `replaced`); download the
    pinned trace_processor (§15) into the state folder, verify sha256.
 3. **Helper** — deep mode (§13.4): one UAC or sudo. Skippable (`--skip deep`). On Windows the one
    elevated step adds the user to Performance Log Users (present events in strobe's own process from
@@ -8418,7 +8420,8 @@ what was built but not yet run on a device is in §21.
 **After 0.28.0**
 
 - 2026-11-10 · cleanup/w6e · `up --skip self,skill` (no install folder copy, user PATH entry or skill;
-  `self` needs `daemon`), an unknown `--skip` name exit 2; the action's `up` only fetches the engine,
+  `self` needs `daemon`), an unknown `--skip` name exit 2, a renamed copy's install refused; the
+  action's `up` only fetches the engine,
   so a self-hosted machine's own strobe and skill stay as they were (5.3, 26.3).
 - 2026-11-10 · cleanup/w6c · the GitHub Action: `action.yml` and `scripts/ci-action.ts`, `check`
   (any runner: each case once, exact counters held to base's) and `compare` (a self-hosted runner: the

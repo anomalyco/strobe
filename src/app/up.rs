@@ -202,8 +202,13 @@ fn exe(name: &str) -> String {
 /// Copies this build into the install folder; also says whether it replaced anything.
 fn install_self(s: &mut Steps) -> Result<(PathBuf, bool)> {
     let dir = install_dir();
-    std::fs::create_dir_all(&dir)?;
     let me = std::env::current_exe()?;
+    // The install takes `strobe` (and `strobew`) from this copy's folder: a copy under another name would
+    // install nothing and set the installed one aside.
+    if !me.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(&exe("strobe"))) {
+        return Err(Error::usage(format!("up installs the strobe beside it by its name, {}; this copy is {}: rename it, or --skip self,daemon", exe("strobe"), me.display())));
+    }
+    std::fs::create_dir_all(&dir)?;
     let from = me.parent().unwrap_or(Path::new(".")).to_path_buf();
     let same = std::fs::canonicalize(&from).ok() == std::fs::canonicalize(&dir).ok();
     let changed = !same && replace_binaries(&from, &dir)?;
