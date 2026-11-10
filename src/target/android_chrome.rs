@@ -256,7 +256,7 @@ pub fn launch(phone: &Phone, what: &str, timed: bool, unlock_wait: Duration) -> 
         std::fs::read_to_string(&journal).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(|v| v["closed"] == true || !v["owner"].as_str().is_some_and(adb::alive)).and_then(|v| {
             Some(Left { package: v["package"].as_str()?.to_string(), tab: v["tab"].as_str()?.to_string(), url: v["url"].as_str().unwrap_or("").to_string(), closed: v["closed"] == true })
         });
-    let (package, forward, stale) = channel(d, &installed, &candidates, left.as_ref(), kept.is_some(), written.is_some())?;
+    let (package, forward, stale) = channel(d, &installed, &candidates, left.as_ref(), kept.is_some(), written.is_some(), facts.emulator.is_some())?;
     let port = forward.port().ok_or_else(|| Error::msg("internal: the DevTools forward has no port"))?;
     let version: Value = serde_json::from_str(&chromium::http_get(&format!("127.0.0.1:{port}"), "/json/version")?)?;
     let path = version["webSocketDebuggerUrl"].as_str().and_then(|u| u.strip_prefix("ws://")).and_then(|r| r.find('/').map(|i| r[i..].to_string())).unwrap_or_else(|| "/devtools/browser".into());
@@ -544,8 +544,18 @@ fn holds_socket(d: &Device, package: &str, why: &str, wanted: &[&str]) -> Error 
 /// candidates with a person's tabs (exit 3: it holds the socket). One that does not run is started as
 /// its launcher starts it (restoring its tabs, opening none) to read its tabs: with a person's it is
 /// refused `LiveChannel` and stopped again. One whose socket never opens is on its first-run screens
-/// (exit 3).
-fn channel(d: &Device, installed: &[&'static str], candidates: &[&'static str], left: Option<&Left>, kept_command_line: bool, wrote_command_line: bool) -> Result<(String, Tunnel, Vec<String>)> {
+/// (exit 3). On an emulator every channel is strobe's, yet a tab restored there still refuses: the
+/// hint names the adb command that clears that channel (strobe closes no tab it did not open).
+fn channel(
+    d: &Device,
+    installed: &[&'static str],
+    candidates: &[&'static str],
+    left: Option<&Left>,
+    kept_command_line: bool,
+    wrote_command_line: bool,
+    emulator: bool,
+) -> Result<(String, Tunnel, Vec<String>)> {
+    let clear = |packages: &[&str]| packages.iter().map(|p| format!("`adb -s {} shell pm clear {p}`", d.serial)).collect::<Vec<_>>().join(", ");
     let live: Vec<&str> = installed.iter().copied().filter(|p| running(d, p)).collect();
     if live.len() > 1 {
         return Err(Error::new(3, format!("{} run on {} at once, and DevTools reaches only one of them", live.iter().map(|p| name(p)).collect::<Vec<_>>().join(" and "), d.serial))
@@ -557,6 +567,7 @@ fn channel(d: &Device, installed: &[&'static str], candidates: &[&'static str], 
     }
     let order: Vec<&str> = live.iter().copied().chain(candidates.iter().copied().filter(|p| !live.contains(p))).collect();
     let (mut people, mut first_run): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut held_by: Vec<&str> = Vec::new();
     for package in order {
         let was_running = live.contains(&package);
         if !was_running {
@@ -596,11 +607,18 @@ fn channel(d: &Device, installed: &[&'static str], candidates: &[&'static str], 
             drop(fwd);
             let held = format!("{} tab{} a person opened ({})", theirs.len(), if theirs.len() == 1 { "" } else { "s" }, theirs[0]);
             if was_running {
-                return Err(Error::new(3, format!("{} runs on {} with {held} and holds Chrome's DevTools socket: strobe stops no channel that holds a person's tabs", name(package), d.serial))
-                    .hint(format!("close {}'s tabs, or close it on the phone, then run again", name(package))));
+                let hint = if emulator {
+                    format!("on an emulator every tab is strobe's to clear: {} clears {}'s tabs and data, then run again", clear(&[package]), name(package))
+                } else {
+                    format!("close {}'s tabs, or close it on the phone, then run again", name(package))
+                };
+                return Err(
+                    Error::new(3, format!("{} runs on {} with {held} and holds Chrome's DevTools socket: strobe stops no channel that holds a person's tabs", name(package), d.serial)).hint(hint)
+                );
             }
             stop(d, package);
             people.push(format!("{} holds {held}", name(package)));
+            held_by.push(package);
             continue;
         }
         if !was_running {
@@ -622,9 +640,15 @@ fn channel(d: &Device, installed: &[&'static str], candidates: &[&'static str], 
         };
     }
     if !people.is_empty() {
-        return Err(Refusal::new(ValidatorId::LiveChannel, format!("every Chrome channel strobe may drive on {} holds tabs a person opened: {}", d.serial, people.join("; ")))
-            .fix("strobe drives a channel no one browses: close those tabs on the phone, or give strobe a channel of its own (install Chrome Canary, open it once, then strobe up --mobile=<serial> --channel canary)")
-            .into());
+        let fix = if emulator {
+            format!(
+                "on an emulator every tab is strobe's to clear (a tab Chrome restored, a person's from an earlier session): {} clears those tabs and the channel's data, then run again",
+                clear(&held_by)
+            )
+        } else {
+            "strobe drives a channel no one browses: close those tabs on the phone, or give strobe a channel of its own (install Chrome Canary, open it once, then strobe up --mobile=<serial> --channel canary)".to_string()
+        };
+        return Err(Refusal::new(ValidatorId::LiveChannel, format!("every Chrome channel strobe may drive on {} holds tabs a person opened: {}", d.serial, people.join("; "))).fix(fix).into());
     }
     let kept = if kept_command_line { format!(" (a {} is kept as it was)", adb::CHROME_COMMAND_LINE) } else { String::new() };
     Err(Error::new(3, format!("{} on {} never opened its DevTools socket: still on its first-run screens{kept}", first_run.join(", "), d.serial))

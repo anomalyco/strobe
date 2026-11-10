@@ -35,10 +35,12 @@ pub const INPUT: &[&str] = &["click", "hover", "move", "type", "press", "down", 
 /// `COUNTED`'s order (key downs and ups, button presses and releases, wheel turns, pointer moves), keeps
 /// the last 16 pointer moves (where a posted move landed), and counts what moves or resizes the viewport
 /// (`resize`, `fullscreenchange`, the visual viewport's `resize`). Listeners only, passive, at the
-/// window's capture phase ahead of the page's own.
+/// window's capture phase ahead of the page's own, only in the top document, each counted in
+/// `window.__strobeListeners`, which a memory census takes off the page's listeners (`probe::census`).
 const SCRIPT: &str = r#"window.__strobeOs ??= (() => {
+  if (window !== window.top) return
   const s = { n: [0, 0, 0, 0, 0, 0], moves: [], viewport: 0 }
-  const on = (t, e, f) => t?.addEventListener(e, f, { capture: true, passive: true })
+  const on = (t, e, f) => { if (!t) return; t.addEventListener(e, f, { capture: true, passive: true }); window.__strobeListeners = (window.__strobeListeners ?? 0) + 1 }
   ;["keydown", "keyup", "pointerdown", "pointerup", "wheel", "pointermove"].forEach((e, i) => on(window, e, (ev) => { if (ev.isTrusted) s.n[i]++ }))
   on(window, "pointermove", (e) => { if (e.isTrusted) { s.moves.push([e.clientX, e.clientY]); if (s.moves.length > 16) s.moves.shift() } })
   for (const [t, e] of [[window, "resize"], [window, "fullscreenchange"], [window.visualViewport, "resize"]]) on(t, e, () => { s.viewport++ })
