@@ -33,7 +33,8 @@
       "type": "object",
       "description": "The device: OS, CPU, GPU, displays, power, strobe's build.",
       "properties": {
-        "reduced_motion": { "type": ["boolean", "null"], "description": "The OS's own reduce-motion setting, read and never changed (Windows animation effects off, macOS Reduce motion, the Linux desktop's enable-animations off): what a target without motion follows. Null when unknown. When true, part of a tracked series' fingerprint for series without motion." }
+        "reduced_motion": { "type": ["boolean", "null"], "description": "The OS's own reduce-motion setting, read and never changed (Windows animation effects off, macOS Reduce motion, the Linux desktop's enable-animations off): what a target without motion follows. Null when unknown. When true, part of a tracked series' fingerprint for series without motion." },
+        "shared_runner": { "type": "string", "description": "Why this machine is a CI runner other jobs share (SPEC 10.1 SharedRunner): a GitHub-hosted runner, CI_SHARED_ENVIRONMENT=true, or a CI job in a virtual machine that is no self-hosted runner. Absent elsewhere." }
       }
     },
     "browser": { "type": ["string", "null"], "description": "The first page target's browser version (each series has its own: series.browser)." },
@@ -209,7 +210,8 @@
         "NotProfileable",
         "MouseNotEnabled",
         "AnchorNotFound",
-        "AnchorAmbiguous"
+        "AnchorAmbiguous",
+        "SharedRunner"
       ]
     },
     "verdictKind": {
@@ -468,6 +470,28 @@
         "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "check: the refusal behind a refused or failed case, when a validator gave one." },
         "declared": { "type": "array", "items": { "type": "string" }, "description": "check: the metrics the case declared." },
         "values": { "type": ["object", "null"], "description": "check: one run's values; with --runs N the median over the launch's N runs; with --repeat R the median over the R launches." },
+        "base": { "type": ["object", "null"], "description": "check --base <variant>: base's side of the case (SPEC 5.6 \"A check against base\"): launches, values, repeat, recording(s), passed, refused. A base that failed fails nothing: its counters are then not compared. Absent without --base." },
+        "base_values": { "type": ["object", "null"], "description": "check --base <variant>: base's values beside head's values (the same keys). Absent without --base." },
+        "counters": {
+          "type": "array",
+          "description": "check --base <variant> --noworse <counters>: each exact counter held to base's. A counter must hold one value on each side (2 runs with a reset, or 2 launches) and head be at most margin above base; worse or unstable fails the case. Absent without --noworse.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "metric": { "type": "string" },
+              "margin": { "type": "number", "description": "The --noworse margin as given for it (0: head at most base's)." },
+              "state": { "enum": ["no_worse", "worse", "unstable", "missing", "not_compared"], "description": "missing: head measured no value where base did (fails); not_compared: base failed or measured no value of it (passes)." },
+              "passed": { "type": "boolean" },
+              "stable": { "type": "boolean", "description": "Each side held one value." },
+              "base": { "type": ["number", "null"], "description": "The median of base's runs." },
+              "head": { "type": ["number", "null"], "description": "The median of head's runs." },
+              "base_runs": { "type": ["array", "null"], "items": { "type": "number" } },
+              "head_runs": { "type": "array", "items": { "type": "number" } },
+              "why": { "type": ["string", "null"], "description": "Why it did not pass." },
+              "text": { "type": "string" }
+            }
+          }
+        },
         "runs": { "type": "integer", "description": "check: the runs measured in each launch (--runs N, no warmup; 1 by default and with --why always). Absent in older results (then 1)." },
         "gpu_cache": { "enum": ["cold", "warm", null], "description": "check: how the case's native launch found the GPU shader caches (cold prints · cold shader cache on its pass line); null when the app did no GPU work or the target is no native app. Absent in older results." },
         "spread": { "type": ["object", "null"], "additionalProperties": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }, "description": "check --runs N: each per-run metric's lowest and highest measured run, beside its median in values. Null with one run and with --repeat." },

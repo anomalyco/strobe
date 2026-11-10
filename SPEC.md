@@ -8979,8 +8979,10 @@ secondary that came out worse fails the job), `unclear` (also any primary that i
 or `no_worse`) or `never` (report only; an error of strobe itself still fails). Outputs: `experiment`
 and `leak-experiment` (the ids, space-separated), `verdict` (`check`: `pass` or `fail`; `compare`: the
 worst primary `verdict_kind`, `worse` before `refused`, `unclear`, `underpowered`, then `same`,
-`no_worse`, `better`), `regressed`, `report-path` (the first experiment's HTML report on the runner),
-`pr-updated`.
+`no_worse`, `better`; `error` when a bench file did not run at all), `regressed` (a comparison or
+decided secondary `worse`, a leak, or a check's counter over base's: `series.counters[].state`),
+`report-path` (the first experiment's HTML report on the runner), `pr-updated`. A bench that did not
+run puts its error and exit code in the step summary.
 
 ### 26.2 Security
 

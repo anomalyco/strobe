@@ -315,12 +315,12 @@ function worst(kinds: string[]): string {
 }
 
 // Any comparison that came out worse: a primary or a decided secondary, a leak, or a check's exact counter
-// over base's (`series.noworse` rows; a timed comparison's `noworse` is its margins).
+// over base's (`series.counters`).
 function regressed(result: any): boolean {
   return (result?.series ?? []).some(
     (s: any) =>
       [s.primary, ...(s.secondaries ?? [])].some((c: any) => c && typeof c === "object" && c.verdict_kind === "worse" && c.decided !== false) ||
-      (Array.isArray(s.noworse) && s.noworse.some((n: any) => n?.state === "worse")),
+      (Array.isArray(s.counters) && s.counters.some((n: any) => n?.state === "worse")),
   )
 }
 
@@ -468,7 +468,8 @@ async function runStep() {
         continue
       }
       done.push(d)
-      if (d.code !== 0) failed = true
+      // 1: a case failed; 4: every case refused. fail-on: never reports them; anything else is an error.
+      if (d.code !== 0 && !(failOn === "never" && [1, 4].includes(d.code))) failed = true
     }
   } else {
     // A paired A/B of base and head on a machine this job has to itself (a self-hosted runner).
@@ -487,8 +488,9 @@ async function runStep() {
       const kinds = verdicts(d.result)
       if (failOn !== "never" && regressed(d.result)) failed = true
       if (failOn === "unclear" && kinds.some((k) => !["better", "same", "no_worse"].includes(k))) failed = true
-      // 0, a verdict-less run with --require-verdict (5) or one --max-time cut short (124) keep their verdicts.
-      if (![0, 5, 124].includes(d.code)) failed = true
+      // 0, a verdict-less run with --require-verdict (5) or one --max-time cut short (124) keep their verdicts;
+      // every series refused (4) is a result fail-on: never reports.
+      if (![0, 5, 124].includes(d.code) && !(failOn === "never" && d.code === 4)) failed = true
     }
   }
 
@@ -533,9 +535,16 @@ async function runStep() {
     }
   }
 
+  // A bench file that did not run at all (a usage error, a refusal before anything ran) is an error.
   const kinds = done.flatMap((d) => verdicts(d.result))
   const verdict =
-    mode === "check" ? (done.length === benches.length && done.every((d) => d.code === 0 && d.result.passed !== false) ? "pass" : "fail") : worst(kinds)
+    done.length < benches.length
+      ? "error"
+      : mode === "check"
+        ? done.every((d) => d.code === 0 && d.result.passed !== false)
+          ? "pass"
+          : "fail"
+        : worst(kinds)
   output("experiment", done.map((d) => d.id).join(" "))
   output("leak-experiment", leakDone.map((d) => d.id).join(" "))
   output("verdict", verdict)
@@ -544,10 +553,10 @@ async function runStep() {
   output("pr-updated", String(prUpdated))
 
   const upload = oneOf("upload-artifacts", ["on-failure", "always", "never"], "on-failure")
-  if (upload === "always" || (upload === "on-failure" && failed)) {
-    const all = [...done, ...leakDone]
+  const all = [...done, ...leakDone]
+  if (all.length && (upload === "always" || (upload === "on-failure" && failed))) {
     output("artifact-path", artifacts(all))
-    output("artifact-name", input("artifact-name") || `strobe-${env("GITHUB_JOB") || "job"}-${all.map((d) => d.id).join("-") || env("GITHUB_RUN_ATTEMPT")}`)
+    output("artifact-name", input("artifact-name") || `strobe-${env("GITHUB_JOB") || "job"}-${all.map((d) => d.id).join("-")}`)
   }
   if (failed) {
     error(

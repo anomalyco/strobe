@@ -98,7 +98,7 @@ outputs:
     description: The leak runs' experiments
     value: ${{ steps.run.outputs.leak-experiment }}
   verdict:
-    description: "check: pass or fail. compare: the worst primary verdict (worse, refused, unclear, underpowered, same, no_worse, better)"
+    description: "check: pass or fail. compare: the worst primary verdict (worse, refused, unclear, underpowered, same, no_worse, better). error: a bench file that did not run"
     value: ${{ steps.run.outputs.verdict }}
   regressed:
     description: true when any comparison came out worse
