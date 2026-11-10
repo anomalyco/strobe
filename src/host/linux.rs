@@ -702,6 +702,16 @@ pub fn virtual_machine() -> Option<String> {
     (flagged || named).then(|| if text.is_empty() { "hypervisor".into() } else { text })
 }
 
+/// The device a folder or file is on and its filesystem's type (`<dev> <f_type>`): stat and statfs.
+pub fn volume(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let dev = std::fs::metadata(path).ok()?.dev();
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    let kind = if unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0 { format!("{:x}", s.f_type) } else { "?".into() };
+    Some(format!("{dev:x} {kind}"))
+}
+
 pub fn on_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
     super::unix_ctrl_c(flag);
 }

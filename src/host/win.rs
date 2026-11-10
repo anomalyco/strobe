@@ -417,6 +417,22 @@ pub fn virtual_machine() -> Option<String> {
     ["VMware", "VirtualBox", "QEMU", "KVM", "Xen", "Parallels", "Virtual Machine", "Bochs"].iter().any(|m| text.contains(m)).then(|| text.trim().to_string())
 }
 
+/// The volume a folder or file is on and its filesystem (`<serial> <filesystem>`), from an open handle.
+pub fn volume(path: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetVolumeInformationByHandleW, OPEN_EXISTING};
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // No access asked: a handle that reads only the volume's facts, on a folder too.
+    let h = unsafe { CreateFileW(name.as_ptr(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, std::ptr::null_mut()) };
+    if h == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let (mut serial, mut fs) = (0u32, [0u16; 64]);
+    let ok = unsafe { GetVolumeInformationByHandleW(h, std::ptr::null_mut(), 0, &mut serial, std::ptr::null_mut(), std::ptr::null_mut(), fs.as_mut_ptr(), fs.len() as u32) } != 0;
+    unsafe { CloseHandle(h) };
+    ok.then(|| format!("{serial:08x} {}", wide_to_string(&fs)))
+}
+
 pub fn cpu_name() -> String {
     reg_string(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString").unwrap_or_default()
 }

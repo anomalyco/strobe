@@ -60,6 +60,56 @@ pub fn plain(p: &Path) -> String {
     }
 }
 
+/// What lies around a base's and a head's folders that differs for a program started in each before its
+/// own code runs (`VariantPlacement`, a warning): another volume or filesystem; a `package.json`,
+/// `node_modules`, `tsconfig.json` or `bunfig.toml` in a folder above one of them alone (a runtime looks
+/// up for them); one under the temporary folder and the other not, or a folder above one alone with 500
+/// entries or more where those above the other hold under 100 each (a runtime that lists the folders it
+/// starts in reads them). None when nothing does.
+pub fn placement_diff(base: &Path, head: &Path) -> Option<String> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (base, head) = (canon(base), canon(head));
+    let mut found: Vec<String> = Vec::new();
+    #[cfg(windows)]
+    let volume = |p: &Path| super::win::volume(p);
+    #[cfg(not(windows))]
+    let volume = |p: &Path| super::os::volume(p);
+    if let (Some(a), Some(b)) = (volume(&base), volume(&head))
+        && a != b
+    {
+        found.push(format!("they are on different volumes or filesystems ({a} and {b})"));
+    }
+    // The folders above each that are not above the other: what one side meets and the other does not.
+    let above = |p: &Path, other: &Path| -> Vec<PathBuf> { p.ancestors().skip(1).filter(|a| !other.starts_with(a)).map(Path::to_path_buf).collect() };
+    let sides = [("base", above(&base, &head)), ("head", above(&head, &base))];
+    for (role, dirs) in &sides {
+        let marks: Vec<String> =
+            dirs.iter().flat_map(|d| ["package.json", "node_modules", "tsconfig.json", "bunfig.toml"].into_iter().map(move |m| d.join(m))).filter(|f| f.exists()).map(|f| plain(&f)).take(3).collect();
+        if !marks.is_empty() {
+            found.push(format!("{} lies above {role}'s folder alone", marks.join(", ")));
+        }
+    }
+    let tmp = canon(&std::env::temp_dir());
+    match (base.starts_with(&tmp), head.starts_with(&tmp)) {
+        (true, false) => found.push(format!("base's folder is under the temporary folder {}", plain(&tmp))),
+        (false, true) => found.push(format!("head's folder is under the temporary folder {}", plain(&tmp))),
+        _ => {
+            // Entries counted up to 500: the largest folder above each side alone.
+            let widest = |dirs: &[PathBuf]| dirs.iter().map(|d| (std::fs::read_dir(d).map(|r| r.take(500).count()).unwrap_or(0), d.clone())).max_by_key(|e| e.0);
+            let (a, b) = (widest(&sides[0].1), widest(&sides[1].1));
+            let (na, nb) = (a.as_ref().map_or(0, |e| e.0), b.as_ref().map_or(0, |e| e.0));
+            if let Some((role, (_, d))) = match (na >= 500 && nb < 100, nb >= 500 && na < 100) {
+                (true, _) => a.map(|e| ("base", e)),
+                (_, true) => b.map(|e| ("head", e)),
+                _ => None,
+            } {
+                found.push(format!("{} above {role}'s folder alone holds 500 entries or more, where those above the other's hold under 100", plain(&d)));
+            }
+        }
+    }
+    (!found.is_empty()).then(|| found.join("; "))
+}
+
 /// Creates `dir` (its parents as the umask says) and makes it the user's alone on Linux and macOS:
 /// created `0700`, and an existing one (an older strobe made it with the umask's mode) that others
 /// may read is set to `0700` when it is seen.

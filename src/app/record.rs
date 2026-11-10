@@ -189,6 +189,10 @@ pub fn run(args: &Args) -> Result<Output> {
     // A timed recording runs on the fastest power plan, as a bench does (SPEC §9.4); attribution,
     // deep, memory and attached phone (`wir:`, `--mobile`) recordings do not switch this host's plan.
     let timed = args.get("probes").unwrap_or("timing") == "timing" && !args.has("mobile") && !is_wir;
+    // Its numbers are timings: none holds on a shared CI runner (`SharedRunner`); attribution does.
+    if timed {
+        super::bench::refuse_shared("record --probes timing")?;
+    }
     // A timed recording takes turns with benches for the device's slot (SPEC §10.1 `ConcurrentBench`),
     // before its power plan: its numbers and a timed block never share the machine.
     // `--max-time` caps that wait (exit 124, `ConcurrentBench`); a recording that takes no slot ends at --for.
@@ -199,7 +203,7 @@ pub fn run(args: &Args) -> Result<Output> {
         None => None,
     };
     let _slot = if slotted { Some(super::bench::slot::Registration::new(&store::new_id("rec"), &target).acquire_until(&format!("strobe record {target}"), deadline)?.0) } else { None };
-    let power = if timed { Some(super::bench::power_quiet(args)?) } else { None };
+    let power = if timed { Some(super::bench::power_quiet(args, true)?) } else { None };
     let mut out = recorded(args, target)?;
     // The user's plan is put back (the guard dropped) before the result says so.
     let switched = power.filter(|p| p.switched()).map(|p| p.used.clone());

@@ -268,6 +268,9 @@ struct Variant {
     target: Option<String>,
     /// What every text calls this side: its target's `name`, else the target's key; the label otherwise.
     name: String,
+    /// The targets this variant was built and served for in this experiment (`prepare_all`): a series
+    /// of one of them builds nothing (`needs_prepare`).
+    prepared: std::collections::BTreeSet<String>,
 }
 
 impl Variant {
@@ -694,6 +697,34 @@ pub(crate) fn ended_runs<'a>(runs: impl IntoIterator<Item = EndedRun<'a>>) -> Va
         })
         .collect();
     if out.is_empty() { Value::Null } else { json!(out) }
+}
+
+/// One run of a kept block for its recording's `run_list` (`run_list`): its key, whether it was measured
+/// (warmup runs are not), wall time (ms, untimed stretches out), the target's CPU in it (`cpu.work`'s
+/// per-run reading, ms), a page renderer's main-thread task time (ms), the main thread's CPU (ms) where
+/// strobe reads it, and whether a process that ended in it took CPU strobe could not count.
+pub(crate) struct RunRow {
+    pub run: String,
+    pub measured: bool,
+    pub ms: f64,
+    pub cpu_work_ms: f64,
+    pub task_ms: Option<f64>,
+    pub main_cpu_ms: Option<f64>,
+    pub cpu_lost: bool,
+}
+
+/// A recording's `run_list` (meta.json, `query <rec> runs`): every run of its block, warmup ones too, in
+/// order. A number strobe has none for (NaN, or CPU lost to an ended process) is null.
+pub(crate) fn run_list(rows: impl IntoIterator<Item = RunRow>) -> Value {
+    let num = |x: f64| Some(x).filter(|x| x.is_finite());
+    json!(
+        rows.into_iter()
+            .map(|r| json!({
+                "run": r.run, "measured": r.measured, "ms": num(r.ms), "cpu_work_ms": num(r.cpu_work_ms).filter(|_| !r.cpu_lost), "task_ms": r.task_ms.and_then(num),
+                "main_cpu_ms": r.main_cpu_ms.and_then(num), "cpu_lost": r.cpu_lost,
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 /// Where `EndedCpu` reads what ended processes used.
@@ -1491,6 +1522,11 @@ struct Ctx<'a> {
     deadline: Option<Instant>,
     /// A wait ran into `deadline` (`out_of_time`): the block it held up was not run.
     ran_out: bool,
+    /// Why this is a shared CI runner (`host::shared_runner`): a comparison here compares exact
+    /// counters only, and only while each holds one value (`shared_state`).
+    shared: Option<String>,
+    /// `VariantPlacement` was looked at (once per experiment, after the first build of both sides).
+    placed: bool,
 }
 
 /// Every block's reservation, merged for the experiment's context.
@@ -1837,6 +1873,20 @@ pub fn run(args: &Args) -> Result<Output> {
         RESUMED.with(|r| r.borrow_mut().take());
         return out;
     }
+    // A shared CI runner (SPEC §10.1 `SharedRunner`): timed blocks of one build and a bisection are
+    // timings alone. A comparison waits for its series (`shared_series`): exact counters may compare.
+    if !args.has("check") && !args.has("plan") {
+        let what = if args.get("bisect").is_some() {
+            Some("bench --bisect")
+        } else if args.get("blocks").is_some() {
+            Some("bench --blocks N")
+        } else {
+            None
+        };
+        if let Some(what) = what {
+            refuse_shared(what)?;
+        }
+    }
     // `--blocks N`: one build's timed blocks, nothing compared, so nothing that compares or decides goes with it.
     if args.get("blocks").is_some() {
         if let Some(f) = ["require-verdict", "plan", "noworse", "pairs", "pixels", "pixels-only"].iter().find(|f| args.has(f)) {
@@ -1936,8 +1986,9 @@ pub fn run(args: &Args) -> Result<Output> {
     let base_spec = match (args.get("base"), aa) {
         _ if check && aa => return Err(Error::usage("--check runs each case once on --head, with nothing to compare; drop --aa")),
         // `--base <target> --head <target> --check`: each case once on each of two targets, checked as
-        // their implementation comparison measures them (`expand`).
-        _ if check && blocks.is_none() && args.get("base").is_some() => None,
+        // their implementation comparison measures them (`expand`, `check_pair`); `--base <variant>`:
+        // each case once on each build (`check_series`), exact counters held to `--noworse`.
+        _ if check && blocks.is_none() && args.get("base").is_some() => args.get("base").map(str::to_string),
         _ if check && blocks.is_some() => return Err(Error::usage("--check runs one untimed block per case; --blocks N runs N timed ones: pick one")),
         _ if check => None,
         _ if blocks.is_some() && (aa || args.get("base").is_some() || leak_run) => {
@@ -2068,6 +2119,8 @@ pub fn run(args: &Args) -> Result<Output> {
         active_out: false,
         deadline: max_time.map(|t| started + t),
         ran_out: false,
+        shared: env.shared_runner.clone(),
+        placed: false,
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
     // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check`, a
@@ -2106,6 +2159,15 @@ pub fn run(args: &Args) -> Result<Output> {
     if series.is_empty() {
         return Err(Error::usage("no series matches --filter / --target / --params"));
     }
+    // `--check --noworse`: exact counters of head held to base's, before anything builds (`check_noworse`).
+    if check && args.get("noworse").is_some() {
+        if variants.len() < 2 {
+            return Err(Error::usage("--check --noworse holds head's exact counters to a base build's: add --base <ref> (a build, not a target of the file)"));
+        }
+        for s in series.iter().filter(|s| s.gap.is_none()) {
+            check_noworse(args, s)?;
+        }
+    }
     ctx.projects = target_projects(&ctx.describe, &series, &variants)?;
     ctx.implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     check_engines(&mut series, &ctx.describe, args, &variants, &config, &ctx.projects)?;
@@ -2117,6 +2179,11 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some((a, b)) = check_pair(&ctx.describe, args, &project)? {
         let sides = [resolve_side("base", a, None, &ctx.describe, &project, &config)?, resolve_side("head", b, None, &ctx.describe, &project, &config)?];
         implementation_preflight(&ctx.describe, &series, &sides, &config, &ctx.projects)?;
+    }
+    if mode == Mode::Compare
+        && let Some(why) = &ctx.shared
+    {
+        shared_series(&mut series, why)?;
     }
     ctx.journeys = series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()).count();
     // A file with `setupKey`: each series' key, before anything builds, so a key that is not plain JSON
@@ -2390,9 +2457,7 @@ pub fn run(args: &Args) -> Result<Output> {
                 None => check_series(&mut ctx, s, &mut variants, &config),
             },
             Mode::Pixels => (|| -> Result<Value> {
-                release_machine(&mut ctx);
-                ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
-                prepare_all(&mut ctx, s, &mut variants, &config)?;
+                prepare_series(&mut ctx, s, &mut variants, &config)?;
                 let pixels = pixels_series(&mut ctx, s, &variants)?;
                 Ok(json!({ "label": s.label(), "case": s.case, "kind": "pixels", "pixels": pixels, "decided": pixels.as_array().is_some_and(|a| a.iter().all(|p| p["state"] == "same")) }))
             })(),
@@ -2671,9 +2736,7 @@ pub fn run(args: &Args) -> Result<Output> {
 /// with what timed out and its screenshot, and the next case runs.
 fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Value) -> Result<Value> {
     // A `cli()` case with `--why always` was refused before the series ran (`run`).
-    release_machine(ctx);
-    ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
-    prepare_all(ctx, s, variants, config)?;
+    prepare_series(ctx, s, variants, config)?;
     let started = Instant::now();
     let log_from = std::fs::metadata(&ctx.runner.log).map(|m| m.len()).unwrap_or(0);
     // Kept, so its views (`query <rec> threads`, …) can follow up on what the check showed. A Linux
@@ -2682,7 +2745,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     let main_counters = split == Counting::Only || (split == Counting::Separate && counted_apart(&s.primary));
     // `--video`: the check block films its run (a counter block films nothing: its times are dropped anyway).
     let film = ctx.args.has("video") && !main_counters && {
-        let skip = no_video(ctx, variants[0].target_of(s));
+        let skip = no_video(ctx, variants[variants.len() - 1].target_of(s));
         if let Some(why) = &skip {
             ctx.warnings.push(validity::info("Video", format!("{}: no video: {why}", s.label())));
         }
@@ -2690,22 +2753,68 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     };
     // `--runs N`: N runs in its one launch, no warmup. `--repeat R`: R fresh launches of the case, each
     // as cold as the first (only the first filmed).
-    let repeat = ctx.args.num("repeat")?.map_or(1, |r| r as usize).max(1);
+    let mut repeat = ctx.args.num("repeat")?.map_or(1, |r| r as usize).max(1);
+    // `--noworse` on counters (`check_noworse`) shows each side's counter held one value: 2 runs of a case
+    // with a reset, else 2 fresh launches.
+    let noworse = check_noworse(ctx.args, s)?;
+    if !noworse.is_empty() && !(s.reset && ctx.runs >= 2) {
+        repeat = repeat.max(2);
+    }
     // A launch case's one run is its launch.
     if ctx.runs > 1 && s.launch.is_object() && !ctx.warnings.iter().any(|w| w.id == "LaunchRuns") {
         ctx.warnings.push(validity::info("LaunchRuns", format!("{}: a launch case times one launch, so --runs does not repeat it: --repeat N launches it N times", s.label())));
     }
+    // Two builds (`--check --base <variant>`): the base once as the head is, before it.
+    let head = variants.len() - 1;
+    let base = if head > 0 {
+        progress(format!("  {} base", s.label()));
+        let (mut r, launches, _) = check_launches(ctx, s, &variants[0], repeat, false, (split, main_counters));
+        let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
+        let r = check_halt(ctx, r)?;
+        let (mut b, counters) = base_check(r, &launches);
+        if let Some(rep) = repeated {
+            b["repeat"] = rep;
+        }
+        Some((b, counters))
+    } else {
+        None
+    };
+    let (mut r, launches, sent) = check_launches(ctx, s, &variants[head], repeat, film, (split, main_counters));
+    let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
+    let r = check_halt(ctx, r)?;
+    let held = r.as_ref().ok().map(|_| side_counters(&launches, &noworse));
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+    let log = runner_log(ctx, log_from, None);
+    let sent = sent.unwrap_or_else(|| ctx.runner.take_actions());
+    let mut out = check_case(ctx, s, variants, r, elapsed_ms, log, sent, film)?;
+    if let Some(rep) = repeated {
+        out["repeat"] = rep;
+    }
+    if let Some((b, counters)) = base {
+        out["base"] = b;
+        if let Some(head) = held {
+            noworse_state(s, &noworse, counters.as_deref(), &head, &mut out);
+        }
+    }
+    Ok(out)
+}
+
+/// A check's launches of one side (`--repeat R` of them, `--runs N` runs each): the block the result
+/// shows (each value the launches' median), every launch's block, and the actions of the first launch or
+/// the one that failed. `kind`: the case's `counting` and whether this block counts.
+fn check_launches(ctx: &mut Ctx, s: &Series, v: &Variant, repeat: usize, film: bool, kind: (Counting, bool)) -> (Result<Block>, Vec<Block>, Option<store::actions::ActionLog>) {
+    let (split, main_counters) = kind;
     let mut launches: Vec<Block> = Vec::new();
     let mut r: Result<Block> = Err(Error::msg("internal: a check ran no launch"));
     let mut sent: Option<store::actions::ActionLog> = None;
     for i in 0..repeat {
         if repeat > 1 {
-            progress(format!("  {} launch {} of {repeat}", s.label(), i + 1));
+            progress(format!("  {} {} launch {} of {repeat}", s.label(), v.role, i + 1));
         }
         let x = Exec { video: film && i == 0, ..Exec::untimed(true, None).counting(main_counters) }.measuring(ctx.runs);
-        r = block_on_screen(ctx, s, &variants[0], 0, &x).and_then(|mut b| {
+        r = block_on_screen(ctx, s, v, 0, &x).and_then(|mut b| {
             if split == Counting::Separate {
-                let other = block_on_screen(ctx, s, &variants[0], 0, &Exec::untimed(false, None).counting(!main_counters).measuring(ctx.runs))?;
+                let other = block_on_screen(ctx, s, v, 0, &Exec::untimed(false, None).counting(!main_counters).measuring(ctx.runs))?;
                 take_metrics(&mut b, &other, |m| counted_apart(m) != main_counters);
             }
             Ok(b)
@@ -2726,10 +2835,13 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
             Err(_) => break,
         }
     }
-    let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
-    // A stop, an unlock wait that ran out, or a question the check cannot answer ends the bench, as a
-    // batch's launch does: the case is not run (`--resume` runs it), never a failure. So does a phone that
-    // went away, with one line, rather than failing each case after it.
+    (r, launches, sent)
+}
+
+/// A stop, an unlock wait that ran out, or a question the check cannot answer ends the bench, as a
+/// batch's launch does: the case is not run (`--resume` runs it), never a failure. So does a phone that
+/// went away, with one line, rather than failing each case after it. Anything else is the case's.
+fn check_halt(ctx: &Ctx, r: Result<Block>) -> Result<Result<Block>> {
     if r.is_err()
         && !stop_requested()
         && let Some(gone) = phone_lost(ctx)
@@ -2741,14 +2853,107 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     {
         return Err(if e.code == 124 || e.code == 2 { e.clone() } else { stop_error() });
     }
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
-    let log = runner_log(ctx, log_from, None);
-    let sent = sent.unwrap_or_else(|| ctx.runner.take_actions());
-    let mut out = check_case(ctx, s, variants, r, elapsed_ms, log, sent, film)?;
-    if let Some(rep) = repeated {
-        out["repeat"] = rep;
+    Ok(r)
+}
+
+/// `--check --noworse`: the flag's margins (a bare one the primary's), each an exact counter
+/// (`model::is_ci_counter`): a time read once per side says nothing about head being no worse. Without
+/// `--base <variant>` it compares nothing. The case's own `noworse` is its timed comparisons'.
+fn check_noworse(args: &Args, s: &Series) -> Result<BTreeMap<String, f64>> {
+    let Some(flag) = args.get("noworse").filter(|_| args.has("check")) else { return Ok(BTreeMap::new()) };
+    let m = margins(&json!(flag), &s.primary).map_err(|e| Error::usage(format!("--noworse: {e}")))?;
+    if let Some(timed) = m.keys().find(|k| !model::is_ci_counter(k)) {
+        return Err(Error::usage(format!(
+            "--check --noworse {timed}: a check compares exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), each read once per side; a time needs timed pairs: bench --base <ref> --noworse {timed}=2%"
+        )));
     }
-    Ok(out)
+    Ok(m)
+}
+
+/// Each `--noworse` counter's values on one side of a check, from every launch (and with `--runs N`
+/// its lowest and highest run): one value when it held, else every one seen, or none when it was not
+/// measured (refused, or no number).
+fn side_counters(launches: &[Block], noworse: &BTreeMap<String, f64>) -> BTreeMap<String, Vec<f64>> {
+    noworse
+        .keys()
+        .map(|m| {
+            let mut seen: Vec<f64> = Vec::new();
+            for b in launches {
+                let Some(v) = b.values.get(m).copied().filter(|v| v.is_finite() && !b.refused.contains_key(m)) else { return (m.clone(), Vec::new()) };
+                seen.extend(std::iter::once(v).chain(b.spread.get(m).into_iter().flatten().copied()));
+            }
+            seen.dedup();
+            let mut held = seen.clone();
+            held.sort_by(f64::total_cmp);
+            held.dedup();
+            (m.clone(), if held.len() == 1 { held } else { seen })
+        })
+        .collect()
+}
+
+/// A two-build check's base: what its line shows (`check_output`), and its `--noworse` counters'
+/// values (`side_counters`) when it passed. Its failure fails nothing: a base that cannot run the case
+/// says only that no counter of it is compared.
+fn base_check(r: Result<Block>, launches: &[Block]) -> (Value, Option<Vec<Block>>) {
+    match r {
+        Ok(b) => (
+            json!({ "passed": true, "values": b.values, "refused": refusal_map(&b.refused), "recording": b.recording, "measured_run": b.warmup, "spread": if b.spread.is_empty() { Value::Null } else { json!(b.spread) }, "launches": launches.len(), "recordings": launches.iter().map(|l| &l.recording).collect::<Vec<_>>() }),
+            Some(launches.to_vec()),
+        ),
+        Err(e) => (json!({ "passed": false, "error": e.message, "hint": e.hint }), None),
+    }
+}
+
+/// `--check --base <variant> --noworse <counters>`: each counter must hold one value on each side
+/// (`side_counters`) and head be at most its margin above base (an exact non-inferiority,
+/// `stats::compare_noworse`): either failing fails the case (exit 1). A base that failed compares
+/// nothing; a counter head did not measure fails, as a declared check that read nothing.
+fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Block]>, head: &BTreeMap<String, Vec<f64>>, out: &mut Value) {
+    if noworse.is_empty() {
+        return;
+    }
+    let base = base.map(|b| side_counters(b, noworse));
+    let unit = |m: &str| model::metric(m).map_or("", |d| d.unit);
+    let list = |v: &[f64], m: &str| v.iter().map(|x| fmt::value(*x, unit(m))).collect::<Vec<_>>().join(", ");
+    let mut rows = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for (m, &margin) in noworse {
+        let h = head.get(m).cloned().unwrap_or_default();
+        let b = base.as_ref().map(|b| b.get(m).cloned().unwrap_or_default());
+        // A counter neither side measured is not this case's: nothing to say of it.
+        if h.is_empty() && b.as_ref().is_none_or(Vec::is_empty) {
+            continue;
+        }
+        let (state, text) = match (&b, h.as_slice()) {
+            (None, _) => ("not_compared", format!("{m}: the base failed: nothing to compare")),
+            (_, []) => ("missing", format!("{m}: head measured no value, where base did")),
+            (_, [_, _, ..]) => ("unstable", format!("{m}: head did not hold one value ({}), so no difference of it holds", list(&h, m))),
+            (Some(b), _) if b.is_empty() => ("not_compared", format!("{m}: base measured no value")),
+            (Some(b), _) if b.len() > 1 => ("unstable", format!("{m}: base did not hold one value ({}), so no difference of it holds", list(b, m))),
+            (Some(b), [hv]) => {
+                let def = model::metric(m).map_or(&model::METRICS[0], model::as_counter);
+                // Each side held one value (`side_counters`): the exact comparison a bench makes of a counter
+                // that held through `EXACT_MIN_PAIRS` pairs, its difference the answer.
+                let c = stats::compare_noworse(m, def, &[(b[0], *hv); stats::EXACT_MIN_PAIRS], margin, 0.95);
+                let worse = c.kind == VerdictKind::Worse;
+                (if worse { "worse" } else { "no_worse" }, format!("{m} {} → {} · {}", fmt::value(b[0], unit(m)), fmt::value(*hv, unit(m)), c.verdict))
+            }
+        };
+        if matches!(state, "worse" | "unstable" | "missing") {
+            failed.push(text.clone());
+        }
+        rows.push(json!({ "metric": m, "margin": margin, "state": state, "base": b, "head": h, "text": text }));
+    }
+    if !rows.is_empty() {
+        out["noworse"] = json!(rows);
+    }
+    if !failed.is_empty() && out["passed"] == true {
+        out["passed"] = json!(false);
+        out["decided"] = json!(false);
+        out["error"] = json!(format!("--noworse: {}", failed.join("; ")));
+        out["hint"] =
+            json!(format!("{}: a counter that moves between launches is no exact count (make it count the work, not time-dependent events); one that grew is what this change does", s.label()));
+    }
 }
 
 /// `--check --repeat R`: the case's R launches as one check result. Its values are each metric's
@@ -2802,10 +3007,11 @@ fn runner_log(ctx: &Ctx, from: u64, to: Option<u64>) -> Vec<String> {
 fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Block>, elapsed_ms: f64, log: Vec<String>, sent: store::actions::ActionLog, film: bool) -> Result<Value> {
     let target = ctx.describe["targets"][&s.target].clone();
     // An adapter entry the target lacks, met as the case ran: a gap in the matrix, not a failure.
+    let head = variants.len() - 1;
     if let Err(e) = &r
         && e.validator() == Some(ValidatorId::ParityGap)
     {
-        return Ok(runtime_gap(ctx, s, variants, 0, e, &[]));
+        return Ok(runtime_gap(ctx, s, variants, head, e, &[]));
     }
     let overhead = r.as_ref().ok().and_then(|b| b.overhead.clone());
     let (same, ops) = r.as_ref().map(|b| (json!(b.same), json!(b.ops))).unwrap_or_default();
@@ -2847,7 +3053,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
         // Warmed and run as in a bench (`--runs`, default 5): `--check`'s single cold run would start no
         // profiler, and one measured run is too few to read per-run numbers from.
         let runs = ctx.args.num("runs")?.unwrap_or(5.0).max(1.0) as usize;
-        head_attribution(ctx, s, &variants[0], runs)?
+        head_attribution(ctx, s, &variants[head], runs)?
     } else {
         (Value::Null, Value::Null)
     };
@@ -2913,6 +3119,23 @@ fn check_spread(s: &Value, name: &str) -> String {
         out += &format!(" ({})", each.iter().map(|v| v.as_f64().map_or("—".to_string(), |v| fmt::value(v, unit))).collect::<Vec<_>>().join(" · "));
     }
     out
+}
+
+/// A two-build check's base line (`base_check`): its declared metrics' values, or why it failed.
+fn base_line(b: &Value, declared: &[&str]) -> String {
+    if b["passed"] != true {
+        return format!("failed, so no counter of it is compared: {}", b["error"].as_str().unwrap_or("").lines().next().unwrap_or(""));
+    }
+    let values: Vec<String> = declared
+        .iter()
+        .map(|n| match b["values"][*n].as_f64() {
+            Some(v) => format!("{n} {}", fmt::value(v, model::metric(n).map_or("", |d| d.unit))),
+            None if b["refused"][*n].is_string() => format!("{n} refused"),
+            None => format!("{n} no value"),
+        })
+        .collect();
+    let rec = b["recording"].as_str().map(|r| format!(" · rec {r}")).unwrap_or_default();
+    format!("{}{rec}", values.join(" · "))
 }
 
 /// The main thread's CPU (`cpu.main`, `cpu.main.busy`) a case's line shows after its declared metrics
@@ -3144,6 +3367,15 @@ fn check_output(
                 text += &format!("      actions  {n} sent before it failed · strobe query {exp} actions\n");
             }
         }
+        // A two-build check (`--base <variant>`): the base's line under the head's, and each `--noworse`
+        // counter held to it.
+        if s["base"].is_object() {
+            text += &format!("      base  {}\n", base_line(&s["base"], &declared));
+        }
+        for n in s["noworse"].as_array().into_iter().flatten() {
+            let ok = matches!(n["state"].as_str(), Some("no_worse" | "not_compared"));
+            text += &format!("      {} noworse  {}\n", if ok { " " } else { "!" }, n["text"].as_str().unwrap_or(""));
+        }
         for (why, names) in &reasons {
             text += &format!("      refused  {}: {why}\n", names.join(", "));
         }
@@ -3190,8 +3422,15 @@ fn check_output(
         1 => "; 1 case measured run 2 instead, since a process of the target ended in its run 1".to_string(),
         n => format!("; {n} cases measured run 2 instead, since a process of the target ended in their run 1"),
     };
+    let compared = if series.iter().any(|s| s["noworse"].is_array()) {
+        "base and head each checked; only the --noworse counters compared, exactly"
+    } else if series.iter().any(|s| s["base"].is_object()) {
+        "base and head each checked; nothing compared"
+    } else {
+        "nothing compared"
+    };
     text += &format!(
-        "\n{} of {ran} cases passed{}{}{} ({cold}{later}; a case with a reset runs once more after it, unmeasured; nothing compared)\n",
+        "\n{} of {ran} cases passed{}{}{} ({cold}{later}; a case with a reset runs once more after it, unmeasured; {compared})\n",
         ran - failed,
         if refused > 0 { format!(", {refused} where the targets' journeys differ") } else { String::new() },
         if gaps > 0 { format!(", {gaps} parity gap{}", if gaps == 1 { "" } else { "s" }) } else { String::new() },
@@ -3226,9 +3465,7 @@ fn check_output(
 /// A leak run (`--probes memory`, SPEC §8.6): one memory block per variant, nothing paired. Each gets
 /// growth verdicts for its post-GC JS heap and DOM nodes, and its suspects.
 fn leak_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Value) -> Result<Value> {
-    release_machine(ctx);
-    ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
-    prepare_all(ctx, s, variants, config)?;
+    prepare_series(ctx, s, variants, config)?;
     let n = ctx.runs;
     progress(format!("\n{}  leak run · warmup, then S0 · {n} runs · S1 · {n} runs · S2, a post-GC census after every run", s.label()));
     let series_started = Instant::now();
@@ -3316,11 +3553,16 @@ fn tested_names(s: &Series, extra: &[&str], blocks: &[Block], pairs: &[(usize, u
 /// A counter (`kind: exact`) that held one value on each side in every pair, from 2 pairs: what
 /// `stats::compare` compares exactly.
 fn stable_exact(name: &str, blocks: &[Block], pairs: &[(usize, usize)]) -> bool {
-    if model::metric(name).is_none_or(|d| d.kind != model::Kind::Exact) || pairs.len() < stats::EXACT_MIN_PAIRS {
-        return false;
+    model::metric(name).is_some_and(|d| d.kind == model::Kind::Exact) && held_from(name, blocks, pairs) == Some(true)
+}
+
+/// Whether `name` held one value on each side in every pair, once there are `EXACT_MIN_PAIRS` to say.
+fn held_from(name: &str, blocks: &[Block], pairs: &[(usize, usize)]) -> Option<bool> {
+    if pairs.len() < stats::EXACT_MIN_PAIRS {
+        return None;
     }
     let (a0, b0) = (val(&blocks[pairs[0].0], name), val(&blocks[pairs[0].1], name));
-    pairs.iter().all(|&(a, b)| val(&blocks[a], name) == a0 && val(&blocks[b], name) == b0)
+    Some(pairs.iter().all(|&(a, b)| val(&blocks[a], name) == a0 && val(&blocks[b], name) == b0))
 }
 
 /// ` · ETA ~12.5 min`: the pairs left to `target` at this series' mean pair time so far, plus the
@@ -3468,9 +3710,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     let target = ctx.describe["targets"][&s.target].clone();
     // Checked before the series ran (`run`).
     let why = ctx.args.get("why").unwrap_or("auto").to_string();
-    release_machine(ctx);
-    ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
-    prepare_all(ctx, s, variants, config)?;
+    prepare_series(ctx, s, variants, config)?;
     let n_blocks = if n == 1 { "1 block".to_string() } else { format!("{n} blocks") };
     progress(format!("\n{}  primary {} · {n_blocks} of head alone", s.label(), s.primary));
     let series_started = Instant::now();
@@ -3614,10 +3854,12 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
 fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Value, started: Instant, max_time: Option<Duration>, remaining: usize) -> Result<Value> {
     let def = model::metric(&s.primary)
         .ok_or_else(|| Error::usage(format!("{}: unknown primary metric {} (known: {})", s.case, s.primary, model::METRICS.iter().map(|m| m.name).collect::<Vec<_>>().join(", "))))?;
+    // A shared runner compares counters only, each exactly (`shared_state`).
+    let shared = ctx.shared.clone();
+    let counter = |d: &'static MetricDef| if shared.is_some() { model::as_counter(d) } else { d };
+    let def = counter(def);
     let target = ctx.describe["targets"][&s.target].clone();
-    release_machine(ctx);
-    ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
-    prepare_all(ctx, s, variants, config)?;
+    prepare_series(ctx, s, variants, config)?;
     let bound =
         ctx.args.num("equivalence")?.map(|b| b / 100.0).unwrap_or_else(|| config["metrics"]["equivalence"].as_str().and_then(|e| e.trim_end_matches('%').parse::<f64>().ok()).unwrap_or(2.0) / 100.0);
     // Verdicts only at planned looks, each at a Pocock level, so looking more than once keeps the
@@ -3670,7 +3912,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let mut driver = sequential::Driver::new(design.clone());
     driver.decided_at = decided_n.and_then(|k| {
         let pp: Vec<(f64, f64)> = pairs[..k].iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).collect();
-        let d = def_in(&s.primary, &blocks).ok().flatten().unwrap_or(def);
+        let d = counter(def_in(&s.primary, &blocks).ok().flatten().unwrap_or(def));
         Some(compare_primary(&pp, d)).filter(|c| c.decided)
     });
     driver.decided_n = decided_n.filter(|_| driver.decided_at.is_some());
@@ -3758,8 +4000,15 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             driver.stopped = "journeys differ".into();
             break;
         }
+        // On a shared runner a counter that moved between blocks decides nothing (`shared_state`): no
+        // more pairs.
+        if shared.is_some() && held_from(&s.primary, &blocks, &pairs) == Some(false) {
+            progress(format!("  pair {n}: {} moved between blocks; on a shared runner a counter compares only while it holds one value", s.primary));
+            driver.stopped = "counter moved".into();
+            break;
+        }
         // A `metric.<name>` primary is better in the direction its lines gave (known from the blocks).
-        let def = def_in(&s.primary, &blocks)?.unwrap_or(def);
+        let def = counter(def_in(&s.primary, &blocks)?.unwrap_or(def));
         let verdict_before = driver.decided_at.as_ref().map(|c| c.verdict.clone());
         let (lk, step) = driver.after_pair(&s.primary, def, &primary_pairs, || tested_names(s, script, &blocks, &pairs, bound).len());
         if let Some(sequential::Look { cmp, look, decided, next, likely, .. }) = &lk {
@@ -3840,7 +4089,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             driver.stopped = if matches!(h.code, 130 | 124) { "stopped".into() } else { format!("failed: {}", h.message.lines().next().unwrap_or("")) };
         }
     }
-    let def = def_in(&s.primary, &blocks)?.unwrap_or(def);
+    let def = counter(def_in(&s.primary, &blocks)?.unwrap_or(def));
     let pp: Vec<(f64, f64)> = pairs.iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).collect();
     // The comparison at the look that decided it, else at the last pair (a resumed series' finished
     // pairs too).
@@ -3950,7 +4199,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             continue;
         }
         let d = match def_in(name, blocks) {
-            Ok(dd) => dd.unwrap_or(d),
+            Ok(dd) => counter(dd.unwrap_or(d)),
             Err(why) => {
                 secondaries.push(refused(name, d, &why));
                 continue;
@@ -3995,7 +4244,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             continue;
         }
         let d = match def_in(name, blocks) {
-            Ok(dd) => dd.unwrap_or(d),
+            Ok(dd) => counter(dd.unwrap_or(d)),
             Err(why) => {
                 descriptive.push(refused(name, d, &why));
                 continue;
@@ -4101,6 +4350,15 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             }
         }
         warnings.push(validity::warn("Background", format!("{}: nothing it moves is decided; rerun once that work is done", why.summary)));
+    }
+    // A shared runner (`SharedRunner`): exact counters that held one value are all that compares.
+    if let Some(why) = &shared {
+        if shared_state(why, &mut primary) {
+            primary_decided = false;
+        }
+        for c in secondaries.iter_mut().chain(descriptive.iter_mut()) {
+            shared_state(why, c);
+        }
     }
     // Secondaries: gated on the primary and Holm-corrected once every refusal is in, so a primary
     // refused after its blocks leaves every secondary untested.
@@ -4727,7 +4985,13 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
         return b;
     }
     if !pinned {
-        let used = format!("strobe and the runner used {} of a core in the runs on the target's own CPUs (strobe {}, runner {}; unpinned", pct_of_core(both), pct_of_core(strobe), pct_of_core(runner));
+        let used = format!(
+            "strobe and the runner used {} of a core in the runs on the target's own CPUs{} (strobe {}, runner {}; unpinned",
+            pct_of_core(both),
+            per_run(both, &b),
+            pct_of_core(strobe),
+            pct_of_core(runner)
+        );
         if both > 20.0 {
             let what = if timed { "its wall-time, CPU-share, frame and latency metrics are refused" } else { "a timed bench refuses this block's wall-time, CPU-share, frame and latency metrics" };
             once("unpinned self", validity::warn("OverheadBudget", format!("{block}: {used}; over 20%): {what}; {fix}")));
@@ -4748,7 +5012,10 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     let residual = (strobe - parts).max(0.0) + if client { 0.0 } else { runner };
     if residual > 10.0 {
         let who = if client { "strobe (besides its budgeted parts)" } else { "strobe (besides its budgeted parts) and the runner" };
-        once("pinned self", validity::warn("OverheadBudget", format!("{block}: {who} used {} of a core in the runs, on strobe's own CPUs (budget 10%)", pct_of_core(residual))));
+        once(
+            "pinned self",
+            validity::warn("OverheadBudget", format!("{block}: {who} used {} of a core in the runs{}, on strobe's own CPUs (budget 10%)", pct_of_core(residual), per_run(residual, &b))),
+        );
     }
     // One JavaScript thread near its ceiling: the client may pace the server it loads, not the server.
     if client && runner >= 85.0 {
@@ -4764,6 +5031,18 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
         );
     }
     b
+}
+
+/// ` (6.0 ms/run over 50 ms runs; …)`: a share of a core over a block's measured runs as CPU per run, and
+/// their mean length. Most of strobe's cost is fixed per run (its marks, reads and relay), so a short
+/// run (under 250 ms) shows it as a large share: said so. Nothing without runs.
+fn per_run(pct: f64, b: &Block) -> String {
+    if b.run_ms.is_empty() {
+        return String::new();
+    }
+    let run = b.run_ms.iter().sum::<f64>() / b.run_ms.len() as f64;
+    let short = if run < 250.0 { "; under 250 ms a run leaves strobe's fixed cost per run a large share of it: give each run more work" } else { "" };
+    format!(" ({}/run over {} runs{short})", fmt::value(pct / 100.0 * run, "ms"), fmt::value(run, "ms"))
 }
 
 /// What to do when strobe and the runner shared the target's CPUs and took too much of them (`self_state`),
@@ -5016,6 +5295,72 @@ fn series_refusal(ctx: &Ctx, s: &Series, e: &Error) -> Option<Refusal> {
     let r = e.refusal.as_deref().filter(|_| e.code == 4 && !stop_requested() && !ctx.ran_out && phone_lost(ctx).is_none())?;
     let dark = r.validator == ValidatorId::Throttled && dark_page(ctx, s) && dark_metric(&s.primary);
     (!r.validator.machine_wide() || dark).then(|| r.clone())
+}
+
+/// What runs on a shared CI runner instead of timing (`SharedRunner`).
+const SHARED_FIX: &str = "time it on a dedicated or self-hosted runner (RUNNER_ENVIRONMENT=self-hosted); here run bench --check (with --base <ref> and --noworse on exact counters: count.*, net.requests, net.bytes, tty.frames, dom.nodes), a leak run (--probes memory) or record --probes attribution";
+
+/// `SharedRunner` for `what` on a shared CI runner (`why`, `host::shared_runner`).
+fn shared_refusal(what: &str, why: &str) -> Refusal {
+    Refusal::new(ValidatorId::SharedRunner, format!("{what}: this is {why}, whose CPUs and memory other jobs share, so its times and readings move with their load")).fix(SHARED_FIX)
+}
+
+/// Refuses `what` (a timed command) on a shared CI runner (SPEC §10.1 `SharedRunner`, exit 4).
+pub(crate) fn refuse_shared(what: &str) -> Result<()> {
+    match host::shared_runner() {
+        Some(why) => Err(shared_refusal(what, &why).into()),
+        None => Ok(()),
+    }
+}
+
+/// A comparison on a shared CI runner: a series whose primary is no exact counter
+/// (`model::is_ci_counter`) is refused before anything builds and the rest run; none left is the
+/// bench's own refusal.
+fn shared_series(series: &mut [Series], why: &str) -> Result<()> {
+    let mut primaries: Vec<String> = Vec::new();
+    for s in series.iter_mut().filter(|s| s.gap.is_none() && s.refused.is_none()) {
+        if !model::is_ci_counter(&s.primary) {
+            s.refused = Some(shared_refusal(&format!("{}'s primary {} is no exact counter", s.label(), s.primary), why));
+            if !primaries.contains(&s.primary) {
+                primaries.push(s.primary.clone());
+            }
+        }
+    }
+    if !primaries.is_empty() && series.iter().all(|s| s.gap.is_some() || s.refused.is_some()) {
+        return Err(shared_refusal(&format!("a timed comparison (primary {})", primaries.join(", ")), why).into());
+    }
+    Ok(())
+}
+
+/// A comparison's rows on a shared CI runner (`SharedRunner`): a metric that is no exact counter is
+/// refused, and so is a counter that did not hold one value on each side (no signed-rank test of
+/// counts that moved with the machine). Returns whether `c` was refused.
+fn shared_state(why: &str, c: &mut Comparison) -> bool {
+    if c.kind == VerdictKind::Refused {
+        return false;
+    }
+    let r = if !model::is_ci_counter(&c.metric) {
+        shared_refusal(&format!("{} is no exact counter", c.metric), why)
+    } else if !c.exact && c.n < stats::EXACT_MIN_PAIRS {
+        Refusal {
+            summary: format!("{}: {} pairs, and on {why} a counter compares only exactly, which takes {} pairs that each held it", c.metric, c.n, stats::EXACT_MIN_PAIRS),
+            ..shared_refusal(&c.metric, why)
+        }
+        .fix(format!("--pairs auto, or --pairs {} or more", stats::EXACT_MIN_PAIRS))
+    } else if !c.exact {
+        Refusal {
+            summary: format!(
+                "{}: the counter did not hold one value on each side in every pair, and on {why} the runs' differences may be its neighbours' (a timer, a retry): no test of it holds here",
+                c.metric
+            ),
+            ..shared_refusal(&c.metric, why)
+        }
+        .fix("make the counter deterministic (count work, not time-dependent events), or compare it on a dedicated or self-hosted runner")
+    } else {
+        return false;
+    };
+    c.refuse(r);
+    true
 }
 
 /// A series that met its own refusal (`series_refusal`) after some of its blocks: they are kept, and
@@ -6077,19 +6422,16 @@ fn hold_machine(ctx: &mut Ctx, what: &str) -> Result<()> {
     }
     // A phone's blocks run on the phone: this computer's power plan is none of theirs (it stays awake).
     if ctx.power.is_none() && ctx.phone.is_none() {
-        let p = power_for(ctx.args)?;
+        // Cores unpark and clocks follow the new plan's policy: a switch waits until they hold, longest
+        // before blocks whose times become a verdict (`power_for`).
+        let p = power_for(ctx.args, matches!(ctx.mode, Mode::Compare | Mode::Blocks(_)))?;
         if let Some(why) = &p.kept
             && !ctx.warnings.iter().any(|w| w.id == "PowerPlan")
         {
             ctx.warnings.push(validity::info("PowerPlan", why.clone()));
         }
         ctx.power_used.get_or_insert_with(|| p.used.clone());
-        let settle = p.switched();
         ctx.power = Some(p);
-        if settle {
-            // Cores unpark and clocks follow the new plan's policy within a second or two.
-            std::thread::sleep(Duration::from_secs(3));
-        }
     }
     ctx.awake.hold(true);
     Ok(())
@@ -8961,6 +9303,18 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let local = measured_of(c).0;
                 c.runs.iter().enumerate().map(move |(i, r)| (format!("run:{}", c.base + i), local.contains(&i), r.ended_ms, r.cpu_lost, r.ended_exes.as_slice()))
             }));
+            meta["run_list"] = run_list(page_cases.iter().flat_map(|(_, c)| {
+                let local = measured_of(c).0;
+                c.runs.iter().enumerate().map(move |(i, r)| RunRow {
+                    run: format!("run:{}", c.base + i),
+                    measured: local.contains(&i),
+                    ms: r.ms,
+                    cpu_work_ms: r.work,
+                    task_ms: Some(r.task),
+                    main_cpu_ms: None,
+                    cpu_lost: r.cpu_lost,
+                })
+            }));
             if let Some(p) = on_phone {
                 meta["phone"] = p.meta(phone_screen.clone());
             }
@@ -9098,18 +9452,33 @@ impl Drop for OwnAffinity {
 /// The run's power plan (SPEC §9.4): `--power high` (the default) switches to the fastest plan the
 /// device offers and puts the user's back afterwards, even after a kill (`host::power`); `--power
 /// keep` keeps the user's. strobe pins the target to its CPUs itself, so it needs no core parking.
-/// A progress line says so only when the plan changed: a plan already in use is the env line's.
-pub(crate) fn power_for(args: &Args) -> Result<host::power::Power> {
-    let p = power_quiet(args)?;
+/// A progress line says so only when the plan changed: a plan already in use is the env line's. A
+/// switch waits until the CPUs' speed holds (`host::power::wait_settled`): up to 3 s before what is
+/// `timed`, 250 ms before anything else.
+pub(crate) fn power_for(args: &Args, timed: bool) -> Result<host::power::Power> {
+    let (p, settled) = power_settled(args, timed)?;
     if p.switched() {
-        progress(format!("  power plan: {} for this run (the user's own comes back after it)", p.used));
+        let (waited, held) = settled.unwrap_or_default();
+        progress(format!(
+            "  power plan: {} for this run (the user's own comes back after it); settled in {}{}",
+            p.used,
+            fmt::ms_duration(waited.as_millis() as u64),
+            if held { "" } else { " (its speed still moved: the wait's cap)" }
+        ));
     }
     Ok(p)
 }
 
 /// `power_for` without the progress line, for a command that says it in its result (`record`).
-pub(crate) fn power_quiet(args: &Args) -> Result<host::power::Power> {
-    Ok(host::power::Power::for_run(power_keep(args)?))
+pub(crate) fn power_quiet(args: &Args, timed: bool) -> Result<host::power::Power> {
+    Ok(power_settled(args, timed)?.0)
+}
+
+/// The run's power plan, and after a switch how long its speed took to hold and whether it did.
+fn power_settled(args: &Args, timed: bool) -> Result<(host::power::Power, Option<(Duration, bool)>)> {
+    let p = host::power::Power::for_run(power_keep(args)?);
+    let settled = p.switched().then(|| host::power::wait_settled(timed));
+    Ok((p, settled))
 }
 
 fn power_keep(args: &Args) -> Result<bool> {
@@ -9425,6 +9794,8 @@ fn check_pair<'a>(describe: &Value, args: &'a Args, project: &Path) -> Result<Op
     }
     match (side_spec(b, describe, project)?, side_spec(h, describe, project)?) {
         (Some((b, None)), Some((h, None))) if b != h => Ok(Some((b, h))),
+        // Two builds (`--base <ref> --head .`): each case once on each (`check_series`).
+        (None, None) => Ok(None),
         _ => Err(Error::usage(format!(
             "--check --base {b} --head {h}: name two different targets of the bench file, with no =<variant> (a check runs the bench file's own folder), to check them as their comparison measures them; or drop --base"
         ))),
@@ -10790,6 +11161,7 @@ fn resolve_variant(role: &'static str, spec: &str, project: &Path, config: &Valu
                 changed: Vec::new(),
                 target: None,
                 name: String::new(),
+                prepared: Default::default(),
             };
             v.commit = (!sha.is_empty()).then_some(sha);
             v.name = v.label.clone();
@@ -10813,6 +11185,7 @@ fn resolve_variant(role: &'static str, spec: &str, project: &Path, config: &Valu
         changed: Vec::new(),
         target: None,
         name: String::new(),
+        prepared: Default::default(),
     };
     if let Kind::Git(r) = &v.kind {
         let sha = git::out(project, &["rev-parse", "--short=10", r]).ok_or_else(|| Error::usage(format!("{spec} is neither a directory nor a git ref in {}", project.display())))?;
@@ -11010,6 +11383,58 @@ fn prepare_all(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Val
     match &s.sides {
         None => unbuilt(&ctx.describe["targets"][&s.target], variants, &s.label()),
         Some(_) => variants.iter().try_for_each(|v| unbuilt(&ctx.describe["targets"][v.target_of(s)], std::slice::from_ref(v), &s.label())),
+    }?;
+    for v in variants.iter_mut() {
+        let name = v.target_of(s).to_string();
+        v.prepared.insert(name);
+    }
+    placement(ctx, variants);
+    Ok(())
+}
+
+/// A series' builds and servers (`prepare_all`). The machine is given back first only when the series
+/// builds or serves something (`needs_prepare`) or another bench waits for the slot: otherwise the slot,
+/// the power plan and its settled clocks carry on from the series before.
+fn prepare_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Value) -> Result<()> {
+    if needs_prepare(s, variants) || (ctx.slot.is_some() && slot::others_queued(&ctx.exp)) {
+        release_machine(ctx);
+        ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
+    }
+    prepare_all(ctx, s, variants, config)
+}
+
+/// Whether a series builds or serves anything before its blocks: a variant not yet prepared for the
+/// target it runs, or a folder whose contents changed since its build (`prepare_variant` builds it again).
+/// Only then does the bench give the machine back (`release_machine`): built variants keep the slot and
+/// the power plan from one series to the next.
+fn needs_prepare(s: &Series, variants: &[Variant]) -> bool {
+    variants.iter().any(|v| {
+        !v.prepared.contains(v.target_of(s))
+            || match (&v.kind, &v.root, &v.state) {
+                (Kind::Dir, Some(root), Some(was)) => tree_state(root).as_ref() != Some(was),
+                _ => false,
+            }
+    })
+}
+
+/// `VariantPlacement`, once per experiment, when base and head have folders: what lies around them
+/// differs in a way that changes what the target does before its own code runs (`host::paths::placement_diff`).
+fn placement(ctx: &mut Ctx, variants: &[Variant]) {
+    let [base, head] = variants else { return };
+    let (Some(b), Some(h)) = (&base.root, &head.root) else { return };
+    if ctx.placed || b == h {
+        return;
+    }
+    ctx.placed = true;
+    if let Some(why) = host::paths::placement_diff(b, h) {
+        ctx.warnings.push(validity::warn(
+            "VariantPlacement",
+            format!(
+                "base runs in {} and head in {}: {why}; a runtime that looks up from its folder (a package.json, node_modules, a config) or reads it at startup does other work on each side, which lands in its numbers; put both in one place (git refs both build under strobe's own folder)",
+                host::paths::plain(b),
+                host::paths::plain(h)
+            ),
+        ));
     }
 }
 

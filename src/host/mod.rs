@@ -1625,7 +1625,35 @@ pub struct Env {
     pub virtual_machine: Option<String>,
     /// The OS's own "reduce motion" setting (`motion::reduced_motion`), read only; None when unknown.
     pub reduced_motion: Option<bool>,
+    /// Why this is a CI runner other jobs share (`shared_runner`): no timing holds here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_runner: Option<String>,
     pub strobe: String,
+}
+
+/// Why this machine is a CI runner other jobs share, whose timings move with its neighbours' load
+/// (SPEC §10.1 `SharedRunner`): a GitHub-hosted runner (`RUNNER_ENVIRONMENT=github-hosted`), a job
+/// that says so (`CI_SHARED_ENVIRONMENT=true`), or a CI job in a virtual machine that is not a
+/// self-hosted runner. A person's shell, and a CI job on bare metal or a self-hosted runner, is none.
+pub fn shared_runner() -> Option<String> {
+    let var = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let runner = var("RUNNER_ENVIRONMENT");
+    if runner.as_deref() == Some("github-hosted") {
+        return Some("a GitHub-hosted runner (RUNNER_ENVIRONMENT=github-hosted)".into());
+    }
+    if var("CI_SHARED_ENVIRONMENT").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+        return Some("a runner its job says is shared (CI_SHARED_ENVIRONMENT=true)".into());
+    }
+    let truthy = |v: &str| !matches!(v.to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off");
+    let ci = ["CI", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TF_BUILD", "BUILDKITE"].into_iter().find(|k| var(k).is_some_and(|v| truthy(&v)))?;
+    if runner.as_deref() == Some("self-hosted") {
+        return None;
+    }
+    #[cfg(windows)]
+    let vm = win::virtual_machine();
+    #[cfg(not(windows))]
+    let vm = os::virtual_machine();
+    vm.map(|vm| format!("a CI job ({ci} is set) in a virtual machine ({vm}) that is no self-hosted runner"))
 }
 
 /// The active power plan's name, with Windows 11's power mode when one is set on it
@@ -1668,7 +1696,18 @@ pub fn env() -> Env {
     #[cfg(not(windows))]
     let virtual_machine = os::virtual_machine();
     let reduced_motion = motion::reduced_motion();
-    Env { os, cpu, logical_cpus: topo.logical, l3_groups: topo.groups, power_plan, on_battery, virtual_machine, reduced_motion, strobe: env!("CARGO_PKG_VERSION").to_string() }
+    Env {
+        os,
+        cpu,
+        logical_cpus: topo.logical,
+        l3_groups: topo.groups,
+        power_plan,
+        on_battery,
+        virtual_machine,
+        reduced_motion,
+        shared_runner: shared_runner(),
+        strobe: env!("CARGO_PKG_VERSION").to_string(),
+    }
 }
 
 /// Share of all CPUs busy over `ms`, 0..1.

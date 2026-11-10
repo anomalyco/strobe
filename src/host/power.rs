@@ -75,6 +75,39 @@ impl Drop for Power {
     }
 }
 
+/// After a plan switch, until this thread's speed holds: a short fixed integer workload (the fastest of
+/// three) read every 100 ms until two reads in a row agree within 1.5%. Before timed blocks (`timed`) at
+/// least 200 ms and at most 3 s; before untimed ones (a check, a leak run) at most 250 ms, since nothing
+/// they measure is a time a verdict reads. Returns how long it waited and whether the reads agreed.
+pub fn wait_settled(timed: bool) -> (std::time::Duration, bool) {
+    use std::time::{Duration, Instant};
+    let (min, cap) = if timed { (Duration::from_millis(200), Duration::from_secs(3)) } else { (Duration::ZERO, Duration::from_millis(250)) };
+    let started = Instant::now();
+    let read = || {
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                let mut x = 0u64;
+                for i in 0..2_000_000u64 {
+                    x = x.rotate_left(5) ^ i.wrapping_mul(2_654_435_761);
+                }
+                std::hint::black_box(x);
+                t.elapsed().as_secs_f64()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut last = read();
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = read();
+        let agree = (now - last).abs() <= 0.015 * now.min(last);
+        if (agree && started.elapsed() >= min) || started.elapsed() >= cap {
+            return (started.elapsed(), agree);
+        }
+        last = now;
+    }
+}
+
 /// Puts back a plan a strobe that is no longer running switched away from (killed mid-run).
 pub fn restore_stale() {
     let Some(v) = std::fs::read_to_string(journal()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };

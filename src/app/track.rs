@@ -119,6 +119,8 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some(id) = args.get("unschedule") {
         return unschedule(id);
     }
+    // A track's points are timed blocks: none holds on a shared CI runner (`SharedRunner`).
+    super::bench::refuse_shared("track")?;
     if args.has("confirm") && args.pos.first().is_none_or(|p| p.starts_with("ser_") || p.starts_with("chg_")) {
         return confirm_pending(args, args.pos.first().map(String::as_str));
     }
