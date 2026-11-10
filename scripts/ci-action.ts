@@ -1,0 +1,553 @@
+// The steps of strobe's GitHub Action (action.yml, SPEC §26):
+//   bun scripts/ci-action.ts resolve   which strobe, where it is cached
+//   bun scripts/ci-action.ts install   that strobe from npm (or the given binary), and its engine's cache key
+//   bun scripts/ci-action.ts setup     strobe up, and whether a browser is there
+//   bun scripts/ci-action.ts browser   Playwright's Chromium, only where no browser was found
+//   bun scripts/ci-action.ts run       the benches, the step summary, the PR block, the artifacts
+// Every input arrives in the environment as INPUT_<NAME> (action.yml puts it there), never in a shell
+// line: an input is data, not code.
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+
+const input = (name: string) => (process.env[`INPUT_${name.toUpperCase().replace(/-/g, "_")}`] ?? "").trim()
+const env = (name: string) => process.env[name] ?? ""
+
+// A workflow command's text: GitHub reads %, CR and LF as escapes.
+const escape = (s: string) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")
+const warn = (s: string) => console.log(`::warning title=strobe::${escape(s)}`)
+const error = (s: string) => console.log(`::error title=strobe::${escape(s)}`)
+function fail(s: string): never {
+  error(s)
+  process.exit(1)
+}
+
+function output(name: string, value: string) {
+  const file = env("GITHUB_OUTPUT")
+  if (!file) return console.log(`${name}=${value}`)
+  const end = `strobe_${crypto.randomUUID()}`
+  appendFileSync(file, `${name}<<${end}\n${value}\n${end}\n`)
+}
+
+function setEnv(name: string, value: string) {
+  const file = env("GITHUB_ENV")
+  if (file) appendFileSync(file, `${name}<<strobe_${name}\n${value}\nstrobe_${name}\n`)
+  process.env[name] = value
+}
+
+function oneOf(name: string, allowed: string[], fallback: string): string {
+  const v = input(name) || fallback
+  if (!allowed.includes(v)) fail(`input ${name}: ${JSON.stringify(v)} is not one of ${allowed.join(", ")}`)
+  return v
+}
+
+const flag = (name: string) => oneOf(name, ["true", "false"], "false") === "true"
+
+// npm's name for this runner's OS and CPU, as strobe's release publishes its binaries.
+function platform(): string {
+  const os = { win32: "win32", darwin: "darwin", linux: "linux" }[process.platform as string]
+  const cpu = { x64: "x64", arm64: "arm64" }[process.arch as string]
+  if (!os || !cpu) fail(`strobe has no release for ${process.platform} ${process.arch}`)
+  return `${os}-${cpu}`
+}
+
+const exe = (name: string) => (process.platform === "win32" ? `${name}.exe` : name)
+const workspace = () => env("GITHUB_WORKSPACE") || process.cwd()
+const cacheRoot = () => join(env("RUNNER_TOOL_CACHE") || env("RUNNER_TEMP") || join(workspace(), ".."), "strobe")
+
+// The pull_request_target event runs a fork's code with the base repository's secrets and a token that
+// can write: a bench runs the pull request's code, so the action never runs there.
+function guard() {
+  if (env("GITHUB_EVENT_NAME") === "pull_request_target")
+    fail("strobe's action refuses pull_request_target: a bench runs the pull request's code, and that event hands it the base repository's secrets and a token that can write. Use pull_request (fork PRs get a read-only token and no secrets)")
+}
+
+function event(): any {
+  try {
+    return JSON.parse(readFileSync(env("GITHUB_EVENT_PATH"), "utf8"))
+  } catch {
+    return {}
+  }
+}
+
+async function registry(path: string): Promise<any> {
+  const url = `https://registry.npmjs.org/${path}`
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const r = await fetch(url, { headers: { accept: "application/json" } })
+      if (r.status === 404) fail(`npm has no ${decodeURIComponent(path)}`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return await r.json()
+    } catch (e) {
+      if (attempt === 3) fail(`${url}: ${e}`)
+      await Bun.sleep(2000 * attempt)
+    }
+  }
+}
+
+// The strobe version to install: the action's own (its Cargo.toml), the project's (@hona/strobe in its
+// node_modules, else the newest release its package.json's range allows) or the one given.
+async function version(dir: string): Promise<string> {
+  const v = input("version") || "action"
+  if (v === "action") {
+    const cargo = readFileSync(join(import.meta.dir, "..", "Cargo.toml"), "utf8")
+    return cargo.match(/^version = "([^"]+)"/m)?.[1] ?? fail("the action's Cargo.toml names no version")
+  }
+  if (v === "project") {
+    for (let d = dir; ; d = dirname(d)) {
+      const installed = join(d, "node_modules", "@hona", "strobe", "package.json")
+      if (existsSync(installed)) return JSON.parse(readFileSync(installed, "utf8")).version
+      const pkg = join(d, "package.json")
+      if (existsSync(pkg)) {
+        const p = JSON.parse(readFileSync(pkg, "utf8"))
+        const range: string | undefined = p.devDependencies?.["@hona/strobe"] ?? p.dependencies?.["@hona/strobe"]
+        if (range) {
+          const all = Object.keys((await registry("@hona%2fstrobe")).versions ?? {})
+          const best = all.filter((x) => Bun.semver.satisfies(x, range)).sort(Bun.semver.order).at(-1)
+          return best ?? fail(`${pkg}: no @hona/strobe release satisfies ${range}`)
+        }
+      }
+      if (dirname(d) === d || resolve(d) === resolve(workspace())) break
+    }
+    fail(`version: project: no @hona/strobe in ${dir}'s package.json or node_modules (bun add -d @hona/strobe)`)
+  }
+  if (v === "latest" || /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(v)) return v
+  fail(`input version: ${JSON.stringify(v)} is not action, project, latest or a version (0.29.0)`)
+}
+
+function workdir(): string {
+  const d = resolve(workspace(), input("working-directory") || ".")
+  if (!existsSync(d)) fail(`working-directory ${d} does not exist`)
+  return d
+}
+
+function givenBinary(): string | null {
+  const b = input("strobe-binary")
+  if (!b) return null
+  let p = isAbsolute(b) ? b : resolve(workspace(), b)
+  if (!existsSync(p) && existsSync(p + ".exe")) p += ".exe"
+  if (existsSync(p) && statSync(p).isDirectory()) p = join(p, exe("strobe"))
+  if (!existsSync(p)) fail(`strobe-binary ${p} does not exist`)
+  return p
+}
+
+async function resolveStep() {
+  guard()
+  oneOf("mode", ["check", "compare"], "check")
+  oneOf("fail-on", ["worse", "unclear", "never"], "worse")
+  oneOf("update-pr", ["auto", "true", "false"], "auto")
+  oneOf("upload-artifacts", ["on-failure", "always", "never"], "on-failure")
+  oneOf("install-browser", ["auto", "false"], "auto")
+  flag("upload-recordings")
+  oneOf("headless", ["true", "false"], "true")
+  if (!input("bench")) fail("input bench: give one or more bench files (comma- or newline-separated)")
+  const plat = platform()
+  if (givenBinary()) {
+    output("cache-key", "")
+    output("cache-path", "")
+    return
+  }
+  const v = await version(workdir())
+  const meta = await registry(`@hona%2fstrobe-${plat}/${v}`)
+  output("version", meta.version)
+  output("cache-key", `strobe-${plat}-${meta.version}`)
+  output("cache-path", join(cacheRoot(), meta.version, plat))
+}
+
+// A ustar archive's regular files, as (path, bytes).
+function untar(tar: Uint8Array): [string, Uint8Array][] {
+  const text = (a: number, b: number, h: Uint8Array) => new TextDecoder().decode(h.subarray(a, b)).replace(/\0.*$/s, "")
+  const files: [string, Uint8Array][] = []
+  for (let at = 0; at + 512 <= tar.length; ) {
+    const h = tar.subarray(at, at + 512)
+    if (h.every((b) => b === 0)) break
+    const size = parseInt(text(124, 136, h).trim() || "0", 8)
+    const name = text(0, 100, h)
+    const prefix = text(345, 500, h)
+    const body = at + 512
+    if ((h[156] === 48 || h[156] === 0) && body + size <= tar.length) files.push([prefix ? `${prefix}/${name}` : name, tar.slice(body, body + size)])
+    at = body + Math.ceil(size / 512) * 512
+  }
+  return files
+}
+
+// The platform package's tarball, checked against the registry's sha512 integrity on every run (a
+// cached copy too) before its binaries are unpacked.
+async function installNpm(v: string, dir: string): Promise<string> {
+  const plat = platform()
+  const name = `@hona/strobe-${plat}`
+  const meta = await registry(`${name.replace("/", "%2f")}/${v}`)
+  const integrity: string = meta.dist?.integrity ?? ""
+  if (!integrity.startsWith("sha512-")) fail(`${name}@${v}: the registry gives no sha512 integrity`)
+  const sha512 = (b: Uint8Array) => `sha512-${new Bun.CryptoHasher("sha512").update(b).digest("base64")}`
+  mkdirSync(dir, { recursive: true })
+  const tgz = join(dir, "package.tgz")
+  let bytes = existsSync(tgz) ? new Uint8Array(readFileSync(tgz)) : null
+  if (bytes && sha512(bytes) !== integrity) {
+    warn(`the cached ${name}@${v} does not match the registry's integrity; downloading it again`)
+    bytes = null
+  }
+  if (!bytes) {
+    const r = await fetch(meta.dist.tarball)
+    if (!r.ok) fail(`download ${meta.dist.tarball}: HTTP ${r.status}`)
+    bytes = new Uint8Array(await r.arrayBuffer())
+    if (sha512(bytes) !== integrity) fail(`${name}@${v}: the tarball's sha512 does not match the registry's integrity`)
+    writeFileSync(tgz, bytes)
+  }
+  const files = untar(Bun.gunzipSync(bytes))
+  for (const n of ["strobe", "strobew"]) {
+    const f = files.find(([p]) => p === `package/${exe(n)}`)
+    if (!f) continue
+    const to = join(dir, exe(n))
+    writeFileSync(to, f[1])
+    if (process.platform !== "win32") chmodSync(to, 0o755)
+  }
+  const main = join(dir, exe("strobe"))
+  if (!existsSync(main)) fail(`${name}@${v} holds no ${exe("strobe")}`)
+  return main
+}
+
+function strobe(args: string[], opts: { cwd?: string; capture?: boolean; env?: Record<string, string> } = {}): { code: number; stdout: string } {
+  const bin = env("STROBE_ACTION_EXE") || "strobe"
+  const p = Bun.spawnSync([bin, ...args], {
+    cwd: opts.cwd,
+    stdin: "ignore",
+    stdout: opts.capture === false ? "inherit" : "pipe",
+    stderr: "inherit",
+    env: { ...process.env, ...opts.env },
+  })
+  return { code: p.exitCode ?? 1, stdout: p.stdout ? p.stdout.toString() : "" }
+}
+
+function json(text: string): any {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+async function installStep() {
+  const given = givenBinary()
+  const main = given ?? (await installNpm(env("STROBE_ACTION_VERSION"), env("STROBE_ACTION_CACHE")))
+  // Later steps of the job run this strobe as `strobe`.
+  if (env("GITHUB_PATH")) appendFileSync(env("GITHUB_PATH"), `${dirname(main)}\n`)
+  setEnv("STROBE_ACTION_EXE", main)
+  const v = Bun.spawnSync([main, "--version"], { stdin: "ignore" })
+  if (v.exitCode !== 0) fail(`${main} does not run: ${v.stderr.toString().trim()}`)
+  console.log(v.stdout.toString().trim())
+  // The engine (trace_processor) has its own version, which the binary names; its folder is cached apart.
+  const status = json(strobe(["status", "--fast", "--json"]).stdout)
+  const engine = status?.engine
+  if (engine?.version && engine?.path) {
+    output("engine-key", `strobe-engine-${platform()}-${engine.version}`)
+    output("engine-path", dirname(engine.path))
+  } else {
+    output("engine-key", "")
+    warn("strobe status named no engine; it downloads on first use, uncached")
+  }
+}
+
+const PLAYWRIGHT = "1.65.0"
+
+async function setupStep() {
+  // No deep mode (a privilege prompt), daemon, MCP registration or calibration on a CI runner.
+  const up = strobe(["up", "--skip", "deep,daemon,mcp,calibrate"], { capture: false })
+  if (up.code !== 0) fail(`strobe up failed (exit ${up.code}); its lines above say which step`)
+  const check = json(strobe(["up", "--check", "--json"]).stdout)
+  const browser = check?.browser?.ok === true
+  const wanted = oneOf("install-browser", ["auto", "false"], "auto") === "auto"
+  output("browser-missing", String(!browser && wanted))
+  if (!browser && !wanted) warn("no browser found and install-browser is false: page targets will fail (install Chrome, or set STROBE_BROWSER)")
+  if (!browser && wanted) {
+    const path = env("PLAYWRIGHT_BROWSERS_PATH") || join(cacheRoot(), "ms-playwright")
+    output("browser-path", path)
+    output("browser-key", `strobe-chromium-${platform()}-playwright-${PLAYWRIGHT}`)
+  }
+}
+
+async function browserStep() {
+  const path = env("STROBE_ACTION_BROWSERS")
+  setEnv("PLAYWRIGHT_BROWSERS_PATH", path)
+  const p = Bun.spawnSync(["bunx", `playwright@${PLAYWRIGHT}`, "install", "chromium"], { stdin: "ignore", stdout: "inherit", stderr: "inherit" })
+  if (p.exitCode !== 0) fail(`bunx playwright@${PLAYWRIGHT} install chromium failed (exit ${p.exitCode})`)
+  const check = json(strobe(["up", "--check", "--json"]).stdout)
+  if (check?.browser?.ok !== true) fail(`strobe finds no browser after Playwright's install: ${check?.browser?.detail ?? "no detail"}`)
+}
+
+function git(args: string[], cwd: string): { code: number; out: string } {
+  const p = Bun.spawnSync(["git", ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  return { code: p.exitCode ?? 1, out: (p.stdout.toString() + p.stderr.toString()).trim() }
+}
+
+// The commit to compare against: the input, else the pull request's base, else the commit a push
+// moved from. Fetched (one commit) when the checkout lacks it.
+function base(cwd: string, ev: any): string {
+  const given = input("base")
+  const zero = /^0+$/
+  const want = given || ev.pull_request?.base?.sha || (ev.before && !zero.test(ev.before) ? ev.before : "")
+  if (!want) return ""
+  const has = (ref: string) => git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd)
+  let r = has(want)
+  if (r.code !== 0) {
+    const f = git(["fetch", "--no-tags", "--depth=1", "origin", want], cwd)
+    if (f.code !== 0) fail(`base ${want}: not in the checkout, and git fetch origin ${want} failed: ${f.out}. Check out with fetch-depth: 0, or keep checkout's credentials for a private repository`)
+    r = has(given && !/^[0-9a-f]{7,40}$/.test(given) ? "FETCH_HEAD" : want)
+  }
+  if (r.code !== 0) fail(`base ${want} is no commit`)
+  return r.out.split("\n")[0]
+}
+
+const list = (s: string) =>
+  s
+    .split(/[\n,]/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+
+// The worst primary verdict of a comparison: worse before anything undecided before anything decided.
+const RANK = ["worse", "refused", "unclear", "underpowered", "saturated", "stopped", "same", "no_worse", "better"]
+
+function verdicts(result: any): string[] {
+  return (result?.series ?? []).map((s: any) => s.primary?.verdict_kind ?? (s.refusal ? "refused" : "unclear"))
+}
+
+function worst(kinds: string[]): string {
+  return kinds.sort((a, b) => (RANK.indexOf(a) + 1 || 99) - (RANK.indexOf(b) + 1 || 99))[0] ?? "unclear"
+}
+
+// Any comparison that came out worse: a primary, or a decided secondary or no-worse metric.
+function regressed(result: any): boolean {
+  return (result?.series ?? []).some((s: any) =>
+    [s.primary, ...(s.secondaries ?? []), ...(s.noworse ?? [])].some((c: any) => c && typeof c === "object" && c.verdict_kind === "worse" && c.decided !== false),
+  )
+}
+
+// One summary block per experiment, at most 1 MiB in all (GitHub's cap for a step's summary).
+let summaryBytes = 0
+function summarize(text: string) {
+  const file = env("GITHUB_STEP_SUMMARY")
+  const block = text.endsWith("\n") ? text : `${text}\n`
+  if (!file) return process.stdout.write(block)
+  const bytes = Buffer.byteLength(block)
+  if (summaryBytes + bytes > 1_000_000) {
+    if (summaryBytes <= 1_000_000) appendFileSync(file, "\n_strobe: the step summary is full (1 MiB); the rest is in the logs and artifacts._\n")
+    summaryBytes = Infinity
+    return
+  }
+  summaryBytes += bytes
+  appendFileSync(file, block)
+}
+
+type Done = { bench: string; id: string; dir: string; result: any; code: number; leak: boolean }
+
+const stateDir = () =>
+  process.platform === "win32"
+    ? join(env("LOCALAPPDATA") || join(env("USERPROFILE"), "AppData", "Local"), "strobe")
+    : join(env("XDG_DATA_HOME") || join(env("HOME"), ".local", "share"), "strobe")
+
+function bench(file: string, args: string[], cwd: string, leak: boolean): Done | null {
+  console.log(`::group::strobe bench ${file} ${args.join(" ")}`)
+  const r = strobe(["bench", file, ...args, "--json"], { cwd })
+  console.log("::endgroup::")
+  const out = json(r.stdout)
+  if (!out || out.error || !out.id) {
+    error(`strobe bench ${file} (exit ${r.code}): ${out?.error ?? r.stdout.trim().slice(0, 2000)}${out?.hint ? ` (fix: ${out.hint})` : ""}`)
+    return null
+  }
+  // A comparison's JSON names its result.json; a check's does not: it is in strobe's state folder (SPEC §4.2).
+  const dir = typeof out.result === "string" ? dirname(out.result) : join(stateDir(), "experiments", out.id)
+  return { bench: file, id: out.id, dir, result: out, code: r.code, leak }
+}
+
+// The experiment's markdown in a format, read from the file report writes (--json names it). A strobe
+// without that format writes something else (before 0.29: an HTML view named "summary").
+function markdownReport(d: Done, cwd: string, format: string): string {
+  const r = json(strobe(["report", "experiment", d.id, "--format", format, "--json"], { cwd }).stdout)
+  const path: string = r?.path ?? ""
+  return path.endsWith(".md") && existsSync(path) ? readFileSync(path, "utf8") : ""
+}
+
+function summary(d: Done, cwd: string) {
+  let text = markdownReport(d, cwd, "summary")
+  if (!text) {
+    warn(`this strobe has no report --format summary; the step summary has ${d.id}'s markdown report instead`)
+    text = markdownReport(d, cwd, "md")
+  }
+  summarize(text || `strobe could not write a summary of ${d.id} (\`${d.bench}\`); see the logs.\n`)
+}
+
+function htmlReport(d: Done, cwd: string): string {
+  const out = d.dir ? join(d.dir, "report-experiment.html") : ""
+  const r = strobe(["report", "experiment", d.id, "--format", "html", ...(out ? ["--out", out] : [])], { cwd })
+  return r.code === 0 && out && existsSync(out) ? out : ""
+}
+
+// Which pull request takes the block: a same-repository pull request, unless update-pr says no. A fork's
+// never: its token is read-only, and its code ran in this job.
+function pullRequest(ev: any): string {
+  const want = input("update-pr") || "auto"
+  if (want === "false") return ""
+  const pr = ev.pull_request
+  if (!pr) {
+    if (want === "true") warn("update-pr: true, but this run is no pull request; the block goes to the step summary only")
+    return ""
+  }
+  const fork = pr.head?.repo?.full_name !== env("GITHUB_REPOSITORY")
+  if (fork) {
+    if (want === "true") warn("update-pr: a fork's pull request is never edited (its token is read-only); the block is in the step summary")
+    return ""
+  }
+  return String(pr.number)
+}
+
+function artifacts(done: Done[]): string {
+  const root = join(env("RUNNER_TEMP") || cacheRoot(), `strobe-artifacts-${done.map((d) => d.id).join("-") || Date.now()}`)
+  mkdirSync(root, { recursive: true })
+  const recordings = flag("upload-recordings")
+  for (const d of done) {
+    if (!d.dir || !existsSync(d.dir)) continue
+    const to = join(root, d.id)
+    mkdirSync(to, { recursive: true })
+    for (const f of readdirSync(d.dir)) {
+      if (f === "report-experiment.html" || f === "result.json" || f === "runner.log" || (f.startsWith("failed-") && f.endsWith(".png"))) copyFileSync(join(d.dir, f), join(to, f))
+    }
+    // Recordings can hold what the target showed and typed (SPEC rule 9): only when asked.
+    if (recordings) {
+      const recs = new Set(readFileSync(join(d.dir, "result.json"), "utf8").match(/rec_[0-9a-f]{6,}/g) ?? [])
+      const from = join(dirname(dirname(d.dir)), "recordings")
+      for (const rec of recs) if (existsSync(join(from, rec))) cpSync(join(from, rec), join(to, "recordings", rec), { recursive: true })
+    }
+  }
+  return root
+}
+
+async function runStep() {
+  guard()
+  // The token goes to the PR edit alone, never into the environment of the bench (the project's code).
+  const token = input("github-token")
+  delete process.env.INPUT_GITHUB_TOKEN
+  const mode = oneOf("mode", ["check", "compare"], "check")
+  const failOn = oneOf("fail-on", ["worse", "unclear", "never"], "worse")
+  const cwd = workdir()
+  const ev = event()
+  const benches = list(input("bench"))
+  const headless = oneOf("headless", ["true", "false"], "true") === "true"
+  const common: string[] = []
+  for (const name of ["filter", "target", "params"]) if (input(name)) common.push(`--${name}`, input(name))
+  if (headless) common.push("--headless")
+
+  // A profile this runner cannot resolve (an app the job never builds, a guard's variable unset) is a
+  // warning: the bench refuses only the series that use it.
+  console.log("::group::strobe config")
+  const config = strobe(["config"], { cwd, capture: false })
+  console.log("::endgroup::")
+  if (config.code !== 0) warn(`strobe config: strobe.json has a problem on this runner (exit ${config.code}); its lines in the log say which`)
+
+  const done: Done[] = []
+  let failed = false
+  const noworse = input("noworse")
+  if (mode === "check") {
+    // Every case once, on head; with noworse, on base too, each exact counter no worse than base's.
+    // Never a timing verdict: a shared runner's timings move with its neighbours (SharedRunner).
+    const b = noworse ? base(cwd, ev) : ""
+    if (noworse && !b) warn("noworse needs a base commit (a pull request, a push, or the base input); checking head alone")
+    for (const file of benches) {
+      const args = ["--head", ".", "--check", ...common]
+      if (b) args.push("--base", b, "--noworse", noworse)
+      if (input("max-time")) args.push("--max-time", input("max-time"))
+      const d = bench(file, args, cwd, false)
+      if (!d) {
+        failed = true
+        continue
+      }
+      done.push(d)
+      if (d.code !== 0) failed = true
+    }
+  } else {
+    // A paired A/B of base and head on a machine this job has to itself (a self-hosted runner).
+    const b = base(cwd, ev)
+    if (!b) fail("mode compare needs a base commit: run on a pull request or a push, or give the base input")
+    for (const file of benches) {
+      const args = ["--base", b, "--head", ".", "--max-time", input("max-time") || "20m", ...common]
+      for (const name of ["primary", "pairs", "equivalence", "noworse"]) if (input(name)) args.push(`--${name}`, input(name))
+      if (failOn === "unclear") args.push("--require-verdict")
+      const d = bench(file, args, cwd, false)
+      if (!d) {
+        failed = true
+        continue
+      }
+      done.push(d)
+      const kinds = verdicts(d.result)
+      if (failOn !== "never" && regressed(d.result)) failed = true
+      if (failOn === "unclear" && kinds.some((k) => !["better", "same", "no_worse"].includes(k))) failed = true
+      // 0, a verdict-less run with --require-verdict (5) or one --max-time cut short (124) keep their verdicts.
+      if (![0, 5, 124].includes(d.code)) failed = true
+    }
+  }
+
+  // A leak run per bench: each case's memory over repeated runs, judged by its slope.
+  const leak = input("leak")
+  const leakDone: Done[] = []
+  if (leak && leak !== "false") {
+    // leak: true runs the filter's cases, or it names the cases itself.
+    const filter = leak === "true" ? input("filter") : leak
+    for (const file of benches) {
+      const args = ["--head", ".", "--probes", "memory", "--repeat", input("leak-repeat") || "6"]
+      if (filter) args.push("--filter", filter)
+      for (const name of ["target", "params"]) if (input(name)) args.push(`--${name}`, input(name))
+      if (headless) args.push("--headless")
+      const d = bench(file, args, cwd, true)
+      if (!d) {
+        failed = true
+        continue
+      }
+      leakDone.push(d)
+      if (failOn !== "never" && (d.code !== 0 || regressed(d.result))) failed = true
+    }
+  }
+
+  for (const d of [...done, ...leakDone]) summary(d, cwd)
+
+  let reportPath = ""
+  for (const d of [...done, ...leakDone]) reportPath ||= htmlReport(d, cwd)
+
+  let prUpdated = false
+  const pr = mode === "compare" ? pullRequest(ev) : ""
+  if (pr) {
+    for (const d of done) {
+      const args = ["report", "experiment", d.id, "--format", "pr", "--update-pr", pr, "-R", env("GITHUB_REPOSITORY")]
+      if (input("labels")) args.push("--labels", input("labels"))
+      const r = strobe(args, { cwd, capture: false, env: token ? { GH_TOKEN: token } : {} })
+      if (r.code === 0) prUpdated = true
+      else if (input("update-pr") === "true") {
+        error(`strobe report --update-pr ${pr} failed (exit ${r.code}): the job needs permissions: pull-requests: write`)
+        failed = true
+      } else warn(`strobe report --update-pr ${pr} failed (exit ${r.code}); give the job permissions: pull-requests: write, or update-pr: false`)
+    }
+  }
+
+  const kinds = done.flatMap((d) => verdicts(d.result))
+  const verdict =
+    mode === "check" ? (done.length === benches.length && done.every((d) => d.code === 0 && d.result.passed !== false) ? "pass" : "fail") : worst(kinds)
+  output("experiment", done.map((d) => d.id).join(" "))
+  output("leak-experiment", leakDone.map((d) => d.id).join(" "))
+  output("verdict", verdict)
+  output("regressed", String([...done, ...leakDone].some((d) => regressed(d.result))))
+  output("report-path", reportPath)
+  output("pr-updated", String(prUpdated))
+
+  const upload = oneOf("upload-artifacts", ["on-failure", "always", "never"], "on-failure")
+  if (upload === "always" || (upload === "on-failure" && failed)) {
+    const all = [...done, ...leakDone]
+    output("artifact-path", artifacts(all))
+    output("artifact-name", input("artifact-name") || `strobe-${env("GITHUB_JOB") || "job"}-${all.map((d) => d.id).join("-") || env("GITHUB_RUN_ATTEMPT")}`)
+  }
+  if (failed) {
+    error(mode === "check" ? "strobe's check failed: the step summary says which case" : "strobe's comparison failed the fail-on rule: the step summary has the verdicts")
+    process.exit(1)
+  }
+}
+
+const step = process.argv[2]
+const steps: Record<string, () => Promise<void>> = { resolve: resolveStep, install: installStep, setup: setupStep, browser: browserStep, run: runStep }
+if (!steps[step]) fail(`ci-action.ts: no step ${step}; one of ${Object.keys(steps).join(", ")}`)
+await steps[step]()

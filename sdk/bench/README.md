@@ -113,6 +113,21 @@ async setup(ctx) {
 },
 ```
 
+In GitHub Actions, strobe's action runs the same check on every pull request: each case once, and with `noworse`
+each exact counter held to the base commit's. `version: project` runs the strobe this package pins.
+
+```yaml
+- uses: anomalyco/strobe@v0.29
+  with:
+    bench: perf/settings.bench.ts
+    noworse: net.requests=0,dom.nodes=0
+    version: project
+```
+
+Timing verdicts need a machine of your own: `mode: compare` on a self-hosted runner (a GitHub-hosted runner's
+timings move with the jobs beside it, so strobe refuses them there). Every input is in the action's
+[action.yml](https://github.com/anomalyco/strobe/blob/main/action.yml).
+
 - **Platforms:** the binary comes from `@hona/strobe-<platform>-<arch>`, installed with this package for your
   machine only: Windows x64 and Arm64, macOS Apple silicon and Intel, Linux x64 and Arm64 (static, glibc or
   musl).

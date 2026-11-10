@@ -1,0 +1,231 @@
+name: strobe
+description: Check a project's strobe benches on any runner, and compare a pull request with its base on a machine of its own.
+author: anomalyco
+branding:
+  icon: activity
+  color: blue
+
+# Two modes (SPEC §26):
+#   check    (default; any runner, GitHub-hosted included) every case of each bench once, headless: does it
+#            run, and with `noworse` and a base commit, is each exact counter (count.*, net.requests, net.bytes,
+#            dom.nodes, tty.frames) no worse than base's? Never a timing verdict: a shared runner's timings move
+#            with the jobs beside it (strobe refuses them there: SharedRunner).
+#   compare  (a self-hosted runner, one job at a time) a paired A/B of the base commit and this checkout:
+#            verdicts per series, the PR block in a same-repository pull request's body.
+# Every input reaches scripts/ci-action.ts through the environment, never a shell line. The action refuses
+# pull_request_target; a fork's pull request gets a read-only token and is never edited.
+inputs:
+  mode:
+    description: "check (default: any runner) or compare (a dedicated, self-hosted runner)"
+    default: check
+  bench:
+    description: Bench files, comma- or newline-separated, relative to working-directory
+    required: true
+  working-directory:
+    description: The project folder strobe runs in (its strobe.json), relative to the workspace
+    default: "."
+  base:
+    description: "The commit to compare with (default: the pull request's base, or the commit a push moved from); fetched when the checkout lacks it"
+    default: ""
+  filter:
+    description: Case names (bench --filter)
+    default: ""
+  target:
+    description: Target names (bench --target)
+    default: ""
+  params:
+    description: Parameter values (bench --params)
+    default: ""
+  primary:
+    description: "compare: the primary metric over each case's own"
+    default: ""
+  pairs:
+    description: "compare: auto or a number of pairs"
+    default: ""
+  max-time:
+    description: "The bench's deadline (compare's default: 20m)"
+    default: ""
+  equivalence:
+    description: "compare: the equivalence margin in %"
+    default: ""
+  noworse:
+    description: "check: exact counters judged against base, e.g. count.items=0,net.requests=0 (needs a base). compare: the non-inferiority margin (2%, or metric=2%,…)"
+    default: ""
+  leak:
+    description: "false (default), true (a leak run of the filtered cases) or the cases to leak-check"
+    default: "false"
+  leak-repeat:
+    description: Runs to each of a leak run's snapshots
+    default: "6"
+  headless:
+    description: "Page targets in a headless browser (true by default; a runner has no display)"
+    default: "true"
+  fail-on:
+    description: "worse (default: a regression or a failed check fails the job), unclear (also an undecided verdict) or never"
+    default: worse
+  update-pr:
+    description: "compare: put strobe's block in the pull request's body: auto (a same-repository pull request, when the token can write it), true or false. A fork's never"
+    default: auto
+  labels:
+    description: "The two sides' names in the PR block, base then head (report --labels)"
+    default: ""
+  upload-artifacts:
+    description: "on-failure (default), always or never: the HTML report, result.json, runner.log and failure screenshots, kept 7 days"
+    default: on-failure
+  upload-recordings:
+    description: "Also upload the recordings (they can hold what the target showed and typed): false by default"
+    default: "false"
+  artifact-name:
+    description: "The artifact's name (default: strobe-<job>-<experiments>)"
+    default: ""
+  version:
+    description: "Which strobe: action (default: this action's release), project (the project's @hona/strobe), latest, or a version (0.29.0)"
+    default: action
+  strobe-binary:
+    description: A strobe executable to run instead of a release (a build of strobe itself)
+    default: ""
+  install-browser:
+    description: "auto (default: Playwright's Chromium, cached, only when the runner has no Chrome, Edge or Chromium) or false"
+    default: auto
+  github-token:
+    description: The token update-pr edits the pull request with
+    default: ${{ github.token }}
+
+outputs:
+  experiment:
+    description: The experiments (exp_…), space-separated, one per bench file
+    value: ${{ steps.run.outputs.experiment }}
+  leak-experiment:
+    description: The leak runs' experiments
+    value: ${{ steps.run.outputs.leak-experiment }}
+  verdict:
+    description: "check: pass or fail. compare: the worst primary verdict (worse, refused, unclear, underpowered, same, no_worse, better)"
+    value: ${{ steps.run.outputs.verdict }}
+  regressed:
+    description: true when any comparison came out worse
+    value: ${{ steps.run.outputs.regressed }}
+  report-path:
+    description: The first experiment's HTML report on the runner
+    value: ${{ steps.run.outputs.report-path }}
+  pr-updated:
+    description: true when strobe's block went into the pull request's body
+    value: ${{ steps.run.outputs.pr-updated }}
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse pull_request_target
+      if: github.event_name == 'pull_request_target'
+      shell: bash
+      run: |
+        echo "::error title=strobe::strobe's action refuses pull_request_target: a bench runs the pull request's code, and that event hands it the base repository's secrets and a token that can write. Use pull_request."
+        exit 1
+
+    - name: Bun on the runner?
+      id: bun
+      shell: bash
+      run: if command -v bun >/dev/null 2>&1; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
+
+    - name: Bun
+      if: steps.bun.outputs.found != 'true'
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        no-cache: true
+
+    - name: Which strobe
+      id: resolve
+      shell: bash
+      run: bun "$GITHUB_ACTION_PATH/scripts/ci-action.ts" resolve
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_BENCH: ${{ inputs.bench }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_UPDATE_PR: ${{ inputs.update-pr }}
+        INPUT_UPLOAD_ARTIFACTS: ${{ inputs.upload-artifacts }}
+        INPUT_UPLOAD_RECORDINGS: ${{ inputs.upload-recordings }}
+        INPUT_INSTALL_BROWSER: ${{ inputs.install-browser }}
+        INPUT_HEADLESS: ${{ inputs.headless }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_STROBE_BINARY: ${{ inputs.strobe-binary }}
+
+    - name: Cache strobe
+      if: steps.resolve.outputs.cache-key != ''
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.cache-path }}
+        key: ${{ steps.resolve.outputs.cache-key }}
+
+    - name: Install strobe
+      id: install
+      shell: bash
+      run: bun "$GITHUB_ACTION_PATH/scripts/ci-action.ts" install
+      env:
+        INPUT_STROBE_BINARY: ${{ inputs.strobe-binary }}
+        STROBE_ACTION_VERSION: ${{ steps.resolve.outputs.version }}
+        STROBE_ACTION_CACHE: ${{ steps.resolve.outputs.cache-path }}
+
+    - name: Cache strobe's engine
+      if: steps.install.outputs.engine-key != ''
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.install.outputs.engine-path }}
+        key: ${{ steps.install.outputs.engine-key }}
+
+    - name: strobe up
+      id: setup
+      shell: bash
+      run: bun "$GITHUB_ACTION_PATH/scripts/ci-action.ts" setup
+      env:
+        INPUT_INSTALL_BROWSER: ${{ inputs.install-browser }}
+
+    - name: Cache Chromium
+      if: steps.setup.outputs.browser-missing == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.setup.outputs.browser-path }}
+        key: ${{ steps.setup.outputs.browser-key }}
+
+    - name: Chromium
+      if: steps.setup.outputs.browser-missing == 'true'
+      shell: bash
+      run: bun "$GITHUB_ACTION_PATH/scripts/ci-action.ts" browser
+      env:
+        STROBE_ACTION_BROWSERS: ${{ steps.setup.outputs.browser-path }}
+
+    - name: strobe bench
+      id: run
+      shell: bash
+      run: bun "$GITHUB_ACTION_PATH/scripts/ci-action.ts" run
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_BENCH: ${{ inputs.bench }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_FILTER: ${{ inputs.filter }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_PARAMS: ${{ inputs.params }}
+        INPUT_PRIMARY: ${{ inputs.primary }}
+        INPUT_PAIRS: ${{ inputs.pairs }}
+        INPUT_MAX_TIME: ${{ inputs.max-time }}
+        INPUT_EQUIVALENCE: ${{ inputs.equivalence }}
+        INPUT_NOWORSE: ${{ inputs.noworse }}
+        INPUT_LEAK: ${{ inputs.leak }}
+        INPUT_LEAK_REPEAT: ${{ inputs.leak-repeat }}
+        INPUT_HEADLESS: ${{ inputs.headless }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_UPDATE_PR: ${{ inputs.update-pr }}
+        INPUT_LABELS: ${{ inputs.labels }}
+        INPUT_UPLOAD_ARTIFACTS: ${{ inputs.upload-artifacts }}
+        INPUT_UPLOAD_RECORDINGS: ${{ inputs.upload-recordings }}
+        INPUT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    - name: Upload strobe's reports
+      if: ${{ !cancelled() && steps.run.outputs.artifact-path != '' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.run.outputs.artifact-name }}
+        path: ${{ steps.run.outputs.artifact-path }}
+        retention-days: 7
+        if-no-files-found: ignore

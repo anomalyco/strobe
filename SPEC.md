@@ -26,7 +26,8 @@ When a design change is agreed, update this file in the same change.
    verdict only through the gate in §9.3; otherwise they are descriptive.
 5. **No automated tests. Ever.** No unit, integration, e2e or snapshot tests, no test files, no
    test dependencies, no test steps in CI. Verification is the calibration page and A/A runs on
-   real devices (§10.3, §10.4). CI only builds release binaries.
+   real devices (§10.3, §10.4). CI builds and lints, and runs strobe's own action once on its
+   known-answer page as a project would (§26.6): a smoke run, never a test suite.
 6. **Early iteration speed beats everything else.** Smallest change that works. No speculative
    abstraction.
 7. **One concept, one name.** Each MCP tool is exactly a CLI command: same name, same
@@ -127,10 +128,14 @@ skill/SKILL.md  the built-in skill, embedded (include_str!)
 schema/         strobe.v1.json (project config), result.v1.json (experiment results); both shipped
                 in @hona/strobe (`schema/`)
 packaging/      macOS entitlements
-scripts/        generic.ts (rule 15), release.ts, macos-sign.sh; dev/ holds the dev benches and fixtures
+scripts/        generic.ts (rule 15), doc-check.ts, release.ts, macos-sign.sh, ci-action.ts (the action's
+                steps, §26); dev/ holds the dev benches and fixtures
 docs/           the README's images
-.github/workflows/release.yml   build + release only, no tests
-.github/workflows/check.yml     clippy and build on every OS, and scripts/generic.ts (rule 15)
+action.yml      the GitHub Action (§26)
+.github/workflows/release.yml   build + release on a v<major>.<minor>.<patch> tag, then the action's
+                                v<major>.<minor> tag (§26.5); no tests
+.github/workflows/check.yml     clippy and build on every OS, scripts/generic.ts (rule 15) and doc-check.ts,
+                                and the action's dogfood run (§26.6)
 SPEC.md  AGENTS.md  README.md
 ```
 
@@ -8175,8 +8180,8 @@ did not move).
     SDK, the runner and the script host and rewrites a bench file's `@hona/strobe` import (or the old
     `@hona/strobe-bench`) to its own copy, so a bench file runs with the SDK of the binary running it,
     installed or not.
-  - **Versions:** every package has Cargo.toml's version. A `v<version>` tag runs
-    `.github/workflows/release.yml`: build, then `scripts/release.ts --publish` publishes the
+  - **Versions:** every package has Cargo.toml's version. A `v<version>` tag (`v0.29.0`; the
+    action's moving `v0.29` starts nothing, §26.5) runs `.github/workflows/release.yml`: build, then `scripts/release.ts --publish` publishes the
     platform packages, `@hona/strobe` and the `@hona/strobe-bench` alias (a re-export, deprecated),
     skipping any already on npm. `scripts/release.ts` refuses a release whose `@hona/strobe`
     optional dependencies and platform list differ, and with `--publish` checks that npm knows every
@@ -8886,3 +8891,116 @@ to −52%: an epoch mark between c14 and c15, no suspicion, nothing confirmed or
 `HEAD` or `.` as the base was refused; a tag and a commit hash were taken. `history <ser_…>`, `history
 <file>` and `query changes` of the device's earlier single-target series printed byte for byte what
 0.11.0 did.
+
+## 26. CI: the GitHub Action (`action.yml`)
+
+strobe's repository root is a composite GitHub Action. A project's workflow runs its benches with it:
+
+```yaml
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  perf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@<sha>
+      - uses: anomalyco/strobe@v0.29
+        with:
+          bench: perf/app.bench.ts
+          noworse: net.requests=0,dom.nodes=0
+```
+
+A shared runner gives no timing strobe can defend: other jobs share its CPUs, and nothing strobe
+can see tells how much (`SharedRunner`, §10.1). So the action has two modes, and neither ever prints
+a timing verdict on a shared runner.
+
+### 26.1 Modes
+
+- **`check`** (the default; any runner, GitHub-hosted included): `strobe config`, then for each bench
+  file `strobe bench <file> --head . --check --headless`: every case once, pass or fail, with its
+  screenshot on a failure. With `noworse` (exact counters, `count.ctx=0,net.requests=0,dom.nodes=0`)
+  and a base commit, `--base <sha> --noworse <list>`: both commits run each case (§5.6 "A check against
+  base") and a counter over base's by more than its margin, or one that varies between runs, fails the
+  case. With `leak` it adds a leak run per bench file (`--probes memory --headless --repeat
+  <leak-repeat>`, default 6), judged by its slopes (§8.6). The step summary gets `strobe report
+  experiment <exp> --format summary` for each experiment (§11.2): case, target, status, the exact
+  counters against base's, notes; never a timing column.
+- **`compare`** (a dedicated runner, one job at a time: self-hosted): the base commit is fetched when
+  the checkout lacks it, then `strobe bench <file> --base <sha> --head . --max-time 20m` (the
+  `max-time` input changes it; `noworse`, `primary`, `pairs` and `equivalence` pass through, and
+  `fail-on: unclear` adds `--require-verdict`). On a same-repository pull request whose token can write
+  it, `report experiment <exp> --format pr --update-pr <n>` puts the block in its body (`update-pr`:
+  `auto`, `true`, `false`; `labels` names the sides). The step summary always gets the card-less block
+  (`--format summary`). On a shared runner strobe refuses the timed series (`SharedRunner`) and the
+  job fails with that refusal: `compare` needs a machine of its own.
+
+The base is the `base` input, else the pull request's base commit, else the commit a push moved from
+(none for a new branch: `check` then runs head alone and warns that `noworse` needs a base; `compare`
+fails). A base the checkout lacks is fetched alone (`git fetch --depth=1 origin <sha>`); a failure
+says to check out with `fetch-depth: 0`, or with credentials for a private repository.
+
+`fail-on`: `worse` (default: a failed check, a counter over base's, a leak, or a comparison or decided
+secondary that came out worse fails the job), `unclear` (also any primary that is not `better`, `same`
+or `no_worse`) or `never` (report only; an error of strobe itself still fails). Outputs: `experiment`
+and `leak-experiment` (the ids, space-separated), `verdict` (`check`: `pass` or `fail`; `compare`: the
+worst primary `verdict_kind`, `worse` before `refused`, `unclear`, `underpowered`, then `same`,
+`no_worse`, `better`), `regressed`, `report-path` (the first experiment's HTML report on the runner),
+`pr-updated`.
+
+### 26.2 Security
+
+- `pull_request_target` is refused before anything runs: a bench runs the pull request's code, and
+  that event gives it the base repository's secrets and a token that can write.
+- No input is ever expanded into a shell line: `action.yml` passes each one in the environment
+  (`INPUT_<NAME>`) to `scripts/ci-action.ts`, which reads it as data and runs strobe with an argument
+  list, never a shell.
+- A fork's pull request is never edited (its token is read-only, and its code ran in the job); its
+  block is in the step summary. The token (`github-token`, the job's by default) reaches only the
+  `report --update-pr` call: the bench's environment, the project's code, never holds it.
+- Every third-party action is pinned by its full commit SHA (`oven-sh/setup-bun`, `actions/cache`,
+  `actions/upload-artifact`).
+- Recordings stay on the runner (rule 9) unless `upload-recordings: true` uploads them: traces and
+  heap snapshots can hold what the target showed and typed.
+
+### 26.3 Install and caching
+
+- Bun: the runner's when it has one, else `oven-sh/setup-bun` (its own cache off).
+- strobe: `version` picks it: `action` (default: the version in the action's own `Cargo.toml`, so
+  `@v0.29` runs the newest 0.29 release), `project` (the project's `@hona/strobe`: its
+  `node_modules`, else the newest release its package.json range allows), `latest` or a version.
+  The platform package's tarball (`@hona/strobe-<platform>-<arch>`, §20) is checked against the
+  registry's sha512 integrity on every run, a cached copy too, before its binaries are unpacked (as
+  `strobe update` does, §5.10). `strobe-binary` runs a given executable instead (strobe's own build).
+  The binary's folder goes on `PATH` for the job's later steps.
+- `actions/cache` keeps the tarball (key `strobe-<platform>-<version>`) and the engine's folder (key
+  `strobe-engine-<platform>-<engine version>`, from `strobe status --fast --json`). Then `strobe up
+  --skip deep,daemon,mcp,calibrate`: no privilege prompt, daemon, MCP registration or calibration on a
+  runner.
+- A browser only when `strobe up --check --json` finds none (hosted runners ship Chrome) and
+  `install-browser` is `auto`: Playwright's Chromium (`bunx playwright@<pinned> install chromium`)
+  into a cached `PLAYWRIGHT_BROWSERS_PATH`, which strobe then finds (§2).
+
+### 26.4 Artifacts
+
+With `upload-artifacts` `on-failure` (default) or `always`, `actions/upload-artifact` keeps for 7
+days, per experiment: `report-experiment.html`, `result.json`, `runner.log` and the failure
+screenshots (`failed-*.png`); with `upload-recordings`, the recordings result.json names. Never the
+`failed-*.actions.json.gz` logs (typed text).
+
+### 26.5 Versions
+
+A release tag is `v<major>.<minor>.<patch>` and only such a tag starts `release.yml`. Once its
+packages are on npm, its `tag-action` job (`contents: write`, no checkout, no secrets) moves
+`v<major>.<minor>` to the release's commit through the API: only forward (the tag's commit must be an
+ancestor), never for a pre-release, created when missing. `@v0.29` follows 0.29's patches; before 1.0
+a minor version may break (rule 13), so there is no `@v0`. The "Release tags" ruleset protects
+`refs/tags/v*.*.*` (creation, update, deletion; administrators bypass), so the moving
+`v<major>.<minor>` tags stay movable by the workflow.
+
+### 26.6 Dogfood
+
+The Check workflow's `dogfood` job builds strobe on ubuntu-24.04, windows-latest and macos-15 and runs
+the action from the checkout (`uses: ./`, `strobe-binary` the build) on `scripts/dev/known-web.bench.ts`'s
+`phases`, `net` and `heap` cases, their exact counters held to the base commit's. A smoke run of the
+action as a project runs it on GitHub-hosted runners, never a test suite (rule 5).

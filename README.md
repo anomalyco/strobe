@@ -57,6 +57,17 @@ strobe open rec_3f9a                                            # the whole reco
 
 `app:desktop` is a profile in your repo's `strobe.json`: how to build and launch the app in a throwaway home, so benches never touch your real data. `strobe status` says what your machine can measure and which permission is missing.
 
+In CI, the GitHub Action checks every case on each pull request, and holds exact counters (requests, bytes, DOM nodes, your own `count.*`) to the base commit's:
+
+```yaml
+- uses: anomalyco/strobe@v0.29
+  with:
+    bench: perf/scroll.bench.ts
+    noworse: net.requests=0,dom.nodes=0
+```
+
+A shared runner's timings move with the jobs beside it, so strobe gives no timing verdict there. On a machine of your own (a self-hosted runner), `mode: compare` runs the A/B and puts the card above in the PR. Every input: [action.yml](action.yml); the design: [SPEC.md §26](SPEC.md#26-ci-the-github-action-actionyml).
+
 Packages for Windows (x64, Arm64), macOS (Apple silicon, Intel) and Linux (x64, arm64).
 
 Design: [SPEC.md](SPEC.md)

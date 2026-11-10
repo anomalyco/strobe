@@ -2,7 +2,7 @@ name: Check
 
 # Every push builds strobe and lints it with clippy on Windows (x64 and Arm), Linux and macOS: each OS compiles
 # its own code paths (ETW, /proc and perf events, libproc and CoreGraphics), which no other OS's build sees. No tests
-# (SPEC rule 5): builds and lints only.
+# (SPEC rule 5): builds, lints, and strobe's own action run once as a project would run it (dogfood).
 on:
   push:
   pull_request:
@@ -60,3 +60,37 @@ jobs:
       # SPEC.md and the skill against the code's catalogs (validators, warnings, flags, MCP tools, the SDK's keys).
       - name: Docs
         run: bun scripts/doc-check.ts
+
+  # The action (action.yml) on a GitHub-hosted runner, as a project uses it, with this commit's strobe: a
+  # check of the known-answer page's phases, net and heap cases, their exact counters held to the base
+  # commit's. A smoke run of the action, not a test suite (SPEC rule 5): it says whether the action installs,
+  # runs and reports here; its step summary is what a project's job shows.
+  dogfood:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, toolchain: stable, rustflags: "" }
+          - { os: windows-latest, toolchain: stable-x86_64-pc-windows-gnu, rustflags: "-C link-self-contained=yes" }
+          - { os: macos-15, toolchain: stable, rustflags: "" }
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust
+        shell: bash
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal && rustup default ${{ matrix.toolchain }}
+      - name: Build
+        run: cargo build --release --locked
+      - name: strobe's action
+        uses: ./
+        with:
+          strobe-binary: target/release/strobe
+          working-directory: scripts/dev
+          bench: known-web.bench.ts
+          filter: phases,net,heap
+          noworse: count.ctx=0,count.page=0,count.wire=0,count.requests=0,net.requests=0,net.bytes=0,dom.nodes=0
+          upload-artifacts: always

@@ -211,7 +211,10 @@ const TOOLS: &[Tool] = &[
             ("view", "experiment, recording or history (default from the handle)"),
         ],
         flags: &[
-            ("format", "html (default), md, pr (an experiment's pull request block), card (its result as a 1200×630 PNG) or badge (an SVG badge)"),
+            (
+                "format",
+                "html (default), md, pr (an experiment's pull request block), summary (an experiment as GitHub markdown for a CI job's step summary: a check's cases and exact counters, never its timings), card (its result as a 1200×630 PNG) or badge (an SVG badge)",
+            ),
             ("out", "where to write it"),
             ("theme", "card and badge: light, dark or auto"),
             ("update-pr", "with format pr: put the block in this pull request's body through gh"),
