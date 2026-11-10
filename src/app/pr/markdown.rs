@@ -780,6 +780,9 @@ impl<'a> Doc<'a> {
     /// Frame pacing, for series that drew frames to a display and kept them.
     pub(super) fn pacing_section(&self) -> String {
         let mut t = String::new();
+        if shared_runner(self.r) {
+            return t;
+        }
         for s in &self.series {
             let ps = framed_pairs(s);
             let pool = |head: bool| -> Vec<f64> {

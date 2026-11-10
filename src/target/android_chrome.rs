@@ -168,9 +168,9 @@ impl Left {
         self.package == package && (self.tab == id || (!self.closed && !self.url.is_empty() && self.url != "about:blank" && same(&self.url, url)))
     }
 
-    /// A tab strobe opened and neither loaded nor closed (its launch ended first): still at
-    /// `about:blank`, which a tab Chrome restored keeps under another id. One blank tab of its channel
-    /// stands for it (`tabs`); a blank tab holds nothing of a person's either way.
+    /// The journal names a tab strobe opened and neither loaded nor closed (its launch ended first):
+    /// it is still at `about:blank`, under another id once Chrome restored it. One blank tab of that
+    /// channel (one strobe may drive) stands for it (`tabs`); a blank tab holds nothing of a person's.
     fn unloaded(&self, package: &str) -> bool {
         self.package == package && !self.closed && self.url == "about:blank"
     }
@@ -195,8 +195,12 @@ impl Drop for Launch {
         if self.device.lost().is_some() {
             return;
         }
-        if let Some(u) =
-            self.cdp.send_timeout("Target.getTargetInfo", json!({ "targetId": self.tab }), None, Duration::from_secs(2)).ok().and_then(|i| i["targetInfo"]["url"].as_str().map(str::to_string))
+        // An empty address (a tab mid-navigation) keeps the one journaled.
+        if let Some(u) = self
+            .cdp
+            .send_timeout("Target.getTargetInfo", json!({ "targetId": self.tab }), None, Duration::from_secs(2))
+            .ok()
+            .and_then(|i| i["targetInfo"]["url"].as_str().filter(|u| !u.is_empty()).map(str::to_string))
         {
             *self.url.lock().unwrap_or_else(|e| e.into_inner()) = u;
         }
@@ -356,6 +360,13 @@ impl Launch {
             Some(why) => Err(crate::validity::thermal_refusal(&self.device.serial, &why, "after the block's runs").into()),
             None => Ok(()),
         }
+    }
+
+    /// Whether the phone went away (unplugged, stopped answering): asked once more (5 s), then
+    /// `Device::lost`.
+    pub fn lost(&self) -> bool {
+        let _ = self.device.shell_for("true", Duration::from_secs(5));
+        self.device.lost().is_some()
     }
 
     /// The phone's hardware serial (else its serial), for its own speed reference.

@@ -2772,31 +2772,26 @@ pub fn runs_view(rec: &Rec) -> Result<Output> {
     let label = |k: &str| run_no(k).map_or_else(|| k.to_string(), |i| format!("run {i}"));
     let (from, mut rows): (&str, Vec<Value>) = if let Some(list) = rec.meta["run_list"].as_array().filter(|l| !l.is_empty()) {
         ("the block's run list", list.clone())
-    } else if let Some(list) = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS))
-        .ok()
-        .and_then(|v| v.as_array().or(v["runs"].as_array()).cloned())
-        .filter(|l| !l.is_empty())
-    {
+    } else if let Some(list) = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS)).ok().and_then(|v| v.as_array().or(v["runs"].as_array()).cloned()).filter(|l| !l.is_empty()) {
         // Measured runs only (a native block's list, a script block's `runs`): no warmup run's readings.
         let rows = list.iter().map(|r| json!({ "run": r["run"], "measured": true, "ms": r["ms"], "cpu_work_ms": r["cpu_ms"], "main_cpu_ms": r["main_cpu_ms"] })).collect();
-        let from = if rec.meta["kind"] == "record" {
-            "runs.json (a recording of a window: its one span is the whole recording)"
-        } else {
-            "runs.json (measured runs only: this recording kept no warmup run)"
-        };
+        let from =
+            if rec.meta["kind"] == "record" { "runs.json (a recording of a window: its one span is the whole recording)" } else { "runs.json (measured runs only: this recording kept no warmup run)" };
         (from, rows)
-    } else if rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()) {
+    } else if let Some(marked) = (rec.meta["kind"] != "record" && rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()))
+        .then(|| trace_runs(rec))
+        .transpose()?
+        .filter(|r| !r.is_empty())
+    {
         // Not run.duration (the driver's wall time of the run) nor main.work: the page's own marks around
-        // each run and the main thread's top-level tasks between them, read alike for every run.
+        // each run and the main thread's top-level tasks between them, read alike for every run. A
+        // recording of a page (`record <url>`) marks its window, no runs: none here.
         (
-            "the trace's run marks: each run's span between its marks (not run.duration, the driver's time) and its main thread's top-level tasks (no CPU times: a trace has none)",
-            trace_runs(rec)?.into_iter().map(|(k, ms, task)| json!({ "run": k, "measured": is_measured(&k), "marked_ms": ms, "task_ms": task })).collect(),
+            "the trace's run marks: each run's span between its marks (wider than run.duration, the driver's time, by the marks' round trips) and its main thread's top-level tasks (no CPU times: a trace has none)",
+            marked.into_iter().map(|(k, ms, task)| json!({ "run": k, "measured": is_measured(&k), "marked_ms": ms, "task_ms": task })).collect(),
         )
     } else {
-        return Err(Error::usage(format!(
-            "{} keeps no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window (record app:, exe:) has none",
-            rec.id
-        )));
+        return Err(Error::usage(format!("{} keeps no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window has none", rec.id)));
     };
     rows.sort_by_key(|r| r["run"].as_str().and_then(run_no));
     let cols: [(&str, &str, &str); 5] =

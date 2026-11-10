@@ -607,8 +607,9 @@ impl Browser {
     /// A phone's Chrome that closed its DevTools connection when asked for its GPU: its GPU process
     /// fails that query on every launch of the device (an emulator whose GPU backend Chrome cannot
     /// use), so it is no passing launch failure to retry (exit 3, never 255), and the error names it.
+    /// A phone that went away keeps its 255: that is the phone, not its Chrome.
     fn gpu_query_lost(&self, e: Error) -> Error {
-        let Some(p) = self.phone.as_ref().filter(|_| e.code == 255) else { return e };
+        let Some(p) = self.phone.as_ref().filter(|p| e.code == 255 && !p.lost()) else { return e };
         let what = format!(
             "{} on {} closed its DevTools connection when strobe asked for its GPU (SystemInfo.getInfo), as a Chrome whose GPU it cannot query does on every launch ({})",
             p.package,

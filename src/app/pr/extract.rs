@@ -452,6 +452,12 @@ pub(super) fn frames_kept(s: &Value, b: &Value) -> bool {
     s["headless"] != true && bv(b, "frames.n") > 0.0 && !refused
 }
 
+/// Whether the result was measured on a shared CI runner (`env.shared_runner`, as it recorded it):
+/// its frame gaps are a shared machine's, so no frame time of it is shown, whatever it compared.
+pub(super) fn shared_runner(r: &Value) -> bool {
+    !matches!(r["env"]["shared_runner"], Value::Null | Value::Bool(false))
+}
+
 /// The pairs whose two blocks both kept their frames.
 pub(super) fn framed_pairs(s: &Value) -> Vec<Pair<'_>> {
     pairs(s).into_iter().filter(|p| frames_kept(s, p.base) && frames_kept(s, p.head)).collect()
@@ -472,7 +478,7 @@ pub(super) fn measured(s: &Value) -> bool {
 /// Late frames (a gap of 1.5 frame times or more) as shares of all gaps, before and this PR, and in
 /// how many pairs this PR had a larger share of them, of those that kept frames on both sides.
 pub(super) fn late_frames(s: &Value, r: &Value) -> Option<(f64, f64, usize, usize)> {
-    if !judged(s) {
+    if !judged(s) || shared_runner(r) {
         return None;
     }
     let ps = framed_pairs(s);

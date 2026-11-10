@@ -1788,7 +1788,9 @@ function fmtAxisTick(t, u, ticks, fmt, signed = false) {
   const step = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) / 1000 : top / 1000;
   const d = step > 0 ? Math.min(3, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) : 0;
   const body = `${rfix(Math.abs(t) / 1000, d)} s`;
-  return !signed || !/[1-9]/.test(body) ? (t < 0 && !signed ? "−" + body : body) : (t < 0 ? "−" : "+") + body;
+  // A sign only on what shows a nonzero digit (fmt::signed): never `−0.0 s`.
+  if (!/[1-9]/.test(body)) return body;
+  return t < 0 ? "−" + body : signed && t > 0 ? "+" + body : body;
 }
 
 // The left margin a y-axis needs for its tick labels (mono, `px` high, right-aligned `gap` px from the

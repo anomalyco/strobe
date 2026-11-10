@@ -68,7 +68,8 @@ pub fn main() -> i32 {
         Ok(out) => {
             if args.json() {
                 println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default());
-            } else if !args.has("quiet") {
+            } else if !args.has("quiet") || out.json["markdown"].is_string() {
+                // A report's Markdown is its output, quiet or not: quiet silences only the stderr line.
                 print!("{}", out.text);
                 if !out.text.ends_with('\n') {
                     println!();
