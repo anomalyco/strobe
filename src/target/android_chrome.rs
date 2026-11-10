@@ -167,6 +167,13 @@ impl Left {
         let same = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
         self.package == package && (self.tab == id || (!self.closed && !self.url.is_empty() && self.url != "about:blank" && same(&self.url, url)))
     }
+
+    /// The journal names a tab strobe opened and neither loaded nor closed (its launch ended first):
+    /// it is still at `about:blank`, under another id once Chrome restored it. One blank tab of that
+    /// channel (one strobe may drive) stands for it (`tabs`); a blank tab holds nothing of a person's.
+    fn unloaded(&self, package: &str) -> bool {
+        self.package == package && !self.closed && self.url == "about:blank"
+    }
 }
 
 impl Launch {
@@ -180,31 +187,40 @@ impl Launch {
 impl Drop for Launch {
     /// Closes strobe's tab and waits (up to 2 s) until the browser no longer lists it, then stops the
     /// channel. Chrome saves its tabs a moment after one closes: stopped first, it brought a closed tab
-    /// back at its next start. The journal stays, marked closed, with the tab's last address: one that
-    /// comes back anyway is known as strobe's and closed by the next launch.
+    /// back at its next start. The journal stays with the tab's last address, marked closed only when
+    /// Chrome closed it: one that comes back anyway, or one a dropped connection left open, is known as
+    /// strobe's and closed by the next launch.
     fn drop(&mut self) {
         // A phone that went away keeps its journal as it is: the next launch there closes the tab it names.
         if self.device.lost().is_some() {
             return;
         }
-        if let Some(u) =
-            self.cdp.send_timeout("Target.getTargetInfo", json!({ "targetId": self.tab }), None, Duration::from_secs(2)).ok().and_then(|i| i["targetInfo"]["url"].as_str().map(str::to_string))
+        // An empty address (a tab mid-navigation) keeps the one journaled.
+        if let Some(u) = self
+            .cdp
+            .send_timeout("Target.getTargetInfo", json!({ "targetId": self.tab }), None, Duration::from_secs(2))
+            .ok()
+            .and_then(|i| i["targetInfo"]["url"].as_str().filter(|u| !u.is_empty()).map(str::to_string))
         {
             *self.url.lock().unwrap_or_else(|e| e.into_inner()) = u;
         }
-        let _ = self.cdp.send_timeout("Target.closeTarget", json!({ "targetId": self.tab }), None, Duration::from_secs(5));
+        // Closed only when Chrome said so: a connection that dropped (Chrome crashed) closed nothing, and
+        // Chrome restores that tab at its next start, which closes it again as strobe's.
+        let closed = self.cdp.send_timeout("Target.closeTarget", json!({ "targetId": self.tab }), None, Duration::from_secs(5)).is_ok();
         let until = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < until {
+        while closed && Instant::now() < until {
             let listed = self.cdp.send_timeout("Target.getTargets", json!({}), None, Duration::from_secs(2));
             if listed.is_ok_and(|l| !l["targetInfos"].as_array().into_iter().flatten().any(|t| t["targetId"] == self.tab.as_str())) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        std::thread::sleep(Duration::from_millis(500));
+        if closed {
+            std::thread::sleep(Duration::from_millis(500));
+        }
         // Within 10 s: a phone that stopped answering is lost here (`Device::lost`), and the run ends at it.
         let _ = self.device.shell_for(&format!("am force-stop {}", self.package), Duration::from_secs(10));
-        self.write_journal(true);
+        self.write_journal(closed);
     }
 }
 
@@ -344,6 +360,13 @@ impl Launch {
             Some(why) => Err(crate::validity::thermal_refusal(&self.device.serial, &why, "after the block's runs").into()),
             None => Ok(()),
         }
+    }
+
+    /// Whether the phone went away (unplugged, stopped answering): asked once more (5 s), then
+    /// `Device::lost`.
+    pub fn lost(&self) -> bool {
+        let _ = self.device.shell_for("true", Duration::from_secs(5));
+        self.device.lost().is_some()
     }
 
     /// The phone's hardware serial (else its serial), for its own speed reference.
@@ -509,9 +532,15 @@ fn tabs(fwd: &Tunnel, package: &str, left: Option<&Left>) -> Result<(Vec<String>
         std::thread::sleep(Duration::from_millis(250));
     };
     let (mut theirs, mut ours) = (Vec::new(), Vec::new());
-    for t in list.as_array().into_iter().flatten().filter(|t| t["type"] == "page") {
+    let pages: Vec<&Value> = list.as_array().into_iter().flatten().filter(|t| t["type"] == "page").collect();
+    // strobe's unloaded tab, under its own id when Chrome kept it, else as one blank tab.
+    let mut unloaded = left.is_some_and(|l| l.unloaded(package) && !pages.iter().any(|t| t["id"] == l.tab.as_str()));
+    for t in pages {
         let (id, url) = (t["id"].as_str().unwrap_or(""), t["url"].as_str().unwrap_or(""));
         if left.is_some_and(|l| l.is(package, id, url)) {
+            ours.push(id.to_string());
+        } else if unloaded && url == "about:blank" {
+            unloaded = false;
             ours.push(id.to_string());
         } else if url.is_empty() {
             theirs.push("a tab whose address Chrome gave no reader".to_string());

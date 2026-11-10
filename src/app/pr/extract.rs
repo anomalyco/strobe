@@ -452,6 +452,12 @@ pub(super) fn frames_kept(s: &Value, b: &Value) -> bool {
     s["headless"] != true && bv(b, "frames.n") > 0.0 && !refused
 }
 
+/// Whether the result was measured on a shared CI runner (`env.shared_runner`, as it recorded it):
+/// its frame gaps are a shared machine's, so no frame time of it is shown, whatever it compared.
+pub(super) fn shared_runner(r: &Value) -> bool {
+    !matches!(r["env"]["shared_runner"], Value::Null | Value::Bool(false))
+}
+
 /// The pairs whose two blocks both kept their frames.
 pub(super) fn framed_pairs(s: &Value) -> Vec<Pair<'_>> {
     pairs(s).into_iter().filter(|p| frames_kept(s, p.base) && frames_kept(s, p.head)).collect()
@@ -472,7 +478,7 @@ pub(super) fn measured(s: &Value) -> bool {
 /// Late frames (a gap of 1.5 frame times or more) as shares of all gaps, before and this PR, and in
 /// how many pairs this PR had a larger share of them, of those that kept frames on both sides.
 pub(super) fn late_frames(s: &Value, r: &Value) -> Option<(f64, f64, usize, usize)> {
-    if !judged(s) {
+    if !judged(s) || shared_runner(r) {
         return None;
     }
     let ps = framed_pairs(s);
@@ -703,6 +709,77 @@ pub(super) fn plain_refusal(id: &str, why: &str) -> String {
 /// A missing OS permission behind a refusal or note: (a row's few words, the sentence said once).
 pub(super) fn permission(text: &str) -> Option<(&'static str, &'static str)> {
     text.contains("Screen Recording").then_some(("no Screen Recording", "not measured (strobe lacks Screen Recording on this Mac)"))
+}
+
+/// Other processes' names out of text a report publishes (a PR block, a step summary): what ran beside
+/// the target on the bench machine is that machine's owner's, and a name can say what they run (SPEC §1
+/// rule 9). The lists strobe's notes and refusals carry (`validity::named_work`, a block's busiest
+/// processes: `name 130%, name 14%`) become their count and the busiest one's share; local output (the
+/// terminal, result.json, query, html, md) keeps the names. Forms: `(busiest elsewhere: …)`, `busiest
+/// processes on the machine (% of a core): …`, `busiest processes on the machine: …`, `busiest
+/// processes (% of a core): …`, `busiest processes: …`; a list ends at `; ` or at the parenthesis
+/// around it; `none named (…)` names none and stays. `ReservedCpus`' lists of the processes it moved or
+/// could not move go, their counts stay.
+pub(crate) fn scrub_public(s: &str) -> String {
+    const LISTS: [(&str, &str); 5] = [
+        ("(busiest elsewhere: ", ""),
+        ("busiest processes on the machine (% of a core): ", " on the machine"),
+        ("busiest processes on the machine: ", " on the machine"),
+        ("busiest processes (% of a core): ", ""),
+        ("busiest processes: ", ""),
+    ];
+    let pct = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").expect("pattern");
+    // `ReservedCpus` (a context note): the processes it moved, and those it could not, by name.
+    let moved = regex_lite::Regex::new(r"moved per block \([^)]*\)").expect("pattern");
+    let unmoved = regex_lite::Regex::new(r"(\d+) could not be moved: .*?(; \d+% put back|$)").expect("pattern");
+    let s = moved.replace_all(s, "moved per block");
+    let s = unmoved.replace_all(&s, "$1 could not be moved$2");
+    let mut out = String::new();
+    let mut rest: &str = &s;
+    loop {
+        let Some((at, marker, where_)) = LISTS.iter().filter_map(|(m, w)| rest.find(m).map(|i| (i, *m, *w))).min_by_key(|x| x.0) else {
+            out += rest;
+            return out;
+        };
+        let wrapped = marker.starts_with('(');
+        let list_start = at + marker.len();
+        // The list: to the parenthesis that closes it (or one around it), else to the next `; ` outside
+        // parentheses, else to the end.
+        let bytes = rest.as_bytes();
+        let (mut depth, mut end) = (0i32, rest.len());
+        let mut i = list_start;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' if depth == 0 => {
+                    end = i;
+                    break;
+                }
+                b')' => depth -= 1,
+                b';' if depth == 0 && !wrapped => {
+                    end = i;
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let list = &rest[list_start..end];
+        out += &rest[..at];
+        if list.starts_with("none named") {
+            out += &rest[at..end];
+        } else {
+            let shares: Vec<f64> = pct.captures_iter(list).filter_map(|c| c[1].parse::<f64>().ok()).collect();
+            let peak = shares.iter().copied().fold(f64::NAN, f64::max);
+            let said = match shares.len() {
+                0 => format!("other processes{where_} (not named here)"),
+                1 => format!("1 other process{where_}, {peak:.0}% of a core"),
+                n => format!("{n} other processes{where_}, the busiest {peak:.0}% of a core"),
+            };
+            out += &if wrapped { format!("({said}") } else { said };
+        }
+        rest = &rest[end..];
+    }
 }
 
 /// Local paths out: a user's home as `~`, other absolute paths by their last part.
@@ -987,19 +1064,20 @@ pub(super) fn tag(v: &Value) -> String {
     t
 }
 
-/// The busiest other processes across blocks, `` `bun.exe` 1230% ``.
-pub(super) fn top_procs(blocks: &[&Value], n: usize) -> Vec<String> {
-    let mut best: BTreeMap<String, f64> = BTreeMap::new();
+/// The other processes across blocks as a published report says them, never by name (`scrub_public`):
+/// how many distinct ones used 5% of a core or more in some block, and the most any one used (% of a
+/// core). None when no block named one that busy.
+pub(super) fn foreign_load(blocks: &[&Value]) -> Option<(usize, f64)> {
+    let mut best: BTreeMap<&str, f64> = BTreeMap::new();
     for b in blocks {
         for e in b["background"].as_array().into_iter().flatten() {
             let (Some(name), Some(p)) = (e[0].as_str(), e[1].as_f64()) else { continue };
-            let x = best.entry(name.to_string()).or_insert(0.0);
+            let x = best.entry(name).or_insert(0.0);
             *x = x.max(p);
         }
     }
-    let mut v: Vec<(String, f64)> = best.into_iter().collect();
-    v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    v.into_iter().take(n).map(|(name, p)| format!("{} {p:.0}%", code(&name))).collect()
+    let busy: Vec<f64> = best.into_values().filter(|p| *p >= 5.0).collect();
+    (!busy.is_empty()).then(|| (busy.len(), busy.iter().copied().fold(0.0, f64::max)))
 }
 
 /// A series label without the target (`window-closed · tray` → `window-closed`).

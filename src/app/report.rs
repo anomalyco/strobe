@@ -147,12 +147,22 @@ pub fn run(args: &Args) -> Result<Output> {
     if format == "pr" && !experiment {
         return Err(Error::usage("--format pr writes an experiment's results for a pull request: give an exp_… handle"));
     }
+    if format == "summary" && !experiment {
+        return Err(Error::usage("--format summary writes an experiment's result for a CI job's summary page: give an exp_… handle"));
+    }
+    let markdown_out = matches!(format, "md" | "pr" | "summary");
     let out = match args.get("out") {
         Some(p) => std::path::PathBuf::from(p),
-        None => scratch.join(format!("report-{view}{}", if format == "pr" { ".pr.md".to_string() } else { format!(".{format}") })),
+        None => scratch.join(format!(
+            "report-{view}{}",
+            match format {
+                "pr" | "summary" => format!(".{format}.md"),
+                _ => format!(".{format}"),
+            }
+        )),
     };
     // Markdown of a file named by its path goes to stdout alone, unless --out says where to write it.
-    let write = file.is_none() || args.get("out").is_some() || !matches!(format, "md" | "pr");
+    let write = file.is_none() || args.get("out").is_some() || !markdown_out;
     if args.get("update-pr").is_some() && format != "pr" {
         return Err(Error::usage("--update-pr replaces an experiment's block in a pull request body: add --format pr"));
     }
@@ -172,6 +182,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let body = match format {
         "md" => markdown(&data),
         "pr" => super::pr::block(&data),
+        "summary" => super::pr::summary(&data),
         _ => html(view, &data),
     };
     if write {
@@ -201,7 +212,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let path = out.display().to_string();
     let size = super::fmt::bytes(body.len() as f64);
     // Markdown is for pasting: it goes to stdout, and the file's path to stderr.
-    if format == "pr" || format == "md" {
+    if markdown_out {
         if !args.json() && !args.has("quiet") && write {
             eprintln!("strobe: wrote {path} · {size}");
         }
