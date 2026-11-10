@@ -493,7 +493,7 @@ strobe up --mobile[=<serial>] --channel canary|dev|beta
 2). `self` (the binary into the install folder and that folder onto the user's PATH) and `skill` are
 for a copy that must not install itself, such as a CI job's (§26.3): `up --skip
 self,skill,daemon,mcp,deep,calibrate` only fetches the engine into the state folder and changes
-nothing else in the user's profile (no binary, PATH entry, autostart, daemon, opencode config or
+nothing else in the user's profile (no binary, PATH entry, autostart, daemon, MCP registration or
 skill). `self` needs `daemon` too: the daemon runs only from the install folder.
 
 `up --check` prints the preflight lines (cpu, power, browser, Firefox, WebKit, phones, Bun) and stops:
@@ -9132,7 +9132,7 @@ run puts its error and exit code in the step summary.
   `strobe-engine-<platform>-<engine version>`, from `strobe status --fast --json`). Then `strobe up
   --skip self,skill,daemon,mcp,deep,calibrate` (§5.3): it only fetches the engine. The binary runs
   from the action's cache folder and nothing goes into the runner user's profile: no install folder
-  copy, user PATH entry, autostart, daemon, opencode config or skill, so a self-hosted machine's own
+  copy, user PATH entry, autostart, daemon, MCP registration or skill, so a self-hosted machine's own
   strobe and skill stay as they were (rule 10). What the bench writes goes to strobe's state folder
   (engine, experiments, recordings, builds: strobe's own files, §4.2).
 - A browser only when `strobe up --check --json` finds none (hosted runners ship Chrome) and
