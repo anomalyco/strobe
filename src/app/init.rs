@@ -1,8 +1,8 @@
-//! `strobe init [<dir>] [--target web|server|native|electron|tty|cli] [--force]`: a first bench for a project,
-//! from what its own files say (SPEC §5): a strobe.json linked to its schema and a runnable
+//! `strobe init [<dir>] [--target web|lib|server|native|electron|tty|cli] [--force]`: a first bench for a
+//! project, from what its own files say (SPEC §5): a strobe.json linked to its schema and a runnable
 //! `perf/smoke.bench.ts` (and the helper it needs), then the commands that check them. It reads generic
-//! markers only (package.json's scripts, `main` and `bin`, a Cargo.toml's binaries, an index.html) and
-//! never replaces a file that is there without `--force`.
+//! markers only (package.json's scripts, `exports`, `module`, `types`, `main` and `bin`, a Cargo.toml's
+//! binaries, an index.html) and never replaces a file that is there without `--force`.
 
 use super::Output;
 use crate::cli::Args;
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     Web,
+    Lib,
     Server,
     Native,
     Electron,
@@ -21,11 +22,12 @@ enum Kind {
 }
 
 impl Kind {
-    const ALL: [Kind; 6] = [Kind::Web, Kind::Server, Kind::Native, Kind::Electron, Kind::Tty, Kind::Cli];
+    const ALL: [Kind; 7] = [Kind::Web, Kind::Lib, Kind::Server, Kind::Native, Kind::Electron, Kind::Tty, Kind::Cli];
 
     fn name(self) -> &'static str {
         match self {
             Kind::Web => "web",
+            Kind::Lib => "lib",
             Kind::Server => "server",
             Kind::Native => "native",
             Kind::Electron => "electron",
@@ -35,7 +37,7 @@ impl Kind {
     }
 
     fn parse(s: &str) -> Result<Kind> {
-        Kind::ALL.into_iter().find(|k| k.name() == s).ok_or_else(|| Error::usage(format!("--target is web, server, native, electron, tty or cli, not {s}")))
+        Kind::ALL.into_iter().find(|k| k.name() == s).ok_or_else(|| Error::usage(format!("--target is web, lib, server, native, electron, tty or cli, not {s}")))
     }
 }
 
@@ -119,25 +121,64 @@ impl Project {
         Some((name, format!("{runtime} {file}")))
     }
 
-    /// The server's entry: package.json `main` or `module`, else the file its `start` script runs (either
-    /// may be the build's output, made before the first block), else a usual name, when the file is there.
+    /// A code file the package names, from its folder: in it, and there (or the build's output, made
+    /// before the first block).
+    fn declared(&self, file: &str) -> Option<String> {
+        let f = file.trim_start_matches("./");
+        (inside(f) && code_file(f) && (self.script("build").is_some() || self.dir.join(f).is_file())).then(|| f.to_string())
+    }
+
+    /// The file a script runs with a JavaScript runtime (`bun src/index.ts`, `node --watch server.js`): the
+    /// first word after the runtime that is no flag, `run` or `watch`, when it is a code file. `tsc --watch`,
+    /// `next start` and `bun run build` run none.
+    fn script_file(&self, name: &str) -> Option<String> {
+        let words: Vec<&str> = self.script(name)?.split_whitespace().collect();
+        let i = words.iter().position(|w| matches!(*w, "bun" | "node" | "tsx" | "ts-node" | "deno"))?;
+        self.declared(words[i + 1..].iter().find(|w| !w.starts_with('-') && !matches!(**w, "run" | "watch"))?)
+    }
+
+    /// The file a server's `start` script runs, else (with no `start`) its `dev` script.
+    fn start_file(&self) -> Option<String> {
+        if self.script("start").is_some() { self.script_file("start") } else { self.script_file("dev") }
+    }
+
+    /// A server by its usual name: `server.ts` and the like, in the folder or `src`.
+    fn server_file(&self) -> Option<String> {
+        ["", "src/"].iter().flat_map(|d| ["ts", "js", "mjs", "cjs"].map(|x| format!("{d}server.{x}"))).find(|f| self.dir.join(f).is_file())
+    }
+
+    /// Whether package.json says what a library says: `exports`, `module`, `types` (or `typings`), or a
+    /// `main` that no script starts and no server file sits beside.
+    fn has_lib_fields(&self) -> bool {
+        let Some(p) = self.package.as_ref() else { return false };
+        ["exports", "module", "types", "typings"].iter().any(|k| !p[k].is_null()) || (p["main"].is_string() && self.start_file().is_none() && self.server_file().is_none())
+    }
+
+    /// A server: a file by a server's usual name, or a script that starts a file in a package that says
+    /// nothing a library says.
+    fn is_server(&self) -> bool {
+        self.server_file().is_some() || (!self.has_lib_fields() && self.start_file().is_some())
+    }
+
+    /// The library's entry: what package.json `exports` (its `.`, else its first subpath), `module` or `main`
+    /// names for a runtime (never `types`), else a usual name that is there.
+    fn lib_entry(&self) -> Option<String> {
+        let p = self.package.as_ref();
+        let declared = p.and_then(|p| export_file(&p["exports"])).into_iter().chain(["module", "main"].iter().filter_map(|k| p?[k].as_str().map(str::to_string)));
+        let usual = ["src/index", "src/lib", "src/mod"]
+            .iter()
+            .flat_map(|f| ["ts", "mts", "js", "mjs"].map(|x| format!("{f}.{x}")))
+            .chain(["index", "lib"].iter().flat_map(|f| ["ts", "js", "mjs"].map(|x| format!("{f}.{x}"))));
+        declared.filter_map(|f| self.declared(&f)).next().or_else(|| usual.into_iter().find(|f| self.dir.join(f).is_file()))
+    }
+
+    /// The server's entry: the file its `start` (or `dev`) script runs, a server's usual name, package.json
+    /// `main` or `module`, else `src/index` and the like that is there.
     fn server_entry(&self) -> Option<String> {
         let p = self.package.as_ref();
-        let mut declared: Vec<String> = ["main", "module"].iter().filter_map(|k| p?[k].as_str().map(str::to_string)).collect();
-        if let Some(start) = self.script("start") {
-            let words: Vec<&str> = start.split_whitespace().collect();
-            if let Some(i) = words.iter().position(|w| matches!(*w, "bun" | "node" | "tsx" | "ts-node" | "deno")) {
-                declared.extend(words[i + 1..].iter().find(|w| !w.starts_with('-') && *w != &"run").map(|w| w.to_string()));
-            }
-        }
-        let code = |f: &String| [".ts", ".js", ".mjs", ".cjs", ".mts", ".tsx", ".jsx"].iter().any(|x| f.ends_with(x));
-        let built = self.script("build").is_some();
-        let usual = ["server.ts", "server.js", "src/server.ts", "src/server.js", "src/index.ts", "src/index.js", "index.ts", "index.js"].map(String::from);
-        declared
-            .into_iter()
-            .map(|f| f.trim_start_matches("./").to_string())
-            .find(|f| inside(f) && code(f) && (built || self.dir.join(f).is_file()))
-            .or_else(|| usual.into_iter().find(|f| self.dir.join(f).is_file()))
+        let declared = ["main", "module"].iter().filter_map(|k| p?[k].as_str()).filter_map(|f| self.declared(f));
+        let usual = ["src/index.ts", "src/index.js", "index.ts", "index.js"];
+        self.start_file().or_else(|| self.server_file()).or_else(|| declared.into_iter().next()).or_else(|| usual.into_iter().find(|f| self.dir.join(f).is_file()).map(str::to_string))
     }
 
     /// Whether the folder holds a page: an index.html where a web app keeps it, or a preview script.
@@ -156,17 +197,44 @@ impl Project {
         if self.bin().is_some() {
             return Ok(Kind::Cli);
         }
-        if self.package.is_some() && self.server_entry().is_some() {
+        if self.package.is_some() && self.is_server() {
             return Ok(Kind::Server);
+        }
+        if self.has_lib_fields() && self.lib_entry().is_some() {
+            return Ok(Kind::Lib);
         }
         if self.script("build").is_some() {
             return Ok(Kind::Web);
         }
+        // A package that neither builds nor runs anything: its source is what others import.
+        if self.package.is_some() && self.script("dev").is_none() && self.script("start").is_none() && self.lib_entry().is_some() {
+            return Ok(Kind::Lib);
+        }
         if !self.bins.is_empty() {
             return Ok(Kind::Cli);
         }
-        Err(Error::usage(format!("{} holds no package.json, Cargo.toml or index.html that says what to bench", self.dir.display()))
-            .hint("name it: strobe init --target web|server|native|electron|tty|cli"))
+        Err(Error::usage(format!("{} holds no package.json, Cargo.toml binary or index.html that says what to bench", self.dir.display()))
+            .hint("name it: strobe init --target web|lib|server|native|electron|tty|cli"))
+    }
+}
+
+/// A file a runtime loads: JavaScript or TypeScript, not a declaration file.
+fn code_file(f: &str) -> bool {
+    [".ts", ".js", ".mjs", ".cjs", ".mts", ".cts", ".tsx", ".jsx"].iter().any(|x| f.ends_with(x)) && ![".d.ts", ".d.mts", ".d.cts"].iter().any(|x| f.ends_with(x))
+}
+
+/// The code file package.json `exports` names for a runtime: a path (no `*` pattern), an array's first,
+/// a subpath map's `.` (else its first other subpath but `./package.json`), or a condition map's `bun`,
+/// `import`, `module`, `node`, `default` or `require` (never `types`).
+fn export_file(exports: &Value) -> Option<String> {
+    match exports {
+        Value::String(f) => (!f.contains('*') && code_file(f)).then(|| f.clone()),
+        Value::Array(a) => a.first().and_then(export_file),
+        Value::Object(m) if m.keys().any(|k| k.starts_with('.')) => {
+            m.get(".").and_then(export_file).or_else(|| m.iter().filter(|(k, _)| k.starts_with("./") && !k.contains('*') && *k != "./package.json").find_map(|(_, v)| export_file(v)))
+        }
+        Value::Object(m) => ["bun", "import", "module", "node", "default", "require"].iter().find_map(|c| m.get(*c).and_then(export_file)),
+        _ => None,
     }
 }
 
@@ -308,7 +376,7 @@ export async function start(): Promise<string> {
   process.env.PORT = String(port)
 @START@
   const url = `http://127.0.0.1:${port}/`
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 50; i++) {
     try {
       await fetch(url)
       return url
@@ -316,8 +384,53 @@ export async function start(): Promise<string> {
       await Bun.sleep(100)
     }
   }
-  throw new Error(`nothing answered ${url} in 10 s: does the server listen on process.env.PORT?`)
+  throw new Error(
+    `nothing answered ${url} in 5 s: does the server listen on process.env.PORT? (if this package is a library, not a server: strobe init --target lib --force)`,
+  )
 }
+"#;
+
+const LIB_BENCH: &str = r#"import { bench, cli, script } from "@hona/strobe"
+
+export default bench({
+  // `cold` times importing the package in a fresh process per run; `lib` loads perf/lib.ts once per block so
+  // cases call its exports with ctx.call (CPU profiles cut to the measured runs).
+  targets: {
+    cold: cli(@COLD@@OPTS@),
+    lib: script("./lib.ts"@OPTS@),
+  },
+  cases: {
+    // Cold import of the package entry in a fresh process: load time, CPU and peak memory.
+    import: {
+      targets: ["cold"],
+      primary: "run.duration",
+      metrics: ["cpu.work", "memory.peak"],
+      run: (ctx) => ctx.exec(),
+    },
+    // Edit `work` in perf/lib.ts to call an export on realistic input, then uncomment:
+    // work: {
+    //   targets: ["lib"],
+    //   primary: "cpu.work",
+    //   metrics: ["run.duration", "js.heap.retained"],
+    //   run: (ctx) => ctx.call("work"),
+    // },
+  },
+})
+"#;
+
+const LIB_TS: &str = r#"// Loaded in a fresh process per run by `cold` (to time importing the package) and once per block by `lib`
+// (a script() target whose exports cases call with ctx.call).
+import * as lib from @ENTRY@
+
+export const loaded: number = Object.keys(lib).length
+
+// Edit `work` to call a function your users call on realistic input, looped to ~20-50 ms so ctx.call's relay
+// stays under 1% of the run, then uncomment the `work` case in smoke.bench.ts.
+// export function work(): number {
+//   let n = 0
+//   for (let i = 0; i < 200; i++) n += Object.keys(lib).join().length
+//   return n
+// }
 "#;
 
 const NATIVE_BENCH: &str = r#"import { bench, native } from "@hona/strobe"
@@ -427,11 +540,24 @@ fn plan(kind: Kind, p: &Project) -> Result<Plan> {
             };
             Ok(Plan { config, bench: head + WEB_BENCH, helper: Some(("serve.ts", SERVE_TS.to_string())), what })
         }
+        Kind::Lib => {
+            let entry = p.lib_entry().ok_or_else(|| {
+                Error::usage(format!("a lib bench imports the package's entry, and {} names none (package.json exports, module or main, or src/index.ts)", p.dir.display()))
+                    .hint("add exports or main to package.json, or point init at the package folder")
+            })?;
+            // Both targets run in the variant's root after the package's build (TypeScript to dist/), once per variant.
+            let build = p.script("build").map(|_| p.in_dir(&p.run("build")));
+            let opts = build.as_ref().map(|b| format!(", {{ build: {} }}", lit(b))).unwrap_or_default();
+            let cold = lit(&format!("bun {}", p.rooted("perf/lib.ts")));
+            let what = format!("a library: {entry}{}, imported by perf/lib.ts", build.as_ref().map(|b| format!(" (after {b})")).unwrap_or_default());
+            let bench = head + &LIB_BENCH.replace("@COLD@", &cold).replace("@OPTS@", &opts);
+            Ok(Plan { config: Vec::new(), bench, helper: Some(("lib.ts", LIB_TS.replace("@ENTRY@", &lit(&format!("../{entry}"))))), what })
+        }
         Kind::Server => {
             let entry = p.server_entry();
             let start = match &entry {
-                Some(e) => format!("  // The project's server (package.json main or start); it must listen on process.env.PORT.\n  await import({})", lit(&format!("../{e}"))),
-                None => "  // No server entry found (package.json main or start): a stand-in that answers. Import yours instead:\n  // await import(\"../src/server.ts\"), a server that listens on process.env.PORT.\n  Bun.serve({ hostname: \"127.0.0.1\", port, fetch: () => Response.json({ status: \"ok\" }) })".to_string(),
+                Some(e) => format!("  // The project's server (package.json start, dev or main); it must listen on process.env.PORT.\n  await import({})", lit(&format!("../{e}"))),
+                None => "  // No server entry found (package.json start, dev or main): a stand-in that answers. Import yours instead:\n  // await import(\"../src/server.ts\"), a server that listens on process.env.PORT.\n  Bun.serve({ hostname: \"127.0.0.1\", port, fetch: () => Response.json({ status: \"ok\" }) })".to_string(),
             };
             // A build (TypeScript to JavaScript, a bundle) runs once per variant before its first block.
             let build = p.script("build").map(|_| p.in_dir(&p.run("build")));
@@ -499,7 +625,7 @@ fn plan(kind: Kind, p: &Project) -> Result<Plan> {
                 (String::new(), lit(&p.in_dir(&p.run("start"))), opts(script_build), "the package's start script".to_string())
             } else {
                 return Err(Error::usage(format!("a {} bench runs the project's program, and {} names none (package.json bin, a Cargo.toml binary)", kind.name(), p.dir.display()))
-                    .hint("write the command in the bench yourself: cli(\"<command> <args>\") or tty(\"<command>\")"));
+                    .hint("for a JS/TS library, strobe init --target lib; else write the command in the bench yourself: cli(\"<command> <args>\") or tty(\"<command>\")"));
             };
             let template = if kind == Kind::Cli { CLI_BENCH } else { TTY_BENCH };
             let what = format!("a {} program: {what}", if kind == Kind::Cli { "command-line" } else { "terminal" });
