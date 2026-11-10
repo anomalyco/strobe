@@ -1527,6 +1527,8 @@ struct Ctx<'a> {
     shared: Option<String>,
     /// `VariantPlacement` was looked at (once per experiment, after the first build of both sides).
     placed: bool,
+    /// `check_series` prints the case's line itself, once `--noworse` judged it (`check_case` does not).
+    case_line_later: bool,
 }
 
 /// Every block's reservation, merged for the experiment's context.
@@ -2121,6 +2123,7 @@ pub fn run(args: &Args) -> Result<Output> {
         ran_out: false,
         shared: env.shared_runner.clone(),
         placed: false,
+        case_line_later: false,
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
     // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check`, a
@@ -2786,7 +2789,11 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     let log = runner_log(ctx, log_from, None);
     let sent = sent.unwrap_or_else(|| ctx.runner.take_actions());
-    let mut out = check_case(ctx, s, variants, r, elapsed_ms, log, sent, film)?;
+    // The case's line once `--noworse` has judged it (`noworse_state` may fail a case its block passed).
+    ctx.case_line_later = true;
+    let out = check_case(ctx, s, variants, r, elapsed_ms, log, sent, film);
+    ctx.case_line_later = false;
+    let mut out = out?;
     if let Some(rep) = repeated {
         out["repeat"] = rep;
     }
@@ -2797,6 +2804,9 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         if let Some(head) = held {
             noworse_state(s, &noworse, counters.as_deref(), &head, &mut out);
         }
+    }
+    if out["kind"] == "check" {
+        progress(case_line(s, out["passed"] == true, &out["error"]));
     }
     Ok(out)
 }
@@ -3017,6 +3027,11 @@ fn runner_log(ctx: &Ctx, from: u64, to: Option<u64>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A check case's progress line: `  pass <label>`, or `  FAIL <label>  <why>`.
+fn case_line(s: &Series, passed: bool, error: &Value) -> String {
+    format!("  {} {}{}", if passed { "pass" } else { "FAIL" }, s.label(), error.as_str().map(|e| format!("  {e}")).unwrap_or_default())
+}
+
 /// A `--check` case's result from its block (or why it failed), its time, what its hooks printed and
 /// the actions they sent (`sent`, written beside the result when no recording keeps them).
 #[allow(clippy::too_many_arguments)]
@@ -3049,7 +3064,9 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
         }
         Err(e) => (false, json!(e.message), json!(e.hint), Value::Null, Value::Null, false, Value::Null, Value::Null, Value::Null),
     };
-    progress(format!("  {} {}{}", if passed { "pass" } else { "FAIL" }, s.label(), error.as_str().map(|e| format!("  {e}")).unwrap_or_default()));
+    if !ctx.case_line_later {
+        progress(case_line(s, passed, &error));
+    }
     // A case without a recording (it failed, or its kind keeps none: a script, a command, a launch, a
     // page measured from outside) keeps what its hooks sent beside the result. A recording took its own.
     let mut actions = Value::Null;
@@ -3468,6 +3485,8 @@ fn check_output(
     });
     store::write_json(&dir.join("result.json"), &result)?;
     let mut out = Output::new(text, result);
+    // Where the whole result is, as a comparison's `--json` says it.
+    out.json["result"] = json!(dir.join("result.json"));
     if failed > 0 {
         out.code = 1;
     } else if (gaps > 0 && require_parity) || (ran == 0 && before > 0) {
