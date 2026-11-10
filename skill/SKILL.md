@@ -232,8 +232,8 @@ export default bench({
      strobe refuses to update a hand-edited block. Write your reading above or below it, and say
      there when a metric was refused or `unclear`. One block per experiment.
    - Never put a card or badge in a PR without the block. `--format card|badge` is for elsewhere.
-   - The sides read "Before" and "This PR" only when head is the PR's own change (`--head .` or
-     `HEAD` at the PR's head commit); an A/B of other builds reads by commit, an A/A as `Base (A/A)`
+   - The sides read "Before" and "This PR" only when head is the working tree or `HEAD`, and with
+     `--update-pr` at the PR's head commit; an A/B of other builds reads by commit, an A/A as `Base (A/A)`
      and `Head (A/A)`. Name them with `--labels <base>,<head>` (`--labels v1.4,v1.5`).
 4. **The bench**: the case's code, or a link to it. A new case ships in the PR of the first change
    it measures.

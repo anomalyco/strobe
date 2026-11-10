@@ -3940,7 +3940,7 @@ const CPU_SCOPE_WORDS = { host: "the whole host process", startup: "the host's s
 
 /* The scope shown for these sides: the one asked when every side has it, else the measured runs */
 function cpuScopeOf(...sides) {
-  const key = CPU_SCOPES[state.cpuScope];
+  const key = Object.hasOwn(CPU_SCOPES, state.cpuScope) ? CPU_SCOPES[state.cpuScope] : null;
   return key && sides.every((x) => x?.[key]?.rows?.length) ? state.cpuScope : "runs";
 }
 
@@ -7663,7 +7663,7 @@ function renderBisect(r) {
     if (i >= 0) state.series = i;
   }
   const scope = asked("scope");
-  if (scope === "runs" || CPU_SCOPES[scope]) state.cpuScope = scope;
+  if (scope === "runs" || Object.hasOwn(CPU_SCOPES, scope ?? "")) state.cpuScope = scope;
   const metric = asked("metric");
   if (metric) state.focusMetric = metric;
   render();

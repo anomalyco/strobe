@@ -751,7 +751,7 @@ rest stay in the experiment's `runner.log`, whose path it names). Each passing c
 block's recording and prints it (`rec  rec_… · strobe query rec_… threads`), and `query <exp> <view>`
 on a check of one case answers from that recording (with several, it lists them). Before anything
 runs, every bench prints the builds it runs with their commits (`head app@f2a281b501 (dirty)`, or
-`base … · head …`; an implementation comparison names its sides as before), and a check's text
+`base … → head …`; an implementation comparison names its sides as before), and a check's text
 starts with that line. A check's
 `result.json` has `env`, `variants` (`role`, `name`, `spec`, `label`, `kind`, `commit`, `dirty`,
 `target`), `stopped` and per case a `state` (`pass`, `fail`, `refused`, `gap`) with
@@ -1022,7 +1022,8 @@ strobe report experiment <exp_…> --format card|badge [--out <file.png|file.svg
 ```
 
 `--labels` names the two sides of a comparison in the PR block and the card (§11.2, side names);
-without it a block calls them "Before" and "This PR" only when head is the pull request's own change.
+without it a block calls them "Before" and "This PR" only when head is the working tree or `HEAD`, and
+with `--update-pr` at the pull request's head commit.
 An HTML report opens on the view its address names: `#series=<i>`, `#scope=runs|host|startup|setup`
 (a script target's CPU profile: its measured runs, its whole host process, the host's startup or the
 bench file's setup alone, where the report has that profile) and `#metric=<name>` (the metric
@@ -5670,7 +5671,9 @@ Side names (`pr::side_names`, the card's too), the first that applies: `--labels
 (two different names, neither empty, else a usage error); an implementation comparison's names
 (§9.10); `Base (A/A)` and `Head (A/A)` for an A/A run; "Before" and "This PR" only when head is the
 working tree (`--head .`, a folder) or `HEAD` and, with `--update-pr`, its commit is the pull
-request's head (`gh pr view --json headRefOid`; uncommitted changes count as the pull request's);
+request's head (`gh pr view --json headRefOid`; uncommitted changes on top of that commit count as
+the pull request's, on another commit they do not); without `--update-pr` (a preview) the working
+tree or `HEAD` is "This PR";
 else each side's tag (`1982f5313f`, `origin/x@7bf4e2d566`), or `Base` and `Head` when the tags do not
 tell them apart. So an A/B of two old builds pasted as evidence into a later pull request never
 calls one of them "This PR". Sentences use the same words: `before` and `with this PR`, else `on
@@ -5882,8 +5885,8 @@ As built (`query <rec> insights`, `query <exp> insights`):
 | `work-while-idle` | a `record` with no input that presents ≥ 1 frame/s or keeps the main thread ≥ 5% busy | frames/s, busy share |
 | `detached-dom` | the heap snapshot holds detached DOM nodes | count, retained size, the largest's retainer path |
 | `wakes-while-idle` | a native app's `record` (no input), or an idle native block (every measured run's `frames.json` inputs empty and `cpu.app.total` under 25% of a core: a busy app's switches are preemptions; JSON `idle_block`), whose threads wake ≥ 50/s (warn from 200/s) | wakes per second, the three threads that wake most |
-| `dominant-thread` | a native recording or block where one thread used ≥ 50% of the processes' CPU and ≥ 50 ms per run (over the recording for a `record`) while the UI thread (`ui.cpu`, else `cpu.main`) used under 25%; the whole is the larger of the runs' median `cpu_ms` (else `cpu.work`) and the threads' sum, so no share reads over 100% (warn from 75%) | the thread, its tid, module and origin (the app's own, a driver's, an OS thread, not placed); `query threads`, `query hotspots --thread <tid>`; JSON `thread`, `tid`, `pid`, `module`, `origin`, `cpu_ms`, `share`, `processes_cpu_ms`, `ui_thread`, `ui_cpu_ms`, `ui_share` |
-| `off-cpu-bound` | `run.duration` ≥ 100 ms and `cpu.work` under a quarter of it (never an idle native block; an attribution recording's profiler cost can keep it silent) | both and the share; `query http` with an HTTP probe, `query network` with a WebKit waterfall, `query waits` for a native capture, else a page's `strobe open` |
+| `dominant-thread` | a native recording or block where one thread used ≥ 50% of the processes' CPU and ≥ 50 ms per run (over the recording for a `record`) while the UI thread used under 25%; every part is a mean over the runs, as the threads' rows are (a median beside a mean would read a thread busy in one run alone as most of a typical run): the UI thread is its own row (`meta.ui_thread`), else `ui.cpu`, else the runs' mean `main_cpu_ms` (else `cpu.main`), and is never a candidate itself; the whole is the larger of the runs' mean `cpu_ms` (else `cpu.work`) and the threads' sum, so no share reads over 100% (warn from 75%) | the thread, its tid, module and origin (the app's own, a driver's, an OS thread, not placed); `query threads`, `query hotspots --thread <tid>`; JSON `thread`, `tid`, `pid`, `module`, `origin`, `cpu_ms`, `share`, `processes_cpu_ms`, `ui_thread`, `ui_cpu_ms`, `ui_share` |
+| `off-cpu-bound` | a bench block (`kind` block, never a `record`, whose `run.duration` is the window it was asked to record) whose `run.duration` is ≥ 100 ms and `cpu.work` under a quarter of it: most of the run was not on a CPU (never an idle native block; an attribution block's profiler cost can keep it silent) | both and the share; `query http` with an HTTP probe, `query network` with a WebKit waterfall, `query waits` for a native capture, else a page's `strobe open` |
 | `style-layout-dominant` | a page's `main.style` + `main.layout` ≥ 20 ms per run (over the recording for a `record`) and over `main.script` (warn from 50 ms and twice script) | style, layout and script ms; `query style`, `query layout` |
 | `background` | `cpu.foreign.max` ≥ 25% | the busiest processes outside strobe's tree |
 | `unresolved` / `native-time` | < 95% of script samples mapped / `(program)` ≥ 30% of busy samples | shares |
@@ -8242,7 +8245,7 @@ what was built but not yet run on a device is in §21.
   startup-spill `NotSteady`, cold shader cache on check lines; variant commits before the runs and in
   a check's result; phone plan lines and `phone` in result.json; a tty target's `cwd` (5.6, 9.1, 9.6,
   10.1, 10.2, 13.2, 14.2, 19).
-- 2026-11-10 · cleanup/w5b e85d927 9a99794 · a phone's census by process, layer and allocator from
+- 2026-11-10 · e85d927 9a99794 e07119b · a phone's census by process, layer and allocator from
   Chromium's dump; strobe's own page listeners out of the census; the emulator's `pm clear` hint;
   insights `dominant-thread`, `off-cpu-bound`, `style-layout-dominant`, and `wakes-while-idle` on idle
   native blocks (8.6, 10.1, 11.3, 13.1).

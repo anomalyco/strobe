@@ -61,7 +61,7 @@ pub(crate) fn pct_bound(frac: f64) -> String {
 /// result's `side_names`); an implementation comparison's sides by name (SPEC §9.10); `Base (A/A)`
 /// and `Head (A/A)` for an A/A run; "Before" and "This PR" when head is the working tree or `HEAD`
 /// and, when the pull request is known (`--update-pr`: its `pr_head_commit`), its commit is the
-/// pull request's head (or uncommitted); else each side's tag (`1982f5313f`, `origin/x@7bf4e2d566`),
+/// pull request's head (uncommitted changes on top of it count); else each side's tag (`1982f5313f`, `origin/x@7bf4e2d566`),
 /// or `Base` and `Head` when the tags do not tell them apart.
 pub(crate) fn side_names(r: &Value) -> (String, String) {
     let pair = |b: &str, h: &str| (b.to_string(), h.to_string());
@@ -86,15 +86,15 @@ pub(crate) fn side_names(r: &Value) -> (String, String) {
 }
 
 /// Whether head is the pull request's own change: the working tree (a folder, or a result from before
-/// variants named their kind: `.` or a path) or `HEAD`, at the pull request's head commit when that
-/// is known (uncommitted changes count as the pull request's).
+/// variants named their kind: `.` or a path) or `HEAD`, and, when the pull request is known, at its
+/// head commit (uncommitted changes on top of it included; on another commit they are not its).
 fn this_pr(r: &Value) -> bool {
     let (_, h) = variants(r);
     let spec = h["spec"].as_str().unwrap_or("");
     let tree = h["kind"] == "dir" || (h["kind"].is_null() && (spec == "." || local_path(spec))) || spec == "HEAD";
     let at_head = match r["pr_head_commit"].as_str() {
         None => true,
-        Some(pr) => h["dirty"] == true || h["commit"].as_str().is_some_and(|c| c.len() >= 7 && pr.to_ascii_lowercase().starts_with(&c.to_ascii_lowercase())),
+        Some(pr) => h["commit"].as_str().is_some_and(|c| c.len() >= 7 && pr.to_ascii_lowercase().starts_with(&c.to_ascii_lowercase())),
     };
     tree && at_head
 }

@@ -439,7 +439,9 @@ fn attribution(rec: &Rec, plan_runs: Option<u64>) -> Option<Value> {
         // The host's startup and the bench file's setup alone (`query hotspots --source startup|setup`),
         // the toggle's other scopes; none for a recording that kept no such span.
         for (key, scope, label) in [("startup", query::Scope::Startup, "Host startup"), ("setup", query::Scope::Setup, "Bench file's setup")] {
-            if let Ok(o) = query::hotspots_scoped(rec, "function", 50, query::Sort::Own, scope) {
+            if let Ok(o) = query::hotspots_scoped(rec, "function", 50, query::Sort::Own, scope)
+                && o.json["rows"].as_array().is_some_and(|r| !r.is_empty())
+            {
                 let mut w = o.json;
                 if let Ok(f) = query::hotspots_scoped(rec, "file", 25, query::Sort::Own, scope) {
                     w["files"] = f.json["rows"].clone();

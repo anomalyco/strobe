@@ -515,8 +515,9 @@ Use
                                   a bench --blocks run: HTML and md, its blocks' median and interval, no verdict)
   report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card] [--labels <base>,<head>]
                                   put the block in PR n's body, with the result card and badges attached through gh;
-                                  the sides read Before and This PR only when head is the PR's head commit (or the
-                                  working tree), else each side's commit; --labels names them (pr and card)
+                                  the sides read Before and This PR only when head is the working tree or HEAD, and
+                                  with --update-pr at the PR's head commit; else each side's commit (A/A: Base (A/A),
+                                  Head (A/A)); --labels names them (pr and card)
   report experiment <exp> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto] [--badge-url]
                                   [--scoreboard] [--labels <base>,<head>]
                                   the result as an image: card 1200×630 (decided wins large, else what happened), badge one
