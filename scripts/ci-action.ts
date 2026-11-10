@@ -350,7 +350,10 @@ function bench(file: string, args: string[], cwd: string, leak: boolean): Done |
   console.log("::endgroup::")
   const out = json(r.stdout)
   if (!out || out.error || !out.id) {
-    error(`strobe bench ${file} (exit ${r.code}): ${out?.error ?? r.stdout.trim().slice(0, 2000)}${out?.hint ? ` (fix: ${out.hint})` : ""}`)
+    const why = `${out?.error ?? (r.stdout.trim().slice(0, 2000) || "no output; the log above says why")}${out?.hint ? ` (fix: ${out.hint})` : ""}`
+    error(`strobe bench ${file} (exit ${r.code}): ${why}`)
+    const fence = "`".repeat(Math.max(3, ...(why.match(/`+/g) ?? []).map((m) => m.length + 1)))
+    summarize(`### strobe · ${file}\n\nstrobe bench exited ${r.code}${out?.validator ? ` (${out.validator})` : ""}:\n\n${fence}\n${why}\n${fence}\n`)
     return null
   }
   // A comparison's JSON names its result.json; a check's does not: it is in strobe's state folder (SPEC §4.2).
@@ -542,7 +545,11 @@ async function runStep() {
     output("artifact-name", input("artifact-name") || `strobe-${env("GITHUB_JOB") || "job"}-${all.map((d) => d.id).join("-") || env("GITHUB_RUN_ATTEMPT")}`)
   }
   if (failed) {
-    error(mode === "check" ? "strobe's check failed: the step summary says which case" : "strobe's comparison failed the fail-on rule: the step summary has the verdicts")
+    error(
+      mode === "check"
+        ? "strobe's check failed: the step summary says which case or why the bench did not run"
+        : "strobe's comparison failed the fail-on rule: the step summary has the verdicts or why the bench did not run",
+    )
     process.exit(1)
   }
 }

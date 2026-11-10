@@ -221,7 +221,10 @@ const TOOLS: &[Tool] = &[
             ("repo", "with update-pr: owner/repo"),
             ("force", "with update-pr: replace a block another experiment wrote"),
             ("no-card", "with update-pr: no result card or badges"),
-            ("labels", "format pr or card: the two sides' names, base then head, comma-separated (default: Before and This PR when head is the working tree or HEAD, and with update-pr at the pull request's head commit; else each side's commit; an A/A run Base (A/A) and Head (A/A))"),
+            (
+                "labels",
+                "format pr or card: the two sides' names, base then head, comma-separated (default: Before and This PR when head is the working tree or HEAD, and with update-pr at the pull request's head commit; else each side's commit; an A/A run Base (A/A) and Head (A/A))",
+            ),
             ("badge-url", "with format badge: print a shields.io URL"),
             ("scoreboard", "with format badge, for an implementation comparison: its journeys' scoreboard (vs <base> | better in 4/5 · 1 gap)"),
         ],

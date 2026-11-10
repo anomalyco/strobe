@@ -1,6 +1,5 @@
 name: strobe
 description: Check a project's strobe benches on any runner, and compare a pull request with its base on a machine of its own.
-author: anomalyco
 branding:
   icon: activity
   color: blue
