@@ -470,9 +470,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
             background = busiest_others(p0, &(host::now_ns(), host::all_processes()));
         }
     }
-    if warmup.unsteady() {
-        values.insert("warmup.unsteady".into(), if warmup.grew() { 2.0 } else { 1.0 });
-    }
+    warmup.values(&mut values);
     for m in declared_metrics(s) {
         if values.contains_key(m) || refused.contains_key(m) || m.starts_with("count.") || m.starts_with("phase.") {
             continue;

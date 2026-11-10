@@ -128,7 +128,7 @@ fn event_values(events: &[Event], timed: &metrics::Timed) -> (BTreeMap<String, f
 }
 
 /// `ctx.waitForLine(match, { in: "events" })`: the first line of the event stream matching it that
-/// arrived after the watch began, on strobe's host clock.
+/// arrived after the watch began (`since: "launch"`: since the program started), on strobe's host clock.
 #[derive(Default)]
 struct EventWatches(Vec<(regex_lite::Regex, u64, Instant, Duration)>);
 
@@ -136,7 +136,14 @@ impl EventWatches {
     fn serve(&mut self, events: &Events, a: &Value) -> Result<Value> {
         if a["step"] == "watch" {
             let timeout = Duration::from_millis(a["timeout"].as_u64().unwrap_or(30_000));
-            self.0.push((launch::pattern(a, "waitForLine")?, host::now_ns(), Instant::now() + timeout, timeout));
+            let after = match a["since"].as_str().unwrap_or("now") {
+                "now" => host::now_ns(),
+                "launch" => 0,
+                other => {
+                    return Err(Error::usage(format!("waitForLine: since is \"now\" (the default: lines written after the call) or \"launch\" (any line since the program started), not {other:?}")));
+                }
+            };
+            self.0.push((launch::pattern(a, "waitForLine")?, after, Instant::now() + timeout, timeout));
             return Ok(json!(self.0.len() - 1));
         }
         let (re, after, deadline, timeout) = self.0.get(a["id"].as_u64().unwrap_or(u64::MAX) as usize).ok_or_else(|| Error::msg("waitForLine: no such watch"))?;
@@ -144,7 +151,10 @@ impl EventWatches {
             return Ok(json!({ "line": e.line, "at": e.at_ns }));
         }
         if Instant::now() >= *deadline {
-            return Err(Error::timeout(format!("waitForLine: no event line matching {} in {:.1} s", re.as_str(), timeout.as_secs_f64())));
+            let e = Error::timeout(format!("waitForLine: no event line matching {} in {:.1} s", re.as_str(), timeout.as_secs_f64()));
+            // A line that came before the call: the wait began too late to see it.
+            let earlier = *after > 0 && events.between(0, *after).iter().any(|e| re.is_match(&e.line));
+            return Err(if earlier { e.hint("a matching event line came before this call (waitForLine sees only lines after it by default): pass { since: \"launch\" }") } else { e });
         }
         Ok(json!({ "pending": true }))
     }
@@ -379,8 +389,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     };
     let result = (|| -> Result<Launch> {
         let lapped = Instant::now();
+        tty_gone(&tty, pid, &set_home, "before the case's setup", false)?;
         let setup = ctx.runner.call("setup", json!({}), t, serve);
         super::batch::launch_hook_case(ctx)?;
+        // A program that exited is refused for that, never as a setup that waited for it.
+        tty_gone(&tty, pid, &set_home, "before the runs", !driver.inputs().is_empty())?;
         setup.map_err(|e| crate::runner::incomplete("setup", "setup", e, &screen_note(&tty), "fix the bench file's setup"))?;
         hooks.check_fixture();
         steps.push(("setup".into(), lapped.elapsed().as_secs_f64() * 1e3));
@@ -416,6 +429,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         _ => {}
                     }
                     hooks.begin(&format!("run:{}", base + runs.len()));
+                    // The program's CPU goes with it when it exits, so a run it exits in is no run of it.
+                    let running = tty.exited().is_none();
                     let k0 = probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref());
                     edges.borrow_mut().clear();
                     host_edges.borrow_mut().clear();
@@ -477,6 +492,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // unknown where what ended is not known.
                     let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total + h1.saturating_sub(h0)));
                     hooks.end();
+                    let n = runs.len() + 1;
+                    tty_gone(&tty, pid, &set_home, &format!("{} {}'s run {n}", if running { "during" } else { "before" }, s.case), !driver.inputs().is_empty())?;
                     ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &screen_note(&tty), "the run threw or timed out"))?;
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
                     // Switches and IO over the timed parts: the snapshots at the run's ends and its untimed
@@ -685,9 +702,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 if let Some(mb) = local.end.checked_sub(1).and_then(|i| runs.get(i)).and_then(|r| r.end_mb).filter(|m| *m > 0.0) {
                     values.insert("memory.app.private".into(), mb);
                 }
-                if warmup.unsteady() {
-                    values.insert("warmup.unsteady".into(), if warmup.grew() { 2.0 } else { 1.0 });
-                }
+                warmup.values(&mut values);
                 // Other work on the program's CPUs during the runs: kept and flagged (`Background`, SPEC §10.2).
                 let foreign: Vec<f64> = measured.iter().filter_map(|r| r.foreign).collect();
                 let mut background = Vec::new();
@@ -702,6 +717,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     }
                 }
                 let syncs = tty.sync_timeouts();
+                // What this machine cannot read is said as that, before what the block did not measure.
+                refuse_not_on_this_os(s, &mut values, &mut refused);
                 for m in declared_metrics(s) {
                     if values.contains_key(m) || refused.contains_key(m) || m.starts_with("count.") || m.starts_with("phase.") {
                         continue;
@@ -730,6 +747,11 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         _ if m.starts_with("tty.frame.") => Refusal::new(ValidatorId::NotForTarget, format!("{m}: the program drew no synchronized frames (?2026){}", if syncs > 0 { format!(", and {syncs} it began never ended within a second") } else { String::new() })),
                         "cpu.pty_host" => Refusal::new(ValidatorId::NotOnThisOs, "cpu.pty_host: on this OS the kernel is the terminal: no host process does its work"),
                         "cpu.wakes" | "io.read" | "io.write" if !read => Refusal::new(ValidatorId::RunIncomplete, format!("{m}: the program's threads could not be read at a measured run's start or end (its processes gone)")),
+                        // A tty target measures these: missing, the program's processes could not be read.
+                        "cpu.work" | "cpu.app.total" | "cpu.process.total" => {
+                            Refusal::new(ValidatorId::RunIncomplete, format!("{m}: the program's CPU could not be read over every measured run (no process of it was left at a run's end, or the cycle clock gave no rate)"))
+                        }
+                        "memory.app.private" => Refusal::new(ValidatorId::RunIncomplete, format!("{m}: no process of the program was left to read at the last measured run's end")),
                         _ if m.starts_with("app.") => {
                             let bad = events.bad();
                             let r = Refusal::new(ValidatorId::NoMetric, format!("{m}: in {} of {} measured runs the program wrote no {{\"strobe\":\"metric\",\"name\":\"{}\"}} line to $STROBE_EVENTS", measured.iter().filter(|r| !r.app.contains_key(&m["app.".len()..])).count(), measured.len(), &m["app.".len()..]))
@@ -754,7 +776,6 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         super::check_overhead(&mut ctx.warnings, s, &used, &stamped, None);
                     }
                 }
-                refuse_not_on_this_os(s, &mut values, &mut refused);
                 super::block::untimed_state(s, &measured.iter().map(|r| &r.timed).collect::<Vec<_>>(), &mut values, &mut refused);
                 base += runs.len();
                 Ok(Block {
@@ -800,6 +821,23 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         launch.disturbed(e);
     }
     Ok(launch)
+}
+
+/// `RunIncomplete` once the terminal program is gone (as `record::app_gone` for a native app): it
+/// exited and nothing of its process set remains (a launcher that handed over to a process stamped
+/// with its home is not gone). One more look 50 ms later, for a child between fork and exec and for
+/// the reader to draw the program's last bytes. `typed`: whether the hooks sent it any input; one
+/// that exits with 0 before any is a command (a CLI), not a terminal app.
+fn tty_gone(tty: &Tty, pid: u32, home: &Path, when: &str, typed: bool) -> Result<()> {
+    let Some(code) = tty.exited() else { return Ok(()) };
+    for wait in [0, 50] {
+        std::thread::sleep(Duration::from_millis(wait));
+        if !host::process_set_pids(pid, Some(home)).is_empty() {
+            return Ok(());
+        }
+    }
+    let r = super::super::record::exited_refusal(code, when, Some(&last_rows(tty)));
+    Err(if code == 0 && !typed { r.fix("a program that prints and exits is a cli() target, not tty(): cli() times a command to its exit") } else { r }.into())
 }
 
 /// The grid's last non-empty rows, for a refusal when the program exits.

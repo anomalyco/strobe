@@ -1,0 +1,21 @@
+<!doctype html>
+<!-- Fixture of scripts/dev/known/startup.bench.ts (dev only, not shipped): ?mode=load spins 45 ms of every 50 ms on the
+     main thread for the first 4 s after the page loaded, then idles; ?mode=steady spins 25 ms of every 50 ms for as
+     long as the page is open. -->
+<title>startup</title>
+<p id="state">loading</p>
+<script>
+  const mode = new URLSearchParams(location.search).get("mode") || "load"
+  const [busy, until] = mode === "steady" ? [25, Infinity] : [45, 4000]
+  const start = performance.now()
+  function tick() {
+    const now = performance.now()
+    if (now - start >= until) {
+      document.getElementById("state").textContent = "ready"
+      return
+    }
+    while (performance.now() - now < busy) {}
+    setTimeout(tick, 50 - busy)
+  }
+  tick()
+</script>
