@@ -38,8 +38,8 @@ bunx strobe bench perf/smoke.bench.ts --head . --check    # each case once: does
 ```
 
 `strobe init` reads your package.json, Cargo.toml or index.html and writes a bench for a web app, a
-server, a native app, an Electron app, a terminal program or a command-line tool (`--target` picks
-one). It never replaces a file without `--force`, and prints what to run next.
+library, a server, a native app, an Electron app, a terminal program or a command-line tool (`--target`
+picks one). It never replaces a file without `--force`, and prints what to run next.
 
 What your agent runs:
 

@@ -15,10 +15,12 @@ The design and every rule behind this file: SPEC.md.
 
 1. `bun add -d @hona/strobe` pins strobe for the project (`bunx strobe …` then runs that version).
 2. `strobe init` writes `strobe.json` (its `$schema` linked) and a runnable `perf/smoke.bench.ts` from
-   the folder's package.json (`build`, `preview`, `start`, `main`, `bin`, an electron dependency),
-   Cargo.toml binaries or index.html. `--target web|server|native|electron|tty|cli` overrides the guess:
-   web serves the build with `perf/serve.ts`, server hosts it in `perf/server.ts` (`PORT`), native
-   builds and launches the Cargo app, cli runs the command to its exit. It never replaces a file
+   the folder's package.json (`build`, `preview`, `start`, `dev`, `exports`, `module`, `types`, `main`,
+   `bin`, an electron dependency), Cargo.toml binaries or index.html.
+   `--target web|lib|server|native|electron|tty|cli` overrides the guess: web serves the build with
+   `perf/serve.ts`, lib imports the package's entry from `perf/lib.ts` (a cold import per run; a
+   commented `work` case calls an export with `ctx.call`), server hosts it in `perf/server.ts` (`PORT`),
+   native builds and launches the Cargo app, cli runs the command to its exit. It never replaces a file
    without `--force`.
 3. Run what it prints: `strobe config`, then `strobe bench perf/smoke.bench.ts --head . --check`
    (`--headless` with no display or a locked session). Then edit the cases to what users do.
@@ -305,7 +307,7 @@ strobe report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--fo
 strobe open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
 strobe look <url|file|wir:…|app:<id>|exe:<path>|tty:<command>> [--until <selector>] [--out shot.png]
 strobe look app:<id>|exe:<path> [--windowless] [--wait 2s] [--timeout 30s] [-- <args…>]
-strobe init [<dir>] [--target web|server|native|electron|tty|cli] [--force]
+strobe init [<dir>] [--target web|lib|server|native|electron|tty|cli] [--force]
 strobe track <file> [--ref <rev> | --range a..b [--every N]] [--schedule commits|nightly|6h]
 strobe history [<ser_…|file>]
 strobe config [<dir>]

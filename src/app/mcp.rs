@@ -263,10 +263,10 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "init",
-        description: "Write a project's first bench from what its files say (package.json scripts, main and bin; a Cargo.toml's binaries; an index.html): a strobe.json linked to its schema and a runnable perf/smoke.bench.ts (with perf/serve.ts for a web app, perf/server.ts for a server), then the commands that check them (config, bench --check). Never replaces a file that is there without force.",
+        description: "Write a project's first bench from what its files say (package.json scripts, exports, module, types, main and bin; a Cargo.toml's binaries; an index.html): a strobe.json linked to its schema and a runnable perf/smoke.bench.ts (with perf/serve.ts for a web app, perf/lib.ts for a library, perf/server.ts for a server), then the commands that check them (config, bench --check). Never replaces a file that is there without force.",
         args: &[("dir", "the project folder, absolute (default: the folder strobe runs in; required through the daemon)")],
         flags: &[
-            ("target", "what to bench: web, server, native, electron, tty or cli (default: guessed from the folder's files)"),
+            ("target", "what to bench: web, lib, server, native, electron, tty or cli (default: guessed from the folder's files)"),
             ("force", "replace strobe.json and the bench files when they are there"),
         ],
         required: &[],

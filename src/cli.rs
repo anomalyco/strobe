@@ -568,7 +568,7 @@ Use
                                   metric.<name> from `strobe:metric <name>=<value>` lines it prints (--aa --head: an A/A)
 
 Setup
-  init [<dir>] [--target web|server|native|electron|tty|cli] [--force]
+  init [<dir>] [--target web|lib|server|native|electron|tty|cli] [--force]
                                   a project's first bench from its package.json, Cargo.toml or index.html: strobe.json
                                   (its schema linked) and a runnable perf/smoke.bench.ts; never replaces a file
                                   without --force; prints the commands that check them

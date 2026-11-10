@@ -306,17 +306,29 @@ commands for this OS with the folders they run in: those are from the checkout's
 folder of it holds strobe.json; a `build.output` given per OS without this OS is a problem.
 It launches nothing.
 
-`strobe init [<dir>] [--target web|server|native|electron|tty|cli] [--force]` starts a project's
+`strobe init [<dir>] [--target web|lib|server|native|electron|tty|cli] [--force]` starts a project's
 first bench from what its own files say, and names no product (rule 15): it reads generic markers
-only, package.json's `scripts` (`build`, `preview`, `start`), `main`, `module`, `bin` and an
-`electron` dependency, a Cargo.toml's `[[bin]]` names (else `[package]` `name` with `src/main.rs`),
-and an `index.html`. Without `--target` it guesses (`Project::guess`): an Electron dependency is
-`electron`; a page (an index.html in the folder or its `public`, `src`, `app` or `static`, or a
-`preview` script) `web`; a `bin` `cli`; a server entry (`main`, `module` or the file `start` runs,
-else a usual name such as `src/index.ts` that is there) `server`; a build script alone `web`; a
-Cargo binary `cli` (a binary that opens a window is `--target native`, one in a terminal `tty`); a
-folder with none of them is a usage error that names the flag. A path the package names that leaves
-its folder (absolute, or with `..`) is never used. It writes `strobe.json` with its
+only, package.json's `scripts` (`build`, `preview`, `start`, `dev`), `exports`, `module`, `types`
+(`typings`), `main`, `bin` and an `electron` dependency, a Cargo.toml's `[[bin]]` names (else
+`[package]` `name` with `src/main.rs`), and an `index.html`. A script runs a file when its first word
+after a JavaScript runtime (`bun`, `node`, `tsx`, `ts-node`, `deno`) that is no flag, `run` or `watch`
+is a code file (`.ts`, `.js`, `.mjs`, `.cjs`, `.mts`, `.cts`, `.tsx`, `.jsx`; never a `.d.ts`): `tsc
+--watch`, `next start` and `bun run build` run none. A package says what a library says with
+`exports`, `module`, `types` or `typings`, or a `main` that no `start` script (without one, no `dev`
+script) runs and no `server.{ts,js,mjs,cjs}` in the folder or its `src` sits beside. Without `--target`
+it guesses (`Project::guess`): an Electron dependency is `electron`; a page (an index.html in the
+folder or its `public`, `src`, `app` or `static`, or a `preview` script) `web`; a `bin` `cli`; a server
+(a `server.*` file, or a `start` script, else a `dev` script, that runs a file in a package with nothing
+a library says) `server`; what a library says with an entry `lib`; a build script alone `web`; a
+package with no `dev` or `start` script whose entry is there `lib`; a Cargo binary `cli` (a binary that
+opens a window is `--target native`, one in a terminal `tty`); a folder with none of them is a usage
+error that names the flag. A library's entry is what `exports` names for a runtime (a path without
+`*`, an array's first, a subpath map's `.` else its first other subpath but `./package.json`, a
+condition map's `bun`, `import`, `module`, `node`, `default` or `require`, never `types`), else
+`module`, else `main`, each a code file that is there or that the build script makes; else
+`src/index`, `src/lib` or `src/mod` (`.ts`, `.mts`, `.js`, `.mjs`) or `index` or `lib` (`.ts`, `.js`,
+`.mjs`) that is there. A path the package names that leaves its folder (absolute, or with `..`) is
+never used. It writes `strobe.json` with its
 `$schema` (the path to the `@hona/strobe` package's `schema/strobe.v1.json` in the folder's or an
 ancestor's `node_modules`, else `./node_modules/…`) and `perf/smoke.bench.ts`, a bench that passes
 `--check` as written, with the helper it needs:
@@ -327,9 +339,21 @@ ancestor's `node_modules`, else `./node_modules/…`) and `perf/smoke.bench.ts`,
   index.html), with a comment naming the project's own `preview` or `start` server as the other
   choice (never a dev server). Cases: a launch to `body *` (`launch.ready`) and a reload
   (`main.work`).
+- **lib:** `perf/lib.ts` imports the entry (`import * as lib from "../<entry>"`) and exports how many
+  names it has. Target `cold` is `cli("bun <folder>/perf/lib.ts")`, a fresh process per run; target
+  `lib` is `script("./lib.ts")`; both take the build script as their `build`. Case `import` (on `cold`):
+  `run.duration` with `cpu.work` and `memory.peak` of a cold import. A commented `work` case (on `lib`:
+  `cpu.work` with `run.duration` and `js.heap.retained`, `ctx.call("work")`) calls a commented `work()`
+  in perf/lib.ts; edited to loop an export over realistic input for 20-50 ms (so the relay stays out of
+  the run), its attribution profile names the library's functions. init never calls an export itself:
+  their arguments and side effects are the project's. Both pass `--check` as written and with `work`
+  uncommented (the placeholder `work` is tiny, so overhead warnings fire until you edit it), and `tsc
+  --noEmit` with `noUnusedLocals` for a source entry.
 - **server:** a `script("./server.ts")` harness whose `start()` sets `PORT` to a free port, imports
-  the entry (`main`, `module`, the file `start` runs, else `server`/`src/index` and the like; a
-  stand-in that answers when there is none) and waits until it answers; setup probes it
+  the entry (the file the `start` script, else the `dev` script, runs, a `server.*` file, `main`,
+  `module`, else `src/index` and the like; a stand-in that answers when there is none) and waits up to
+  5 s until it answers: its error names `strobe init --target lib --force`, for a library guessed a
+  server; setup probes it
   (`ctx.httpProbe`, any status below 500) and the case makes 1000 requests from four clients 10 ms
   apart from the runner: `cpu.main` with `http.latency.p95` and `http.timeouts`.
 - **native:** `build` `cargo build --release` into `{cache}/cargo-target` with the line-table, no-strip
@@ -344,6 +368,8 @@ ancestor's `node_modules`, else `./node_modules/…`) and `perf/smoke.bench.ts`,
   `memory.peak`).
 - tty and cli of a package with a build script take it as the target's `build` (a program that is its
   build's output, TypeScript to `dist/`), run once per variant before its first block.
+
+A `--target cli` or `tty` with no program to run says, for a JS/TS library, `strobe init --target lib`.
 
 A folder below its checkout's root gets every path from the root (`build.cwd`, `serve.cwd`, a
 command's path), as a folder variant builds there (§9.5). A file that is there is kept (`kept`),
@@ -363,8 +389,22 @@ its own folder and as a package below a monorepo's git root; vps (2 vCPU) web (`
 cli, tty and native (an X11 window on Xvfb that sets `_NET_WM_PID`, as toolkits do). vps from an
 empty folder holding a three-file web app, on a cold Bun cache: `bun add -d @hona/strobe` 1.5 s,
 `init` and `config` under 0.1 s each, the `--check` 7.5 s (its build, the server and both cases;
-Chromium was installed): about 10 s of commands from install to a passing check. Not run: an Electron
-project (a headed app; as root on Linux it also needs `--no-sandbox`).
+Chromium was installed): about 10 s of commands from install to a passing check. Checked (2026-11-10,
+W5-4) on adais (headless) and vps, each `--check` passing as written: a standalone TypeScript library
+(`exports` `.` → `src/index.ts`) guessed `lib`, and with `work` calling its `render` 500 times
+`--check`, `--aa --pairs 6` (no `ObserverCost`) and `record --bench .#work`, whose hotspots name
+`inline`, `render` and `escape`; a monorepo package (`main` `./dist/index.cjs`, `module`
+`./dist/index.js`, `types`, `exports` `{ ".": { types, import, require } }`, a `bun build` build, `dev`
+`--watch`, `start` `tsc --noEmit`, `dist` ignored) guessed `lib` on `dist/index.js` with build `cd
+packages/markdown && bun run build`, its `--check` and `--base main --head . --pairs 2` with `perf/`
+uncommitted (the harness overlaid on base) passing; the same library as `--target server` failing in
+5.1 s (vps; 8.8 s on adais) with the `--target lib --force` hint, which then passes; a server (`start`
+`bun src/index.ts`, `main`) and a Bun server with only `dev` (`bun run --hot src/index.ts`) still
+`server` and passing; a framework app (`dev`, `build`, `start` `next start`) still `web`; a copy of a
+real monorepo markdown package (`exports` `./src/index.ts` only), before guessed `server` and failing
+its check, now `lib` and passing. On Linux the cold import's `memory.peak` reads `-` in timed blocks
+(`NotOnThisOs`, as for every `cli()`). Not run: an Electron project (a headed app; as root on Linux it
+also needs `--no-sandbox`).
 
 Every flag strobe reads is in one table (`cli::FLAGS`, with whether it takes a value and which
 commands read it); any other
@@ -8233,6 +8273,10 @@ what was built but not yet run on a device is in §21.
 
 **After 0.27.0**
 
+- 2026-11-10 · 8a352dd · `init --target lib`: a library guessed from `exports`, `module`, `types` or
+  `main` (a server needs a server file or a `start`/`dev` script that runs a file in a package with no
+  library fields); `perf/lib.ts` with a cold-import case and a commented `ctx.call` case; the server
+  harness waits 5 s and names `--target lib` (5).
 - 2026-11-10 · this change · PR block and card side names: `report --labels <base>,<head>`; "Before"
   and "This PR" only when head is the working tree or `HEAD` at the pull request's head commit
   (`--update-pr` reads `headRefOid`), `Base (A/A)`/`Head (A/A)` for an A/A run, else each side's
