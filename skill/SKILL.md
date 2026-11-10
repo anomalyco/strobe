@@ -142,6 +142,8 @@ The design and every rule behind this file: SPEC.md.
   counter `--noworse`), leak runs (`--probes memory`), `--pixels-only`, `record --probes attribution`.
 - Timing verdicts in CI: `mode: compare` on a self-hosted runner that runs one job at a time; the block
   goes in a same-repository PR's body (never a fork's). Never `pull_request_target`.
+- The PR block, step summary, card and badge never name the machine's other processes; result.json and
+  the HTML report do: on a personal self-hosted runner with a public repo, `upload-artifacts: never`.
 
 ### No display, a locked session, a server
 

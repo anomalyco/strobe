@@ -37,6 +37,11 @@ When a design change is agreed, update this file in the same change.
 9. **Local only.** Recordings never leave the machine unless the user copies them. Traces and
    heap snapshots can hold prompts, file contents and credentials: they are written owner-only,
    reports and MCP results carry aggregates, and string contents appear only with `--reveal`.
+   What ran beside the target is the bench machine's owner's business: a published surface
+   (`report --format pr`, `--format summary`, `--format card|badge`: what the Action or a person
+   posts) names no process outside the target's own; it says how many and how busy. Local
+   diagnostics keep the names (terminal progress and stderr, result.json, meta.json, `query`,
+   `--format html`, `--format md`).
 10. **Never break user space.** strobe writes only its own files and marked managed entries, all
     removed by `strobe leave`. It never changes a target's settings, profile or data. Launched
     targets get isolated homes; attached targets are left as they were on detach.
@@ -5518,7 +5523,7 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 | `actions` | `--phase` `--top` `--reveal` `--case` (`exp_…` too) | a bench block's actions in order (§9.6, `actions.json.gz`): seq, hook, run, ms from the first, from its input's send to strobe's answer, call, selector, arguments, outcome, its latency sample (`sample sent 32.7 ms`), untimed and phase, and each input's hit (role, name, point, scrolled) on a line of its own; the seed in the header, and the samples counted by edge with what each means. `--phase` keeps one phase's, `--top` bounds the rows (default 15), `--json` gives every record. Typed text, `act` values, `ctx.call` arguments and `ctx.exec` lines show as their length (`«18 chars»`) unless `--reveal` (rule 9). `exp_…`: each series' kept recordings' (a check's, attribution blocks', kept timing blocks'), each named by what it was, and each check case's kept beside the result (`no recording` or `failed`) |
 | `timeline` | `--from --to --thread` | not built: bounded event list for a range (`threads --timeline` and `strobe open` show time) |
 | `progress` | (`exp_…` only) | a running experiment's state and estimate |
-| `runs` | | every run of a block recording, warmup and unmeasured runs too, measured or not: from the block's `meta.run_list` (run, measured, `run.duration`, `cpu.work`, main-thread tasks, main CPU, CPU lost; kept with every block recording, §9.6); else `runs.json` (a native or script block's measured runs only, no warmup run: `run.duration`, `cpu.work`, main CPU; a `record` of a native window: its one span is the whole recording); else a bench block's run marks in its trace (a page: each run's span between its marks, not `run.duration`, which is the driver's wall time, and the renderer main thread's top-level task time when the trace holds tasks; a lean trace holds none, so none is shown). A `record <url>` marks its window, not runs: usage error (`keeps no runs to list`). JSON `{ recording, from, runs: […] }` |
+| `runs` | | every run of a block recording, warmup and unmeasured runs too, measured or not: from the block's `meta.run_list` (run, measured, `run.duration`, `cpu.work`, main-thread tasks, main CPU, CPU lost; kept with every block recording, §9.6); else `runs.json` (a native or script block's measured runs only, no warmup run: `run.duration`, `cpu.work`, main CPU; a `record` of a native window: its one span is the whole recording); else a bench block's run marks in its trace (a page: each run's span between its marks, wider than `run.duration`, the driver's time, by the marks' round trips, and the renderer main thread's top-level task time when the trace holds tasks; a lean trace holds none, so none is shown). A `record <url>` marks its window, not runs: usage error (`keeps no runs to list`). JSON `{ recording, from, runs: […] }` |
 | `sql` | `"<query>"` | rows from trace_processor, row-limited; trace_processor's six-decimal floats print without trailing zeros (`71.000000` → `71`, `-0.000000` → `0`; strings left alone), as in the views built on it. A recording without `trace.pftrace` (a script recording, a native one, a page in another engine) is queried in `perfetto.pftrace`, the trace `strobe open` builds, built on first use |
 
 `--case <case|label|seq>` narrows a `--check --batch` recording to one case's runs, values and
@@ -5863,15 +5868,36 @@ section for a CI job's summary page (`$GITHUB_STEP_SUMMARY`, §26), to stdout li
 `report-experiment.summary.md`, or `--out`; its path to stderr; a recording handle is a usage error).
 A check is one table, Case | Target | Status | Exact counters | Notes: status pass, fail, refused,
 gap or not run; the counters one run reads exactly (`count.*`, `net.requests*`, `net.bytes*`,
-`tty.frames`, `dom.nodes`), base → head when the check ran both (each `--noworse` counter with its
-outcome: **worse** or **unstable**; else base's values beside head's), at most six; a failed or
-refused case's validator and summary. A check states no time: its values are one cold run. A pixels
-run: the frames that differ per case. A leak run: per case and side, the JS heap's (a native app's
-host memory's) and the DOM's verdict with the slope's 95% interval per run, and the top suspect class
-(count, retained); no time. `--blocks`: the primary's median with its 95% interval (one block: its
-value, no interval). Each with the warn-level warnings in a closed drawer and a line naming the strobe
-and `strobe report <id>`. A comparison: its `--format pr` block without card or badges (a step
-summary attaches no images). Paths scrubbed as in a PR block.
+`tty.frames`, `dom.nodes`: `model::is_ci_counter`), base → head when the check ran both: each
+`counters` row with its state (`count.items 3 → 5 **worse** (--noworse 0%)`; **unstable** with an
+unstable side's runs, `count.drift 310, 718 → 322, 523`; **missing in head**; not compared), then
+the other exact counters, base's from `base_values` when `base.passed` (a failed base: `(head's: base
+failed)` in the cell and `base failed: <error>` in Notes), at most six; a failed or refused case's
+validator and summary (a case whose `state` is pass but `passed` false, a `--noworse` failure, is a
+fail). A check states no time: its values are one cold run. A pixels run: the frames that differ per
+case. A leak run: per case and side, the JS heap's (a native app's host memory's) and the DOM's
+verdict with the slope's 95% interval per run, and the top suspect class (count, retained); no time.
+`--blocks`: the primary's median with its 95% interval (one block: its value, no interval). Each
+with the warn-level warnings in a closed drawer, the experiment's and each series' own (`HighVariance`,
+`NotSteady`, `Background`, `StateDrift`, `ObserverCost`, …; deduped, prefixed with the series label
+when there are several), and a line naming the strobe and `strobe report <id>`. A comparison: its
+`--format pr` block without card or badges (a step summary attaches no images). Paths scrubbed as in
+a PR block. `-q` keeps the Markdown on stdout (md, pr, summary); only the `wrote <path>` line goes.
+
+**Publishable surfaces** (rule 9): the PR block and the step summary pass every text strobe wrote
+(notes, refusals, errors) through one scrub (`pr::scrub_public`, beside the path scrub): each list of
+other processes (`(busiest elsewhere: …)`, `busiest processes on the machine (% of a core): …`,
+`busiest processes on the machine: …`, `busiest processes (% of a core): …`, `busiest processes: …`)
+becomes its count and the busiest one's share (`2 other processes, the busiest 101% of a core`;
+`none named (…)` stays), and `ReservedCpus`' lists of the processes it moved or could not move go
+(their counts stay). The PR block's Pairs footnote says `<n> other processes ≥ 5%, busiest <x>% of a
+core` (each pair's `cpu.foreign.max` stays). Cards and badges draw only a refusal's validator and
+summary, which name no process. Not foreign, so kept: `EndedCpu` (the target's own ended processes)
+and an implementation comparison's sides' processes. On a shared runner (`env.shared_runner` in the
+result) the PR block has no frame pacing table and no late-frames caution. Checked on adais (a
+renamed process spinning a core beside an `--aa` bench, exp_14d5fa): its name 0 times in `--format
+pr`, `summary`, the card and the badge, against 6 in the terminal, 18 in result.json, 6 in md and 18
+in the HTML report.
 
 `--format card` (`app/card.rs`) draws an experiment's result as one 1200×630 image (the Open Graph
 size), from the same rows as the hero line and its caution (`pr::hero`): up to three tiles in the
@@ -6442,7 +6468,9 @@ Wi-Fi adb, a channel given to strobe, its touch slop and timing) is designed, no
   does on every launch`): on an emulator the fix is to start it with `-gpu swiftshader_indirect`
   (lavapipe Vulkan, and `-gpu auto` on a computer without a GPU the emulator supports, dropped it every
   time; an emulator's timing is refused anyway), on a phone to close Chrome and run again, else another
-  phone. strobe's tab journal marks a tab closed only when `Target.closeTarget` succeeded, and at the
+  phone; only while the phone still answers (one 5 s adb probe: an unplugged phone keeps its exit
+  255). strobe's tab journal marks a tab closed only when `Target.closeTarget` succeeded (an empty
+  `getTargetInfo` address keeps the journaled one), and at the
   next launch one `about:blank` tab of the channel stands for strobe's tab that never loaded (its launch
   ended first; Chrome restores it under another id); blank tabs hold nothing of a person's. Before a bench block's or a recording's first load
   the page's origin is cleared (`Storage.clearDataForOrigin`, all types) and the HTTP cache
@@ -8394,11 +8422,12 @@ what was built but not yet run on a device is in §21.
   CPU's speed on the target's CPUs (3 s → about 0.2–0.3 s); the parity matrix only for shared
   journeys; `run_list` in kept recordings; `OverheadBudget` per-run cost (5.4, 5.6, 9.4, 9.10, 10.1,
   10.2, 14.1, 19).
-- 2026-11-10 · cleanup/w6b · `report --format summary` (check, pixels, leak and `--blocks` tables;
-  comparisons as card-less PR blocks); `query <rec> runs`; axis ticks in seconds and margins from the
-  widest label; a phone's Chrome that drops its socket on `SystemInfo.getInfo` exits 3 with the
-  emulator's `-gpu swiftshader_indirect`; strobe's unloaded `about:blank` tab cleaned up at the next
-  launch (5.8, 11.1, 11.2, 13.1).
+- 2026-11-10 · c35741c 693ca2f 308e903 9c6b27f · `report --format summary` (check, pixels, leak and
+  `--blocks` tables, the check's counters base → head; comparisons as card-less PR blocks); no other
+  process's name on a published surface (`pr::scrub_public`); `-q` keeps a report's Markdown;
+  `query <rec> runs`; axis ticks in seconds and margins from the widest label; a phone's Chrome that
+  drops its socket on `SystemInfo.getInfo` exits 3 with the emulator's `-gpu swiftshader_indirect`;
+  strobe's unloaded `about:blank` tab cleaned up at the next launch (1 rule 9, 5.8, 11.1, 11.2, 13.1).
 
 **0.28.0** (7c769e5, 2026-11-10)
 
