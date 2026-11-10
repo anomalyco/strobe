@@ -610,7 +610,7 @@ impl Browser {
     fn gpu_query_lost(&self, e: Error) -> Error {
         let Some(p) = self.phone.as_ref().filter(|_| e.code == 255) else { return e };
         let what = format!(
-            "{} on {} closed its DevTools connection when strobe asked for its GPU (SystemInfo.getInfo): its GPU process failed that query ({})",
+            "{} on {} closed its DevTools connection when strobe asked for its GPU (SystemInfo.getInfo), as a Chrome whose GPU it cannot query does on every launch ({})",
             p.package,
             p.facts.serial,
             e.message.lines().next().unwrap_or("")
