@@ -544,7 +544,9 @@ installed apps), recordings disk use (from the folders' listing, not a stat of e
 calibration, the cycle clock (`cycles` line, §13.6) and macOS timer coalescing (`timers` line). The
 cpu line and a Firefox older than 148 read as in `up` (§5.3). The benches running here are listed
 (§10.1 `ConcurrentBench`); a machine-wide bench slot held by a bench of another user or state folder,
-which this folder's list cannot show, is a `slot` line (`slot_elsewhere` in `--json`).
+which this folder's list cannot show, is a `slot` line (`slot_elsewhere` in `--json`). On a shared
+CI runner (§10.1 `SharedRunner`) a `! runner  shared: <why>; …` line names what still works there,
+the problems list says so, and `env.shared_runner` holds the reason.
 `--calibrate` runs the full calibration (§10.3). `--fast` skips the 3 s idle-load sample and the slow
 device reads (an adb server that refuses the loopback connection is given up after 200 ms, as
 usbmuxd is): `status --fast` 2.0 s → 0.56 s on adais.
@@ -815,6 +817,25 @@ repeat it (`LaunchRuns`, info). `--check --repeat R` (from 2) runs R fresh cold 
 and `repeat.recordings` their recordings (a `launches` line); a launch that fails fails the case
 (`launch k of R: …`); refused with `--batch` and `--video`. Neither decides anything: a check stays
 untimed and verdict-free.
+**A check against base** (`--check --base <variant>`: a folder, git ref, `app:`, `exe:`; a bare target
+name is the two-target check above) builds both and runs each case on base, then head, the same
+launches each (`--runs`, `--repeat`). The case's line is head's, with `base  <declared values> · rec
+<id>` under it, or `base failed, so no counter of it is compared: <why>`: a base failure never fails
+the case. Nothing is compared but `--noworse`: with `--check` it takes the flag's margins only, not
+the cases' own (a bare margin is each case's primary), and exact counters only (`count.*`,
+`net.requests*`, `net.bytes*`, `tty.frames`, `dom.nodes`: `model::is_ci_counter`; anything else exits
+2, `a check compares exact counters only …`; without `--base <variant>` exit 2 too). Each side then
+runs 2 runs of a case with a reset and `--runs 2`, else 2 fresh launches (`--repeat` at least 2), and
+each counter must hold one value per side (every launch's value, and with `--runs N` its lowest and
+highest run): one that moved (`unstable`), head without a value where base had one (`missing`), or
+head over base by more than its margin (an exact non-inferiority: a count's margin is at least 0.5, so
+`0%` means no more) fails the case (exit 1), its progress line printed once judged. Lines `  noworse
+count.items 3 → 5 · worse (>0.5) (exact)` (`!` when it fails); the summary ends `base and head each
+checked; only the --noworse counters compared, exactly`. In result.json the series keeps `base` (base's
+side, as head's fields), `base_values` and `counters` (`metric`, `margin` as a fraction, `state`
+`no_worse`, `worse`, `unstable`, `missing` or `not_compared`, `passed`, `stable`, `base` and `head`
+medians, `base_runs`, `head_runs`, `why`, `text`). This is the comparison a shared CI runner allows
+(§10.1 `SharedRunner`, §26).
 **Many cases per launch** (`--check --batch N`): run cases that one launch can hold share it, its
 `prepare` and its `setup`, up to N at a time, so a file of many small cases (a fuzzer's) checks in a
 fraction of the time. Cases share a launch when they run on one target (so one engine, headless
@@ -3048,12 +3069,20 @@ flowchart LR
 | battery | `GetSystemPowerStatus` | `/sys/class/power_supply` | IOKit |
 
 **Per-run machine state only while blocks run.** A bench switches the power plan, keeps the machine
-awake and reserves CPUs only for its blocks: the plan switches (then 3 s to settle) and keep-awake
-starts when it takes the bench slot for a block, and both stay for its next block while nothing
-else happens in between. When it builds, waits for an unlock, queues behind another bench, or hands
-the slot to one, the user's plan is back and the machine sleeps as their settings say: a bench left
-waiting for days changes nothing. Reserved CPUs last one block each. The env line names the plan
-the blocks ran on.
+awake and reserves CPUs only for its blocks: the plan switches and keep-awake starts when it takes
+the bench slot for a block, and both stay for its next block while nothing else happens in between,
+from one series to the next too, unless the series builds or serves something (a variant not yet
+prepared for its target, or a folder that changed) or another bench waits for the slot. After a
+switch strobe waits until the CPUs' speed holds (`power::wait_settled`): a 2M-step integer workload
+(the fastest of three, about 1 ms) every 100 ms until two reads agree within 1.5%; before timed
+blocks at least 200 ms and at most 3 s, before untimed ones (a check, a leak run, pixels) at most
+250 ms; the progress line says `settled in N ms` (`(its speed still moved: the wait's cap)` at the
+cap). A timed `record` and `strobe run` settle too. It replaced a fixed 3 s sleep per switch: a
+3-case check on adais went from 15.4 s (3.5–3.6 s a case) to 6.0 s (one switch, settled in 105 ms),
+and timed blocks wait 207–515 ms a switch. When it builds, waits for an unlock, queues behind another
+bench, or hands the slot to one, the user's plan is back and the machine sleeps as their settings
+say: a bench left waiting for days changes nothing. Reserved CPUs last one block each. The env line
+names the plan the blocks ran on.
 
 strobe pins the target itself, so High performance's unparked cores cost it nothing: an X3D CCD's
 V-Cache preference holds through `--pin`. The plan used (with its power mode) is in every
@@ -4727,7 +4756,8 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   validator, or `gap  no @find`) and the `expect.same` reads where two or more ran, or why their
   journeys differ (`NotEquivalent`, `InputMismatch`, compared with the first target that ran it). A
   differing journey fails the check (exit 1); a gap, found before the run or met in it, is listed
-  (exit 0), and exits 4 with `--require-parity`.
+  (exit 0), and exits 4 with `--require-parity`. The matrix shows only when some journey ran on two or
+  more targets: targets with cases of their own share no row (0.27.0 printed rows of `—`).
   A case whose targets (those it runs on) run on different engines checks its pages from outside
   with OS input, as a timed block does; pages in several browsers and no other target are no such
   case, and each checks in its own engine. `--check --base <target> --head <target>` checks two
@@ -5088,6 +5118,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `MouseNotEnabled` | a `tty()` target's mouse call (`click`, `hover`, `move`, `drag`, `wheel`, `scroll`, a mouse button's `down`/`up`) needs mouse reporting the program has not turned on (clicks and the wheel after `?1000`, moves with a button held after `?1002`, any move after `?1003`; 13.9): a terminal would send nothing, so strobe sends nothing rather than bytes the program would read as keys. Refused before anything is sent |
 | `AnchorNotFound` | an image locator (or an image `until`, `waitFor`) showed nowhere in the call's timeout at its threshold (9.6 "Image anchors"): the message gives the best place's score, where it was and, when that failed, how far its colours were; the capture searched is kept as `failed-<step>-anchor.png` |
 | `AnchorAmbiguous` | an image locator for input matched two or more places, and still did 50 ms later: input aimed at it would be a guess. `page.query({ image })` lists them; a region, a tighter crop or a higher threshold makes it one |
+| `SharedRunner` | a CI runner other jobs share (`host::shared_runner`, `env.shared_runner`): `RUNNER_ENVIRONMENT=github-hosted`; `CI_SHARED_ENVIRONMENT=true`; or a CI flag (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`, `TF_BUILD`, `BUILDKITE`, any value but false, 0, no or off) in a virtual machine (`env.virtual_machine`) unless `RUNNER_ENVIRONMENT=self-hosted`. Its CPUs and memory move with its neighbours' load, so nothing timed there holds. Machine-wide, not transient (exit 4). Refused before anything builds: `bench --blocks N`, `bench --bisect`, `record` with `--probes timing` (the default), `track` (all but `--schedules` and `--unschedule`) and `strobe run -- <command>`. A comparison (`--base`, `--aa`, `strobe run --base … --head …`) refuses each series whose primary is no exact counter (listed refused, the rest run; none left: the bench's own refusal `a timed comparison (primary …)`); in a series that runs, every metric but an exact counter is refused, a counter is compared only exactly (6 pairs that each held it; fewer: `N pairs, and on … a counter compares only exactly, which takes 6 pairs`), and one that moved refuses (its pairs stop at 6). `dom.nodes` counts as an exact counter there (`model::is_ci_counter`). Unaffected: `config`, `plan` and `--plan`, `--check` (with `--base` and `--noworse`, §5.6), leak runs, `--pixels-only`, `record --probes attribution|memory`, `record --bench`, `query`, `report`, `look`, `status`. Message `<what>: this is <why>, whose CPUs and memory other jobs share, so its times and readings move with their load`; fix: time it on a dedicated or self-hosted runner, or here run `bench --check` (with `--base <ref>` and `--noworse` on exact counters), a leak run or `record --probes attribution` (§26) |
 
 Validators are one type in the code (`model::ValidatorId`, these ids), and a refusal is data:
 `Refusal { validator, summary, detail, fix, hidden }`. A refused run's error carries it (exit 4;
@@ -5141,6 +5172,7 @@ emits:
 | `Battery` | warn | on battery: clocks may drop mid-run |
 | `PowerPlan` | info | the user's power plan was kept: `--power keep`, on battery, or no faster plan to switch to |
 | `VirtualMachine` | warn | the firmware strings say a virtual machine: its timings move with the host's load; prefer bare metal |
+| `VariantPlacement` | warn | once per experiment, never a refusal: base's and head's folders differ in what a program started in each meets first: another kind of filesystem (NTFS against ReFS; ext4, tmpfs, 9p, overlayfs; another volume of the same kind is not said: on adais `bun -e 0` from strobe's builds folder on C: and a checkout on D:, both NTFS, read 24.1 and 24.3 ms median), a `package.json`, `node_modules`, `tsconfig.json` or `bunfig.toml` in a folder above one alone, one under the temporary folder (`%TEMP%`: 28.5 ms median there; Bun's startup reads its folders' parents), or a folder above one alone with 500 entries or more where those above the other hold under 100 (`host::paths::placement_diff`) |
 | `BackgroundPriority` | warn | strobe or the target runs at background priority: frame and input-latency metrics are refused (§10.1), and the CPU metrics kept are to be compared only at the same priority |
 | `TimerCoalescing` | warn | macOS: strobe's 5 ms sleeps wake over 5 ms late (median of 7): it runs in a launchd job of ProcessType Standard or Background (a remote shell's daemon whose plist sets none), and macOS coalesces the timers of everything in it, the target included (20 to 60 ms late from a 16 ms sleep on air against 1 to 4 ms under ProcessType Interactive; no thread QoS, `PRIO_DARWIN_ROLE`, `taskpolicy` tier or `NSProcessInfo` activity strobe may set changed it); `status` shows it on a `timers` line |
 | `ReservedCpus` | info | which of this user's processes `--reserve-cpus` could not move off the target's CPUs (elevated ones), or why it kept none apart (§9.4) |
@@ -7896,7 +7928,12 @@ recordings/rec_3f9a1c/
                         span, and every probe's due, dispatch, sent and completed times and fate, owner-only
 ```
 
-A bench block's `meta.json` names the experiment's `seed` beside `experiment`.
+A bench block's `meta.json` names the experiment's `seed` beside `experiment`. A kept page or native
+block's `meta.json` also keeps `run_list`: every run, warmup and the run after a reset too, as `{ run,
+measured, ms, cpu_work_ms, task_ms, main_cpu_ms, cpu_lost }` (null where strobe has no number;
+`cpu_work_ms` null when `cpu_lost`), which `query <rec> runs` reads (§11.1). Script and cli blocks
+keep none (their `runs.json` stands in). Every recording's `meta.json` env holds `shared_runner` on a
+shared CI runner (§10.1).
 
 A native recording's stacks go to `deep.json.gz` beside these, symbolized against the variant's
 executable and `.pdb` that §9.5 copies (the module's own CodeView path finds it).
@@ -8142,7 +8179,10 @@ command's start and is a metric of its own, `cli.launch` (§9.6). A run that cou
 nothing to the share. Each edge reads strobe's own cycles right beside the clock and the runner's beyond
 them, so reading the runner is not in strobe's count. `--check` prints it per case (`self  strobe 0.81% · runner 0.40% ·
 sampler 0.16% of a core`), a bench per series (the blocks' mean); in a timed block a part over its
-budget above warns `OverheadBudget`, once per series and part. strobe's own process and the runner
+budget above warns `OverheadBudget`, once per series and part. The strobe-and-runner warning says what
+that share is per run, `(X ms/run over Y ms runs)`, and when the runs average under 250 ms adds `; under
+250 ms a run leaves strobe's fixed cost per run a large share of it: give each run more work` (`121.4%
+of a core in the runs (2.56 ms/run over 2.11 ms runs; …)`). strobe's own process and the runner
 (in a timed or `--check` block, `self_state`): with the target unpinned (`--pin none`, under 4 cores,
 macOS) they share its CPUs, so `strobe` + `runner` over 5% of a core warns `OverheadBudget` and over
 20% refuses a timed block's wall-time, CPU-share, frame and latency metrics (`OverheadBudget`; the
@@ -8332,6 +8372,22 @@ what was built but not yet run on a device is in §21.
 
 **After 0.27.0**
 
+- 2026-11-10 · cleanup/w6c · the GitHub Action: `action.yml` and `scripts/ci-action.ts`, `check`
+  (any runner: each case once, exact counters held to base's) and `compare` (a self-hosted runner: the
+  A/B and the PR block); `pull_request_target` refused, inputs through the environment, forks never
+  edited; the npm tarball's integrity checked on every run; caches for strobe, its engine and
+  Playwright's Chromium; releases on `v*.*.*` only and the moving `v<major>.<minor>`; the Check
+  workflow's dogfood run on `scripts/dev/served` (1 rule 5, 4.1, 20, 26).
+- 2026-11-10 · cleanup/w6a · `SharedRunner` (timing refused on shared CI runners; exact counters only
+  in comparisons); `--check --base <build>` with `--noworse` on exact counters; `VariantPlacement`;
+  the machine kept across built series, the power plan settled by reading the CPU's speed (3 s → about
+  0.1–0.5 s); the parity matrix only for shared journeys; `run_list` in kept recordings;
+  `OverheadBudget` per-run cost (5.4, 5.6, 9.4, 9.10, 10.1, 10.2, 14.1, 19).
+- 2026-11-10 · cleanup/w6b · `report --format summary` (check, pixels, leak and `--blocks` tables;
+  comparisons as card-less PR blocks); `query <rec> runs`; axis ticks in seconds and margins from the
+  widest label; a phone's Chrome that drops its socket on `SystemInfo.getInfo` exits 3 with the
+  emulator's `-gpu swiftshader_indirect`; strobe's unloaded `about:blank` tab cleaned up at the next
+  launch (5.8, 11.1, 11.2, 13.1).
 - 2026-11-10 · this change · PR block and card side names: `report --labels <base>,<head>`; "Before"
   and "This PR" only when head is the working tree or `HEAD` at the pull request's head commit
   (`--update-pr` reads `headRefOid`), `Base (A/A)`/`Head (A/A)` for an A/A run, else each side's

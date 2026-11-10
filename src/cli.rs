@@ -447,6 +447,11 @@ Use
         [--check --runs N]             (N runs in each case's one launch, no warmup: values their median, [lowest … highest run])
         [--check --repeat R]           (R fresh cold launches per case, from 2: the median over them and each launch's value;
                                         not with --batch or --video)
+        [--check --base <variant>]     (each case once on base and on head, each line base's under head's; nothing compared but
+                                        --noworse's exact counters)
+        [--check --noworse count.x=0%,…]  (with --base: exact counters only (count.*, net.requests, net.bytes, tty.frames,
+                                        dom.nodes); each must hold one value per side (2 runs with a reset, else 2 launches)
+                                        and head stay within its margin of base, or the case fails)
         [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a comparison keeps
                                         the pairs it has, anything else stops, exit 124)
         [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over adb instead
@@ -468,7 +473,10 @@ Use
                                        runnable example: node_modules/@hona/strobe/README.md)
         --filter: case names, comma-separated (or --filter given again); exact unless a name holds * (a glob)
         --base <target>[=<variant>] --head <target>[=<variant>]: two targets of the file compared (two
-                                  implementations of one app); target:<name> when a folder or ref has that name
+                                  implementations of one app; with --check: bare target names); target:<name> when a
+                                  folder or ref has that name
+        a shared CI runner (GitHub-hosted) refuses timing (SharedRunner): --check (with --base and --noworse on exact
+                                  counters), leak runs and record --probes attribution run there
                                   run an experiment; a verdict per series
   plan <file.bench.ts> [--base <variant>] [--head <variant>] [--filter …] [--effect <pct>] [--pilot]
                                   before a bench: pairs and minutes per series from earlier runs here, builds, the slot's

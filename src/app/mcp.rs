@@ -97,7 +97,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "bench",
-        description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups; a series refused on its own (exit 4: its engine, an overhead budget) ends alone and the rest of the file runs. A server hosted in a script() target is probed from strobe's own threads when setup calls ctx.httpProbe({ url, authorization, expect }): declare http.latency.p95 or http.timeouts, and cpu.main for its main thread alone (the runnable example: node_modules/@hona/strobe/README.md). Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
+        description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups; a series refused on its own (exit 4: its engine, an overhead budget) ends alone and the rest of the file runs. A server hosted in a script() target is probed from strobe's own threads when setup calls ctx.httpProbe({ url, authorization, expect }): declare http.latency.p95 or http.timeouts, and cpu.main for its main thread alone (the runnable example: node_modules/@hona/strobe/README.md). On a shared CI runner (GitHub-hosted) timing is refused (SharedRunner): check (with base and noworse on exact counters) and leak runs work there. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
         args: &[("file", "absolute path to the .bench.ts file (not with stop or resume)")],
         flags: &[
             (
@@ -109,7 +109,10 @@ const TOOLS: &[Tool] = &[
                 "baseline variant: an absolute directory, a git ref (e.g. origin/dev), url:<href>, cmd:<line> (a cli() target's command line); or a target of the file, target[=variant]: base and head naming two targets compare two implementations",
             ),
             ("aa", "same build on both sides (checks the method)"),
-            ("check", "validate the file: each case once on head (one launch; runs N runs in it, repeat R launches), pass or fail with a screenshot, no statistics"),
+            (
+                "check",
+                "validate the file: each case once on head (one launch; runs N runs in it, repeat R launches), pass or fail with a screenshot, no statistics; with base (a build) each case once on base too, and noworse holds head's exact counters to base's",
+            ),
             (
                 "batch",
                 "with check: up to N run cases per launch (one prepare and setup), each held to the launch's start after its reset; a failing or dirty case ends its launch and the next case gets a fresh one",
@@ -127,7 +130,10 @@ const TOOLS: &[Tool] = &[
             ("params", "k=v,k2=v2, or all (adds every parameter's more values)"),
             ("primary", "override the case's primary metric"),
             ("equivalence", "equivalence bound in % (default 2)"),
-            ("noworse", "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear); \"metric=2%,metric2=5%\" per metric"),
+            (
+                "noworse",
+                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear); \"metric=2%,metric2=5%\" per metric; with check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's",
+            ),
             ("plan", "do not run: estimate pairs and minutes per series from earlier experiments here, builds and the bench slot's queue"),
             ("effect", "with plan: the expected change of the primary in % (default: what the last run of the series measured, else 0)"),
             ("pilot", "with plan: run 4 pairs first to learn the spread"),

@@ -300,7 +300,7 @@ strobe record pid:<n>|proc:<name> [--probes timing|deep|waits|stacks-unprivilege
 strobe record wir:[<selector>] [--probes attribution|memory] [--for 10s]
 strobe record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--max-time 10m]
 strobe bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check [--batch N] [--runs N]
-             [--repeat R] | --blocks N]
+             [--repeat R] [--base <ref> --noworse count.x=0%,dom.nodes=0%] | --blocks N]
              [--filter <cases>] [--target <names>] [--params k=v|all] [--primary <metric>]
              [--pairs auto|N] [--runs 5] [--noworse 2%] [--why auto|always|never] [--trace lean|full]
              [--probes memory --repeat 10] [--bisect good..bad] [--pixels | --pixels-only]
