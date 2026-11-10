@@ -531,17 +531,27 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     let per = if meta["kind"] == "record" { "over the recording" } else { "per run" };
     // One thread doing most of the work off the UI (or main) thread: a worker, a pool thread, a
     // driver's compiler, which a UI-thread metric never shows.
-    let runs_cpu: Vec<f64> = store::read_json(&dir.join("runs.json")).ok().and_then(|r| r.as_array().map(|a| a.iter().filter_map(|r| r["cpu_ms"].as_f64()).collect())).unwrap_or_default();
-    // The threads' rows average the runs, the processes' total is their median: the larger is the whole,
+    // Every part is a mean over the runs, as the threads' rows are (`wakes::by_thread`): a median beside
+    // a mean reads a thread that was busy in one run alone as most of a typical run's CPU.
+    let runs = store::read_json(&dir.join("runs.json")).unwrap_or(Value::Null);
+    let column = |k: &str| -> Vec<f64> { runs.as_array().into_iter().flatten().filter_map(|r| r[k].as_f64()).collect() };
+    let mean = |x: &[f64]| (!x.is_empty()).then(|| x.iter().sum::<f64>() / x.len() as f64);
+    let (runs_cpu, main_cpu) = (column("cpu_ms"), column("main_cpu_ms"));
+    // The threads that exited before the end are in the processes' total alone: the larger is the whole,
     // so no thread reads over 100% of it.
     let listed: f64 = all_threads.iter().filter_map(|t| t["cpu_ms_per_run"].as_f64()).sum();
-    let total = if runs_cpu.is_empty() { v["cpu.work"].as_f64().unwrap_or(f64::NAN) } else { metrics::median(&runs_cpu) }.max(listed);
-    let (ui_name, ui_ms) = match (v["ui.cpu"].as_f64(), v["cpu.main"].as_f64()) {
+    let total = mean(&runs_cpu).or(v["cpu.work"].as_f64()).unwrap_or(f64::NAN).max(listed);
+    let ui_tid = meta["ui_thread"].as_u64();
+    let ui_row = ui_tid.and_then(|tid| all_threads.iter().find(|t| t["tid"].as_u64() == Some(tid))).and_then(|t| t["cpu_ms_per_run"].as_f64());
+    let (ui_name, ui_ms) = match (ui_row.or(v["ui.cpu"].as_f64()), mean(&main_cpu).or(v["cpu.main"].as_f64())) {
         (Some(u), _) => ("the UI thread", u),
         (None, Some(m)) => ("the main thread", m),
         (None, None) => ("", f64::NAN),
     };
-    let busiest = all_threads.iter().filter(|t| t["cpu_ms_per_run"].is_number()).max_by(|a, b| a["cpu_ms_per_run"].as_f64().unwrap_or(0.0).total_cmp(&b["cpu_ms_per_run"].as_f64().unwrap_or(0.0)));
+    let busiest = all_threads
+        .iter()
+        .filter(|t| t["cpu_ms_per_run"].is_number() && (ui_tid.is_none() || t["tid"].as_u64() != ui_tid))
+        .max_by(|a, b| a["cpu_ms_per_run"].as_f64().unwrap_or(0.0).total_cmp(&b["cpu_ms_per_run"].as_f64().unwrap_or(0.0)));
     if let Some(t) = busiest
         && total > 0.0
         && ui_ms.is_finite()
@@ -574,10 +584,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
     }
-    // Off-CPU: runs that took their time waiting (on a server, the network, a timer, a lock, I/O) rather
-    // than computing; an idle native block waits by design.
+    // Off-CPU: a block's runs that took their time waiting (on a server, the network, a timer, a lock,
+    // I/O) rather than computing; an idle native block waits by design. A recording has no runs: its
+    // `run.duration` is the window it was asked to record.
     let (duration, cpu) = (v["run.duration"].as_f64().unwrap_or(f64::NAN), v["cpu.work"].as_f64().unwrap_or(f64::NAN));
-    if duration >= 100.0 && cpu.is_finite() && cpu < 0.25 * duration && !idle_block {
+    if meta["kind"] == "block" && duration >= 100.0 && cpu.is_finite() && cpu < 0.25 * duration && !idle_block {
         let mut handles = Vec::new();
         if crate::probe::http_probe::read(dir).is_some() {
             handles.push(q("http"));
@@ -598,7 +609,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             "off-cpu-bound",
             "info",
             format!(
-                "off-CPU: each run took {} while the target's processes used {} of CPU ({:.0}%): most of the run waited (on a server, the network, a timer, a lock or I/O), so faster code alone would not shorten it",
+                "off-CPU: each run took {} while the target's processes used {} of CPU ({:.0}%): most of the run was not on a CPU (waiting on a server, the network, a timer, a lock or I/O)",
                 fmt::value(duration, "ms"),
                 fmt::value(cpu, "ms"),
                 100.0 * cpu / duration
@@ -618,7 +629,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             "style-layout-dominant",
             if sl >= 2.0 * script.max(1.0) && sl >= 50.0 { "warn" } else { "info" },
             format!(
-                "style and layout: {} {per} ({} style, {} layout) against {} of script: the page's time is the browser restyling and laying out what script changed",
+                "style and layout: {} {per} ({} style, {} layout) against {} of script: the page's time goes to restyling and laying out rather than running script",
                 fmt::value(sl, "ms"),
                 fmt::value(style.unwrap_or(f64::NAN), "ms"),
                 fmt::value(layout_ms.unwrap_or(f64::NAN), "ms"),
@@ -940,7 +951,9 @@ pub fn memory(dir: &Path, by: &str, top: usize, at: Option<&str>) -> Result<Outp
                 .filter(|r| !r.1.starts_with("tracing/"))
                 .collect();
             rows.sort_by(|a, b| b.2.total_cmp(&a.2));
-            text += "  effective        size  process           allocator\n";
+            if !rows.is_empty() || !phone {
+                text += "  effective        size  process           allocator\n";
+            }
             for (ty, path, e, s) in rows.iter().take(top) {
                 text += &format!("  {:>9}  {:>10}  {:<16}  {path}\n", mb(*e), mb(*s), ty);
             }
