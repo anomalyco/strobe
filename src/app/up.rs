@@ -17,6 +17,10 @@ use std::time::Duration;
 
 const SKILL: &str = include_str!("../../skill/SKILL.md");
 const CALIBRATION: &str = include_str!("../../calibration/index.html");
+/// The steps `up --skip` takes: `deep` (`helper` its old name), `daemon`, `mcp`, `calibrate`, and for a
+/// copy that must not install itself (a CI job's own) `self` (the binary into the install folder and
+/// that folder onto PATH) and `skill`.
+const SKIPS: &[&str] = &["self", "deep", "helper", "daemon", "mcp", "skill", "calibrate"];
 #[cfg(windows)]
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -66,7 +70,14 @@ pub fn run(args: &Args) -> Result<Output> {
         return Ok(Output::new(text, json!({ "serial": phone.device.serial, "channel": channel, "channels": crate::target::android_chrome::opted_in(&phone.device) })));
     }
     let check = args.has("check");
-    let skip: Vec<&str> = args.get("skip").map(|s| s.split(',').collect()).unwrap_or_default();
+    let skip: Vec<&str> = args.get("skip").map(|s| s.split(',').map(str::trim).filter(|n| !n.is_empty()).collect()).unwrap_or_default();
+    if let Some(bad) = skip.iter().find(|n| !SKIPS.contains(n)) {
+        return Err(Error::usage(format!("up --skip: no step {bad}; the steps up can skip: {}", SKIPS.join(", "))));
+    }
+    // The daemon runs only from the install folder (§5.3): without the install there is none to start.
+    if skip.contains(&"self") && !skip.contains(&"daemon") {
+        return Err(Error::usage("up --skip self leaves strobe uninstalled, and the daemon runs only from the install folder: skip daemon too (--skip self,daemon)"));
+    }
     let device = host::device_name();
     let mut s = Steps::new(&format!("strobe up · {device}"));
     let env = host::env();
@@ -111,8 +122,13 @@ pub fn run(args: &Args) -> Result<Output> {
     if check {
         return Ok(s.done("strobe up --check"));
     }
-    // Binary on PATH.
-    let (installed, updated) = install_self(&mut s)?;
+    // Binary on PATH. `--skip self` (a CI job's own copy) leaves the install folder and PATH alone.
+    let (installed, updated) = if skip.contains(&"self") {
+        s.line("i", "binary", format!("skipped: {} runs from where it is; nothing installed", std::env::current_exe()?.display()));
+        (install_dir(), false)
+    } else {
+        install_self(&mut s)?
+    };
     // Engine.
     match engine::ensure() {
         Ok(p) => s.line("✓", "engine", format!("trace_processor {} · sha256 ok · {}", engine::VERSION, p.display())),
@@ -133,7 +149,11 @@ pub fn run(args: &Args) -> Result<Output> {
         mcp_up(&mut s);
     }
     // Skill.
-    skill_up(&mut s)?;
+    if skip.contains(&"skill") {
+        s.line("i", "skill", format!("skipped: {} left as it is", skill_path().display()));
+    } else {
+        skill_up(&mut s)?;
+    }
     // Quick calibration.
     if !skip.contains(&"calibrate") {
         match calibrate(false) {

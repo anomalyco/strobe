@@ -484,10 +484,17 @@ Not built: `node:<port>` and `bun:<port>` (an inspector endpoint, §13.5: a Node
 Idempotent; re-running is the repair command.
 
 ```
-strobe up [--skip deep,daemon,mcp,calibrate]
+strobe up [--skip self,deep,daemon,mcp,skill,calibrate]
 strobe up --check
 strobe up --mobile[=<serial>] --channel canary|dev|beta
 ```
+
+`--skip` names steps below (`helper` is `deep`'s old name); any other name is a usage error (exit
+2). `self` (the binary into the install folder and that folder onto the user's PATH) and `skill` are
+for a copy that must not install itself, such as a CI job's (§26.3): `up --skip
+self,skill,daemon,mcp,deep,calibrate` only fetches the engine into the state folder and changes
+nothing else in the user's profile (no binary, PATH entry, autostart, daemon, opencode config or
+skill). `self` needs `daemon` too: the daemon runs only from the install folder.
 
 `up --check` prints the preflight lines (cpu, power, browser, Firefox, WebKit, phones, Bun) and stops:
 it installs, starts and registers nothing.
@@ -501,7 +508,9 @@ Steps (each checks first, prints ✓ / ! / ✗):
 
 1. **Preflight** — OS, CPU and topology (CCDs, V-Cache by L3 size, P/E cores), power plan,
    GPUs (adapters, NVML), displays and refresh rates, `opencode`, browsers, installed apps.
-2. **Engine** — download the pinned trace_processor (§15), verify sha256.
+2. **Binary and engine** — copy this build into the install folder and put that folder on the
+   user's PATH (`--skip self`: neither; the line names where this copy runs from); download the
+   pinned trace_processor (§15) into the state folder, verify sha256.
 3. **Helper** — deep mode (§13.4): one UAC or sudo. Skippable (`--skip deep`). On Windows the one
    elevated step adds the user to Performance Log Users (present events in strobe's own process from
    the next logon) and installs the helper (present events until then, and native stacks).
@@ -510,7 +519,8 @@ Steps (each checks first, prints ✓ / ! / ✗):
 5. **MCP** — register `strobe` in opencode's global config and make it live in every loaded
    location, exactly as mesh does (`opencode mcp add`, then `opencode api experimental.mcp.add`),
    with the token read from `{file:<state>/mcp-token}`.
-6. **Skill** — write `~/.config/opencode/skills/strobe/SKILL.md` (strobe-owned folder, §18).
+6. **Skill** — write `~/.config/opencode/skills/strobe/SKILL.md` (strobe-owned folder, §18;
+   `--skip skill` leaves it).
 7. **Calibrate** — the quick calibration (§10.3) in a strobe-launched Chromium.
 
 ```
@@ -8407,6 +8417,9 @@ what was built but not yet run on a device is in §21.
 
 **After 0.28.0**
 
+- 2026-11-10 · cleanup/w6e · `up --skip self,skill` (no install folder copy, user PATH entry or skill;
+  `self` needs `daemon`), an unknown `--skip` name exit 2; the action's `up` only fetches the engine,
+  so a self-hosted machine's own strobe and skill stay as they were (5.3, 26.3).
 - 2026-11-10 · cleanup/w6c · the GitHub Action: `action.yml` and `scripts/ci-action.ts`, `check`
   (any runner: each case once, exact counters held to base's) and `compare` (a self-hosted runner: the
   A/B and the PR block); `pull_request_target` refused, inputs through the environment, forks never
@@ -9111,11 +9124,14 @@ run puts its error and exit code in the step summary.
   The platform package's tarball (`@hona/strobe-<platform>-<arch>`, §20) is checked against the
   registry's sha512 integrity on every run, a cached copy too, before its binaries are unpacked (as
   `strobe update` does, §5.10). `strobe-binary` runs a given executable instead (strobe's own build).
-  The binary's folder goes on `PATH` for the job's later steps.
+  The binary's folder goes on the job's `PATH` (`$GITHUB_PATH`, the job's later steps only).
 - `actions/cache` keeps the tarball (key `strobe-<platform>-<version>`) and the engine's folder (key
   `strobe-engine-<platform>-<engine version>`, from `strobe status --fast --json`). Then `strobe up
-  --skip deep,daemon,mcp,calibrate`: no privilege prompt, daemon, MCP registration or calibration on a
-  runner.
+  --skip self,skill,daemon,mcp,deep,calibrate` (§5.3): it only fetches the engine. The binary runs
+  from the action's cache folder and nothing goes into the runner user's profile: no install folder
+  copy, user PATH entry, autostart, daemon, opencode config or skill, so a self-hosted machine's own
+  strobe and skill stay as they were (rule 10). What the bench writes goes to strobe's state folder
+  (engine, experiments, recordings, builds: strobe's own files, §4.2).
 - A browser only when `strobe up --check --json` finds none (hosted runners ship Chrome) and
   `install-browser` is `auto`: Playwright's Chromium (`bunx playwright@<pinned> install chromium`)
   into a cached `PLAYWRIGHT_BROWSERS_PATH`, which strobe then finds (§2).

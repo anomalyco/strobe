@@ -253,8 +253,9 @@ async function installStep() {
 const PLAYWRIGHT = "1.65.0"
 
 async function setupStep() {
-  // No deep mode (a privilege prompt), daemon, MCP registration or calibration on a CI runner.
-  const up = strobe(["up", "--skip", "deep,daemon,mcp,calibrate"], { capture: false })
+  // Only the engine: nothing installed into the runner user's profile (a self-hosted machine's own strobe,
+  // PATH and skill stay as they were), no privilege prompt, daemon, MCP registration or calibration.
+  const up = strobe(["up", "--skip", "self,skill,daemon,mcp,deep,calibrate"], { capture: false })
   if (up.code !== 0) fail(`strobe up failed (exit ${up.code}); its lines above say which step`)
   const check = json(strobe(["up", "--check", "--json"]).stdout)
   const browser = check?.browser?.ok === true

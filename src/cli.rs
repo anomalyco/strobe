@@ -589,6 +589,8 @@ Setup
                                   without --force; prints the commands that check them
   up [--skip deep,daemon,mcp,calibrate]  install, download the engine, deep mode (one UAC prompt), start the daemon,
                                   register MCP and the skill (--check: only what it finds, cpu to bun; nothing changes)
+                                  (--skip self,skill: install nothing into this user's profile (no binary, PATH or
+                                  skill; with daemon): a CI job's own copy, which only fetches the engine)
   up --mobile[=<serial>] --channel canary|dev|beta
                                   give strobe that Chrome channel on the phone, once: --mobile runs may force-stop it and
                                   clear the origins they load (strobe never drives a phone's own Chrome)
