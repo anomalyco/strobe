@@ -1,17 +1,26 @@
 name: Check
 
-# Every push builds strobe and lints it with clippy on Windows (x64 and Arm), Linux and macOS: each OS compiles
+# Every branch push builds strobe and lints it with clippy on Windows (x64 and Arm), Linux and macOS: each OS compiles
 # its own code paths (ETW, /proc and perf events, libproc and CoreGraphics), which no other OS's build sees. No tests
 # (SPEC rule 5): builds, lints, and strobe's own action run once as a project would run it (dogfood).
+# The org shares 5 macOS runners, so CI time is spent once per commit: not on tags (Release builds them, and a tag's
+# commit was checked on main), not on a pull request from this repository (its branch push checks the same commit),
+# and a newer push to a branch cancels the branch's older, still running check.
 on:
   push:
+    branches: ["**"]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +59,7 @@ jobs:
 
   # The tree stays rustfmt-clean, so a builder's `cargo fmt` only ever touches its own lines.
   fmt:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,6 +72,7 @@ jobs:
 
   # Rule 15 (SPEC §1): no product names outside scripts/generic.ts's allowlist.
   generic:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
