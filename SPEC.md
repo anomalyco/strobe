@@ -781,7 +781,7 @@ values hold them either way), as do `record --bench`'s `check` line and a `--blo
 secondaries (adais: a spinning script `cpu.main 295 ms · cpu.main.busy 97.6%`, an idle tray app
 `cpu.main 1.31 ms · cpu.main.busy 0.13%`). A native case's pass line ends ` · cold shader cache`
 when its launch found the GPU shader caches cold (`gpu_cache` per series; said only of an app that
-did GPU work in the runs, 13.2). `tty.latency.p50` and `.p95` on a check line say their
+did GPU work in the runs, or for a launch case one that opened a window, 13.2). `tty.latency.p50` and `.p95` on a check line say their
 inputs, `(N inputs[, B busy][, S silent])` (busy: written while the program still drew; silent:
 followed by no change; both left out), as `tty.latency.p50 20.7 ms (10 inputs)`.
 A failure keeps the fix strobe's driver gave (a missing permission and where to grant it) and
@@ -2703,29 +2703,46 @@ flowchart LR
   the machine, more work per run). A steady pair may be a plateau of work the launch left running (a
   load that keeps a thread busy through the first runs): a measured run after the pair, up to
   `MAX_WARMUP`, that drops below half the pair's first run's work (and by 10 ms or more) shows it was no
-  steady point, and warmup goes on from that run (pages, native, tty, script and cli). Measured runs
-  that still step down (the first over twice the last half's median, by 20 ms or more; never in an
-  untimed block, whose first run is cold by design) keep the block and warn `NotSteady` `<n> block(s)'
-  measured runs stepped down (the most: the first measured run's work X, the last half's median Y): work
-  left over from the launch ran into the first runs; wait in setup until the app is ready
-  (ctx.waitForLine(<its ready line>, { since: "launch" })), or give the case more runs` (values
-  `warmup.stepped.first` and `warmup.stepped.last`; cli blocks keep only `warmup.unsteady`). An
-  untimed block (`--check`) whose run 1 is 2 s or longer warns `NotSteady`, never refuses, when a
-  thread of the target (or its set) used a quarter of a core or more in the 2 s before run 1 and in
-  its first half (50 ms or more) and three times less in its second: `<case> · <side> block: startup
-  was still running in run 1: <thread> (<module>, <origin>) of process P used X% of a core in the 2 s
-  before it, Y% in its first half and Z% in its second; busy from A s to B s after the launch, while run
-  1 ran from C s to D s, so run 1 measured the launch's work, not the case's; wait in setup until the
-  app is ready (…)`. Native targets read the block's thread timeline; script hosts run that timeline in
-  untimed blocks too (about 1% of a core, in the check's self line); pages read the OS sampler's busy
-  time on the pinned CPUs (the set as a whole; it needs a pin and 1 s of samples before run 1). A
-  steady busy target (a game, an animation) is as busy in both halves and says nothing. Known answers
-  (`scripts/dev/known/startup.bench.ts`, a thread busy 4 s from the launch, setup 1 s, run 5 s): adais
-  0.27.0 read `cpu.work` 2819 ms with no warning; now `NotSteady` naming `loader (known.exe, app)`,
-  100% before run 1, 99% in its first half and 15% in its second; two steady loads (50% on 2 threads,
-  100% on 1) read 4989 and 4995 ms with no warning; a script host whose import spawns a 4 s spin names
-  the child's thread; vps the same. The plateau guard (`--blocks 1`, 1 s runs, no setup, the same load):
-  0.27.0 `cpu.work` 999 ms, the load's plateau; now 0.00 ms, warmup went on past the load. Attribution
+  steady point, and warmup goes on from that run (pages, native, tty, script and cli). Both this guard
+  and the stepped test below read the tree's CPU (`cpu`, a page's whole browser) beside the work where
+  every run has it, so a worker's or a browser service's plateau that leaves the renderer's task time
+  alone counts too (code read only: no live fixture). Measured runs that still step down (the first
+  over twice the last half's median, by 20 ms or more; never in an untimed block, whose first run is
+  cold by design) keep the block and warn `NotSteady` `<n> block(s)' measured runs stepped down (the
+  most: the first measured run's work X, the last half's median Y): work left over from the launch ran
+  into the first runs; wait in setup until the app is ready (ctx.waitForLine(<its ready line>, {
+  since: "launch" })), or give the case more runs` (values `warmup.stepped.first` and
+  `warmup.stepped.last`, cli blocks included). An untimed block (`--check`) whose run 1 is 2 s or
+  longer warns `NotSteady`, never refuses, when a thread of the target (or its set) used a quarter of a
+  core or more in the stretch before run 1 (up to 2 s) and in its first half (50 ms or more) and three
+  times less in its second (`block::startup_spill`, one rule for every kind, on a thread timeline):
+  `<case> · <side> block: startup was still running in run 1: <thread> (<module>, <origin>) of process P
+  used X% of a core in the 2 s before it, Y% in its first half and Z% in its second; busy from A s to B s
+  after the launch, while run 1 ran from C s to D s, so run 1 measured startup work, not the case's;
+  wait in setup until the target is ready (…)`. The stretch before run 1 is judged only when strobe
+  watched 200 ms or more of it, or saw 50 ms of the thread's work in it (a fast target with no setup
+  reads a few ms of init as busy), and the text gives its length when under 2 s (`in the 1.15 s before
+  it`). It says busy `after the launch` (native, the block's thread timeline), `after the host started`
+  (script: hosts run that timeline in untimed blocks too, about 1% of a core, in the check's self line)
+  or `after setup began` (an untimed page block not on a phone runs the browser's thread timeline from
+  before setup; the OS sampler starts there too, its other readers taking a run's window as before). The
+  timeline sees no other process, so other work on the target's CPUs cannot hold up the second half (in
+  a `--check` nothing keeps it off them: a summed-busy test on the pinned CPUs missed a page's 4 s load on
+  adais). On Linux a thread that exited loses its last tick's CPU (`/proc` keeps none of it; Windows keeps
+  it through the held handle), so its busy stretch may end up to a second early (vps: `busy from 0.0 s
+  to 3.0 s` for a 4 s load). A steady busy target (a game, an animation) is as busy in both halves and
+  says nothing. Known answers (`scripts/dev/known/startup.bench.ts`, a thread busy 4 s from the launch,
+  setup 1 s, run 5 s): adais 0.27.0 read `cpu.work` 2819 ms with no warning; now `NotSteady` naming
+  `loader (known.exe, app)`, 100% before run 1, 99% in its first half and 15% in its second; two steady
+  loads (50% on 2 threads, 100% on 1) read 4989 and 4995 ms with no warning; a script host whose import
+  spawns a 4 s spin names the child's thread; vps the same. A page (`pages/startup.html?mode=load`, 90%
+  of the main thread for 4 s from the load, headless): no warning before; now `CrRendererMain (chrome.exe,
+  app) … 89% of a core in the 2 s before it, 43% in its first half and 0% in its second; busy from 0.0 s
+  to 4.0 s after setup began, while run 1 ran from 2.5 s to 7.5 s`; `?mode=steady` (50% throughout)
+  silent. A script that spins 1.5 s then sleeps 1.5 s with no setup (`#front`) warned falsely before the
+  floor (`37% of a core in the 2 s before it`), now silent. The plateau guard (`--blocks 1`, 1 s runs,
+  no setup, the same load): 0.27.0 `cpu.work` 999 ms, the load's plateau; now 0.00 ms, warmup went on
+  past the load. Attribution
   blocks profile the measured runs after the steady point, each run whole and only the run (below).
 - **Warm-up blocks**: before pair 0 every timed series discards one block per side: GPU shader
   caches' (`gpuCache`, up to 3), a launch case's first launch, and for every other run or command
@@ -3410,7 +3427,9 @@ targets), `waitForLine(match, { in, timeout, since })` (native targets: the firs
 RegExp that the app writes after the call (`since: "now"`, the default), or since it started (`since:
 "launch"`: a ready line it printed once at startup; strobe keeps a native app's output since its
 launch, its last 2,000 lines or 512 KiB, and a wait that finds nothing says when older lines were
-dropped; a log glob's files are read from their start, a tty's event lines from the program's start;
+dropped; a log glob reads each file that is there from its last 512 KiB, as the output keeps (its
+first line there may be partial), and a file that appears later from its start; a tty's event lines
+are read from the program's start;
 another `since` is a usage error; a since-now wait that times out while an earlier line matched, in
 the kept output or the files' content before the call, adds the fix `a matching line came before this
 call (waitForLine sees only lines written after it by default): pass { since: "launch" }, or start the
@@ -6820,13 +6839,14 @@ Strobe launches any Electron app the same way, with no change to the app:
   after an install or a driver update. The plan (`plan.gpu_cache`) says which per target (per series
   where a case sets its own), and each
   kept recording whether its launch found caches (`gpu_cache`). A native block keeps it too (`gpu_cache`
-  `cold` or `warm`, and a check's series), said only of an app that did GPU work in the runs: a
+  `cold` or `warm`, and a check's series), said only of an app that did GPU work in the runs (a launch
+  case's block, as the launch found it, of an app that opened a window): a
   `--check` pass line ends ` · cold shader cache` when cold (§5.6), and `record --bench` of a native
   case notes when the check's launch found the caches cold and the recording's warm (`the check's
   launch found the GPU shader caches cold and this recording's launch warm, so a shader compile the
   check's numbers hold is not in this recording; record app:<id> --gpu-cache cold --probes attribution
   records a cold launch`), beside the check's warnings (`NotSteady` with `Background`, `Throttled`, …).
-  Not yet shown live on a GPU app. Killing the tree loses nothing:
+  Not yet shown live on a GPU app or a windowed launch case. Killing the tree loses nothing:
   the driver's cache files are written as it compiles (memory-mapped, flushed at the process's
   end). macOS keeps Metal's compiled shaders per app in the per-user cache folder the OS assigns
   (`getconf DARWIN_USER_CACHE_DIR`, `<bundle id>/com.apple.metal`), which no environment variable
@@ -7871,8 +7891,9 @@ experiments/
 
 - Experiment ids: `exp_` + 6 hex; any unique prefix works.
 - A `--mobile` experiment's `result.json` keeps `phone`, the facts read when the phone was picked
-  (§13.1). Its leak-run, `--blocks` and comparison text print `phone <model · Android · Chrome ·
-  transport · temperature · an emulator (…)>` and leave this computer's pin, CPU reservation and
+  (§13.1; the Chrome channel is resolved per page launch, so it is not there). Its leak-run,
+  `--blocks` and comparison text print the phone's line (`record::phone_line`: model, OS, screen,
+  transport, battery, temperature, an emulator) and leave this computer's pin, CPU reservation and
   power plan off the plan line (they do not describe where the page ran). Code read only: not yet run
   on a phone.
 - History per series and device is `strobe track`'s own store (§25.6), not a scan of `index.jsonl`:
@@ -8273,22 +8294,23 @@ what was built but not yet run on a device is in §21.
 
 **After 0.27.0**
 
-- 2026-11-10 · 8a352dd · `init --target lib`: a library guessed from `exports`, `module`, `types` or
-  `main` (a server needs a server file or a `start`/`dev` script that runs a file in a package with no
-  library fields); `perf/lib.ts` with a cold-import case and a commented `ctx.call` case; the server
-  harness waits 5 s and names `--target lib` (5).
 - 2026-11-10 · this change · PR block and card side names: `report --labels <base>,<head>`; "Before"
   and "This PR" only when head is the working tree or `HEAD` at the pull request's head commit
   (`--update-pr` reads `headRefOid`), `Base (A/A)`/`Head (A/A)` for an A/A run, else each side's
   commit; report HTML opens on `#series=`, `#scope=runs|host|startup|setup` and `#metric=`, with
   "Host startup" and "Bench file's setup" beside the whole host in the CPU scope toggle (5.8, 9.6,
   11.2, 17).
-- 2026-11-10 · cleanup/w5a f2a281b · tty programs that exit refused `RunIncomplete` with their code
-  and last rows, never `NotForTarget`; a script run without `ctx.call` judged as the bench file's
-  load, not relay; `waitForLine(…, { since: "launch" })`; the warmup plateau guard, stepped-down and
-  startup-spill `NotSteady`, cold shader cache on check lines; variant commits before the runs and in
-  a check's result; phone plan lines and `phone` in result.json; a tty target's `cwd` (5.6, 9.1, 9.6,
-  10.1, 10.2, 13.2, 14.2, 19).
+- 2026-11-10 · f2a281b e613682 ec385b6 · tty programs that exit refused `RunIncomplete` with their
+  code and last rows, never `NotForTarget`; a script run without `ctx.call` judged as the bench file's
+  load, not relay; `waitForLine(…, { since: "launch" })`; the warmup plateau guard and stepped test
+  (reading the tree's CPU beside the work), and startup-spill `NotSteady` from a thread timeline for
+  native, script and page blocks; cold shader cache on check lines (launch cases too); variant commits
+  before the runs and in a check's result; phone plan lines and `phone` in result.json; a tty target's
+  `cwd` (5.6, 9.1, 9.6, 10.1, 10.2, 13.2, 14.2, 19).
+- 2026-11-10 · 8a352dd · `init --target lib`: a library guessed from `exports`, `module`, `types` or
+  `main` (a server needs a server file or a `start`/`dev` script that runs a file in a package with no
+  library fields); `perf/lib.ts` with a cold-import case and a commented `ctx.call` case; the server
+  harness waits 5 s and names `--target lib` (5).
 - 2026-11-10 · e85d927 9a99794 e07119b · a phone's census by process, layer and allocator from
   Chromium's dump; strobe's own page listeners out of the census; the emulator's `pm clear` hint;
   insights `dominant-thread`, `off-cpu-bound`, `style-layout-dominant`, and `wakes-while-idle` on idle
