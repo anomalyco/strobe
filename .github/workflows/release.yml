@@ -202,7 +202,8 @@ jobs:
             echo "created $minor at $SHA"
             exit 0
           fi
-          status=$(gh api "repos/$REPO/compare/$old...$SHA" --jq .status)
+          # By the tag's name, so an annotated tag peels to its commit.
+          status=$(gh api "repos/$REPO/compare/$minor...$SHA" --jq .status)
           case "$status" in
             identical) echo "$minor is already at $SHA" ;;
             ahead) gh api "repos/$REPO/git/refs/tags/$minor" -X PATCH -f sha="$SHA" -F force=true >/dev/null && echo "moved $minor from $old to $SHA" ;;

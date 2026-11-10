@@ -69,7 +69,7 @@ inputs:
     description: "The two sides' names in the PR block, base then head (report --labels)"
     default: ""
   upload-artifacts:
-    description: "on-failure (default), always or never: the HTML report, result.json, runner.log and failure screenshots, kept 7 days"
+    description: "on-failure (default), always or never: the HTML report, result.json, runner.log and failure screenshots, kept 7 days. result.json and the HTML report name the bench machine's other processes (the busiest, and those kept off its CPUs): on a personal self-hosted machine with a public repository, set never"
     default: on-failure
   upload-recordings:
     description: "Also upload the recordings (they can hold what the target showed and typed): false by default"

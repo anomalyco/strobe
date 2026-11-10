@@ -135,10 +135,11 @@ The design and every rule behind this file: SPEC.md.
   The default `mode: check` runs each case once, headless, and fails the job on a failed case.
   `noworse: net.requests=0,count.items=0` also runs the base commit and fails a case whose exact counter
   is over base's or varies between runs. The step summary is `report experiment <exp> --format summary`.
-- A shared runner (GitHub-hosted, `CI_SHARED_ENVIRONMENT=true`, or a CI job in a VM that is no
-  self-hosted runner) refuses timing: `SharedRunner`, exit 4, for a timed bench, `--blocks`, `track`,
-  `--bisect` and a timed `record`. `status` says so. There: `--check` (`--base` with counter
-  `--noworse`), leak runs (`--probes memory`), `--pixels-only`, `record --probes attribution`, `query`.
+- A shared runner (GitHub-hosted, `CI_SHARED_ENVIRONMENT=true`, or a CI job in a VM) refuses timing:
+  `SharedRunner`, exit 4, for a timed bench, `--blocks`, `track`, `--bisect`, `plan --pilot` and a timed
+  `record`. `status` says so. A dedicated CI VM says `RUNNER_ENVIRONMENT=self-hosted` or
+  `CI_SHARED_ENVIRONMENT=false` (neither overrides GitHub-hosted). There: `--check` (`--base` with
+  counter `--noworse`), leak runs (`--probes memory`), `--pixels-only`, `record --probes attribution`.
 - Timing verdicts in CI: `mode: compare` on a self-hosted runner that runs one job at a time; the block
   goes in a same-repository PR's body (never a fork's). Never `pull_request_target`.
 

@@ -546,8 +546,9 @@ calibration, the cycle clock (`cycles` line, §13.6) and macOS timer coalescing 
 cpu line and a Firefox older than 148 read as in `up` (§5.3). The benches running here are listed
 (§10.1 `ConcurrentBench`); a machine-wide bench slot held by a bench of another user or state folder,
 which this folder's list cannot show, is a `slot` line (`slot_elsewhere` in `--json`). On a shared
-CI runner (§10.1 `SharedRunner`) a `! runner  shared: <why>; …` line names what still works there,
-the problems list says so, and `env.shared_runner` holds the reason.
+CI runner (§10.1 `SharedRunner`) a `! runner  shared: <why>; …` line names what still works there
+and ends `; a dedicated runner in a virtual machine says RUNNER_ENVIRONMENT=self-hosted or
+CI_SHARED_ENVIRONMENT=false`, the problems list says so, and `env.shared_runner` holds the reason.
 `--calibrate` runs the full calibration (§10.3). `--fast` skips the 3 s idle-load sample and the slow
 device reads (an adb server that refuses the loopback connection is given up after 200 ms, as
 usbmuxd is): `status --fast` 2.0 s → 0.56 s on adais.
@@ -820,7 +821,10 @@ and `repeat.recordings` their recordings (a `launches` line); a launch that fail
 untimed and verdict-free.
 **A check against base** (`--check --base <variant>`: a folder, git ref, `app:`, `exe:`; a bare target
 name is the two-target check above) builds both and runs each case on base, then head, the same
-launches each (`--runs`, `--repeat`). The case's line is head's, with `base  <declared values> · rec
+launches each (`--runs`, `--repeat`; one launch per case and side, so not with `--batch`).
+`--target` picks targets of the file as anywhere (refused only in a two-target check: `drop --target
+(it picks targets of a two-build check, --base <ref> --head .)`); a build on one side and a target on
+the other is a usage error naming both forms. The case's line is head's, with `base  <declared values> · rec
 <id>` under it, or `base failed, so no counter of it is compared: <why>`: a base failure never fails
 the case. Nothing is compared but `--noworse`: with `--check` it takes the flag's margins only, not
 the cases' own (a bare margin is each case's primary), and exact counters only (`count.*`,
@@ -3074,13 +3078,15 @@ awake and reserves CPUs only for its blocks: the plan switches and keep-awake st
 the bench slot for a block, and both stay for its next block while nothing else happens in between,
 from one series to the next too, unless the series builds or serves something (a variant not yet
 prepared for its target, or a folder that changed) or another bench waits for the slot. After a
-switch strobe waits until the CPUs' speed holds (`power::wait_settled`): a 2M-step integer workload
-(the fastest of three, about 1 ms) every 100 ms until two reads agree within 1.5%; before timed
-blocks at least 200 ms and at most 3 s, before untimed ones (a check, a leak run, pixels) at most
-250 ms; the progress line says `settled in N ms` (`(its speed still moved: the wait's cap)` at the
-cap). A timed `record` and `strobe run` settle too. It replaced a fixed 3 s sleep per switch: a
-3-case check on adais went from 15.4 s (3.5–3.6 s a case) to 6.0 s (one switch, settled in 105 ms),
-and timed blocks wait 207–515 ms a switch. When it builds, waits for an unlock, queues behind another
+switch strobe waits until the CPUs' speed holds (`power::wait_settled`): a fixed integer workload of
+about 4.5 ms (sized by a first 1M-step burst) on a thread on the target's pinned CPUs (strobe's mask
+widened for it, as the native speed check does; unpinned: any CPU), every 100 ms until three reads
+in a row agree within 1.5%; before timed blocks at least 200 ms and at most 3 s, before untimed ones
+(a check, a leak run, pixels) at most 250 ms; the progress line says `settled in N ms` (`(its speed
+still moved: the wait's cap)` at the cap). A timed `record` and `strobe run` settle too. It replaced a
+fixed 3 s sleep per switch: a 3-case check on adais went from 15.4 s (3.5–3.6 s a case) to about 6 s
+(one switch); after Balanced → High performance an untimed check settled in 215 ms, a timed
+comparison (one switch for the experiment) in 320 ms. When it builds, waits for an unlock, queues behind another
 bench, or hands the slot to one, the user's plan is back and the machine sleeps as their settings
 say: a bench left waiting for days changes nothing. Reserved CPUs last one block each. The env line
 names the plan the blocks ran on.
@@ -5119,7 +5125,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `MouseNotEnabled` | a `tty()` target's mouse call (`click`, `hover`, `move`, `drag`, `wheel`, `scroll`, a mouse button's `down`/`up`) needs mouse reporting the program has not turned on (clicks and the wheel after `?1000`, moves with a button held after `?1002`, any move after `?1003`; 13.9): a terminal would send nothing, so strobe sends nothing rather than bytes the program would read as keys. Refused before anything is sent |
 | `AnchorNotFound` | an image locator (or an image `until`, `waitFor`) showed nowhere in the call's timeout at its threshold (9.6 "Image anchors"): the message gives the best place's score, where it was and, when that failed, how far its colours were; the capture searched is kept as `failed-<step>-anchor.png` |
 | `AnchorAmbiguous` | an image locator for input matched two or more places, and still did 50 ms later: input aimed at it would be a guess. `page.query({ image })` lists them; a region, a tighter crop or a higher threshold makes it one |
-| `SharedRunner` | a CI runner other jobs share (`host::shared_runner`, `env.shared_runner`): `RUNNER_ENVIRONMENT=github-hosted`; `CI_SHARED_ENVIRONMENT=true`; or a CI flag (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`, `TF_BUILD`, `BUILDKITE`, any value but false, 0, no or off) in a virtual machine (`env.virtual_machine`) unless `RUNNER_ENVIRONMENT=self-hosted`. Its CPUs and memory move with its neighbours' load, so nothing timed there holds. Machine-wide, not transient (exit 4). Refused before anything builds: `bench --blocks N`, `bench --bisect`, `record` with `--probes timing` (the default), `track` (all but `--schedules` and `--unschedule`) and `strobe run -- <command>`. A comparison (`--base`, `--aa`, `strobe run --base … --head …`) refuses each series whose primary is no exact counter (listed refused, the rest run; none left: the bench's own refusal `a timed comparison (primary …)`); in a series that runs, every metric but an exact counter is refused, a counter is compared only exactly (6 pairs that each held it; fewer: `N pairs, and on … a counter compares only exactly, which takes 6 pairs`), and one that moved refuses (its pairs stop at 6). `dom.nodes` counts as an exact counter there (`model::is_ci_counter`). Unaffected: `config`, `plan` and `--plan`, `--check` (with `--base` and `--noworse`, §5.6), leak runs, `--pixels-only`, `record --probes attribution|memory`, `record --bench`, `query`, `report`, `look`, `status`. Message `<what>: this is <why>, whose CPUs and memory other jobs share, so its times and readings move with their load`; fix: time it on a dedicated or self-hosted runner, or here run `bench --check` (with `--base <ref>` and `--noworse` on exact counters), a leak run or `record --probes attribution` (§26) |
+| `SharedRunner` | a CI runner other jobs share (`host::shared_runner`, `env.shared_runner`). `RUNNER_ENVIRONMENT=github-hosted` and `CI_SHARED_ENVIRONMENT=true` are shared, and nothing overrides them; otherwise a CI flag (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`, `TF_BUILD`, `BUILDKITE`, any value but false, 0, no or off) in a virtual machine (`env.virtual_machine`) is taken for shared unless the job says it is dedicated: `RUNNER_ENVIRONMENT=self-hosted` or `CI_SHARED_ENVIRONMENT` false, 0, no or off (these bypass only that guess; there is no other override). Its CPUs and memory move with its neighbours' load, so nothing timed there holds. Machine-wide, not transient (exit 4). Refused before anything builds: `bench --blocks N`, `bench --bisect`, `record` with `--probes timing` (the default), `track` (all but `--schedules` and `--unschedule`), `strobe run -- <command>` and `plan --pilot` (plain `plan` and `--plan` run). A comparison (`--base`, `--aa`, `strobe run --base … --head …`) refuses each series whose primary is no exact counter (listed refused, the rest run; none left: the bench's own refusal `a timed comparison (primary …)`); in a series that runs, every metric but an exact counter is refused and a counter is compared only exactly (6 pairs that each held it; fewer: `N pairs, and on … a counter compares only exactly, which takes 6 pairs`). No pair runs that could not count: no secondary keeps the pairs going for Holm's family, the counter and HTTP probe passes do not run (perf counters and `http.*` are refused there anyway), and a counter primary that moved stops the pairs at the first pair that shows it (from pair 2), refused `the counter did not hold one value …`. `--resume` there never keeps a comparison series' earlier verdicts: a finished series runs again (its secondaries may hold another host's timings), and anywhere a series finished before the resume is kept only when this run does not refuse it. `dom.nodes` counts as an exact counter there (`model::is_ci_counter`). Unaffected: `config`, `plan` and `--plan`, `--check` (with `--base`, `--target` and `--noworse`, §5.6), leak runs, `--pixels-only`, `record --probes attribution|memory`, `record --bench`, `query`, `report`, `look`, `status`. Message `<what>: this is <why>, whose CPUs and memory other jobs share, so its times and readings move with their load` (the guess's why: `a CI job (CI is set) in a virtual machine (<vm>), taken for a shared runner (a dedicated one: RUNNER_ENVIRONMENT=self-hosted or CI_SHARED_ENVIRONMENT=false)`); fix: time it on a dedicated runner (a CI job in a virtual machine that is one says `RUNNER_ENVIRONMENT=self-hosted` or `CI_SHARED_ENVIRONMENT=false`; a GitHub-hosted runner never is), or here run `bench --check` (with `--base <ref>` and `--noworse` on exact counters), a leak run or `record --probes attribution` (§26) |
 
 Validators are one type in the code (`model::ValidatorId`, these ids), and a refusal is data:
 `Refusal { validator, summary, detail, fix, hidden }`. A refused run's error carries it (exit 4;
@@ -5512,7 +5518,7 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 | `actions` | `--phase` `--top` `--reveal` `--case` (`exp_…` too) | a bench block's actions in order (§9.6, `actions.json.gz`): seq, hook, run, ms from the first, from its input's send to strobe's answer, call, selector, arguments, outcome, its latency sample (`sample sent 32.7 ms`), untimed and phase, and each input's hit (role, name, point, scrolled) on a line of its own; the seed in the header, and the samples counted by edge with what each means. `--phase` keeps one phase's, `--top` bounds the rows (default 15), `--json` gives every record. Typed text, `act` values, `ctx.call` arguments and `ctx.exec` lines show as their length (`«18 chars»`) unless `--reveal` (rule 9). `exp_…`: each series' kept recordings' (a check's, attribution blocks', kept timing blocks'), each named by what it was, and each check case's kept beside the result (`no recording` or `failed`) |
 | `timeline` | `--from --to --thread` | not built: bounded event list for a range (`threads --timeline` and `strobe open` show time) |
 | `progress` | (`exp_…` only) | a running experiment's state and estimate |
-| `runs` | | every run of a block recording, warmup and unmeasured runs too, measured or not: from the block's `meta.run_list` (run, measured, `run.duration`, `cpu.work`, main-thread tasks, main CPU, CPU lost; kept with every block recording, §9.6); else `runs.json` (a native or script block's measured runs only: `run.duration`, `cpu.work`, main CPU; a recording of a window: its one span); else the trace's run marks (a page: each run's span between its marks, not `run.duration`, which is the driver's wall time, and the renderer main thread's top-level task time when the trace holds tasks; a lean trace holds none, so none is shown). JSON `{ recording, from, runs: […] }` |
+| `runs` | | every run of a block recording, warmup and unmeasured runs too, measured or not: from the block's `meta.run_list` (run, measured, `run.duration`, `cpu.work`, main-thread tasks, main CPU, CPU lost; kept with every block recording, §9.6); else `runs.json` (a native or script block's measured runs only, no warmup run: `run.duration`, `cpu.work`, main CPU; a `record` of a native window: its one span is the whole recording); else a bench block's run marks in its trace (a page: each run's span between its marks, not `run.duration`, which is the driver's wall time, and the renderer main thread's top-level task time when the trace holds tasks; a lean trace holds none, so none is shown). A `record <url>` marks its window, not runs: usage error (`keeps no runs to list`). JSON `{ recording, from, runs: […] }` |
 | `sql` | `"<query>"` | rows from trace_processor, row-limited; trace_processor's six-decimal floats print without trailing zeros (`71.000000` → `71`, `-0.000000` → `0`; strings left alone), as in the views built on it. A recording without `trace.pftrace` (a script recording, a native one, a page in another engine) is queried in `perfetto.pftrace`, the trace `strobe open` builds, built on first use |
 
 `--case <case|label|seq>` narrows a `--check --batch` recording to one case's runs, values and
@@ -8380,11 +8386,14 @@ what was built but not yet run on a device is in §21.
   caches for strobe, its engine and Playwright's Chromium; releases on `v*.*.*` only and the moving
   `v<major>.<minor>`; the Check workflow runs the action once per OS on `scripts/dev/served`
   (1 rule 5, 4.1, 20, 26).
-- 2026-11-10 · cleanup/w6a · `SharedRunner` (timing refused on shared CI runners; exact counters only
-  in comparisons); `--check --base <build>` with `--noworse` on exact counters; `VariantPlacement`;
-  the machine kept across built series, the power plan settled by reading the CPU's speed (3 s → about
-  0.1–0.5 s); the parity matrix only for shared journeys; `run_list` in kept recordings;
-  `OverheadBudget` per-run cost (5.4, 5.6, 9.4, 9.10, 10.1, 10.2, 14.1, 19).
+- 2026-11-10 · 85ed91f 8e2c116 44f8fa5 e11b7ac 13de156 e92abb9 · `SharedRunner` (timing refused on
+  shared CI runners, `plan --pilot` too; exact counters only in comparisons, no doomed pairs, a resumed
+  comparison's verdicts never kept there; `CI_SHARED_ENVIRONMENT=false` or `self-hosted` overrides only
+  the CI-in-a-VM guess); `--check --base <build>` (with `--target`) and `--noworse` on exact counters;
+  `VariantPlacement`; the machine kept across built series, the power plan settled by reading the
+  CPU's speed on the target's CPUs (3 s → about 0.2–0.3 s); the parity matrix only for shared
+  journeys; `run_list` in kept recordings; `OverheadBudget` per-run cost (5.4, 5.6, 9.4, 9.10, 10.1,
+  10.2, 14.1, 19).
 - 2026-11-10 · cleanup/w6b · `report --format summary` (check, pixels, leak and `--blocks` tables;
   comparisons as card-less PR blocks); `query <rec> runs`; axis ticks in seconds and margins from the
   widest label; a phone's Chrome that drops its socket on `SystemInfo.getInfo` exits 3 with the
@@ -9059,6 +9068,10 @@ run puts its error and exit code in the step summary.
   `actions/upload-artifact`).
 - Recordings stay on the runner (rule 9) unless `upload-recordings: true` uploads them: traces and
   heap snapshots can hold what the target showed and typed.
+- Nothing the action publishes names the machine's other processes: the step summary is `--format
+  summary` only (never `md`), a bench that did not run shows its refusal's validator and summary
+  (never its detail, which can name the busiest processes), and the artifacts that do name them are
+  the machine's own (§26.4).
 
 ### 26.3 Install and caching
 
@@ -9083,7 +9096,14 @@ run puts its error and exit code in the step summary.
 With `upload-artifacts` `on-failure` (default) or `always`, `actions/upload-artifact` keeps for 7
 days, per experiment: `report-experiment.html`, `result.json`, `runner.log` and the failure
 screenshots (`failed-*.png`); with `upload-recordings`, the recordings result.json names. Never the
-`failed-*.actions.json.gz` logs (typed text).
+`failed-*.actions.json.gz` logs (typed text). The artifacts are the machine's own record, not a
+publishable surface: `result.json` and `report-experiment.html` name the bench machine's other
+processes (each block's `background`, `plan.reserve.moved` and `plan.reserve.failed`). Anyone who can
+read the repository's Actions can download them, so on a personal self-hosted machine with a public
+repository set `upload-artifacts: never`. What the action publishes itself (the step summary, its
+annotations, the PR block) never names one: `--format summary` and `--format pr` leave them out
+(§11.2), and a bench that did not run shows its refusal's validator and summary only, never its
+detail.
 
 ### 26.5 Versions
 
@@ -9098,8 +9118,9 @@ the workflow.
 
 ### 26.6 Dogfood
 
-The Check workflow's `dogfood` job builds strobe on ubuntu-24.04, windows-latest and macos-15 and runs
-the action from the checkout (`uses: ./`, `strobe-binary` the build) on
+The Check workflow's `check` job ends, on ubuntu-24.04, windows-latest and macos-15 (not Windows on
+Arm), with one step that runs the action from the checkout (`uses: ./`, `strobe-binary` the build it
+just made, so nothing builds twice) on
 `scripts/dev/served/known-served.bench.ts`: the known-answer page's `phases`, `net` and `heap` cases,
 the page served by each checkout (that folder's strobe.json `serve`; `known-web.bench.ts`'s `url()`
 would be one page for both sides, `VariantMismatch`), their exact counters (`count.ctx`, `count.page`,

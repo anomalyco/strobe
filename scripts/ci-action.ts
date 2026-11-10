@@ -396,13 +396,12 @@ function markdownReport(d: Done, cwd: string, format: string): string {
   return typeof r.markdown === "string" ? r.markdown : existsSync(path) ? readFileSync(path, "utf8") : ""
 }
 
+// Only `--format summary`, which strobe writes for publishing (no process names, scrubbed paths): never
+// `md`, which is for the machine's own user.
 function summary(d: Done, cwd: string) {
-  let text = markdownReport(d, cwd, "summary")
-  if (!text) {
-    warn(`this strobe has no report --format summary; the step summary has ${d.id}'s markdown report instead`)
-    text = markdownReport(d, cwd, "md")
-  }
-  summarize(text || `strobe could not write a summary of ${d.id} (\`${d.bench}\`); see the logs.\n`)
+  const text = markdownReport(d, cwd, "summary")
+  if (!text) warn(`this strobe has no report --format summary (0.29.0 and later): ${d.id} gets no step summary; its result is in the artifacts`)
+  summarize(text || `### strobe · ${d.bench}\n\n\`${d.id}\`: this strobe writes no step summary (\`report --format summary\` needs 0.29.0 or later).\n`)
 }
 
 function htmlReport(d: Done, cwd: string): string {
@@ -519,7 +518,8 @@ async function runStep() {
   // A leak run per bench: each case's memory over repeated runs, judged by its slope.
   const leak = input("leak")
   const leakDone: Done[] = []
-  if (leak && leak !== "false") {
+  const leaking = !!leak && leak !== "false"
+  if (leaking) {
     // leak: true runs the filter's cases, or it names the cases itself.
     const filter = leak === "true" ? input("filter") : leak
     for (const file of benches) {
@@ -557,13 +557,15 @@ async function runStep() {
     }
   }
 
-  // A bench file that did not run at all (a usage error, a refusal before anything ran) is an error.
+  // A bench file that did not run at all (a usage error, a refusal before anything ran), its leak run
+  // included, is an error; a leak run that failed or found growth fails a check.
   const kinds = done.flatMap((d) => verdicts(d.result))
+  const leakFailed = leakDone.some((d) => d.code !== 0 || regressed(d.result))
   const verdict =
-    done.length < benches.length
+    done.length < benches.length || (leaking && leakDone.length < benches.length)
       ? "error"
       : mode === "check"
-        ? done.every((d) => d.code === 0 && d.result.passed !== false)
+        ? done.every((d) => d.code === 0 && d.result.passed !== false) && !leakFailed
           ? "pass"
           : "fail"
         : worst(kinds)

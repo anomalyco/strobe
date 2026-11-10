@@ -34,7 +34,7 @@
       "description": "The device: OS, CPU, GPU, displays, power, strobe's build.",
       "properties": {
         "reduced_motion": { "type": ["boolean", "null"], "description": "The OS's own reduce-motion setting, read and never changed (Windows animation effects off, macOS Reduce motion, the Linux desktop's enable-animations off): what a target without motion follows. Null when unknown. When true, part of a tracked series' fingerprint for series without motion." },
-        "shared_runner": { "type": "string", "description": "Why this machine is a CI runner other jobs share (SPEC 10.1 SharedRunner): a GitHub-hosted runner, CI_SHARED_ENVIRONMENT=true, or a CI job in a virtual machine that is no self-hosted runner. Absent elsewhere." }
+        "shared_runner": { "type": "string", "description": "Why this machine is a CI runner other jobs share (SPEC 10.1 SharedRunner): a GitHub-hosted runner, CI_SHARED_ENVIRONMENT=true, or a CI job in a virtual machine that does not say it is dedicated (RUNNER_ENVIRONMENT=self-hosted or CI_SHARED_ENVIRONMENT=false). Absent elsewhere." }
       }
     },
     "browser": { "type": ["string", "null"], "description": "The first page target's browser version (each series has its own: series.browser)." },
