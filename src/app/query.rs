@@ -167,6 +167,7 @@ pub fn run(args: &Args) -> Result<Output> {
             Ok(Output::new(text, json))
         }
         "style" => style(&rec, top),
+        "runs" => runs_view(&rec),
         "sql" => {
             let sql = args.pos.get(2).ok_or_else(|| Error::usage("query <h> sql \"select …\""))?;
             // Without a Chrome trace (a script recording, a native one, a page in another engine): the
@@ -276,9 +277,9 @@ pub fn run(args: &Args) -> Result<Output> {
             }
             memory(&dir, by, top, args.get("at"))
         }
-        other => {
-            Err(Error::usage(format!("unknown view {other}: summary frames inputs threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network insights actions sql")))
-        }
+        other => Err(Error::usage(format!(
+            "unknown view {other}: summary runs frames inputs threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log network insights actions sql"
+        ))),
     }
 }
 
@@ -2757,6 +2758,98 @@ fn run_phases_cached(rec: &Rec) -> Option<(String, Value)> {
         let _ = store::write_atomic(&path, &bytes);
     }
     got
+}
+
+/// `query <rec> runs`: every run of a block recording, warmup and unmeasured ones too, with its time
+/// and work: from the run list the block kept (`meta.run_list`), else its measured runs (`runs.json`:
+/// a native or script block's), else the run marks in its trace (a page's runs, by its main thread's
+/// tasks). Where a block's first runs went (warmup), and which runs its values are.
+pub fn runs_view(rec: &Rec) -> Result<Output> {
+    let measured: Option<Vec<String>> = rec::measured_keys(&rec.meta);
+    let is_measured = |k: &str| measured.as_ref().is_none_or(|m| m.iter().any(|x| x == k));
+    let num = |v: &Value, unit: &str| v.as_f64().filter(|x| x.is_finite()).map_or("—".to_string(), |x| fmt::value(x, unit));
+    let run_no = |k: &str| k.rsplit(':').next().and_then(|i| i.parse::<u64>().ok());
+    let label = |k: &str| run_no(k).map_or_else(|| k.to_string(), |i| format!("run {i}"));
+    let (from, mut rows): (&str, Vec<Value>) = if let Some(list) = rec.meta["run_list"].as_array().filter(|l| !l.is_empty()) {
+        ("the block's run list", list.clone())
+    } else if let Some(list) = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS))
+        .ok()
+        .and_then(|v| v.as_array().or(v["runs"].as_array()).cloned())
+        .filter(|l| !l.is_empty())
+    {
+        // Measured runs only (a native block's list, a script block's `runs`): no warmup run's readings.
+        let rows = list.iter().map(|r| json!({ "run": r["run"], "measured": true, "ms": r["ms"], "cpu_work_ms": r["cpu_ms"], "main_cpu_ms": r["main_cpu_ms"] })).collect();
+        let from = if rec.meta["kind"] == "record" {
+            "runs.json (a recording of a window: its one span is the whole recording)"
+        } else {
+            "runs.json (measured runs only: this recording kept no warmup run)"
+        };
+        (from, rows)
+    } else if rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()) {
+        // Not run.duration (the driver's wall time of the run) nor main.work: the page's own marks around
+        // each run and the main thread's top-level tasks between them, read alike for every run.
+        (
+            "the trace's run marks: each run's span between its marks (not run.duration, the driver's time) and its main thread's top-level tasks (no CPU times: a trace has none)",
+            trace_runs(rec)?.into_iter().map(|(k, ms, task)| json!({ "run": k, "measured": is_measured(&k), "marked_ms": ms, "task_ms": task })).collect(),
+        )
+    } else {
+        return Err(Error::usage(format!(
+            "{} keeps no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window (record app:, exe:) has none",
+            rec.id
+        )));
+    };
+    rows.sort_by_key(|r| r["run"].as_str().and_then(run_no));
+    let cols: [(&str, &str, &str); 5] =
+        [("ms", "run.duration", "ms"), ("marked_ms", "marked span", "ms"), ("cpu_work_ms", "cpu.work", "ms"), ("task_ms", "main tasks", "ms"), ("main_cpu_ms", "main CPU", "ms")];
+    let shown: Vec<&(&str, &str, &str)> = cols.iter().filter(|(k, _, _)| rows.iter().any(|r| r[*k].as_f64().is_some())).collect();
+    let mut table = vec![std::iter::once("run".to_string()).chain(std::iter::once(String::new())).chain(shown.iter().map(|c| c.1.to_string())).collect::<Vec<_>>()];
+    for r in &rows {
+        let k = r["run"].as_str().unwrap_or("");
+        let what = match (r["measured"].as_bool().unwrap_or_else(|| is_measured(k)), r["cpu_lost"] == true) {
+            (true, true) => "measured · CPU lost",
+            (true, false) => "measured",
+            (false, true) => "not measured · CPU lost",
+            (false, false) => "not measured",
+        };
+        table.push(std::iter::once(label(k)).chain(std::iter::once(what.to_string())).chain(shown.iter().map(|c| num(&r[c.0], c.2))).collect());
+    }
+    let n_measured = rows.iter().filter(|r| r["measured"].as_bool().unwrap_or_else(|| is_measured(r["run"].as_str().unwrap_or("")))).count();
+    let mut text = format!("runs  {} · {} run{}, {n_measured} measured · from {from}\n", rec.id, rows.len(), if rows.len() == 1 { "" } else { "s" });
+    let right: Vec<bool> = std::iter::repeat_n(false, 2).chain(std::iter::repeat_n(true, shown.len())).collect();
+    text += &fmt::table(&table, &right, "  ", 2);
+    if rows.len() > n_measured {
+        text += "  not measured: warmup until two runs agree, and a check's run after its reset; the values are the measured runs'\n";
+    }
+    Ok(Output::new(text, json!({ "recording": rec.id, "from": from, "runs": rows })))
+}
+
+/// A page recording's runs from the run marks in its trace, warmup ones too, in order: (key, ms
+/// outside the run's untimed stretches, the renderer main thread's top-level task time in it: NaN
+/// when the trace holds no tasks, as a lean block's does not).
+fn trace_runs(rec: &Rec) -> Result<Vec<(String, f64, f64)>> {
+    let token = rec.meta["token"].as_str().unwrap_or("");
+    let sql = format!(
+        "{}
+select w.k, (w.t1 - w.t0) - coalesce((select sum(min(u.t1, w.t1) - u.t0) from _u u where u.t0 >= w.t0 and u.t0 < w.t1), 0),
+  case when exists (select 1 from slice where name = 'RunTask') then
+  (select coalesce(sum(min(s.ts + s.dur, w.t1) - max(s.ts, w.t0)), 0) from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
+    where s.depth = 0 and s.dur > 0 and s.name = 'RunTask' and t.name = 'CrRendererMain' and s.ts < w.t1 and s.ts + s.dur > w.t0
+      and t.upid in (select p.upid from _wp p where p.k = w.k and p.t0 = w.t0)) end
+from _w w order by w.t0;",
+        rec::windows_sql(token, None)
+    );
+    let table = crate::engine::query(&rec.dir.join("trace.pftrace"), &sql)?;
+    let ns = |c: Option<&Option<String>>| c.cloned().flatten().and_then(|v| v.parse::<f64>().ok()).unwrap_or(f64::NAN) / 1e6;
+    Ok(table
+        .rows
+        .iter()
+        .filter_map(|r| {
+            let k = r.first().cloned().flatten()?;
+            // `strobe:<token>:run:<i>`, as the block's `measured` names them.
+            let key = k.strip_prefix(&format!("strobe:{token}:")).unwrap_or(&k).to_string();
+            key.starts_with("run:").then(|| (key, ns(r.get(1)), ns(r.get(2))))
+        })
+        .collect())
 }
 
 /// Per measured run, the renderer main thread's style, layout and paint time and the elements style

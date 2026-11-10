@@ -577,7 +577,7 @@ impl Browser {
 
     /// GPU devices and whether compositing runs on a hardware adapter.
     pub fn gpu(&self) -> Result<Gpu> {
-        let info = self.cdp.send("SystemInfo.getInfo", json!({}), None)?;
+        let info = self.cdp.send("SystemInfo.getInfo", json!({}), None).map_err(|e| self.gpu_query_lost(e))?;
         let mut list: Vec<&Value> = info["gpu"]["devices"].as_array().map(|a| a.iter().filter(|d| d["deviceString"].as_str().is_some_and(|s| !s.is_empty())).collect()).unwrap_or_default();
         // Chromium lists the primary adapter first, which on a machine with two (a laptop's integrated and
         // discrete GPUs) need not be the one it draws with: that one is the adapter its GL renderer names
@@ -602,6 +602,25 @@ impl Browser {
         // Element 0 is the adapter Chromium draws with; the rest are every other adapter on the system.
         let software = devices.first().is_none_or(|d| crate::validity::is_software_gpu(d)) || !compositing.starts_with("enabled");
         Ok(Gpu { devices, compositing, software })
+    }
+
+    /// A phone's Chrome that closed its DevTools connection when asked for its GPU: its GPU process
+    /// fails that query on every launch of the device (an emulator whose GPU backend Chrome cannot
+    /// use), so it is no passing launch failure to retry (exit 3, never 255), and the error names it.
+    fn gpu_query_lost(&self, e: Error) -> Error {
+        let Some(p) = self.phone.as_ref().filter(|_| e.code == 255) else { return e };
+        let what = format!(
+            "{} on {} closed its DevTools connection when strobe asked for its GPU (SystemInfo.getInfo): its GPU process failed that query ({})",
+            p.package,
+            p.facts.serial,
+            e.message.lines().next().unwrap_or("")
+        );
+        let fix = if p.facts.emulator.is_some() {
+            "start the emulator with -gpu swiftshader_indirect: Chrome cannot query the GPU backend it picked (host Vulkan through lavapipe, on a computer without a GPU it supports); an emulator's timings are refused anyway (Emulator), so its software GPU costs no measurement"
+        } else {
+            "close Chrome on the phone (Recents, swipe it away) and run again; a phone whose Chrome fails this query on every launch has a GPU driver Chrome cannot use: use another phone"
+        };
+        Error::new(3, what).hint(fix)
     }
 
     /// Closes the browser as a person would (`Browser.close`, up to 5 s for it to exit), then ends

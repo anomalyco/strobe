@@ -100,18 +100,24 @@ const colorOf = c => ({ loss: "var(--loss)", win: "var(--win)", warn: "var(--war
 function chart(s, host) {
   const unit = s.meta.unit || "";
   const pts = s.points;
-  const W = 960, H = 240, L = 64, R = 12, T = 14, B = 26;
+  const W = 960, H = 240, R = 12, T = 14, B = 26;
   const ys = pts.filter(p => p.valid).flatMap(p => [p.lo ?? p.median, p.hi ?? p.median]).filter(v => v != null);
   if (!ys.length) { host.innerHTML = `<p class="note">No point with a value yet.</p>`; return; }
   let lo = Math.min(...ys), hi = Math.max(...ys);
   const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.05 || 1; lo -= pad; hi += pad;
+  // The y-axis's five labels: a millisecond axis that reaches a second in seconds, at the decimals its
+  // step needs; the left margin as wide as the widest label.
+  const ticks = [0, 1, 2, 3, 4].map(k => lo + (hi - lo) * k / 4);
+  const secs = unit === "ms" && Math.max(Math.abs(lo), Math.abs(hi)) >= 1000;
+  const sd = Math.min(3, Math.max(0, -Math.floor(Math.log10((hi - lo) / 4000) + 1e-9)));
+  const labels = ticks.map(v => secs ? (v / 1000).toFixed(sd) + " s" : val(v, unit));
+  const L = Math.max(64, Math.ceil(Math.max(...labels.map(l => l.length)) * 11 * 0.62) + 10);
   const x = i => L + (pts.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (pts.length - 1));
   const y = v => T + (hi - v) / (hi - lo) * (H - T - B);
   let g = "";
-  for (let k = 0; k <= 4; k++) {
-    const v = lo + (hi - lo) * k / 4;
-    g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--hairline)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--ink-3)">${esc(val(v, unit))}</text>`;
-  }
+  ticks.forEach((v, k) => {
+    g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--hairline)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--ink-3)">${esc(labels[k])}</text>`;
+  });
   // Segment medians between change points that are not rejected.
   const cps = s.changes.filter(c => c.state !== "rejected").map(c => ({ c, i: pts.findIndex(p => p.commit === c.bad) })).filter(o => o.i > 0).sort((a, b) => a.i - b.i);
   // A comparator update starts another baseline: no segment median spans it.

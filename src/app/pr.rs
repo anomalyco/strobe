@@ -11,6 +11,7 @@ mod extract;
 mod github;
 mod implementations;
 mod markdown;
+mod summary;
 
 use crate::model::{self, Better, Error, Result, VerdictKind};
 use crate::stats;
@@ -23,6 +24,7 @@ pub use implementations::{claim, cpu_scope, factor_or_pct, fairness, range_x, re
 use markdown::*;
 use serde_json::Value;
 use std::collections::BTreeMap;
+pub use summary::summary;
 
 /// The blocks that measured `metric` in series `s`: a series that counts cpu.instructions apart from
 /// its times (Linux perf events never run in a timing block, SPEC §7.5) keeps the other kind's blocks
