@@ -8371,14 +8371,15 @@ describe it now. The sections above say what strobe does; this list only dates i
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
 
-**After 0.27.0**
+**After 0.28.0**
 
 - 2026-11-10 · cleanup/w6c · the GitHub Action: `action.yml` and `scripts/ci-action.ts`, `check`
   (any runner: each case once, exact counters held to base's) and `compare` (a self-hosted runner: the
   A/B and the PR block); `pull_request_target` refused, inputs through the environment, forks never
-  edited; the npm tarball's integrity checked on every run; caches for strobe, its engine and
-  Playwright's Chromium; releases on `v*.*.*` only and the moving `v<major>.<minor>`; the Check
-  workflow's dogfood run on `scripts/dev/served` (1 rule 5, 4.1, 20, 26).
+  edited, no process names in what it publishes; the npm tarball's integrity checked on every run;
+  caches for strobe, its engine and Playwright's Chromium; releases on `v*.*.*` only and the moving
+  `v<major>.<minor>`; the Check workflow runs the action once per OS on `scripts/dev/served`
+  (1 rule 5, 4.1, 20, 26).
 - 2026-11-10 · cleanup/w6a · `SharedRunner` (timing refused on shared CI runners; exact counters only
   in comparisons); `--check --base <build>` with `--noworse` on exact counters; `VariantPlacement`;
   the machine kept across built series, the power plan settled by reading the CPU's speed (3 s → about
@@ -8389,7 +8390,10 @@ what was built but not yet run on a device is in §21.
   widest label; a phone's Chrome that drops its socket on `SystemInfo.getInfo` exits 3 with the
   emulator's `-gpu swiftshader_indirect`; strobe's unloaded `about:blank` tab cleaned up at the next
   launch (5.8, 11.1, 11.2, 13.1).
-- 2026-11-10 · this change · PR block and card side names: `report --labels <base>,<head>`; "Before"
+
+**0.28.0** (7c769e5, 2026-11-10)
+
+- 2026-11-10 · bb7c821 · PR block and card side names: `report --labels <base>,<head>`; "Before"
   and "This PR" only when head is the working tree or `HEAD` at the pull request's head commit
   (`--update-pr` reads `headRefOid`), `Base (A/A)`/`Head (A/A)` for an A/A run, else each side's
   commit; report HTML opens on `#series=`, `#scope=runs|host|startup|setup` and `#metric=`, with

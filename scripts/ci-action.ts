@@ -6,7 +6,7 @@
 //   bun scripts/ci-action.ts run       the benches, the step summary, the PR block, the artifacts
 // Every input arrives in the environment as INPUT_<NAME> (action.yml puts it there), never in a shell
 // line: an input is data, not code.
-import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 
 const input = (name: string) => (process.env[`INPUT_${name.toUpperCase().replace(/-/g, "_")}`] ?? "").trim()
@@ -30,7 +30,8 @@ function output(name: string, value: string) {
 
 function setEnv(name: string, value: string) {
   const file = env("GITHUB_ENV")
-  if (file) appendFileSync(file, `${name}<<strobe_${name}\n${value}\nstrobe_${name}\n`)
+  const end = `strobe_${crypto.randomUUID()}`
+  if (file) appendFileSync(file, `${name}<<${end}\n${value}\n${end}\n`)
   process.env[name] = value
 }
 
@@ -195,9 +196,11 @@ async function installNpm(v: string, dir: string): Promise<string> {
   }
   const files = untar(Bun.gunzipSync(bytes))
   for (const n of ["strobe", "strobew"]) {
+    // Each binary written afresh from the checked tarball: no cached copy (or one the package lacks) stays.
+    const to = join(dir, exe(n))
+    rmSync(to, { force: true })
     const f = files.find(([p]) => p === `package/${exe(n)}`)
     if (!f) continue
-    const to = join(dir, exe(n))
     writeFileSync(to, f[1])
     if (process.platform !== "win32") chmodSync(to, 0o755)
   }
@@ -314,13 +317,16 @@ function worst(kinds: string[]): string {
   return kinds.sort((a, b) => (RANK.indexOf(a) + 1 || 99) - (RANK.indexOf(b) + 1 || 99))[0] ?? "unclear"
 }
 
-// Any comparison that came out worse: a primary or a decided secondary, a leak, or a check's exact counter
-// over base's (`series.counters`).
+// Any comparison that came out worse: a primary or a decided secondary, a check's exact counter over base's
+// (`series.counters`), or a leak run's growth of any kind on any side (`series.leak.<side>.{js_heap,dom_nodes,
+// native_host}`: the primary is the heap's alone, and a leak run exits 0, so a DOM-only leak shows only there).
 function regressed(result: any): boolean {
+  const worse = (c: any) => c && typeof c === "object" && c.verdict_kind === "worse"
   return (result?.series ?? []).some(
     (s: any) =>
-      [s.primary, ...(s.secondaries ?? [])].some((c: any) => c && typeof c === "object" && c.verdict_kind === "worse" && c.decided !== false) ||
-      (Array.isArray(s.counters) && s.counters.some((n: any) => n?.state === "worse")),
+      [s.primary, ...(s.secondaries ?? [])].some((c: any) => worse(c) && c.decided !== false) ||
+      (Array.isArray(s.counters) && s.counters.some((n: any) => n?.state === "worse")) ||
+      Object.values(s.leak && typeof s.leak === "object" ? s.leak : {}).some((side: any) => side && typeof side === "object" && Object.values(side).some(worse)),
   )
 }
 
@@ -347,13 +353,29 @@ const stateDir = () =>
     ? join(env("LOCALAPPDATA") || join(env("USERPROFILE"), "AppData", "Local"), "strobe")
     : join(env("XDG_DATA_HOME") || join(env("HOME"), ".local", "share"), "strobe")
 
+// What a bench that did not run says on a publishable surface (the step summary, an annotation): a
+// refusal's validator and summary only, never its detail, which can name this machine's other processes
+// (SPEC §1 rule 9, §26.2); any other error without a `; busiest …` tail.
+const BUSIEST = /;?\s*(the )?(three )?busiest\b[\s\S]*$/i
+function publicError(out: any, stdout: string): string {
+  const refusal = out?.refusal
+  if (refusal?.summary) return `${refusal.validator ?? out.validator ?? "refused"}: ${String(refusal.summary).replace(BUSIEST, "")}`
+  if (out?.validator && typeof out.error === "string") {
+    // `<validator>: <summary>[; <detail>]` (SPEC §10.1): the detail goes.
+    const [head] = out.error.split("; ")
+    return head.replace(BUSIEST, "")
+  }
+  const text = typeof out?.error === "string" ? out.error : stdout.trim().slice(0, 2000) || "no output; the log above says why"
+  return `${text.replace(BUSIEST, "")}${out?.hint ? ` (fix: ${String(out.hint).replace(BUSIEST, "")})` : ""}`
+}
+
 function bench(file: string, args: string[], cwd: string, leak: boolean): Done | null {
   console.log(`::group::strobe bench ${file} ${args.join(" ")}`)
   const r = strobe(["bench", file, ...args, "--json"], { cwd })
   console.log("::endgroup::")
   const out = json(r.stdout)
   if (!out || out.error || !out.id) {
-    const why = `${out?.error ?? (r.stdout.trim().slice(0, 2000) || "no output; the log above says why")}${out?.hint ? ` (fix: ${out.hint})` : ""}`
+    const why = publicError(out, r.stdout)
     error(`strobe bench ${file} (exit ${r.code}): ${why}`)
     const fence = "`".repeat(Math.max(3, ...(why.match(/`+/g) ?? []).map((m) => m.length + 1)))
     summarize(`### strobe · ${file}\n\nstrobe bench exited ${r.code}${out?.validator ? ` (${out.validator})` : ""}:\n\n${fence}\n${why}\n${fence}\n`)
