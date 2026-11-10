@@ -154,6 +154,17 @@ fn frame_metric(metric: &str) -> bool {
     ["frames.", "interaction.", "scroll.", "display."].iter().any(|p| metric.starts_with(p))
 }
 
+/// The GPU shader caches as a launch found them (`Block::gpu_cache`): `warm` or `cold` where strobe
+/// lends them (`gpuCache: "warm"`), `cold` with `gpuCache: "cold"`; none on macOS, which keeps Metal's
+/// in the user's own folder, saying nothing of this launch.
+fn gpu_cache_of(home: &isolate::Home, s: &Series, target: &Value, app: &isolate::App) -> Option<String> {
+    match home.gpu_warm {
+        Some(w) => Some(if w { "warm" } else { "cold" }.to_string()),
+        None if !cfg!(target_os = "macos") && super::gpu_cache_mode(s, target, Some(app)) == "cold" => Some("cold".to_string()),
+        None => None,
+    }
+}
+
 /// One launch of a native app for its cases: one case, or a chunk of them with `--check --batch`
 /// (SPEC §5.6), each case's runs after the case before it.
 pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) -> Result<Launch> {
@@ -196,7 +207,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     if let (Some(t), Ok(l)) = (timeline, &result) {
         let t = t.stop();
         // A check's one cold run that measured the launch's startup still running says so.
-        if let Some(why) = l.first_run.filter(|_| x.untimed).and_then(|(t0, t1)| super::block::startup_spill(&t, t0, t1)) {
+        if let Some(why) = l.first_run.filter(|_| x.untimed).and_then(|(t0, t1)| super::block::startup_spill(&t, t0, t1, "the launch")) {
             ctx.warnings.push(validity::warn("NotSteady", format!("{} · {} block: {why}", s.label(), side_of(ctx, v))));
         }
         if let Some(dir) = l.recordings().first().and_then(|id| store::resolve(id).ok()) {
@@ -287,13 +298,7 @@ fn runs(
     };
     // A windowless app (a tray app, `window: false`) has no window to wait for, place or check.
     let windowless = target["window"] == false || app.windowless;
-    // The GPU shader caches as the launch found them (`Block::gpu_cache`); macOS keeps Metal's in the
-    // user's own folder, which says nothing of this launch.
-    let gpu_cache = match home.gpu_warm {
-        Some(w) => Some(if w { "warm" } else { "cold" }.to_string()),
-        None if !cfg!(target_os = "macos") && super::gpu_cache_mode(s, target, Some(app)) == "cold" => Some("cold".to_string()),
-        None => None,
-    };
+    let gpu_cache = gpu_cache_of(home, s, target, app);
     if !windowless {
         n.wait_window(Duration::from_secs(60), guard)?;
         let viewport = target.get("viewport").filter(|v| v.is_object());
@@ -2174,6 +2179,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             same: same.take(0..1),
             client: opened.as_ref().map(client_of),
             frame: opened.is_some() && cfg!(target_os = "macos"),
+            // Said of an app that opened a window (it draws); a windowless launch compiles no shaders it shows.
+            gpu_cache: gpu_cache_of(&prepared, s, &target, &app).filter(|_| opened.is_some()),
             ..Block::default()
         })
     })();

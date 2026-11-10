@@ -7478,6 +7478,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             driver.watch(presents_rc.clone(), browser.pids(), refresh);
         }
         lap("checks");
+        // GPU engines and VRAM of the target's process tree, read from the OS (SPEC §13.6); none of this
+        // computer's is a phone's page's.
+        let sampler = on_phone.is_none().then(|| probe::os::Sampler::start(browser.pid(), browser.profile()));
+        let sampled = Instant::now();
+        // An untimed block's browser threads from before setup (about 1% of a core): what they did then is
+        // what a check's run 1 is judged against (`block::startup_spill`).
+        let timeline = (x.untimed && on_phone.is_none()).then(|| {
+            let (pid, profile) = (browser.pid(), browser.profile());
+            probe::wakes::Timeline::start(move || host::process_set_pids(pid, profile.as_deref()))
+        });
         // `page.window` in setup sizes the browser's window: the driver follows its processes from now.
         driver.set_pids(browser.pids());
         // The page's viewport in CSS pixels (device-independent at zoom 1) and its scale, before any
@@ -7572,10 +7582,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let gecko_dir = if gecko_on { Some(draft.insert(store::claim_recording(&id)?).dir().to_path_buf()) } else { None };
         // A leak run measures 2 × N runs (`Warmup`): N to S1 and N more to S2.
         let mut census: Vec<Value> = Vec::new();
-        // GPU engines and VRAM of the target's process tree, read from the OS (SPEC §13.6); none of this
-        // computer's is a phone's page's.
-        let sampler = on_phone.is_none().then(|| probe::os::Sampler::start(browser.pid(), browser.profile()));
-        let sampled = Instant::now();
         // Renderer main-thread task time, a cumulative counter: the live work signal for warmup, and
         // main.busy when the trace carries no RunTask slices.
         if let Some(p) = page.cdp() {
@@ -8269,11 +8275,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             };
             let samples = sampler.map(probe::os::Sampler::stop).unwrap_or_default();
             let sampler_pct = samples.cpu_ms.map(|c| 100.0 * c / (sampled.elapsed().as_secs_f64() * 1e3).max(1.0));
-            // A check's one cold run that measured startup work still running on the target's CPUs says so.
-            if x.untimed
-                && let (Some(cpus), Some((0, c))) = (ctx.pin, page_cases.first())
+            // A check's one cold run that measured the browser's or page's startup still running says so.
+            if let (Some(t), Some((0, c))) = (timeline.map(probe::wakes::Timeline::stop), page_cases.first())
                 && let Some(r) = c.runs.first().filter(|_| c.base == 0)
-                && let Some(why) = block::startup_spill_cpus(&samples, cpus, r.t0, r.t1)
+                && let Some(why) = block::startup_spill(&t, r.t0, r.t1, "setup began")
             {
                 ctx.warnings.push(validity::warn("NotSteady", format!("{} · {side} block: {why}", s0.label())));
             }

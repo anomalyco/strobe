@@ -679,7 +679,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let (exited, ended) = host.into_inner().exit(profiles.is_some(), wait, cut);
     let mut launch = result?;
     // A check's one cold run that measured the host's startup still running says so.
-    if let Some(why) = timeline.as_ref().zip(launch.first_run.filter(|_| x.untimed)).and_then(|(t, (t0, t1))| super::block::startup_spill(t, t0, t1)) {
+    if let Some(why) = timeline.as_ref().zip(launch.first_run.filter(|_| x.untimed)).and_then(|(t, (t0, t1))| super::block::startup_spill(t, t0, t1, "the host started")) {
         ctx.warnings.push(validity::warn("NotSteady", format!("{} · {} block: {why}", s.label(), side_of(ctx, v))));
     }
     if let Some(dir) = &profiles

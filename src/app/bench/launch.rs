@@ -790,12 +790,12 @@ impl Lines {
                 other => return Err(Error::usage(format!("waitForLine: since is \"now\" (the default: lines written after the call) or \"launch\" (any line since the app started), not {other:?}"))),
             };
             let pattern = pattern(a, "waitForLine")?;
-            // Files that exist now are read from their end (from their start since the launch); later
-            // ones from their start.
+            // Files that exist now are read from their end (since the launch: their last `SINCE_BYTES`, as
+            // the output keeps); later ones from their start.
             let before: BTreeMap<PathBuf, u64> =
                 if source == "output" { BTreeMap::new() } else { matching(home, &source).into_iter().map(|p| (p.clone(), std::fs::metadata(&p).map_or(0, |m| m.len()))).collect() };
             let tail = (source != "output").then(|| {
-                let offsets: BTreeMap<PathBuf, u64> = if launch { BTreeMap::new() } else { before.clone() };
+                let offsets: BTreeMap<PathBuf, u64> = before.iter().map(|(p, len)| (p.clone(), if launch { len.saturating_sub(SINCE_BYTES as u64) } else { *len })).collect();
                 let (tx, lines) = channel();
                 let stop = Arc::new(AtomicBool::new(false));
                 let (home, glob, flag) = (home.to_path_buf(), source.clone(), stop.clone());
