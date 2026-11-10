@@ -45,10 +45,16 @@ pub fn page_reading(page: &Page) -> (Option<f64>, Option<f64>, Instant) {
 /// stops the page until they are read, so a growth window ends there.
 pub fn take_at(browser: &Browser, page: &Page) -> (Value, Instant) {
     let _ = page.send("HeapProfiler.enable", json!({}));
+    // strobe's own listeners in the page (its input counters, `window.__strobeListeners`), read before
+    // the collection: the DOM's listener count is the page's alone without them.
+    let own = page.send("Runtime.evaluate", json!({ "expression": "window.__strobeListeners ?? 0", "returnByValue": true })).ok().and_then(|r| r["result"]["value"].as_u64()).unwrap_or(0);
     let read = Instant::now();
     let _ = page.send("HeapProfiler.collectGarbage", json!({}));
     let heap = page.send("Runtime.getHeapUsage", json!({})).unwrap_or(Value::Null);
-    let dom = page.send("Memory.getDOMCounters", json!({})).unwrap_or(Value::Null);
+    let mut dom = page.send("Memory.getDOMCounters", json!({})).unwrap_or(Value::Null);
+    if let Some(n) = dom["jsEventListeners"].as_u64() {
+        dom["jsEventListeners"] = json!(n.saturating_sub(own));
+    }
     // A phone's Chrome runs on the phone: no process of this computer's is its (null, never none).
     let processes = if browser.phone.is_some() {
         Value::Null
@@ -109,13 +115,13 @@ fn dump(browser: &Browser, page: &Page, path: &Path) -> Result<(Value, Option<u6
     let table = engine::query(
         path,
         &format!(
-            "select p.pid, n.path, n.size, n.effective_size
+            "select p.pid, n.path, n.size, n.effective_size, coalesce(p.name, '')
            from memory_snapshot_node n
            join process_memory_snapshot s on n.process_snapshot_id = s.id
            join process p using(upid)
           where p.pid is not null
          union all
-         select distinct p.pid, '{PAGE}', null, null
+         select distinct p.pid, '{PAGE}', null, null, null
            from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid) join process p using(upid)
           where s.name = '{mark}' and p.pid is not null"
         ),
@@ -126,14 +132,19 @@ fn dump(browser: &Browser, page: &Page, path: &Path) -> Result<(Value, Option<u6
         [p] => Some(*p),
         _ => None,
     };
-    /// Per pid: top-level allocators (layers) by effective size, and their children as (path, size, effective).
-    type Dump = (BTreeMap<String, f64>, Vec<(String, f64, f64)>);
+    /// Per pid: top-level allocators (layers) by effective size, their children as (path, size,
+    /// effective), and the process's name in the dump's trace (`Browser`, `Renderer`, `GPU Process`,
+    /// `Service: <name>.mojom.<Service>`): a phone's census has no other.
+    type Dump = (BTreeMap<String, f64>, Vec<(String, f64, f64)>, String);
     let mut by_pid: BTreeMap<String, Dump> = BTreeMap::new();
     for r in table.rows.iter().filter(|r| r.get(1).cloned().flatten().as_deref() != Some(PAGE)) {
         let cell = |i: usize| r.get(i).cloned().flatten().unwrap_or_default();
         let (pid, node) = (cell(0), cell(1));
         let (size, effective) = (cell(2).parse::<f64>().unwrap_or(0.0), cell(3).parse::<f64>().unwrap_or(0.0));
         let entry = by_pid.entry(pid).or_default();
+        if entry.2.is_empty() {
+            entry.2 = cell(4);
+        }
         match node.matches('/').count() {
             0 => {
                 entry.0.insert(node, effective);
@@ -144,11 +155,11 @@ fn dump(browser: &Browser, page: &Page, path: &Path) -> Result<(Value, Option<u6
     }
     let out: serde_json::Map<String, Value> = by_pid
         .into_iter()
-        .map(|(pid, (layers, mut children))| {
+        .map(|(pid, (layers, mut children, name))| {
             children.sort_by(|a, b| b.2.total_cmp(&a.2));
             children.truncate(40);
             let children: Vec<Value> = children.into_iter().map(|(p, s, e)| json!({ "path": p, "size": s, "effective": e })).collect();
-            (pid, json!({ "layers": layers, "allocators": children }))
+            (pid, json!({ "name": name, "layers": layers, "allocators": children }))
         })
         .collect();
     Ok((Value::Object(out), page_pid))

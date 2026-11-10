@@ -156,12 +156,15 @@ pub const NATIVE_RAF: &str = "window.__strobeRaf ??= window.requestAnimationFram
 /// through the OS, not on a phone) before its scripts run: when a key last went down or up in it, on the
 /// document's own monotonic clock (`performance.now`, bound before the page's scripts could replace it;
 /// -1 before any), so a wait after keys sent to no element can tell whether any reached the page
-/// (`Driver::unfocused`). Two passive listeners at the window's capture phase, under the driver's source
-/// URL, so a profile folds their ticks into strobe's.
+/// (`Driver::unfocused`). Two passive listeners at the window's capture phase of the top document, under
+/// the driver's source URL, so a profile folds their ticks into strobe's, counted in
+/// `window.__strobeListeners` (a memory census takes them off the page's listeners).
 pub const KEYS_SEEN: &str = r#"window.__strobeKeys ??= (() => {
+  if (window !== window.top) return
   const now = performance.now.bind(performance)
   const s = { at: -1, now }
   for (const e of ["keydown", "keyup"]) addEventListener(e, (ev) => { if (ev.isTrusted) s.at = now() }, { capture: true, passive: true })
+  window.__strobeListeners = (window.__strobeListeners ?? 0) + 2
   return s
 })(), true
 //# sourceURL=strobe-driver.js"#;
