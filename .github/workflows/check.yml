@@ -62,9 +62,9 @@ jobs:
         run: bun scripts/doc-check.ts
 
   # The action (action.yml) on a GitHub-hosted runner, as a project uses it, with this commit's strobe: a
-  # check of the known-answer page's phases, net and heap cases, their exact counters held to the base
-  # commit's. A smoke run of the action, not a test suite (SPEC rule 5): it says whether the action installs,
-  # runs and reports here; its step summary is what a project's job shows.
+  # check of the known-answer page (served by each checkout, scripts/dev/served), its exact counters held to
+  # the base commit's. A smoke run of the action, not a test suite (SPEC rule 5): it says whether the action
+  # installs, runs and reports here; its step summary is what a project's job shows.
   dogfood:
     strategy:
       fail-fast: false
@@ -89,8 +89,7 @@ jobs:
         uses: ./
         with:
           strobe-binary: target/release/strobe
-          working-directory: scripts/dev
-          bench: known-web.bench.ts
-          filter: phases,net,heap
-          noworse: count.ctx=0,count.page=0,count.wire=0,count.requests=0,net.requests=0,net.bytes=0,dom.nodes=0
+          working-directory: scripts/dev/served
+          bench: known-served.bench.ts
+          noworse: count.ctx=0,count.page=0,net.requests=0,net.bytes=0,dom.nodes=0
           upload-artifacts: always

@@ -480,7 +480,9 @@ Use
                                   app profile resolved for this OS (its executable, guards, window), build and serve
   query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash|host|startup|setup] [--reveal] [--native] [--thread <name>]
                                   views: summary frames inputs threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log
-                                  network insights actions sql
+                                  network insights actions sql runs
+                                  (runs: every run of a block recording, warmup too: time and work per run, which are
+                                  measured)
                                   (inputs [--case <c>] [--top N]: each measured input: its run and time, what proved its
                                   change, the frames around it, its latency or why it gave none (and how much later it had
                                   to come); the first 100 by default, --json lists every one)
@@ -508,15 +510,16 @@ Use
                                   (insights: rule hits with their evidence: dominant-thread (one thread off the UI thread
                                   doing most of the CPU), off-cpu-bound (runs that mostly waited), style-layout-dominant,
                                   wakes-while-idle (idle recordings and idle native blocks), forced-layout, gc-pressure, …)
-  report [experiment|recording] <handle> [--format html|md|pr|summary] [--out <path>] [--open]
+  report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
                                   write a self-contained HTML (or markdown) report; pr: an experiment's tables for a PR body
                                   (md and pr print the markdown; the file's path goes to stderr; the view follows from the
                                   handle; a path to a result.json or meta.json is read as it is, nothing written beside it;
                                   a bench --blocks run: HTML and md, its blocks' median and interval, no verdict)
-                                  (summary: an experiment as GitHub markdown for a CI job's step summary: a check's cases
-                                  and exact counters (against base's after --check --base), a leak run's slopes and top
-                                  suspect, --blocks' medians, a comparison's PR block without images; never a check's
-                                  timings)
+  report experiment <exp> --format summary [--out <file.md>]
+                                  the result as short GitHub Markdown for a CI job's summary page ($GITHUB_STEP_SUMMARY):
+                                  a check, pixels run, leak run or --blocks as one table (a check shows only exact
+                                  counters, base -> head with --noworse when it ran both; never a time), a comparison as
+                                  its PR block without images
   report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card] [--labels <base>,<head>]
                                   put the block in PR n's body, with the result card and badges attached through gh;
                                   the sides read Before and This PR only when head is the working tree or HEAD, and

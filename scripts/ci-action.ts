@@ -314,10 +314,13 @@ function worst(kinds: string[]): string {
   return kinds.sort((a, b) => (RANK.indexOf(a) + 1 || 99) - (RANK.indexOf(b) + 1 || 99))[0] ?? "unclear"
 }
 
-// Any comparison that came out worse: a primary, or a decided secondary or no-worse metric.
+// Any comparison that came out worse: a primary or a decided secondary, a leak, or a check's exact counter
+// over base's (`series.noworse` rows; a timed comparison's `noworse` is its margins).
 function regressed(result: any): boolean {
-  return (result?.series ?? []).some((s: any) =>
-    [s.primary, ...(s.secondaries ?? []), ...(s.noworse ?? [])].some((c: any) => c && typeof c === "object" && c.verdict_kind === "worse" && c.decided !== false),
+  return (result?.series ?? []).some(
+    (s: any) =>
+      [s.primary, ...(s.secondaries ?? [])].some((c: any) => c && typeof c === "object" && c.verdict_kind === "worse" && c.decided !== false) ||
+      (Array.isArray(s.noworse) && s.noworse.some((n: any) => n?.state === "worse")),
   )
 }
 
@@ -325,7 +328,7 @@ function regressed(result: any): boolean {
 let summaryBytes = 0
 function summarize(text: string) {
   const file = env("GITHUB_STEP_SUMMARY")
-  const block = text.endsWith("\n") ? text : `${text}\n`
+  const block = `${text.trimEnd()}\n\n`
   if (!file) return process.stdout.write(block)
   const bytes = Buffer.byteLength(block)
   if (summaryBytes + bytes > 1_000_000) {
@@ -364,9 +367,11 @@ function bench(file: string, args: string[], cwd: string, leak: boolean): Done |
 // The experiment's markdown in a format, read from the file report writes (--json names it). A strobe
 // without that format writes something else (before 0.29: an HTML view named "summary").
 function markdownReport(d: Done, cwd: string, format: string): string {
-  const r = json(strobe(["report", "experiment", d.id, "--format", format, "--json"], { cwd }).stdout)
+  const labels = input("labels") && !d.leak && d.result?.kind !== "check" ? ["--labels", input("labels")] : []
+  const r = json(strobe(["report", "experiment", d.id, "--format", format, ...labels, "--json"], { cwd }).stdout)
   const path: string = r?.path ?? ""
-  return path.endsWith(".md") && existsSync(path) ? readFileSync(path, "utf8") : ""
+  if (!path.endsWith(".md")) return ""
+  return typeof r.markdown === "string" ? r.markdown : existsSync(path) ? readFileSync(path, "utf8") : ""
 }
 
 function summary(d: Done, cwd: string) {

@@ -1060,12 +1060,15 @@ Not built: `--max-bytes` (agents get top-K rows, §17).
 ```
 strobe report [experiment|recording|history] <exp_…|rec_…|ser_…|result.json|meta.json>
               [--format html|md|pr] [--out <path>] [--open] [--json]
+strobe report experiment <exp_…> --format summary [--out <file.md>]
 strobe report experiment <exp_…> --format pr --update-pr <n> [-R|--repo owner/repo] [--force] [--no-card]
               [--labels <base>,<head>]
 strobe report experiment <exp_…> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto]
               [--badge-url] [--scoreboard] [--labels <base>,<head>]
 ```
 
+`--format summary` is an experiment as short Markdown for a CI job's summary page (§11.2, §26): a
+check's exact counters, never a time.
 `--labels` names the two sides of a comparison in the PR block and the card (§11.2, side names);
 without it a block calls them "Before" and "This PR" only when head is the working tree or `HEAD`, and
 with `--update-pr` at the pull request's head commit.
@@ -5476,6 +5479,7 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 | `actions` | `--phase` `--top` `--reveal` `--case` (`exp_…` too) | a bench block's actions in order (§9.6, `actions.json.gz`): seq, hook, run, ms from the first, from its input's send to strobe's answer, call, selector, arguments, outcome, its latency sample (`sample sent 32.7 ms`), untimed and phase, and each input's hit (role, name, point, scrolled) on a line of its own; the seed in the header, and the samples counted by edge with what each means. `--phase` keeps one phase's, `--top` bounds the rows (default 15), `--json` gives every record. Typed text, `act` values, `ctx.call` arguments and `ctx.exec` lines show as their length (`«18 chars»`) unless `--reveal` (rule 9). `exp_…`: each series' kept recordings' (a check's, attribution blocks', kept timing blocks'), each named by what it was, and each check case's kept beside the result (`no recording` or `failed`) |
 | `timeline` | `--from --to --thread` | not built: bounded event list for a range (`threads --timeline` and `strobe open` show time) |
 | `progress` | (`exp_…` only) | a running experiment's state and estimate |
+| `runs` | | every run of a block recording, warmup and unmeasured runs too, measured or not: from the block's `meta.run_list` (run, measured, `run.duration`, `cpu.work`, main-thread tasks, main CPU, CPU lost; kept with every block recording, §9.6); else `runs.json` (a native or script block's measured runs only: `run.duration`, `cpu.work`, main CPU; a recording of a window: its one span); else the trace's run marks (a page: each run's span between its marks, not `run.duration`, which is the driver's wall time, and the renderer main thread's top-level task time when the trace holds tasks; a lean trace holds none, so none is shown). JSON `{ recording, from, runs: […] }` |
 | `sql` | `"<query>"` | rows from trace_processor, row-limited; trace_processor's six-decimal floats print without trailing zeros (`71.000000` → `71`, `-0.000000` → `0`; strings left alone), as in the views built on it. A recording without `trace.pftrace` (a script recording, a native one, a page in another engine) is queried in `perfetto.pftrace`, the trace `strobe open` builds, built on first use |
 
 `--case <case|label|seq>` narrows a `--check --batch` recording to one case's runs, values and
@@ -5608,6 +5612,11 @@ ranges, so a player seeks, each read from the file 64 KiB at a time as it is sen
 file in the daemon's memory). The daemon refuses `/report/` and `/video/` to a request whose
 `Sec-Fetch-Site` is anything but `same-origin` or `none` (another site's page). The PR block and
 markdown are unchanged.
+
+Axis ticks of a millisecond metric read in seconds once the axis reaches a second (`16 s`,
+`15.05 s`), at the decimals the step needs; a chart's left margin is as wide as its widest tick label
+(report.html's pair, per-pair delta, forest, frame-distribution, census and leak charts; history.html),
+where a 16,000 ms axis once read `.6000 ms`.
 
 A `--check` experiment's HTML shows each case as a check (`renderCheckSeries`): passed or failed,
 its error and fix, the one run's declared values (not a verdict), what was on screen, its recording
@@ -5809,6 +5818,21 @@ the end of the body). When gh has no `--attach` or an upload fails, the block go
 images; `--no-card` skips them. GitHub serves the SVG as it was uploaded (`image/svg+xml`), so its
 colour-scheme stylesheet follows the reader's light or dark theme. No commits, gists or release
 assets: they would write to the user's repository.
+
+`--format summary` (`app/pr/summary.rs`) writes an experiment as a short GitHub-flavoured Markdown
+section for a CI job's summary page (`$GITHUB_STEP_SUMMARY`, §26), to stdout like md (the file,
+`report-experiment.summary.md`, or `--out`; its path to stderr; a recording handle is a usage error).
+A check is one table, Case | Target | Status | Exact counters | Notes: status pass, fail, refused,
+gap or not run; the counters one run reads exactly (`count.*`, `net.requests*`, `net.bytes*`,
+`tty.frames`, `dom.nodes`), base → head when the check ran both (each `--noworse` counter with its
+outcome: **worse** or **unstable**; else base's values beside head's), at most six; a failed or
+refused case's validator and summary. A check states no time: its values are one cold run. A pixels
+run: the frames that differ per case. A leak run: per case and side, the JS heap's (a native app's
+host memory's) and the DOM's verdict with the slope's 95% interval per run, and the top suspect class
+(count, retained); no time. `--blocks`: the primary's median with its 95% interval (one block: its
+value, no interval). Each with the warn-level warnings in a closed drawer and a line naming the strobe
+and `strobe report <id>`. A comparison: its `--format pr` block without card or badges (a step
+summary attaches no images). Paths scrubbed as in a PR block.
 
 `--format card` (`app/card.rs`) draws an experiment's result as one 1200×630 image (the Open Graph
 size), from the same rows as the hero line and its caution (`pr::hero`): up to three tiles in the
@@ -6372,7 +6396,16 @@ Wi-Fi adb, a channel given to strobe, its touch slop and timing) is designed, no
 - The page: an adb forward to the socket (`tcp:0`, a `Tunnel`, journaled), CDP to the browser target, and
   a tab of strobe's own (`Target.createTarget about:blank`, activated): `chromium::Browser` with
   `phone` set, so the driver, the trace, profiles and heap snapshots work as on a desktop Chromium, and
-  `navigator.webdriver` false as on a desktop launch. Before a bench block's or a recording's first load
+  `navigator.webdriver` false as on a desktop launch. A phone's Chrome that closes its DevTools
+  connection on `SystemInfo.getInfo` (strobe's GPU query, right after its tab opens) fails the block
+  with exit 3, never retried as a passing launch failure (`<package> on <serial> closed its DevTools
+  connection when strobe asked for its GPU (SystemInfo.getInfo), as a Chrome whose GPU it cannot query
+  does on every launch`): on an emulator the fix is to start it with `-gpu swiftshader_indirect`
+  (lavapipe Vulkan, and `-gpu auto` on a computer without a GPU the emulator supports, dropped it every
+  time; an emulator's timing is refused anyway), on a phone to close Chrome and run again, else another
+  phone. strobe's tab journal marks a tab closed only when `Target.closeTarget` succeeded, and at the
+  next launch one `about:blank` tab of the channel stands for strobe's tab that never loaded (its launch
+  ended first; Chrome restores it under another id); blank tabs hold nothing of a person's. Before a bench block's or a recording's first load
   the page's origin is cleared (`Storage.clearDataForOrigin`, all types) and the HTTP cache
   (`Network.clearBrowserCache`), as a fresh desktop profile starts: the channel is strobe's (given to it,
   or an emulator's) and holds no person's tabs. `look --mobile` clears nothing: it loads the page as the
@@ -8932,8 +8965,9 @@ a timing verdict on a shared runner.
   `fail-on: unclear` adds `--require-verdict`). On a same-repository pull request whose token can write
   it, `report experiment <exp> --format pr --update-pr <n>` puts the block in its body (`update-pr`:
   `auto`, `true`, `false`; `labels` names the sides). The step summary always gets the card-less block
-  (`--format summary`). On a shared runner strobe refuses the timed series (`SharedRunner`) and the
-  job fails with that refusal: `compare` needs a machine of its own.
+  (`--format summary`). On a shared runner strobe refuses every series whose primary is no exact
+  counter (`SharedRunner`, §10.1) and the job fails with that refusal: `compare` needs a machine of its
+  own.
 
 The base is the `base` input, else the pull request's base commit, else the commit a push moved from
 (none for a new branch: `check` then runs head alone and warns that `noworse` needs a base; `compare`
@@ -9001,6 +9035,9 @@ a minor version may break (rule 13), so there is no `@v0`. The "Release tags" ru
 ### 26.6 Dogfood
 
 The Check workflow's `dogfood` job builds strobe on ubuntu-24.04, windows-latest and macos-15 and runs
-the action from the checkout (`uses: ./`, `strobe-binary` the build) on `scripts/dev/known-web.bench.ts`'s
-`phases`, `net` and `heap` cases, their exact counters held to the base commit's. A smoke run of the
-action as a project runs it on GitHub-hosted runners, never a test suite (rule 5).
+the action from the checkout (`uses: ./`, `strobe-binary` the build) on
+`scripts/dev/served/known-served.bench.ts`: the known-answer page's `phases`, `net` and `heap` cases,
+the page served by each checkout (that folder's strobe.json `serve`; `known-web.bench.ts`'s `url()`
+would be one page for both sides, `VariantMismatch`), their exact counters (`count.ctx`, `count.page`,
+`net.requests`, `net.bytes`, `dom.nodes`) held to the base commit's. A smoke run of the action as a
+project runs it on GitHub-hosted runners, never a test suite (rule 5).

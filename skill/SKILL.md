@@ -129,6 +129,19 @@ The design and every rule behind this file: SPEC.md.
 - `track <file> --range <old>..<branch> --every 3` (or `--schedule` on a branch), then
   `history <file>` or `query changes`. Only `confirmed` changes are findings.
 
+### In CI: every pull request
+
+- GitHub Actions: `uses: anomalyco/strobe@v0.29` with `bench: perf/app.bench.ts` (inputs: action.yml).
+  The default `mode: check` runs each case once, headless, and fails the job on a failed case.
+  `noworse: net.requests=0,count.items=0` also runs the base commit and fails a case whose exact counter
+  is over base's or varies between runs. The step summary is `report experiment <exp> --format summary`.
+- A shared runner (GitHub-hosted, `CI_SHARED_ENVIRONMENT=true`, or a CI job in a VM that is no
+  self-hosted runner) refuses timing: `SharedRunner`, exit 4, for a timed bench, `--blocks`, `track`,
+  `--bisect` and a timed `record`. `status` says so. There: `--check` (`--base` with counter
+  `--noworse`), leak runs (`--probes memory`), `--pixels-only`, `record --probes attribution`, `query`.
+- Timing verdicts in CI: `mode: compare` on a self-hosted runner that runs one job at a time; the block
+  goes in a same-repository PR's body (never a fork's). Never `pull_request_target`.
+
 ### No display, a locked session, a server
 
 - `--headless` runs page cases (check or timed) with no display: frames, latency, scroll, canvas and
@@ -264,6 +277,8 @@ noisy discovery evidence, or leave them out.
     engine or mode cannot give that metric; pick another primary (the message names one).
   - `OverheadBudget`: strobe's own work disturbed timed runs (a `--check` only warns).
   - `VariantMismatch`, `DisplayTooSmall`, `DeviceMismatch`, `InputMismatch`: the sides differ.
+  - `SharedRunner`: a CI runner other jobs share; no timing there. `--check`, counters against base, leak
+    runs and attribution work (In CI, above); timing needs a machine of its own.
 - A refused primary refuses its series; the rest of the file runs. A series refused while it runs
   (`OverheadBudget`, `NoPhase`) ends alone too: `refused` in the listing, `--resume` keeps it. Only
   the machine's refusals (`SessionLocked`, `Background`, `Thermal`, …) stop the bench. Every series
@@ -297,7 +312,9 @@ strobe plan <file.bench.ts> [--base …] [--head …] [--filter …] [--effect 3
 strobe run [--pin auto] [--reserve-cpus on|off] -- <command>
 strobe run --base "<command>" --head "<command>" [--aa | --check] [--metrics metric.<name>,…]
 strobe query <rec_…|exp_…|recA..recB> <view> [--top N] [--by …] [--reveal] [--case <name>]
-strobe report <exp_…|rec_…|ser_…|result.json> [--format html|md|pr|card|badge] [--open]
+strobe report <exp_…|rec_…|ser_…|result.json> [--format html|md|pr|summary|card|badge] [--open]
+                  (summary: short GitHub Markdown for $GITHUB_STEP_SUMMARY; a check's exact counters, never
+                  a time)
 strobe report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
                   [--labels <base>,<head>]
                   (a --blocks run: HTML and md, its median and interval, no verdict; pr/card/badge refused;
@@ -331,7 +348,8 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - Progress goes to stderr. Windows PowerShell 5.1 with `2>&1` turns each stderr line into an error
   and exits 1: read `$LASTEXITCODE`, or pass `--progress stdout`.
 - Query views: `summary` `frames` `inputs` `threads` `gpu` `hotspots` `waits` `alloc` `layout` `style`
-  `shifts` `gc` `heap` `leaks` `memory` `http` `log` `network` `insights` `actions` `sql`; `exp_…` also
+  `shifts` `gc` `heap` `leaks` `memory` `http` `log` `network` `insights` `actions` `sql` `runs` (every run,
+  warmup too, and which were measured); `exp_…` also
   `progress` and `http`. `sql` works on any recording (a script's or a native one's: on the trace
   `strobe open` builds). A script's hotspots leave out strobe's host frames (`--source host` keeps them).
   `a..b` and `exp_…` diff `hotspots` `alloc` `layout` `style` `threads` `frames` `summary` `heap`

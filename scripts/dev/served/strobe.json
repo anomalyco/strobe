@@ -1,0 +1,7 @@
+{
+  "serve": {
+    "command": "bun known-server.ts {port} 3600",
+    "cwd": "scripts/dev",
+    "ready": "http://127.0.0.1:{port}/"
+  }
+}
