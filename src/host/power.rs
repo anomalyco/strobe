@@ -75,6 +75,51 @@ impl Drop for Power {
     }
 }
 
+/// After a plan switch, until the target's CPUs' speed holds: a fixed integer workload of about 4.5 ms
+/// (sized by a first short burst) on a thread on `cpus` (the target's pin; strobe's mask is widened to
+/// them for it and comes back after), read every 100 ms until three reads in a row agree within 1.5%.
+/// Before timed blocks (`timed`) at least 200 ms and at most 3 s; before untimed ones (a check, a leak
+/// run) at most 250 ms, since nothing they measure is a time a verdict reads. Returns how long it waited
+/// and whether the reads agreed.
+pub fn wait_settled(timed: bool, cpus: Option<u64>) -> (std::time::Duration, bool) {
+    use std::time::{Duration, Instant};
+    let (min, cap) = if timed { (Duration::from_millis(200), Duration::from_secs(3)) } else { (Duration::ZERO, Duration::from_millis(250)) };
+    let previous = cpus.and_then(super::set_affinity);
+    let settled = std::thread::spawn(move || {
+        if let Some(m) = cpus {
+            super::set_thread_affinity(m);
+        }
+        let started = Instant::now();
+        let burst = |n: u64| {
+            let t = Instant::now();
+            let mut x = 0u64;
+            for i in 0..n {
+                x = x.rotate_left(5) ^ i.wrapping_mul(2_654_435_761);
+            }
+            std::hint::black_box(x);
+            t.elapsed().as_secs_f64()
+        };
+        let n = (1_000_000.0 * 0.0045 / burst(1_000_000).max(1e-6)).clamp(1e5, 1e9) as u64;
+        let mut reads: Vec<f64> = vec![burst(n)];
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            reads.push(burst(n));
+            let last = &reads[reads.len().saturating_sub(3)..];
+            let (lo, hi) = last.iter().fold((f64::INFINITY, 0.0f64), |(lo, hi), r| (lo.min(*r), hi.max(*r)));
+            let agree = last.len() == 3 && hi - lo <= 0.015 * lo;
+            if (agree && started.elapsed() >= min) || started.elapsed() >= cap {
+                return (started.elapsed(), agree);
+            }
+        }
+    })
+    .join()
+    .unwrap_or((Duration::ZERO, false));
+    if let Some(p) = previous {
+        super::set_affinity(p);
+    }
+    settled
+}
+
 /// Puts back a plan a strobe that is no longer running switched away from (killed mid-run).
 pub fn restore_stale() {
     let Some(v) = std::fs::read_to_string(journal()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };

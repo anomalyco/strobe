@@ -137,6 +137,7 @@ validators!(
     MouseNotEnabled,
     AnchorNotFound,
     AnchorAmbiguous,
+    SharedRunner,
 );
 
 impl ValidatorId {
@@ -155,7 +156,7 @@ impl ValidatorId {
             | Throttled | BackgroundPriority | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter
             | NotOnThisOs | NotForTarget | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent
             | Untimed | OutOfView | Covered | DisplayTooSmall | DeviceMismatch | PowerSave | LowBattery | Emulator | WirelessTransport | NotProfileable | MouseNotEnabled | AnchorNotFound
-            | AnchorAmbiguous => false,
+            | AnchorAmbiguous | SharedRunner => false,
         }
     }
 
@@ -165,7 +166,7 @@ impl ValidatorId {
     pub fn machine_wide(self) -> bool {
         use ValidatorId::*;
         match self {
-            SessionLocked | Background | BackgroundPriority | Thermal | DeviceAsleep | ConcurrentBench | PowerSave | LowBattery | Emulator | WirelessTransport | Throttled => true,
+            SessionLocked | Background | BackgroundPriority | Thermal | DeviceAsleep | ConcurrentBench | PowerSave | LowBattery | Emulator | WirelessTransport | Throttled | SharedRunner => true,
             SoftwareGpu | DevBuild | DebuggerAttached | WindowHidden | WrongScreen | UnpacedSpin | NoPresentSource | AmbiguousInteraction | PatternInput | VariantMismatch | RunIncomplete
             | PresentsUnmatched | OverheadBudget | NoDisplayForBudget | TailTooShort | ClockUnsynced | LiveChannel | NoPhase | NoInput | NoSpan | NoCounter | NotOnThisOs | NotForTarget
             | ResetIncomplete | EngineUnsupported | FixtureMismatch | NotComparable | ParityGap | InputMismatch | Headless | NoMetric | NoWaits | NotEquivalent | Untimed | OutOfView | Covered
@@ -1414,6 +1415,20 @@ pub const METRIC_HIGHER: MetricDef = MetricDef {
     across: Across::Compared,
     about: "`metric.<name>`: what a cli target's command printed, summed per run, higher is better (its lines say `higher`)",
 };
+
+/// A counter whose value no neighbour on the CPUs moves: an exact count of what the target did
+/// (`count.*`, `net.requests*`, `net.bytes*`, `tty.frames`) or the DOM it left (`dom.nodes`). On a
+/// shared runner (`SharedRunner`) these alone are compared, and only while they hold one value.
+pub fn is_ci_counter(name: &str) -> bool {
+    name == "dom.nodes" || metric(name).is_some_and(|d| d.kind == Kind::Exact)
+}
+
+/// `def` as a shared runner compares it (`is_ci_counter`): `dom.nodes` as an exact counter, its
+/// difference the answer while it holds one value on each side; any other definition as it is.
+pub fn as_counter(def: &'static MetricDef) -> &'static MetricDef {
+    static DOM_NODES: std::sync::OnceLock<MetricDef> = std::sync::OnceLock::new();
+    if def.name == "dom.nodes" { DOM_NODES.get_or_init(|| MetricDef { kind: Kind::Exact, ..*def }) } else { def }
+}
 
 /// A metric's definition. Families resolve by their base: `net.requests{<glob>}` → `net.requests`,
 /// `count.<name>` → `count`, `phase.<name>` → `phase`, `span.<name>` → `span`, `metric.<name>` →
