@@ -102,6 +102,16 @@ bunx strobe record --bench "perf/server.bench.ts#slow handler" --head .   # then
 `http.latency.p95` is what a client waited while the runs held the server; `cpu.main` is the server's main
 thread alone (`cpu.main.busy` near 100%: its event loop never waited).
 
+A native app (`native(…, { output: true })`) that prints a line when it is ready: wait for it in setup, so the first run does not measure the
+launch's work. `since: "launch"` also takes a line the app wrote before the call (strobe keeps its output's last
+2,000 lines); the default takes only lines written after it.
+
+```ts
+async setup(ctx) {
+  await ctx.waitForLine(/listening on/, { since: "launch", timeout: 60_000 })
+},
+```
+
 - **Platforms:** the binary comes from `@hona/strobe-<platform>-<arch>`, installed with this package for your
   machine only: Windows x64 and Arm64, macOS Apple silicon and Intel, Linux x64 and Arm64 (static, glibc or
   musl).

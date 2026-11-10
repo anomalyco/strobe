@@ -269,6 +269,8 @@ noisy discovery evidence, or leave them out.
 - `!` lines warn next to a kept number; `i` lines inform. Read them before trusting a number:
   `NotSteady`, `HighVariance`, `ScreenChanged`, `EndedCpu`, `HeadlessFrame`, `ObserverCost`,
   `Rerun`, `StaleCalibration`, `DisplayOff`, `TimerCoalescing`. SPEC §10 lists them all.
+  `ObserverCost` on a script case says whether strobe relayed `ctx.call` or the bench file's own
+  `run()` (a `fetch` client) was near a core: the latter is your load generator, not strobe.
 
 ## Commands
 
@@ -498,6 +500,8 @@ export default bench({
   `io.*`, `gpu.*`, `memory.app.*`, and from OS presents `frames.*`, `interaction.p95`. A click that
   acts on the press is timed from it.
 - `ctx.waitForLine(/saved/, { in: "output" })` (with `native(…, { output: true })`) or a log glob.
+  A ready line printed once at startup: `ctx.waitForLine(/ready/, { since: "launch" })` in setup, so
+  run 1 does not measure the launch's work (`NotSteady … startup was still running in run 1`).
   `ctx.home`, `ctx.env`, `ctx.exe` drive the copy through its own CLI where no driver reaches.
 - `webview("my-app")`: an app on WebView2 (Windows), its page over CDP; Linux and macOS webviews
   refuse `EngineUnsupported`: use `native()`.
@@ -508,8 +512,11 @@ export default bench({
   (`MouseNotEnabled`). Events: the program appends JSON lines to `STROBE_EVENTS`
   (`{"strobe":"state","name":"done"}` for `until: { state: "done" }`). Wait in setup for what arrives
   late (a status line), and leave a clock out of the reset check with `ignore: [[col, row, cols, rows]]`.
+  A program that prints and exits is `RunIncomplete` ("the app exited (code 0)…"): time it with `cli()`.
+  A tty target's `cwd` is where its program runs, under the variant's folder.
 - A directory or git variant runs strobe.json `build` and launches its `output`; `gpuCache: "warm"`
   (the default) keeps each variant's GPU shader caches across launches. A debug build is refused.
+  A `--check` line ending `· cold shader cache` holds a shader compile a warm bench will not.
 
 ### Picking metrics
 

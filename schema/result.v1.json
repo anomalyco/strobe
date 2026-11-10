@@ -48,7 +48,9 @@
       "enum": ["builds", "implementations"],
       "description": "builds: both sides are builds of one target (an A/B). implementations: each side is a target of its own (SPEC 9.10); every text names the sides by variants[].name, never before/after."
     },
+    "phone": { "type": ["object", "null"], "description": "bench --mobile: the phone's facts read when it was picked (model, Android, Chrome, transport, temperature, emulator); its text prints them and leaves this computer's pin, reservation and power plan off the plan line. Null otherwise; absent in older results." },
     "variants": {
+      "description": "The builds the experiment ran (a check's too: role, name, spec, label, kind, commit, dirty, target; absent in checks from before).",
       "type": "array",
       "items": {
         "type": "object",
@@ -333,7 +335,8 @@
         "pixel_pct": { "type": "number", "description": "strobe's pixel reads inside the runs (captures and image matching for image locators and pixel waits, opening the window's capture and decoding a template included), CPU as % of the runs' wall time (budget 0.5%; over 2% refuses timing and latency metrics)." },
         "pixel_cpu_ms": { "type": "number", "description": "The same pixel reads' CPU in ms per measured run (the mean over the runs): their absolute cost, which compares across builds whose runs differ in length where pixel_pct does not." },
         "encoder_pct": { "type": "number", "description": "A filmed block's (--video) video encoder process, its CPU over the video's span as % of one core. No budget: a filmed block is never timed." },
-        "http_probe_pct": { "type": "number", "description": "The HTTP probe's scheduler and workers (ctx.httpProbe, SPEC 8.9), their CPU over the probe's span as % of one core (budget 1%; over 2% refuses http.latency.* in a timed block)." }
+        "http_probe_pct": { "type": "number", "description": "The HTTP probe's scheduler and workers (ctx.httpProbe, SPEC 8.9), their CPU over the probe's span as % of one core (budget 1%; over 2% refuses http.latency.* in a timed block)." },
+        "script_calls": { "type": "number", "description": "A script() block's timed ctx.call count per measured run (the mean): 2 or more and runner_pct is strobe's relay of them (ObserverCost), fewer and it is the bench file's own run() (SPEC 19). Absent for other targets and in older results." }
       }
     },
     "step": {
@@ -420,8 +423,9 @@
             "properties": {
               "variant": { "enum": ["base", "head"] },
               "pair": { "type": "integer" },
-              "values": { "type": "object", "additionalProperties": { "type": ["number", "null"] } },
+              "values": { "type": "object", "additionalProperties": { "type": ["number", "null"] }, "description": "Each metric's value, and the block's own notes: warmup.unsteady (1 swung, 2 grew), warmup.stepped.first and warmup.stepped.last (the measured runs stepped down: the first measured run's work and the last half's median, NotSteady, SPEC 9.1), untimed.n and untimed.ms." },
               "refused": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Metrics the block refused: \"<validator>: <why>\"." },
+              "gpu_cache": { "enum": ["cold", "warm", null], "description": "A native block: how its launch found the GPU shader caches, said only of an app that did GPU work in the runs (SPEC 13.2). Absent otherwise and in older results." },
               "same": { "type": "object", "description": "implementations: what each expect.same element read, by its name: { setup, run[], reset[] }." },
               "ops": { "type": "object", "additionalProperties": { "type": "number" }, "description": "implementations: the measured runs' input calls, each call's median count per run (a typed character each)." },
               "recording": { "type": ["string", "null"] },
@@ -465,6 +469,7 @@
         "declared": { "type": "array", "items": { "type": "string" }, "description": "check: the metrics the case declared." },
         "values": { "type": ["object", "null"], "description": "check: one run's values; with --runs N the median over the launch's N runs; with --repeat R the median over the R launches." },
         "runs": { "type": "integer", "description": "check: the runs measured in each launch (--runs N, no warmup; 1 by default and with --why always). Absent in older results (then 1)." },
+        "gpu_cache": { "enum": ["cold", "warm", null], "description": "check: how the case's native launch found the GPU shader caches (cold prints · cold shader cache on its pass line); null when the app did no GPU work or the target is no native app. Absent in older results." },
         "spread": { "type": ["object", "null"], "additionalProperties": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }, "description": "check --runs N: each per-run metric's lowest and highest measured run, beside its median in values. Null with one run and with --repeat." },
         "repeat": {
           "type": ["object", "null"],
