@@ -2205,7 +2205,13 @@ counters (`Memory.getDOMCounters`), and every target process's OS private bytes 
 labelled with Chromium's process type (`SystemInfo.getProcessInfo`). The allocator layer is a
 detailed memory-infra dump through a short trace of its own, read as effective sizes per process:
 top-level allocators are layers, their children allocators; the `tracing` allocator (the dump's own
-trace buffers) is left out. Taken at each point of a memory recording, after every run of a leak
+trace buffers) is left out; each `allocators[<pid>]` keeps the process's name in the dump's trace
+(`name`: `Browser`, `Renderer`, `GPU Process`, `Service: <name>.mojom.<Service>`), the only name a
+phone's census has (§13.1 leak runs on a phone). The DOM counters are the page's own: strobe's
+listeners in the page (touch on a phone or emulated phone, 6; key evidence, 2; OS input, up to 10)
+run only in the top document and count themselves in `window.__strobeListeners`, which the census
+reads before its forced GC and takes off `jsEventListeners`, saturating (`scripts/dev/listeners.bench.ts`:
+an emulated phone's page with 0 or 3 listeners read 6 and 9 before, 0 and 3 now). Taken at each point of a memory recording, after every run of a leak
 run (with a dump at S0 and S2 only) and once at the end of every attribution block (before its
 heap snapshot). GPU and page (images, canvases) layers are not built. The page's renderer is the
 process that made a `performance.mark` the page makes inside the dump's trace (`blink.user_timing`),
@@ -2335,7 +2341,16 @@ case without a leak `no growth`; the array case read `+104 KB/run` on air too.
 **Leak runs on a phone** (`bench <file> --mobile --probes memory --repeat <N>`): the page is read over
 DevTools as on a desktop: post-GC JS heap and DOM counters, heap snapshots S0/S1/S2 and Chrome's
 memory-infra dump, all the phone's; its census names no process of this computer's (`processes:
-null`). Heap censuses time nothing, so no phone refusal of timed runs applies (an emulator, Wi-Fi,
+null`). `query memory` then lists the page's processes from the dump, typed by `allocators[<pid>].name`
+(Browser → browser, Renderer → renderer, GPU Process → GPU, `Service: x.mojom.Y` → its service; a
+census from before names: a renderer by its V8 layer, else other; pid 0, the dump's global part, is no
+process), private and working set `—`, so `--by process|layer|allocator` and `a..b memory` render,
+each with one line: `the page's processes are on the phone: listed from Chromium's memory dump, with
+no OS private bytes or working set (strobe reads no process memory of the phone's)`. Without a dump
+the line says the census has none to list them and only the page's JS heap and DOM are there, with no
+table header. JSON `phone: true`, `processes_from: dump|none`, `note`; `a..b` adds `phone` (adais
+emulator, `listeners.bench.ts --probes memory --repeat 3 --target phone`: 0.27.0 an empty table, now
+browser, renderer, GPU and `renderer (page)` 67.4 MB by allocators). Heap censuses time nothing, so no phone refusal of timed runs applies (an emulator, Wi-Fi,
 Battery Saver, a low battery), nor the primary's phone refusal: the run reads the page's heap and DOM,
 never the primary (`prepared-servers.bench.ts` case `keeps host`, primary `cpu.work`). adais emulator (Android 15 Chrome, `prepared-servers.bench.ts --probes
 memory --repeat 3 --mobile=emulator-5590`, exp_72e42f): `keeps` (25,000 references a run, 4 bytes each
@@ -3691,8 +3706,9 @@ fails (a wait in the page that ran out, an image that never showed) adds `the pa
 (document.hasFocus() is false), so keys did not reach it; click the page first or pass a selector`
 only when the evidence says so, read within 1 s. The evidence (`driver::KEYS_SEEN`) is an init script
 (`//# sourceURL=strobe-driver.js`) only where strobe drives the page itself: not through OS input, not
-on a phone, and not in attribution or memory blocks, whose census counts the page's listeners (a page
-with none read 8). It keeps the last trusted key's time on the document's own `performance.now`
+on a phone, and not in attribution or memory blocks; like strobe's other listeners in a page it runs
+in the top document only and counts itself in `window.__strobeListeners`, which a census takes off
+the page's listeners (§8.6). It keeps the last trusted key's time on the document's own `performance.now`
 (bound before the page's scripts; -1 before any key); the check reads `document.hasFocus()`, that
 time, the bound `now()` and whether the active element is a frame, and compares them with strobe's
 monotonic time since the call (read after the page answered): no note when focus is in a frame, when
@@ -4928,7 +4944,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `NoDisplayForBudget` | a budget metric is requested without a real display. Reserved: nothing refuses it now (a headless page's display metrics are `Headless`, a virtual display's `SoftwareGpu`, a missing one `NoPresentSource`) |
 | `TailTooShort` | a percentile lacks its minimum n (refuses that metric only) |
 | `ClockUnsynced` | sources cannot be aligned within 1 ms (§6); a page launch whose own time for `until` falls outside strobe's span from its navigation command to hearing of it, by over 2 ms (§9.6); a Firefox profile that gives no process start on the host's monotonic clock, or puts strobe's run marks outside the runs (§8.3); an app's `STROBE_EVENTS` event that arrived later than this OS delivers one after the `t_ns` it carries (§13.9) |
-| `LiveChannel` | an app profile would launch the user's own running app, or a macOS app whose data lives in the user's Library (§13.2); a WebKit page whose Safari (or Safari Technology Preview) already runs (§13.1); `--mobile` where every Chrome channel strobe may drive on the phone (on a phone, only one given to it with `strobe up --mobile --channel`; never Chrome itself) holds a tab a person opened (13.1 "Chrome on a phone"): strobe drives only a channel whose tabs are blank or its own. A running one with a person's tabs holds the DevTools socket: exit 3 naming it |
+| `LiveChannel` | an app profile would launch the user's own running app, or a macOS app whose data lives in the user's Library (§13.2); a WebKit page whose Safari (or Safari Technology Preview) already runs (§13.1); `--mobile` where every Chrome channel strobe may drive on the phone (on a phone, only one given to it with `strobe up --mobile --channel`; never Chrome itself) holds a tab a person opened (13.1 "Chrome on a phone"): strobe drives only a channel whose tabs are blank or its own. A running one with a person's tabs holds the DevTools socket: exit 3 naming it. On an emulator, where every tab is strobe's to clear, the fix names `adb -s <serial> shell pm clear <package>` for each such channel; strobe runs no such command itself |
 | `NoPhase`, `NoInput` | a declared `phase.<name>` no measured run entered; `input.*` with no drag in the runs; a `tty()` target's `tty.latency.*` when no input of the measured runs changed the grid while it was at rest, and `tty.settle.*` when no input was followed by changes that then held still (refuse that metric) |
 | `NoSpan` | a declared `span.<name>` no measured run's page measured, or a target with no page (§7.3) |
 | `NoMetric` | a declared `metric.<name>` that a measured run of a `cli()` target's command did not print (`strobe:metric <name>=<value>`): a run that printed none is not 0 (§9.6); a `strobe:metric` line that does not parse; lines (a run's, or base's against head's) that disagree on its direction; a declared `app.<name>` that a measured run of a `tty()` program did not write to `STROBE_EVENTS` (§13.9) |
@@ -5810,7 +5826,10 @@ As built (`query <rec> insights`, `query <exp> insights`):
 | `long-tasks` | renderer main-thread tasks over 50 ms in the runs, as `main.tasks.long` counts them (a task's time inside the run and outside its untimed stretches, one task however a stretch cuts it) | count, the longest |
 | `work-while-idle` | a `record` with no input that presents ≥ 1 frame/s or keeps the main thread ≥ 5% busy | frames/s, busy share |
 | `detached-dom` | the heap snapshot holds detached DOM nodes | count, retained size, the largest's retainer path |
-| `wakes-while-idle` | a native app's `record` (no input) whose threads wake ≥ 50/s (warn from 200/s) | wakes per second, the three threads that wake most |
+| `wakes-while-idle` | a native app's `record` (no input), or an idle native block (every measured run's `frames.json` inputs empty and `cpu.app.total` under 25% of a core: a busy app's switches are preemptions; JSON `idle_block`), whose threads wake ≥ 50/s (warn from 200/s) | wakes per second, the three threads that wake most |
+| `dominant-thread` | a native recording or block where one thread used ≥ 50% of the processes' CPU and ≥ 50 ms per run (over the recording for a `record`) while the UI thread (`ui.cpu`, else `cpu.main`) used under 25%; the whole is the larger of the runs' median `cpu_ms` (else `cpu.work`) and the threads' sum, so no share reads over 100% (warn from 75%) | the thread, its tid, module and origin (the app's own, a driver's, an OS thread, not placed); `query threads`, `query hotspots --thread <tid>`; JSON `thread`, `tid`, `pid`, `module`, `origin`, `cpu_ms`, `share`, `processes_cpu_ms`, `ui_thread`, `ui_cpu_ms`, `ui_share` |
+| `off-cpu-bound` | `run.duration` ≥ 100 ms and `cpu.work` under a quarter of it (never an idle native block; an attribution recording's profiler cost can keep it silent) | both and the share; `query http` with an HTTP probe, `query network` with a WebKit waterfall, `query waits` for a native capture, else a page's `strobe open` |
+| `style-layout-dominant` | a page's `main.style` + `main.layout` ≥ 20 ms per run (over the recording for a `record`) and over `main.script` (warn from 50 ms and twice script) | style, layout and script ms; `query style`, `query layout` |
 | `background` | `cpu.foreign.max` ≥ 25% | the busiest processes outside strobe's tree |
 | `unresolved` / `native-time` | < 95% of script samples mapped / `(program)` ≥ 30% of busy samples | shares |
 | `leak` | a memory recording or leak run | its facts and verdict |
@@ -6214,10 +6233,13 @@ Wi-Fi adb, a channel given to strobe, its touch slop and timing) is designed, no
   restoring it after a start) is read again for up to 3 s and is a person's if it keeps none. A running
   channel with a person's tabs is exit 3 (it holds the socket: close its tabs or close it); one strobe
   started is stopped again and refused `LiveChannel`, and strobe tries the next; when none is left, the
-  launch refuses `LiveChannel` naming each. A channel whose socket never opens is on its first-run screens:
+  launch refuses `LiveChannel` naming each. On an emulator (`adb::Facts::emulator`) every tab is
+  strobe's to clear, a tab Chrome restored included: the exit 3 hint and the `LiveChannel` fix name the
+  exact command (`adb -s <serial> shell pm clear <package>`) for each channel that held one; strobe
+  never runs it and never closes a tab it did not open. A channel whose socket never opens is on its first-run screens:
   exit 3 ("open that Chrome on the phone once and finish its first run"). strobe force-stops and starts
   only a channel it may drive that holds no person's tab, so every launch's browser is fresh. Never `pm
-  clear`, never `am set-debug-app`, never Chrome's command-line file on a phone that is not debuggable. On a debuggable
+  clear` itself, never `am set-debug-app`, never Chrome's command-line file on a phone that is not debuggable. On a debuggable
   device (an emulator: `ro.debuggable=1`) strobe writes `/data/local/tmp/chrome-command-line` (`_
   --disable-fre --no-default-browser-check --no-first-run`: the first-run screens keep the socket
   closed) only where none is (`adb::CommandLine`, journaled `<state>/adb/cmdline-<phone>.json` before it
@@ -8133,6 +8155,10 @@ what was built but not yet run on a device is in §21.
   commit; report HTML opens on `#series=`, `#scope=runs|host|startup|setup` and `#metric=`, with
   "Host startup" and "Bench file's setup" beside the whole host in the CPU scope toggle (5.8, 9.6,
   11.2, 17).
+- 2026-11-10 · cleanup/w5b e85d927 9a99794 · a phone's census by process, layer and allocator from
+  Chromium's dump; strobe's own page listeners out of the census; the emulator's `pm clear` hint;
+  insights `dominant-thread`, `off-cpu-bound`, `style-layout-dominant`, and `wakes-while-idle` on idle
+  native blocks (8.6, 10.1, 11.3, 13.1).
 
 **0.27.0** (bbdd4f0, 2026-11-10)
 

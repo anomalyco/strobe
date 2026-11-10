@@ -76,6 +76,7 @@ The design and every rule behind this file: SPEC.md.
 - `query <rec> memory` (per process; `--by layer|allocator` for Chromium's accounting). A native
   app: what holds it (host heap, GPU memory mapped in, unmapped commit, shared, files) beside
   `gpu.vram`. On Windows `memory.app.private` counts VRAM a driver maps in: quote `memory.app.host`.
+  A phone's page: processes from Chromium's dump (no OS memory); listeners are the page's own.
 - `query <rec> heap`: classes by retained size, detached DOM, retainer paths; `query <a>..<b> heap`.
 - A case's leak: `bench <file> --filter <case> --head . --probes memory --repeat 10`: growth per run
   with an interval, and `query <rec> leaks` for what from the first half is still alive.
@@ -89,7 +90,8 @@ The design and every rule behind this file: SPEC.md.
   (`look … --windowless` first: does it stay up, what does it print?).
   `record pid:<n>` or `proc:<name>` for a process strobe did not start.
 - `query <rec> threads`: wakes/s and CPU per thread, the module each started in, whose (app, driver,
-  os, `unknown (?)`); `--timeline` per second. Idle wake-ups: `query <rec> insights`.
+  os, `unknown (?)`); `--timeline` per second. `query <rec> insights` rules include dominant-thread,
+  off-cpu-bound, style-layout-dominant, wakes-while-idle (idle blocks too).
 - Native hotspots of a tree pool every process: read `by process`, then `--pid <pid|exe>`.
   A native attribution recording (`record --bench`, `--why`) keeps frames too: `query <rec> inputs`.
   `! Coverage`: samples cover under 80% of the CPU (read shares, not totals); it names what the
