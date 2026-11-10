@@ -344,7 +344,8 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - Every duration needs its unit (`500ms`, `10s`, `2m`, `2h`, `1d`): `--for 2000` exits 2.
 - `--filter`, `--target`, `--params`, `--metrics` and `--noworse` given twice add up; any other flag
   given twice with another value exits 2. `--params n=1,n=3` runs both values.
-- `-q`: stdout holds only the handles (`rec_…`, `exp_…`); a failure says why on stderr.
+- `-q`: stdout holds only the handles (`rec_…`, `exp_…`), or `report --format md|pr|summary`'s markdown;
+  a failure says why on stderr.
 - Progress goes to stderr. Windows PowerShell 5.1 with `2>&1` turns each stderr line into an error
   and exits 1: read `$LASTEXITCODE`, or pass `--progress stdout`.
 - Query views: `summary` `frames` `inputs` `threads` `gpu` `hotspots` `waits` `alloc` `layout` `style`

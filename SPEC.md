@@ -290,7 +290,8 @@ flag table; `strobe --help` (or a command the help does not name) prints all of 
 the result schema is (`schema/result.v1.json`, also in the `@hona/strobe` package's `schema/`).
 
 `-q` turns progress off, and stdout then holds only the handles a command made (`rec_…`, `exp_…`,
-one a line). A command that made one and did not succeed writes why on stderr (what halted it, else
+one a line), or `report --format md|pr|summary`'s markdown, which is that command's output. A
+command that made one and did not succeed writes why on stderr (what halted it, else
 its `FAIL` lines) and keeps its exit code. `--json` prints the result's JSON on stdout instead
 (the shape of `result.json`, §14.2, for `bench`).
 
@@ -9084,11 +9085,12 @@ screenshots (`failed-*.png`); with `upload-recordings`, the recordings result.js
 
 A release tag is `v<major>.<minor>.<patch>` and only such a tag starts `release.yml`. Once its
 packages are on npm, its `tag-action` job (`contents: write`, no checkout, no secrets) moves
-`v<major>.<minor>` to the release's commit through the API: only forward (the tag's commit must be an
-ancestor), never for a pre-release, created when missing. `@v0.29` follows 0.29's patches; before 1.0
-a minor version may break (rule 13), so there is no `@v0`. The "Release tags" ruleset protects
-`refs/tags/v*.*.*` (creation, update, deletion; administrators bypass), so the moving
-`v<major>.<minor>` tags stay movable by the workflow.
+`v<major>.<minor>` to the release's commit through the API with the run's `GITHUB_TOKEN`: only
+forward (the tag's commit must be an ancestor), never for a pre-release, created when missing.
+`@v0.29` follows 0.29's patches; before 1.0 a minor version may break (rule 13), so there is no `@v0`.
+The "Release tags" ruleset protects `refs/tags/v*.*.*` only (creation, update, deletion;
+administrators bypass), so release tags never move and the `v<major>.<minor>` tags stay movable by
+the workflow.
 
 ### 26.6 Dogfood
 

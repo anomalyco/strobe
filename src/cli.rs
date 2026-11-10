@@ -603,7 +603,8 @@ Targets   https://… · a local page.html (or file:page.html) · app:<id> (a st
           · wir:[<selector>] (an open Safari tab on a USB-cabled iPhone: look, record)
 Variants  a directory · a git ref (git:<ref>) · app:<id> · exe:<path> · url:<href> · cmd:<line> (a cli() target's command)
 Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells that count stderr lines as a failure)
-          (-q: no progress lines and no summary; a command that makes a recording or experiment prints its handle)
+          (-q: no progress lines and no text report; a command that makes a recording or experiment prints its
+          handle; report --format md|pr|summary still prints its markdown)
           (--filter, --target, --params, --metrics, --noworse, --skip given twice add up; any other flag
           given twice with another value is a usage error; so is a flag the command does not take: strobe
           <command> --help lists its flags)
