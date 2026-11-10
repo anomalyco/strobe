@@ -352,6 +352,11 @@ pub(super) fn matrix(series: &mut [Value]) -> Option<String> {
             journeys.push(j);
         }
     }
+    // Targets that each run cases of their own (a case per target) share no journey: no row would
+    // compare anything.
+    if !journeys.iter().any(|j| series.iter().filter(|s| s["journey"].as_str() == Some(j.as_str())).count() >= 2) {
+        return None;
+    }
     let width = journeys.iter().map(|j| j.chars().count()).max().unwrap_or(7).max(7) + 2;
     let col = 34;
     let mut text = format!("{:<width$}{}same\n", "journey", targets.iter().map(|t| format!("{:<col$}", t.1)).collect::<String>());

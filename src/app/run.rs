@@ -21,6 +21,8 @@ pub fn run(args: &Args) -> Result<Output> {
     if args.has("seed") {
         return Err(Error::usage("--seed seeds a bench's ctx.random(); strobe run -- <command> runs your own harness: give it its own seed"));
     }
+    // A harness under a bench block's conditions times something: on a shared CI runner nothing does.
+    bench::refuse_shared("strobe run")?;
     let at = args.pos.iter().position(|a| a == "--").ok_or_else(|| {
         Error::usage("run needs a command after --: strobe run [--pin auto] [--reserve-cpus on|off] [--power high|keep] -- <command> [args…], or two to compare: strobe run --base \"<command>\" --head \"<command>\"")
     })?;
@@ -34,7 +36,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let deadline = args.get("max-time").map(duration_ms).transpose()?.map(|ms| Instant::now() + Duration::from_millis(ms));
     let reg = bench::slot::Registration::new(&id, &cmd.join(" "));
     let (slot, waited) = reg.acquire_until(&format!("strobe run {program}"), deadline)?;
-    let power = bench::power_for(args)?;
+    let power = bench::power_for(args, true, pin)?;
     let reserve = match (args.get("reserve-cpus").unwrap_or("on"), pin) {
         ("off", _) | (_, None) => None,
         (_, Some(cpus)) => match host::reserve::Reserve::start(cpus) {

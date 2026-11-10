@@ -82,6 +82,9 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some(why) = &timers {
         problems.push(format!("strobe has {why} (TimerCoalescing)"));
     }
+    if let Some(why) = &env.shared_runner {
+        problems.push(format!("a shared CI runner ({why}): timing is refused (SharedRunner); checks, leak runs and attribution work"));
+    }
     let locked = host::session_locked();
     if locked {
         problems.push("the session is locked (benches wait for an unlock)".into());
@@ -167,6 +170,11 @@ pub fn run(args: &Args) -> Result<Output> {
     t += &format!("  {} cpu        {} · {} logical{}\n", mark(true), env.cpu, env.logical_cpus, if shape.is_empty() { String::new() } else { format!(" · {}", shape.join(", ")) });
     t += &format!("  {} power      {}{}\n", mark(!env.on_battery), env.power_plan, if env.on_battery { " · on battery" } else { "" });
     t += &format!("  {} load       {:.0}% of all CPUs busy\n", mark(busy <= 0.10), busy * 100.0);
+    if let Some(why) = &env.shared_runner {
+        t += &format!(
+            "  ! runner     shared: {why}; other jobs share its CPUs, so timed benches, records and tracks are refused (SharedRunner): bench --check (with --base and --noworse on exact counters), leak runs and attribution recordings work; a dedicated runner in a virtual machine says RUNNER_ENVIRONMENT=self-hosted or CI_SHARED_ENVIRONMENT=false\n"
+        );
+    }
     t += &format!("  {} cycles     {cycle_clock}\n", mark(cycles_refused.is_none()));
     t += &format!(
         "  {} priority   {}\n",

@@ -1436,6 +1436,19 @@ fn runs(
             let base = range.start - local.start;
             c.runs.iter().enumerate().map(move |(i, r)| (format!("run:{}", base + i), local.contains(&i), r.ended_ms, r.cpu_lost, r.ended_exes.as_slice()))
         }));
+        meta["run_list"] = super::run_list(kept.iter().flat_map(|c| {
+            let (local, range) = measured_of(c);
+            let base = range.start - local.start;
+            c.runs.iter().enumerate().map(move |(i, r)| super::RunRow {
+                run: format!("run:{}", base + i),
+                measured: local.contains(&i),
+                ms: r.ms,
+                cpu_work_ms: r.cpu,
+                task_ms: None,
+                main_cpu_ms: r.main.as_ref().ok().map(|share| share * r.ms),
+                cpu_lost: r.cpu_lost,
+            })
+        }));
         store::write_json(&dir.join("meta.json"), &meta)?;
         draft.keep();
         for b in blocks.iter_mut().flatten() {

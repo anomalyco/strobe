@@ -70,6 +70,8 @@ pub fn run(args: &Args) -> Result<Output> {
 /// `--pilot`: a short experiment first (4 pairs per series, no attribution), so the plan has a spread and
 /// a block time to start from. An A/A on head when there is no `--base`.
 fn pilot(args: &Args, file: &Path) -> Result<()> {
+    // Its pairs are timed blocks, refused on a shared CI runner before they run (`SharedRunner`).
+    super::refuse_shared("plan --pilot")?;
     let mut a = args.clone();
     a.command = "bench".into();
     a.pos = vec![file.display().to_string()];
