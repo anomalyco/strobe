@@ -195,6 +195,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let result = runs(ctx, cases, v, pair, x, &target, &app, &home, &mut n, &guard, &drive, &mut steps, ratio, timeline.as_ref());
     if let (Some(t), Ok(l)) = (timeline, &result) {
         let t = t.stop();
+        // A check's one cold run that measured the launch's startup still running says so.
+        if let Some(why) = l.first_run.filter(|_| x.untimed).and_then(|(t0, t1)| super::block::startup_spill(&t, t0, t1)) {
+            ctx.warnings.push(validity::warn("NotSteady", format!("{} · {} block: {why}", s.label(), side_of(ctx, v))));
+        }
         if let Some(dir) = l.recordings().first().and_then(|id| store::resolve(id).ok()) {
             let _ = crate::symbol::write_gz(&dir.join("timeline.json.gz"), &t);
         }
@@ -283,6 +287,13 @@ fn runs(
     };
     // A windowless app (a tray app, `window: false`) has no window to wait for, place or check.
     let windowless = target["window"] == false || app.windowless;
+    // The GPU shader caches as the launch found them (`Block::gpu_cache`); macOS keeps Metal's in the
+    // user's own folder, which says nothing of this launch.
+    let gpu_cache = match home.gpu_warm {
+        Some(w) => Some(if w { "warm" } else { "cold" }.to_string()),
+        None if !cfg!(target_os = "macos") && super::gpu_cache_mode(s, target, Some(app)) == "cold" => Some("cold".to_string()),
+        None => None,
+    };
     if !windowless {
         n.wait_window(Duration::from_secs(60), guard)?;
         let viewport = target.get("viewport").filter(|v| v.is_object());
@@ -535,6 +546,7 @@ fn runs(
     let mut case_marks: Vec<(String, u64)> = Vec::new();
     let mut log_at: Vec<u64> = Vec::new();
     let mut case_ms: Vec<f64> = Vec::new();
+    let mut first_run: Option<(u64, u64)> = None;
     for (k, s) in cases.iter().enumerate() {
         // A launch hook that read what differs per case set up the first case alone (`unbatched`).
         if k > 0 && (stop_requested() || ctx.unbatched.is_some()) {
@@ -660,6 +672,9 @@ fn runs(
                 let ran = ctx.runner.call("run", json!({ "case": s.case }), run_timeout, &serve);
                 let t1 = host::now_ns();
                 cost.end();
+                if g == 0 {
+                    first_run = Some((t0, t1));
+                }
                 let at1 = read_known(c0.keys().chain(edges.borrow().iter().flat_map(|e| e.0.keys())));
                 let clock1 = Clock::now();
                 let main1 = main_read();
@@ -856,7 +871,7 @@ fn runs(
     }
     // No case passed: the launch closes as a failed block does, its probes dropped.
     if native_cases.is_empty() {
-        return Ok(Launch { cases: failed.map(|e| vec![Err(e)]).unwrap_or_default(), abort, notes, actions: None, log_at, case_ms });
+        return Ok(Launch { cases: failed.map(|e| vec![Err(e)]).unwrap_or_default(), abort, notes, actions: None, log_at, case_ms, first_run });
     }
     let finished = (|| -> Result<(Vec<Result<Block>>, Kept)> {
         let s0 = &cases[native_cases[0].0];
@@ -911,7 +926,6 @@ fn runs(
             let s = &cases[*k];
             let (local, range) = measured_of(c);
             let first = range.start;
-            let unsteady = c.warmup.unsteady();
             let (strobe_pct, runner_pct) = cost.share(range.clone());
             let measured = &c.runs[local.clone()];
             let key = |j: usize| format!("run:{}", first + j);
@@ -1196,9 +1210,7 @@ fn runs(
                 values.insert("cpu.foreign".into(), metrics::median(&foreign));
                 values.insert("cpu.foreign.max".into(), foreign.iter().copied().fold(0.0, f64::max));
             }
-            if unsteady {
-                values.insert("warmup.unsteady".into(), if c.warmup.grew() { 2.0 } else { 1.0 });
-            }
+            c.warmup.values(&mut values);
             // A metric no run gave a number for (an empty per-run map's median) is missing, not a value.
             values.retain(|_, x| x.is_finite());
             // A run in which a process of the app ended and what it used is not known: the set's CPU is short.
@@ -1278,6 +1290,8 @@ fn runs(
                 same: c.same.take(local.clone()),
                 ops: super::journey::ops(&measured.iter().map(|r| &r.counts).collect::<Vec<_>>()),
                 spread: super::run_spread(x, &extra),
+                // Said only of an app that did GPU work in the runs: one that draws nothing compiles no shaders.
+                gpu_cache: gpu_cache.clone().filter(|_| adapter.is_some()),
                 ..Block::default()
             }));
         }
@@ -1430,12 +1444,12 @@ fn runs(
             for b in blocks.iter_mut().flatten() {
                 b.steps.extend(steps.last().cloned());
             }
-            return Ok(Launch { cases: blocks.into_iter().chain(failed.map(Err)).collect(), abort, notes, actions, log_at, case_ms });
+            return Ok(Launch { cases: blocks.into_iter().chain(failed.map(Err)).collect(), abort, notes, actions, log_at, case_ms, first_run });
         }
         Err(e) => native_cases.iter().map(|_| Err(e.clone())).collect(),
     };
     out.extend(failed.map(Err));
-    Ok(Launch { cases: out, abort, notes, actions: None, log_at, case_ms })
+    Ok(Launch { cases: out, abort, notes, actions: None, log_at, case_ms, first_run })
 }
 
 /// A native leak run's verdict (SPEC §8.6): growth per run of the processes' host memory (heap,

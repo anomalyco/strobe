@@ -689,23 +689,38 @@ pub(super) fn pattern(d: &Value, what: &str) -> Result<regex_lite::Regex> {
     regex_lite::Regex::new(&source).map_err(|e| Error::usage(format!("{what}: {e}")))
 }
 
-/// `ctx.waitForLine(match, { in, timeout })` in a block's hooks: each call registers a watch
+/// `ctx.waitForLine(match, { in, timeout, since })` in a block's hooks: each call registers a watch
 /// (`watch`) and then polls it (`poll`) until it has the first line matching it that the app wrote
-/// after the watch: from its output (`in: "output"`, the default; only a target with `output: true`
-/// pipes it) or from files under its home matching a glob. A poll never blocks, so the runner keeps
-/// serving the hook's other calls (a click) meanwhile. A line carries when strobe read it on the host
-/// clock (ns), the clock of phase marks and presents: output as its reader thread got it, a log file's
-/// line as the watch's own tail thread read it.
+/// after the watch (`since: "now"`, the default) or since its launch (`since: "launch"`): from its
+/// output (`in: "output"`, the default; only a target with `output: true` pipes it) or from files
+/// under its home matching a glob. A poll never blocks, so the runner keeps serving the hook's other
+/// calls (a click) meanwhile. A line carries when strobe read it on the host clock (ns), the clock of
+/// phase marks and presents: output as its reader thread got it, a log file's line as the watch's own
+/// tail thread read it.
 #[derive(Default)]
 pub(super) struct Lines {
     watches: Vec<LineWatch>,
     /// The app's last few output lines, for a refusal when it exits.
     last: std::collections::VecDeque<String>,
+    /// Its output since the launch (`since: "launch"`), the oldest dropped past `SINCE_LINES` lines or
+    /// `SINCE_BYTES` bytes (`dropped`): what a watch begun later still finds.
+    since: std::collections::VecDeque<(u64, String)>,
+    since_bytes: usize,
+    dropped: bool,
 }
+
+/// What `Lines` keeps of the output since the launch: an app that logs a line a millisecond for its
+/// whole startup keeps its last 2 seconds.
+const SINCE_LINES: usize = 2000;
+const SINCE_BYTES: usize = 512 * 1024;
 
 struct LineWatch {
     pattern: regex_lite::Regex,
     source: String,
+    /// Its lines from the launch on (`since: "launch"`), else from the watch.
+    launch: bool,
+    /// The log files under the home that matched the glob at the watch, by the length they had then.
+    before: BTreeMap<PathBuf, u64>,
     deadline: Instant,
     timeout: Duration,
     tail: Option<Tail>,
@@ -737,8 +752,20 @@ impl Lines {
             if self.last.len() == 5 {
                 self.last.pop_front();
             }
-            self.last.push_back(line);
+            self.last.push_back(line.clone());
+            self.since_bytes += line.len();
+            self.since.push_back((at, line));
+            while self.since.len() > SINCE_LINES || self.since_bytes > SINCE_BYTES {
+                let Some((_, l)) = self.since.pop_front() else { break };
+                self.since_bytes -= l.len();
+                self.dropped = true;
+            }
         }
+    }
+
+    /// The first output line since the launch that matches, as strobe kept it (`since`).
+    fn since_launch(&self, pattern: &regex_lite::Regex) -> Option<(u64, String)> {
+        self.since.iter().find(|(_, l)| pattern.is_match(l)).cloned()
     }
 
     /// The app's last output lines (none unless the target pipes its output: `output: true`).
@@ -757,16 +784,26 @@ impl Lines {
                 ));
             }
             let timeout = Duration::from_millis(a["timeout"].as_u64().unwrap_or(30_000));
+            let launch = match a["since"].as_str().unwrap_or("now") {
+                "now" => false,
+                "launch" => true,
+                other => return Err(Error::usage(format!("waitForLine: since is \"now\" (the default: lines written after the call) or \"launch\" (any line since the app started), not {other:?}"))),
+            };
+            let pattern = pattern(a, "waitForLine")?;
+            // Files that exist now are read from their end (from their start since the launch); later
+            // ones from their start.
+            let before: BTreeMap<PathBuf, u64> =
+                if source == "output" { BTreeMap::new() } else { matching(home, &source).into_iter().map(|p| (p.clone(), std::fs::metadata(&p).map_or(0, |m| m.len()))).collect() };
             let tail = (source != "output").then(|| {
-                // Files that exist now are read from their end; later ones from their start.
-                let offsets: BTreeMap<PathBuf, u64> = matching(home, &source).into_iter().map(|p| (p.clone(), std::fs::metadata(&p).map_or(0, |m| m.len()))).collect();
+                let offsets: BTreeMap<PathBuf, u64> = if launch { BTreeMap::new() } else { before.clone() };
                 let (tx, lines) = channel();
                 let stop = Arc::new(AtomicBool::new(false));
                 let (home, glob, flag) = (home.to_path_buf(), source.clone(), stop.clone());
                 std::thread::spawn(move || tail_from(&home, &glob, offsets, &flag, &tx));
                 (lines, stop)
             });
-            self.watches.push(LineWatch { pattern: pattern(a, "waitForLine")?, source, deadline: Instant::now() + timeout, timeout, tail, found: None });
+            let found = if launch && source == "output" { self.since_launch(&pattern) } else { None };
+            self.watches.push(LineWatch { pattern, source, launch, before, deadline: Instant::now() + timeout, timeout, tail, found });
             return Ok(json!(self.watches.len() - 1));
         }
         let id = a["id"].as_u64().unwrap_or(u64::MAX) as usize;
@@ -784,10 +821,36 @@ impl Lines {
         }
         if Instant::now() >= w.deadline {
             w.tail = None;
-            return Err(Error::timeout(format!("waitForLine: no line matching {} in {} in {:.1} s", w.pattern.as_str(), w.source, w.timeout.as_secs_f64())));
+            let what = if w.launch { "since the launch" } else { "after the call" };
+            let e = Error::timeout(format!("waitForLine: no line matching {} in {} {what} in {:.1} s", w.pattern.as_str(), w.source, w.timeout.as_secs_f64()));
+            let (launch, source, before, pattern) = (w.launch, w.source.clone(), w.before.clone(), w.pattern.clone());
+            // A line that came before the call: the wait began too late to see it.
+            let earlier = !launch && if source == "output" { self.since_launch(&pattern).is_some() } else { matched_before(&before, &pattern) };
+            return Err(if earlier {
+                e.hint("a matching line came before this call (waitForLine sees only lines written after it by default): pass { since: \"launch\" }, or start the wait before what makes the app write")
+            } else if launch && source == "output" && self.dropped {
+                e.hint(format!("strobe keeps the output's last {SINCE_LINES} lines ({} KiB) since the launch, and the app wrote more: start the wait earlier", SINCE_BYTES / 1024))
+            } else {
+                e
+            });
         }
         Ok(json!({ "pending": true }))
     }
+}
+
+/// Whether a line matching `pattern` was in the log files a watch saw (their first `before` bytes,
+/// at most the last `SINCE_BYTES` of each).
+fn matched_before(before: &BTreeMap<PathBuf, u64>, pattern: &regex_lite::Regex) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    before.iter().filter(|(_, len)| **len > 0).any(|(path, &len)| {
+        let Ok(mut f) = std::fs::File::open(path) else { return false };
+        let from = len.saturating_sub(SINCE_BYTES as u64);
+        let mut buf = Vec::new();
+        if f.seek(SeekFrom::Start(from)).is_err() || f.take(len - from).read_to_end(&mut buf).is_err() {
+            return false;
+        }
+        String::from_utf8_lossy(&buf).lines().any(|l| pattern.is_match(&isolate::strip_ansi(l.trim_end_matches('\r'))))
+    })
 }
 
 /// Lines appended to files under `home` matching `glob` after `offsets` (a file not in it: from its

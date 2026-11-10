@@ -28,6 +28,9 @@ pub(super) struct Warmup {
     again: usize,
     /// Unsteady, and the work grew across the runs (`grew`).
     growth: bool,
+    /// A timing block's measured runs stepped down (`stepped`): the first one's work and the median of
+    /// the last half's.
+    stepped: Option<(f64, f64)>,
     /// An untimed block that may measure its second run when its first lost a process: not a pixels
     /// block (its snapshots are the first run's) or a filmed one, and a case whose reset brings each run
     /// back to the same start (`resetCheck` on). Without a reset the second run starts where the first
@@ -43,7 +46,7 @@ impl Warmup {
         let again = usize::from(x.untimed && s.reset && x.pixels.is_none());
         let retry = x.untimed && x.pixels.is_none() && !x.video && s.reset && s.reset_check;
         // A video block films the one run after the steady point: run 0 is cold, never the filmed one.
-        Warmup { first: None, unsteady: false, untimed: x.untimed, keeps_pair: !matches!(x.set, Set::Attribution | Set::Memory) && !x.video, measured, again, growth: false, retry }
+        Warmup { first: None, unsteady: false, untimed: x.untimed, keeps_pair: !matches!(x.set, Set::Attribution | Set::Memory) && !x.video, measured, again, growth: false, stepped: None, retry }
     }
 
     /// Whether another run is due after `ran` runs.
@@ -95,11 +98,35 @@ impl Warmup {
     /// short), which must hold steady too: a browser's after-startup chores (Chromium's network and
     /// storage services' deferred work, about 230 ms of CPU just after its first page loads) leave the
     /// renderer's task time alone, and made a cold block's first measured run's `cpu.work` 4x.
+    ///
+    /// A timing block's steady pair may be a plateau of work left over from the launch (a model load
+    /// that keeps a thread busy through the first runs, so each does the same: a core's worth). A
+    /// measured run after the pair, up to `MAX_WARMUP`, that drops below half the plateau's work (and
+    /// by 10 ms or more) shows the pair was never the steady point: warmup goes on from there.
+    /// Measured runs that still step down (the first over twice the last half's median, by 20 ms or
+    /// more) are said (`stepped`, `NotSteady`).
     pub(super) fn after(&mut self, work: &[f64], cpu: &[f64], lost: &[bool]) -> bool {
-        if self.first.is_some() || work.is_empty() {
+        if work.is_empty() {
             return false;
         }
         let i = work.len() - 1;
+        if let Some(f) = self.first {
+            if !self.keeps_pair || self.untimed || self.unsteady || i >= f + self.measured {
+                return false;
+            }
+            if i > f + 1 && i <= MAX_WARMUP && work[i] < 0.5 * work[f] && work[f] - work[i] >= 10.0 {
+                self.first = None;
+                return false;
+            }
+            if i + 1 == f + self.measured && self.measured >= 2 {
+                let m = &work[f..=i];
+                let tail = metrics::median(&m[m.len() / 2..]);
+                if m[0] > 2.0 * tail && m[0] - tail >= 20.0 {
+                    self.stepped = Some((m[0], tail));
+                }
+            }
+            return false;
+        }
         if self.untimed {
             self.first = Some(usize::from(i == 0 && self.retry && lost.first() == Some(&true)));
             return true;
@@ -122,6 +149,133 @@ impl Warmup {
     pub(super) fn grew(&self) -> bool {
         self.growth
     }
+
+    /// What a block's values keep of its warmup: `warmup.unsteady` (2 grew, 1 swung), and where its
+    /// measured runs stepped down, the first one's work and the last half's median (ms of CPU, or of
+    /// wall time where the block read no CPU): `warmup.stepped.first`, `warmup.stepped.last`.
+    pub(super) fn values(&self, values: &mut BTreeMap<String, f64>) {
+        if self.unsteady {
+            values.insert("warmup.unsteady".into(), if self.growth { 2.0 } else { 1.0 });
+        }
+        if let Some((first, tail)) = self.stepped {
+            values.insert("warmup.stepped.first".into(), first);
+            values.insert("warmup.stepped.last".into(), tail);
+        }
+    }
+}
+
+/// A thread or the whole set busy at this share of a core (%) is busy, for `startup_spill`.
+const SPILL_BUSY_PCT: f64 = 25.0;
+
+/// Startup still running in an untimed block's measured run 1 (`NotSteady`, never a refusal): run 1
+/// (`t0`..`t1`, 2 s or longer) found a thread of the target, or its whole set, busy at a quarter of a
+/// core or more in the 2 s before it began and in its first half (50 ms or more), and three times
+/// quieter in its second half: work the launch began, not the case, which a `--check`'s one cold run
+/// measures. A steady busy target (a game, an animation) is as busy in both halves and says nothing.
+/// From the block's timeline (`wakes::Timeline`: CPU per thread a second, and at the run's edges); each
+/// window takes a tick's CPU in proportion to their overlap. What it says: the thread (its name, module
+/// and origin), when it was busy (from the launch), and the wait that fixes it.
+pub(super) fn startup_spill(t: &probe::wakes::TimelineData, t0: u64, t1: u64) -> Option<String> {
+    if t1.saturating_sub(t0) < 2_000_000_000 || t.cpu_refused.is_some() || t0 <= t.t0_ns {
+        return None;
+    }
+    let mid = t0 + (t1 - t0) / 2;
+    let pre = (t0.saturating_sub(2_000_000_000).max(t.t0_ns), t0);
+    let span = |i: usize| (if i == 0 { t.t0_ns } else { t.ticks[i - 1] }, t.ticks[i]);
+    // A window's share of tick `i`'s span.
+    let share = |i: usize, (a, b): (u64, u64)| {
+        let (from, to) = span(i);
+        if to <= from {
+            return 0.0;
+        }
+        to.min(b).saturating_sub(from.max(a)) as f64 / (to - from) as f64
+    };
+    let n = t.threads.len();
+    // Each thread's CPU ms in each window: before run 1, its first half, its second half.
+    let mut ms = vec![[0.0f64; 3]; n + 1];
+    for &(tick, th, cpu, _) in &t.cells {
+        let (tick, th) = (tick as usize, th as usize);
+        if tick >= t.ticks.len() || th >= n || t.cpu_unknown.contains(&(th as u32)) {
+            continue;
+        }
+        for (k, w) in [pre, (t0, mid), (mid, t1)].into_iter().enumerate() {
+            let x = cpu as f64 * share(tick, w);
+            ms[th][k] += x;
+            ms[n][k] += x;
+        }
+    }
+    let pct = |x: f64, (a, b): (u64, u64)| 100.0 * x / (b.saturating_sub(a) as f64 / 1e6).max(1e-9);
+    let spilled = |m: &[f64; 3]| pct(m[0], pre) >= SPILL_BUSY_PCT && pct(m[1], (t0, mid)) >= SPILL_BUSY_PCT && m[1] >= 50.0 && m[1] >= 3.0 * m[2];
+    // The busiest such thread, else the set as a whole (startup spread over a pool).
+    let thread = (0..n).filter(|&i| spilled(&ms[i])).max_by(|&a, &b| ms[a][1].total_cmp(&ms[b][1]));
+    let i = match thread {
+        Some(i) => i,
+        None if spilled(&ms[n]) => n,
+        None => return None,
+    };
+    // When it was busy: the ticks up to the run's end it used a quarter of a core in, from the launch.
+    let busy: Vec<usize> = (0..t.ticks.len())
+        .filter(|&k| span(k).1 <= t1 && span(k).1 > span(k).0)
+        .filter(|&k| {
+            let used: f64 = t.cells.iter().filter(|c| c.0 as usize == k && (i == n || c.1 as usize == i)).map(|c| c.2 as f64).sum();
+            pct(used, span(k)) >= SPILL_BUSY_PCT
+        })
+        .collect();
+    let at = |ns: u64| ns.saturating_sub(t.t0_ns) as f64 / 1e9;
+    let (from, to) = (busy.first().map_or(t.t0_ns, |&k| span(k).0), busy.last().map_or(mid, |&k| span(k).1));
+    let who = match t.threads.get(i) {
+        Some(th) => {
+            let name = th.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| format!("thread {}", th.tid));
+            let module = th.module.as_deref().map(|m| format!(" ({}, {})", m.rsplit(['/', '\\']).next().unwrap_or(m), probe::wakes::origin(m))).unwrap_or_default();
+            format!("{name}{module} of process {}", th.pid)
+        }
+        None => "the target's processes".to_string(),
+    };
+    let m = &ms[i];
+    Some(format!(
+        "startup was still running in run 1: {who} used {:.0}% of a core in the 2 s before it, {:.0}% in its first half and {:.0}% in its second; busy from {:.1} s to {:.1} s after the launch, while run 1 ran from {:.1} s to {:.1} s, so run 1 measured the launch's work, not the case's; wait in setup until the app is ready (ctx.waitForLine(<its ready line>, {{ since: \"launch\" }}), or a page.waitFor)",
+        pct(m[0], pre),
+        pct(m[1], (t0, mid)),
+        pct(m[2], (mid, t1)),
+        at(from),
+        at(to),
+        at(t0),
+        at(t1)
+    ))
+}
+
+/// `startup_spill` for a page, whose browser strobe keeps no thread timeline of: the OS sampler's busy
+/// time on the CPUs the target is pinned to (`cpus`), the set as a whole, each window as the sampler's
+/// ticks cover it (at least half of the 2 s before run 1, which begins at the sampler's start or later).
+pub(super) fn startup_spill_cpus(samples: &probe::os::Samples, cpus: u64, t0: u64, t1: u64) -> Option<String> {
+    let first_tick = samples.ticks.first().map(|t| t.t_ns.saturating_sub(t.dt_ns))?;
+    if t1.saturating_sub(t0) < 2_000_000_000 || t0 <= first_tick {
+        return None;
+    }
+    let mid = t0 + (t1 - t0) / 2;
+    let pre = (t0.saturating_sub(2_000_000_000).max(first_tick), t0);
+    if pre.1 - pre.0 < 1_000_000_000 {
+        return None;
+    }
+    let on = |c: usize| c < 64 && cpus >> c & 1 == 1;
+    // % of a core over a window: the pinned CPUs' busy shares summed.
+    let busy = |(a, b): (u64, u64)| -> f64 { samples.window(a, b).cores.iter().filter(|c| on(c.cpu as usize)).filter_map(|c| c.busy_pct).sum() };
+    let (p, f, s) = (busy(pre), busy((t0, mid)), busy((mid, t1)));
+    let first_ms = f / 100.0 * (mid - t0) as f64 / 1e6;
+    if p < SPILL_BUSY_PCT || f < SPILL_BUSY_PCT || first_ms < 50.0 || f < 3.0 * s {
+        return None;
+    }
+    let tick_busy = |t: &probe::os::Tick| -> f64 { t.busy.iter().enumerate().filter(|(c, x)| on(*c) && x.is_finite()).map(|(_, x)| *x as f64).sum() };
+    let busy_ticks: Vec<&probe::os::Tick> = samples.ticks.iter().filter(|t| t.t_ns <= t1 && tick_busy(t) >= SPILL_BUSY_PCT).collect();
+    let at = |ns: u64| ns.saturating_sub(first_tick) as f64 / 1e9;
+    let (from, to) = (busy_ticks.first().map_or(first_tick, |t| t.t_ns.saturating_sub(t.dt_ns)), busy_ticks.last().map_or(mid, |t| t.t_ns));
+    Some(format!(
+        "startup was still running in run 1: the target's CPUs were busy {p:.0}% of a core in the 2 s before it, {f:.0}% in its first half and {s:.0}% in its second; busy from {:.1} s to {:.1} s after the block's sampler began, while run 1 ran from {:.1} s to {:.1} s, so run 1 measured the browser's or page's startup work, not the case's; wait in setup until the page is ready (page.waitFor, or ctx.waitForLine(<a ready line>, {{ since: \"launch\" }}) for an app's output)",
+        at(from),
+        at(to),
+        at(t0),
+        at(t1)
+    ))
 }
 
 /// A run's count that is the fixture's CPU (ms), not the bench file's: `cpu.fixture`.

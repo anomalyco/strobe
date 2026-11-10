@@ -299,6 +299,22 @@ fn tree_state(root: &Path) -> Option<String> {
     Some(format!("{sha} {:x}", sha2::Sha256::digest(diff)))
 }
 
+/// `head strobe@1a2b3c4d5e (dirty)`, or `base … → head …`: the builds a bench runs, by their labels
+/// (a folder's or ref's name and commit).
+fn variants_line(variants: &[Variant]) -> String {
+    variants.iter().map(|v| format!("{} {}", v.role, v.label)).collect::<Vec<_>>().join(" → ")
+}
+
+/// The variants as a check's result.json keeps them: what each was, its commit included.
+fn variants_json(variants: &[Variant]) -> Value {
+    json!(
+        variants
+            .iter()
+            .map(|v| json!({ "role": v.role, "name": v.name, "spec": v.spec, "label": v.label, "kind": v.kind.name(), "commit": v.commit, "dirty": v.dirty, "target": v.target }))
+            .collect::<Vec<_>>()
+    )
+}
+
 /// What a recording says about the variant it ran: the commit, uncommitted changes and their hash
 /// (what the build read), so a kept or `--check` recording still names its code later.
 fn variant_git(v: &Variant) -> Value {
@@ -783,6 +799,10 @@ struct Block {
     /// measured run, beside its median in `values`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     spread: BTreeMap<String, [f64; 2]>,
+    /// A native app's GPU shader caches as its launch found them (`gpuCache`): `cold` (none from an
+    /// earlier launch: its runs may compile shaders) or `warm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gpu_cache: Option<String>,
 }
 
 /// Each per-run metric's lowest and highest measured run (`Block::spread`), for an untimed block of
@@ -1588,6 +1608,11 @@ struct Overhead {
     /// `http.latency.*`).
     #[serde(skip_serializing_if = "Option::is_none")]
     http_probe_pct: Option<f64>,
+    /// A script target's `ctx.call`s in a measured run's timed parts (the mean over them): what strobe
+    /// relays. Under 2, the runner's share is the bench file's own `run()` (a client that loads a
+    /// server with `fetch`), not the relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_calls: Option<f64>,
 }
 
 impl Overhead {
@@ -1612,7 +1637,8 @@ impl Overhead {
             Some(format!("{n} {}{ms}", pct_of_core(p?)))
         })
         .collect();
-        if parts.is_empty() { String::new() } else { format!("{} of a core", parts.join(" · ")) }
+        let calls = self.script_calls.map(|n| format!(" · {} ctx.call a run", fmt::value(n, "count"))).unwrap_or_default();
+        if parts.is_empty() { String::new() } else { format!("{} of a core{calls}", parts.join(" · ")) }
     }
 
     /// Where a part went over its §19 budget: (part, its share, the budget).
@@ -1678,6 +1704,7 @@ fn mean_overhead<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Option<Over
         pixel_cpu_ms: mean(|o| o.pixel_cpu_ms),
         encoder_pct: mean(|o| o.encoder_pct),
         http_probe_pct: mean(|o| o.http_probe_pct),
+        script_calls: mean(|o| o.script_calls),
     })
 }
 
@@ -2112,6 +2139,9 @@ pub fn run(args: &Args) -> Result<Output> {
             let kinds: Vec<&str> = variants.iter().filter_map(|v| v.target.as_deref()).map(|t| engine(&ctx.describe["targets"][t])).collect();
             kinds[0] != kinds[1]
         };
+    } else {
+        // What each build is, its commit included, before anything runs: a folder's name says no commit.
+        progress(variants_line(&variants));
     }
     ctx.fixture = fixture::Spec::from(&ctx.describe)?;
     let mut engines: Vec<WebEngine> = Vec::new();
@@ -2518,7 +2548,7 @@ pub fn run(args: &Args) -> Result<Output> {
         let matrix = journey::matrix(&mut series_out);
         let batched = batching.as_ref().map_or(Value::Null, batch::Batching::summary);
         let stopped = halted.as_ref().map_or(Value::Null, |h| json!({ "code": h.code, "why": h.message, "validator": h.validator(), "not_run": not_run }));
-        let mut out = check_output(&exp, &dir, &file, series_out, ctx.warnings, matrix, args.has("require-parity"), (seed, used_random), batched, (json!(env), stopped))?;
+        let mut out = check_output(&exp, &dir, &file, series_out, ctx.warnings, matrix, args.has("require-parity"), (seed, used_random), batched, (json!(env), stopped), variants_json(&variants))?;
         // A check that stopped (a stop, the user's state disturbed, launches that kept failing) ends with
         // that error's code.
         if let Some(h) = &halted {
@@ -2571,6 +2601,8 @@ pub fn run(args: &Args) -> Result<Output> {
             "seed": seed, "used_random": used_random,
         },
         "file_repo": super::pr::repo_relative(&file.display().to_string()), "identity": ident, "ledger": ledger,
+        // `--mobile`: the phone the pages ran on, whose CPUs no host pin, reservation or power plan touches.
+        "phone": ctx.phone.as_ref().and_then(|p| serde_json::to_value(&p.facts).ok()),
         "comparison": if ctx.implementations { "implementations" } else { "builds" },
         "variants": variants.iter().map(|v| {
             let kind = v.target.as_deref().map(|t| ctx.describe["targets"][t]["kind"].clone()).unwrap_or(Value::Null);
@@ -2786,6 +2818,8 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     let failed_by = r.as_ref().err().and_then(|e| e.refusal.as_deref()).map_or(Value::Null, |f| json!(f));
     // `--runs N`: each per-run metric's lowest and highest run beside its median.
     let spread = r.as_ref().ok().filter(|b| !b.spread.is_empty()).map_or(Value::Null, |b| json!(b.spread));
+    // A native app's GPU shader caches as its launch found them: a cold one compiles in the run.
+    let gpu_cache = r.as_ref().ok().and_then(|b| b.gpu_cache.clone());
     let (passed, error, hint, values, refused, locked, recording, screen, shown) = match r {
         Ok(b) => {
             let shown = shown::summarize(std::slice::from_ref(&b), false).0;
@@ -2822,7 +2856,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "check", "until": launch::until_of(&s.launch), "primary": { "metric": s.primary }, "declared": declared,
         "passed": passed, "decided": passed, "error": error, "hint": hint, "refusal": failed_by, "values": values, "refused": refused, "measured_run": measured_run, "session_locked": locked, "headless": headless_series(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
         "recording": recording, "screen": screen, "shown": shown, "overhead": overhead, "untimed": untimed_of(&[(values["untimed.n"].as_f64(), values["untimed.ms"].as_f64())]),
-        "runs": ctx.runs, "spread": spread,
+        "runs": ctx.runs, "spread": spread, "gpu_cache": gpu_cache,
         "video": recording.as_str().filter(|r| film && has_video(r)).map(|r| json!({ "head": r })),
         "log": log, "log_path": ctx.runner.log, "actions": actions,
         // For the parity matrix (`journey::matrix`).
@@ -2906,6 +2940,7 @@ fn check_output(
     seeded: (u32, bool),
     batched: Value,
     ran: (Value, Value),
+    variants: Value,
 ) -> Result<Output> {
     let (env, stopped) = ran;
     let halted = stopped.is_object();
@@ -2931,7 +2966,19 @@ fn check_output(
     let before = series.iter().filter(|s| s["kind"] == "refused").count();
     let refused = series.iter().filter(|s| s["journey_refusal"].is_object()).count();
     let failed = series.iter().filter(|s| !matches!(s["kind"].as_str(), Some("gap" | "refused")) && (s["passed"] != true || s["journey_refusal"].is_object())).count();
-    let mut text = String::new();
+    // The builds checked, their commits included (a folder's name says none). An implementation check
+    // names its sides on each case's line.
+    let mut text = variants
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["target"].is_null())
+        .map(|v| format!("{} {}", v["role"].as_str().unwrap_or(""), v["label"].as_str().unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join(" → ");
+    if !text.is_empty() {
+        text += "\n\n";
+    }
     for s in &series {
         if s["kind"] == "gap" {
             text += &format!("gap   {}  {}\n", s["label"].as_str().unwrap_or(""), s["gap"]["reason"].as_str().unwrap_or(""));
@@ -3011,7 +3058,7 @@ fn check_output(
         let later = s["measured_run"].as_u64().filter(|r| *r > 0);
         if s["passed"] == true {
             text += &format!(
-                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}{}\n",
+                "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}{}{}\n",
                 s["label"].as_str().unwrap_or(""),
                 later.map(|r| format!(" · run {}", r + 1)).unwrap_or_default(),
                 s["engine"].as_str().filter(|e| *e != "chromium").map(|e| format!(" · {e}")).unwrap_or_default(),
@@ -3027,7 +3074,9 @@ fn check_output(
                 // The film's capture and encoder ran beside the run: its values are not a clean run's.
                 if s["video"]["head"].is_string() { " · perturbed (filmed)" } else { "" },
                 // So did the HTTP probe: its requests are work the server did in the run.
-                if s["values"]["http.probes"].is_number() { " · probed (its times hold the HTTP probe's requests)" } else { "" }
+                if s["values"]["http.probes"].is_number() { " · probed (its times hold the HTTP probe's requests)" } else { "" },
+                // A native app whose launch found no shader caches compiled them in its run.
+                if s["gpu_cache"] == "cold" { " · cold shader cache" } else { "" }
             );
             if let Some(r) = later {
                 text += &format!("      run  {} measured, not run 1: a process of the target ended in run 1, so these values are a warm run's (from the state the reset left)\n", r + 1);
@@ -3160,7 +3209,7 @@ fn check_output(
     }
     text += &format!("\n{exp}\n");
     let result = json!({
-        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "env": env, "plan": { "seed": seeded.0, "used_random": seeded.1 },
+        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "env": env, "plan": { "seed": seeded.0, "used_random": seeded.1 }, "variants": variants,
         "series": series, "warnings": warnings, "passed": failed == 0 && !halted, "stopped": stopped, "parity": matrix, "batch": batched, "text": text,
     });
     store::write_json(&dir.join("result.json"), &result)?;
@@ -4623,8 +4672,11 @@ fn full_trace_warning(ctx: &Ctx, target: &Value) -> Option<Warning> {
 /// wall-time, CPU-share, frame and latency metrics (the target's CPU time and exact counters stay).
 /// Pinned, they run on CPUs of their own: what strobe used beside its budgeted parts (reserve sweep,
 /// samplers, present consumer, terminal reader, pixel reads), with the runner, over 10% warns. A script
-/// target's runs are mostly strobe relaying each `ctx.call`: over 10% warns `ObserverCost`, over 20%
-/// refuses `run.duration` (its `cpu.work` and `js.heap.retained` are the script's own). Only a timed
+/// target's runs that made 2 or more `ctx.call`s a run are mostly strobe relaying them: over 10% warns
+/// `ObserverCost`, over 20% refuses `run.duration` (its `cpu.work` and `js.heap.retained` are the
+/// script's own). With fewer, the runner's share is the bench file's own `run()` (a client loading a
+/// server): unpinned it is judged as any runner's; pinned it is off the target's CPUs, so strobe's
+/// residual is budgeted alone and only a client near one thread's ceiling (85%) warns. Only a timed
 /// block refuses: a `--check` warns, saying what a timed block would refuse. What the runner does in
 /// its own process (a `ctx.mock` handler, a `Bun.serve` in the bench file) is the runner's share.
 fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut b: Block) -> Block {
@@ -4635,7 +4687,10 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     let block = format!("{} · {} block", s.label(), side_of(ctx, v));
     let pinned = ctx.pin.is_some();
     let timed = x.measures_time();
-    let fix = if !pinned && kind != "script" && both > 5.0 { unpinned_fix(ctx) } else { String::new() };
+    // A script run that made under 2 `ctx.call`s a run relayed next to nothing: the runner's share is
+    // the bench file's own `run()` (a client that loads a server with `fetch`), the target's load.
+    let relay = kind == "script" && o.script_calls.is_none_or(|n| n >= 2.0);
+    let fix = if !pinned && !relay && both > 5.0 { unpinned_fix(ctx) } else { String::new() };
     // Once per series and part (`key`).
     let mut once = |key: &str, w: Warning| {
         if ctx.overhead_warned.insert(format!("{}\n{key}", s.label())) {
@@ -4648,7 +4703,8 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
             b.refused.entry(m.clone()).or_insert_with(|| Refusal::new(ValidatorId::OverheadBudget, format!("{m}: {why}")).fix(fix));
         }
     };
-    if kind == "script" {
+    if relay {
+        let calls = o.script_calls.map(|n| format!(" {}", fmt::value(n, "count"))).unwrap_or_default();
         if both > 10.0 {
             let refusing = if both > 20.0 && !timed { " (over 20%: a timed bench refuses run.duration)" } else { "" };
             once(
@@ -4656,7 +4712,7 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
                 validity::warn(
                     "ObserverCost",
                     format!(
-                        "{block}: strobe relaying ctx.call used {} of a core in the runs (strobe {}, runner {}){refusing}: run.duration is mostly the relay, not the script; batch the work into fewer calls (one call that loops)",
+                        "{block}: strobe relaying{calls} ctx.call a run used {} of a core in the runs (strobe {}, runner {}){refusing}: run.duration is mostly the relay, not the script; batch the work into fewer calls (one call that loops)",
                         pct_of_core(both),
                         pct_of_core(strobe),
                         pct_of_core(runner)
@@ -4665,7 +4721,7 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
             );
         }
         if both > 20.0 && timed {
-            let why = format!("strobe and the runner used {} of a core relaying ctx.call in the runs (over 20%), so the run's time is mostly strobe's", pct_of_core(both));
+            let why = format!("strobe and the runner used {} of a core relaying{calls} ctx.call a run (over 20%), so the run's time is mostly strobe's", pct_of_core(both));
             refuse(&mut b, &|m| m == "run.duration", &why, "batch the work into fewer ctx.call (one call that loops), or compare cpu.work");
         }
         return b;
@@ -4686,13 +4742,24 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
         return b;
     }
     let parts = [o.reserve_pct, o.sampler_pct, o.present_pct, o.terminal_pct, o.pixel_pct, o.http_probe_pct].iter().flatten().sum::<f64>();
-    let residual = (strobe - parts).max(0.0) + runner;
+    // A script's run that relayed nothing: the runner's share is the bench file's own load, on strobe's
+    // CPUs, off the target's; strobe's own residual is budgeted alone.
+    let client = kind == "script";
+    let residual = (strobe - parts).max(0.0) + if client { 0.0 } else { runner };
     if residual > 10.0 {
+        let who = if client { "strobe (besides its budgeted parts)" } else { "strobe (besides its budgeted parts) and the runner" };
+        once("pinned self", validity::warn("OverheadBudget", format!("{block}: {who} used {} of a core in the runs, on strobe's own CPUs (budget 10%)", pct_of_core(residual))));
+    }
+    // One JavaScript thread near its ceiling: the client may pace the server it loads, not the server.
+    if client && runner >= 85.0 {
         once(
-            "pinned self",
+            "script client",
             validity::warn(
-                "OverheadBudget",
-                format!("{block}: strobe (besides its budgeted parts) and the runner used {} of a core in the runs, on strobe's own CPUs (budget 10%)", pct_of_core(residual)),
+                "ObserverCost",
+                format!(
+                    "{block}: the bench file's run() used {} of a core on strobe's CPUs (off the target's): near one JS thread's ceiling, client fetch() may pace the server; spread the load over fewer, larger requests or a load generator of its own (fixture())",
+                    pct_of_core(runner)
+                ),
             ),
         );
     }
@@ -5035,6 +5102,22 @@ fn change_ci(relative: bool, est: f64, lo: f64, hi: f64, unit: &str) -> (String,
     (fmt::signed(est, unit), fmt::signed(lo, unit), fmt::signed(hi, unit))
 }
 
+/// `NotSteady` for blocks whose measured runs stepped down (`Warmup::values`): work left over from the
+/// launch (a load still running when warmup decided) is in their first runs, not the case's.
+fn stepped_note(blocks: &[Block]) -> Option<Warning> {
+    let stepped: Vec<(f64, f64)> = blocks.iter().filter_map(|b| Some((*b.values.get("warmup.stepped.first")?, *b.values.get("warmup.stepped.last")?))).collect();
+    let (first, last) = stepped.iter().copied().max_by(|a, b| (a.0 - a.1).total_cmp(&(b.0 - b.1)))?;
+    Some(validity::warn(
+        "NotSteady",
+        format!(
+            "{} block(s)' measured runs stepped down (the most: the first measured run's work {}, the last half's median {}): work left over from the launch ran into the first runs; wait in setup until the app is ready (ctx.waitForLine(<its ready line>, {{ since: \"launch\" }})), or give the case more runs",
+            stepped.len(),
+            fmt::value(first, "ms"),
+            fmt::value(last, "ms")
+        ),
+    ))
+}
+
 /// The analysers of a series' blocks; `names` are how its notes name base and head (`side_of`).
 fn analyse(s: &Series, def: &MetricDef, blocks: &[Block], pairs: &[(usize, usize)], relative: bool, names: [&str; 2], w: &mut Vec<Warning>) {
     for (role, name) in ["base", "head"].into_iter().zip(names) {
@@ -5072,6 +5155,7 @@ fn analyse(s: &Series, def: &MetricDef, blocks: &[Block], pairs: &[(usize, usize
             format!("{swung} block(s) never did the same work twice in {MAX_WARMUP} warmup runs: the work swung from run to run without growing (jitter, not state): pin the target's CPUs (--pin), quiet the machine, or give each run more work"),
         ));
     }
+    w.extend(stepped_note(blocks));
     // On the comparison's own scale: log ratios, or differences for counts and anything that read 0
     // (a ratio of 0 dropped those pairs, and a count's every pair).
     let d: Vec<f64> =
@@ -5566,6 +5650,9 @@ struct Launch {
     log_at: Vec<u64>,
     /// The time each case took in the launch (ms): its runs, resets and the checks after them.
     case_ms: Vec<f64>,
+    /// The launch's first run (`run:0`) on the host clock, where it ran: what `block::startup_spill`
+    /// reads the launch's timeline around.
+    first_run: Option<(u64, u64)>,
 }
 
 impl Launch {
@@ -6457,7 +6544,7 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     b.refused.retain(|k, _| !http_probe::metric(k));
     if x.http && !x.untimed {
         // What says whether the block is valid stays: its untimed stretches, warmup, other work on its CPUs.
-        b.values.retain(|k, _| matches!(k.as_str(), "untimed.n" | "untimed.ms" | "warmup.unsteady" | "cpu.foreign" | "cpu.foreign.max"));
+        b.values.retain(|k, _| matches!(k.as_str(), "untimed.n" | "untimed.ms" | "warmup.unsteady" | "warmup.stepped.first" | "warmup.stepped.last" | "cpu.foreign" | "cpu.foreign.max"));
         b.refused.clear();
         b.frames.clear();
         b.intervals.clear();
@@ -8000,7 +8087,31 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     let unmeasured = warmup.first().is_some() && i >= warmup.measured().end;
                     let key = if unmeasured { format!("warm:{g}") } else { format!("run:{g}") };
                     runs.push(run_once(&mut ctx.runner, s, &same, &key, profile, profile && i + 1 == warmup.measured().end, set != Set::Memory && warmup.may_end(i))?);
+                    // The work that must hold steady is the renderer's main-thread time. `--check` measures the
+                    // first run: it asks whether a case works, not what it costs. From outside or in an engine
+                    // without that counter, the work is the processes' CPU, as a native app's; where this machine
+                    // gives no CPU time (cycles refused), the run's wall time.
+                    let work: Vec<f64> = runs
+                        .iter()
+                        .map(|r| {
+                            // A run that left a document without `goto` has no task time, one whose set lost
+                            // a process no CPU: the next measure stands in.
+                            if !traceless && !r.doc_lost {
+                                r.task
+                            } else if !r.cpu_lost && r.work.is_finite() {
+                                r.work
+                            } else {
+                                r.ms
+                            }
+                        })
+                        .collect();
+                    // The browser's whole CPU must hold steady too (its after-startup chores leave the
+                    // renderer's task time alone).
+                    let tree: Vec<f64> = runs.iter().map(|r| if !r.cpu_lost && r.work.is_finite() { r.work } else { f64::NAN }).collect();
+                    let lost: Vec<bool> = runs.iter().map(|r| r.cpu_lost).collect();
                     if let Some(f) = warmup.first() {
+                        // A timing block's plateau that a later run left goes back to warmup (`Warmup::after`).
+                        warmup.after(&work, &tree, &lost);
                         // Leak run: a post-GC census after every run; S1 after N runs, S2 after 2 × N. Firefox
                         // takes about:memory's after its own GC and CC, and no heap snapshot.
                         if let (Some(dir), Some(b)) = (&mem_dir, firefox) {
@@ -8023,28 +8134,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         }
                         continue;
                     }
-                    // The work that must hold steady is the renderer's main-thread time. `--check` measures the
-                    // first run: it asks whether a case works, not what it costs. From outside or in an engine
-                    // without that counter, the work is the processes' CPU, as a native app's; where this machine
-                    // gives no CPU time (cycles refused), the run's wall time.
-                    let work: Vec<f64> = runs
-                        .iter()
-                        .map(|r| {
-                            // A run that left a document without `goto` has no task time, one whose set lost
-                            // a process no CPU: the next measure stands in.
-                            if !traceless && !r.doc_lost {
-                                r.task
-                            } else if !r.cpu_lost && r.work.is_finite() {
-                                r.work
-                            } else {
-                                r.ms
-                            }
-                        })
-                        .collect();
-                    // The browser's whole CPU must hold steady too (its after-startup chores leave the
-                    // renderer's task time alone).
-                    let tree: Vec<f64> = runs.iter().map(|r| if !r.cpu_lost && r.work.is_finite() { r.work } else { f64::NAN }).collect();
-                    if warmup.after(&work, &tree, &runs.iter().map(|r| r.cpu_lost).collect::<Vec<_>>()) && !x.untimed {
+                    if warmup.after(&work, &tree, &lost) && !x.untimed {
                         if let (Some(dir), Some(b)) = (&gecko_dir, firefox) {
                             match probe::gecko::census(b, &page, &dir.join("memory-0.json.gz"), "after warmup, before the profiler started and the measured runs") {
                                 Ok(c) => census.push(c),
@@ -8152,7 +8242,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         // No case passed: the launch closes as a failed block does, its trace and probes dropped.
         if page_cases.is_empty() {
-            return Ok(Launch { cases: failed.map(|e| vec![Err(e)]).unwrap_or_default(), abort, notes, actions: None, log_at, case_ms });
+            return Ok(Launch { cases: failed.map(|e| vec![Err(e)]).unwrap_or_default(), abort, notes, actions: None, log_at, case_ms, first_run: None });
         }
         // The cases that passed, as blocks; anything the launch fails from here fails each of them.
         let finished = (|| -> Result<(Vec<Block>, Kept)> {
@@ -8179,6 +8269,14 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             };
             let samples = sampler.map(probe::os::Sampler::stop).unwrap_or_default();
             let sampler_pct = samples.cpu_ms.map(|c| 100.0 * c / (sampled.elapsed().as_secs_f64() * 1e3).max(1.0));
+            // A check's one cold run that measured startup work still running on the target's CPUs says so.
+            if x.untimed
+                && let (Some(cpus), Some((0, c))) = (ctx.pin, page_cases.first())
+                && let Some(r) = c.runs.first().filter(|_| c.base == 0)
+                && let Some(why) = block::startup_spill_cpus(&samples, cpus, r.t0, r.t1)
+            {
+                ctx.warnings.push(validity::warn("NotSteady", format!("{} · {side} block: {why}", s0.label())));
+            }
             let procs1 = snapshot_procs();
             let background = busiest_others(&procs0, &procs1);
             // A phone's page reaches none of this computer's screens.
@@ -8566,9 +8664,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     // The same quantity from the Performance domain, next to the trace's: they must agree.
                     values.insert("main.busy.cdp".into(), busy_cdp);
                 }
-                if c.warmup.unsteady() {
-                    values.insert("warmup.unsteady".into(), if c.warmup.grew() { 2.0 } else { 1.0 });
-                }
+                c.warmup.values(&mut values);
                 if private_mb > 0.0 {
                     values.insert("memory.app.private".into(), private_mb);
                 }
@@ -8792,6 +8888,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     reduced_motion,
                     http: None,
                     spread: run_spread(x, &extra),
+                    gpu_cache: None,
                 });
             }
             // From outside there is no trace to keep: the block's numbers are in result.json. A Firefox block
@@ -8888,12 +8985,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         })();
         let mut out: Vec<Result<Block>> = match finished {
             Ok((blocks, actions)) => {
-                return Ok(Launch { cases: blocks.into_iter().map(Ok).chain(failed.map(Err)).collect(), abort, notes, actions, log_at, case_ms });
+                return Ok(Launch { cases: blocks.into_iter().map(Ok).chain(failed.map(Err)).collect(), abort, notes, actions, log_at, case_ms, first_run: None });
             }
             Err(e) => page_cases.iter().map(|_| Err(e.clone())).collect(),
         };
         out.extend(failed.map(Err));
-        Ok(Launch { cases: out, abort, notes, actions: None, log_at, case_ms })
+        Ok(Launch { cases: out, abort, notes, actions: None, log_at, case_ms, first_run: None })
     })();
     lapped.set(Instant::now());
     // A timed block whose phone got hot during it describes a throttling phone (`Thermal`): it runs again.
@@ -10753,9 +10850,10 @@ fn side_spec<'a>(spec: &'a str, describe: &Value, project: &Path) -> Result<Opti
 }
 
 /// The project a target's builds and app profiles come from: its `cwd`'s strobe.json root (another
-/// repository), else none (the bench file's own).
+/// repository), else none (the bench file's own). A command's and a terminal program's `cwd` is the
+/// folder it runs in, under the variant's (`bench/tty.rs` `prepare`), not another project.
 pub(crate) fn target_project(describe: &Value, name: &str) -> Result<Option<(PathBuf, Value)>> {
-    let Some(cwd) = describe["targets"][name]["cwd"].as_str().filter(|_| describe["targets"][name]["kind"] != "command") else { return Ok(None) };
+    let Some(cwd) = describe["targets"][name]["cwd"].as_str().filter(|_| !matches!(describe["targets"][name]["kind"].as_str(), Some("command" | "tty"))) else { return Ok(None) };
     let file = Path::new(describe["file"].as_str().unwrap_or("."));
     let dir = file.parent().unwrap_or(Path::new(".")).join(cwd);
     let dir = std::fs::canonicalize(&dir).map_err(|_| Error::usage(format!("target {name}: cwd {cwd} is no folder ({})", dir.display())))?;
@@ -11264,7 +11362,11 @@ fn leak_text(r: &Value, s: &Value, file: &str) -> String {
     } else {
         format!("warmup, then S0 · {n} runs · S1 · {n} runs · S2 · a post-GC census after every run")
     };
-    out += &format!("plan   {plan} · {}\n", r["plan"]["pin"].as_str().unwrap_or(""));
+    // On a phone, this computer's CPU pin says nothing of where the page ran.
+    match super::record::phone_line(&r["phone"]) {
+        Some(phone) => out += &format!("phone  {phone}\nplan   {plan}\n"),
+        None => out += &format!("plan   {plan} · {}\n", r["plan"]["pin"].as_str().unwrap_or("")),
+    }
     out += &format!("time   {}\n", fmt::ms_duration(s["elapsed_ms"].as_f64().unwrap_or(0.0) as u64));
     for v in r["variants"].as_array().into_iter().flatten() {
         let role = v["role"].as_str().unwrap_or("");
@@ -11346,7 +11448,13 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
     if !engine.is_empty() {
         out += &format!("env    {engine}\n");
     }
-    out += &format!("plan   {} · warmup until steady · {} runs per block{}\n", r["plan"]["pin"].as_str().unwrap_or(""), r["plan"]["runs_per_block"], full_trace_note(r, s));
+    // On a phone, this computer's CPU pin says nothing of where the page ran.
+    let phone = super::record::phone_line(&r["phone"]);
+    if let Some(p) = &phone {
+        out += &format!("phone  {p}\n");
+    }
+    let pin = if phone.is_some() { String::new() } else { format!("{} · ", r["plan"]["pin"].as_str().unwrap_or("")) };
+    out += &format!("plan   {pin}warmup until steady · {} runs per block{}\n", r["plan"]["runs_per_block"], full_trace_note(r, s));
     let steps: Vec<(String, f64)> = serde_json::from_value(s["steps"].clone()).unwrap_or_default();
     out += &format!("time   {} · per block {}\n", fmt::ms_duration(s["elapsed_ms"].as_f64().unwrap_or(0.0) as u64), steps_text(&steps));
     out += &self_line(s);
@@ -11522,13 +11630,21 @@ pub(crate) fn render(r: &Value) -> String {
             Some("mixed") => "session locked in some pairs only: nothing decided",
             _ => "visible",
         };
-        let reserved = r["plan"]["reserve"]["cpus"].as_u64().map(|c| format!("others kept off CPUs {}", cpu_list(c))).unwrap_or_default();
-        let power = format!("power plan {}", env["power_plan"].as_str().filter(|p| !p.is_empty()).unwrap_or("?"));
+        // On a phone, this computer's CPU pin, reservation and power plan say nothing of where the page ran:
+        // the phone's line says what it ran on.
+        let phone = super::record::phone_line(&r["phone"]);
+        if let Some(p) = &phone {
+            out += &format!("phone  {p}\n");
+        }
+        let host = |t: String| if phone.is_some() { String::new() } else { t };
+        let reserved = host(r["plan"]["reserve"]["cpus"].as_u64().map(|c| format!("others kept off CPUs {}", cpu_list(c))).unwrap_or_default());
+        let power = host(format!("power plan {}", env["power_plan"].as_str().filter(|p| !p.is_empty()).unwrap_or("?")));
+        let pin = host(r["plan"]["pin"].as_str().unwrap_or("").to_string());
         // Only blocks whose speed check compared with a reference (`speed_ratio`) say their CPUs ran at
         // speed: a command or a harness gets no check, and a device's first native check sets its reference.
         let checked = s["blocks"].as_array().is_some_and(|b| !b.is_empty() && b.iter().all(|b| b["speed_ratio"].is_number()));
         let speed = if checked { "unthrottled" } else { "speed not checked" };
-        out += &format!("plan   {}{}\n", fmt::fields([r["plan"]["pin"].as_str().unwrap_or(""), &reserved, &power, &format!("{screen}, {speed}")]), full_trace_note(r, &s));
+        out += &format!("plan   {}{}\n", fmt::fields([&pin, &reserved, &power, &format!("{screen}, {speed}")]), full_trace_note(r, &s));
         let cache = &r["plan"]["gpu_cache"];
         if let Some(gpu) = cache[s["label"].as_str().unwrap_or("")].as_str().or(cache[s["target"].as_str().unwrap_or("")].as_str()) {
             out += &format!("gpu    shader caches {gpu}\n");

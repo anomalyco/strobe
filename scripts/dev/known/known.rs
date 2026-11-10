@@ -33,6 +33,8 @@
 //                               plus the wakes' own cost, which `tick <hz> 0` runs alone; so the true ratio of
 //                               two works at one <hz> is known once that is read
 //   hold <mb> [s]               long-running: <mb> MiB private written once, then idle, for [s] (60) s
+//   startup <ms> [s] [text]     long-running: a thread named `loader` spins <ms> of its CPU from the launch (a
+//                               slow startup), then prints [text] (READY); the process idles for [s] (60) s
 //   tty <bytes> <delay_ms>      terminal app: raw input; on each key, after <delay_ms>, one synchronized
 //                               frame that rewrites row 1 with <bytes> cells (alternating A and B); `q` quits.
 //                               Prints `ready` on row 0 first.
@@ -468,6 +470,20 @@ fn main() {
                 }
             }
         }
+        "startup" => {
+            let (busy, secs) = (arg(&args, 2, 4000.0), arg(&args, 3, 60.0));
+            let text = args.get(4).cloned().unwrap_or_else(|| "READY".into());
+            thread::Builder::new()
+                .name("loader".into())
+                .spawn(move || {
+                    spin(busy);
+                    println!("{text}");
+                    std::io::stdout().flush().unwrap();
+                })
+                .unwrap();
+            thread::sleep(Duration::from_secs_f64(secs));
+            return;
+        }
         "hold" => {
             let mb = arg(&args, 2, 100.0) as usize;
             let mut v = vec![0u8; mb * MIB];
@@ -506,7 +522,7 @@ fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|hold|tty|frames> …");
+            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|hold|startup|tty|frames> …");
             std::process::exit(2);
         }
     }

@@ -336,8 +336,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         p if host::tree_pids(pid).contains(&p) => (p, host::MainThread::attach(p)),
         p => (pid, Err(host::MainLost::Gone(format!("the script host named process {p} as its runtime, which is not of the process tree strobe started ({pid})")))),
     };
-    // Each thread of the host's tree over the block, where its recording is kept (attribution).
-    let timeline = profiles.is_some().then(|| probe::wakes::Timeline::start(move || host::tree_pids(pid)));
+    // Each thread of the host's tree over the block, where its recording is kept (attribution), and in an
+    // untimed block, whose one cold run it checks for startup still running (`block::startup_spill`).
+    let timeline = (profiles.is_some() || x.untimed).then(|| probe::wakes::Timeline::start(move || host::tree_pids(pid)));
     let host = RefCell::new(spawned);
     let heap_mb = || -> Result<f64> { Ok(host.borrow_mut().request(json!({ "op": "heap" }), Duration::from_secs(120))?.as_f64().unwrap_or(f64::NAN) / (1024.0 * 1024.0)) };
     steps.push(("launch".into(), launched.elapsed().as_secs_f64() * 1e3));
@@ -349,9 +350,16 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     // that ended (`host::ended_marks`), read right after the cycles and of the same processes.
     let edges: RefCell<Vec<(super::super::record::Cycles, host::EndedMarks)>> = RefCell::new(Vec::new());
     let ended_of = |c: &super::super::record::Cycles| host::ended_marks(&c.keys().map(|k| k.0).collect::<Vec<_>>(), None);
+    // The run's `ctx.call`s in its timed parts: what strobe relays (`Overhead::script_calls`).
+    let calls = Cell::new(0usize);
     let serve = |op: &str, a: &Value| -> Result<Value> {
         match op {
-            "call" => host.borrow_mut().request(json!({ "name": a["name"], "args": a["args"] }), Duration::from_secs(600)),
+            "call" => {
+                if hooks.in_run() && !hooks.untimed_now() {
+                    calls.set(calls.get() + 1);
+                }
+                host.borrow_mut().request(json!({ "name": a["name"], "args": a["args"] }), Duration::from_secs(600))
+            }
             "count" => {
                 hooks.count(a);
                 Ok(Value::Bool(true))
@@ -411,6 +419,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let mut ended_exes: Vec<Vec<(String, f64, u32)>> = Vec::new();
                 // Per run: the share of the timed parts the host's main thread was on a CPU (`cpu.main`), or why none.
                 let mut mains: Vec<std::result::Result<f64, host::MainLost>> = Vec::new();
+                // Per run: its timed `ctx.call`s.
+                let mut called: Vec<usize> = Vec::new();
                 // Who else used the CPUs, from two snapshots outside the runs, for a block with other work.
                 let procs0 = ctx.pin.map(|_| (host::now_ns(), host::all_processes()));
                 // Steady once two runs cost the same CPU (SPEC §9.2).
@@ -437,11 +447,16 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let at0 = super::super::record::read_known(c0.keys());
                     super::super::record::read_at(&mut c0, &at0);
                     let clock0 = super::super::record::Clock::now();
+                    calls.set(0);
                     cost.start();
                     let t0 = host::now_ns();
                     ctx.runner.call("run", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw or timed out"))?;
                     let t1 = host::now_ns();
                     cost.end();
+                    called.push(calls.get());
+                    if base + runs.len() == 0 {
+                        launch.first_run = Some((t0, t1));
+                    }
                     let at1 = super::super::record::read_known(c0.keys().chain(edges.borrow().iter().flat_map(|e| e.0.keys())));
                     let clock1 = super::super::record::Clock::now();
                     let main1 = main_read();
@@ -538,9 +553,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let (counts, uncounted) = probe::wakes::counter_metrics(&counted, declared_metrics(s));
                 extra.extend(counts);
                 let mut values = metrics::block_values(&metrics::BlockData::default(), "run", &extra);
-                if warmup.unsteady() {
-                    values.insert("warmup.unsteady".into(), if warmup.grew() { 2.0 } else { 1.0 });
-                }
+                warmup.values(&mut values);
                 // Never a reading from after the reset in its place: no value.
                 let (private_mb, pss) = local.end.checked_sub(1).and_then(|i| ends.get(i).copied().flatten()).unwrap_or((0.0, None));
                 if private_mb > 0.0 {
@@ -628,7 +641,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     screen: None,
                     reserve: None,
                     shown: None,
-                    overhead: Some(Overhead { strobe_pct, runner_pct, ..Overhead::default() }),
+                    overhead: Some(Overhead { strobe_pct, runner_pct, script_calls: Some(called[local.clone()].iter().sum::<usize>() as f64 / local.len().max(1) as f64), ..Overhead::default() }),
                     process_set: Some(programs(&host::process_tree(pid))),
                     fixture_connected: None,
                     client: None,
@@ -665,6 +678,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     let (wait, cut) = if left < wait { (left, Some("--max-time")) } else { (wait, None) };
     let (exited, ended) = host.into_inner().exit(profiles.is_some(), wait, cut);
     let mut launch = result?;
+    // A check's one cold run that measured the host's startup still running says so.
+    if let Some(why) = timeline.as_ref().zip(launch.first_run.filter(|_| x.untimed)).and_then(|(t, (t0, t1))| super::block::startup_spill(t, t0, t1)) {
+        ctx.warnings.push(validity::warn("NotSteady", format!("{} · {} block: {why}", s.label(), side_of(ctx, v))));
+    }
     if let Some(dir) = &profiles
         && launch.cases.iter().any(Result::is_ok)
     {

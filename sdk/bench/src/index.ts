@@ -316,9 +316,11 @@ export interface Context<P, K = any> extends Seeded {
    * output (`in: "output"`, the default; needs the target's `output: true`) or from files under its home matching a glob (`in: "logs/*.log"`), and
    * when strobe read it on its host clock (`at`, ns: the clock of phase marks and presented frames). Start the wait
    * before what makes the app write: `const saved = ctx.waitForLine(/saved/); await page.click("Save"); await saved`.
+   * `since: "launch"` also takes a line written before the call, since the app started (a ready line it printed
+   * once at startup; strobe keeps the output's last 2,000 lines, and reads log files from their start).
    * Fails after `timeout` ms (default 30000).
    */
-  waitForLine(match: string | RegExp, opts?: { in?: string; timeout?: number }): Promise<{ line: string; at: number }>
+  waitForLine(match: string | RegExp, opts?: { in?: string; timeout?: number; since?: "now" | "launch" }): Promise<{ line: string; at: number }>
   params: P
   target: string
   variant: "base" | "head"
@@ -665,7 +667,7 @@ export type Target<P, K = any> = Side &
 export interface Side {
   /** What reports call this side ("Rewrite"); default the target's key. */
   name?: string
-  /** A folder (relative to the bench file) whose strobe.json gives this target's `build` and app profiles: another repository's implementation. Its default variant is that project. (A `command` target's `cwd` is where its command runs.) */
+  /** A folder (relative to the bench file) whose strobe.json gives this target's `build` and app profiles: another repository's implementation. Its default variant is that project. (A `command` target's `cwd` is where its command runs, and a `tty` target's the folder under the variant's its program runs in.) */
   cwd?: string
   /**
    * The adapter: what a journey's `@name`s mean on this target. A selector string (CSS on a page, a key path or

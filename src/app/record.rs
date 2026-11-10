@@ -60,7 +60,7 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
             // The attribution block's recording (`kind`), beside the check run's own (`check_recording`).
             Some(json!({
                 "case": s["label"], "recording": s["attribution"].as_str()?, "kind": "attribution", "check_recording": s["recording"], "values": s["values"], "refused": s["refused"], "declared": s["declared"],
-                "headless": s["headless"], "sampling": s["attribution_sampling"], "video": s["video"]["head"],
+                "headless": s["headless"], "sampling": s["attribution_sampling"], "video": s["video"]["head"], "check_gpu_cache": s["gpu_cache"],
             }))
         })
         .collect();
@@ -104,6 +104,11 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
             text += &super::video::line(v, &meta["video"]);
         }
         let meta = store::resolve(rec).ok().and_then(|d| store::read_json(&d.join("meta.json")).ok()).unwrap_or(Value::Null);
+        // The check's launch compiled its shaders (cold caches) and this one found them: what the cold
+        // compile cost is in the check's numbers, not in this recording.
+        if r["check_gpu_cache"] == "cold" && meta["gpu_cache"] == "warm" {
+            text += "note     the check's launch found the GPU shader caches cold and this recording's launch warm, so a shader compile the check's numbers hold is not in this recording; record app:<id> --gpu-cache cold --probes attribution records a cold launch\n";
+        }
         text += &sampling_line(&meta);
         let native = meta["native"] == true;
         text += &if native {
@@ -120,8 +125,9 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
     }
     // What the recordings are: a loaded machine's (other work on the CPUs; a slow speed check is said,
     // never waited for), a profile that missed or failed (`Attribution`), one that cost the page its time
-    // (`ProbeOverhead`, `ObserverCost`), or timers the target inherited coalesced (`TimerCoalescing`).
-    let shown = |id: Option<&str>| matches!(id, Some("Background" | "Throttled" | "Attribution" | "ProbeOverhead" | "ObserverCost" | "TimerCoalescing"));
+    // (`ProbeOverhead`, `ObserverCost`), timers the target inherited coalesced (`TimerCoalescing`), or a
+    // check run that measured startup still running (`NotSteady`).
+    let shown = |id: Option<&str>| matches!(id, Some("Background" | "Throttled" | "Attribution" | "ProbeOverhead" | "ObserverCost" | "TimerCoalescing" | "NotSteady"));
     let busy: Vec<Value> = out.json["warnings"].as_array().into_iter().flatten().filter(|w| shown(w["id"].as_str()) && w["level"] == "warn").cloned().collect();
     for w in &busy {
         text += &format!("! {:<24}{}\n", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or(""));
@@ -1357,13 +1363,17 @@ pub fn app_gone(n: &mut crate::target::native::Native, when: &str, last: impl Fn
 /// The refusal for an app that exited with `code` `when`, with its last output lines (None: strobe
 /// did not read its output).
 pub fn exited(code: i32, when: &str, last: Option<&[String]>) -> Error {
+    exited_refusal(code, when, last).into()
+}
+
+/// `exited`'s refusal, for a caller that says more in its fix.
+pub fn exited_refusal(code: i32, when: &str, last: Option<&[String]>) -> crate::model::Refusal {
     let r = crate::model::Refusal::new(crate::model::ValidatorId::RunIncomplete, format!("the app exited (code {code}) {when}, so there was no app left to measure"));
     match last {
         Some([]) => r.detail("it printed nothing").fix("run the app's command line by hand to see why it exits"),
         Some(lines) => r.detail(format!("its last output: {}", lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" | "))).fix("fix what made the app exit (its output above)"),
         None => r.fix("run the app's command line by hand to see why it exits; output: true on the target keeps its last lines here"),
     }
-    .into()
 }
 
 /// Up to the last `keep` lines of the app's output: those `wait_line` read (`seen`), then what its

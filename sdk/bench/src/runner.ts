@@ -40,7 +40,7 @@ const TARGET_KEYS: Record<string, string[]> = {
   cli: [...SIDE, "run", "env", "build"],
   native: [...SIDE, "app", "path", "home", "viewport", "args", "env", "files", "unset", "display", "gpuCache", "window", "expect", "resetPixels", "output", "motion"],
   webview: [...SIDE, "app", "path", "home", "viewport", "gpuCache", "expect", "motion"],
-  tty: [...SIDE, "run", "cwd", "cols", "rows", "home", "files", "env", "unset", "build", "ignore"],
+  tty: [...SIDE, "run", "cols", "rows", "home", "files", "env", "unset", "build", "ignore"],
 }
 for (const [kind, keys] of Object.entries(TARGET_KEYS)) KEYS[`target ${kind}`] = keys
 // Where a key that belongs elsewhere goes.
@@ -470,9 +470,9 @@ const context = (): any => seeded({
   exec: (line?: string) => request("exec", { line }),
   // The watch goes in at the call, before whatever the hook does next; then short polls, each answered
   // at once, so strobe serves the hook's other calls (a click) between them.
-  async waitForLine(match: string | RegExp, opts: { in?: string; timeout?: number } = {}) {
+  async waitForLine(match: string | RegExp, opts: { in?: string; timeout?: number; since?: "now" | "launch" } = {}) {
     const pattern = match instanceof RegExp ? plain(match) : { match }
-    const id = await request("line", { step: "watch", ...pattern, in: opts.in ?? "output", timeout: opts.timeout ?? 30_000 })
+    const id = await request("line", { step: "watch", ...pattern, in: opts.in ?? "output", timeout: opts.timeout ?? 30_000, since: opts.since ?? "now" })
     for (;;) {
       const got: any = await request("line", { step: "poll", id, in: opts.in ?? "output" })
       if (!got?.pending) return got
