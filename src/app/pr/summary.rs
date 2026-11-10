@@ -20,7 +20,7 @@ pub fn summary(r: &Value) -> String {
         // attaches no images).
         _ => return block(r),
     };
-    scrub_paths(&body)
+    scrub_public(&scrub_paths(&body))
 }
 
 /// `### strobe check · perf/app.bench.ts`: the section's heading, with the bench file.
@@ -52,13 +52,7 @@ fn why(s: &Value) -> String {
         .or_else(|| s["gap"]["reason"].as_str().map(str::to_string))
         .or_else(|| refusal(&s["primary"]["refusal"]))
         .unwrap_or_default();
-    cell(&first_clause(&text.replace(['\n', '\r'], " "), 180))
-}
-
-/// An exact counter: one run counts it exactly, so a check's single run reads it as any run would
-/// (requests, bytes, the bench file's or page's counts, terminal frames, DOM nodes).
-fn exact_counter(metric: &str) -> bool {
-    metric == "dom.nodes" || model::metric(metric).is_some_and(|d| d.kind == model::Kind::Exact)
+    cell(&first_clause(&scrub_public(&text.replace(['\n', '\r'], " ")), 180))
 }
 
 /// The warnings of the result worth a CI reader's look (warn level): the experiment's, then each
@@ -72,9 +66,10 @@ fn warnings(r: &Value) -> String {
         let id = w["id"].as_str().unwrap_or("");
         let text = w["text"].as_str().unwrap_or("");
         let label = s.and_then(|s| s["label"].as_str()).filter(|l| series.len() > 1 && !text.starts_with(l));
+        // Counts and shares, never another process's name (`scrub_public`), before it is cut short.
         let text = match label {
-            Some(l) => format!("{l}: {text}"),
-            None => text.to_string(),
+            Some(l) => format!("{l}: {}", scrub_public(text)),
+            None => scrub_public(text),
         };
         if !warns.iter().any(|(i, t)| *i == id && *t == text) {
             warns.push((id, text));
@@ -147,7 +142,7 @@ fn check(r: &Value, series: &[&Value]) -> String {
         }
         // A base that failed fails nothing of head's: it compares no counter.
         if s["base"]["passed"] == false {
-            notes.push(format!("base failed: {}", cell(&first_clause(s["base"]["error"].as_str().unwrap_or("").lines().next().unwrap_or(""), 140))));
+            notes.push(format!("base failed: {}", cell(&first_clause(&scrub_public(s["base"]["error"].as_str().unwrap_or("").lines().next().unwrap_or("")), 140))));
         }
         let note = notes.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join("<br>");
         rows.push(format!("| {} | {} | {status} | {counters} | {note} |", cell(&case), cell(&target)));
@@ -225,8 +220,13 @@ fn counters_cell(s: &Value) -> String {
         };
         parts.push(p);
     }
-    let mut keys: Vec<&String> =
-        s["values"].as_object().into_iter().flat_map(|o| o.keys()).chain(base.as_object().into_iter().flat_map(|o| o.keys())).filter(|k| exact_counter(k) && !shown.contains(&k.as_str())).collect();
+    let mut keys: Vec<&String> = s["values"]
+        .as_object()
+        .into_iter()
+        .flat_map(|o| o.keys())
+        .chain(base.as_object().into_iter().flat_map(|o| o.keys()))
+        .filter(|k| model::is_ci_counter(k) && !shown.contains(&k.as_str()))
+        .collect();
     keys.sort();
     keys.dedup();
     for m in keys {

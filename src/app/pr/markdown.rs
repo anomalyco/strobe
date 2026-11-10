@@ -745,11 +745,13 @@ impl<'a> Doc<'a> {
         let both = if crate::app::family::implementations(self.r) { "both implementations" } else { "both builds" };
         let mut foot = vec![format!("Each pair launched {both} fresh, in alternating order (AB or BA). Change: the main metric.")];
         if foreign {
-            let who = top_procs(&busy, 3);
-            foot.push(format!(
-                "Other apps' CPU: other processes on the measured CPUs, % of one core, bold from 25%{}.",
-                if who.is_empty() { String::new() } else { format!("; busiest {}", who.join(", ")) }
-            ));
+            // Counts and shares only: a published block names no process of the bench machine's.
+            let who = match foreign_load(&busy) {
+                Some((1, peak)) => format!("; 1 other process ≥ 5%, {peak:.0}% of a core"),
+                Some((n, peak)) => format!("; {n} other processes ≥ 5%, busiest {peak:.0}% of a core"),
+                None => String::new(),
+            };
+            foot.push(format!("Other apps' CPU: other processes on the measured CPUs, % of one core, bold from 25%{who}."));
         }
         if left > 0 {
             foot.push(format!("{left} quiet pairs left out for length."));
@@ -1168,7 +1170,7 @@ impl<'a> Doc<'a> {
             } else if let (true, Some((_, said))) = (id == "NoPresentSource", permission(raw)) {
                 ("NoPresentSource", said.to_string())
             } else {
-                (id, plain_note(&first_clause(&scrub_paths(raw), 150), (&sides.0, &sides.1)))
+                (id, plain_note(&first_clause(&scrub_public(&scrub_paths(raw)), 150), (&sides.0, &sides.1)))
             };
             match seen.iter_mut().find(|(i, t, _)| i == id && *t == text) {
                 Some(e) => e.2.push(series),

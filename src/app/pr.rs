@@ -177,8 +177,8 @@ fn framed(r: &Value, level: u8) -> String {
     let top = format!("<sub>strobe · {id}{file} · generated</sub>");
     let bottom = format!("<sub>strobe · {id} · end of generated report</sub>");
     let body = if r["kind"] == "bisect" { bisect(r) } else { Doc::new(r, level).render() };
-    // No machine's paths in a pull request, whatever a note or a refusal quoted.
-    format!("{top}\n\n{}\n\n{bottom}", scrub_paths(body.trim()))
+    // No machine's paths and no other process's name in a pull request, whatever a note or a refusal quoted.
+    format!("{top}\n\n{}\n\n{bottom}", scrub_public(&scrub_paths(body.trim())))
 }
 
 /// `strobe 0.6.0 (a1b2c3d4e5)`: Cargo.toml's version and, for a build from a checkout, its commit, so
