@@ -172,7 +172,7 @@ pub fn run(args: &Args) -> Result<Output> {
     t += &format!("  {} load       {:.0}% of all CPUs busy\n", mark(busy <= 0.10), busy * 100.0);
     if let Some(why) = &env.shared_runner {
         t += &format!(
-            "  ! runner     shared: {why}; other jobs share its CPUs, so timed benches, records and tracks are refused (SharedRunner): bench --check (with --base and --noworse on exact counters), leak runs and attribution recordings work\n"
+            "  ! runner     shared: {why}; other jobs share its CPUs, so timed benches, records and tracks are refused (SharedRunner): bench --check (with --base and --noworse on exact counters), leak runs and attribution recordings work; a dedicated runner in a virtual machine says RUNNER_ENVIRONMENT=self-hosted or CI_SHARED_ENVIRONMENT=false\n"
         );
     }
     t += &format!("  {} cycles     {cycle_clock}\n", mark(cycles_refused.is_none()));

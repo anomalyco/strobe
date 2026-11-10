@@ -1944,7 +1944,7 @@ pub fn run(args: &Args) -> Result<Output> {
             } else if args.has("blocks") || args.has("aa") {
                 Some("--blocks and --aa time fresh launches")
             } else if args.get("base").is_some() {
-                Some("--base runs an implementation comparison's check, one launch per case and side")
+                Some("--base checks two builds or two targets, one launch per case and side")
             } else {
                 None
             };
@@ -2426,8 +2426,11 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         // A wait that ran into `--max-time` is said of the series it held up only.
         ctx.ran_out = false;
-        // A resumed experiment keeps the series it had finished.
-        if let Some(done) = ctx.saved["series"][s.label()].get("done").filter(|d| d.is_object()).cloned() {
+        // A resumed experiment keeps the series it had finished, unless this run refuses the series (a
+        // resume on a shared runner of what a dedicated host timed: `SharedRunner`). On a shared runner a
+        // comparison's finished series runs again: its secondaries may hold another host's timings.
+        let keep = s.refused.is_none() && (ctx.shared.is_none() || mode != Mode::Compare);
+        if let Some(done) = ctx.saved["series"][s.label()].get("done").filter(|d| d.is_object() && keep).cloned() {
             progress(format!("\n{}  finished before the resume: kept", s.label()));
             all_decided &= done["decided"].as_bool().unwrap_or(false);
             series_out.push(done);
@@ -3590,13 +3593,15 @@ fn stable_exact(name: &str, blocks: &[Block], pairs: &[(usize, usize)]) -> bool 
     model::metric(name).is_some_and(|d| d.kind == model::Kind::Exact) && held_from(name, blocks, pairs) == Some(true)
 }
 
-/// Whether `name` held one value on each side in every pair, once there are `EXACT_MIN_PAIRS` to say.
+/// Whether `name` held one value on each side in every pair: false as soon as a pair shows it moved,
+/// true once `EXACT_MIN_PAIRS` held it, unknown before.
 fn held_from(name: &str, blocks: &[Block], pairs: &[(usize, usize)]) -> Option<bool> {
-    if pairs.len() < stats::EXACT_MIN_PAIRS {
-        return None;
+    let &(a0, b0) = pairs.first()?;
+    let (a0, b0) = (val(&blocks[a0], name), val(&blocks[b0], name));
+    if !pairs.iter().all(|&(a, b)| val(&blocks[a], name) == a0 && val(&blocks[b], name) == b0) {
+        return Some(false);
     }
-    let (a0, b0) = (val(&blocks[pairs[0].0], name), val(&blocks[pairs[0].1], name));
-    Some(pairs.iter().all(|&(a, b)| val(&blocks[a], name) == a0 && val(&blocks[b], name) == b0))
+    (pairs.len() >= stats::EXACT_MIN_PAIRS).then_some(true)
 }
 
 /// ` · ETA ~12.5 min`: the pairs left to `target` at this series' mean pair time so far, plus the
@@ -4044,7 +4049,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         // A `metric.<name>` primary is better in the direction its lines gave (known from the blocks).
         let def = counter(def_in(&s.primary, &blocks)?.unwrap_or(def));
         let verdict_before = driver.decided_at.as_ref().map(|c| c.verdict.clone());
-        let (lk, step) = driver.after_pair(&s.primary, def, &primary_pairs, || tested_names(s, script, &blocks, &pairs, bound).len());
+        // On a shared runner no secondary is tested (`shared_state` refuses or compares each exactly): no
+        // pairs run on for Holm.
+        let (lk, step) = driver.after_pair(&s.primary, def, &primary_pairs, || if shared.is_some() { 0 } else { tested_names(s, script, &blocks, &pairs, bound).len() });
         if let Some(sequential::Look { cmp, look, decided, next, likely, .. }) = &lk {
             // Where this series likely ends: at the look its projection reaches, or where it gives up.
             // Decided: it ends here, or runs on to the pairs its secondaries need.
@@ -4166,7 +4173,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // series ran: counter blocks after timing pairs, or timing blocks after counter pairs.
     let mut pass: Option<Pass> = None;
     let mut counters_note: Option<String> = None;
-    if split == Counting::Separate && halted.is_none() && !pairs.is_empty() {
+    // On a shared runner neither pass runs: what it measures (perf counters, `http.*`) is refused there.
+    if split == Counting::Separate && halted.is_none() && !pairs.is_empty() && shared.is_none() {
         // Holm corrects across every tested secondary, both kinds of block's: the pass's must clear its
         // first step at that family's size, not at the size of its own share of it.
         // The paired loop's own kind once (a counter loop's blocks also hold the non-time metrics the
@@ -4187,7 +4195,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     }
     // A series of `http.*` and other metrics (SPEC §8.9): K pairs of the other kind of block, as above.
     let mut http_note: Option<String> = None;
-    if probe == Probing::Separate && halted.is_none() && !pairs.is_empty() {
+    if probe == Probing::Separate && halted.is_none() && !pairs.is_empty() && shared.is_none() {
         let family = tested_names(s, script, &blocks, &pairs, bound).into_iter().filter(|m| http_probe::metric(m) == main_http).count()
             + secondary_names(s, script, false).into_iter().filter(|m| http_probe::metric(m) != main_http && model::metric(m).is_some() && !s.per_side(m)).count();
         let k = holm_pairs(family).max(min_pairs).min(pairs.len());
@@ -4387,11 +4395,16 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     }
     // A shared runner (`SharedRunner`): exact counters that held one value are all that compares.
     if let Some(why) = &shared {
-        if shared_state(why, &mut primary) {
+        let moved = |name: &str| {
+            let (b, p) = source(name);
+            held_from(name, b, p) == Some(false)
+        };
+        if shared_state(why, &mut primary, moved(&s.primary)) {
             primary_decided = false;
         }
         for c in secondaries.iter_mut().chain(descriptive.iter_mut()) {
-            shared_state(why, c);
+            let m = moved(&c.metric);
+            shared_state(why, c, m);
         }
     }
     // Secondaries: gated on the primary and Holm-corrected once every refusal is in, so a primary
@@ -5332,7 +5345,7 @@ fn series_refusal(ctx: &Ctx, s: &Series, e: &Error) -> Option<Refusal> {
 }
 
 /// What runs on a shared CI runner instead of timing (`SharedRunner`).
-const SHARED_FIX: &str = "time it on a dedicated or self-hosted runner (RUNNER_ENVIRONMENT=self-hosted); here run bench --check (with --base <ref> and --noworse on exact counters: count.*, net.requests, net.bytes, tty.frames, dom.nodes), a leak run (--probes memory) or record --probes attribution";
+const SHARED_FIX: &str = "time it on a dedicated runner (a CI job in a virtual machine that is one says RUNNER_ENVIRONMENT=self-hosted or CI_SHARED_ENVIRONMENT=false; a GitHub-hosted runner never is); here run bench --check (with --base <ref> and --noworse on exact counters: count.*, net.requests, net.bytes, tty.frames, dom.nodes), a leak run (--probes memory) or record --probes attribution";
 
 /// `SharedRunner` for `what` on a shared CI runner (`why`, `host::shared_runner`).
 fn shared_refusal(what: &str, why: &str) -> Refusal {
@@ -5368,14 +5381,15 @@ fn shared_series(series: &mut [Series], why: &str) -> Result<()> {
 
 /// A comparison's rows on a shared CI runner (`SharedRunner`): a metric that is no exact counter is
 /// refused, and so is a counter that did not hold one value on each side (no signed-rank test of
-/// counts that moved with the machine). Returns whether `c` was refused.
-fn shared_state(why: &str, c: &mut Comparison) -> bool {
+/// counts that moved with the machine; `moved`: a pair showed it, `held_from`). Returns whether `c` was
+/// refused.
+fn shared_state(why: &str, c: &mut Comparison, moved: bool) -> bool {
     if c.kind == VerdictKind::Refused {
         return false;
     }
     let r = if !model::is_ci_counter(&c.metric) {
         shared_refusal(&format!("{} is no exact counter", c.metric), why)
-    } else if !c.exact && c.n < stats::EXACT_MIN_PAIRS {
+    } else if !c.exact && !moved && c.n < stats::EXACT_MIN_PAIRS {
         Refusal {
             summary: format!("{}: {} pairs, and on {why} a counter compares only exactly, which takes {} pairs that each held it", c.metric, c.n, stats::EXACT_MIN_PAIRS),
             ..shared_refusal(&c.metric, why)
@@ -6458,7 +6472,7 @@ fn hold_machine(ctx: &mut Ctx, what: &str) -> Result<()> {
     if ctx.power.is_none() && ctx.phone.is_none() {
         // Cores unpark and clocks follow the new plan's policy: a switch waits until they hold, longest
         // before blocks whose times become a verdict (`power_for`).
-        let p = power_for(ctx.args, matches!(ctx.mode, Mode::Compare | Mode::Blocks(_)))?;
+        let p = power_for(ctx.args, matches!(ctx.mode, Mode::Compare | Mode::Blocks(_)), ctx.pin)?;
         if let Some(why) = &p.kept
             && !ctx.warnings.iter().any(|w| w.id == "PowerPlan")
         {
@@ -9489,8 +9503,8 @@ impl Drop for OwnAffinity {
 /// A progress line says so only when the plan changed: a plan already in use is the env line's. A
 /// switch waits until the CPUs' speed holds (`host::power::wait_settled`): up to 3 s before what is
 /// `timed`, 250 ms before anything else.
-pub(crate) fn power_for(args: &Args, timed: bool) -> Result<host::power::Power> {
-    let (p, settled) = power_settled(args, timed)?;
+pub(crate) fn power_for(args: &Args, timed: bool, cpus: Option<u64>) -> Result<host::power::Power> {
+    let (p, settled) = power_settled(args, timed, cpus)?;
     if p.switched() {
         let (waited, held) = settled.unwrap_or_default();
         progress(format!(
@@ -9504,14 +9518,15 @@ pub(crate) fn power_for(args: &Args, timed: bool) -> Result<host::power::Power> 
 }
 
 /// `power_for` without the progress line, for a command that says it in its result (`record`).
-pub(crate) fn power_quiet(args: &Args, timed: bool) -> Result<host::power::Power> {
-    Ok(power_settled(args, timed)?.0)
+pub(crate) fn power_quiet(args: &Args, timed: bool, cpus: Option<u64>) -> Result<host::power::Power> {
+    Ok(power_settled(args, timed, cpus)?.0)
 }
 
-/// The run's power plan, and after a switch how long its speed took to hold and whether it did.
-fn power_settled(args: &Args, timed: bool) -> Result<(host::power::Power, Option<(Duration, bool)>)> {
+/// The run's power plan, and after a switch how long the speed of `cpus` (the target's pin) took to
+/// hold and whether it did.
+fn power_settled(args: &Args, timed: bool, cpus: Option<u64>) -> Result<(host::power::Power, Option<(Duration, bool)>)> {
     let p = host::power::Power::for_run(power_keep(args)?);
-    let settled = p.switched().then(|| host::power::wait_settled(timed));
+    let settled = p.switched().then(|| host::power::wait_settled(timed, cpus));
     Ok((p, settled))
 }
 
@@ -9819,19 +9834,22 @@ fn series_and_sides(describe: &Value, args: &Args, base: Option<&str>, head: &st
 }
 
 /// `--base <target> --head <target> --check`: the two targets of the bench file it names, each run at
-/// the bench file's own folder (a check builds no variant), or None without `--base`.
+/// the bench file's own folder (a check builds no variant). None without `--base`, and for two builds
+/// (`--base <ref> --head .`), which `--target` may narrow as any build's targets.
 fn check_pair<'a>(describe: &Value, args: &'a Args, project: &Path) -> Result<Option<(&'a str, &'a str)>> {
     let Some(b) = args.get("base").filter(|_| args.has("check")) else { return Ok(None) };
     let h = args.get("head").unwrap_or(".");
-    if args.get("target").is_some() {
-        return Err(Error::usage("--check --base <target> --head <target> runs those two targets: drop --target"));
-    }
     match (side_spec(b, describe, project)?, side_spec(h, describe, project)?) {
-        (Some((b, None)), Some((h, None))) if b != h => Ok(Some((b, h))),
+        (Some((b, None)), Some((h, None))) if b != h => {
+            if args.get("target").is_some() {
+                return Err(Error::usage("--check --base <target> --head <target> runs those two targets: drop --target (it picks targets of a two-build check, --base <ref> --head .)"));
+            }
+            Ok(Some((b, h)))
+        }
         // Two builds (`--base <ref> --head .`): each case once on each (`check_series`).
         (None, None) => Ok(None),
         _ => Err(Error::usage(format!(
-            "--check --base {b} --head {h}: name two different targets of the bench file, with no =<variant> (a check runs the bench file's own folder), to check them as their comparison measures them; or drop --base"
+            "--check --base {b} --head {h}: name two builds (a git ref or folder on each side: each case once on each), or two different targets of the bench file with no =<variant> (a check runs the bench file's own folder) to check them as their comparison measures them; or drop --base"
         ))),
     }
 }

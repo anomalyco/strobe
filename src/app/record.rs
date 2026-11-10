@@ -203,7 +203,7 @@ pub fn run(args: &Args) -> Result<Output> {
         None => None,
     };
     let _slot = if slotted { Some(super::bench::slot::Registration::new(&store::new_id("rec"), &target).acquire_until(&format!("strobe record {target}"), deadline)?.0) } else { None };
-    let power = if timed { Some(super::bench::power_quiet(args, true)?) } else { None };
+    let power = if timed { Some(super::bench::power_quiet(args, true, None)?) } else { None };
     let mut out = recorded(args, target)?;
     // The user's plan is put back (the guard dropped) before the result says so.
     let switched = power.filter(|p| p.switched()).map(|p| p.used.clone());

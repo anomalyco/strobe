@@ -36,7 +36,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let deadline = args.get("max-time").map(duration_ms).transpose()?.map(|ms| Instant::now() + Duration::from_millis(ms));
     let reg = bench::slot::Registration::new(&id, &cmd.join(" "));
     let (slot, waited) = reg.acquire_until(&format!("strobe run {program}"), deadline)?;
-    let power = bench::power_for(args, true)?;
+    let power = bench::power_for(args, true, pin)?;
     let reserve = match (args.get("reserve-cpus").unwrap_or("on"), pin) {
         ("off", _) | (_, None) => None,
         (_, Some(cpus)) => match host::reserve::Reserve::start(cpus) {
