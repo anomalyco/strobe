@@ -888,15 +888,15 @@ pub fn virtual_machine() -> Option<String> {
     (sysctl_i64("kern.hv_vmm_present") == Some(1)).then(|| sysctl_string("hw.model").unwrap_or_else(|| "virtual machine".into()))
 }
 
-/// The filesystem a folder or file is on (`<mount point> <type>`): statfs.
-pub fn volume(path: &std::path::Path) -> Option<String> {
+/// The volume a folder or file is on (its mount point) and its filesystem's type: statfs.
+pub fn volume(path: &std::path::Path) -> Option<(String, String)> {
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
         return None;
     }
     let text = |b: &[libc::c_char]| String::from_utf8_lossy(&b.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect::<Vec<u8>>()).to_string();
-    Some(format!("{} {}", text(&s.f_mntonname), text(&s.f_fstypename)))
+    Some((text(&s.f_mntonname), text(&s.f_fstypename)))
 }
 
 /// The assertions `keep_awake` holds: (system, display).

@@ -61,7 +61,7 @@ pub fn plain(p: &Path) -> String {
 }
 
 /// What lies around a base's and a head's folders that differs for a program started in each before its
-/// own code runs (`VariantPlacement`, a warning): another volume or filesystem; a `package.json`,
+/// own code runs (`VariantPlacement`, a warning): another kind of filesystem; a `package.json`,
 /// `node_modules`, `tsconfig.json` or `bunfig.toml` in a folder above one of them alone (a runtime looks
 /// up for them); one under the temporary folder and the other not, or a folder above one alone with 500
 /// entries or more where those above the other hold under 100 each (a runtime that lists the folders it
@@ -74,10 +74,12 @@ pub fn placement_diff(base: &Path, head: &Path) -> Option<String> {
     let volume = |p: &Path| super::win::volume(p);
     #[cfg(not(windows))]
     let volume = |p: &Path| super::os::volume(p);
-    if let (Some(a), Some(b)) = (volume(&base), volume(&head))
-        && a != b
+    // Another kind of filesystem (NTFS and ReFS, ext4 and tmpfs or 9p): another volume of the same kind
+    // costs nothing measurable (adais: `bun -e 0` from C: and D:, both NTFS, the same within 1 ms).
+    if let (Some((va, fa)), Some((vb, fb))) = (volume(&base), volume(&head))
+        && fa != fb
     {
-        found.push(format!("they are on different volumes or filesystems ({a} and {b})"));
+        found.push(format!("they are on different filesystems ({fa} on {va}, {fb} on {vb})"));
     }
     // The folders above each that are not above the other: what one side meets and the other does not.
     let above = |p: &Path, other: &Path| -> Vec<PathBuf> { p.ancestors().skip(1).filter(|a| !other.starts_with(a)).map(Path::to_path_buf).collect() };

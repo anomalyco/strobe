@@ -702,14 +702,27 @@ pub fn virtual_machine() -> Option<String> {
     (flagged || named).then(|| if text.is_empty() { "hypervisor".into() } else { text })
 }
 
-/// The device a folder or file is on and its filesystem's type (`<dev> <f_type>`): stat and statfs.
-pub fn volume(path: &std::path::Path) -> Option<String> {
+/// The device a folder or file is on and its filesystem's type (statfs's magic number): stat and statfs.
+pub fn volume(path: &std::path::Path) -> Option<(String, String)> {
     use std::os::unix::fs::MetadataExt;
     let dev = std::fs::metadata(path).ok()?.dev();
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-    let kind = if unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0 { format!("{:x}", s.f_type) } else { "?".into() };
-    Some(format!("{dev:x} {kind}"))
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    let kind = match s.f_type {
+        0xEF53 => "ext4".to_string(),
+        0x0102_1994 => "tmpfs".to_string(),
+        0x9123_683E => "btrfs".to_string(),
+        0x5846_5342 => "xfs".to_string(),
+        0x794C_7630 => "overlayfs".to_string(),
+        0x0102_1997 => "9p".to_string(),
+        0x6573_5546 => "fuse".to_string(),
+        0x6969 => "nfs".to_string(),
+        t => format!("filesystem {t:#x}"),
+    };
+    Some((format!("device {dev:x}"), kind))
 }
 
 pub fn on_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
