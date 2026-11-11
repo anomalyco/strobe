@@ -671,22 +671,6 @@ fn share(seed: &Path, dst: &Path) -> Option<Shared> {
             let _ = std::fs::set_permissions(&cache, p);
             let _ = std::fs::remove_file(&cache);
         }
-        // Copies of seeds no bench linked for a week go (a regenerated seed is a new version).
-        let week = std::time::Duration::from_secs(7 * 86_400);
-        for e in std::fs::read_dir(host::paths::sub("seeds")).into_iter().flatten().flatten() {
-            let used = std::fs::read_dir(e.path()).into_iter().flatten().flatten().filter_map(|f| f.metadata().ok()?.accessed().ok()).max();
-            if used.and_then(|t| t.elapsed().ok()).is_some_and(|age| age > week) {
-                for f in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
-                    if let Ok(m) = f.metadata() {
-                        let mut p = m.permissions();
-                        #[allow(clippy::permissions_set_readonly_false)]
-                        p.set_readonly(false);
-                        let _ = std::fs::set_permissions(f.path(), p);
-                    }
-                }
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
         std::fs::create_dir_all(cache.parent()?).ok()?;
         std::fs::copy(seed, &cache).ok()?;
         let mut p = std::fs::metadata(&cache).ok()?.permissions();
@@ -694,6 +678,8 @@ fn share(seed: &Path, dst: &Path) -> Option<Shared> {
         std::fs::set_permissions(&cache, p).ok()?;
         std::fs::write(cache.with_extension("stamp"), format!("{:?}", stamp(&cache))).ok()?;
     }
+    // When this seed version was last linked: copies unused for long go (`strobe prune`, SPEC §5.14).
+    host::cache::touch(cache.parent()?);
     std::fs::hard_link(&cache, dst).ok()?;
     let (len, modified) = stamp(&cache)?;
     Some(Shared { link: dst.to_path_buf(), cache, len, modified })
@@ -862,27 +848,62 @@ pub fn reap_dead_owners() -> Vec<String> {
             }
         })
         .collect();
-    // Snap Firefox's profiles live where its sandbox lets it read them (`firefox::snap_profiles`).
-    let entries: Vec<std::fs::DirEntry> = [host::paths::run(), super::firefox::snap_profiles()].iter().filter_map(|d| std::fs::read_dir(d).ok()).flat_map(|r| r.flatten()).collect();
-    for e in entries {
-        let name = e.file_name().to_string_lossy().to_string();
-        // A launch's home or browser profile, or the folder of a Wayland compositor strobe ran (`wayland`).
-        let Some(named) = ["profile-", "home-", "wl-"].iter().find_map(|p| name.strip_prefix(p)).and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok()) else { continue };
-        let gone = match std::fs::read_to_string(e.path().join(OWNER_FILE)).ok().as_deref().and_then(parse_owner) {
-            Some((pid, start)) => pid != std::process::id() && !owner_alive(pid, start),
-            // A folder from before owner files: its strobe by the pid in its name.
-            None => named != std::process::id() && !host::exe_of(named).is_some_and(|exe| exe.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase().starts_with("strobe"))),
-        };
-        if !gone {
-            continue;
+    for dir in launch_folders() {
+        if folder_gone(&dir) == Some(true) {
+            lines.extend(release_gone(&dir));
+            remove_home(&dir);
         }
-        let k = key(&e.path());
-        let left: Vec<(u32, u32, Stamp)> = stamped().into_iter().filter(|(_, _, s)| s.home == k).collect();
-        lines.extend(end_roots(&left).into_iter().map(|(pid, exe, _)| format!("ended {exe} (pid {pid}): it ran from {}, a folder of a strobe that is gone", e.path().display())));
-        restore_protocols(&e.path());
-        remove_home(&e.path());
     }
     lines
+}
+
+/// The launch folders strobe makes: homes and browser profiles under `run/`, and Snap Firefox's
+/// profiles where its sandbox lets it read them (`firefox::snap_profiles`).
+pub fn launch_folders() -> Vec<PathBuf> {
+    [host::paths::run(), super::firefox::snap_profiles()]
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flat_map(|r| r.flatten())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| launch_pid(&n.to_string_lossy()).is_some()))
+        .collect()
+}
+
+/// The pid in a launch folder's name: a launch's home or browser profile, or the folder of a Wayland
+/// compositor strobe ran (`wayland`).
+fn launch_pid(name: &str) -> Option<u32> {
+    ["profile-", "home-", "wl-"].iter().find_map(|p| name.strip_prefix(p)).and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok())
+}
+
+/// Whether the strobe that made a launch folder is gone (its owner file's pid and start time, or for a
+/// folder from before owner files, the pid in its name): None for a folder of another kind.
+pub fn folder_gone(dir: &Path) -> Option<bool> {
+    let named = launch_pid(&dir.file_name()?.to_string_lossy())?;
+    Some(match std::fs::read_to_string(dir.join(OWNER_FILE)).ok().as_deref().and_then(parse_owner) {
+        Some((pid, start)) => pid != std::process::id() && !owner_alive(pid, start),
+        None => named != std::process::id() && !host::exe_of(named).is_some_and(|exe| exe.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase().starts_with("strobe"))),
+    })
+}
+
+/// Before a gone strobe's launch folder is removed: ends what still runs from it, restores the URL
+/// schemes saved in it and unlinks its shared seed files. A line per process ended.
+pub fn release_gone(dir: &Path) -> Vec<String> {
+    let k = key(dir);
+    let left: Vec<(u32, u32, Stamp)> = stamped().into_iter().filter(|(_, _, s)| s.home == k).collect();
+    let lines = end_roots(&left).into_iter().map(|(pid, exe, _)| format!("ended {exe} (pid {pid}): it ran from {}, a folder of a strobe that is gone", dir.display())).collect();
+    restore_protocols(dir);
+    unshare(dir);
+    lines
+}
+
+/// What a launch folder borrows from strobe's caches while it exists: the shared seed copies linked
+/// into it and the GPU cache store lent to it.
+pub fn borrowed(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_to_string(dir.join(".strobe-shared")).unwrap_or_default().lines().filter_map(|l| l.split_once('\t')).map(|(_, cache)| PathBuf::from(cache)).collect();
+    if let Ok(store) = std::fs::read_to_string(dir.join(".strobe-gpu-cache")) {
+        out.push(PathBuf::from(store.trim()));
+    }
+    out
 }
 
 /// Ends what still runs from `home` (an app's detached service, anything stamped with it) and
@@ -1070,17 +1091,6 @@ pub fn gpu_cache_bytes(store: &Path) -> u64 {
         std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| if e.path().is_dir() { size(&e.path()) } else { e.metadata().map(|m| m.len()).unwrap_or(0) }).sum()
     }
     size(&store.join("dirs"))
-}
-
-/// Stores of GPU caches (`gpu-cache/<key>`) no launch used for a week go.
-pub fn prune_gpu_caches() {
-    let week = Duration::from_secs(7 * 86_400);
-    for e in std::fs::read_dir(host::paths::sub("gpu-cache")).into_iter().flatten().flatten() {
-        let used = std::fs::metadata(e.path().join("paths")).or_else(|_| e.metadata()).ok().and_then(|m| m.modified().ok());
-        if used.and_then(|t| t.elapsed().ok()).is_some_and(|age| age > week) {
-            let _ = std::fs::remove_dir_all(e.path());
-        }
-    }
 }
 
 /// Removes a home once nothing holds its files any more.

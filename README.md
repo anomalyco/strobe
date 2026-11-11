@@ -55,7 +55,7 @@ strobe look app:desktop                                         # what's on scre
 strobe open rec_3f9a                                            # the whole recording in Perfetto
 ```
 
-`app:desktop` is a profile in your repo's `strobe.json`: how to build and launch the app in a throwaway home, so benches never touch your real data. `strobe status` says what your machine can measure and which permission is missing.
+`app:desktop` is a profile in your repo's `strobe.json`: how to build and launch the app in a throwaway home, so benches never touch your real data. `strobe status` says what your machine can measure and which permission is missing, and how much disk strobe's files take; `strobe prune` frees what no process uses, like `docker system prune`.
 
 In CI, the GitHub Action checks every case on each pull request, and holds exact counters (requests, bytes, DOM nodes, your own `count.*`) to the base commit's:
 

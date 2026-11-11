@@ -48,6 +48,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": { "servers": { "type": "array", "items": { "type": "string" }, "description": "Symbol servers tried after Microsoft's." } }
+    },
+    "prune": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "This machine's setting, read only from your own <state>/strobe.json (a project's file may not set it) (SPEC 5.14).",
+      "properties": { "unused": { "type": "string", "description": "Caches unused this long go on their own, once a day: an age (\"14d\", the default) or \"off\"." } }
     }
   },
   "definitions": {

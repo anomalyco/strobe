@@ -493,7 +493,7 @@ fn mcp_up(s: &mut Steps) {
     s.line("✓", "mcp", format!("registered \"strobe\" · {url} · live in {live} opencode location{}", if live == 1 { "" } else { "s" }));
 }
 
-fn skill_path() -> PathBuf {
+pub(super) fn skill_path() -> PathBuf {
     host::home().join(".config").join("opencode").join("skills").join("strobe").join("SKILL.md")
 }
 

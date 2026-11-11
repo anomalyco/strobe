@@ -138,6 +138,8 @@ pub fn find(module: &Path, cv: &CodeView, servers: &[String]) -> Option<PathBuf>
     let dir = cache_dir().join(&name).join(cv.id());
     let cached = dir.join(&name);
     if cached.is_file() {
+        // When this download was last used: `strobe prune` ages the symbol cache by it.
+        crate::host::cache::touch(&dir);
         return Some(cached);
     }
     let missing = dir.join("missing");

@@ -85,6 +85,22 @@ fn claim(prefix: &str, root: &Path) -> Result<(String, PathBuf)> {
     Err(Error::msg(format!("no free {prefix}_ id in {}", root.display())))
 }
 
+/// Removes a recording's or an experiment's folder for `strobe prune` (SPEC §5.14): only a folder
+/// directly in `recordings/` or `experiments/`, never through a link (`host::disk::remove`).
+pub fn remove(dir: &Path) -> host::disk::Removed {
+    match [paths::recordings(), paths::experiments()].into_iter().find(|r| dir.parent() == Some(r.as_path())) {
+        Some(root) => host::disk::remove(dir, &root),
+        None => host::disk::Removed { failed: vec![format!("{}: not a recording or an experiment", dir.display())], ..Default::default() },
+    }
+}
+
+/// Marks a recording or experiment used now (`<dir>/.used`): `strobe prune` ages data by its last use.
+fn touch(dir: &Path) {
+    if let Ok(f) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(".used")) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
 /// Removes an unfinished recording (`Draft`): none of it is kept.
 fn discard(dir: &Path) {
     if dir.parent().is_some_and(|p| p == paths::recordings() || p == paths::experiments()) {
@@ -172,6 +188,7 @@ pub fn resolve(handle: &str) -> Result<PathBuf> {
         vec![paths::recordings(), paths::experiments()]
     };
     if let Some(exact) = roots.iter().map(|root| root.join(handle)).find(|p| p.is_dir()) {
+        touch(&exact);
         return Ok(exact);
     }
     let matches: Vec<PathBuf> = roots
@@ -183,7 +200,10 @@ pub fn resolve(handle: &str) -> Result<PathBuf> {
         .filter(|p| p.is_dir())
         .collect();
     match matches.len() {
-        1 => Ok(matches[0].clone()),
+        1 => {
+            touch(&matches[0]);
+            Ok(matches[0].clone())
+        }
         0 => Err(Error::usage(format!("no recording or experiment {handle}"))),
         _ => Err(Error::usage(format!("{handle} is ambiguous ({} matches)", matches.len()))),
     }

@@ -164,11 +164,16 @@ experiments/<exp>/  result.json per experiment; index.jsonl lists them (§14.2)
 recordings/<rec>/   §14.1
 history/            tracked series per device, schedules (§25.6)
 builds/<key>/       variant build cache (§9.5)
+seeds/<id>/         shared copies of large seed files (§13.2)
+gpu-cache/<store>/  GPU shader caches of warm launches (§13.2)
 sdk/<build>/        the bench SDK the runner imports, one folder per strobe build (`STROBE_BUILD_ID`);
-                    each use touches its `.used`, and other builds' folders unused for 30 days go
+                    each use touches its `.used`; other builds' folders are caches (§5.14)
 symbols/            source maps by debug ID, PDB cache
 engine/<version>/   trace_processor (§15), sha256-checked
 run/  log/          temp files; daemon.log, helper.log (rotated at 1 MB)
+<entry>.used        a cache entry's stamp: when strobe last used it, locked while a process does (§5.14)
+disk-cache.json     the last walk of each recording, experiment and large build (§5.14)
+prune.json          what the last automatic prune removed, and when (§5.14)
 cycle-clock.json    the cycle clock's check, once per boot (§13.6)
 native-speed.json   the native speed check's references per CPU mask (§10.1 `Throttled`)
 phones.json  adb/   Chrome channels given to strobe per phone; adb journals (§13.1)
@@ -283,7 +288,7 @@ host/           paths, processes (spawn.rs, jobs.rs, cgroup.rs), the cycle clock
 ```
 strobe <command> [flags]
 
-Setup      init · up · update · leave
+Setup      init · up · update · leave · prune (§5.14)
 Use        status · record · bench · plan · run (§5.13) · config · query · report · open (§11.4)
            · look (§5.12) · top · track · history (§25)
 Internal   daemon · mcp · helper · stats (hidden, §5.11)
@@ -550,7 +555,7 @@ Firefox 148+ for --engine firefox)`, as in `status`.
 ### 5.4 `strobe status`
 
 ```
-strobe status [--calibrate] [--fast] [--json]
+strobe status [--calibrate] [--fast] [--disk] [--json]
 ```
 
 It checks this device and takes no target (one is a usage error pointing at `look`).
@@ -558,7 +563,7 @@ It checks this device and takes no target (one is a usage error pointing at `loo
 Reports: environment (§9.4 provenance fields), a validity preflight (idle load per core for
 3 s, power plan, battery, throttling, displays and the adapter driving each), daemon, helper,
 engine, attachable targets (running apps, CDP endpoints found through `DevToolsActivePort` files,
-installed apps), recordings disk use (from the folders' listing, not a stat of every file), last
+installed apps), the disk strobe's files take (`disk` line, §5.14), last
 calibration, the cycle clock (`cycles` line, §13.6) and macOS timer coalescing (`timers` line). The
 cpu line and a Firefox older than 148 read as in `up` (§5.3). The benches running here are listed
 (§10.1 `ConcurrentBench`); a machine-wide bench slot held by a bench of another user or state folder,
@@ -569,6 +574,20 @@ CI_SHARED_ENVIRONMENT=false`, the problems list says so, and `env.shared_runner`
 `--calibrate` runs the full calibration (§10.3). `--fast` skips the 3 s idle-load sample and the slow
 device reads (an adb server that refuses the loopback connection is given up after 200 ms, as
 usbmuxd is): `status --fast` 2.0 s → 0.56 s on adais.
+
+Disk (`disk` line, `disk` in JSON; `disk_bytes` is its total): what everything strobe keeps takes on
+the disk, the state folder and strobe's own files outside it, and what a plain `strobe prune` would
+free now (§5.14), measured after the idle-load sample, which would otherwise count the walk as load:
+`! disk 119 GB (119 GB in <state>, 75.7 MB outside it) · 96.2 GB reclaimable: strobe prune frees it
+· 2440 GB free on its disk` (adais). The mark is `!`, with `: strobe prune frees it`, from 5 GB
+reclaimable or a tenth of the free space (vps: 1.68 GB of 6.31 GB free). Entries unchanged since
+their last walk count it (§5.14 "Sizes"); the rest are walked within 0.6 s (`--fast` 0.3 s; status
+keeps to its 4 s, §19); what the time does not reach is left out and said (`at least …`, `N entries
+not measured …`, JSON `complete: false`, `unmeasured`), and the next status goes on from there.
+`--disk` walks every entry again, kept walks aside, and adds a table: each category's size, files,
+entries and reclaimable bytes, with what `strobe prune <category>` frees for recordings and
+experiments. Before this, the line summed `recordings/` and `experiments/` alone: 22.8 GB of a 116
+GB state folder on adais.
 
 iOS devices (`ios` row, `ios.devices` and `ios.pages` in JSON): every phone the OS's usbmuxd sees,
 read beside the idle-load sample within 2.5 s for all of them (`--fast`: 250 ms, without the
@@ -1323,6 +1342,121 @@ strobe run --base "<command>" --head "<command>" [--aa | --check] [--primary <me
   same command on both sides: 100 experiments with `cpu.work` primary said `same` 99 times and
   `better` once (1%); 150 with `run.duration` of a 6 ms command and a 0.3% bound (so almost nothing is
   `same`, and most went to 12–40 pairs) said `better` 4 and `worse` 2 times (4.0%, nominal 5%).
+
+### 5.14 `strobe prune`
+
+```
+strobe prune [builds|seeds|gpu-cache|symbols|sdk|engine|run|recordings|experiments …] [--all]
+             [--older-than <dur>] [--dry-run] [-f|--force] [--json]
+```
+
+Removes what strobe keeps and no process uses, like `docker system prune`. Everything strobe keeps
+falls in one category (`app::prune::CATEGORIES`):
+
+| Category | Class | What |
+|---|---|---|
+| `builds` | cache | a git ref's worktree (`builds/<sha12>`, with its executable's copy, build key and log), a folder variant's executable copy (`out/<hash>`), a repository's compile cache (`cache/<hash>`), failed builds' logs |
+| `seeds` | cache | shared copies of large seed files (§13.2) |
+| `gpu-cache` | cache | GPU shader caches of warm launches (§13.2) |
+| `symbols` | cache | downloaded PDBs and gathered dSYMs (§12.2) |
+| `sdk` | cache | other strobe builds' bench SDK |
+| `engine` | cache | trace_processor versions this build does not use |
+| `run` | cache | launch folders of strobes that are gone, temporary files of processes that ended |
+| `recordings`, `experiments` | data | not made again |
+| `history`, `logs`, `other`, `install` | kept | tracked series, logs, settings and tokens, strobe's executables, helper and skill outside the state folder: never pruned |
+
+- **What goes.** With no category, every cache entry no process uses now (docker's "unused"; no
+  age). Named categories narrow it. Data goes only when named or with `--all`, and only what was
+  last used more than 30 days ago (`--older-than` sets the age for every category it names; for
+  caches it narrows by last use). Last use: a cache entry's stamp (below), else its newest write; a
+  recording or experiment's newest file (`store::resolve` touches its `.used` on each use).
+- **What stays, and why** (each said in the plan, counted by reason; the in-use ones by name):
+  a build a live process holds (`host::cache` leases, below); every build while a bench of a strobe
+  build before leases runs (its registration has no `leases`); a seed copy linked into, or a GPU
+  cache store lent to, a launch of a live strobe; this build's SDK and engine, and another build's
+  SDK used within a day (older builds mark it only when a bench starts); a launch folder whose
+  strobe runs; a temporary file named after a live strobe's pid, or, without a pid, from the last
+  day; a recording folder from the last day without `meta.json` (being written) or made by a bench
+  that runs; a running experiment; an experiment tracked history names (`history/`, `strobe
+  history` drills into it); a recording any experiment that stays names (in its `result.json` or
+  `state.json`: its views would break). The bench slot, the bench registry, phone journals and open
+  trace sessions in `run/`, and `experiments/index.jsonl` (the rerun ledger counts pruned
+  experiments too) are never entries.
+- **Leases.** A cache entry has a stamp beside it, `<entry>.used`: its time is the entry's last use,
+  and a process using the entry holds a shared lock on it for as long as it does (a bench: each
+  variant's worktree and executable copy until the experiment ends; a build: the repository's
+  compile cache while it runs). The OS drops a dead process's lock. `prune` removes an entry only
+  while it holds the stamp's exclusive lock, so it never takes what a live process uses, and a
+  bench that starts on an entry being removed waits for it and makes it again; the stamp goes with
+  the entry, and a lease checks that the file it locked is still the one at the path. Seed links
+  and pdb or dSYM hits touch their stamps.
+- **The plan first.** Per category: entries and bytes it frees, what stays and why, the in-use
+  entries by name, the total, and with data the age. On a terminal it asks `Remove N entries, X?
+  [y/N]`; `-f`/`--force` does not ask; with no terminal (or `--json`) and no `--force` it prints the
+  plan, removes nothing, says `strobe prune --force removes these` and exits 3, so an agent never
+  deletes by accident nor hangs on a prompt. `--dry-run` prints the plan only (exit 0). After a
+  removal: what went per category, what failed, and `Total reclaimed space: X`, the bytes of the
+  files whose last name it removed, counted file by file as it went (not the plan's estimate).
+- **Safety.** Removal is `host::disk::remove`: every path is checked to lie inside its root (the
+  state folder, Snap Firefox's profile folder, a worktree's record in its repository) with the
+  folder above it canonicalized; a symbolic link, junction or mount point is removed itself, never
+  followed; a folder is emptied file by file (paths past 260 characters through `\\?\`), read-only
+  files and folders made writable first, and a file that cannot go (held open, denied) is named
+  while the rest goes. One entry's failure does not stop the others; the exit code is 1 when any
+  failed, and a failed entry keeps its stamp's earlier time. Recordings and experiments go through
+  `store::remove`, their only writer. A launch folder's leftover processes end and its URL schemes
+  are restored first (`isolate::release_gone`, as `reap_dead_owners` does). One prune at a time per
+  state folder (`run/prune.lock`). Not an MCP tool.
+- **Worktrees.** After its folder goes, a worktree leaves its repository's list through `git
+  --git-dir <repo> worktree remove --force --force <dir>` (git accepts a folder already gone), and
+  by hand only when git cannot and the record names that folder. A bench that finds a git ref's
+  folder gone but still listed (removed by hand) removes that one entry the same way before `git
+  worktree add`, which otherwise fails (`missing but already registered worktree`).
+- **Sizes.** What files take on the disk (their allocation), each file once however many names it
+  has, never through a link, on the volume of each walked path (a filesystem mounted inside is left
+  out), with each folder's own blocks: its lstat on Unix, its index on NTFS, which the parent's
+  listing gives as 0 (reading it from the folder's handle added 977 MB, 1.3%, to adais's builds:
+  their node_modules folders). A file NTFS keeps inside its own records (under about 700 bytes)
+  takes no allocation and counts 0, as Explorer's "size on disk" says; Git's `du` counts each 1 KB
+  (35 k of them made a 3 GB worktree read 1.1% larger there). Windows lists no file's link count: a walk asks each file of 1 MB or more by name
+  (`NtQueryInformationByName`, about 40 µs each) and counts a smaller one as having one name;
+  asking all 2.1 M files of adais's 116 GB state folder took the walk from 14 s to 104 s, and moved
+  its total by 0.02% and the reclaimable bytes by 0.03% (small files a compiler links under two
+  names count twice: a 9.7 GB compile cache read 0.26% over `du`). A file with a name outside every walked
+  path frees nothing when the entries go, and is not counted as reclaimable (exact on Unix; on
+  Windows for the files asked). A recording or experiment (but one still being written or running,
+  whose logs grow without moving its folder's time), and a build entry of 1000 files or more, keep
+  their walk in `disk-cache.json`: one is counted from it while its fingerprint holds (a data
+  folder's own time, which every file landing in it moves; a build's paths, what each holds
+  directly, and their stamps, which every use touches) and for at most a day.
+- **Automatic retention.** Caches unused for 14 days go on their own, at most once a day while no
+  bench runs or waits: after a bench, track or run from the command line (once nothing is measured
+  any more; at a bench's start it would land on the timed blocks' disk and CPUs) and in the daemon's
+  minute tick, with one line (`strobe: pruned 3 builds, 1 seeds unused for 14d: 12.4 GB …`) and
+  `<state>/prune.json`. `"prune": { "unused": "30d" }` in the user's own `<state>/strobe.json`
+  changes the age, `"off"` turns it off; a project's strobe.json may not set it (a usage error).
+  It replaces the GPU cache stores' week, the seed copies' week and other builds' SDKs' 30 days.
+- Checked on adais (Windows 11) and vps (Linux) with `scripts/dev/prune-check.ts` on a scratch state
+  folder: status total within 0.03% of `du` (vps 0.006%); no terminal and no `--force`, and
+  `--dry-run`, remove nothing; `--force` removes exactly the plan; the canary behind a junction
+  (symbolic link on Linux) out of the folder, the leased worktree, the bench registry stay; on
+  Windows the entry with a file held open fails by name (exit 1) and its neighbour goes; `git
+  worktree list` has no stale entry; `Total reclaimed space` equals `du` before minus after within
+  0.03% (vps 0.05%); `--all` removes an old experiment and the recording only it names and keeps an
+  old recording a new experiment names and an old experiment tracked history names.
+  `scripts/dev/prune-lease.ts` on both: while a `bench --check` of a git ref runs, the plan keeps its
+  worktree `in use` and `prune --force` leaves it; the bench made the worktree over a stale entry;
+  once it ended the worktree was a cache the plan removes. On vps under `script` (a terminal): `n`
+  removes nothing, `y` removes the plan; automatic retention removed a 20-day-old compile cache and
+  seed copy and kept a 5-day-old one, ran once a day, not at all with `"off"`, and at `"3d"` took
+  the 5-day-old one. The real state folders, read only (`status`, `prune --dry-run`): adais 119 GB
+  (2.1 M files; the first walk of everything 14 to 25 s, then `status --fast` 0.64 to 0.98 s with
+  0.14 to 0.24 s of it the disk, `status` 3.4 s; against `du`: seeds within 35 KB of 25.2 GB,
+  recordings 0.01%, experiments 0.3%, builds 0.5% under it over the 64 GB `du` walked, all but four
+  worktrees it took over 3 minutes each on, the tiny files above), a plain prune would free 96.2 GB (119 builds 70.6 GB, 37
+  seed copies 25.2 GB), `--all` the same (no data older than 30 days); vps 4.24 GB (4.22 GB
+  in the state folder, `du` 4.22 GB, within 4 KB), a plain prune would free 1.68 GB (20 builds 1.66
+  GB), `--all` the same.
 
 ## 6. Clock
 
@@ -3261,7 +3395,9 @@ reserved for tools that list a project's bench files; strobe does not read it ye
   from the bench file's repository (`git -C <project>`, wherever strobe runs from, the daemon
   included). A worktree kept from an earlier bench is reset to its ref first (`checkout --force`,
   `clean -fd`): a harness overlaid then must not carry over; ignored files (dependencies, build
-  output) stay. Built with the project's command.
+  output) stay. Built with the project's command. The bench leases the worktree and its executable
+  copy until it ends, so `strobe prune` leaves them (§5.14); one whose folder is gone but still in the
+  repository's worktree list is taken out of the list first, or `git worktree add` fails.
 - **A build that works on any commit:** a `--base` from before a build profile or a feature existed
   must build with the same command as `--head` (and `--bisect` walks such history). Prefer the
   build tool's standard optimized profile with settings in `build.env` over a custom profile or
@@ -6949,7 +7085,8 @@ Strobe launches any Electron app the same way, with no change to the app:
   first pair, again while the store still grew by 5% (at most 3: NVIDIA's Vulkan cache took two
   40 s launches to fill; `GpuCacheGrowing` warns after the third); a launch case's discarded first
   launch warms it too. The experiment removes its stores when it ends (a stopped one keeps them
-  for `--resume`), and stores unused for a week go. `--check` has no warm-up block: its first launch
+  for `--resume`); stores are caches `strobe prune` removes when no live launch borrows them (§5.14),
+  and those unused for 14 days go on their own. `--check` has no warm-up block: its first launch
   per variant is cold, the next warm. `record` and `record --bench` share one store per
   executable (`gpu-cache/rec-<hash>`): the first recording of a build is cold, later ones warm
   (`--gpu-cache cold` keeps a recording cold). `cold` starts every launch without: the first launch
@@ -7027,7 +7164,10 @@ What one app needs beyond that is its **app profile**, in the consumer's strobe.
   had an antivirus scan it on every CPU and the system flush and free it, around the speed check and
   the measured runs. The app cannot write through the link (read-only), and `guard` checks that the
   shared copy is unchanged after every block. Where a link cannot be made (another volume), the file
-  is copied as before. Shared copies no bench used for a week go.
+  is copied as before. Each link touches the copy's stamp (`<state>/seeds/<id>.used`); copies are
+  caches `strobe prune` removes (§5.14), and those unused for 14 days go on their own. The week-old
+  sweep this replaced ran only when a new seed version was copied, and judged use by the files' access
+  times, which NTFS mostly does not keep: 25 GB of copies piled up on adais.
 - **Background downloads are an isolation gap.** An isolated desktop app's stable channel downloaded its next
   release mid-run, which read as "the beta channel idles at 83% less CPU" until the updater log showed the
   download. Proxy env vars do not stop it (Electron's network stack ignores them on Windows), and
@@ -7990,9 +8130,9 @@ executable and `.pdb` that §9.5 copies (the module's own CodeView path finds it
   and `new_experiment` claim the folder itself and draw again on a clash with another process.
 - Every file is written whole or not at all (§4.2): `store::write_json`, `store::write_atomic` and
   the gzipped files (`symbol::write_gz`). A crash or a reader never sees half a `result.json`.
-- Retention: not built. Recordings and experiments stay until `strobe leave --yes` or a person
-  removes their folders; `status` shows the disk they use. (The design: a 20 GB cap, oldest first,
-  with a mark that keeps a recording.)
+- Retention: `strobe prune recordings experiments` (or `--all`) removes those last used more than 30
+  days ago (`--older-than`), never a recording an experiment that stays names nor an experiment
+  tracked history names (§5.14); nothing removes them on its own. `status` shows the disk they use.
 
 ### 14.2 Experiments
 
@@ -8138,7 +8278,7 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 
 | Tool | Input (beyond the CLI flags of the same name) | Output |
 |---|---|---|
-| `status` | `calibrate?`, `fast?` | §5.4 JSON |
+| `status` | `calibrate?`, `fast?`, `disk?` | §5.4 JSON |
 | `record` | `target` (not with `bench`), `for?`, `probes?`, `native?`, `app?`, `windowless?`, `headless?`, `wayland?`, `emulate?`, `engine?`, `mobile?`, `served?`, `style?`, `os-frames?`, `until-line?`, `stop-line?`, `bench?`, `head?`, `gpu-cache?`, `params?`, `runs?`, `seed?`, `pin?`, `power?`, `video?`, `max-time?`, `timeout?` | `{ handle, valid, summary, warnings }` (with `bench`: `{ recordings, warnings }`) |
 | `bench` | `file` (not with `stop`/`resume`), `head?`, `base?`, `aa?`, `check?`, `batch?`, `headless?`, `engine?`, `wayland?`, `mobile?`, `blocks?`, `filter?`, `target?`, `params?`, `primary?`, `equivalence?`, `noworse?`, `plan?`, `effect?`, `pilot?`, `pairs?`, `runs?`, `probes?`, `repeat?`, `seed?`, `bisect?`, `pin?`, `power?`, `reserve-cpus?`, `why?`, `trace?`, `keep?`, `pixels?`, `pixels-only?`, `video?`, `style?`, `max-time?`, `unlock-wait?`, `require-verdict?`, `require-parity?`, `stop?`, `resume?`, `timeout?` | result (§5.6) or `{ id, state: "running", progress }` |
 | `query` | `handle`, `view?`, `sql?`, `by?`, `source?`, `top?`, `reveal?`, `at?`, `native?`, `thread?`, `pid?`, `sort?`, `case?`, `phase?`, `timeline?`; `history`, `changes` or `ser_…` for tracked history (§25.5) | view JSON |
@@ -8419,6 +8559,13 @@ what was built but not yet run on a device is in §21.
 
 **After 0.28.0**
 
+- 2026-11-11 · cleanup/prune · `strobe prune` (caches unused now, data when named and older than 30
+  days, never a recording a kept experiment names; the plan first, `--force` without a terminal,
+  `--dry-run`, measured `Total reclaimed space`); cache leases and stamps (`host::cache`); removal
+  that never follows a link (`host::disk`); caches unused for 14 days go on their own
+  (`prune.unused`), replacing the seed, GPU cache and SDK sweeps; `status` counts everything strobe
+  keeps (`disk` line, `--disk` table; it summed recordings and experiments: 22.8 of 116 GB on adais);
+  a bench clears a stale worktree entry before `git worktree add` (4.2, 5, 5.4, 5.14, 9.5, 13.2, 14.1).
 - 2026-11-10 · cleanup/w6e · `up --skip self,skill` (no install folder copy, user PATH entry or skill;
   `self` needs `daemon`), an unknown `--skip` name exit 2, a renamed copy's install refused; the
   action's `up` only fetches the engine,

@@ -18,32 +18,21 @@ const RUNNER: &str = include_str!("../sdk/bench/src/runner.ts");
 const PRELOAD: &str = include_str!("../sdk/bench/src/preload.ts");
 const HOST: &str = include_str!("../sdk/bench/src/host.mjs");
 
-/// An SDK folder no strobe build has used for this long is removed (`sdk_dir`).
-const SDK_UNUSED: Duration = Duration::from_secs(30 * 24 * 3600);
-
 /// Writes the embedded SDK under the state dir (once per strobe build) and returns its folder. Each
-/// use touches its `.used` file; the folders of other builds unused for 30 days go (one per build, they
-/// would pile up with every update).
+/// use touches its `.used` file; other builds' folders are caches `strobe prune` removes (one per
+/// build, they would pile up with every update).
 pub fn sdk_dir() -> Result<PathBuf> {
     let root = paths::sdk();
     let dir = root.join(env!("STROBE_BUILD_ID"));
     std::fs::create_dir_all(&dir)?;
     // Marked used before anything else, so another strobe's prune never takes a folder being filled.
-    let now = std::time::SystemTime::now();
     if let Ok(f) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(".used")) {
-        let _ = f.set_modified(now);
+        let _ = f.set_modified(std::time::SystemTime::now());
     }
     for (name, body) in [("index.ts", INDEX), ("runner.ts", RUNNER), ("preload.ts", PRELOAD), ("host.mjs", HOST)] {
         let p = dir.join(name);
         if std::fs::read_to_string(&p).ok().as_deref() != Some(body) {
             paths::write_atomic(&p, body.as_bytes())?;
-        }
-    }
-    for other in std::fs::read_dir(&root).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir() && *p != dir) {
-        // A folder from before `.used` counts from when it was written.
-        let used = std::fs::metadata(other.join(".used")).or_else(|_| std::fs::metadata(&other)).and_then(|m| m.modified());
-        if used.is_ok_and(|t| now.duration_since(t).is_ok_and(|age| age > SDK_UNUSED)) {
-            let _ = std::fs::remove_dir_all(&other);
         }
     }
     Ok(dir)

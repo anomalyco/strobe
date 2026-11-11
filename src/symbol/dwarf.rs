@@ -127,6 +127,7 @@ fn dsym(path: &Path, uuid: &[u8; 16]) -> Option<PathBuf> {
     let id: String = uuid.iter().map(|b| format!("{b:02X}")).collect();
     let cached = super::pdb::cache_dir().join("dsym").join(format!("{id}.dSYM"));
     if inner(&cached).is_file() {
+        crate::host::cache::touch(&cached);
         return Some(inner(&cached));
     }
     // System libraries have no debug info to gather; a build that left its objects has.

@@ -43,6 +43,11 @@ pub fn load(root: &Path) -> Result<Value> {
         }
     }
     let (project, problems) = read(&root.join("strobe.json"))?;
+    // This machine's settings (`prune`) are the user's own: a repository's file never sets them.
+    if project.contains_key("prune") && root.join("strobe.json") != user_path {
+        return Err(Error::usage(format!("{}: \"prune\" is a setting of this machine's strobe, read from your own {} only", root.join("strobe.json").display(), user_path.display()))
+            .hint("move it there, or remove it from the repository's strobe.json"));
+    }
     let more = match problems.len() {
         0 | 1 => String::new(),
         2 => "; 1 more problem".to_string(),
@@ -194,7 +199,16 @@ const TOP: Shape = Keys(&[
     ("metrics", Keys(&[("equivalence", Percent)])),
     ("harness", Strings),
     ("symbols", Keys(&[("servers", Strings)])),
+    // The user's own file only (`load` refuses it in a project's): caches unused this long go on
+    // their own, or "off" (SPEC 5.14).
+    ("prune", Keys(&[("unused", Str)])),
 ]);
+
+/// A top-level key of the user's own strobe.json (`<state>/strobe.json`), as it is there: null when
+/// the file, or the key, is not there or does not parse.
+pub fn user(key: &str) -> Value {
+    read(&host::paths::state_path().join("strobe.json")).ok().and_then(|(m, _)| m.get(key).cloned()).unwrap_or(Value::Null)
+}
 
 struct Found {
     path: Vec<Seg>,

@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod open;
 pub mod outside;
 pub mod pr;
+pub mod prune;
 pub mod query;
 pub mod record;
 pub mod report;
@@ -148,7 +149,7 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     // A strobe killed mid-run left the user on its power plan: put theirs back first. Not from a
     // command that only reads strobe's own files: a bench runs those as its commands, and they would
     // read the bench's journal on every launch; the next command that measures puts it back.
-    if !matches!(args.command.as_str(), "query" | "report" | "history" | "plan" | "status") {
+    if !matches!(args.command.as_str(), "query" | "report" | "history" | "plan" | "status" | "prune") {
         crate::host::power::restore_stale();
     }
     // And the CPU sets of processes it moved off a timed block's CPUs (`--reserve-cpus`).
@@ -160,7 +161,7 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     if matches!(args.command.as_str(), "record" | "bench" | "run" | "status" | "top" | "track" | "mcp" | "daemon") {
         crate::host::warm_cycle_clock();
     }
-    match args.command.as_str() {
+    let out = match args.command.as_str() {
         "record" => record::run(args),
         "bench" => bench::run(args),
         "plan" => bench::plan::run(args),
@@ -173,6 +174,7 @@ pub fn dispatch(args: &Args) -> Result<Output> {
         "top" => top::run(args),
         "track" => track::run(args),
         "history" => history::run(args),
+        "prune" => prune::run(args),
         "up" => up::run(args),
         "update" => update::run(args),
         "leave" => up::leave(args),
@@ -180,7 +182,18 @@ pub fn dispatch(args: &Args) -> Result<Output> {
         "mcp" => mcp::stdio().map(|_| Output::new(String::new(), Value::Null)),
         "daemon" => mcp::daemon(args).map(|_| Output::new(String::new(), Value::Null)),
         other => Err(Error::usage(format!("unknown command {other}; see strobe --help"))),
+    };
+    // Caches unused for long go once a day, after the bench is done: nothing is measured any more
+    // (SPEC §5.14). The daemon does it on its own clock.
+    if matches!(args.command.as_str(), "bench" | "track" | "run")
+        && !in_daemon()
+        && !args.has("stop")
+        && !args.has("plan")
+        && let Some(line) = prune::auto()
+    {
+        progress(line);
     }
+    out
 }
 
 fn fail(e: &Error, json: bool) -> i32 {

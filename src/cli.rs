@@ -102,7 +102,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("open", Switch, "report"),
     ("update-pr", Number, "report"),
     ("repo", Value, "report"),
-    ("force", Switch, "report update init"),
+    ("force", Switch, "report update init prune"),
     ("no-card", Switch, "report"),
     ("labels", Value, "report"),
     ("theme", Value, "report"),
@@ -143,6 +143,11 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     // status, top.
     ("calibrate", Switch, "status"),
     ("fast", Switch, "status"),
+    ("disk", Switch, "status"),
+    // prune.
+    ("all", Switch, "prune"),
+    ("older-than", Value, "prune"),
+    ("dry-run", Switch, "prune"),
     ("once", Switch, "top"),
     ("interval", Value, "top"),
     ("limit", Number, "top"),
@@ -167,7 +172,7 @@ pub fn kind(name: &str) -> Option<Kind> {
 
 /// Every command strobe has (`app::dispatch`).
 pub const COMMANDS: &[&str] =
-    &["record", "bench", "plan", "query", "report", "open", "look", "run", "status", "top", "track", "history", "up", "update", "leave", "helper", "mcp", "daemon", "config", "init", "stats"];
+    &["record", "bench", "plan", "query", "report", "open", "look", "run", "status", "top", "track", "history", "prune", "up", "update", "leave", "helper", "mcp", "daemon", "config", "init", "stats"];
 
 /// Flags a command reads that `FLAGS` does not list for it: only to refuse them in its own typed way
 /// (`look --engine firefox` is `EngineUnsupported`, exit 4, never a page in Chromium).
@@ -289,12 +294,14 @@ impl Args {
                 "-V" => Some("version".to_string()),
                 "-q" => Some("quiet".to_string()),
                 "-v" => Some("verbose".to_string()),
+                // As docker's (`prune -f`).
+                "-f" => Some("force".to_string()),
                 // As gh names a repository (`report … --update-pr 12 -R owner/repo`).
                 "-R" => Some("repo".to_string()),
                 a if a.starts_with("--") && a.len() > 2 => Some(a[2..].to_string()),
                 // A short flag strobe does not have (a negative number stays an argument).
                 a if a.len() > 1 && a.starts_with('-') && !a[1..].starts_with(|c: char| c.is_ascii_digit() || c == '.') => {
-                    return Err(Error::usage(format!("unknown flag {a}")).hint("short flags: -h -V -q -v -R; strobe --help lists the rest"));
+                    return Err(Error::usage(format!("unknown flag {a}")).hint("short flags: -h -V -q -v -R -f; strobe --help lists the rest"));
                 }
                 _ => None,
             };
@@ -417,7 +424,9 @@ pub const HELP: &str = "strobe — measure and explain performance
 Usage: strobe <command> [flags]
 
 Use
-  status [--fast] [--calibrate]   environment, validity preflight, recent recordings and experiments
+  status [--fast] [--calibrate] [--disk]
+                                  environment, validity preflight, recent recordings and experiments, the disk strobe's
+                                  files take and what strobe prune frees (--disk: by category)
   record <target> [--for 10s] [--probes timing|attribution|memory] [--headless] [--emulate mobile|touch] [--served <dir>] [--style]
                                   record a target; prints a handle (rec_…); exe:<path> --native for a native app
                                   (--engine firefox|webkit: a page in that engine, from outside; --wayland: a native app
@@ -569,6 +578,14 @@ Use
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
                                   console messages and uncaught errors, and a screenshot (exit 124 when it never loads);
                                   tty: the program on strobe's own terminal in an isolated home: its grid, the modes it set
+  prune [builds|seeds|gpu-cache|symbols|sdk|engine|run|recordings|experiments …] [--all] [--older-than 7d] [--dry-run] [-f]
+                                  remove what strobe keeps and no process uses: with no category every cache (builds,
+                                  seeds, GPU caches, symbols, other builds' SDKs and engines, finished processes' files);
+                                  recordings and experiments only when named or with --all, older than 30d (--older-than)
+                                  and never a recording an experiment that stays names; prints the plan first, asks on a
+                                  terminal, removes nothing without one unless -f (--force); --dry-run: the plan only
+                                  (caches unused for 14d also go on their own, once a day after a bench and in the daemon:
+                                  \"prune\": { \"unused\": \"30d\" | \"off\" } in <state>/strobe.json)
   top [--target <pid>] [--once] [--interval 1s] [--limit N] [--sort cpu|gpu|vram|mem]
                                   live per-core load by CCD, processes with CPU, GPU, VRAM
   run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] [--max-time 5m] -- <command> [args…]

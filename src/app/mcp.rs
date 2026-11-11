@@ -37,9 +37,9 @@ struct Tool {
 const TOOLS: &[Tool] = &[
     Tool {
         name: "status",
-        description: "Environment, validity preflight (load, power, browser, engine, calibration) and recent recordings and experiments.",
+        description: "Environment, validity preflight (load, power, browser, engine, calibration), recent recordings and experiments, and the disk strobe's files take with what `strobe prune` (CLI only) frees.",
         args: &[],
-        flags: &[("fast", "skip the 3 s idle-load sample"), ("calibrate", "run the full calibration")],
+        flags: &[("fast", "skip the 3 s idle-load sample"), ("calibrate", "run the full calibration"), ("disk", "walk all of strobe's files again: each category's size and reclaimable bytes")],
         required: &[],
         long: false,
     },
@@ -651,6 +651,8 @@ pub fn daemon(_args: &Args) -> Result<()> {
     std::thread::spawn(|| {
         loop {
             let _ = crate::target::isolate::reap_dead_owners();
+            // And caches unused for long, once a day while no bench runs (`prune.json` says what went).
+            let _ = super::prune::auto();
             std::thread::sleep(Duration::from_secs(60));
         }
     });

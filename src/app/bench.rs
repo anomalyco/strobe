@@ -271,6 +271,9 @@ struct Variant {
     /// The targets this variant was built and served for in this experiment (`prepare_all`): a series
     /// of one of them builds nothing (`needs_prepare`).
     prepared: std::collections::BTreeSet<String>,
+    /// strobe's build folders this variant uses (its worktree, its executable's copy), held until the
+    /// experiment ends so `strobe prune` leaves them alone (`host::cache`).
+    leases: Vec<host::cache::Lease>,
 }
 
 impl Variant {
@@ -2045,7 +2048,6 @@ pub fn run(args: &Args) -> Result<Output> {
     // read now, the first block reads a state rather than none (a pair whose base saw none ran again).
     let _ = host::display_state();
     let busy = host::system_busy(1000);
-    isolate::prune_gpu_caches();
     let runner = Runner::spawn(&file, dir.join("runner.log"), runner_pin)?;
     // `--max-time` from here: every wait counts, the slot's before the first block too (`fit_answer`).
     let started = Instant::now();
@@ -11214,6 +11216,7 @@ fn resolve_variant(role: &'static str, spec: &str, project: &Path, config: &Valu
                 target: None,
                 name: String::new(),
                 prepared: Default::default(),
+                leases: Vec::new(),
             };
             v.commit = (!sha.is_empty()).then_some(sha);
             v.name = v.label.clone();
@@ -11238,6 +11241,7 @@ fn resolve_variant(role: &'static str, spec: &str, project: &Path, config: &Valu
         target: None,
         name: String::new(),
         prepared: Default::default(),
+        leases: Vec::new(),
     };
     if let Kind::Git(r) = &v.kind {
         let sha = git::out(project, &["rev-parse", "--short=10", r]).ok_or_else(|| Error::usage(format!("{spec} is neither a directory nor a git ref in {}", project.display())))?;
@@ -11524,7 +11528,9 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
         if let Kind::Git(r) = &v.kind
             && v.root.is_none()
         {
-            v.root = Some(worktree(r, project)?);
+            let (root, lease) = worktree(r, project)?;
+            v.root = Some(root);
+            v.leases.push(lease);
         }
         if let Some(root) = v.root.clone() {
             overlay_harness(v, &root, h)?;
@@ -11560,13 +11566,16 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
             return Ok(());
         }
         if let Kind::Git(r) = &v.kind {
-            v.root = Some(worktree(r, project)?);
+            let (root, lease) = worktree(r, project)?;
+            v.root = Some(root);
+            v.leases.push(lease);
         }
         let root = v.root.clone().ok_or_else(|| Error::msg("variant has no directory"))?;
         overlay_harness(v, &root, h)?;
         let output = crate::target::isolate::per_os(&build["output"])
             .ok_or_else(|| Error::usage(format!("a native or webview target's build in strobe.json needs output for {}: the executable it builds", crate::target::isolate::os())))?;
         let dest = host::paths::sub("builds").join("out").join(hash_str(&root.to_string_lossy()));
+        v.leases.push(host::cache::take(&dest));
         let built = root.join(cache_fill(output, &root));
         let exe = dest.join(built.file_name().ok_or_else(|| Error::usage(format!("build output {output} is not a file")))?);
         build_variant(v.role, &root, build, Some((&built, &exe)))?;
@@ -11577,7 +11586,9 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
         return Ok(());
     }
     if let Kind::Git(r) = &v.kind {
-        v.root = Some(worktree(r, project)?);
+        let (root, lease) = worktree(r, project)?;
+        v.root = Some(root);
+        v.leases.push(lease);
     }
     let root = v.root.clone().ok_or_else(|| Error::msg("variant has no directory"))?;
     overlay_harness(v, &root, h)?;
@@ -11618,10 +11629,15 @@ fn cache_fill(s: &str, root: &Path) -> String {
     if !s.contains("{cache}") {
         return s.to_string();
     }
-    let common = git::out(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).and_then(|d| std::fs::canonicalize(d).ok()).unwrap_or_else(|| root.to_path_buf());
-    let dir = host::paths::sub("builds").join("cache").join(hash_str(&common.to_string_lossy().to_lowercase()));
+    let dir = cache_dir(root);
     let _ = std::fs::create_dir_all(&dir);
     s.replace("{cache}", &dir.display().to_string())
+}
+
+/// The folder `{cache}` names for the repository `root` is in.
+fn cache_dir(root: &Path) -> PathBuf {
+    let common = git::out(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).and_then(|d| std::fs::canonicalize(d).ok()).unwrap_or_else(|| root.to_path_buf());
+    host::paths::sub("builds").join("cache").join(hash_str(&common.to_string_lossy().to_lowercase()))
 }
 
 /// Runs `build` in `root` unless its key is unchanged. With `copy`, the built file (and a `.pdb` beside
@@ -11633,6 +11649,8 @@ fn build_variant(role: &str, root: &Path, build: &Value, copy: Option<(&Path, &P
         return Ok(());
     }
     let cwd = root.join(build["cwd"].as_str().unwrap_or("."));
+    // The repository's compile cache, used for as long as this build runs and copies its output.
+    let _cache = build.to_string().contains("{cache}").then(|| host::cache::take(&cache_dir(root)));
     let key = build_key(root, build);
     let marker = host::paths::sub("builds").join(format!("{}.key", hash_str(&root.to_string_lossy())));
     let output = crate::target::isolate::per_os(&build["output"]).map(|o| root.join(cache_fill(o, root)));
@@ -11754,7 +11772,8 @@ fn build_key(root: &Path, build: &Value) -> String {
     hash_str(&format!("{}\n{}\n{}\n{}", git(&["rev-parse", "HEAD"]), status, git(&["diff"]), build))
 }
 
-fn hash_str(s: &str) -> String {
+/// The short hash naming a variant's files in `<state>/builds` (`out/<hash>`, `<hash>.key`, `logs/<hash>.log`).
+pub(crate) fn hash_str(s: &str) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(s.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -11763,15 +11782,23 @@ fn hash_str(s: &str) -> String {
 /// earlier bench is reset to the ref first: a harness overlaid then (or anything a build wrote
 /// into tracked files) must not carry into this bench. Ignored files (dependencies, build output)
 /// stay, so builds and installs are reused.
-fn worktree(r: &str, project: &Path) -> Result<PathBuf> {
+fn worktree(r: &str, project: &Path) -> Result<(PathBuf, host::cache::Lease)> {
     let sha = git::out(project, &["rev-parse", r]).ok_or_else(|| Error::usage(format!("unknown git ref {r} in {}", project.display())))?;
     let dir = host::paths::sub("builds").join(&sha[..12.min(sha.len())]);
+    // Held before it is looked at: a prune removing it now finishes first, and none removes it later
+    // while this bench uses it.
+    let lease = host::cache::take(&dir);
     if dir.join(".git").exists() {
         if !(git::ok(&dir, &["checkout", "--force", "--detach", &sha]) && git::ok(&dir, &["clean", "-fd"])) {
             return Err(Error::msg(format!("could not reset the worktree for {r} at {}", dir.display())).hint("remove that folder; strobe makes it again"));
         }
     } else {
         progress(format!("  worktree {r} → {}", dir.display()));
+        // A folder removed by hand stays in the repository's list of worktrees, and `worktree add` of
+        // its path then fails ("missing but already registered"): that entry, and only it, goes first.
+        if !dir.exists() {
+            let _ = git::out(project, &["worktree", "remove", "--force", "--force", &dir.to_string_lossy()]);
+        }
         git::run(project, &["worktree", "add", "--detach", &dir.to_string_lossy(), &sha]).map_err(|e| Error::msg(format!("git worktree add for {r} failed: {}", e.message)))?;
         if dir.join("bun.lock").exists() || dir.join("bun.lockb").exists() {
             let _unpinned = Unpinned::start();
@@ -11779,7 +11806,7 @@ fn worktree(r: &str, project: &Path) -> Result<PathBuf> {
             Command::new(crate::runner::find_bun().unwrap_or_else(|| "bun".into())).arg("install").current_dir(&dir).stdout(Stdio::null()).status()?;
         }
     }
-    Ok(dir)
+    Ok((dir, lease))
 }
 
 fn shell(cmd: &str) -> Command {

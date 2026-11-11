@@ -42,6 +42,11 @@ pub fn run(args: &Args) -> Result<Output> {
     let env = host::env();
     let topo = host::topology();
     let busy = host::system_busy(if args.has("fast") { 300 } else { 3000 });
+    // Everything strobe keeps on the disk (SPEC §5.14), after the idle-load sample, which would count
+    // the walk as load: unchanged entries from their last walk, the rest within 0.6 s (`--fast` 0.3 s;
+    // status keeps to 4 s, SPEC §19); `--disk` walks all of it again.
+    let budget = (!args.has("disk")).then(|| std::time::Duration::from_millis(if fast { 300 } else { 600 }));
+    let mut disk = super::prune::measure(budget, args.has("disk"));
     let located = chromium::locate();
     let browser = located.as_ref().ok().cloned();
     let browser_text = match &located {
@@ -63,7 +68,6 @@ pub fn run(args: &Args) -> Result<Output> {
     let state: Value = std::fs::read_to_string(host::paths::state_dir().join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let recordings = store::list("rec", 5);
     let experiments = store::list("exp", 5);
-    let disk: u64 = dir_size(&host::paths::recordings()) + dir_size(&host::paths::experiments());
     let vcache = topo.vcache().map(|g| format!("{} MB L3 on {} CPUs", g.l3_mb, g.cpus));
     let groups: Vec<String> = topo.groups.iter().enumerate().map(|(i, g)| format!("CCD{i} {} MB L3 ({} CPUs)", g.l3_mb, g.cpus)).collect();
     let shape = topo.cpu_shape();
@@ -137,11 +141,12 @@ pub fn run(args: &Args) -> Result<Output> {
     if calibration.is_null() {
         problems.push("no calibration yet (strobe up)".into());
     }
+    let (disk_text, disk_json) = disk.status(args.has("disk"));
     let json = json!({
         "env": env, "topology": { "groups": groups, "vcache": vcache }, "busy": busy,
         "browser": browser, "firefox": firefox, "webkit": if webkit { Value::String(webkit_text.clone()) } else { Value::Null }, "bun": bun, "engine": { "installed": engine::installed(), "version": engine::VERSION, "path": engine::path() },
         "calibration": calibration, "recordings": recordings.iter().map(|r| &r.0).collect::<Vec<_>>(),
-        "experiments": experiments.iter().map(|r| &r.0).collect::<Vec<_>>(), "disk_bytes": disk,
+        "experiments": experiments.iter().map(|r| &r.0).collect::<Vec<_>>(), "disk_bytes": disk_json["total_bytes"], "disk": disk_json,
         "session_locked": locked, "background_priority": qos, "timer_coalescing": timers, "valid": problems.is_empty(), "problems": problems,
         "daemon": { "running": daemon, "port": super::mcp::port(), "autostart": { "registered": autostart.0, "detail": autostart.1 } }, "skill": skill, "benches": benches, "slot_elsewhere": slot_elsewhere,
         "deep": { "access": deep, "presents": deep.presents(), "detail": deep_text },
@@ -278,7 +283,8 @@ pub fn run(args: &Args) -> Result<Output> {
             b["since"].as_str().unwrap_or("")
         );
     }
-    t += &format!("    data       {} recordings, {} experiments shown · {}\n", recordings.len(), experiments.len(), super::fmt::bytes(disk as f64));
+    t += &disk_text;
+    t += &format!("    data       {} recordings, {} experiments shown\n", recordings.len(), experiments.len());
     for (id, _) in &experiments {
         t += &format!("               {id}\n");
     }
@@ -341,11 +347,4 @@ fn native_drive() -> (bool, String) {
         );
         (bus && x11 || crate::target::wayland::unavailable().is_none(), text)
     }
-}
-
-/// Bytes under a folder, from what the listing gave (the entry's type and size; no file opened per
-/// entry: thousands of recordings' files made a path stat each the larger part of `status --fast`).
-fn dir_size(p: &std::path::Path) -> u64 {
-    let Ok(rd) = std::fs::read_dir(p) else { return 0 };
-    rd.flatten().map(|e| if e.file_type().is_ok_and(|t| t.is_dir()) { dir_size(&e.path()) } else { e.metadata().map(|m| m.len()).unwrap_or(0) }).sum()
 }

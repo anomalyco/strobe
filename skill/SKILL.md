@@ -297,7 +297,8 @@ noisy discovery evidence, or leave them out.
 ## Commands
 
 ```text
-strobe status [--fast] [--calibrate]
+strobe status [--fast] [--calibrate] [--disk]
+strobe prune [builds|seeds|run|recordings|experiments …] [--all] [--older-than 7d] [--dry-run] [-f]
 strobe record <target> [--probes timing|attribution|memory] [--for 10s] [--headless]
               [--engine chromium|firefox|webkit] [--emulate mobile|touch] [--mobile[=<serial>]] [--video]
 strobe record app:<id>|exe:<path> [--native] [--windowless] [--until-line "<re>"] [--stop-line "<re>"]
@@ -344,6 +345,8 @@ strobe update [<version>] [--from <path>] [--check] [--force]
   `run -- <command>` it caps the wait for the bench slot (exit 124, `ConcurrentBench`).
 - `strobe status` lists the benches holding or queued for the slot, and a `slot` line when a bench of
   another user or state folder holds it.
+- `status`'s `disk` line is everything strobe keeps and what `strobe prune` frees. Prune removes caches no
+  process uses; data only when named or `--all`. Without a terminal it deletes only with `--force` (exit 3).
 - `record --bench` prints the bench's warnings (`Attribution`, `ProbeOverhead`, `ObserverCost`,
   `TimerCoalescing`); `--json` marks each recording `kind: "attribution"`.
 - Every duration needs its unit (`500ms`, `10s`, `2m`, `2h`, `1d`): `--for 2000` exits 2.

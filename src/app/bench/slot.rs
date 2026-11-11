@@ -120,7 +120,9 @@ impl Drop for Inner {
 impl Registration {
     pub fn new(exp: &str, file: &str) -> Registration {
         let pid = std::process::id();
-        let entry = json!({ "pid": pid, "exp": exp, "file": file, "daemon": super::super::in_daemon(), "state": "starting", "why": "", "since": super::super::record::now_iso() });
+        // `leases`: this build holds a lease on each build it uses (`host::cache`), so `strobe prune` leaves
+        // them alone; a bench of a build before leases keeps every build while it runs.
+        let entry = json!({ "pid": pid, "exp": exp, "file": file, "daemon": super::super::in_daemon(), "leases": true, "state": "starting", "why": "", "since": super::super::record::now_iso() });
         let path = dir().join(format!("{pid}-{exp}.json"));
         let r = Registration(Arc::new(Inner { path, exp: exp.to_string(), entry: Mutex::new(entry) }));
         r.write();

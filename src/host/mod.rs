@@ -2,6 +2,7 @@
 
 pub(crate) mod adb;
 pub mod build;
+pub mod cache;
 pub mod capture;
 #[cfg(target_os = "linux")]
 pub mod cgroup;
@@ -9,6 +10,7 @@ pub mod cgroup;
 pub mod cycle_clock;
 #[cfg(target_os = "linux")]
 pub mod dbus;
+pub mod disk;
 pub mod git;
 pub mod http;
 pub mod ios;
