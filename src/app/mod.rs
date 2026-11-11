@@ -185,11 +185,12 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     };
     // Caches unused for long go once a day, after the bench is done: nothing is measured any more
     // (SPEC §5.14). The daemon does it on its own clock.
-    // Only after one that ran benches and succeeded: not a schedule listed or dropped, a stop asked, a plan.
+    // Only after one that ran benches and succeeded: not a schedule made, listed or dropped, a stop
+    // asked, a plan.
     if matches!(args.command.as_str(), "bench" | "track" | "run")
         && out.as_ref().is_ok_and(|o| o.code == 0)
         && !in_daemon()
-        && !["stop", "plan", "schedules", "unschedule"].iter().any(|f| args.has(f))
+        && !["stop", "plan", "schedule", "schedules", "unschedule"].iter().any(|f| args.has(f))
         && let Some(line) = prune::auto()
     {
         progress(line);

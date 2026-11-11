@@ -2575,8 +2575,9 @@ pub fn run(args: &Args) -> Result<Output> {
     // The experiment's GPU cache stores go with it; a stopped one (Ctrl-C, `--stop`, `--unlock-wait`)
     // keeps them, so `--resume` launches as warm as the pairs it already has.
     if halted.as_ref().is_none_or(|h| !matches!(h.code, 130 | 124)) && args.get("gpu-store") != Some("exe") {
+        // Its own lease let go first, so the store and its stamp go together.
         for v in variants.iter() {
-            let _ = std::fs::remove_dir_all(gpu_store(&exp, v));
+            crate::host::cache::remove_own(&gpu_store(&exp, v));
         }
     }
     if let Some(t) = &ctx.reserved {

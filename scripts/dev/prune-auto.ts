@@ -88,6 +88,37 @@ try {
   const schedules = strobe("track", "--schedules")
   check(failedRun.code !== 0 && left() === 20 && !fs.existsSync(autoFile), "no automatic prune after a command that failed", `exit ${failedRun.code}`)
   check(left() === 20 && !fs.existsSync(autoFile), "nor after track --schedules", `exit ${schedules.code}`)
+  // `track <file> --schedule` only registers a schedule (exit 0): taken out again before any daemon runs it.
+  const bdir = P.join(scratch, "b")
+  const git = (...a: string[]) => spawnSync("git", ["-c", "user.email=a@b", "-c", "user.name=a", ...a], { cwd: bdir, encoding: "utf8" })
+  git("init", "-q")
+  git("add", "-A")
+  git("commit", "-qm", "one")
+  const sch = spawnSync(bin, ["track", benchFile(20), "--schedule", "nightly", "--json"], { env, cwd: bdir, encoding: "utf8" })
+  const schId = (() => { try { return JSON.parse(sch.stdout).id as string } catch { return "" } })()
+  check(sch.status === 0 && schId !== "" && left() === 20 && !fs.existsSync(autoFile), "nor after track --schedule (it registered one, exit 0)", `exit ${sch.status} ${schId}`)
+  if (schId) strobe("track", "--unschedule", schId)
+
+  // --- what the user's strobe.json says, read as it is ---
+  const refused = () => strobe("status", "--fast", "--json").out.match(/"auto_refused":\s*("(?:[^"\\]|\\.)*"|null)/)?.[1] ?? "?"
+  fs.writeFileSync(P.join(state, "strobe.json"), `{ "prune": { "unused": "0s" } }`)
+  const zero = refused()
+  check(/off/.test(zero), "prune.unused \"0s\" refuses the automatic prune and says to write \"off\"", zero)
+  fs.rmSync(P.join(state, "strobe.json"))
+  fs.mkdirSync(P.join(state, "strobe.json"))
+  const unreadable = refused()
+  check(/cannot be read/.test(unreadable), "a strobe.json that cannot be read refuses it, never taken for an absent one", unreadable)
+  fs.rmdirSync(P.join(state, "strobe.json"))
+  // Windows PowerShell 5.1's `>` writes UTF-16: read as what it says ("off"), and the daemon prunes nothing.
+  fs.writeFileSync(P.join(state, "strobe.json"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`{ "prune": { "unused": "off" } }\r\n`, "utf16le")]))
+  const utf16 = refused()
+  daemon = spawn(bin, ["daemon"], { env, cwd: scratch, stdio: "ignore" })
+  await Bun.sleep(8000)
+  check(utf16 === "null" && left() === 20 && !fs.existsSync(autoFile), "a UTF-16 strobe.json saying \"off\" is read: the daemon prunes nothing", `auto_refused ${utf16}, ${left()} left`)
+  daemon.kill()
+  daemon = undefined
+  await Bun.sleep(1000)
+  fs.writeFileSync(P.join(state, "strobe.json"), "{}\n")
 
   // --- the daemon: not while a bench runs, then on its next minute once it ended ---
   const a = startBench(20)

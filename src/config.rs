@@ -120,10 +120,31 @@ impl Problem {
     }
 }
 
-/// One strobe.json, parsed; an absent file is empty. A file that does not parse fails here; what
+/// A strobe.json's text: UTF-8 (a byte-order mark dropped), or UTF-16 after its byte-order mark
+/// (Windows PowerShell 5.1's `>` writes that).
+fn text_of(path: &Path, b: Vec<u8>) -> Result<String> {
+    let wide = |rest: &[u8], le: bool| {
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| if le { u16::from_le_bytes(*c) } else { u16::from_be_bytes(*c) }).collect();
+        String::from_utf16(&units).ok()
+    };
+    let text = match b.as_slice() {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).ok(),
+        [0xFF, 0xFE, rest @ ..] => wide(rest, true),
+        [0xFE, 0xFF, rest @ ..] => wide(rest, false),
+        _ => String::from_utf8(b).ok(),
+    };
+    text.ok_or_else(|| Error::usage(format!("{}: is not UTF-8 or UTF-16 text", path.display())).hint("save it as UTF-8"))
+}
+
+/// One strobe.json, parsed; an absent file is empty. A file that cannot be read or does not parse
+/// fails here (never taken for an absent one, whose defaults it may have meant to change); what
 /// parses but is wrong comes back as problems, first in file order.
 fn read(path: &Path) -> Result<(Map<String, Value>, Vec<Problem>)> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Ok((Map::new(), Vec::new())) };
+    let text = match std::fs::read(path) {
+        Ok(b) => text_of(path, b)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Map::new(), Vec::new())),
+        Err(e) => return Err(Error::usage(format!("{}: cannot be read: {e}", path.display()))),
+    };
     let json = jsonc::strip(&text);
     let at = |line: usize, col: usize| format!("{}:{line}:{col}", path.display());
     let value: Value = serde_json::from_str(&json).map_err(|e| {
@@ -213,6 +234,9 @@ const TOP: Shape = Keys(&[
 fn bad_unused(v: &Value) -> Option<String> {
     match v {
         Value::Null => None,
+        Value::String(s) if crate::cli::duration_ms(s).is_ok_and(|ms| ms == 0) => {
+            Some(format!("prune.unused is {s:?}, which would remove every cache the moment nothing uses it: write \"off\" to turn automatic pruning off"))
+        }
         Value::String(s) if s == "off" || crate::cli::duration_ms(s).is_ok() => None,
         other => Some(format!("prune.unused must be \"off\" or an age such as \"14d\", not {other}")),
     }
@@ -223,8 +247,10 @@ fn bad_unused(v: &Value) -> Option<String> {
 /// make is never taken for its default.
 pub fn user_strict(key: &str) -> std::result::Result<Value, String> {
     let path = host::paths::state_path().join("strobe.json");
-    if !path.exists() {
-        return Ok(Value::Null);
+    match path.try_exists() {
+        Ok(false) => return Ok(Value::Null),
+        Err(e) => return Err(format!("{}: cannot be read: {e}", path.display())),
+        Ok(true) => {}
     }
     match read(&path) {
         Ok((_, problems)) if problems.iter().any(|p| matches!(p.path.first(), Some(Seg::Key(k)) if k == key)) => {

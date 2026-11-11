@@ -1701,17 +1701,56 @@ pub fn restore_protocols(home: &Path) {
         };
         // The app in the home can write these files: only a URL scheme's name, and a saved key that holds
         // that scheme's key alone, are put back (rule 10).
-        let plain = scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
+        // Not a link, not a class Windows or the shell owns (whose user-level override a delete would drop),
+        // and a URL scheme's key (`URL Protocol`): the saved one, or for one that did not exist, the one there now.
+        const BUILT_IN: [&str; 24] = [
+            "http",
+            "https",
+            "ftp",
+            "file",
+            "mailto",
+            "tel",
+            "ldap",
+            "news",
+            "nntp",
+            "exefile",
+            "lnkfile",
+            "batfile",
+            "cmdfile",
+            "comfile",
+            "clsid",
+            "directory",
+            "folder",
+            "drive",
+            "allfilesystemobjects",
+            "appid",
+            "interface",
+            "typelib",
+            "wow6432node",
+            "applications",
+        ];
+        let lower = scheme.to_ascii_lowercase();
+        let plain = scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+            && !BUILT_IN.contains(&lower.as_str())
+            && !lower.starts_with("ms-")
+            && !lower.starts_with("microsoft")
+            && e.file_type().is_ok_and(|t| t.is_file());
         let own = |line: &str| {
             let l = line.trim_start_matches('\u{feff}').trim_matches('\0').trim().to_ascii_lowercase();
-            let k = format!(r"hkey_current_user\software\classes\{}", scheme.to_ascii_lowercase());
+            let k = format!(r"hkey_current_user\software\classes\{lower}");
             !l.starts_with('[') || l == format!("[{k}]") || l.starts_with(&format!("[{k}\\")) || l == format!("[-{k}]")
         };
+        let key = format!(r"HKCU\Software\Classes\{scheme}");
         let text = if reg { std::fs::read(e.path()).map(|b| reg_text(&b)).unwrap_or_default() } else { String::new() };
-        if !plain || (reg && !text.lines().all(own)) {
+        let url = if reg {
+            text.lines().any(|l| l.trim().to_ascii_lowercase().starts_with("\"url protocol\"="))
+        } else {
+            Command::new("reg").args(["query", &key, "/v", "URL Protocol"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+        };
+        if !plain || !url || (reg && !text.lines().all(own)) {
             continue;
         }
-        let key = format!(r"HKCU\Software\Classes\{scheme}");
         let _ = Command::new("reg").args(["delete", &key, "/f"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
         if reg {
             let _ = Command::new("reg").arg("import").arg(e.path()).stdout(Stdio::null()).stderr(Stdio::null()).status();
@@ -1773,31 +1812,42 @@ mod macos_library {
         !app.exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app"))
     }
 
-    fn places(app: &App) -> (String, Vec<PathBuf>) {
+    /// The Library folders Cocoa and its daemons key by an id: the folder and the suffix after the id.
+    /// The first five for any executable, the rest for a bundle's.
+    const BY_ID: [(&str, &str); 8] = [
+        ("Preferences", ".plist"),
+        ("HTTPStorages", ""),
+        ("WebKit", ""),
+        ("Cookies", ".binarycookies"),
+        ("Containers", ""),
+        ("Application Support", ""),
+        ("Caches", ""),
+        ("Saved Application State", ".savedState"),
+    ];
+
+    fn places(app: &App) -> (String, Option<String>, Vec<PathBuf>) {
         let (id, name) = ids(app);
         let lib = host::home().join("Library");
-        let mut p = vec![
-            lib.join(format!("Preferences/{id}.plist")),
-            lib.join(format!("HTTPStorages/{id}")),
-            lib.join(format!("WebKit/{id}")),
-            lib.join(format!("Cookies/{id}.binarycookies")),
-            lib.join(format!("Containers/{id}")),
-        ];
         // The folders a process looks up itself (its caches, data and saved state) follow `HOME` and
         // `CFFIXED_USER_HOME` into the home. A bundle's helpers and services that launchd starts under
         // its id never get that environment, so a bundle's are counted; a bare executable has no
         // bundle id to key them by: what is left in the user's Library for it is what a daemon
         // writes under its name (cfprefsd's preferences, network and web storage).
-        if !bare(app) {
-            p.extend([lib.join(format!("Application Support/{id}")), lib.join(format!("Caches/{id}")), lib.join(format!("Saved Application State/{id}.savedState"))]);
-        }
-        if let Some(n) = name {
-            p.push(lib.join(format!("Application Support/{n}")));
+        let n = if bare(app) { 5 } else { BY_ID.len() };
+        let mut p: Vec<PathBuf> = BY_ID[..n].iter().map(|(dir, ext)| lib.join(dir).join(format!("{id}{ext}"))).collect();
+        if let Some(n) = &name {
+            p.push(lib.join("Application Support").join(n));
         }
         // A folder the profile's env moves into the home (an app that reads its data folder from an
         // environment variable) is the app's own choice, not Cocoa's: its guards watch it.
         p.retain(|place| !app.moved.iter().any(|m| m == place));
-        (id, p)
+        (id, name, p)
+    }
+
+    /// A bundle id or an executable's name that is safe as one name in the Library and as an argument
+    /// to `defaults`: no `/`, no leading `-` or `.`, no `..`.
+    fn plain(s: &str) -> bool {
+        !s.is_empty() && s.len() <= 255 && !s.starts_with(['-', '.']) && !s.contains("..") && s.chars().all(|c| c.is_ascii_alphanumeric() || "._- +".contains(c))
     }
 
     fn sandboxed(app: &App) -> bool {
@@ -1806,7 +1856,7 @@ mod macos_library {
     }
 
     pub fn check(app: &App) -> Result<()> {
-        let (id, places) = places(app);
+        let (id, _, places) = places(app);
         if sandboxed(app) {
             return Err(Error::refused(
                 "LiveChannel",
@@ -1837,22 +1887,44 @@ mod macos_library {
 
     /// Records what the launch may create, for `restore`.
     pub fn save(home: &Path, app: &App) {
-        let (id, places) = places(app);
+        let (id, name, places) = places(app);
         let list: Vec<String> = places.iter().filter(|p| matches!(p.try_exists(), Ok(false))).map(|p| p.display().to_string()).collect();
-        let _ = std::fs::write(home.join(".strobe-macos-library.json"), json!({ "id": id, "created": list }).to_string());
+        let _ = std::fs::write(home.join(".strobe-macos-library.json"), json!({ "id": id, "name": name, "created": list }).to_string());
     }
 
-    /// Removes what the launch created in the user's Library, and its preferences domain.
+    /// Removes what the launch created in the user's Library, and its preferences domain. The launched
+    /// app can write its home, so the record is trusted only this far (rule 10): a plain file; an id
+    /// and a bundle name that are plain names; a place only when it is exactly one of the id's (or the
+    /// name's) Library folders, not a link, and made after the home was (an older one is the user's).
+    /// It goes through `disk::remove`, which never follows a link.
     pub fn restore(home: &Path) {
-        let Some(v) = std::fs::read_to_string(home.join(".strobe-macos-library.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };
-        let id = v["id"].as_str().unwrap_or("");
-        let created: Vec<&str> = v["created"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        if !id.is_empty() && created.iter().any(|p| p.ends_with(&format!("Preferences/{id}.plist"))) {
+        let file = home.join(".strobe-macos-library.json");
+        if !std::fs::symlink_metadata(&file).is_ok_and(|m| m.file_type().is_file()) {
+            return;
+        }
+        let Some(v) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };
+        let Some(id) = v["id"].as_str().filter(|s| plain(s)) else { return };
+        let name = v["name"].as_str().filter(|s| plain(s));
+        let Ok(since) = std::fs::symlink_metadata(home).and_then(|m| m.created()) else { return };
+        let lib = host::home().join("Library");
+        let mut allowed: Vec<PathBuf> = BY_ID.iter().map(|(dir, ext)| lib.join(dir).join(format!("{id}{ext}"))).collect();
+        allowed.extend(name.map(|n| lib.join("Application Support").join(n)));
+        let created: Vec<PathBuf> = v["created"].as_array().into_iter().flatten().filter_map(Value::as_str).map(PathBuf::from).filter(|p| allowed.contains(p)).collect();
+        // Absent (not written yet), or a plain file or folder this launch made.
+        let ours = |p: &Path| match std::fs::symlink_metadata(p) {
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            Ok(m) => !m.file_type().is_symlink() && m.created().is_ok_and(|c| c >= since),
+        };
+        let prefs = lib.join("Preferences").join(format!("{id}.plist"));
+        // Only a domain whose file this launch made: `defaults` also reaches a domain kept elsewhere (an
+        // app's container) by its id alone.
+        if created.contains(&prefs) && std::fs::symlink_metadata(&prefs).is_ok() && ours(&prefs) {
             let _ = Command::new("defaults").args(["delete", id]).stdout(Stdio::null()).stderr(Stdio::null()).status();
         }
         for p in created {
-            let p = Path::new(p);
-            let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+            if std::fs::symlink_metadata(&p).is_ok() && ours(&p) {
+                let _ = host::disk::remove(&p, &lib);
+            }
         }
     }
 }

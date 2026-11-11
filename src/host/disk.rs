@@ -148,7 +148,9 @@ impl Tally {
     }
 
     fn item(&mut self, dir: &Path, mut it: Item, owner: usize, dev: u64, skip: &Skip, out: &mut Sized) {
-        if it.dev != dev {
+        // A folder of another filesystem is not entered; a file's device may be a lower layer's
+        // (overlayfs) and counts.
+        if it.kind == Kind::Dir && it.dev != dev {
             return;
         }
         if it.modified > out.newest {
@@ -322,7 +324,12 @@ fn remove_item(dir: &Path, mut it: Item, dev: u64, out: &mut Removed) {
             }
         }
         Kind::Dir => {
-            // Still the folder the listing named, not a junction put in its place since.
+            // Held open without sharing deletion while its files go: nobody can rename, move or delete it
+            // and put a junction in its place meanwhile. A real folder, and still the one the listing named.
+            let held = match retry_held(&path) {
+                Ok(h) => h,
+                Err(e) => return out.failed.push(format!("{}: {e}; left alone", path.display())),
+            };
             if !stat(&path).is_ok_and(|s| s.kind == Kind::Dir && s.id == it.id) {
                 out.failed.push(format!("{}: changed while it was being removed; left alone", path.display()));
                 return;
@@ -330,7 +337,7 @@ fn remove_item(dir: &Path, mut it: Item, dev: u64, out: &mut Removed) {
             writable(&path);
             let before = out.failed.len();
             let mut own = it.bytes;
-            match list_dir(&path) {
+            match os::list_held(&held, &path) {
                 Ok((bytes, children)) => {
                     own = own.max(bytes);
                     for c in children {
@@ -339,6 +346,7 @@ fn remove_item(dir: &Path, mut it: Item, dev: u64, out: &mut Removed) {
                 }
                 Err(e) => out.failed.push(format!("{}: {e}", path.display())),
             }
+            drop(held);
             // A folder that kept something it holds stays; what it holds was named.
             if before == out.failed.len() {
                 match retry(|| std::fs::remove_dir(&path), &path) {
@@ -372,6 +380,25 @@ fn retry(mut f: impl FnMut() -> std::io::Result<()>, path: &Path) -> std::io::Re
         }
     }
     Err(last.unwrap_or_else(|| std::io::Error::other("could not remove")))
+}
+
+/// `os::hold`, again over half a second while another process (a scanner) has the folder open in a way
+/// that conflicts.
+#[cfg(not(unix))]
+fn retry_held(path: &Path) -> std::io::Result<os::Held> {
+    let mut last = None;
+    for _ in 0..10 {
+        match os::hold(path) {
+            Ok(h) => return Ok(h),
+            // ERROR_SHARING_VIOLATION.
+            Err(e) if e.raw_os_error() == Some(32) => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("could not open")))
 }
 
 /// Clears a read-only mark; never through a link.
@@ -464,8 +491,15 @@ mod unix_rm {
             return;
         }
         let fd = Fd(fd);
+        // The filesystem is the parent folder's: one mounted on the entry itself is never entered.
+        // SAFETY: an open descriptor and a stat the call fills.
+        let mut at: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd.0, &mut at) } != 0 {
+            out.failed.push(format!("{}: {}", parent.display(), std::io::Error::last_os_error()));
+            return;
+        }
         match lstat_at(fd.0, &n) {
-            Ok(st) => remove_at(fd.0, parent, name, dev(&st), out),
+            Ok(_) => remove_at(fd.0, parent, name, dev(&at), out),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => out.failed.push(format!("{}: {e}", path.display())),
         }
@@ -479,10 +513,12 @@ mod unix_rm {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => return out.failed.push(format!("{}: {e}", path.display())),
         };
-        if self::dev(&st) != dev {
+        let fmt = st.st_mode & libc::S_IFMT;
+        // Only a folder is entered: a file's device may be a lower layer's (overlayfs), and unlinking a
+        // file mounted over fails by itself.
+        if fmt == libc::S_IFDIR && self::dev(&st) != dev {
             return out.failed.push(format!("{}: another filesystem is mounted here; left alone", path.display()));
         }
-        let fmt = st.st_mode & libc::S_IFMT;
         let bytes = st.st_blocks as u64 * 512;
         if fmt != libc::S_IFDIR {
             // The last name of a file frees its bytes; a link frees what it takes itself.
@@ -686,7 +722,49 @@ mod os {
     /// reparse tag and file id: no file is opened. And the folder's own allocation (its index), which
     /// its parent's listing gives as 0.
     pub fn list(dir: &Path) -> std::io::Result<(u64, Vec<Item>)> {
-        let h = open(dir, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
+        listing(&open(dir, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?, dir)
+    }
+
+    /// A folder held open without `FILE_SHARE_DELETE`: while it is, no process can rename, move or
+    /// delete it (a swap for a junction fails). Only a real folder (no reparse point) is held.
+    pub struct Held(Handle);
+
+    pub fn hold(dir: &Path) -> std::io::Result<Held> {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo};
+        let w = wide(dir);
+        // SAFETY: a NUL-terminated path; the handle is closed by `Handle`.
+        let h = unsafe {
+            CreateFileW(
+                w.as_ptr(),
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if h == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let h = Handle(h);
+        let mut tag: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: an open handle and a structure the call fills.
+        if unsafe { GetFileInformationByHandleEx(h.0, FileAttributeTagInfo, (&mut tag as *mut FILE_ATTRIBUTE_TAG_INFO).cast(), std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if kind(tag.FileAttributes, tag.ReparseTag) != Kind::Dir {
+            return Err(std::io::Error::other("not a folder any more"));
+        }
+        Ok(Held(h))
+    }
+
+    /// `list`, through the held folder's own handle.
+    pub fn list_held(h: &Held, dir: &Path) -> std::io::Result<(u64, Vec<Item>)> {
+        listing(&h.0, dir)
+    }
+
+    fn listing(h: &Handle, dir: &Path) -> std::io::Result<(u64, Vec<Item>)> {
         let dev = volume(dir);
         let mut standard: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
         // SAFETY: an open handle and a structure the call fills.

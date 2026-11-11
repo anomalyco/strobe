@@ -142,6 +142,8 @@ check(
   `exit ${code2}, ${metas.map((m: any) => `${m.gpu_cache}${Date.parse(m.created) > midAt ? " (after the prune)" : ""}`).join(", ")}; ${P.join(scratch, "bench2.log")}`,
 )
 check(seedDir !== "" && fs.statSync(P.join(seedDir, "big.bin")).mtimeMs === seedTime, "the seed copy was not made again", seedDir)
+const leftInGpu = fs.readdirSync(P.join(data, "strobe", "gpu-cache")).filter((n) => n.startsWith(exp))
+check(leftInGpu.length === 0, "once the experiment ended, its store and the store's stamp are gone", leftInGpu.join(", ") || "nothing left")
 const failed = results.filter((r) => r.startsWith("FAIL")).length
 console.log(`\n${results.length - failed} passed, ${failed} failed · scratch left in ${scratch}`)
 process.exit(failed ? 1 : 0)

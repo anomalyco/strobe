@@ -1371,8 +1371,12 @@ falls in one category (`app::prune::CATEGORIES`):
 - **What goes.** With no category, every cache entry no process uses now (docker's "unused"; no
   age). Named categories narrow it. Data goes only when named or with `--all`, and only what was
   last used more than 30 days ago (`--older-than` sets the age for every category it names; for
-  caches it narrows by last use). Last use: a cache entry's stamp (below), else its newest write; a
-  recording or experiment's newest file (`store::resolve` touches its `.used` on each use).
+  caches it narrows by last use). Last use: a cache entry's stamp (below; a GPU cache store's too, as
+  a launch gives it back without writing its folder), else its newest write; a recording or
+  experiment's newest file (`store::resolve` touches its `.used` on each use). A stamp whose entry is
+  gone (a store an older strobe removed without it) is an entry of its own (`<entry>.used`), last
+  used when it was touched, removed under its own hold (one a process leases before it makes the
+  entry, a seed copy, stays).
 - **What stays, and why** (each said in the plan, counted by reason; the in-use ones by name):
   a build, seed copy, GPU cache store or `run/cmd-<hash>` folder a live process leases (below); every
   build, and every other engine version, while a bench of a strobe build before leases runs (its
@@ -1390,7 +1394,9 @@ falls in one category (`app::prune::CATEGORIES`):
   recordings any of them name (their views would break). The bench slot, the bench registry, phone
   journals and open trace sessions in `run/`, and `experiments/index.jsonl` (the rerun ledger counts
   pruned experiments too) are never entries. What started between the plan and the removal (a
-  person may take minutes to answer) is read again before each entry.
+  person may take minutes to answer) is read again before each entry: the bench registry and slot,
+  the launch folders and what they borrow, the experiments that can resume (for a store or a
+  `run/cmd-<hash>` folder); the daemon's build once.
 - **Leases.** A cache entry has a stamp beside it, `<entry>.used`: its time is the entry's last use,
   and a process using the entry holds a shared lock on it for as long as it does (a bench: each
   variant's worktree and executable copy until the experiment ends; a build: the repository's
@@ -1415,22 +1421,33 @@ falls in one category (`app::prune::CATEGORIES`):
 - **Safety.** Removal is `host::disk::remove`: every path is checked to lie inside its root (the
   state folder, Snap Firefox's profile folder, a worktree's record in its repository) with the
   folder above it canonicalized; a symbolic link, junction or mount point is removed itself, never
-  followed; a filesystem mounted inside an entry (a bind mount, a tmpfs) is never entered (its
-  mount point is named as a failure and stays); a folder is emptied file by file (paths past 260
+  followed; a filesystem mounted inside an entry or on the entry itself (a bind mount, a tmpfs) is
+  never entered (its mount point is named as a failure and stays; the filesystem is the entry's
+  parent folder's, and only folders are compared, as a file's device can be a lower layer's on
+  overlayfs); a folder is emptied file by file (paths past 260
   characters through `\\?\`, names kept as UTF-16 units), read-only files and folders made writable
   first, and a file that cannot go (held open, denied) is named while the rest goes. On Unix the
   removal goes through open folders (`openat` with `O_NOFOLLOW | O_DIRECTORY`, the folder's device
   and inode checked against what `fstatat` saw, then `unlinkat`), so a folder swapped for a link
-  meanwhile is never entered; on Windows a folder is listed only while it is still the one the
-  listing named (its id). One entry's failure does not stop the others; the exit code is 1 when any
+  meanwhile is never entered; on Windows a folder is held open without `FILE_SHARE_DELETE` while
+  what it holds goes (nobody can rename, move or delete it and put a junction there meanwhile), is
+  checked through that handle to be a real folder and listed through it, and only while it is still
+  the one the listing named (its id). One entry's failure does not stop the others; the exit code is 1 when any
   failed, and a failed entry keeps its stamp's earlier time. Recordings and experiments go through
   `store::remove`, their only writer. A launch folder's leftover processes end and its URL schemes
   are restored first (`isolate::release_gone`, as `reap_dead_owners` does). What a launched app can
   write in its home is never trusted: a `.strobe-shared` line counts only for a link inside the home
   to a copy inside `<state>/seeds`, both one regular file (no read-only mark is changed through a
   link); `.strobe-gpu-cache` only for a store inside `<state>/gpu-cache`, and only real folders of
-  the home (no link) move back into it; a saved URL scheme only for a scheme's name and a `.reg`
-  that holds that scheme's key alone. Before this, a line of `.strobe-shared` naming any file made
+  the home (no link) move back into it; a saved URL scheme only for a scheme's name that is no
+  class Windows or the shell owns (`http`, `https`, `file`, `exefile`, `clsid`, `directory`,
+  `folder`, `ms-*` …), saved in a regular file (no link), a URL scheme's key (`URL Protocol` in the
+  saved `.reg`, or for one that did not exist, in the key there now), and a `.reg` that holds that
+  scheme's key alone; macOS's `.strobe-macos-library.json` only as a regular file, its id and bundle
+  name only as plain names (no `/`, no leading `-` or `.`), each place only when it is exactly one of
+  that id's or name's Library folders, no link, and made after the home was (an older one is
+  the user's), removed through `host::disk` (`defaults delete` only for a preferences file so made).
+  Before this, a line of `.strobe-shared` naming any file made
   reaping a dead launch delete it. One prune at a time per state folder (`run/prune.lock`; another
   running is exit 1). Not an MCP tool.
 - **Worktrees.** After its folder goes, a worktree leaves its repository's list through `git
@@ -1471,13 +1488,15 @@ falls in one category (`app::prune::CATEGORIES`):
   here, this folder's slot held, or the machine-wide lock held by another user's or state folder's),
   checked before it starts and again before each entry, so a bench that starts stops it there (the
   day is then not recorded): after a bench, track or run from the command line that succeeded (not
-  `track --schedules` or `--unschedule`, a stop or a plan; at a bench's start it would land on the
+  `track --schedule`, `--schedules` or `--unschedule`, a stop or a plan; at a bench's start it would land on the
   timed blocks' disk and CPUs) and in the daemon's minute tick, with one line (`strobe: pruned 3
   builds, 1 seeds unused for 14d: 12.4 GB …`) and `<state>/prune.json`. `"prune": { "unused": "30d"
   }` in the user's own `<state>/strobe.json` changes the age, `"off"` turns it off; any other value is
   a usage error of every command that reads strobe.json, and a project's strobe.json may not set it
   (compared with the user's file canonically, so `strobe config` in the state folder reads it). A
-  user strobe.json that does not parse refuses the automatic prune, the daemon's tick too (a command
+  user strobe.json that cannot be read (denied, a folder; UTF-16 after its byte-order mark, as
+  Windows PowerShell 5.1's `>` writes, is read), or does not parse, refuses the automatic prune,
+  as does `"0s"` (the hint says `"off"`), the daemon's tick too (a command
   that reads strobe.json fails on it first), and `status` says why (`disk.auto_refused` in JSON):
   the 14-day default never comes back behind an `"off"` the file meant. It replaces the GPU cache
   stores' week, the seed copies' week and other builds' SDKs' 30 days.
@@ -1496,24 +1515,37 @@ falls in one category (`app::prune::CATEGORIES`):
   records with relative paths goes and leaves no stale entry (adais, git 2.56); a kept bisect's old
   `<exp>_s1` and the recording it names stay; a `run/cmd-<hash>` a resumable experiment names stays;
   on vps a tmpfs mounted inside an entry fails by name (`another filesystem is mounted here`), its
-  file stays and its neighbour goes.
+  file stays and its neighbour goes. Second review: on vps a tmpfs mounted on an entry itself fails
+  the same way without being entered (its file stays); a stamp whose store is gone is planned and
+  removed, one a live process locks stays `in use`; `prune gpu-cache --older-than 7d` takes a
+  20-day-old store and leaves one whose folder is 20 days old but whose stamp is from today; on
+  adais every folder removal held its folder open without `FILE_SHARE_DELETE` (the checks above all
+  pass through it). The hostile `.strobe-macos-library.json` cases (an id `-g`, an id `../Other`, a
+  place outside the Library, a place through `..`, a link at an expected place, places older than
+  the home) are in the script for macOS and not yet run there.
   `scripts/dev/prune-lease.ts` on both: while a `bench --check` of a git ref runs, the plan keeps its
   worktree `in use` and `prune --force` leaves it; the bench made the worktree over a stale entry;
   once it ended the worktree was a cache the plan removes; the bench's `reap_dead_owners` of a dead
   home whose `.strobe-shared` and `.strobe-gpu-cache` aim outside touched nothing there; a `prune
   --force` between the launches of a windowless native `--check` with a 65 MB seed kept the GPU cache
-  store and seed copy (`in use`), the launches after it were warm and the seed was not copied again.
+  store and seed copy (`in use`), the launches after it were warm and the seed was not copied again;
+  once the experiment ended, its store and the store's stamp were gone.
   `scripts/dev/prune-auto.ts` on both: a user strobe.json that does not parse made the daemon prune
   nothing and `status` say why; no automatic prune after a failed `run` or `track --schedules`; the
   daemon pruned nothing while a bench ran and pruned the old caches on its tick once it ended; a
-  bench that started during an automatic prune stopped it after 8 of 300 entries (vps 13 of 600)
-  with no day recorded. On vps under `script` (a terminal): `n`
+  bench that started during an automatic prune stopped it after 5 to 8 of 300 entries (vps 13 to 16 of 600)
+  with no day recorded; nor after `track <file> --schedule nightly` (exit 0); `"0s"` and a
+  strobe.json that cannot be read (a folder in its place) refuse it, said in `status`; a UTF-16
+  strobe.json saying `"off"` is read (the daemon pruned nothing, nothing refused). On vps under
+  `script` (a terminal): `n`
   removes nothing, `y` removes the plan; automatic retention removed a 20-day-old compile cache and
   seed copy and kept a 5-day-old one, ran once a day, not at all with `"off"`, and at `"3d"` took
   the 5-day-old one. Again after the fixes (read only): adais 128.06 GB (decimal; complete), the
   fresh walk 22.9 s, then `status --fast` 0.78 s (0.26 s the disk) and `status` 3.5 s, a plain prune
   96.2 GB; vps the state folder within 4 KB of `du`, a plain prune 1.68 GB, 2 GPU cache stores and a
-  `run/cmd-<hash>` kept for experiments that can resume. The real state folders, read only (`status`, `prune --dry-run`): adais 119 GB
+  `run/cmd-<hash>` kept for experiments that can resume. The reviewer then ran a plain `strobe prune
+  --force` on adais's real state from 5c86c84: 639 entries, 96.2 GB in 7 minutes, exit 0; `status`
+  then 23.1 GB, no stale worktree entry. The real state folders, read only (`status`, `prune --dry-run`): adais 119 GB
   (2.1 M files; the first walk of everything 14 to 25 s, then `status --fast` 0.64 to 0.98 s with
   0.14 to 0.24 s of it the disk, `status` 3.4 s; against `du`: seeds within 35 KB of 25.2 GB,
   recordings 0.01%, experiments 0.3%, builds 0.5% under it over the 64 GB `du` walked, all but four
@@ -7149,7 +7181,8 @@ Strobe launches any Electron app the same way, with no change to the app:
   first pair, again while the store still grew by 5% (at most 3: NVIDIA's Vulkan cache took two
   40 s launches to fill; `GpuCacheGrowing` warns after the third); a launch case's discarded first
   launch warms it too. The experiment removes its stores when it ends (a stopped one keeps them
-  for `--resume`); stores are caches `strobe prune` removes when no live launch borrows them and their
+  for `--resume`; an ending one lets go of its own leases first, so each store goes with its
+  stamp); stores are caches `strobe prune` removes when no live launch borrows them and their
   experiment neither runs (it leases them between blocks) nor can resume (§5.14),
   and those unused for 14 days go on their own. `--check` has no warm-up block: its first launch
   per variant is cold, the next warm. `record` and `record --bench` share one store per
@@ -7259,7 +7292,9 @@ What one app needs beyond that is its **app profile**, in the consumer's strobe.
   (`Preferences/<id>.plist`, `Application Support/<id>` and `/<name>`, `Caches/<id>`, `Saved
   Application State/<id>.savedState`, `HTTPStorages`, `WebKit`, `Cookies`, `Containers/<id>`): a build
   with its own bundle id, or an app this account never ran. It records which may appear and removes
-  them, and the preferences domain, when the home is released. Anything else refuses `LiveChannel`
+  them, and the preferences domain, when the home is released, trusting the record (the app can
+  write it) only as §5.14 says: plain names, exactly those places, no link, made after the home.
+  Anything else refuses `LiveChannel`
   with the folder it found. Sandboxed apps (their container is in the user's Library) are refused.
   A bare executable (no app bundle: a command-line program, a `tty()` target's program, a source
   build) counts only what a daemon writes under its name, which no environment reaches:
@@ -8638,6 +8673,13 @@ what was built but not yet run on a device is in §21.
   each entry, runs only after a command that succeeded and is refused when the user strobe.json does
   not parse; kept experiments keep the experiments they name (a bisect's steps); a cut walk is a
   floor (`null` totals, `at least`); `--dry-run` takes no lock; MIT `LICENSE` (4.1, 4.3, 5.2, 5.14).
+  Second review: macOS's Library record is trusted only for plain ids and exactly their places made
+  after the home; a strobe.json that cannot be read refuses automatic pruning (UTF-16 is read),
+  `"0s"` too; a filesystem mounted on an entry is never entered; no automatic prune after `track
+  --schedule`; an ending experiment removes its stores with their stamps, and orphan stamps are
+  entries; a store's last use is its stamp; a removal reads live state before each entry and, on
+  Windows, holds each folder against renames; URL schemes the shell owns are never restored
+  (5.14, 13.2).
 - 2026-11-10 · cleanup/w6e · `up --skip self,skill` (no install folder copy, user PATH entry or skill;
   `self` needs `daemon`), an unknown `--skip` name exit 2, a renamed copy's install refused; the
   action's `up` only fetches the engine,

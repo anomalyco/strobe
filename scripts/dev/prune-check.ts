@@ -21,7 +21,10 @@ const scratch = P.resolve(scratchArg)
 if (fs.existsSync(scratch)) throw new Error(`${scratch} exists: give a folder that does not, so nothing real is touched`)
 const data = P.join(scratch, "data")
 const state = P.join(data, "strobe")
-const env = { ...process.env, [win ? "LOCALAPPDATA" : "XDG_DATA_HOME"]: data, STROBE_PROGRESS: "off" }
+const mac = process.platform === "darwin"
+// macOS: the user's Library strobe cleans after a launch is a scratch one too (HOME moves).
+const userHome = P.join(scratch, "userhome")
+const env = { ...process.env, [win ? "LOCALAPPDATA" : "XDG_DATA_HOME"]: data, STROBE_PROGRESS: "off", ...(mac ? { HOME: userHome } : {}) }
 const outside = P.join(scratch, "outside")
 const DAY = 86_400_000
 const results: string[] = []
@@ -149,6 +152,13 @@ if (root) {
   put(P.join(mountDir, "inmount.txt"), "a mounted filesystem's file")
   put(P.join(builds, "cache", "eeee5555ffff6666", "beside.bin"), MB)
 }
+// A filesystem mounted on an entry itself: never entered, nothing in it removed.
+const mountOn = P.join(builds, "cache", "ffff9999ffff9999")
+if (root) {
+  mk(mountOn)
+  spawnSync("mount", ["-t", "tmpfs", "-o", "size=8m", "tmpfs", mountOn])
+  put(P.join(mountOn, "onmount.txt"), "a file of the filesystem mounted on the entry")
+}
 // A large compile cache nobody walked yet: a status with a short time cannot finish it.
 const bigDir = P.join(builds, "cache", "bbbb7777bbbb7777")
 // Each file past what NTFS keeps inside its own records (about 700 bytes), which Git's `du` counts as 1 KB.
@@ -169,8 +179,44 @@ put(
 )
 put(P.join(home, "cache.bin"), MB)
 
+// macOS: dead launches whose app rewrote the record of what the launch made in the user's Library.
+const lib = P.join(userHome, "Library")
+if (mac) {
+  // The user's own, older than the launch: never removed.
+  put(P.join(lib, "Application Support", "com.strobe.victim", "data.txt"), "the user's")
+  put(P.join(lib, "Preferences", "com.strobe.victim.plist"), "the user's")
+  put(P.join(lib, "Application Support", "Other", "keep.txt"), "another app's")
+  await Bun.sleep(1100)
+  const mhome = P.join(state, "run", "home-4194304-1")
+  mk(mhome)
+  await Bun.sleep(1100)
+  // What the launch made, after its home: removed.
+  put(P.join(lib, "Caches", "com.strobe.victim", "new.bin"), "made by the launch")
+  // A link in an expected place: removed never, followed never.
+  link(outside, P.join(lib, "WebKit", "com.strobe.victim"))
+  const places = ["Application Support", "Preferences", "Caches", "WebKit"].map((d) => P.join(lib, d, `com.strobe.victim${d === "Preferences" ? ".plist" : ""}`))
+  put(
+    P.join(mhome, ".strobe-macos-library.json"),
+    JSON.stringify({ id: "com.strobe.victim", name: null, created: [...places, P.join(outside, "canary.txt"), P.join(lib, "Application Support", "Other"), P.join(lib, "Caches", "com.strobe.victim", "..", "..", "Application Support", "Other")] }),
+  )
+  // An id that is an option of `defaults`, and one that climbs out.
+  for (const [n, id] of [["home-4194305-1", "-g"], ["home-4194306-1", "../Other"]]) {
+    put(P.join(state, "run", n, ".strobe-macos-library.json"), JSON.stringify({ id, created: [P.join(lib, "Preferences", `${id}.plist`), P.join(lib, "Application Support", id)] }))
+  }
+}
+
 // --- the rest of the caches ---
 put(P.join(state, "gpu-cache", "exp_000001-head", "dirs", "x", "shader.bin"), 2 * MB)
+age(P.join(state, "gpu-cache", "exp_000001-head"), 20)
+// A store a launch used today without writing its folder: its stamp says so.
+put(P.join(state, "gpu-cache", "exp_000002-head", "dirs", "x", "shader.bin"), MB)
+age(P.join(state, "gpu-cache", "exp_000002-head"), 20)
+put(P.join(state, "gpu-cache", "exp_000002-head.used"), "")
+// A stamp whose store an older strobe removed, and one a live process leases before it makes its seed copy.
+put(P.join(state, "gpu-cache", "exp_gone01-head.used"), "")
+age(P.join(state, "gpu-cache", "exp_gone01-head.used"), 20)
+const heldStamp = P.join(state, "seeds", "5eedc0de5eedc0de.used")
+put(heldStamp, "")
 put(P.join(state, "symbols", "lib.pdb", "ABCDEF1", "lib.pdb"), 3 * MB)
 put(P.join(state, "sdk", "0000000000000001", "index.ts"), "x")
 age(P.join(state, "sdk", "0000000000000001"), 3)
@@ -223,9 +269,10 @@ const holders = win
   ? [
       ps(`$f=[IO.File]::Open('${stamp2}','OpenOrCreate','ReadWrite','ReadWrite,Delete'); $f.Lock(0,1); Start-Sleep 600`),
       ps(`$f=[IO.File]::Open('${locked}','Open','Read','None'); Start-Sleep 600`),
+      ps(`$f=[IO.File]::Open('${heldStamp}','OpenOrCreate','ReadWrite','ReadWrite,Delete'); $f.Lock(0,1); Start-Sleep 600`),
     ]
   : // In a group of its own: the sleep flock starts holds the lock too, and ends with the group.
-    [spawn("flock", ["-s", stamp2, "sleep", "600"], { stdio: "ignore", detached: true })]
+    [stamp2, heldStamp].map((s) => spawn("flock", ["-s", s, "sleep", "600"], { stdio: "ignore", detached: true }))
 await Bun.sleep(3000)
 
 try {
@@ -266,14 +313,23 @@ try {
     `builds/${sha1.slice(0, 12)}`, `builds/out/${hash(P.join(scratch, "a-folder-variant"))}`, "builds/cache/aaaa1111bbbb2222", "builds/cache/cccc3333dddd4444",
     "builds/cache/bbbb7777bbbb7777", "seeds/5eed5eed5eed5eed", "gpu-cache/exp_000001-head", "symbols/lib.pdb/ABCDEF1", "sdk/0000000000000001", "engine/v0.0",
     "run/home-4194301-1", "run/q-4194302-1-1.sql", "run/look-1.png",
+    "gpu-cache/exp_000002-head", "gpu-cache/exp_gone01-head.used",
     ...(relative ? [`builds/${sha3.slice(0, 12)}`] : []),
-    ...(root ? ["builds/cache/eeee5555ffff6666"] : []),
+    ...(root ? ["builds/cache/eeee5555ffff6666", "builds/cache/ffff9999ffff9999"] : []),
+    ...(mac ? ["run/home-4194304-1", "run/home-4194305-1", "run/home-4194306-1"] : []),
   ]
   check(want.every((w) => planned.has(w)) && planned.size === want.length, "the default plan is every unused cache", [...planned].sort().join(", "))
   const keptWhy = Object.fromEntries(dry.json.kept.map((e: any) => [e.name, e.why]))
   check(/in use/.test(keptWhy[`builds/${sha2.slice(0, 12)}`] ?? ""), "the worktree a live process leases stays", keptWhy[`builds/${sha2.slice(0, 12)}`])
   check(keptWhy["sdk/0000000000000002"] !== undefined && keptWhy["run/look-2.png"] !== undefined, "a recent other build's SDK and a new temporary file stay")
   check(/resume/.test(keptWhy["run/cmd-aaaa11112222"] ?? ""), "run/cmd-<hash> stays while an experiment that can resume names it", keptWhy["run/cmd-aaaa11112222"])
+  check(/in use/.test(keptWhy["seeds/5eedc0de5eedc0de.used"] ?? ""), "a stamp a live process leases before its entry exists stays", keptWhy["seeds/5eedc0de5eedc0de.used"])
+  const olderGpu = new Set<string>((strobe("prune", "gpu-cache", "--older-than", "7d", "--dry-run", "--json").json?.remove ?? []).map((e: any) => e.name))
+  check(
+    olderGpu.has("gpu-cache/exp_000001-head") && olderGpu.has("gpu-cache/exp_gone01-head.used") && !olderGpu.has("gpu-cache/exp_000002-head"),
+    "a GPU cache store's last use is its stamp's (--older-than 7d leaves the one used today, its folder 20 days old)",
+    [...olderGpu].sort().join(", "),
+  )
   const frees = dry.json.frees_bytes
 
   // --- remove: exactly the plan ---
@@ -282,7 +338,7 @@ try {
   const duAfter = du(scratch)
   const removed = new Set<string>(gone.json.removed.map((e: any) => e.name))
   const failed = gone.json.failed.map((e: any) => e.name)
-  const wantFailed = [...(win ? ["builds/cache/cccc3333dddd4444"] : []), ...(root ? ["builds/cache/eeee5555ffff6666"] : [])]
+  const wantFailed = [...(win ? ["builds/cache/cccc3333dddd4444"] : []), ...(root ? ["builds/cache/eeee5555ffff6666", "builds/cache/ffff9999ffff9999"] : [])]
   check(JSON.stringify([...failed].sort()) === JSON.stringify(wantFailed.sort()) && gone.code === (wantFailed.length ? 1 : 0), "only the entries with a held file or a mount fail, named, and the rest goes", `failed ${failed.join(", ")}, exit ${gone.code}`)
   check([...removed].every((r) => planned.has(r)) && removed.size + failed.length === planned.size, "--force removes exactly the plan", [...removed].sort().join(", "))
   check(fs.readFileSync(P.join(outside, "canary.txt"), "utf8") === "do not delete" && fs.existsSync(P.join(outside, "big.bin")), "the canary behind the link is untouched")
@@ -290,6 +346,17 @@ try {
   if (root) {
     const why = gone.json.failed.find((f: any) => f.name === "builds/cache/eeee5555ffff6666")?.errors?.join(" ") ?? ""
     check(fs.existsSync(P.join(mountDir, "inmount.txt")) && /another filesystem/.test(why) && !fs.existsSync(P.join(builds, "cache", "eeee5555ffff6666", "beside.bin")), "a mounted filesystem inside an entry is never entered; its neighbour goes", why)
+    const whyOn = gone.json.failed.find((f: any) => f.name === "builds/cache/ffff9999ffff9999")?.errors?.join(" ") ?? ""
+    check(fs.existsSync(P.join(mountOn, "onmount.txt")) && /another filesystem/.test(whyOn), "a filesystem mounted on the entry itself is never entered (its file stays)", whyOn)
+  }
+  check(!fs.existsSync(P.join(state, "gpu-cache", "exp_gone01-head.used")) && fs.existsSync(heldStamp), "the orphan stamp went; the leased one stayed")
+  if (mac) {
+    check(
+      fs.existsSync(P.join(lib, "Application Support", "com.strobe.victim", "data.txt")) && fs.existsSync(P.join(lib, "Preferences", "com.strobe.victim.plist")) && fs.existsSync(P.join(lib, "Application Support", "Other", "keep.txt")),
+      "macOS: Library places older than the launch, and another app's named in the record, stay",
+    )
+    check(!fs.existsSync(P.join(lib, "Caches", "com.strobe.victim")), "macOS: the place the launch made goes")
+    check(fs.lstatSync(P.join(lib, "WebKit", "com.strobe.victim")).isSymbolicLink() && fs.existsSync(P.join(outside, "big.bin")), "macOS: a link at an expected place is neither removed nor followed")
   }
   if (relative) check(!fs.existsSync(wt3), "the worktree git records with relative paths is removed")
   check(fs.existsSync(P.join(wt2, "dist", "out.bin")), "the leased worktree is still there")
@@ -321,7 +388,10 @@ try {
     if (win || !h.pid) h.kill()
     else process.kill(-h.pid)
   }
-  if (root) spawnSync("umount", [mountDir])
+  if (root) {
+    spawnSync("umount", [mountDir])
+    spawnSync("umount", [mountOn])
+  }
 }
 const failedChecks = results.filter((r) => r.startsWith("FAIL")).length
 console.log(`\n${results.length - failedChecks} passed, ${failedChecks} failed · scratch left in ${scratch}`)

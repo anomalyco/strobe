@@ -259,6 +259,16 @@ struct Live {
 
 impl Live {
     fn read() -> Live {
+        let mut live = Live { benches: Vec::new(), unleased: None, borrowed: Vec::new(), other_daemon: None };
+        live.local();
+        live.other_daemon =
+            super::mcp::running().then(super::mcp::daemon_build).flatten().filter(|b| b.as_str() != super::mcp::build_id()).map(|b| format!("the daemon runs another strobe build ({b})"));
+        live
+    }
+
+    /// Reads again what this state folder's files say runs (the bench registry and slot, launch
+    /// folders): cheap enough before each entry a removal takes.
+    fn local(&mut self) {
         let benches = super::bench::slot::list();
         let mut unleased = benches
             .iter()
@@ -273,10 +283,9 @@ impl Live {
         {
             unleased = Some(format!("an older strobe (pid {pid}) holds the bench slot (run/bench.lock) and marks no build it uses; prune builds once it ends"));
         }
-        let borrowed = isolate::launch_folders().into_iter().filter(|d| isolate::folder_gone(d) == Some(false)).flat_map(|d| isolate::borrowed(&d)).collect();
-        let other_daemon =
-            super::mcp::running().then(super::mcp::daemon_build).flatten().filter(|b| b.as_str() != super::mcp::build_id()).map(|b| format!("the daemon runs another strobe build ({b})"));
-        Live { benches, unleased, borrowed, other_daemon }
+        self.borrowed = isolate::launch_folders().into_iter().filter(|d| isolate::folder_gone(d) == Some(false)).flat_map(|d| isolate::borrowed(&d)).collect();
+        self.benches = benches;
+        self.unleased = unleased;
     }
 
     fn running(&self, exp: &str) -> Option<&Value> {
@@ -319,6 +328,8 @@ fn entries(state: &Path, live: &Live) -> Vec<Entry> {
     }
     for c in children(&state.join("gpu-cache")) {
         let mut e = Entry::new("gpu-cache", format!("gpu-cache/{}", name_of(&c.0)), c, state);
+        // Its stamp: a launch takes it and gives it back without writing the store's own folder.
+        e.how = Used::Cache;
         e.leases = vec![e.paths[0].clone()];
         // An experiment's store (`<exp>-<role>`) is its warm caches between blocks, and for `--resume`.
         let exp = e.name.trim_start_matches("gpu-cache/").rsplit_once('-').map(|(x, _)| x.to_string()).filter(|x| x != "rec");
@@ -364,6 +375,20 @@ fn entries(state: &Path, live: &Live) -> Vec<Entry> {
         out.push(e);
     }
     run_folder(state, &mut out);
+    for (dir, cat, prefix) in [
+        (state.join("builds"), "builds", "builds/"),
+        (state.join("builds").join("out"), "builds", "builds/out/"),
+        (state.join("builds").join("cache"), "builds", "builds/cache/"),
+        (state.join("seeds"), "seeds", "seeds/"),
+        (state.join("gpu-cache"), "gpu-cache", "gpu-cache/"),
+        (state.join("run"), "run", "run/"),
+    ] {
+        orphan_stamps(&dir, cat, prefix, state, &mut out);
+    }
+    for (group, _) in children(&state.join("symbols")) {
+        let prefix = format!("symbols/{}/", name_of(&group));
+        orphan_stamps(&group, "symbols", &prefix, state, &mut out);
+    }
     for c in children(&state.join("recordings")) {
         let mut e = Entry::new("recordings", name_of(&c.0), c, state);
         e.removal = Removal::Store;
@@ -388,6 +413,24 @@ fn entries(state: &Path, live: &Live) -> Vec<Entry> {
         out.push(e);
     }
     out
+}
+
+/// Stamps (`<entry>.used`, `host::cache`) in `dir` whose entry is gone: an entry each (an
+/// experiment's GPU cache store an older strobe removed without its stamp), removed under its own
+/// hold, so one a process leases before it makes the entry (a seed copy) stays.
+fn orphan_stamps(dir: &Path, cat: &str, prefix: &str, state: &Path, out: &mut Vec<Entry>) {
+    for i in disk::list(dir).unwrap_or_default() {
+        let n = i.name.to_string_lossy().to_string();
+        let Some(entry) = n.strip_suffix(".used").filter(|e| !e.is_empty()).map(|e| dir.join(e)) else { continue };
+        if i.kind != disk::Kind::File || !std::fs::symlink_metadata(&entry).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+            continue;
+        }
+        let mut e = Entry::new(cat, format!("{prefix}{n}"), (entry.clone(), i.modified), state);
+        e.how = Used::Cache;
+        e.leases = vec![entry.clone()];
+        e.keep = if cache::in_use(&entry) { why("in use by a running strobe", "") } else { None };
+        out.push(e);
+    }
 }
 
 /// `builds/`: a git ref's worktree (`<sha12>`) with its executable's copy, build key and log; a folder
@@ -1146,11 +1189,16 @@ fn apply(d: &Disk, chosen: &[usize], say: impl Fn(String), stop: impl Fn() -> Op
     // What started since the plan (a person may have taken minutes to answer): a launch that borrows a
     // seed copy or a GPU cache store, a bench of a build that takes no leases or of the experiment a
     // store, a recording or an experiment belongs to.
-    let live = Live::read();
-    for i in order {
+    // Read again before each entry: the registry, the slot and the launch folders (the daemon's build
+    // once).
+    let mut live = Live::read();
+    for (n, i) in order.into_iter().enumerate() {
         if let Some(why) = stop() {
             done.stopped = Some(why);
             break;
+        }
+        if n > 0 {
+            live.local();
         }
         let e = &d.entries[i];
         let cat = CATEGORIES[e.cat].name;
@@ -1166,6 +1214,11 @@ fn apply(d: &Disk, chosen: &[usize], say: impl Fn(String), stop: impl Fn() -> Op
             "recordings" => {
                 let meta = e.paths[0].join("meta.json");
                 !meta.is_file() || (!live.benches.is_empty() && store::read_json(&meta).ok().and_then(|m| m["experiment"].as_str().map(str::to_string)).is_some_and(|x| live.running(&x).is_some()))
+            }
+            // A `strobe run` bench file an experiment that started (and stopped) meanwhile names.
+            "run" if e.name.starts_with("run/cmd-") => {
+                let n = name_of(&e.paths[0]);
+                resumable_states(&d.state).iter().any(|(_, text)| text.contains(n.as_str()))
             }
             _ => false,
         };
@@ -1284,7 +1337,12 @@ fn auto_age() -> std::result::Result<Option<Duration>, String> {
     match &prune["unused"] {
         Value::Null => Ok(Some(AUTO_AGE)),
         Value::String(s) if s == "off" => Ok(None),
-        Value::String(s) => crate::cli::duration_ms(s).map(|ms| Some(Duration::from_millis(ms))).map_err(|e| format!("prune.unused in your strobe.json: {}", e.message)),
+        Value::String(s) => match crate::cli::duration_ms(s) {
+            // An age of nothing would remove every cache the moment nothing uses it.
+            Ok(0) => Err(format!("prune.unused in your strobe.json is {s:?}: write \"off\" to turn automatic pruning off, or an age such as \"14d\"")),
+            Ok(ms) => Ok(Some(Duration::from_millis(ms))),
+            Err(e) => Err(format!("prune.unused in your strobe.json: {}", e.message)),
+        },
         other => Err(format!("prune.unused in your strobe.json must be \"off\" or an age such as \"14d\", not {other}")),
     }
 }

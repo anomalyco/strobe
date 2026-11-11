@@ -74,6 +74,22 @@ pub fn keep(entry: &Path, lease: &std::sync::Arc<Lease>) {
     });
 }
 
+/// Lets go of the lease the scopes on this thread keep on `entry` (before the entry is removed).
+pub fn release(entry: &Path) {
+    let gone: Vec<_> = SCOPES.with(|s| s.borrow_mut().iter_mut().flat_map(|frame| frame.extract_if(.., |(p, _)| p == entry).collect::<Vec<_>>()).collect());
+    drop(gone);
+}
+
+/// Removes an entry this process owns (an experiment's GPU cache store at its end) with its stamp,
+/// under the stamp's exclusive hold; left alone while another process uses it.
+pub fn remove_own(entry: &Path) {
+    release(entry);
+    if let Some(h) = hold(entry) {
+        let _ = std::fs::remove_dir_all(entry);
+        if entry.exists() { h.kept() } else { h.removed() }
+    }
+}
+
 /// Uses the entry until the lease drops; waits while a prune removes it (the caller makes it again).
 /// An entry it cannot lease (no stamp to lock, a filesystem that cannot tell its files apart) is an
 /// error, never a lease that holds nothing.
