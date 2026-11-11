@@ -108,7 +108,7 @@ jobs:
         include:
           - { target: darwin-arm64, triple: aarch64-apple-darwin }
           - { target: darwin-x64, triple: x86_64-apple-darwin }
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     env:
       SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
     steps:

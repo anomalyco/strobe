@@ -28,7 +28,7 @@ jobs:
           - { os: windows-latest, toolchain: stable-x86_64-pc-windows-gnu, rustflags: "-C link-self-contained=yes" }
           - { os: windows-11-arm, toolchain: stable-aarch64-pc-windows-msvc, rustflags: "" }
           - { os: ubuntu-24.04, toolchain: stable, rustflags: "" }
-          - { os: macos-15, toolchain: stable, rustflags: "" }
+          - { os: blacksmith-6vcpu-macos-15, toolchain: stable, rustflags: "" }
     runs-on: ${{ matrix.os }}
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
