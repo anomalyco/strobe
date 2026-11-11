@@ -42,9 +42,14 @@ pub fn load(root: &Path) -> Result<Value> {
             _ => return Err(p.error("")),
         }
     }
+    if let Some(why) = out.get("prune").and_then(|p| bad_unused(&p["unused"])) {
+        return Err(Error::usage(format!("{}: {why}", user_path.display())));
+    }
     let (project, problems) = read(&root.join("strobe.json"))?;
-    // This machine's settings (`prune`) are the user's own: a repository's file never sets them.
-    if project.contains_key("prune") && root.join("strobe.json") != user_path {
+    // This machine's settings (`prune`) are the user's own: a repository's file never sets them. The
+    // user's file itself, however named (`strobe config` in the state folder, another case, a link).
+    let same = |a: &Path, b: &Path| a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(x, y)| x == y);
+    if project.contains_key("prune") && !same(&root.join("strobe.json"), &user_path) {
         return Err(Error::usage(format!("{}: \"prune\" is a setting of this machine's strobe, read from your own {} only", root.join("strobe.json").display(), user_path.display()))
             .hint("move it there, or remove it from the repository's strobe.json"));
     }
@@ -204,10 +209,30 @@ const TOP: Shape = Keys(&[
     ("prune", Keys(&[("unused", Str)])),
 ]);
 
+/// Why `prune.unused` is not one strobe reads ("off" or an age), if it is not.
+fn bad_unused(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::String(s) if s == "off" || crate::cli::duration_ms(s).is_ok() => None,
+        other => Some(format!("prune.unused must be \"off\" or an age such as \"14d\", not {other}")),
+    }
+}
+
 /// A top-level key of the user's own strobe.json (`<state>/strobe.json`), as it is there: null when
-/// the file, or the key, is not there or does not parse.
-pub fn user(key: &str) -> Value {
-    read(&host::paths::state_path().join("strobe.json")).ok().and_then(|(m, _)| m.get(key).cloned()).unwrap_or(Value::Null)
+/// the file or the key is not there; an error when the file does not parse, so a setting it meant to
+/// make is never taken for its default.
+pub fn user_strict(key: &str) -> std::result::Result<Value, String> {
+    let path = host::paths::state_path().join("strobe.json");
+    if !path.exists() {
+        return Ok(Value::Null);
+    }
+    match read(&path) {
+        Ok((_, problems)) if problems.iter().any(|p| matches!(p.path.first(), Some(Seg::Key(k)) if k == key)) => {
+            Err(problems.into_iter().find(|p| matches!(p.path.first(), Some(Seg::Key(k)) if k == key)).map(|p| p.message).unwrap_or_default())
+        }
+        Ok((m, _)) => Ok(m.get(key).cloned().unwrap_or(Value::Null)),
+        Err(e) => Err(e.message),
+    }
 }
 
 struct Found {

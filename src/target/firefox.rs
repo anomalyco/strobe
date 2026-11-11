@@ -183,9 +183,17 @@ fn snap(exe: &Path) -> bool {
 }
 
 /// Where Snap Firefox profiles go (`~/snap/firefox/common/strobe`), which strobe reaps as it reaps
-/// `run/`.
+/// `run/`. A state folder other than the default one (`XDG_DATA_HOME` set elsewhere) has its own
+/// (`strobe-<hash of its path>`), so it never reaps, counts or prunes the default one's.
 pub fn snap_profiles() -> PathBuf {
-    host::home().join("snap/firefox/common/strobe")
+    let common = host::home().join("snap/firefox/common");
+    let state = host::paths::state_path();
+    if state == host::home().join(".local/share/strobe") {
+        return common.join("strobe");
+    }
+    use sha2::Digest;
+    let key: String = sha2::Sha256::digest(state.to_string_lossy().as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
+    common.join(format!("strobe-{key}"))
 }
 
 /// The version an install says it is (`application.ini` beside the executable, or in `Resources` on

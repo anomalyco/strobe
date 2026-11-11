@@ -578,14 +578,6 @@ Use
                                   a page in a headless browser, nothing measured: title, address, headings, visible text,
                                   console messages and uncaught errors, and a screenshot (exit 124 when it never loads);
                                   tty: the program on strobe's own terminal in an isolated home: its grid, the modes it set
-  prune [builds|seeds|gpu-cache|symbols|sdk|engine|run|recordings|experiments …] [--all] [--older-than 7d] [--dry-run] [-f]
-                                  remove what strobe keeps and no process uses: with no category every cache (builds,
-                                  seeds, GPU caches, symbols, other builds' SDKs and engines, finished processes' files);
-                                  recordings and experiments only when named or with --all, older than 30d (--older-than)
-                                  and never a recording an experiment that stays names; prints the plan first, asks on a
-                                  terminal, removes nothing without one unless -f (--force); --dry-run: the plan only
-                                  (caches unused for 14d also go on their own, once a day after a bench and in the daemon:
-                                  \"prune\": { \"unused\": \"30d\" | \"off\" } in <state>/strobe.json)
   top [--target <pid>] [--once] [--interval 1s] [--limit N] [--sort cpu|gpu|vram|mem]
                                   live per-core load by CCD, processes with CPU, GPU, VRAM
   run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] [--max-time 5m] -- <command> [args…]
@@ -616,6 +608,14 @@ Setup
                                   copy; refreshes the skill, MCP, the helper where installed, and restarts the daemon;
                                   keeps a newer or local build unless --force
   leave [--yes]                   undo up (--yes also deletes recordings and experiments)
+  prune [builds|seeds|gpu-cache|symbols|sdk|engine|run|recordings|experiments …] [--all] [--older-than 7d] [--dry-run] [-f]
+                                  remove what strobe keeps and no process uses: with no category every cache (builds,
+                                  seeds, GPU caches, symbols, other builds' SDKs and engines, finished processes' files);
+                                  recordings and experiments only when named or with --all, older than 30d (--older-than)
+                                  and never one an experiment that stays names; prints the plan first, asks on a terminal,
+                                  removes nothing without one unless -f (--force: exit 3 otherwise); --dry-run: the plan only
+                                  (caches unused for 14d also go on their own, once a day after a bench and in the daemon,
+                                  never beside a bench: \"prune\": { \"unused\": \"30d\" | \"off\" } in <state>/strobe.json)
 
 Targets   https://… · a local page.html (or file:page.html) · app:<id> (a strobe.json profile, Electron or native) · exe:<path> [--app <id> | --native]
           · cdp:<port> · cdp:ws://… · file:<trace> (import) · pid:<n> · proc:<name> · tty:<command> (look)

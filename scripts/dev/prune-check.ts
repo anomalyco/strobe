@@ -61,7 +61,7 @@ const strobe = (...args: string[]) => {
 // Allocated bytes under `p`, by `du` (each file once, links not followed): the independent measure.
 const du = (p: string) => {
   const exe = win ? "C:\\Program Files\\Git\\usr\\bin\\du.exe" : "du"
-  const r = spawnSync(exe, ["-s", "-B1", p], { encoding: "utf8" })
+  const r = spawnSync(exe, ["-s", "-x", "-B1", p], { encoding: "utf8" })
   return Number(r.stdout.split(/\s/)[0])
 }
 // Every path under `p` but strobe's own bookkeeping a prune writes (its lock, the kept walks).
@@ -92,6 +92,13 @@ const sha1 = git(repo, "rev-parse", "HEAD")
 put(P.join(repo, "a.txt"), "b")
 git(repo, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qam", "two")
 const sha2 = git(repo, "rev-parse", "HEAD")
+put(P.join(repo, "a.txt"), "c")
+git(repo, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qam", "three")
+const sha3 = git(repo, "rev-parse", "HEAD")
+// git's worktree.useRelativePaths came with 2.48.
+const gitVersion = git(repo, "--version").match(/(\d+)\.(\d+)/)?.slice(1).map(Number) ?? [0, 0]
+const relative = gitVersion[0] > 2 || (gitVersion[0] === 2 && gitVersion[1] >= 48)
+const root = !win && process.getuid?.() === 0
 
 // --- outside the state: a canary behind a link ---
 put(P.join(outside, "canary.txt"), "do not delete")
@@ -128,15 +135,38 @@ const locked = P.join(lockedDir, "held.bin")
 put(locked, 2 * MB)
 put(P.join(lockedDir, "free.bin"), 3 * MB)
 put(P.join(builds, "times.json"), "{}")
+// A worktree git records with relative paths (worktree.useRelativePaths).
+const wt3 = P.join(builds, sha3.slice(0, 12))
+if (relative) {
+  git(repo, "-c", "worktree.useRelativePaths=true", "worktree", "add", "--detach", wt3, sha3)
+  put(P.join(wt3, "dist", "rel.bin"), 2 * MB)
+}
+// A filesystem mounted inside an entry (Linux, as root): its mount point stays, its file is never entered.
+const mountDir = P.join(builds, "cache", "eeee5555ffff6666", "m")
+if (root) {
+  mk(mountDir)
+  spawnSync("mount", ["-t", "tmpfs", "-o", "size=8m", "tmpfs", mountDir])
+  put(P.join(mountDir, "inmount.txt"), "a mounted filesystem's file")
+  put(P.join(builds, "cache", "eeee5555ffff6666", "beside.bin"), MB)
+}
+// A large compile cache nobody walked yet: a status with a short time cannot finish it.
+const bigDir = P.join(builds, "cache", "bbbb7777bbbb7777")
+// Each file past what NTFS keeps inside its own records (about 700 bytes), which Git's `du` counts as 1 KB.
+for (let i = 0; i < (win ? 30_000 : 60_000); i++) put(P.join(bigDir, String(i), "a.o"), "x".repeat(2000))
 
-// --- seeds, linked into a dead strobe's launch home ---
+// --- seeds, linked into a dead strobe's launch home, whose app wrote lines aiming outside ---
 const seed = P.join(state, "seeds", "5eed5eed5eed5eed", "profile.db")
 put(seed, 9 * MB)
 fs.chmodSync(seed, 0o444)
 const home = P.join(state, "run", "home-4194301-1")
 mk(home)
 fs.linkSync(seed, P.join(home, "profile.db"))
-put(P.join(home, ".strobe-shared"), `${P.join(home, "profile.db")}\t${seed}\n`)
+put(P.join(outside, "canary2.txt"), "a file the home's .strobe-shared names")
+link(outside, P.join(home, "escape"))
+put(
+  P.join(home, ".strobe-shared"),
+  [`${P.join(home, "profile.db")}\t${seed}`, `${P.join(outside, "canary2.txt")}\t${P.join(outside, "canary2.txt")}`, `${P.join(home, "escape", "canary.txt")}\t${seed}`].join("\n") + "\n",
+)
 put(P.join(home, "cache.bin"), MB)
 
 // --- the rest of the caches ---
@@ -151,6 +181,10 @@ put(P.join(state, "run", "look-1.png"), MB)
 age(P.join(state, "run", "look-1.png"), 2)
 put(P.join(state, "run", "look-2.png"), MB)
 mk(P.join(state, "run", "benches"))
+// `strobe run --base/--head`'s bench file, two days old, which an experiment that can resume names.
+put(P.join(state, "run", "cmd-aaaa11112222", "run.bench.ts"), "export default {}")
+age(P.join(state, "run", "cmd-aaaa11112222"), 2)
+put(P.join(state, "experiments", "exp_resume", "state.json"), JSON.stringify({ args: { pos: [P.join(state, "run", "cmd-aaaa11112222", "run.bench.ts")] } }))
 
 // --- data ---
 const rec = (id: string, days: number, meta = true) => {
@@ -163,6 +197,7 @@ rec("rec_old001", 40)
 rec("rec_old002", 40)
 rec("rec_new003", 0)
 rec("rec_draft4", 0, false)
+rec("rec_old005", 40)
 const exp = (id: string, days: number, names: string[]) => {
   const d = P.join(state, "experiments", id)
   put(P.join(d, "result.json"), JSON.stringify({ id, series: names.map((r) => ({ recording: r })) }))
@@ -170,11 +205,15 @@ const exp = (id: string, days: number, names: string[]) => {
   if (days) age(d, days)
 }
 exp("exp_old001", 40, ["rec_old001"])
-exp("exp_keep02", 0, ["rec_old002"])
+// A kept bisect names its step experiment, which names its own recording.
+exp("exp_keep02", 0, ["rec_old002", "exp_keep02_s1"])
+exp("exp_keep02_s1", 40, ["rec_old005"])
 exp("exp_track3", 40, [])
+age(P.join(state, "experiments", "exp_resume"), 40)
 put(P.join(state, "experiments", "index.jsonl"), "")
 put(P.join(state, "history", "dev", "ser_1.jsonl"), `{"exp":"exp_track3"}\n`)
-put(P.join(state, "state.json"), "{}")
+// No daemon answers this state's port (the real one, another build, would keep other engines).
+put(P.join(state, "state.json"), JSON.stringify({ mcp_port: 47994 }))
 
 // --- live processes: one holds wt2's lease as a bench does, one holds a file open ---
 const stamp2 = `${wt2}.used`
@@ -190,6 +229,16 @@ const holders = win
 await Bun.sleep(3000)
 
 try {
+  // --- a short status cannot walk the big cache: no exact number, an "at least" ---
+  const short = strobe("status", "--fast", "--json").json?.disk
+  const shortText = strobe("status", "--fast").out.split("\n").find((l) => / disk /.test(l)) ?? ""
+  check(
+    short?.complete === false && short?.total_bytes === null && short?.at_least_bytes > 0 && short?.categories?.find((c: any) => c.name === "builds")?.bytes === null,
+    "a walk the deadline cut gives no exact total (total_bytes and builds' bytes null, at_least_bytes kept)",
+    `complete ${short?.complete}, total ${short?.total_bytes}, at least ${short?.at_least_bytes}, unmeasured ${short?.unmeasured}, ${short?.seconds} s`,
+  )
+  check(/at least [^(]+\(at least /.test(shortText), "  and its line says at least, inside the parentheses too", shortText.trim())
+
   // --- status: its total against du ---
   const truth = du(state)
   const st = strobe("status", "--fast", "--disk", "--json")
@@ -197,6 +246,11 @@ try {
   const inState = disk ? disk.total_bytes - disk.outside_bytes : NaN
   check(within(inState, truth, 1), "status total = du of the state folder (1%)", `strobe ${inState}, du ${truth}`)
   check(disk?.complete === true, "status --disk measured every entry")
+
+  // --- a plan alone takes no lock ---
+  const lockFile = P.join(state, "run", "prune.lock")
+  const dry0 = strobe("prune", "--dry-run")
+  check(dry0.code === 0 && !fs.existsSync(lockFile), "prune --dry-run takes no lock and makes no lock file")
 
   // --- the plan, without a terminal: nothing goes ---
   const before = listing(scratch)
@@ -210,13 +264,16 @@ try {
   const planned = new Set<string>(dry.json.remove.map((e: any) => e.name))
   const want = [
     `builds/${sha1.slice(0, 12)}`, `builds/out/${hash(P.join(scratch, "a-folder-variant"))}`, "builds/cache/aaaa1111bbbb2222", "builds/cache/cccc3333dddd4444",
-    "seeds/5eed5eed5eed5eed", "gpu-cache/exp_000001-head", "symbols/lib.pdb/ABCDEF1", "sdk/0000000000000001", "engine/v0.0",
+    "builds/cache/bbbb7777bbbb7777", "seeds/5eed5eed5eed5eed", "gpu-cache/exp_000001-head", "symbols/lib.pdb/ABCDEF1", "sdk/0000000000000001", "engine/v0.0",
     "run/home-4194301-1", "run/q-4194302-1-1.sql", "run/look-1.png",
+    ...(relative ? [`builds/${sha3.slice(0, 12)}`] : []),
+    ...(root ? ["builds/cache/eeee5555ffff6666"] : []),
   ]
   check(want.every((w) => planned.has(w)) && planned.size === want.length, "the default plan is every unused cache", [...planned].sort().join(", "))
   const keptWhy = Object.fromEntries(dry.json.kept.map((e: any) => [e.name, e.why]))
   check(/in use/.test(keptWhy[`builds/${sha2.slice(0, 12)}`] ?? ""), "the worktree a live process leases stays", keptWhy[`builds/${sha2.slice(0, 12)}`])
   check(keptWhy["sdk/0000000000000002"] !== undefined && keptWhy["run/look-2.png"] !== undefined, "a recent other build's SDK and a new temporary file stay")
+  check(/resume/.test(keptWhy["run/cmd-aaaa11112222"] ?? ""), "run/cmd-<hash> stays while an experiment that can resume names it", keptWhy["run/cmd-aaaa11112222"])
   const frees = dry.json.frees_bytes
 
   // --- remove: exactly the plan ---
@@ -225,15 +282,22 @@ try {
   const duAfter = du(scratch)
   const removed = new Set<string>(gone.json.removed.map((e: any) => e.name))
   const failed = gone.json.failed.map((e: any) => e.name)
-  if (win) check(failed.length === 1 && failed[0] === "builds/cache/cccc3333dddd4444" && gone.code === 1, "the entry with a held file fails, named, and the rest goes (exit 1)", `failed ${failed.join(", ")}, exit ${gone.code}`)
+  const wantFailed = [...(win ? ["builds/cache/cccc3333dddd4444"] : []), ...(root ? ["builds/cache/eeee5555ffff6666"] : [])]
+  check(JSON.stringify([...failed].sort()) === JSON.stringify(wantFailed.sort()) && gone.code === (wantFailed.length ? 1 : 0), "only the entries with a held file or a mount fail, named, and the rest goes", `failed ${failed.join(", ")}, exit ${gone.code}`)
   check([...removed].every((r) => planned.has(r)) && removed.size + failed.length === planned.size, "--force removes exactly the plan", [...removed].sort().join(", "))
   check(fs.readFileSync(P.join(outside, "canary.txt"), "utf8") === "do not delete" && fs.existsSync(P.join(outside, "big.bin")), "the canary behind the link is untouched")
+  check(fs.existsSync(P.join(outside, "canary2.txt")) && fs.existsSync(P.join(outside, "canary.txt")), "lines of the dead home's .strobe-shared aiming outside (a path, a link) touched nothing")
+  if (root) {
+    const why = gone.json.failed.find((f: any) => f.name === "builds/cache/eeee5555ffff6666")?.errors?.join(" ") ?? ""
+    check(fs.existsSync(P.join(mountDir, "inmount.txt")) && /another filesystem/.test(why) && !fs.existsSync(P.join(builds, "cache", "eeee5555ffff6666", "beside.bin")), "a mounted filesystem inside an entry is never entered; its neighbour goes", why)
+  }
+  if (relative) check(!fs.existsSync(wt3), "the worktree git records with relative paths is removed")
   check(fs.existsSync(P.join(wt2, "dist", "out.bin")), "the leased worktree is still there")
   check(fs.existsSync(P.join(state, "run", "benches")) && fs.existsSync(P.join(builds, "times.json")), "the bench registry and build times are kept")
   if (win) check(fs.existsSync(locked) && !fs.existsSync(P.join(lockedDir, "free.bin")), "the held file stays, its neighbour went")
   const slash = (s: string) => s.replaceAll("\\", "/").toLowerCase()
   const wtList = slash(git(repo, "worktree", "list", "--porcelain"))
-  check(!wtList.includes(slash(wt1)) && !/prunable/.test(wtList) && wtList.includes(slash(wt2)), "git worktree list: the removed worktree is gone, nothing stale", wtList.split("\n").filter((l) => l.startsWith("worktree")).join(" | "))
+  check(!wtList.includes(slash(wt1)) && !wtList.includes(slash(wt3)) && !/prunable/.test(wtList) && wtList.includes(slash(wt2)), "git worktree list: the removed worktrees are gone, nothing stale", wtList.split("\n").filter((l) => l.startsWith("worktree")).join(" | "))
   const reclaimed = gone.json.reclaimed_bytes
   check(within(reclaimed, duBefore - duAfter, 1), "Total reclaimed space = du before - du after (1%)", `strobe ${reclaimed}, du ${duBefore - duAfter}`)
   check(within(reclaimed, frees - (win ? 2 * MB : 0), 2), "  and = the plan's frees, less the held file (2%)", `plan ${frees}`)
@@ -245,6 +309,7 @@ try {
   check(gone2.has("rec_old001") && gone2.has("exp_old001"), "--all removes an old experiment and the old recording only it names")
   check(/experiment that stays/.test(kept2["rec_old002"] ?? ""), "an old recording a kept experiment names stays", kept2["rec_old002"])
   check(/history/.test(kept2["exp_track3"] ?? ""), "an old experiment tracked history names stays", kept2["exp_track3"])
+  check(/experiment that stays/.test(kept2["exp_keep02_s1"] ?? "") && /experiment that stays/.test(kept2["rec_old005"] ?? ""), "a kept bisect's old step experiment, and the recording it names, stay", `${kept2["exp_keep02_s1"]} · ${kept2["rec_old005"]}`)
   check(!gone2.has("rec_new003") && !gone2.has("rec_draft4") && !gone2.has("exp_keep02"), "new data stays")
 
   // --- status again, against du ---
@@ -256,6 +321,7 @@ try {
     if (win || !h.pid) h.kill()
     else process.kill(-h.pid)
   }
+  if (root) spawnSync("umount", [mountDir])
 }
 const failedChecks = results.filter((r) => r.startsWith("FAIL")).length
 console.log(`\n${results.length - failedChecks} passed, ${failedChecks} failed · scratch left in ${scratch}`)

@@ -100,6 +100,9 @@ fn paired(args: &Args) -> Result<Output> {
     use sha2::Digest;
     let hash: String = sha2::Sha256::digest(text.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
     let dir = host::paths::run().join(format!("cmd-{hash}"));
+    // Leased before it is written, until the bench ends: `strobe prune` leaves it (SPEC §5.14), and the
+    // stamp's time is its last use (a `--resume` of its experiment reads it again).
+    let _lease = host::cache::take(&dir)?;
     std::fs::create_dir_all(&dir)?;
     let file = dir.join("run.bench.ts");
     if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {

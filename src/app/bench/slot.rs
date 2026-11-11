@@ -333,6 +333,31 @@ pub fn machine_busy() -> Option<String> {
     Some(format!("held by a bench of another user or state folder (the machine-wide lock {}): benches here wait for it", machine_path()?.display()))
 }
 
+/// What runs or waits for a bench slot now, anywhere on this machine: a bench registered here (running,
+/// queued, building), this folder's slot held (a timed `record`, `strobe run --`), or the machine-wide
+/// lock held by another user's or state folder's. None when the machine is free of all of them.
+/// Read-only: no lock file is made.
+pub fn busy() -> Option<String> {
+    if let Some(b) = list().first() {
+        return Some(format!("a bench runs ({} pid {}, {})", b["exp"].as_str().unwrap_or(""), b["pid"], b["state"].as_str().unwrap_or("")));
+    }
+    let held = |path: PathBuf| {
+        let f = File::open(&path).or_else(|_| File::options().write(true).open(&path)).ok()?;
+        match f.try_lock() {
+            Ok(()) => {
+                let _ = f.unlock();
+                None
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Some(path),
+            Err(_) => None,
+        }
+    };
+    if let Some(p) = held(paths::state_path().join("run").join("bench.slot")) {
+        return Some(format!("the bench slot is held ({})", p.display()));
+    }
+    machine_path().and_then(held).map(|p| format!("a bench of another user or state folder holds the machine-wide lock ({})", p.display()))
+}
+
 fn legacy() -> PathBuf {
     paths::run().join("bench.lock")
 }

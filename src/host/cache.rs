@@ -29,37 +29,81 @@ pub fn last_used(entry: &Path) -> Option<SystemTime> {
 
 /// An entry in use by this process: dropping it marks the entry used then and lets it go.
 pub struct Lease {
-    file: Option<File>,
+    file: File,
+}
+
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Lease")
+    }
+}
+
+/// The leases one scope keeps, one per entry.
+type Kept = Vec<(PathBuf, std::sync::Arc<Lease>)>;
+
+thread_local! {
+    /// Leases kept until the innermost `Scope` on this thread ends.
+    static SCOPES: std::cell::RefCell<Vec<Kept>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// While alive, `keep` holds leases on this thread until it drops: an experiment's seed copies and GPU
+/// cache stores stay its own between blocks, when no launch holds them.
+pub struct Scope(());
+
+pub fn scope() -> Scope {
+    SCOPES.with(|s| s.borrow_mut().push(Vec::new()));
+    Scope(())
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        let frame = SCOPES.with(|s| s.borrow_mut().pop());
+        drop(frame);
+    }
+}
+
+/// Keeps a lease on `entry` until the innermost scope on this thread ends (one per entry); without a
+/// scope the caller's own lease is all there is.
+pub fn keep(entry: &Path, lease: &std::sync::Arc<Lease>) {
+    SCOPES.with(|s| {
+        if let Some(frame) = s.borrow_mut().last_mut()
+            && !frame.iter().any(|(p, _)| p == entry)
+        {
+            frame.push((entry.to_path_buf(), lease.clone()));
+        }
+    });
 }
 
 /// Uses the entry until the lease drops; waits while a prune removes it (the caller makes it again).
-pub fn take(entry: &Path) -> Lease {
+/// An entry it cannot lease (no stamp to lock, a filesystem that cannot tell its files apart) is an
+/// error, never a lease that holds nothing.
+pub fn take(entry: &Path) -> std::io::Result<Lease> {
     let path = stamp(entry);
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
     for _ in 0..20 {
-        let Ok(f) = File::options().create(true).truncate(false).write(true).open(&path) else { break };
-        if f.lock_shared().is_err() {
-            break;
-        }
+        let f = File::options().create(true).truncate(false).write(true).open(&path)?;
+        f.lock_shared().map_err(|e| std::io::Error::new(e.kind(), format!("lock {}: {e}", path.display())))?;
         // A prune that held the lock removed the stamp with the entry: this lock is on a file no
         // longer at the path, which the next prune would not see. Take the one there now.
-        if super::disk::stat(&path).ok().map(|s| s.id) == super::disk::file_id(&f) {
-            let _ = f.set_modified(SystemTime::now());
-            return Lease { file: Some(f) };
+        match super::disk::same_file(&f, &path) {
+            Some(true) => {
+                let _ = f.set_modified(SystemTime::now());
+                return Ok(Lease { file: f });
+            }
+            Some(false) => continue,
+            None if path.exists() => return Err(std::io::Error::other(format!("{}: cannot tell whether the locked stamp is the one there", path.display()))),
+            None => continue,
         }
     }
-    touch(entry);
-    Lease { file: None }
+    Err(std::io::Error::other(format!("{}: removed again and again while it was being leased", path.display())))
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        if let Some(f) = self.file.take() {
-            let _ = f.set_modified(SystemTime::now());
-            let _ = f.unlock();
-        }
+        let _ = self.file.set_modified(SystemTime::now());
+        let _ = self.file.unlock();
     }
 }
 

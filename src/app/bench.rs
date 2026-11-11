@@ -1982,6 +1982,10 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let file = args.pos.first().ok_or_else(|| Error::usage("bench needs a bench file: strobe bench perf/x.bench.ts --base <variant> --head <variant>"))?;
     let file = std::fs::canonicalize(file).map_err(|_| Error::usage(format!("no such bench file: {file}")))?;
+    // A bench file `strobe run --base/--head` wrote (`<run>/cmd-<hash>/`), resumed or run again: its folder
+    // is in use until the bench ends (`strobe prune` leaves it).
+    let cmd_dir = file.parent().filter(|d| d.file_name().is_some_and(|n| n.to_string_lossy().starts_with("cmd-")) && host::disk::inside(d, &host::paths::run()));
+    let _cmd = cmd_dir.map(|d| host::cache::take(&host::paths::run().join(d.file_name().unwrap_or_default()))).transpose()?;
     let head_spec = args.get("head").unwrap_or(".").to_string();
     let aa = args.has("aa");
     // `--probes memory`: a leak run per variant (SPEC §8.6); `--base` is optional there.
@@ -11414,14 +11418,16 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 
 /// `look app:<id> --build`: the native executable strobe.json's `build` makes of the checkout `dir`
 /// is in, built as a bench of that directory builds it (unchanged since the last build: reused),
-/// as strobe's own copy.
-pub(crate) fn build_native(dir: &Path) -> Result<PathBuf> {
+/// as strobe's own copy, with the leases on what it built: the caller holds them while it runs the
+/// executable, so `strobe prune` leaves it.
+pub(crate) fn build_native(dir: &Path) -> Result<(PathBuf, Vec<host::cache::Lease>)> {
     let project = config::project_root(dir);
     let config = config::load(&project)?;
     let mut v = resolve_variant("head", &dir.display().to_string(), &project, &config)?;
     let root = v.root.clone().ok_or_else(|| Error::usage(format!("{} is not a folder to build", dir.display())))?;
     prepare_variant(&mut v, &json!({ "kind": "native" }), &config, &Harness { from: root, paths: Vec::new() }, &project)?;
-    v.exe.take().ok_or_else(|| Error::usage(format!("strobe.json has no build.command for {} in {}: nothing to build", isolate::os(), project.display())))
+    let exe = v.exe.take().ok_or_else(|| Error::usage(format!("strobe.json has no build.command for {} in {}: nothing to build", isolate::os(), project.display())))?;
+    Ok((exe, std::mem::take(&mut v.leases)))
 }
 
 /// Builds and serves the variants for a series: each for the target its side runs, in that target's
@@ -11575,7 +11581,7 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
         let output = crate::target::isolate::per_os(&build["output"])
             .ok_or_else(|| Error::usage(format!("a native or webview target's build in strobe.json needs output for {}: the executable it builds", crate::target::isolate::os())))?;
         let dest = host::paths::sub("builds").join("out").join(hash_str(&root.to_string_lossy()));
-        v.leases.push(host::cache::take(&dest));
+        v.leases.push(host::cache::take(&dest)?);
         let built = root.join(cache_fill(output, &root));
         let exe = dest.join(built.file_name().ok_or_else(|| Error::usage(format!("build output {output} is not a file")))?);
         build_variant(v.role, &root, build, Some((&built, &exe)))?;
@@ -11650,7 +11656,7 @@ fn build_variant(role: &str, root: &Path, build: &Value, copy: Option<(&Path, &P
     }
     let cwd = root.join(build["cwd"].as_str().unwrap_or("."));
     // The repository's compile cache, used for as long as this build runs and copies its output.
-    let _cache = build.to_string().contains("{cache}").then(|| host::cache::take(&cache_dir(root)));
+    let _cache = build.to_string().contains("{cache}").then(|| host::cache::take(&cache_dir(root))).transpose()?;
     let key = build_key(root, build);
     let marker = host::paths::sub("builds").join(format!("{}.key", hash_str(&root.to_string_lossy())));
     let output = crate::target::isolate::per_os(&build["output"]).map(|o| root.join(cache_fill(o, root)));
@@ -11787,7 +11793,7 @@ fn worktree(r: &str, project: &Path) -> Result<(PathBuf, host::cache::Lease)> {
     let dir = host::paths::sub("builds").join(&sha[..12.min(sha.len())]);
     // Held before it is looked at: a prune removing it now finishes first, and none removes it later
     // while this bench uses it.
-    let lease = host::cache::take(&dir);
+    let lease = host::cache::take(&dir)?;
     if dir.join(".git").exists() {
         if !(git::ok(&dir, &["checkout", "--force", "--detach", &sha]) && git::ok(&dir, &["clean", "-fd"])) {
             return Err(Error::msg(format!("could not reset the worktree for {r} at {}", dir.display())).hint("remove that folder; strobe makes it again"));

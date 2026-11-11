@@ -110,8 +110,9 @@ struct Entry {
     keep: Option<Why>,
     /// Entries whose stamp a live process locks while it uses them (`host::cache`).
     leases: Vec<PathBuf>,
-    /// A git worktree: the repository's git folder and the worktree's folder in it.
-    worktree: Option<(PathBuf, PathBuf)>,
+    /// A git worktree: the repository's git folder, the worktree's record in it, and the worktree's
+    /// own folder resolved (all while it is there).
+    worktree: Option<(PathBuf, PathBuf, PathBuf)>,
     removal: Removal,
     size: disk::Sized,
     /// Not walked: the time budget ran out before it (`status`), its size unknown.
@@ -252,22 +253,52 @@ struct Live {
     unleased: Option<String>,
     /// What the launch folders of live strobes borrow (seed copies, GPU cache stores).
     borrowed: Vec<PathBuf>,
+    /// The daemon runs another strobe build, which may use another engine version.
+    other_daemon: Option<String>,
 }
 
 impl Live {
     fn read() -> Live {
         let benches = super::bench::slot::list();
-        let unleased = benches
+        let mut unleased = benches
             .iter()
             .find(|b| b["leases"] != true)
             .map(|b| format!("{} (pid {}) runs on a strobe build that marks no build it uses; prune builds once it ends", b["exp"].as_str().unwrap_or("a bench"), b["pid"]));
+        // A strobe from before the bench registry holds the slot by `run/bench.lock` alone.
+        if unleased.is_none()
+            && let Some(pid) = std::fs::read_to_string(paths::run().join("bench.lock")).ok().and_then(|t| t.trim().parse::<u32>().ok())
+            && strobe_alive(pid)
+            && pid != std::process::id()
+            && !benches.iter().any(|b| b["pid"].as_u64() == Some(pid as u64) && b["leases"] == true)
+        {
+            unleased = Some(format!("an older strobe (pid {pid}) holds the bench slot (run/bench.lock) and marks no build it uses; prune builds once it ends"));
+        }
         let borrowed = isolate::launch_folders().into_iter().filter(|d| isolate::folder_gone(d) == Some(false)).flat_map(|d| isolate::borrowed(&d)).collect();
-        Live { benches, unleased, borrowed }
+        let other_daemon =
+            super::mcp::running().then(super::mcp::daemon_build).flatten().filter(|b| b.as_str() != super::mcp::build_id()).map(|b| format!("the daemon runs another strobe build ({b})"));
+        Live { benches, unleased, borrowed, other_daemon }
     }
 
     fn running(&self, exp: &str) -> Option<&Value> {
         self.benches.iter().find(|b| b["exp"].as_str().is_some_and(|e| e == exp || e.strip_prefix(exp).is_some_and(|r| r.starts_with("_s"))))
     }
+}
+
+/// Whether experiment `exp` can go on (`bench --resume`): it saved its state and wrote no result.
+fn resumable(state: &Path, exp: &str) -> bool {
+    let dir = state.join("experiments").join(exp);
+    dir.join("state.json").is_file() && !dir.join("result.json").exists()
+}
+
+/// The experiments that can resume, with their saved state's text (what a `run/cmd-<hash>` folder is
+/// named in).
+fn resumable_states(state: &Path) -> Vec<(String, String)> {
+    dirs(&state.join("experiments"))
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| !p.join("result.json").exists())
+        .filter_map(|p| Some((name_of(&p), std::fs::read_to_string(p.join("state.json")).ok()?)))
+        .collect()
 }
 
 /// Every entry a prune could remove, with why it stays when it must.
@@ -277,12 +308,29 @@ fn entries(state: &Path, live: &Live) -> Vec<Entry> {
     for c in children(&state.join("seeds")) {
         let mut e = Entry::new("seeds", format!("seeds/{}", name_of(&c.0)), c, state);
         e.how = Used::Cache;
-        e.keep = live.borrowed.iter().find(|b| same_or_under(b, &e.paths[0])).and_then(|_| why("linked into a running launch's home", ""));
+        // Leased by a launch that links it and by its experiment until it ends (`host::cache::keep`).
+        e.leases = vec![e.paths[0].clone()];
+        e.keep = if cache::in_use(&e.paths[0]) {
+            why("in use by a running strobe", "")
+        } else {
+            live.borrowed.iter().find(|b| same_or_under(b, &e.paths[0])).and_then(|_| why("linked into a running launch's home", ""))
+        };
         out.push(e);
     }
     for c in children(&state.join("gpu-cache")) {
         let mut e = Entry::new("gpu-cache", format!("gpu-cache/{}", name_of(&c.0)), c, state);
-        e.keep = live.borrowed.iter().find(|b| same_or_under(b, &e.paths[0])).and_then(|_| why("lent to a running launch", ""));
+        e.leases = vec![e.paths[0].clone()];
+        // An experiment's store (`<exp>-<role>`) is its warm caches between blocks, and for `--resume`.
+        let exp = e.name.trim_start_matches("gpu-cache/").rsplit_once('-').map(|(x, _)| x.to_string()).filter(|x| x != "rec");
+        e.keep = if cache::in_use(&e.paths[0]) {
+            why("in use by a running strobe", "")
+        } else if let Some(b) = exp.as_deref().and_then(|x| live.running(x)) {
+            why("its experiment runs", format!("{} (pid {})", b["exp"].as_str().unwrap_or(""), b["pid"]))
+        } else if exp.as_deref().is_some_and(|x| resumable(state, x)) {
+            why("its experiment can resume", format!("strobe bench --resume {}", exp.as_deref().unwrap_or("")))
+        } else {
+            live.borrowed.iter().find(|b| same_or_under(b, &e.paths[0])).and_then(|_| why("lent to a running launch", ""))
+        };
         out.push(e);
     }
     for (group, _) in children(&state.join("symbols")) {
@@ -305,9 +353,14 @@ fn entries(state: &Path, live: &Live) -> Vec<Entry> {
     }
     for c in children(&state.join("engine")) {
         let mut e = Entry::new("engine", format!("engine/{}", name_of(&c.0)), c, state);
-        if name_of(&e.paths[0]) == crate::engine::VERSION {
-            e.keep = why("this build's", "");
-        }
+        e.keep = if name_of(&e.paths[0]) == crate::engine::VERSION {
+            why("this build's", "")
+        } else if let Some(who) = live.unleased.as_ref().or(live.other_daemon.as_ref()) {
+            // An older strobe runs its own engine version.
+            why("an older strobe runs", who.clone())
+        } else {
+            None
+        };
         out.push(e);
     }
     run_folder(state, &mut out);
@@ -358,7 +411,7 @@ fn builds(state: &Path, live: &Live, out: &mut Vec<Entry>) {
         e.paths.extend([outdir.clone(), key.clone(), log].into_iter().filter(|q| q.exists()));
         e.how = Used::Build { out: outdir.clone(), key };
         e.leases = vec![p.clone(), outdir];
-        e.worktree = worktree_of(&p);
+        e.worktree = worktree_of(&p).zip(std::fs::canonicalize(&p).ok()).map(|((common, admin), real)| (common, admin, real));
         e.keep = in_use(&e.leases);
         out.push(e);
     }
@@ -394,9 +447,28 @@ fn builds(state: &Path, live: &Live, out: &mut Vec<Entry>) {
 /// (`gitdir: <repo>/.git/worktrees/<id>`) and that folder's `commondir`.
 fn worktree_of(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let text = std::fs::read_to_string(dir.join(".git")).ok()?;
-    let admin = dir.join(text.trim().strip_prefix("gitdir:")?.trim());
+    // Resolved now, while the worktree is there (a relative `gitdir:`, git's worktree.useRelativePaths,
+    // is from the worktree's folder).
+    let admin = std::fs::canonicalize(dir.join(text.trim().strip_prefix("gitdir:")?.trim())).ok()?;
     let common = std::fs::read_to_string(admin.join("commondir")).ok().map(|c| admin.join(c.trim())).unwrap_or_else(|| admin.join("..").join(".."));
-    Some((std::fs::canonicalize(&common).ok()?, admin))
+    let common = std::fs::canonicalize(&common).ok()?;
+    // Only a repository's own record of a worktree: `<repo git folder>/worktrees/<id>`.
+    (common.join("HEAD").is_file() && admin.parent() == Some(common.join("worktrees").as_path())).then_some((common, admin))
+}
+
+/// `p` with `.` and `..` folded away, by its text alone (for a folder already gone).
+fn lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Names in `run/` that are the slot, the bench registry, phone journals and open trace sessions:
@@ -424,11 +496,26 @@ fn run_folder(state: &Path, out: &mut Vec<Entry>) {
     if snap != dir {
         items.extend(children(&snap).into_iter().filter(|c| isolate::folder_gone(&c.0).is_some()).map(|c| (c, snap.clone())));
     }
+    let resumable = std::cell::OnceCell::new();
     for (c, root) in items {
         let p = c.0.clone();
         let n = name_of(&p);
         let shown = if root == dir { paths::plain(p.strip_prefix(state).unwrap_or(&p)) } else { paths::plain(&p) };
         let mut e = Entry::new("run", shown.replace('\\', "/"), c, &root);
+        // `strobe run --base/--head`'s bench file: leased while a run uses it, and needed by an
+        // experiment of it that can still resume.
+        if n.starts_with("cmd-") && root == dir {
+            e.how = Used::Cache;
+            e.leases = vec![p.clone()];
+            e.keep = if cache::in_use(&p) {
+                why("in use by a running strobe", "")
+            } else {
+                let saved = resumable.get_or_init(|| resumable_states(state));
+                saved.iter().find(|(_, text)| text.contains(n.as_str())).map(|(x, _)| Why { what: "its experiment can resume".into(), detail: format!("strobe bench --resume {x}") })
+            };
+            out.push(e);
+            continue;
+        }
         match isolate::folder_gone(&p) {
             Some(true) => e.removal = Removal::Launch,
             Some(false) => e.keep = why("its strobe runs", ""),
@@ -449,48 +536,55 @@ fn run_folder(state: &Path, out: &mut Vec<Entry>) {
 /// The experiments each recording is named in (`result.json`, `state.json`), and the experiments
 /// tracked history names (`history/`): what a removal must not break.
 fn references(entries: &[Entry], state: &Path) -> Refs {
-    let recordings: HashSet<&str> = entries.iter().filter(|e| CATEGORIES[e.cat].name == "recordings").map(|e| e.name.as_str()).collect();
-    let mut named: HashMap<String, Vec<String>> = HashMap::new();
+    let names = |c: &str| entries.iter().filter(|e| CATEGORIES[e.cat].name == c).map(|e| e.name.as_str()).collect::<HashSet<&str>>();
+    let (recordings, experiments) = (names("recordings"), names("experiments"));
+    let mut refs = Refs::default();
+    let add = |to: &mut HashMap<String, Vec<String>>, what: &str, by: &str| {
+        let v = to.entry(what.to_string()).or_default();
+        if !v.iter().any(|x| x == by) {
+            v.push(by.to_string());
+        }
+    };
     for e in entries.iter().filter(|e| CATEGORIES[e.cat].name == "experiments") {
         for f in ["result.json", "state.json"] {
             let Ok(text) = std::fs::read_to_string(e.paths[0].join(f)) else { continue };
-            for m in handles(&text, "rec_").filter(|m| recordings.contains(m)) {
-                let v = named.entry(m.to_string()).or_default();
-                if !v.contains(&e.name) {
-                    v.push(e.name.clone());
+            // Every handle it holds, whatever its prefix (`bench --id` names an experiment freely; a
+            // bisect's steps are `<exp>_s<k>`).
+            for t in handles(&text) {
+                if recordings.contains(t) {
+                    add(&mut refs.recordings, t, &e.name);
+                } else if t != e.name && experiments.contains(t) {
+                    add(&mut refs.experiments, t, &e.name);
                 }
             }
         }
     }
-    let mut tracked = HashSet::new();
     let mut stack = vec![state.join("history")];
     while let Some(d) = stack.pop() {
         for (p, _) in children(&d) {
             if p.is_dir() {
                 stack.push(p);
             } else if let Ok(text) = std::fs::read_to_string(&p) {
-                tracked.extend(handles(&text, "exp_").map(str::to_string));
+                refs.tracked.extend(handles(&text).filter(|t| experiments.contains(t)).map(str::to_string));
             }
         }
     }
-    (named, tracked)
+    refs
 }
 
-/// Every `<prefix>…` handle in `text` (letters, digits, `_` and `-` after the prefix).
-fn handles<'a>(text: &'a str, prefix: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-    text.match_indices(prefix).map(move |(at, _)| {
-        let rest = &text[at + prefix.len()..];
-        let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(rest.len());
-        &text[at..at + prefix.len() + end]
-    })
+/// Every run of letters, digits, `_` and `-` in `text`: the handles it may hold.
+fn handles(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).filter(|t| t.len() > 3)
 }
 
 /// Everything strobe keeps, measured.
 pub struct Disk {
     state: PathBuf,
     entries: Vec<Entry>,
-    /// Per category: what no entry holds (kept).
+    /// Per category: what no entry holds (kept); `cut` when the deadline came first.
     loose: Vec<disk::Sized>,
+    /// Bytes of Snap Firefox's profiles no entry holds (outside the state folder, in `run`'s loose).
+    snap: u64,
     tally: disk::Tally,
     free: Option<u64>,
     took: Duration,
@@ -499,13 +593,20 @@ pub struct Disk {
     refs: Option<Refs>,
 }
 
-/// The experiments naming each recording, and the experiments tracked history names.
-type Refs = (HashMap<String, Vec<String>>, HashSet<String>);
+/// What a removal must not break: the experiments naming each recording, and each experiment (a
+/// bisect's steps), and the experiments tracked history names.
+#[derive(Default)]
+struct Refs {
+    recordings: HashMap<String, Vec<String>>,
+    experiments: HashMap<String, Vec<String>>,
+    tracked: HashSet<String>,
+}
 
 fn add(to: &mut disk::Sized, s: disk::Sized) {
     to.bytes += s.bytes;
     to.files += s.files;
     to.newest = to.newest.max(s.newest);
+    to.cut |= s.cut;
 }
 
 /// A build entry of at least this many files keeps its walk in `disk-cache.json`, as every recording
@@ -556,7 +657,9 @@ pub fn measure(budget: Option<Duration>, fresh: bool) -> Disk {
     let mut entries = entries(&state, &live);
     let listed = started.elapsed();
     let walking = std::time::Instant::now();
+    // The deadline holds inside each walk too: one 300 k-file worktree cannot blow the time status has.
     let mut tally = disk::Tally::default();
+    tally.deadline = budget.map(|b| walking + b);
     // A kept walk is used only from this way of counting (`CACHE_FORM`).
     let kept = store::read_json(&cache_file(&state)).ok().filter(|k| k["form"] == CACHE_FORM).map(|k| k["entries"].clone()).unwrap_or(Value::Null);
     let mut keep = serde_json::Map::new();
@@ -590,6 +693,11 @@ pub fn measure(budget: Option<Duration>, fresh: bool) -> Disk {
         for p in e.paths.clone() {
             add(&mut e.size, tally.walk(&p, i));
         }
+        // Cut at the deadline: what it found is a floor, and never kept as its walk.
+        if e.size.cut {
+            e.unmeasured = true;
+            continue;
+        }
         // Not one still being written (a running experiment appends to its logs, which moves no folder time).
         let settled = !(e.class() == Class::Data && e.keep.is_some());
         if let Some(fp) = fp.filter(|_| settled && (e.class() == Class::Data || e.size.files >= KEEP_FILES)) {
@@ -601,7 +709,9 @@ pub fn measure(budget: Option<Duration>, fresh: bool) -> Disk {
     let n = entries.len();
     let claimed: HashSet<PathBuf> = entries.iter().flat_map(|e| e.paths.iter().cloned()).collect();
     let mut loose = vec![disk::Sized::default(); CATEGORIES.len()];
-    for p in disk::list(&state).unwrap_or_default().into_iter().map(|i| state.join(i.name)) {
+    // The state folder's own listing through what it ends on: a state folder that is a junction.
+    let real = std::fs::canonicalize(&state).unwrap_or_else(|_| state.clone());
+    for p in disk::list(&real).unwrap_or_default().into_iter().map(|i| state.join(i.name)) {
         let c = match name_of(&p).as_str() {
             "log" => index("logs"),
             name if CATEGORIES.iter().any(|c| c.name == name && c.class != Class::Kept) || name == "history" => index(name),
@@ -609,16 +719,18 @@ pub fn measure(budget: Option<Duration>, fresh: bool) -> Disk {
         };
         add(&mut loose[c], tally.walk_except(&p, n + c, &claimed, 3));
     }
-    let snap = crate::target::firefox::snap_profiles();
-    if !snap.starts_with(&state) {
-        let c = index("run");
-        add(&mut loose[c], tally.walk_except(&snap, n + c, &claimed, 1));
+    // Snap Firefox's profiles: outside the state folder, counted with `run` but not as in it.
+    let snap_dir = crate::target::firefox::snap_profiles();
+    let mut snap = disk::Sized::default();
+    if !snap_dir.starts_with(&state) {
+        snap = tally.walk_except(&snap_dir, n + index("run"), &claimed, 1);
+        add(&mut loose[index("run")], snap);
     }
     let c = index("install");
     for p in install_files() {
         add(&mut loose[c], tally.walk(&p, n + c));
     }
-    Disk { free: disk::free(&state), state, entries, loose, tally, took: started.elapsed(), listed, refs: None }
+    Disk { free: disk::free(&state), state, entries, loose, snap: snap.bytes, tally, took: started.elapsed(), listed, refs: None }
 }
 
 /// strobe's own files outside the state folder: its executables (and old copies an update set
@@ -709,7 +821,7 @@ impl Disk {
                 why(format!("used within {}", days(ask.data_age())), ago(e.used()))
             } else if let Some(o) = ask.older.filter(|o| e.within(*o)) {
                 why(format!("used within {}", days(o)), ago(e.used()))
-            } else if CATEGORIES[e.cat].name == "experiments" && self.refs.as_ref().is_some_and(|r| r.1.contains(&e.name)) {
+            } else if CATEGORIES[e.cat].name == "experiments" && self.refs.as_ref().is_some_and(|r| r.tracked.contains(&e.name)) {
                 why("named by tracked history", "strobe history")
             } else {
                 None
@@ -719,21 +831,29 @@ impl Disk {
                 None => remove.push(i),
             }
         }
-        // A recording an experiment that stays names stays with it: its handles would break.
-        if let Some((named, _)) = &self.refs {
-            let gone: HashSet<&str> = remove.iter().map(|i| self.entries[*i].name.as_str()).collect();
-            let mut keep_too = Vec::new();
-            for &i in &remove {
-                let e = &self.entries[i];
-                if CATEGORIES[e.cat].name != "recordings" {
-                    continue;
+        // What an experiment that stays names stays with it, its handles would break: an experiment
+        // (a bisect's steps), again for what each one kept names, then the recordings any of them name.
+        if let Some(refs) = &self.refs {
+            loop {
+                let gone: HashSet<&str> = remove.iter().map(|i| self.entries[*i].name.as_str()).collect();
+                let mut keep_too = Vec::new();
+                for &i in &remove {
+                    let e = &self.entries[i];
+                    let (by, what) = match CATEGORIES[e.cat].name {
+                        "experiments" => (&refs.experiments, "named by an experiment that stays"),
+                        "recordings" => (&refs.recordings, "named by an experiment that stays"),
+                        _ => continue,
+                    };
+                    if let Some(exp) = by.get(&e.name).and_then(|v| v.iter().find(|x| !gone.contains(x.as_str()))) {
+                        keep_too.push((i, Why { what: what.into(), detail: exp.clone() }));
+                    }
                 }
-                if let Some(exp) = named.get(&e.name).and_then(|v| v.iter().find(|x| !gone.contains(x.as_str()))) {
-                    keep_too.push((i, Why { what: "named by an experiment that stays".into(), detail: exp.clone() }));
+                if keep_too.is_empty() {
+                    break;
                 }
+                remove.retain(|i| !keep_too.iter().any(|k| k.0 == *i));
+                kept.extend(keep_too);
             }
-            remove.retain(|i| !keep_too.iter().any(|k| k.0 == *i));
-            kept.extend(keep_too);
         }
         Plan { remove, kept }
     }
@@ -762,7 +882,14 @@ impl Disk {
         let freed = self.frees(&plan);
         let reclaim: u64 = freed.values().sum();
         let total = self.total();
-        let outside = self.cat_bytes(index("install")).0;
+        // Outside the state folder: strobe's own files, and Snap Firefox's profiles (entries and the rest).
+        let outside = self.cat_bytes(index("install")).0 + self.snap + self.entries.iter().filter(|e| !e.root.starts_with(&self.state)).map(|e| e.size.bytes).sum::<u64>();
+        // What the deadline left out, per category: entries not walked or cut, and a cut walk of the rest.
+        let missing: Vec<usize> = (0..CATEGORIES.len()).map(|c| self.entries.iter().filter(|e| e.cat == c && e.unmeasured).count() + usize::from(self.loose.get(c).is_some_and(|l| l.cut))).collect();
+        let missing = |c: usize| missing[c];
+        let unmeasured: usize = (0..CATEGORIES.len()).map(missing).sum();
+        // A floor is never given as an exact number: `bytes` is null and `at_least_bytes` says it.
+        let exact = |n: u64, whole: bool| if whole { json!(n) } else { Value::Null };
         let mut cats = Vec::new();
         let mut rows = vec![vec!["".to_string(), "size".into(), "files".into(), "entries".into(), "reclaimable".into(), "".into()]];
         for (c, k) in CATEGORIES.iter().enumerate() {
@@ -775,7 +902,13 @@ impl Disk {
                 }
                 _ => None,
             };
-            cats.push(json!({ "name": k.name, "class": k.class.name(), "bytes": bytes, "files": files, "entries": n, "reclaimable_bytes": r, "what": k.what }));
+            let whole = missing(c) == 0;
+            cats.push(json!({
+                "name": k.name, "class": k.class.name(), "bytes": exact(bytes, whole), "at_least_bytes": bytes, "files": files, "entries": n,
+                "reclaimable_bytes": r.and_then(|r| whole.then_some(r)), "reclaimable_at_least_bytes": r, "unmeasured": missing(c), "complete": whole, "what": k.what,
+            }));
+            let bytes = bytes as f64;
+            let floor = if whole { "" } else { "≥ " };
             let note = match k.class {
                 Class::Data if detail => {
                     format!("strobe prune {}: older than {}, unless {} names it", k.name, days(DATA_AGE), if k.name == "recordings" { "an experiment that stays" } else { "tracked history" })
@@ -783,18 +916,24 @@ impl Disk {
                 Class::Kept => "never pruned".into(),
                 _ => String::new(),
             };
-            rows.push(vec![k.name.to_string(), super::fmt::bytes(bytes as f64), files.to_string(), n.to_string(), r.map(|r| super::fmt::bytes(r as f64)).unwrap_or_else(|| "-".into()), note]);
+            rows.push(vec![
+                k.name.to_string(),
+                format!("{floor}{}", super::fmt::bytes(bytes)),
+                files.to_string(),
+                n.to_string(),
+                r.map(|r| format!("{floor}{}", super::fmt::bytes(r as f64))).unwrap_or_else(|| "-".into()),
+                note,
+            ]);
         }
         let hint = reclaim >= 5 << 30 || self.free.is_some_and(|f| reclaim * 10 >= f && reclaim > 0);
-        let unmeasured = self.entries.iter().filter(|e| e.unmeasured).count();
         let floor = if unmeasured > 0 { "at least " } else { "" };
         let mut t = format!(
-            "  {} disk       {floor}{} ({} in {}{}) · {floor}{} reclaimable{} · {} free on its disk\n",
+            "  {} disk       {floor}{} ({floor}{} in {}{}) · {floor}{} reclaimable{} · {} free on its disk\n",
             if hint { "!" } else { "✓" },
             super::fmt::bytes(total as f64),
             super::fmt::bytes((total - outside) as f64),
             paths::plain(&self.state),
-            if outside > 0 { format!(", {} outside it", super::fmt::bytes(outside as f64)) } else { String::new() },
+            if outside > 0 { format!(", {floor}{} outside it", super::fmt::bytes(outside as f64)) } else { String::new() },
             super::fmt::bytes(reclaim as f64),
             if hint { ": strobe prune frees it" } else { "" },
             self.free.map(|f| super::fmt::bytes(f as f64)).unwrap_or_else(|| "?".into()),
@@ -802,13 +941,19 @@ impl Disk {
         if unmeasured > 0 {
             t += &format!("               {unmeasured} entries not measured within the time status gives the walk: strobe status --disk measures all\n");
         }
+        let refused = auto_age().err();
+        if let Some(why) = &refused {
+            t += &format!("               caches are not pruned on their own: {why}\n");
+        }
         if detail {
             t += &super::fmt::table(&rows, &[false, true, true, true, true, false], "               ", 2);
             t += "               sizes on the disk, each file once, every entry walked now\n";
         }
+        let whole = unmeasured == 0;
         let json = json!({
-            "state": paths::plain(&self.state), "total_bytes": total, "outside_bytes": outside, "reclaimable_bytes": reclaim, "free_bytes": self.free,
-            "complete": unmeasured == 0, "unmeasured": unmeasured,
+            "state": paths::plain(&self.state), "total_bytes": exact(total, whole), "at_least_bytes": total, "outside_bytes": exact(outside, whole),
+            "reclaimable_bytes": exact(reclaim, whole), "reclaimable_at_least_bytes": reclaim, "free_bytes": self.free,
+            "complete": whole, "unmeasured": unmeasured, "auto_refused": refused,
             "seconds": (self.took.as_secs_f64() * 100.0).round() / 100.0, "list_seconds": (self.listed.as_secs_f64() * 100.0).round() / 100.0, "categories": cats, "auto": last_auto(),
         });
         (t, json)
@@ -818,7 +963,9 @@ impl Disk {
 /// `strobe prune [<category>…] [--all] [--older-than <dur>] [--dry-run] [-f]`.
 pub fn run(args: &Args) -> Result<Output> {
     let ask = Ask::from(args)?;
-    let lock = PruneLock::take().ok_or_else(|| Error::usage("another strobe prune runs on this state folder").hint("wait for it to end"))?;
+    // A plan alone removes nothing: it takes no lock and makes no lock file. Another prune running is no
+    // usage mistake (exit 1).
+    let lock = if args.has("dry-run") { None } else { Some(PruneLock::take().ok_or_else(|| Error::msg("another strobe prune runs on this state folder").hint("wait for it to end"))?) };
     let mut d = measure(None, false);
     let plan = d.plan(&ask);
     let freed = d.frees(&plan);
@@ -852,7 +999,7 @@ pub fn run(args: &Args) -> Result<Output> {
         json["removed"] = json!([]);
         return Ok(Output::new(text, json));
     }
-    let done = apply(&d, &plan.remove, super::progress);
+    let done = apply(&d, &plan.remove, super::progress, || None);
     drop(lock);
     text += &done.text();
     json["removed"] = json!(done.removed);
@@ -958,11 +1105,16 @@ struct Done {
     ended: Vec<String>,
     freed: u64,
     per_cat: HashMap<usize, (usize, u64)>,
+    /// Why the removal ended before the last entry (a bench started).
+    stopped: Option<String>,
 }
 
 impl Done {
     fn text(&self) -> String {
         let mut t = String::new();
+        if let Some(why) = &self.stopped {
+            t += &format!("  stopped    {why}\n");
+        }
         for l in &self.ended {
             t += &format!("  {l}\n");
         }
@@ -985,20 +1137,36 @@ impl Done {
 /// Removes the entries, each under its stamps' exclusive holds (an entry a process started to use
 /// meanwhile stays), launch folders after what runs from them ended, worktrees out of their
 /// repository's list too. What is freed is counted file by file as it goes.
-fn apply(d: &Disk, chosen: &[usize], say: impl Fn(String)) -> Done {
+/// `stop` is asked before each entry: what it names (a bench that started) ends the removal there.
+fn apply(d: &Disk, chosen: &[usize], say: impl Fn(String), stop: impl Fn() -> Option<String>) -> Done {
     let mut done = Done::default();
     // Launch folders first: they hold links to seed copies, which then free their bytes.
     let mut order: Vec<usize> = chosen.to_vec();
     order.sort_by_key(|i| (d.entries[*i].removal != Removal::Launch, d.entries[*i].cat));
     // What started since the plan (a person may have taken minutes to answer): a launch that borrows a
-    // seed copy or a GPU cache store, a bench of a build that takes no leases.
+    // seed copy or a GPU cache store, a bench of a build that takes no leases or of the experiment a
+    // store, a recording or an experiment belongs to.
     let live = Live::read();
     for i in order {
+        if let Some(why) = stop() {
+            done.stopped = Some(why);
+            break;
+        }
         let e = &d.entries[i];
         let cat = CATEGORIES[e.cat].name;
         let started = match cat {
-            "seeds" | "gpu-cache" => live.borrowed.iter().any(|b| same_or_under(b, &e.paths[0])),
+            "seeds" => live.borrowed.iter().any(|b| same_or_under(b, &e.paths[0])),
+            "gpu-cache" => {
+                let exp = e.name.trim_start_matches("gpu-cache/").rsplit_once('-').map(|(x, _)| x).filter(|x| *x != "rec");
+                live.borrowed.iter().any(|b| same_or_under(b, &e.paths[0])) || exp.is_some_and(|x| live.running(x).is_some() || resumable(&d.state, x))
+            }
             "builds" => live.unleased.is_some(),
+            "engine" => live.unleased.is_some() || live.other_daemon.is_some(),
+            "experiments" => live.running(&e.name).is_some(),
+            "recordings" => {
+                let meta = e.paths[0].join("meta.json");
+                !meta.is_file() || (!live.benches.is_empty() && store::read_json(&meta).ok().and_then(|m| m["experiment"].as_str().map(str::to_string)).is_some_and(|x| live.running(&x).is_some()))
+            }
             _ => false,
         };
         if started {
@@ -1037,10 +1205,10 @@ fn apply(d: &Disk, chosen: &[usize], say: impl Fn(String)) -> Done {
         if r.failed.is_empty() && e.leases.is_empty() {
             let _ = std::fs::remove_file(cache::stamp(&e.paths[0]));
         }
-        if let Some((common, admin)) = &e.worktree
+        if let Some((common, admin, real)) = &e.worktree
             && r.failed.is_empty()
         {
-            unregister(common, admin, &e.paths[0], &mut r);
+            unregister(common, admin, &e.paths[0], real, &mut r);
         }
         // A symbols group left empty goes too.
         if CATEGORIES[e.cat].name == "symbols"
@@ -1071,14 +1239,19 @@ fn apply(d: &Disk, chosen: &[usize], say: impl Fn(String)) -> Done {
 /// folder already gone), so the next `git worktree add` of that path does not fail on a stale entry.
 /// When git cannot (no git, the repository moved), its own record of the worktree goes by hand, only
 /// when it names this folder.
-fn unregister(common: &Path, admin: &Path, dir: &Path, r: &mut disk::Removed) {
+fn unregister(common: &Path, admin: &Path, dir: &Path, real: &Path, r: &mut disk::Removed) {
     // As a person types the paths: git takes no `\\?\` prefix.
     let (git_dir, folder) = (paths::plain(common), paths::plain(dir));
     let _ = host::git::out(Path::new(&git_dir), &["--git-dir", &git_dir, "worktree", "remove", "--force", "--force", &folder]);
     if !admin.exists() {
         return;
     }
-    let names = std::fs::read_to_string(admin.join("gitdir")).ok().is_some_and(|g| same_or_under(Path::new(g.trim()), dir));
+    // The record's `gitdir` names the worktree's `.git`, relative to the record itself with git's
+    // worktree.useRelativePaths: resolved against the record, never the folder strobe runs in.
+    let names = std::fs::read_to_string(admin.join("gitdir")).ok().is_some_and(|g| {
+        let at = lexical(&admin.join(g.trim()));
+        same_or_under(&at, &real.join(".git")) || same_or_under(&at, &dir.join(".git"))
+    });
     if names {
         let one = disk::remove(admin, &common.join("worktrees"));
         r.failed.extend(one.failed);
@@ -1104,11 +1277,15 @@ impl Drop for PruneLock {
 
 /// `prune.unused` in the user's own strobe.json: how long a cache may go unused before it goes on its
 /// own (`"14d"`, the default), or `"off"`.
+/// A user strobe.json that does not parse refuses it: the 14-day default must never come back behind
+/// an `"off"` the file meant to say.
 fn auto_age() -> std::result::Result<Option<Duration>, String> {
-    match crate::config::user("prune")["unused"].as_str() {
-        None => Ok(Some(AUTO_AGE)),
-        Some("off") => Ok(None),
-        Some(s) => crate::cli::duration_ms(s).map(|ms| Some(Duration::from_millis(ms))).map_err(|e| format!("prune.unused in your strobe.json: {}", e.message)),
+    let prune = crate::config::user_strict("prune")?;
+    match &prune["unused"] {
+        Value::Null => Ok(Some(AUTO_AGE)),
+        Value::String(s) if s == "off" => Ok(None),
+        Value::String(s) => crate::cli::duration_ms(s).map(|ms| Some(Duration::from_millis(ms))).map_err(|e| format!("prune.unused in your strobe.json: {}", e.message)),
+        other => Err(format!("prune.unused in your strobe.json must be \"off\" or an age such as \"14d\", not {other}")),
     }
 }
 
@@ -1127,11 +1304,13 @@ pub fn auto() -> Option<String> {
     let age = match auto_age() {
         Ok(Some(a)) => a,
         Ok(None) => return None,
-        Err(e) => return Some(format!("strobe: {e}; caches are not pruned on their own")),
+        Err(e) => return Some(format!("strobe: {e}; caches are not pruned on their own until it reads")),
     };
     let day = Duration::from_secs(86_400);
     let at = last_auto()["at"].as_u64().map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s));
-    if at.and_then(|t| t.elapsed().ok()).is_some_and(|e| e < day) || !super::bench::slot::list().is_empty() {
+    // Never beside a bench or a timed recording anywhere on the machine (rule 2): its blocks would
+    // share the disk and CPUs with tens of GB of deletion.
+    if at.and_then(|t| t.elapsed().ok()).is_some_and(|e| e < day) || super::bench::slot::busy().is_some() {
         return None;
     }
     let lock = PruneLock::take()?;
@@ -1144,14 +1323,18 @@ pub fn auto() -> Option<String> {
         .filter(|(_, e)| e.class() == Class::Cache && e.keep.is_none() && e.used().and_then(|t| now.duration_since(t).ok()).is_some_and(|a| a >= age))
         .map(|(i, _)| i)
         .collect();
-    let d = Disk { state: paths::state_path(), entries, loose: Vec::new(), tally: disk::Tally::default(), free: None, took: Duration::ZERO, listed: Duration::ZERO, refs: None };
-    let done = apply(&d, &chosen, |_| {});
+    let d = Disk { state: paths::state_path(), entries, loose: Vec::new(), snap: 0, tally: disk::Tally::default(), free: None, took: Duration::ZERO, listed: Duration::ZERO, refs: None };
+    // Asked again before each entry: a bench that starts meanwhile ends it there.
+    let done = apply(&d, &chosen, |_| {}, super::bench::slot::busy);
     drop(lock);
     let secs = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let _ = paths::write_atomic(
-        &auto_file(),
-        json!({ "at": secs, "unused_s": age.as_secs(), "removed": done.removed.len(), "freed_bytes": done.freed, "failed": done.failed.len() }).to_string().as_bytes(),
-    );
+    // A removal a bench stopped goes on another time (the day starts again once it is done).
+    if done.stopped.is_none() {
+        let _ = paths::write_atomic(
+            &auto_file(),
+            json!({ "at": secs, "unused_s": age.as_secs(), "removed": done.removed.len(), "freed_bytes": done.freed, "failed": done.failed.len() }).to_string().as_bytes(),
+        );
+    }
     if done.removed.is_empty() && done.failed.is_empty() {
         return None;
     }

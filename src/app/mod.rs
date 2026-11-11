@@ -185,10 +185,11 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     };
     // Caches unused for long go once a day, after the bench is done: nothing is measured any more
     // (SPEC §5.14). The daemon does it on its own clock.
+    // Only after one that ran benches and succeeded: not a schedule listed or dropped, a stop asked, a plan.
     if matches!(args.command.as_str(), "bench" | "track" | "run")
+        && out.as_ref().is_ok_and(|o| o.code == 0)
         && !in_daemon()
-        && !args.has("stop")
-        && !args.has("plan")
+        && !["stop", "plan", "schedules", "unschedule"].iter().any(|f| args.has(f))
         && let Some(line) = prune::auto()
     {
         progress(line);
@@ -222,8 +223,9 @@ thread_local! {
     static SCOPE: std::cell::RefCell<RunScope> = std::cell::RefCell::new(RunScope::default());
 }
 
-/// An entered scope; dropping it puts the enclosing one back.
-pub struct Scope(Option<RunScope>);
+/// An entered scope; dropping it puts the enclosing one back, and lets go of the caches the
+/// experiment kept (`host::cache::keep`: its seed copies and GPU cache stores).
+pub struct Scope(Option<RunScope>, #[allow(dead_code)] host::cache::Scope);
 
 impl Drop for Scope {
     fn drop(&mut self) {
@@ -246,7 +248,7 @@ pub fn experiment_scope(dir: &Path) -> Scope {
         let prev = s.clone();
         s.progress = Some(dir.join("progress.log"));
         s.stops.push(dir.join("stop"));
-        Scope(Some(prev))
+        Scope(Some(prev), host::cache::scope())
     })
 }
 

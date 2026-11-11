@@ -648,6 +648,8 @@ pub struct Shared {
     pub cache: PathBuf,
     len: u64,
     modified: Option<std::time::SystemTime>,
+    /// The copy's folder in use for as long as the home links it (`host::cache`): `strobe prune` leaves it.
+    _lease: std::sync::Arc<host::cache::Lease>,
 }
 
 fn stamp(p: &Path) -> Option<(u64, Option<std::time::SystemTime>)> {
@@ -661,6 +663,12 @@ fn share(seed: &Path, dst: &Path) -> Option<Shared> {
     let (len, modified) = stamp(seed)?;
     let id: String = sha2::Sha256::digest(format!("{}\n{len}\n{modified:?}", seed.display()).as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
     let cache = host::paths::sub("seeds").join(id).join(seed.file_name()?);
+    // In use from before it is looked at or copied (a prune removing it now finishes first), until the
+    // home goes, and with an experiment until it ends (`host::cache::keep`): its blocks find it warm.
+    // Taking it marks when this seed version was last linked.
+    // A copy that cannot be leased is not shared: the seed is copied into the home instead.
+    let lease = std::sync::Arc::new(host::cache::take(cache.parent()?).ok()?);
+    host::cache::keep(cache.parent()?, &lease);
     // A cached copy that changed since it was made (a write that got through) is made again.
     let fresh = stamp(&cache).is_some_and(|(l, _)| l == len) && std::fs::read_to_string(cache.with_extension("stamp")).ok() == Some(format!("{:?}", stamp(&cache)));
     if !fresh {
@@ -678,11 +686,9 @@ fn share(seed: &Path, dst: &Path) -> Option<Shared> {
         std::fs::set_permissions(&cache, p).ok()?;
         std::fs::write(cache.with_extension("stamp"), format!("{:?}", stamp(&cache))).ok()?;
     }
-    // When this seed version was last linked: copies unused for long go (`strobe prune`, SPEC §5.14).
-    host::cache::touch(cache.parent()?);
     std::fs::hard_link(&cache, dst).ok()?;
     let (len, modified) = stamp(&cache)?;
-    Some(Shared { link: dst.to_path_buf(), cache, len, modified })
+    Some(Shared { link: dst.to_path_buf(), cache, len, modified, _lease: lease })
 }
 
 fn copy_dir(from: &Path, to: &Path, shared: &mut Vec<Shared>) -> Result<()> {
@@ -707,18 +713,38 @@ fn unshare(home: &Path) {
     let Ok(text) = std::fs::read_to_string(home.join(".strobe-shared")) else { return };
     for line in text.lines() {
         let Some((link, cache)) = line.split_once('\t') else { continue };
-        unlink_shared(Path::new(link), Path::new(cache));
+        let (link, cache) = (Path::new(link), Path::new(cache));
+        // The app in this home can write the file: a line counts only for a link inside the home to a
+        // copy inside strobe's seed folder, both one file (rule 10: nothing outside them is touched).
+        if shared_pair(home, link, cache) {
+            unlink_shared(link, cache);
+        }
     }
 }
 
-/// Removes one link to a shared seed file, never the cached copy's content or its read-only mark.
+/// Whether `link` (in `home`) and `cache` (in `<state>/seeds`) are names of one regular file, neither a
+/// link, each inside its folder with the folders above it resolved.
+fn shared_pair(home: &Path, link: &Path, cache: &Path) -> bool {
+    let seeds = host::paths::state_path().join("seeds");
+    if !(host::disk::inside(link, home) && host::disk::inside(cache, &seeds)) {
+        return false;
+    }
+    match (host::disk::stat(link), host::disk::stat(cache)) {
+        (Ok(l), Ok(c)) => l.kind == host::disk::Kind::File && c.kind == host::disk::Kind::File && (l.dev, l.id) == (c.dev, c.id),
+        _ => false,
+    }
+}
+
+/// Removes one link to a shared seed file, never the cached copy's content or its read-only mark. The
+/// read-only mark is changed only on a regular file, never through a link.
 fn unlink_shared(link: &Path, cache: &Path) {
-    if std::fs::remove_file(link).is_ok() || !link.exists() {
+    if std::fs::remove_file(link).is_ok() || std::fs::symlink_metadata(link).is_err() {
         return;
     }
     let set = |ro: bool| {
-        if let Ok(m) = std::fs::metadata(cache) {
+        if let Some(m) = std::fs::symlink_metadata(cache).ok().filter(|m| m.file_type().is_file()) {
             let mut p = m.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
             p.set_readonly(ro);
             let _ = std::fs::set_permissions(cache, p);
         }
@@ -1048,12 +1074,18 @@ pub fn lend_gpu_caches(home: &Path, store: &Path) -> bool {
 pub fn keep_gpu_caches(home: &Path) {
     let Ok(store) = std::fs::read_to_string(home.join(".strobe-gpu-cache")) else { return };
     let store = PathBuf::from(store.trim());
-    let mut rels: Vec<String> = DRIVER_CACHES.iter().map(|r| r.to_string()).filter(|r| home.join(r).is_dir()).collect();
+    // The app in this home can write that file: only a store in strobe's own GPU cache folder is one.
+    if !host::disk::inside(&store, &host::paths::state_path().join("gpu-cache")) || std::fs::symlink_metadata(&store).is_ok_and(|m| m.file_type().is_symlink()) {
+        return;
+    }
+    // A real folder, never a link the app left (it could lead out of the home).
+    let real_dir = |p: &Path| host::disk::inside(p, home) && std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let mut rels: Vec<String> = DRIVER_CACHES.iter().map(|r| r.to_string()).filter(|r| real_dir(&home.join(r))).collect();
     fn chromium(dir: &Path, home: &Path, depth: usize, out: &mut Vec<String>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
             let rel = p.strip_prefix(home).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-            if !p.is_dir() || DRIVER_CACHES.iter().any(|d| rel == *d) {
+            if !e.file_type().is_ok_and(|t| t.is_dir()) || DRIVER_CACHES.iter().any(|d| rel == *d) {
                 continue;
             }
             if CHROMIUM_GPU_CACHES.iter().any(|n| e.file_name() == *n) {
@@ -1180,6 +1212,9 @@ pub struct Home {
     /// The Wayland compositor the launch runs on (`App::wayland`), ended with the last clone of the home.
     #[cfg(target_os = "linux")]
     pub display: Option<std::sync::Arc<super::wayland::Session>>,
+    /// The GPU cache store lent to the home, in use until the last clone of the home goes (and with an
+    /// experiment until it ends): `strobe prune` leaves it (`host::cache`).
+    pub leases: Vec<std::sync::Arc<host::cache::Lease>>,
 }
 
 impl Home {
@@ -1281,9 +1316,18 @@ pub fn prepare_home(app: &App, seed: Option<&Path>, home: Option<PathBuf>) -> Re
         std::fs::write(home.join(".strobe-shared"), list)?;
     } else if let Ok(text) = std::fs::read_to_string(home.join(".strobe-shared")) {
         // A warm home keeps its links: watch them for this launch too.
+        // The app can write that file: only a link in the home to a copy in strobe's seed folder counts.
         for (link, cache) in text.lines().filter_map(|l| l.split_once('\t')) {
-            if let Some((len, modified)) = stamp(Path::new(cache)) {
-                shared.push(Shared { link: link.into(), cache: cache.into(), len, modified });
+            let (link, cache) = (Path::new(link), Path::new(cache));
+            if !shared_pair(&home, link, cache) {
+                continue;
+            }
+            let Some(dir) = cache.parent() else { continue };
+            let Ok(lease) = host::cache::take(dir) else { continue };
+            let lease = std::sync::Arc::new(lease);
+            host::cache::keep(dir, &lease);
+            if let Some((len, modified)) = stamp(cache) {
+                shared.push(Shared { link: link.into(), cache: cache.into(), len, modified, _lease: lease });
             }
         }
     }
@@ -1388,8 +1432,18 @@ pub fn prepare_home(app: &App, seed: Option<&Path>, home: Option<PathBuf>) -> Re
     env.extend(app.env.iter().map(|(k, v)| (k.clone(), fill(v))));
     // Last, so no profile replaces them: what tells strobe's launches (and what they start) apart.
     env.extend(launch_env(&home));
+    let gpu_lease = app
+        .gpu_cache
+        .as_deref()
+        .map(|store| -> Result<_> {
+            let lease = std::sync::Arc::new(host::cache::take(store)?);
+            host::cache::keep(store, &lease);
+            Ok(lease)
+        })
+        .transpose()?;
     let gpu_warm = app.gpu_cache.as_deref().map(|store| lend_gpu_caches(&home, store));
     Ok(Home {
+        leases: gpu_lease.into_iter().collect(),
         dir: home,
         port,
         env,
@@ -1623,6 +1677,15 @@ fn save_protocols(home: &Path, schemes: &[String]) {
     let _ = (home, schemes);
 }
 
+/// A `reg export` file's text: UTF-16LE after its byte-order mark, else UTF-8.
+#[cfg(windows)]
+fn reg_text(b: &[u8]) -> String {
+    match b {
+        [0xFF, 0xFE, rest @ ..] => String::from_utf16_lossy(&rest.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>()),
+        _ => String::from_utf8_lossy(b).to_string(),
+    }
+}
+
 /// Puts every saved scheme back as it was before the launch (deleting one that did not exist).
 pub fn restore_protocols(home: &Path) {
     #[cfg(target_os = "macos")]
@@ -1636,6 +1699,18 @@ pub fn restore_protocols(home: &Path) {
             (_, Some(s)) => (s.to_string(), false),
             _ => continue,
         };
+        // The app in the home can write these files: only a URL scheme's name, and a saved key that holds
+        // that scheme's key alone, are put back (rule 10).
+        let plain = scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
+        let own = |line: &str| {
+            let l = line.trim_start_matches('\u{feff}').trim_matches('\0').trim().to_ascii_lowercase();
+            let k = format!(r"hkey_current_user\software\classes\{}", scheme.to_ascii_lowercase());
+            !l.starts_with('[') || l == format!("[{k}]") || l.starts_with(&format!("[{k}\\")) || l == format!("[-{k}]")
+        };
+        let text = if reg { std::fs::read(e.path()).map(|b| reg_text(&b)).unwrap_or_default() } else { String::new() };
+        if !plain || (reg && !text.lines().all(own)) {
+            continue;
+        }
         let key = format!(r"HKCU\Software\Classes\{scheme}");
         let _ = Command::new("reg").args(["delete", &key, "/f"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
         if reg {

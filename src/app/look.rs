@@ -137,12 +137,16 @@ fn native(args: &Args, target: &str, app_args: &[String]) -> Result<Output> {
             return Err(Error::usage(format!("--{tty_only} is for a terminal program (look tty:<command>); a native app's look sends no input")));
         }
     }
-    // `--build`: this checkout's own build of the app (strobe.json `build`), as a bench of it runs.
+    // `--build`: this checkout's own build of the app (strobe.json `build`), as a bench of it runs; its
+    // copy stays leased until the look ends.
+    let mut _built = Vec::new();
     if args.has("build") {
         if target.starts_with("exe:") {
             return Err(Error::usage("--build builds the app of an app:<id> profile from this checkout; exe:<path> names the executable already"));
         }
-        app = app.with_exe(&super::bench::build_native(&std::env::current_dir()?)?);
+        let (exe, leases) = super::bench::build_native(&std::env::current_dir()?)?;
+        _built = leases;
+        app = app.with_exe(&exe);
     }
     if !app.exe.is_file() {
         return Err(missing(&app, target.strip_prefix("app:").or(args.get("app"))));
