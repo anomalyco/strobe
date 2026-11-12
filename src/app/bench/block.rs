@@ -100,21 +100,24 @@ impl Warmup {
     /// by 10 ms or more) shows the pair was never the steady point: warmup goes on from there.
     /// Measured runs that still step down (the first over twice the last half's median, by 20 ms or
     /// more: past `MAX_WARMUP`, where warmup no longer goes on) are said (`stepped`, `NotSteady`). Both
-    /// read the whole tree's CPU (`cpu`) beside the work, where every run has it.
+    /// read the whole tree's CPU (`cpu`) beside the work, where every run has it. An untimed block's
+    /// measured runs (`--check --runs N`, N ≥ 2) are judged `stepped` the same way.
     pub(super) fn after(&mut self, work: &[f64], cpu: &[f64], lost: &[bool]) -> bool {
         if work.is_empty() {
             return false;
         }
         let i = work.len() - 1;
         if let Some(f) = self.first {
-            if !self.keeps_pair || self.untimed || self.unsteady || i >= f + self.measured {
+            if !self.keeps_pair || self.unsteady || i >= f + self.measured {
                 return false;
             }
             // The work, and where it is one thread's, the whole tree's CPU too (a worker's or a browser
             // service's plateau leaves a page's renderer alone): every run of it read, or none.
             let tree: Option<&[f64]> = cpu.get(..=i).filter(|c| c.iter().all(|x| x.is_finite()));
             let series = std::iter::once(work).chain(tree);
-            if i > f + 1 && i <= MAX_WARMUP && series.clone().any(|x| x[i] < 0.5 * x[f] && x[f] - x[i] >= 10.0) {
+            // An untimed block (`--check --runs N`) measures from its first run whatever follows: its runs
+            // that step down are only said.
+            if !self.untimed && i > f + 1 && i <= MAX_WARMUP && series.clone().any(|x| x[i] < 0.5 * x[f] && x[f] - x[i] >= 10.0) {
                 self.first = None;
                 return false;
             }
@@ -185,6 +188,13 @@ fn before((a, b): (u64, u64)) -> String {
 /// launch or a page's setup), and the wait that fixes it. On Linux a thread that exited loses its last
 /// tick's CPU (`/proc` keeps none of it), so its busy stretch may end up to a second early.
 pub(super) fn startup_spill(t: &probe::wakes::TimelineData, t0: u64, t1: u64, since: &str) -> Option<String> {
+    startup_spill_skipping(t, t0, t1, since, &[])
+}
+
+/// `startup_spill`, with strobe's own work in the target before run 1 left out (`skip`: a page's speed
+/// check, which keeps its renderer busy for tens of ms): the ticks it took more than half of (its edges
+/// take ticks, `Timeline::mark_edge`) count neither as busy nor as time watched.
+pub(super) fn startup_spill_skipping(t: &probe::wakes::TimelineData, t0: u64, t1: u64, since: &str, skip: &[(u64, u64)]) -> Option<String> {
     if t1.saturating_sub(t0) < 2_000_000_000 || t.cpu_refused.is_some() || t0 <= t.t0_ns {
         return None;
     }
@@ -199,12 +209,18 @@ pub(super) fn startup_spill(t: &probe::wakes::TimelineData, t0: u64, t1: u64, si
         }
         to.min(b).saturating_sub(from.max(a)) as f64 / (to - from) as f64
     };
+    let skipped = |i: usize| skip.iter().any(|&w| share(i, w) > 0.5);
+    // The stretch before run 1 strobe watched the target in, less what it skipped.
+    let pre_ns = (0..t.ticks.len()).filter(|&i| skipped(i)).fold(pre.1 - pre.0, |left, i| {
+        let (a, b) = span(i);
+        left.saturating_sub(b.min(pre.1).saturating_sub(a.max(pre.0)))
+    });
     let n = t.threads.len();
     // Each thread's CPU ms in each window: before run 1, its first half, its second half.
     let mut ms = vec![[0.0f64; 3]; n + 1];
     for &(tick, th, cpu, _) in &t.cells {
         let (tick, th) = (tick as usize, th as usize);
-        if tick >= t.ticks.len() || th >= n || t.cpu_unknown.contains(&(th as u32)) {
+        if tick >= t.ticks.len() || th >= n || t.cpu_unknown.contains(&(th as u32)) || skipped(tick) {
             continue;
         }
         for (k, w) in [pre, (t0, mid), (mid, t1)].into_iter().enumerate() {
@@ -216,8 +232,8 @@ pub(super) fn startup_spill(t: &probe::wakes::TimelineData, t0: u64, t1: u64, si
     let pct = |x: f64, (a, b): (u64, u64)| 100.0 * x / (b.saturating_sub(a) as f64 / 1e6).max(1e-9);
     // A watched stretch before run 1 of 200 ms or more, or 50 ms of work in a shorter one: a fast target
     // with no setup (10–20 ms between its start and run 1) would read a few ms of its init as busy.
-    let watched = |m: &[f64; 3]| pre.1 - pre.0 >= SPILL_PRE_NS || m[0] >= 50.0;
-    let spilled = |m: &[f64; 3]| watched(m) && pct(m[0], pre) >= SPILL_BUSY_PCT && pct(m[1], (t0, mid)) >= SPILL_BUSY_PCT && m[1] >= 50.0 && m[1] >= 3.0 * m[2];
+    let watched = |m: &[f64; 3]| pre_ns >= SPILL_PRE_NS || m[0] >= 50.0;
+    let spilled = |m: &[f64; 3]| watched(m) && pct(m[0], (0, pre_ns)) >= SPILL_BUSY_PCT && pct(m[1], (t0, mid)) >= SPILL_BUSY_PCT && m[1] >= 50.0 && m[1] >= 3.0 * m[2];
     // The busiest such thread, else the set as a whole (startup spread over a pool).
     let thread = (0..n).filter(|&i| spilled(&ms[i])).max_by(|&a, &b| ms[a][1].total_cmp(&ms[b][1]));
     let i = match thread {
@@ -227,7 +243,7 @@ pub(super) fn startup_spill(t: &probe::wakes::TimelineData, t0: u64, t1: u64, si
     };
     // When it was busy: the ticks up to the run's end it used a quarter of a core in, from the launch.
     let busy: Vec<usize> = (0..t.ticks.len())
-        .filter(|&k| span(k).1 <= t1 && span(k).1 > span(k).0)
+        .filter(|&k| span(k).1 <= t1 && span(k).1 > span(k).0 && !skipped(k))
         .filter(|&k| {
             let used: f64 = t.cells.iter().filter(|c| c.0 as usize == k && (i == n || c.1 as usize == i)).map(|c| c.2 as f64).sum();
             pct(used, span(k)) >= SPILL_BUSY_PCT
@@ -246,8 +262,8 @@ pub(super) fn startup_spill(t: &probe::wakes::TimelineData, t0: u64, t1: u64, si
     let m = &ms[i];
     Some(format!(
         "startup was still running in run 1: {who} used {:.0}% of a core in the {} before it, {:.0}% in its first half and {:.0}% in its second; busy from {:.1} s to {:.1} s after {since}, while run 1 ran from {:.1} s to {:.1} s, so run 1 measured startup work, not the case's; wait in setup until the target is ready (ctx.waitForLine(<its ready line>, {{ since: \"launch\" }}), or a page.waitFor)",
-        pct(m[0], pre),
-        before(pre),
+        pct(m[0], (0, pre_ns)),
+        before((0, pre_ns)),
         pct(m[1], (t0, mid)),
         pct(m[2], (mid, t1)),
         at(from),
@@ -463,7 +479,9 @@ impl<'a> Hooks<'a> {
 pub(super) type Hooked<'a> = (&'a BTreeMap<String, f64>, &'a [(String, u64)], &'a metrics::Timed);
 
 /// `count.<name>` and `phase.<name>` per measured run for the series' declared metrics, from each
-/// run's counts and host-clock phase marks (`phase_ms`).
+/// run's counts and host-clock phase marks (`phase_ms`). A run that counted none of a name is 0 when
+/// the case declares it or another measured run counted it; one only `--noworse` names that no run
+/// counted has no value (`Series::case_declares`).
 pub(super) fn per_run_hooks(s: &Series, key: &dyn Fn(usize) -> String, runs: &[Hooked]) -> BTreeMap<String, BTreeMap<String, f64>> {
     let mut extra = BTreeMap::new();
     // The fixture's CPU per run, whether declared or not: result.json's fixture says it per side. None
@@ -473,6 +491,9 @@ pub(super) fn per_run_hooks(s: &Series, key: &dyn Fn(usize) -> String, runs: &[H
     }
     for m in declared_metrics(s) {
         if let Some(name) = m.strip_prefix("count.") {
+            if !s.case_declares(m) && !runs.iter().any(|(c, _, _)| c.contains_key(name)) {
+                continue;
+            }
             extra.insert(m.clone(), runs.iter().enumerate().map(|(j, (c, _, _))| (key(j), c.get(name).copied().unwrap_or(0.0))).collect());
         } else if let Some(name) = m.strip_prefix("phase.") {
             extra.insert(m.clone(), runs.iter().enumerate().map(|(j, (_, marks, t))| (key(j), super::phase_ms(marks, name, t))).filter(|(_, x)| x.is_finite()).collect());

@@ -322,6 +322,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     // (`lifecycle_spans`), each passing case's measured runs, and its measured range of the launch's runs.
     let life: RefCell<Vec<(String, u64, u64)>> = RefCell::new(Vec::new());
     let kept: RefCell<Vec<Measured>> = RefCell::new(Vec::new());
+    // Every run of those cases, warmup ones too: the recording's `run_list`.
+    let listed: RefCell<Vec<RunRow>> = RefCell::new(Vec::new());
     let passed: RefCell<Vec<(usize, std::ops::Range<usize>)>> = RefCell::new(Vec::new());
     let started = host::now_ns();
     let mut spawned = Host::spawn(&target, &entry, &root, ctx.pin, profiles.as_ref().map(|p| p.0.as_path()), &log)?;
@@ -617,6 +619,15 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         main_ms: m.clone().map(|share| share * r.0),
                         ended: (l.0, l.1, e.clone()),
                     }));
+                    listed.borrow_mut().extend(runs.iter().zip(&mains).zip(&lost).enumerate().map(|(i, ((r, m), l))| RunRow {
+                        run: format!("run:{}", base + i),
+                        measured: local.contains(&i),
+                        ms: r.0,
+                        cpu_work_ms: r.1,
+                        task_ms: None,
+                        main_cpu_ms: m.as_ref().ok().map(|share| share * r.0),
+                        cpu_lost: l.1,
+                    }));
                     passed.borrow_mut().push((k, base + local.start..base + local.end));
                 }
                 base += runs.len();
@@ -699,6 +710,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
             log: &log,
             life: &life.take(),
             runs: &kept.take(),
+            listed: &listed.take(),
             passed: &passed.take(),
             timeline: timeline.as_ref(),
         };
@@ -736,6 +748,8 @@ struct Profiled<'a> {
     log: &'a Path,
     life: &'a [(String, u64, u64)],
     runs: &'a [Measured],
+    /// Every run of the passing cases, warmup and unmeasured ones too (`run_list`).
+    listed: &'a [RunRow],
     passed: &'a [(usize, std::ops::Range<usize>)],
     /// The host's threads over the block (`query threads --timeline`).
     timeline: Option<&'a probe::wakes::TimelineData>,
@@ -843,6 +857,7 @@ impl Profiled<'_> {
             meta["batch"] = super::batch::meta(self.passed.iter().zip(&blocks).map(|((k, r), b)| (&self.cases[*k], r.clone(), *b)));
         }
         meta["ended_runs"] = super::ended_runs(self.runs.iter().map(|r| (r.key.clone(), true, r.ended.0, r.ended.1, r.ended.2.as_slice())));
+        meta["run_list"] = super::run_list(self.listed.iter().cloned());
         store::write_json(&rec.join("meta.json"), &meta)?;
         draft.keep();
         Ok(())
