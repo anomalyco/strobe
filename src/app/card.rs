@@ -648,6 +648,8 @@ fn calm(series: &[&Value], aa: bool) -> (String, Option<Box<Tile>>) {
         let v = verdict(&s["primary"]);
         // Results from before comparisons kept their refusal: from the verdict's words.
         let why = s["primary"]["refusal"]["summary"].as_str().or_else(|| v.split_once("): ").map(|x| x.1)).or_else(|| v.split_once(": ").map(|x| x.1)).unwrap_or("");
+        // A card is public: another program's names and a person's folders out (`pr::public`).
+        let why = super::pr::public(why);
         let plain = match why.split_once(" frames < ") {
             Some((have, need)) => format!("too few frames ({have} per launch, {need} needed)"),
             None if why.is_empty() => "strobe refused the measurement".into(),

@@ -69,7 +69,7 @@ inputs:
     description: "The two sides' names in the PR block, base then head (report --labels)"
     default: ""
   upload-artifacts:
-    description: "on-failure (default), always or never: the HTML report, result.json, runner.log and failure screenshots, kept 7 days. result.json and the HTML report name the bench machine's other processes (the busiest, and those kept off its CPUs): on a personal self-hosted machine with a public repository, set never"
+    description: "on-failure (default), always or never: result.json and an HTML report drawn from it, both without the names of the bench machine's other processes; runner.log and failure screenshots; kept 7 days"
     default: on-failure
   upload-recordings:
     description: "Also upload the recordings (they can hold what the target showed and typed): false by default"
@@ -84,7 +84,7 @@ inputs:
     description: A strobe executable to run instead of a release (a build of strobe itself)
     default: ""
   install-browser:
-    description: "auto (default: Playwright's Chromium, cached, only when the runner has no Chrome, Edge or Chromium) or false"
+    description: "auto (default: Playwright's Chromium, only when the runner has no Chrome, Edge or Chromium) or false"
     default: auto
   github-token:
     description: The token update-pr edits the pull request with
@@ -178,19 +178,10 @@ runs:
       env:
         INPUT_INSTALL_BROWSER: ${{ inputs.install-browser }}
 
-    - name: Cache Chromium
-      if: steps.setup.outputs.browser-missing == 'true'
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ${{ steps.setup.outputs.browser-path }}
-        key: ${{ steps.setup.outputs.browser-key }}
-
     - name: Chromium
       if: steps.setup.outputs.browser-missing == 'true'
       shell: bash
       run: bun "$GITHUB_ACTION_PATH/scripts/ci-action.ts" browser
-      env:
-        STROBE_ACTION_BROWSERS: ${{ steps.setup.outputs.browser-path }}
 
     - name: strobe bench
       id: run

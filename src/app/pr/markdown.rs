@@ -1159,8 +1159,10 @@ impl<'a> Doc<'a> {
             .chain(self.series.iter().flat_map(|s| s["warnings"].as_array().into_iter().flatten().map(move |w| (self.title(s), w))))
         {
             let id = w["id"].as_str().unwrap_or("");
-            // `UserFolders` leads the block as a caution (`folder_caution`).
-            if id == "ReservedCpus" || id == "SessionLocked" && w["level"] != "warn" || id == "DisplayOff" || id == "UserFolders" {
+            // `UserFolders` leads the block as a caution (`folder_caution`). A `HarnessOverlay` that only placed
+            // a file base lacked (info) changed nothing base ran: only the warn level reaches a reviewer.
+            let context = (id == "SessionLocked" || id == "HarnessOverlay") && w["level"] != "warn";
+            if id == "ReservedCpus" || context || id == "DisplayOff" || id == "UserFolders" {
                 continue;
             }
             let raw = w["text"].as_str().unwrap_or("");
@@ -1290,6 +1292,8 @@ impl<'a> Doc<'a> {
             }
             match (v["kind"].as_str(), v["commit"].as_str()) {
                 (Some("dir"), Some(c)) => return c.to_string(),
+                // A folder in no repository: its path is this machine's, never published.
+                (Some("dir"), None) => return label_commit(v).unwrap_or_else(|| if fallback == "." { "<head folder>".into() } else { "<base folder>".into() }),
                 (Some(_), _) => return symbolic(s),
                 _ => {}
             }

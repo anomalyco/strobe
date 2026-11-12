@@ -54,7 +54,7 @@ const TOOLS: &[Tool] = &[
             ("for", "duration, e.g. 10s (default 10s)"),
             (
                 "probes",
-                "timing (default), attribution (CPU stacks, allocations, forced layouts, GC, a heap snapshot) or memory (a heap snapshot); pid:/proc: targets also deep; native targets (pid:, a native app) also waits: deep plus off-CPU waits and who woke each thread (query view waits), which costs the target at every context switch and refuses NoWaits (exit 4) where this OS or setup cannot take them",
+                "timing (default), attribution (CPU stacks, allocations, forced layouts, GC, a heap snapshot) or memory (a heap snapshot); pid:/proc: targets also deep; native targets (pid:, a native app) also waits: deep plus off-CPU waits and who woke each thread (query view waits), which costs the target at every context switch and refuses NoWaits (exit 4) where this OS or setup cannot take them. With bench: attribution (default) or waits; memory exits 2 (the attribution block already ends with a heap snapshot; a leak run is the bench tool with probes memory)",
             ),
             ("native", "exe:<path> is a native app (no browser engine): recorded from outside: CPU, thread wakes, IO, GPU, memory, the UI thread's CPU and what reached the screen"),
             ("app", "exe:<path>: the strobe.json app profile it borrows"),
@@ -132,14 +132,17 @@ const TOOLS: &[Tool] = &[
             ("equivalence", "equivalence bound in % (default 2)"),
             (
                 "noworse",
-                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear); \"metric=2%,metric2=5%\" per metric; with check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's",
+                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear); \"metric=2%,metric2=5%\" per metric; with check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's. A count.* only this names is the series' once any block of either side counted it (a block that counted none then reads 0); never counted: nothing of it, and an Uncounted warning when no case of the run counted it",
             ),
             ("plan", "do not run: estimate pairs and minutes per series from earlier experiments here, builds and the bench slot's queue"),
             ("effect", "with plan: the expected change of the primary in % (default: what the last run of the series measured, else 0)"),
             ("pilot", "with plan: run 4 pairs first to learn the spread"),
             ("pairs", "auto (default) or a number"),
             ("runs", "measured runs per block (default 5); with check: N runs in each case's one launch, no warmup, its value their median with the lowest and highest run"),
-            ("probes", "timing skips attribution blocks; memory runs a leak run per variant (no base needed); waits adds off-CPU waits to native attribution blocks (with why always)"),
+            (
+                "probes",
+                "timing skips attribution blocks; memory runs a leak run per variant (no base needed; not with check, which takes no heap snapshot: one case's heap is strobe record --bench <file>#<case>); waits adds off-CPU waits to native attribution blocks (with why always)",
+            ),
             (
                 "repeat",
                 "leak run: N runs to the middle snapshot and N more to the last (default 10); with check: R fresh cold launches per case (from 2), the median over them and each launch's value (not with batch or video)",
@@ -174,7 +177,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "query",
-        description: "Views over a recording (rec_…) or experiment (exp_…): summary, frames, threads, hotspots (CPU self time by function|file|package with full stacks), alloc (bytes allocated by function|file|package with full stacks), layout (forced layouts and style recalcs by the call that forced them), shifts (the largest layout shifts and the elements they moved), gc (collections and GC time per run), heap (live objects by class with retained sizes, detached DOM, retainer paths), leaks (memory recordings: objects from the first half still alive at the end, with retainer paths), memory (by process, layer or allocator), insights (rules with evidence; exp_… too), waits (a native capture taken with probes waits: off-CPU time by the stack each thread waited at, blocked or runnable, and who woke it); those need attribution recordings; http (a bench block's HTTP probe from ctx.httpProbe: idle control against the measured runs, p50/p95/max with timeouts censored, errors, missed sends, the probe's CPU, and stalled cohorts; exp_… lists its probe blocks; rec_a..rec_b side by side); actions (a bench block's recording, or exp_… for its kept recordings and check cases: what the hooks sent the target in order, with hook, run, phase, outcome; typed text, act values, ctx.call arguments and ctx.exec lines redacted unless reveal); inputs (each measured input of a recording from OS presents or a Chromium trace: its run and time, what proved its change, the frames around it, its latency or why it gave none, busy with why, and the delay it needed); sql (Perfetto trace_processor SQL; a recording without a Chrome trace is queried in the Perfetto trace strobe open builds, built on first use), runs (every run of a block recording, warmup and unmeasured runs too: run.duration, cpu.work, main-thread time, whether it was measured), progress (running experiments). rec_a..rec_b compares two recordings in hotspots, alloc, layout, style, threads, frames, summary, heap and memory: per-run deltas and the stacks where they concentrate; exp_… with one of those views (other than summary) compares each series' base..head attribution recordings. Tracked history (strobe track): handle history lists this device's series (or history <ser_…|bench file> one series' points with intervals), handle changes lists suspected and confirmed changes with their paired A/B and culprit; handle ser_… takes views history and changes.",
+        description: "Views over a recording (rec_…) or experiment (exp_…): summary, frames, threads, hotspots (CPU self time by function|file|package with full stacks), alloc (bytes allocated by function|file|package with full stacks), layout (forced layouts and style recalcs by the call that forced them), shifts (the largest layout shifts and the elements they moved), gc (collections and GC time per run), heap (live objects by class with retained sizes, detached DOM, retainer paths), leaks (memory recordings: objects from the first half still alive at the end, with retainer paths), memory (by process, layer or allocator), insights (rules with evidence: dominant-thread, off-cpu-bound, hot-function, http-stalls, forced-layout, gc-pressure, …; exp_…: insights per series: verdict or status, ranked suspects, the warnings that bear on it, the commands to run next), waits (a native capture taken with probes waits: off-CPU time by the stack each thread waited at, blocked or runnable, and who woke it); those need attribution recordings; http (a bench block's HTTP probe from ctx.httpProbe: idle control against the measured runs, p50/p95/max with timeouts censored, errors, missed sends, the probe's CPU, and stalled cohorts; exp_… lists its probe blocks; rec_a..rec_b side by side); actions (a bench block's recording, or exp_… for its kept recordings and check cases: what the hooks sent the target in order, with hook, run, phase, outcome; typed text, act values, ctx.call arguments and ctx.exec lines redacted unless reveal); inputs (each measured input of a recording from OS presents or a Chromium trace: its run and time, what proved its change, the frames around it, its latency or why it gave none, busy with why, and the delay it needed); sql (Perfetto trace_processor SQL; a recording without a Chrome trace is queried in the Perfetto trace strobe open builds, built on first use), runs (every run of a block recording, warmup and unmeasured runs too: run.duration, cpu.work, main-thread time, whether it was measured), progress (running experiments). rec_a..rec_b compares two recordings in hotspots, alloc, layout, style, threads, frames, summary, heap and memory: per-run deltas and the stacks where they concentrate; exp_… with one of those views (other than summary) compares each series' base..head attribution recordings. Tracked history (strobe track): handle history lists this device's series (or history <ser_…|bench file> one series' points with intervals), handle changes lists suspected and confirmed changes with their paired A/B and culprit; handle ser_… takes views history and changes.",
         args: &[
             ("handle", "rec_…, exp_… (a unique prefix works) or rec_a..rec_b; history, changes or ser_… for tracked history"),
             (
@@ -219,7 +222,7 @@ const TOOLS: &[Tool] = &[
         flags: &[
             (
                 "format",
-                "html (default), md, pr (an experiment's pull request block), summary (short GitHub Markdown for a CI job's summary page: a check's exact counters, a leak run's growth, a comparison's PR block without images), card (its result as a 1200×630 PNG) or badge (an SVG badge)",
+                "html (default), md, pr (an experiment's pull request block), summary (short GitHub Markdown for a CI job's summary page: a check's exact counters, a leak run's growth, a comparison's PR block without images), card (its result as a 1200×630 PNG) or badge (an SVG badge); a recording's report is html or md. Any other is an error before anything is written. pr, summary, card and badge are public: every string of the result is scrubbed first (no other program's name or window title, no person's folder; a plain folder variant reads <base folder> or <head folder>)",
             ),
             ("out", "where to write it"),
             ("theme", "card and badge: light, dark or auto"),
@@ -240,7 +243,10 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "look",
         description: "Look at a target without measuring it, as strobe sees it: a page in a headless Chromium (title, address, headings, visible text, console messages and uncaught errors, a screenshot), a native app in an isolated home (window titles, its accessibility tree's headings and keyed elements, what a case's expect matches), a windowless app (whether it kept running, how it ended, what it printed), a terminal program on strobe's own terminal (its grid and the modes it set), or an open Safari tab on a USB-cabled iPhone. Exit 124 (a result with problems) when it never loaded or --until never showed.",
-        args: &[("target", "https://…, a local page.html, app:<id>, exe:<absolute path>, tty:<command> or wir:[<selector>]")],
+        args: &[(
+            "target",
+            "https://…, a local page.html, app:<id>, exe:<absolute path>, tty:<command> or wir:[<selector>]; pid:, proc:, cdp:, ws:// (record attaches to those) and node:, bun: (a bench file's script() target) are usage errors",
+        )],
         flags: &[
             ("until", "wait for this selector (a page's CSS, a native app's accessibility selector, text=… on a terminal; image=<png> an image anchor)"),
             ("wait", "settle time after the load or --until (page 1s, app 2s: a windowless app is watched that long)"),
