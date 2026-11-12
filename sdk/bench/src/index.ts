@@ -191,10 +191,19 @@ export interface Page {
    * (headed Chromium, headless pages). Pacing stops for the rest of the call once the target never rests (an animation).
    * `burst: true` sends the keys `delay` apart without waiting: no key is a latency sample (`interaction.*` refuses
    * `AmbiguousInteraction`); measure burst typing by `cpu.work`, `main.work`, `ui.cpu`, `run.duration` or a phase.
+   * A terminal target (`tty()`) waits up to a second for each key's change (a key that changes nothing waits the
+   * whole second), and `paste: true` sends the text as one paste instead (bracketed, `ESC [200~ … ESC [201~`, once
+   * the program turned bracketed paste on): one `tty.latency` sample, to the paste's first change.
    */
-  type(selector: Element, text: string, opts?: Options & { delay?: number; burst?: boolean }): Promise<void>
-  /** A key or chord: `"Enter"`, `"F9"`, `"Control+a"`, `"ControlOrMeta+Shift+P"`. `opts.selector` sends it to that element (clicked into focus first, as `type` does). */
-  press(key: string, opts?: Options & { selector?: Element }): Promise<void>
+  type(selector: Element, text: string, opts?: Options & { delay?: number; burst?: boolean; paste?: boolean }): Promise<void>
+  /**
+   * A key or chord: `"Enter"`, `"F9"`, `"Control+a"`, `"ControlOrMeta+Shift+P"`. `opts.selector` sends it to that element (clicked into focus first, as `type` does).
+   * A terminal target (`tty()`) sends it once the grid held still 50 ms and does not wait for its answer: pass
+   * `until` before the next input when the answer may take longer (else `tty.latency.*` refuses `AmbiguousInteraction`).
+   * `burst: true` sends it at once (a chord's next key, `g` `g`), no latency sample: a block that sends one refuses
+   * `tty.latency.*`.
+   */
+  press(key: string, opts?: Options & { selector?: Element; burst?: boolean }): Promise<void>
   /**
    * Presses one key and holds it across other calls until `up`: a game's `"w"`, or `"Shift"` (held modifiers mark later keys).
    * A mouse button: `"Mouse"` (left), `"MouseRight"`, `"MouseMiddle"`, pressed where the pointer is, or first at `opts.at`

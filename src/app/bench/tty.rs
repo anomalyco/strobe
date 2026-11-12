@@ -258,6 +258,46 @@ fn host_cycles(tty: &Tty) -> u64 {
 /// What a terminal block measures beyond CPU and memory, said when a declared metric has no value.
 const MEASURES: &str = "run.duration, cpu.work, cpu.app.total, cpu.pty_host, cpu.wakes, memory.app.private, io.*, tty.latency.*, tty.settle.*, tty.updates, tty.frames, tty.frame.*, tty.bytes, tty.cells, count.*, phase.*, app.*";
 
+/// Why the block's inputs have no latency strobe can pair with them (`AmbiguousInteraction`, which
+/// refuses every `tty.latency.*` and `tty.settle.*`), first reason first: its summary after the
+/// metric's name, and the fix.
+fn ambiguous(lat: &drv::Latencies) -> Option<(String, &'static str)> {
+    let tried = lat.ms.len() + lat.busy;
+    if lat.burst > 0 {
+        Some((
+            format!("the runs sent {} inputs with burst: true, each before the one before it answered, so no grid update is any one input's answer", lat.burst),
+            "measure burst input by cpu.work, run.duration, tty.bytes or a phase, or drop burst: true (or use type with paste: true for one paste) for input latency",
+        ))
+    } else if lat.echoed > 0 {
+        Some((
+            format!("the terminal's kernel line discipline had ECHO on for {} input(s), so the grid showed the kernel's echo before the program read the input", lat.echoed),
+            "wait in setup until the program enters raw mode, or time a line-mode command's answer after Enter with a phase and until: \"text=…\"",
+        ))
+    } else if lat.overran + lat.after_overrun > 0 {
+        let ms = drv::ANSWER_MAX.as_millis();
+        let what = match (lat.overran, lat.after_overrun) {
+            (0, n) => format!("{n} input(s) came less than {ms} ms after inputs outside the measured runs (setup, a reset, a warmup run) that went out before an earlier one changed the grid"),
+            (o, 0) => format!("{o} input(s) were sent while an earlier input within {ms} ms had not yet changed the grid"),
+            (o, n) => format!("{o} input(s) were sent while an earlier input within {ms} ms had not yet changed the grid, and {n} more before {ms} ms passed without input"),
+        };
+        Some((
+            format!("input outran the program ({what}), so late output cannot be paired with the input that caused it"),
+            "wait for each input's answer before sending the next (pass { until: \"frame\" }, { until: \"idle\" } or { until: \"text=…\" } to page.press/click, or use paced page.type; after an input that changes nothing, page.wait(1000)), or measure throughput with cpu.work or run.duration",
+        ))
+    } else if tried > 0 && lat.busy * 2 > tried {
+        Some((
+            format!(
+                "the program was still drawing when {} of {tried} inputs were sent (not {} ms still after the last change), so the next update may not be their answer",
+                lat.busy,
+                drv::QUIET.as_millis()
+            ),
+            "wait for the grid to settle before each input (until: \"idle\"), or stop spinners and animations in the target",
+        ))
+    } else {
+        None
+    }
+}
+
 /// One measured run.
 struct Run {
     ms: f64,
@@ -686,9 +726,17 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let settled: Vec<metrics::Timed> = measured.iter().map(|r| metrics::Timed { t1: r.settled, ..r.timed.clone() }).collect();
                 let lat = drv::latencies(&tty, &driver.inputs(), &settled.iter().collect::<Vec<_>>());
                 let stretches: Vec<&metrics::Timed> = measured.iter().map(|r| &r.timed).collect();
+                // Some input's latency is no input's answer for sure: none of the block's (never the
+                // inputs strobe could pair alone, which would leave out the slow answers).
+                let ambiguous = ambiguous(&lat);
+                for m in declared_metrics(s).into_iter().filter(|m| m.starts_with("tty.latency.") || m.starts_with("tty.settle.")) {
+                    if let Some((summary, fix)) = &ambiguous {
+                        refused.insert(m.clone(), Refusal::new(ValidatorId::AmbiguousInteraction, format!("{m}: {summary}")).fix(*fix));
+                    }
+                }
                 let mut ms = lat.ms.clone();
                 ms.sort_by(f64::total_cmp);
-                if !ms.is_empty() {
+                if !ms.is_empty() && ambiguous.is_none() {
                     values.insert("tty.latency.n".into(), ms.len() as f64);
                     values.insert("tty.latency.p50".into(), metrics::percentile(&ms, 0.5));
                     values.insert("tty.latency.p95".into(), metrics::percentile(&ms, 0.95));
@@ -696,12 +744,14 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let mut settle = lat.settle_ms.clone();
                 settle.sort_by(f64::total_cmp);
                 // A resize after which only the host drew would leave its slowest settles out: none then.
-                if !settle.is_empty() && lat.host_only == 0 {
+                if !settle.is_empty() && lat.host_only == 0 && ambiguous.is_none() {
                     values.insert("tty.settle.n".into(), settle.len() as f64);
                     values.insert("tty.settle.p50".into(), metrics::percentile(&settle, 0.5));
                     values.insert("tty.settle.p95".into(), metrics::percentile(&settle, 0.95));
                 }
-                if lat.busy + lat.silent > 0 {
+                // The inputs that were no sample, by why: counts, 0 included (a declared one is a value then,
+                // not a refusal), none where the block's latency is refused.
+                if ambiguous.is_none() {
                     values.insert("tty.latency.busy".into(), lat.busy as f64);
                     values.insert("tty.latency.silent".into(), lat.silent as f64);
                 }
@@ -739,7 +789,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // What this machine cannot read is said as that, before what the block did not measure.
                 refuse_not_on_this_os(s, &mut values, &mut refused);
                 for m in declared_metrics(s) {
-                    if values.contains_key(m) || refused.contains_key(m) || m.starts_with("count.") || m.starts_with("phase.") {
+                    // A counter only a counter block measures here is that block's to give (none in a check).
+                    if values.contains_key(m) || refused.contains_key(m) || m.starts_with("count.") || m.starts_with("phase.") || (!x.counters && super::counted_apart(m)) {
                         continue;
                     }
                     let r = match m.as_str() {

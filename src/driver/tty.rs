@@ -2,7 +2,8 @@
 //! the mouse and its window's size, written to the program's pseudo-terminal, and waits on the cell
 //! grid strobe's terminal keeps (`target::tty`). Selectors find text on the grid (`text=`), and a
 //! point is a cell, `[col, row]` from 0. Every input is stamped on the host clock when it is written,
-//! and its latency is the first grid change the program drew after it (`latencies`).
+//! and its latency is the first grid change the program drew after it (`latencies`), when strobe can
+//! tell that change from an earlier input's late answer.
 
 use crate::host;
 use crate::model::{Error, Refusal, Result, ValidatorId};
@@ -16,11 +17,13 @@ use std::time::{Duration, Instant};
 /// How long the grid must hold still before a measured input: a program still drawing then (a
 /// spinner, a redraw of the last step) is not at rest, and the input is no latency sample.
 pub const QUIET: Duration = Duration::from_millis(50);
-/// The longest strobe waits for the grid to hold still before an input, and for a key's change.
+/// The longest strobe waits for the grid to hold still before an input.
 const SETTLE_MAX: Duration = Duration::from_millis(300);
-/// The longest strobe waits after a run for its last input's answer, and for it to hold still: long
-/// enough not to cut off a slow answer's latency (a shorter wait would right-censor its p95).
-const ANSWER_MAX: Duration = Duration::from_secs(1);
+/// The longest an answer may take: strobe waits this long after a run for its last input's answer,
+/// and for it to hold still (a shorter wait would right-censor a slow answer's p95), and for each
+/// paced key's answer. An input with no answer yet may still get one this long after it was sent, so
+/// what the grid shows then is no later input's answer for sure (`latencies`).
+pub const ANSWER_MAX: Duration = Duration::from_secs(1);
 /// How to time a resize on Windows, where ConPTY's host redraws before the program does.
 pub const RESIZE_FIX: &str = "on Windows time a resize with a phase whose until is what only the program's redraw shows (text its new layout puts somewhere new) or its state on STROBE_EVENTS (until: { state }); tty.settle times it when the program redrew after the host; tty.latency measures resizes on Linux and macOS";
 
@@ -42,18 +45,57 @@ pub struct Input {
     /// The grid held still before it (`QUIET`): without that its first change may be the program's
     /// earlier drawing.
     pub rested: bool,
+    /// It begins something the program may answer: a key, a paste, a click's press, a button or key
+    /// going down, the pointer moving, a wheel's turn, a drag, a resize. The inputs after it in the same
+    /// gesture (a click's release, a wheel's later notches, a drag's moves, a button or key let go, a
+    /// modifier alone) are part of it, and its answer may come after any of them.
+    pub action: bool,
+    /// Sent in a burst (`burst: true`): before the input ahead of it was answered.
+    pub burst: bool,
+    /// The terminal's line discipline had `ECHO` on (`Tty::line_echo`): the kernel echoed it to the
+    /// grid before the program read it.
+    pub echoed: bool,
+}
+
+impl Input {
+    fn of(what: &'static str) -> Input {
+        Input { sent_ns: 0, what, sample: false, rested: false, action: false, burst: false, echoed: false }
+    }
+}
+
+/// How a key goes out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pace {
+    /// After the grid held still, a latency sample; with `wait`, also until its answer (typing).
+    Paced { wait: bool },
+    /// Without waiting, no sample: typing once the program never rests.
+    Unpaced,
+    /// Without waiting, no sample (`burst: true`): a block whose runs sent one has no latency.
+    Burst,
 }
 
 /// What became of the inputs of a stretch (`latencies`): each sample's latency, and how many were
-/// not samples because the program was still drawing before them, or drew nothing after them.
+/// not samples, and why.
 #[derive(Clone, Debug, Default)]
 pub struct Latencies {
     pub ms: Vec<f64>,
     /// Each input's time to the grid's last change before it held still (`QUIET`) or the next input:
     /// what it set off, done drawing (a resize on Windows too, after its host's redraw).
     pub settle_ms: Vec<f64>,
+    /// Written while the program still drew, or less than `QUIET` after its last change.
     pub busy: usize,
+    /// Followed by no change before the next input.
     pub silent: usize,
+    /// Sent while an earlier input, sent less than `ANSWER_MAX` before, had not changed the grid yet,
+    /// and the grid then changed: that change may be the earlier input's answer.
+    pub overran: usize,
+    /// Sent after such a mix-up and before a second without input: what the grid showed after it may
+    /// be the answer of the input before it, which took the earlier one's.
+    pub after_overrun: usize,
+    /// Echoed by the kernel's line discipline.
+    pub echoed: usize,
+    /// Sent with `burst: true`.
+    pub burst: usize,
     /// Resizes that were no sample: ConPTY's host redraws first (Windows).
     pub host_resizes: usize,
     /// Of those, the ones after which only the host drew (one change): no settle sample either.
@@ -356,19 +398,20 @@ impl<'a> Driver<'a> {
         if let Some(b) = self.pressed.take() {
             let at = self.pointer.get().unwrap_or((0, 0));
             if self.tty.modes().mouse != Mouse::Off {
-                self.write(&mouse_bytes(&self.tty.modes(), button_code(b), at, true, self.held.get())?, "mouse", false, false)?;
+                self.write(&mouse_bytes(&self.tty.modes(), button_code(b), at, true, self.held.get())?, Input::of("mouse"))?;
             }
         }
         self.held.set(Mods::default());
         Ok(())
     }
 
-    /// Writes `bytes` and records the input (`sample`: one a latency may come from; `rested`: the grid
-    /// held still before it). The action log gets it as `driver::sent`.
-    fn write(&self, bytes: &[u8], what: &'static str, sample: bool, rested: bool) -> Result<u64> {
+    /// Writes `bytes` and records the input `i` (its time, and whether the kernel echoes it, filled in).
+    /// The action log gets it as `driver::sent`.
+    fn write(&self, bytes: &[u8], i: Input) -> Result<u64> {
+        let echoed = self.tty.line_echo();
         let at = self.tty.write(bytes)?;
-        self.inputs.borrow_mut().push(Input { sent_ns: at, what, sample, rested });
-        crate::driver::sent(at, sample, None);
+        self.inputs.borrow_mut().push(Input { sent_ns: at, echoed, ..i });
+        crate::driver::sent(at, i.sample, None);
         Ok(at)
     }
 
@@ -447,21 +490,43 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// One key with `extra` held over what `down` holds: settles first (a sample only at rest), then
-    /// with `wait` up to `SETTLE_MAX` for its change (typing: the next key's input must not come
-    /// before this one's output). False when the grid never held still, so the caller stops waiting
-    /// for rest.
-    fn key(&self, extra: Mods, k: Key, paced: bool, wait: bool) -> Result<(u64, bool)> {
+    /// One key with `extra` held over what `down` holds, sent as `pace` says. False when the grid never
+    /// held still before a paced key, so the caller stops waiting for rest.
+    fn key(&self, extra: Mods, k: Key, pace: Pace) -> Result<(u64, bool)> {
         let bytes = key_bytes(self.held.get().or(extra), k, &self.tty.modes(), false)?;
         if bytes.is_empty() {
             return Err(Error::usage(format!("{k:?}: a terminal sends no bytes for a modifier alone (unless the program asks for every key); hold it with page.down and press the key")));
         }
+        let paced = matches!(pace, Pace::Paced { .. });
         let rested = paced && self.settle();
-        let at = self.write(&bytes, "key", paced, rested)?;
-        if paced && wait {
-            let _ = self.tty.first_change(at, Instant::now() + SETTLE_MAX);
+        let at = self.write(&bytes, Input { sample: paced, rested, action: true, burst: pace == Pace::Burst, ..Input::of("key") })?;
+        // Typing: the next key must not go out before this one's answer, which may take up to
+        // `ANSWER_MAX` (a shorter wait sent the next key while a slow answer was on its way). A key
+        // that changed nothing by then has no answer coming, so the next key is paced as well.
+        if pace == (Pace::Paced { wait: true }) {
+            let _ = self.tty.first_change(at, Instant::now() + ANSWER_MAX);
         }
         Ok((at, rested || !paced))
+    }
+
+    /// `type(sel, text, { paste: true })`: the text as one paste, after the grid held still, in one
+    /// write: one latency sample, to the paste's first change. Inside `CSI 200 ~` … `CSI 201 ~` once the
+    /// program turned bracketed paste on (`?2004`), as a terminal pastes; else the text alone. A line
+    /// break goes as a terminal pastes it, a carriage return.
+    fn paste(&self, text: &str, burst: bool) -> Result<u64> {
+        if burst {
+            return Err(Error::usage("page.type(…, { paste: true, burst: true }): a paste is one input, with no keys to send apart; drop burst"));
+        }
+        if text.is_empty() {
+            return Err(Error::usage("page.type(…, { paste: true }): no text to paste"));
+        }
+        if text.contains("\x1b[201~") {
+            return Err(Error::usage("page.type(…, { paste: true }): the text holds ESC [201~, which ends a bracketed paste; a terminal never pastes it"));
+        }
+        let body = text.replace("\r\n", "\r").replace('\n', "\r");
+        let bytes = if self.tty.modes().bracketed_paste { format!("\x1b[200~{body}\x1b[201~") } else { body };
+        let rested = self.settle();
+        self.write(bytes.as_bytes(), Input { sample: true, rested, action: true, ..Input::of("paste") })
     }
 
     fn mouse_mode(&self, call: &str, motion: bool) -> Result<Modes> {
@@ -510,9 +575,15 @@ impl<'a> Driver<'a> {
                     self.focus_click(&sel(0), &o, pixels)?;
                 }
                 let text = args.get(1).and_then(Value::as_str).unwrap_or("");
+                let burst = crate::driver::Typing::of(&o) == crate::driver::Typing::Burst;
+                if o["paste"] == true {
+                    let at = self.paste(text, burst)?;
+                    self.until(&o, at)?;
+                    return Ok(Value::Bool(true));
+                }
                 let delay = Duration::from_millis(o["delay"].as_u64().unwrap_or(0));
-                let mut paced = crate::driver::Typing::of(&o) == crate::driver::Typing::Paced;
-                if !paced {
+                let mut pace = if burst { Pace::Burst } else { Pace::Paced { wait: true } };
+                if burst {
                     crate::driver::unmeasured();
                 }
                 // `until` counts from the call when it typed nothing.
@@ -520,10 +591,12 @@ impl<'a> Driver<'a> {
                 for c in text.chars() {
                     let k = if c == '\n' { Key::Named(Named::Enter) } else { Key::Char(c) };
                     let started = Instant::now();
-                    let (at, rested) = self.key(Mods::default(), k, paced, true)?;
+                    let (at, rested) = self.key(Mods::default(), k, pace)?;
                     last = at;
                     // A program that never rests holds every key the whole wait: pacing stops.
-                    paced &= rested;
+                    if !rested {
+                        pace = Pace::Unpaced;
+                    }
                     std::thread::sleep(delay.saturating_sub(started.elapsed()));
                 }
                 self.until(&o, last)?;
@@ -534,7 +607,12 @@ impl<'a> Driver<'a> {
                     self.focus_click(s, &o, pixels)?;
                 }
                 let (m, k) = keys::parse_chord(args.first().and_then(Value::as_str).unwrap_or(""))?;
-                let (at, _) = self.key(m, k, true, false)?;
+                // `burst: true`: at once, a chord's next key (`g` `g`) before the last one's answer.
+                let pace = if o["burst"] == true { Pace::Burst } else { Pace::Paced { wait: false } };
+                if pace == Pace::Burst {
+                    crate::driver::unmeasured();
+                }
+                let (at, _) = self.key(m, k, pace)?;
                 self.until(&o, at)?;
             }
             "down" | "up" => {
@@ -549,7 +627,7 @@ impl<'a> Driver<'a> {
                     };
                     self.pointer.set(Some(at));
                     let rested = down && self.settle();
-                    let t = self.write(&mouse_bytes(&modes, button_code(b), at, !down, self.held.get())?, "mouse", down, rested)?;
+                    let t = self.write(&mouse_bytes(&modes, button_code(b), at, !down, self.held.get())?, Input { sample: down, rested, action: down, ..Input::of("mouse") })?;
                     self.pressed.set(down.then_some(b));
                     self.until(&o, t)?;
                 } else {
@@ -568,13 +646,13 @@ impl<'a> Driver<'a> {
                         let bytes = key_bytes(if down { held } else { self.held.get() }, k, &self.tty.modes(), !down)?;
                         self.held.set(held);
                         if !bytes.is_empty() {
-                            self.write(&bytes, "key", false, false)?;
+                            self.write(&bytes, Input::of("key"))?;
                         }
                     } else {
                         let bytes = key_bytes(self.held.get().or(m), k, &self.tty.modes(), !down)?;
                         if !bytes.is_empty() {
                             let rested = down && self.settle();
-                            let t = self.write(&bytes, "key", down, rested)?;
+                            let t = self.write(&bytes, Input { sample: down, rested, action: down, ..Input::of("key") })?;
                             self.until(&o, t)?;
                         }
                     }
@@ -593,16 +671,18 @@ impl<'a> Driver<'a> {
                 let measured = count == 1 && !self.focusing.get();
                 for i in 0..count {
                     let rested = measured && self.settle();
+                    let echoed = self.tty.line_echo();
                     let press = self.tty.write(&mouse_bytes(&modes, b, at, false, m)?)?;
                     // A program that acts on the press has changed the grid by the release: the
                     // click's latency is from the press then (`driver::sent`'s press).
                     let on_press = measured && self.tty.first_change(press, Instant::now() + PRESS_HOLD).is_some();
                     let release = self.tty.write(&mouse_bytes(&modes, b, at, true, m)?)?;
                     // Both edges are inputs: what the release drew bounds the press's sample, and the
-                    // release is the sample when the press drew nothing.
+                    // release is the sample when the press drew nothing. The click (a double one
+                    // whole) is one action, from its first press.
                     let mut ins = self.inputs.borrow_mut();
-                    ins.push(Input { sent_ns: press, what: "click", sample: on_press, rested });
-                    ins.push(Input { sent_ns: release, what: "release", sample: measured && !on_press, rested });
+                    ins.push(Input { sent_ns: press, sample: on_press, rested, action: i == 0, echoed, ..Input::of("click") });
+                    ins.push(Input { sent_ns: release, sample: measured && !on_press, rested, echoed, ..Input::of("release") });
                     drop(ins);
                     crate::driver::sent(release, measured, on_press.then_some(press));
                     last = release;
@@ -624,7 +704,7 @@ impl<'a> Driver<'a> {
                 let modes = self.mouse_mode(call, true)?;
                 let b = self.pressed.get().map_or(3, button_code) + 32;
                 self.pointer.set(Some(at));
-                let t = self.write(&mouse_bytes(&modes, b, at, false, self.held.get())?, "pointer", false, false)?;
+                let t = self.write(&mouse_bytes(&modes, b, at, false, self.held.get())?, Input { action: true, ..Input::of("pointer") })?;
                 self.until(&o, t)?;
             }
             "wheel" | "scroll" => {
@@ -649,7 +729,7 @@ impl<'a> Driver<'a> {
                     if i > 0 {
                         std::thread::sleep(gap);
                     }
-                    last = self.write(&mouse_bytes(&modes, *b, at, false, self.held.get())?, "wheel", i == 0, rested && i == 0)?;
+                    last = self.write(&mouse_bytes(&modes, *b, at, false, self.held.get())?, Input { sample: i == 0, rested: rested && i == 0, action: i == 0, ..Input::of("wheel") })?;
                 }
                 self.until(&o, last)?;
             }
@@ -662,7 +742,7 @@ impl<'a> Driver<'a> {
                 let duration = Duration::from_millis(o["duration"].as_u64().unwrap_or(1000));
                 let held = self.pressed.get().is_some();
                 if !held {
-                    self.write(&mouse_bytes(&modes, b, from, false, self.held.get())?, "mouse", false, false)?;
+                    self.write(&mouse_bytes(&modes, b, from, false, self.held.get())?, Input { action: true, ..Input::of("mouse") })?;
                     self.pressed.set(Some(Button::parse(o["button"].as_str())?));
                 }
                 self.mouse_mode("drag", true)?;
@@ -678,13 +758,13 @@ impl<'a> Driver<'a> {
                     std::thread::sleep(due.saturating_sub(started.elapsed()));
                     if cell != at {
                         at = cell;
-                        self.write(&mouse_bytes(&modes, b + 32, at, false, self.held.get())?, "drag", false, false)?;
+                        self.write(&mouse_bytes(&modes, b + 32, at, false, self.held.get())?, Input::of("drag"))?;
                     }
                 }
                 self.pointer.set(Some(at));
                 let mut last = self.inputs.borrow().last().map_or(0, |i| i.sent_ns);
                 if !held {
-                    last = self.write(&mouse_bytes(&modes, b, at, true, self.held.get())?, "mouse", false, false)?;
+                    last = self.write(&mouse_bytes(&modes, b, at, true, self.held.get())?, Input::of("mouse"))?;
                     self.pressed.set(None);
                 }
                 self.until(&o, last)?;
@@ -721,7 +801,7 @@ impl<'a> Driver<'a> {
                 // ConPTY's console host redraws its own buffer at a resize before the program hears of
                 // it: the first change is the host's, so a resize is no latency sample there.
                 let sample = !cfg!(windows);
-                self.inputs.borrow_mut().push(Input { sent_ns: at, what: "resize", sample, rested });
+                self.inputs.borrow_mut().push(Input { sent_ns: at, sample, rested, action: true, ..Input::of("resize") });
                 crate::driver::sent(at, sample, None);
                 self.until(&o, at)?;
             }
@@ -784,18 +864,99 @@ impl<'a> Driver<'a> {
     }
 }
 
+/// Whether strobe can tell an input's answer from an earlier input's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pairing {
+    Clear,
+    /// Its action went out while an earlier action, sent less than `ANSWER_MAX` before, had changed no
+    /// cells yet, and the grid changed before the next action: that change may be the earlier one's
+    /// late answer.
+    Overran,
+    /// After an `Overran` and before a second with no action: the action before it may have taken an
+    /// earlier one's answer, and this one's change may be that action's.
+    AfterOverrun,
+}
+
+/// Each input's `Pairing`, by its action (`Input::action`; the inputs after it in its gesture take
+/// its action's). `inputs` in the order sent, every one of the launch (setup's and a reset's too: an
+/// answer they still owed lands in a run); `changes`: when each update that changed cells began, sorted.
+fn pairings(inputs: &[&Input], changes: &[u64]) -> Vec<Pairing> {
+    let answer_max = ANSWER_MAX.as_nanos() as u64;
+    let starts: Vec<u64> = inputs.iter().filter(|i| i.action).map(|i| i.sent_ns).collect();
+    let (mut unanswered, mut tainted, mut prev, mut now) = (None::<u64>, false, None::<u64>, Pairing::Clear);
+    let mut k = 0;
+    inputs
+        .iter()
+        .map(|i| {
+            if !i.action {
+                return now;
+            }
+            let end = starts.get(k + 1).copied().unwrap_or(u64::MAX);
+            k += 1;
+            // A second with no action: whatever an earlier one still owed has come.
+            if prev.is_some_and(|p| i.sent_ns - p >= answer_max) {
+                tainted = false;
+            }
+            if unanswered.is_some_and(|u| i.sent_ns - u >= answer_max) {
+                unanswered = None;
+            }
+            prev = Some(i.sent_ns);
+            let answered = changes.get(changes.partition_point(|c| *c < i.sent_ns)).is_some_and(|c| *c < end);
+            now = match (answered, unanswered.is_some(), tainted) {
+                (true, true, _) => Pairing::Overran,
+                (true, false, true) => Pairing::AfterOverrun,
+                _ => Pairing::Clear,
+            };
+            tainted |= now != Pairing::Clear;
+            if !answered {
+                unanswered = Some(i.sent_ns);
+            } else if now == Pairing::Clear {
+                unanswered = None;
+            }
+            now
+        })
+        .collect()
+}
+
 /// Each sample's latency among `inputs` (those in `stretches`, host clock, without `gaps`): from
 /// the input to the first update after it that changed cells and began before the next input was
-/// written (its output, not the next one's). An input written while the program still drew is
-/// `busy`; one after which nothing changed before the next input (or the stretch's end) is `silent`.
+/// written (its output, not the next one's), when strobe can tell that update is its answer. Not a
+/// sample, counted by why: sent in a burst (`burst`), echoed by the kernel (`echoed`), sent while an
+/// earlier input's answer may still have been on its way (`overran`), written while the program
+/// still drew or less than `QUIET` after its last change (`busy`), or followed by no change before
+/// the next input or the stretch's end (`silent`).
 pub fn latencies(tty: &Tty, inputs: &[Input], stretches: &[&crate::metrics::Timed]) -> Latencies {
     let mut out = Latencies::default();
+    let updates = tty.updates(0, u64::MAX);
+    let mut all: Vec<&Input> = inputs.iter().collect();
+    all.sort_by_key(|i| i.sent_ns);
+    let mut changes: Vec<u64> = updates.iter().filter(|u| u.cells > 0).map(|u| u.start_ns).collect();
+    changes.sort_unstable();
+    let pairing = pairings(&all, &changes);
+    let quiet = QUIET.as_nanos() as u64;
     for crate::metrics::Timed { t0, t1, untimed: gaps } in stretches.iter().copied() {
-        let updates = tty.updates(*t0, u64::MAX);
-        let ins: Vec<&Input> = inputs.iter().filter(|i| i.sent_ns >= *t0 && i.sent_ns <= *t1 && !gaps.iter().any(|g| i.sent_ns >= g.0 && i.sent_ns < g.1)).collect();
-        out.host_resizes += ins.iter().filter(|i| i.what == "resize" && !i.sample).count();
-        for i in ins.iter().filter(|i| i.sample || i.what == "resize") {
-            if !i.rested {
+        let ins: Vec<(&Input, Pairing)> =
+            all.iter().zip(&pairing).filter(|(i, _)| i.sent_ns >= *t0 && i.sent_ns <= *t1 && !gaps.iter().any(|g| i.sent_ns >= g.0 && i.sent_ns < g.1)).map(|(i, o)| (*i, *o)).collect();
+        out.host_resizes += ins.iter().filter(|(i, _)| i.what == "resize" && !i.sample).count();
+        out.burst += ins.iter().filter(|(i, _)| i.burst).count();
+        for (i, pairing) in ins.iter().copied().filter(|(i, _)| i.sample || i.what == "resize") {
+            if i.echoed {
+                out.echoed += 1;
+                continue;
+            }
+            match pairing {
+                Pairing::Overran => out.overran += 1,
+                Pairing::AfterOverrun => out.after_overrun += 1,
+                Pairing::Clear => {}
+            }
+            if pairing != Pairing::Clear {
+                continue;
+            }
+            // At rest when it went out, as the grid shows now: no update spanned it (a frame begun
+            // before it) and the last change came `QUIET` before it.
+            let drawing = updates.iter().any(|u| u.start_ns < i.sent_ns && u.commit_ns >= i.sent_ns)
+                || updates.iter().filter(|u| u.cells > 0 && u.commit_ns < i.sent_ns).map(|u| u.commit_ns).max().is_some_and(|c| i.sent_ns - c < quiet);
+            if !i.rested || drawing {
                 out.busy += i.sample as usize;
                 continue;
             }
