@@ -149,9 +149,16 @@ fn section(r: &Value, s: &Value, cmd: &Command) -> Result<Section> {
     Ok(sec)
 }
 
-/// The warnings that bear on a result: every warn-level one, and why an attribution block is missing.
+/// The warnings that bear on a result: every warn-level one, and why an attribution block is missing
+/// or failed; each once.
 fn warnings(list: &Value) -> Vec<Value> {
-    list.as_array().into_iter().flatten().filter(|w| w["level"] == "warn" || w["id"] == "Attribution").cloned().collect()
+    let bears = |w: &Value| w["level"] == "warn" || (w["id"] == "Attribution" && w["text"].as_str().is_some_and(|t| t.contains("attribution block")));
+    list.as_array().into_iter().flatten().filter(|w| bears(w)).fold(Vec::new(), |mut all, w| {
+        if !all.iter().any(|x: &Value| x["id"] == w["id"] && x["text"] == w["text"]) {
+            all.push(w.clone());
+        }
+        all
+    })
 }
 
 fn warnings_text(list: &[Value]) -> String {
