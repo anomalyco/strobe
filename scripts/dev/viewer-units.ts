@@ -90,10 +90,27 @@ const VECTORS: { fn: string; v: number | number[]; unit?: string; want: Partial<
   { fn: "val", v: 5e-324, want: { us: "<0.01 µs", ms: "<0.0001 ms", s: "<0.000001 s" } },
   { fn: "signed", v: 5e-324, want: { us: "+<0.01 µs", ms: "+<0.0001 ms", s: "+<0.000001 s" } },
   { fn: "signed", v: -5e-324, want: { us: "−<0.01 µs", ms: "−<0.0001 ms", s: "−<0.000001 s" } },
-  // (In ms and s these print every digit, as Rust's `{:.0}` does: the Rust sweep compares them.)
-  { fn: "val", v: 1e307, want: { us: "—" } },
-  { fn: "signed", v: -1e307, want: { us: "—" } },
-  { fn: "times", v: [1e307, -5e-324], want: { us: "— … −<0.01 µs" } },
+  { fn: "val", v: 1e307, want: { us: "—", ms: "1.00e307 ms", s: "1.00e304 s" } },
+  { fn: "signed", v: -1e307, want: { us: "—", ms: "−1.00e307 ms", s: "−1.00e304 s" } },
+  { fn: "times", v: [1e307, -5e-324], want: { us: "— … −<0.01 µs", ms: "+1.00e307 ms … −<0.0001 ms", s: "+1.00e304 s … −<0.000001 s" } },
+  // Too large to print exactly (|v| ≥ 2^53, the scaled value for a time): three significant digits in
+  // scientific notation, the unit as it would have been (us-A's round-1 note).
+  { fn: "val", v: 1e13, want: { us: "1.00e16 µs", ms: "10,000,000,000,000 ms", s: "10,000,000,000 s" } },
+  { fn: "signed", v: -1e13, want: { us: "−1.00e16 µs" } },
+  { fn: "val", v: 1e300, want: { s: "1.00e297 s" } },
+  { fn: "plain", unit: "count", v: 1e307, want: { us: "1.00e307", ms: "1.00e307", s: "1.00e307" } },
+  { fn: "plain", unit: "count", v: -1e307, want: { us: "-1.00e307", ms: "-1.00e307", s: "-1.00e307" } },
+  { fn: "plain", unit: "count", v: 9007199254740991, want: { us: "9,007,199,254,740,991" } },
+  { fn: "plain", unit: "count", v: 9007199254740992, want: { us: "9.01e15" } },
+  { fn: "plain", unit: "bytes", v: 1e307, want: { us: "1.00e307 B" } },
+  { fn: "plain", unit: "instructions", v: 1e307, want: { us: "1.00e307 instr" } },
+  { fn: "plain", unit: "MB", v: 1e307, want: { us: "1.00e307 MB" } },
+  { fn: "plain", unit: "/s", v: 1e307, want: { us: "1.00e307/s" } },
+  { fn: "pct", v: 1e307, want: { us: "—" } },
+  { fn: "pct", v: 1e15, want: { us: "+1.00e17%" } },
+  // A tie at three digits goes to even, as Rust's `{:.2e}` (toExponential would give 1.13e16).
+  { fn: "plain", unit: "count", v: 11250000000000000, want: { us: "1.12e16" } },
+  { fn: "plain", unit: "Hz", v: 59.94, want: { us: "60 Hz" } },
   { fn: "count", v: 1234567, want: { us: "1,234,567", ms: "1,234,567", s: "1,234,567" } },
   { fn: "count", v: -12345, want: { us: "-12,345", ms: "-12,345", s: "-12,345" } },
   { fn: "count", v: 12.5, want: { us: "12.5", ms: "12.5", s: "12.5" } },
@@ -495,18 +512,22 @@ async function parity(c: { cdp: Cdp; sid: string }, kind: "report" | "history") 
   // (without float_roundtrip) can read a 17-digit one a unit in the last place off.
   for (let e = -8; e <= 6; e++) for (const m of [1, 1.5, 2.5, 4.9996, 9.9996, 9.995, 12.345, 99.95, 99.996, 314.159]) sweep.push(parseFloat(`${m}e${e}`), -parseFloat(`${m}e${e}`))
   // The ends of a double: underflow to 0 when scaled (the floor, unsigned 0 never), overflow (`—`),
-  // and large whole numbers printed digit for digit.
-  // (Times only: a count past i64 has no agreed text yet, Rust clamping it to i64::MAX.)
-  const ends = [5e-324, -5e-324, 2.2e-308, -2.2e-308, 1e-310, 1e307, -1e307, 1.7976931348623157e308, -1.7976931348623157e308, 1e21, 1e22, 9007199254740993, 4.5e15]
+  // and from 2^53 scientific notation (its edge, a tie at three digits, a value that rounds up to
+  // 1000 of the mantissa).
+  const ends = [5e-324, -5e-324, 2.2e-308, -2.2e-308, 1e-310, 1e307, -1e307, 1.7976931348623157e308, -1.7976931348623157e308, 1e21, 1e22, 9007199254740991, -9007199254740991, 9007199254740992, -9007199254740992, 9007199254740994, 4.5e15, 1e13, -1e13, 1e16, 11250000000000000, 11350000000000000, 9995000000000000, 1e300]
   const groups: number[][] = [[-0.0032, -0.0012, 0.0124], [0.12, 0.05, 2.5], [0, -1e-7, 2e-7], [0.00003, 0.052], [-3837.429, -4012.11, -3661.804], [5.9, 0.004, 120.5], [0.3, 0.30005, 0.9999], [1e307, -5e-324, 0]]
   const bounds = [0.00004, 0.04, 0.52, 1.2, 14.76, 0.0000001, 0]
+  const OTHER = ["%", "MB", "value", "bytes", "instructions", "score", "pp", "/s", "count", "Hz"]
   for (const u of UNITS) {
     const reqs = [
       ...[...sweep, ...ends].map((v) => ({ op: "value", v, unit: "ms", time_unit: u })),
       ...[...sweep, ...ends].map((v) => ({ op: "signed", v, unit: "ms", time_unit: u })),
-      ...sweep.filter((v) => Math.abs(v) >= 1 || v === 0).map((v) => ({ op: "value", v: Math.round(v), unit: "count", time_unit: u })),
+      ...[...sweep, ...ends].filter((v) => Math.abs(v) >= 1 || v === 0).map((v) => ({ op: "value", v: Math.round(v), unit: "count", time_unit: u })),
       // Other units (fmt::value), the history page's values included: never `-0.00`, Rust's digits.
-      ...(u === "us" ? ["%", "MB", "value", "bytes", "instructions", "score", "pp", "/s", "count"].flatMap((unit) => sweep.map((v) => ({ op: "value", v, unit, time_unit: u }))) : []),
+      ...(u === "us" ? OTHER.flatMap((unit) => [...sweep, ...ends].map((v) => ({ op: "value", v, unit, time_unit: u }))) : []),
+      // Signed (fmt::signed: the report's changes) and percentages (fmt::pct), every unit alike.
+      ...(u === "us" && kind === "report" ? OTHER.flatMap((unit) => [...sweep, ...ends].map((v) => ({ op: "signed", v, unit, time_unit: u }))) : []),
+      ...(u === "us" ? [...sweep, ...ends].map((r) => ({ op: "pct", r, time_unit: u })) : []),
       ...groups.map((v) => ({ op: "times", v, signed: true, time_unit: u })),
       ...bounds.flatMap((b) => [
         { op: "verdict", c: { metric: "main.work", relative: false, bound: b, verdict: "same (±0 ms)" }, time_unit: u },
@@ -519,6 +540,8 @@ async function parity(c: { cdp: Cdp; sid: string }, kind: "report" | "history") 
     const js: string[][] = await evaluate(c, `(() => { TIME_UNIT = "${u}"; return ${JSON.stringify(reqs)}.map((r) =>
       r.op === "times" ? fmtTimes(r.v, true)
       : r.op === "verdict" ? [verdictText(r.c, "ms")]
+      : r.op === "pct" ? [${kind === "report" ? `fmtPct(r.r)` : `pct(r.r)`}]
+      : r.op === "signed" && r.unit !== "ms" ? [fmtSigned(r.v, r.unit)]
       : r.unit !== "ms" ? [${kind === "report" ? `fmtVal(r.v, r.unit)` : `val(r.v, r.unit)`}]
       : r.op === "signed" ? [${kind === "report" ? `fmtSigned(r.v, "ms")` : `fmtTimeSigned(r.v)`}]
       : [${kind === "report" ? `fmtVal(r.v, "ms")` : `val(r.v, "ms")`}]); })()`)
@@ -532,7 +555,7 @@ async function parity(c: { cdp: Cdp; sid: string }, kind: "report" | "history") 
       // difference the Rust side's to close; counted apart so the rest still has to match.
       if (w.length === 1 && /^-0(\.0+)?( |$)/.test(w[0]) && w[0].slice(1) === js[i][0]) return void negZero.push(`${r.unit} ${r.v}: Rust '${w[0]}'`)
       const k = `${r.op} ${r.unit || ""}`.trim()
-      const first = `${JSON.stringify(r.v ?? r.c?.bound)}${r.op === "verdict" ? ` '${r.c.verdict}'` : ""}: Rust ${JSON.stringify(w)}, page ${JSON.stringify(js[i])}`
+      const first = `${JSON.stringify(r.v ?? r.r ?? r.c?.bound)}${r.op === "verdict" ? ` '${r.c.verdict}'` : ""}: Rust ${JSON.stringify(w)}, page ${JSON.stringify(js[i])}`
       kinds.set(k, { n: (kinds.get(k)?.n || 0) + 1, first: kinds.get(k)?.first || first })
     })
     const bad = [...kinds].map(([k, { n, first }]) => `${k}: ${n} differ, e.g. ${first}`)
@@ -779,6 +802,7 @@ async function main() {
       await load(c, url)
       for (const u of UNITS) {
         const got: string[] = await evaluate(c, `(() => { TIME_UNIT = "${u}"; return ${JSON.stringify(VECTORS)}.map((x) => x.fn === "times" ? fmtTimes(x.v, true).join(" … ")
+          : x.fn === "pct" ? ${kind === "report" ? "fmtPct(x.v)" : "pct(x.v)"}
           : x.fn === "verdict" ? verdictText({ relative: false, bound: x.v, verdict: x.v > 1 ? "no worse (≤1.20 ms, faster)" : "same (±0 ms)" }, "ms")
           : ${kind === "report"
           ? `x.fn === "plain" ? fmtVal(x.v, x.unit) : x.fn === "val" ? fmtVal(x.v, "ms") : x.fn === "signed" ? fmtSigned(x.v, "ms") : x.fn === "count" ? fmtVal(x.v, "count") : fmtBound({ relative: false, bound: x.v }, "ms")`

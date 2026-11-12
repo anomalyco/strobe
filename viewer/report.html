@@ -1660,6 +1660,26 @@ function rfix(v, d) {
   return (v < 0 && q !== 0n ? "-" : "") + body;
 }
 
+// 2^53: from here a double no longer holds every integer, so its whole digits would be the binary
+// number's, not the value's (fmt::EXACT).
+const EXACT = 2 ** 53;
+// A number too large to print exactly in scientific notation with three significant digits (fmt::sci,
+// Rust's `{:.2e}`): `1.00e307`, `-4.50e16`; the exact decimal of the double rounded, a tie to even
+// (toExponential breaks a tie upward), no `+`. `v`: finite, |v| ≥ EXACT (a whole number).
+function sci(v) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, Math.abs(v));
+  const hi = dv.getUint32(0), lo = dv.getUint32(4);
+  const mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo) | (1n << 52n);
+  const s = (mant << BigInt(((hi >>> 20) & 0x7ff) - 1075)).toString();
+  let head = BigInt(s.slice(0, 3)), exp = s.length - 1;
+  const rest = s.slice(3), half = "5" + "0".repeat(Math.max(0, rest.length - 1));
+  if (rest > half || (rest === half && head % 2n === 1n)) head += 1n;
+  if (head === 1000n) { head = 100n; exp += 1; }
+  const h = head.toString();
+  return `${v < 0 ? "-" : ""}${h[0]}.${h.slice(1)}e${exp}`;
+}
+
 // A measured time is stored in ms and shown in one unit for the whole page (fmt::TimeUnit): µs unless
 // the address (`#unit=ms`) or the page's data (`default_unit`) says otherwise, never promoted to a
 // larger unit as it grows. `finest`: the most decimals a time shows in the unit; a nonzero time that
@@ -1708,7 +1728,8 @@ function timeText(ms, { d = null, signed = false, num = false, unit = TIME_UNIT 
   if (!Number.isFinite(x)) return "—";
   const dd = d ?? timeDigits(x, t.finest);
   let body = "0";
-  if (ms !== 0) {
+  if (x >= EXACT) body = sci(x);
+  else if (ms !== 0) {
     const s = rfix(x, dd);
     body = /[1-9]/.test(s) ? groupDigits(s) : `<${rfix(10 ** -t.finest, t.finest)}`;
   }
@@ -1785,6 +1806,12 @@ function digitsFor(v, min, max) {
 function fmtVal(v, u) {
   if (!Number.isFinite(v)) return "—";
   if (u === "ms") return fmtTime(v);
+  // Too large to print exactly: three significant digits with the unit as it would have been
+  // (`1.00e307`, `1.00e307 instr`, `1.00e307 B`), never a cast's or the binary number's digits.
+  if (Math.abs(v) >= EXACT) {
+    const n = sci(v);
+    return u === "count" || u === "value" || !u ? n : u === "%" ? n + "%" : u === "/s" ? n + "/s" : u === "instructions" ? n + " instr" : u === "bytes" ? n + " B" : `${n} ${u}`;
+  }
   const d0 = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4);
   // A value that rounds to zero prints as 0 at two decimals, without a sign (fmt::value).
   let d = d0;
@@ -1872,8 +1899,10 @@ function fmtSignedBytes(bytes) {
 function pctWith(r, digits) {
   if (!finite(r)) return "—";
   const p = r * 100;
+  // A fraction past a double's range once it is a percentage (1e307 → inf) is no number to print.
+  if (!finite(p)) return "—";
   const zero = Math.round(Math.abs(p) * 10 ** digits) === 0;
-  return (zero ? "" : p < 0 ? "−" : "+") + rfix(Math.abs(p), digits) + "%";
+  return (zero ? "" : p < 0 ? "−" : "+") + (Math.abs(p) >= EXACT ? sci(Math.abs(p)) : rfix(Math.abs(p), digits)) + "%";
 }
 const pctDefault = (p) => (Math.abs(p) >= 10 ? 0 : digitsFor(p, 1, 3));
 function fmtPct(r) {
