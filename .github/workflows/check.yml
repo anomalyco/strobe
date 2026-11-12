@@ -91,3 +91,6 @@ jobs:
       # SPEC.md and the skill against the code's catalogs (validators, warnings, flags, MCP tools, the SDK's keys).
       - name: Docs
         run: bun scripts/doc-check.ts
+      # The support matrix's own invariants from the source (the Linux check job runs it against the library).
+      - name: Support matrix
+        run: bun scripts/dev/support-matrix.ts --check --no-rust
