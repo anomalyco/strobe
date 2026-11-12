@@ -39,19 +39,26 @@ pub fn installed() -> bool {
     exe.is_file() && verified(&exe)
 }
 
-/// The installed engine was hashed and matched its pinned digest in this process.
-static VERIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The size and modification time of the engine file this process hashed and found the pinned build.
+type Stamp = (u64, Option<std::time::SystemTime>);
+static VERIFIED: std::sync::Mutex<Option<Stamp>> = std::sync::Mutex::new(None);
 
-/// Whether `exe` is the pinned trace_processor_shell (`asset`), hashed once per process: a file that is
-/// not (a write cut short, a file something else put there) is never run, and `ensure` extracts it again.
+fn stamp(exe: &Path) -> Option<Stamp> {
+    std::fs::metadata(exe).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+/// Whether `exe` is the pinned trace_processor_shell (`asset`), hashed once per process while its size
+/// and modification time stay as they were then (a daemon lives for days): a file that is not (a write
+/// cut short, a file something else put there) is never run, and `ensure` extracts it again.
 fn verified(exe: &Path) -> bool {
-    if VERIFIED.load(std::sync::atomic::Ordering::Relaxed) {
+    let Some(now) = stamp(exe) else { return false };
+    let mut seen = VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+    if *seen == Some(now) {
         return true;
     }
     let ok = asset().is_some_and(|(_, _, want)| sha256(exe).is_ok_and(|got| got == want));
-    if ok {
-        VERIFIED.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
+    // The stamp read before the hash: a file changed while it was read is hashed again next time.
+    *seen = ok.then_some(now);
     ok
 }
 
@@ -65,7 +72,8 @@ pub fn download(name: &str, sha: &str) -> Result<PathBuf> {
     let dir = host::paths::engine().join(VERSION);
     std::fs::create_dir_all(&dir)?;
     let archive = dir.join(name);
-    if archive.is_file() && sha256(&archive)? == sha {
+    // Another strobe may remove it between a look and a read: then it is downloaded again.
+    if sha256(&archive).is_ok_and(|got| got == sha) {
         return Ok(archive);
     }
     let url = format!("https://github.com/google/perfetto/releases/download/{VERSION}/{name}");
@@ -83,7 +91,15 @@ pub fn download(name: &str, sha: &str) -> Result<PathBuf> {
         let _ = std::fs::remove_file(&part);
         return Err(Error::msg(format!("{name}: sha256 {got} does not match the pinned {sha}")));
     }
-    std::fs::rename(&part, &archive)?;
+    if let Err(e) = std::fs::rename(&part, &archive) {
+        let _ = std::fs::remove_file(&part);
+        // Another strobe put the same archive there first (Windows refuses a rename over a file that one
+        // reads): it is the pinned one, or this download fails.
+        if sha256(&archive).is_ok_and(|got| got == sha) {
+            return Ok(archive);
+        }
+        return Err(Error::msg(format!("{name}: {e}")));
+    }
     Ok(archive)
 }
 
@@ -103,12 +119,17 @@ pub fn ensure() -> Result<PathBuf> {
         return Ok(exe);
     }
     let (name, sha, want) = asset().ok_or_else(|| Error::msg("no trace_processor build for this OS and CPU"))?;
-    let archive = download(name, sha)?;
+    // Another strobe installing it at the same time: whatever step of this one fails, the engine it wrote
+    // is as good (`verified`).
+    let theirs = |e: Error| if exe.is_file() && verified(&exe) { Ok(exe.clone()) } else { Err(e) };
+    let archive = match download(name, sha) {
+        Ok(a) => a,
+        Err(e) => return theirs(e),
+    };
     let bytes = match std::fs::read(&archive) {
         Ok(b) => b,
-        // Another strobe installed it and removed the archive meanwhile.
-        Err(_) if exe.is_file() && verified(&exe) => return Ok(exe),
-        Err(e) => return Err(e.into()),
+        // It installed it and removed the archive meanwhile.
+        Err(e) => return theirs(e.into()),
     };
     let body = unzip_one(&bytes, |n| n.ends_with(exe_name()))?.ok_or_else(|| Error::msg(format!("{name} has no {}", exe_name())))?;
     let got: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
@@ -116,8 +137,11 @@ pub fn ensure() -> Result<PathBuf> {
         return Err(Error::msg(format!("{name}'s {}: sha256 {got} does not match the pinned {want}", exe_name())));
     }
     // Whole and runnable or not at all, over a file that was not the pinned build.
-    host::paths::write_executable(&exe, &body).map_err(|e| Error::msg(format!("write {}: {e}", exe.display())))?;
-    VERIFIED.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Err(e) = host::paths::write_executable(&exe, &body) {
+        return theirs(Error::msg(format!("write {}: {e}", exe.display())));
+    }
+    // The bytes just checked are the file now.
+    *VERIFIED.lock().unwrap_or_else(|e| e.into_inner()) = stamp(&exe);
     let _ = std::fs::remove_file(&archive);
     Ok(exe)
 }
