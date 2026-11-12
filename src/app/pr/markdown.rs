@@ -913,7 +913,7 @@ impl<'a> Doc<'a> {
                     layer_name(r["layer"].as_str().unwrap_or("")),
                     mb(f(&r["base_bytes"])),
                     mb(f(&r["head_bytes"])),
-                    fmt::signed_by(d, &mb)
+                    fmt::signed_by(d, mb)
                 );
             }
             let rows = all_rows(s);
