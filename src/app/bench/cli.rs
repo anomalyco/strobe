@@ -267,9 +267,14 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     // target's on its CPUs over the run is other work (`cpu.foreign`).
     let own_ms: Cell<f64> = Cell::new(0.0);
     let cost = SelfCost::new(ctx.runner.pid());
+    // The command lines the case's `ctx.exec` calls gave (`HarnessOverlay`).
+    let lines: RefCell<Vec<Value>> = RefCell::new(Vec::new());
     let serve = |op: &str, a: &Value| -> Result<Value> {
         match op {
             "exec" => {
+                if a["line"].is_string() {
+                    lines.borrow_mut().push(a["line"].clone());
+                }
                 let line = line_for(&a["line"], v, &target)?;
                 // `{fixture.url}` and the like, in a line the call or the variant gave (the target's
                 // own `run` and `env` are filled with the block).
@@ -487,6 +492,10 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     }
     refuse_not_on_this_os(s, &mut values, &mut refused);
     let _ = ctx.runner.call("close", json!({}), t, &serve);
+    // A harness file the case's own command lines run, over the variant's own copy.
+    let ran: Vec<PathBuf> = lines.take().iter().flat_map(|l| super::line_files(Path::new(""), l)).collect();
+    let notes = super::harness_overlay(v, &ran, v.target_of(s), &ctx.harness.from);
+    super::say_overlay(ctx, notes);
     Ok(Block {
         variant: v.role.to_string(),
         pair,
