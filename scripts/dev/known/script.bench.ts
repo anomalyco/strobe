@@ -2,25 +2,30 @@
 // Build known.rs first (see cli.bench.ts), then run from the repo root:
 //   strobe bench scripts/dev/known/script.bench.ts --head . --check
 // Truth per run: spin 300 ms CPU over 300 ms; sleep 0 CPU over 400 ms; keep-0 and keep-100 differ by 100 MiB of
-// memory.app.private (each run's memory is cleared by the reset); child 300 ms CPU in a child that exits inside
-// the run (not in the host's tree at the run's end: cpu.work must not read ~0 as valid); io 32 MiB written and read.
+// memory.app.private and of js.heap.retained (each run's memory is cleared by the reset), on Bun (`harness`) and on
+// Node (`node`): on macOS a Bun host's memory.app.private is refused (its allocator reuses pages the footprint no
+// longer counts: 100 MiB held read as 5.1 MiB), and js.heap.retained still reads the 100 MiB; child 300 ms CPU in a
+// child that exits inside the run (not in the host's tree at the run's end: cpu.work must not read ~0 as valid);
+// io 32 MiB written and read.
 import { bench, script } from "@hona/strobe"
 
 const all = ["cpu.app.total", "run.duration", "memory.app.private", "cpu.wakes", "io.read", "io.write"]
-const call = (name: string, arg: number, primary = "cpu.work") => ({
+const call = (name: string, arg: number, primary = "cpu.work", extra: string[] = []) => ({
+  targets: ["harness"],
   primary,
-  metrics: [...all, "cpu.work"].filter((m) => m !== primary),
+  metrics: [...all, ...extra, "cpu.work"].filter((m) => m !== primary),
   run: ({ call }: any) => call(name, arg),
   reset: ({ call }: any) => call("clear"),
 })
+const keep = (mb: number) => ({ ...call("keep", mb, "memory.app.private", ["js.heap.retained"]), targets: ["harness", "node"] })
 
 export default bench({
-  targets: { harness: script("./harness.ts") },
+  targets: { harness: script("./harness.ts"), node: script("./harness.ts", { runtime: "node" }) },
   cases: {
     spin: call("spin", 300),
     sleep: call("sleep", 400, "run.duration"),
-    "keep-0": call("keep", 0, "memory.app.private"),
-    "keep-100": call("keep", 100, "memory.app.private"),
+    "keep-0": keep(0),
+    "keep-100": keep(100),
     child: call("child", 300),
     io: call("io", 32, "io.write"),
   },

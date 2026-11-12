@@ -3,7 +3,9 @@
 them, so two targets that differ only in it differ by exactly that:
   ?delay=<ms>  #ready appears after a task that busy-waits <ms>: launch.ready differs by it (a busy-wait, not a
                timer of <ms>: a browser's timer fires late by its own slack)
-  ?frame=<ms>  every animation frame spins <ms> on the main thread and moves #box: frames over a vsync drop
+  ?vsyncs=<k>  the page first times the display's refresh (the median of 30 animation frames' gaps, V), then every
+               animation frame spins k × V on the main thread and moves #box: the same plant at any refresh rate
+               (k 1.5: Chromium starts each late frame at once, so 2 frames are presented in every 3 vsyncs)
   ?click=<ms>  a click on #btn asks for an animation frame, which spins <ms> and then changes #btn's colour: with
                <ms> a whole number of vsyncs, interaction latency differs by exactly it (a spin in the click
                handler itself read about 7 ms less on a 60 Hz Mac)
@@ -33,11 +35,23 @@ setTimeout(() => {
   main.textContent = "ready"
   document.body.append(main)
 }, 0)
-if (q.has("frame")) {
+if (q.has("vsyncs")) {
   const box = document.getElementById("box")
-  const ms = num("frame")
+  const gaps = []
+  let last = 0
+  let work = 0
   let i = 0
-  const tick = () => { spin(ms); box.style.transform = `translateX(${++i % 40}px)`; requestAnimationFrame(tick) }
+  const tick = (t) => {
+    if (!work) {
+      if (last) gaps.push(t - last)
+      last = t
+      if (gaps.length === 30) work = num("vsyncs") * gaps.sort((a, b) => a - b)[15]
+    } else {
+      spin(work)
+    }
+    box.style.transform = `translateX(${++i % 40}px)`
+    requestAnimationFrame(tick)
+  }
   requestAnimationFrame(tick)
 }
 const btn = document.getElementById("btn")

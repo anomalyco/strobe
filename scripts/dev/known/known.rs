@@ -39,6 +39,10 @@
 //                               core it lands on (a spin by time does: a short burst runs at a lower clock), so
 //                               two counts at one <hz> retire instructions in the known ratio once `burst <hz> 0`
 //                               reads the wakes' own cost; two rates with one count do the same bursts 1x and 2x
+//   pulse <busy_ms> <idle_ms> [s]  long-running, a wall-time answer that no sleep blurs: prints `BEGIN`, busy-waits
+//                               <busy_ms> of wall time, prints `END`, sleeps <idle_ms>, again for [s] (60) s; a run
+//                               that waits for `BEGIN` and then `END` (`ctx.waitForLine`) spans <busy_ms> exactly
+//                               (a sleep on macOS wakes 1.5-10 ms late, so a `page.wait` is no wall truth there)
 //   hold <mb> [s]               long-running: <mb> MiB private written once, then idle, for [s] (60) s
 //   startup <ms> [s] [text]     long-running: a thread named `loader` spins <ms> of its CPU from the launch (a
 //                               slow startup), then prints [text] (READY); the process idles for [s] (60) s
@@ -525,6 +529,22 @@ fn main() {
                 }
             }
         }
+        "pulse" => {
+            let (busy, idle, secs) = (arg(&args, 2, 100.0), arg(&args, 3, 300.0), arg(&args, 4, 60.0));
+            let start = Instant::now();
+            let mut out = std::io::stdout();
+            while start.elapsed().as_secs_f64() < secs {
+                writeln!(out, "BEGIN").unwrap();
+                out.flush().unwrap();
+                let begun = Instant::now();
+                while begun.elapsed() < ms(busy) {
+                    std::hint::spin_loop();
+                }
+                writeln!(out, "END").unwrap();
+                out.flush().unwrap();
+                thread::sleep(ms(idle));
+            }
+        }
         "startup" => {
             let (busy, secs) = (arg(&args, 2, 4000.0), arg(&args, 3, 60.0));
             let text = args.get(4).cloned().unwrap_or_else(|| "READY".into());
@@ -577,7 +597,7 @@ fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|burst|hold|startup|tty|frames> …");
+            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|burst|pulse|hold|startup|tty|frames> …");
             std::process::exit(2);
         }
     }
