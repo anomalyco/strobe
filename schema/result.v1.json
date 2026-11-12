@@ -214,6 +214,53 @@
         "SharedRunner"
       ]
     },
+    "support": {
+      "enum": ["verified", "preview"],
+      "description": "How far a path is checked (SPEC 21.1): verified against a known answer on this host, or preview (its runtime checks held; no known-answer fixture has checked it here). A refused path has none."
+    },
+    "runtime": {
+      "enum": ["chromium_page", "firefox_page", "webkit_page", "android_chrome", "ios_safari", "chromium_app", "webview_app", "native", "native_windowless", "script", "cli", "tty"],
+      "description": "What a target runs on (src/support.rs Runtime)."
+    },
+    "capability": {
+      "enum": [
+        "wall_and_counts",
+        "page_engine",
+        "process_cpu",
+        "process_memory",
+        "hardware_counters",
+        "package_idle",
+        "frames",
+        "input_latency",
+        "gpu",
+        "pixels",
+        "launch",
+        "launch_signal",
+        "tty_grid",
+        "http_probe"
+      ],
+      "description": "The instrument a metric is read with (src/model.rs MetricDef.capability)."
+    },
+    "host": {
+      "enum": ["windows-x64", "windows-arm64", "macos-arm64", "macos-x64", "linux-x64", "linux-arm64"],
+      "description": "The OS and CPU architecture strobe ran on; off x64 Windows and Linux and Apple silicon every path is preview."
+    },
+    "pathSupport": {
+      "description": "A series' path (SPEC 21.1): its primary's runtime, capability and host, the pixels and OS input it went through, and the least support of its parts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "runtime", "capability", "host", "os_input", "pixels"],
+      "properties": {
+        "tier": { "$ref": "#/definitions/support" },
+        "runtime": { "$ref": "#/definitions/runtime", "description": "The only side's, or in an implementation comparison the less checked side's (base when alike)." },
+        "capability": { "$ref": "#/definitions/capability" },
+        "host": { "$ref": "#/definitions/host" },
+        "os_input": { "type": "boolean", "description": "A side was driven through the OS's input (fairness.input os)." },
+        "pixels": { "type": "boolean", "description": "strobe read the window's pixels in a run, or a launch ended on them." },
+        "base_runtime": { "$ref": "#/definitions/runtime", "description": "implementations: base's runtime." },
+        "head_runtime": { "$ref": "#/definitions/runtime", "description": "implementations: head's runtime." }
+      }
+    },
     "verdictKind": {
       "enum": ["better", "worse", "same", "no_worse", "unclear", "underpowered", "saturated", "stopped", "refused", "untested", "descriptive"],
       "description": "untested: a secondary the gate did not test (shown as —); descriptive: shown, never decided (·). A leak verdict: worse leaks, same does not grow or levels off."
