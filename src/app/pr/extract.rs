@@ -719,7 +719,8 @@ pub(super) fn permission(text: &str) -> Option<(&'static str, &'static str)> {
 /// processes on the machine (% of a core): …`, `busiest processes on the machine: …`, `busiest
 /// processes (% of a core): …`, `busiest processes: …`; a list ends at `; ` or at the parenthesis
 /// around it; `none named (…)` names none and stays. `ReservedCpus`' lists of the processes it moved or
-/// could not move go, their counts stay.
+/// could not move go, their counts stay. A window that covered the target's is named by its process id,
+/// never its title.
 pub(crate) fn scrub_public(s: &str) -> String {
     const LISTS: [(&str, &str); 5] = [
         ("(busiest elsewhere: ", ""),
@@ -729,11 +730,20 @@ pub(crate) fn scrub_public(s: &str) -> String {
         ("busiest processes: ", ""),
     ];
     let pct = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").expect("pattern");
-    // `ReservedCpus` (a context note): the processes it moved, and those it could not, by name.
-    let moved = regex_lite::Regex::new(r"moved per block \([^)]*\)").expect("pattern");
+    // One share of a list: a name (anything but `; `), then its percentage.
+    let share = regex_lite::Regex::new(r"^[^;]*?\s\d+(?:\.\d+)?%").expect("pattern");
+    // `ReservedCpus` (a context note): the processes it moved, and those it could not, by name; the list
+    // ends at the parenthesis before `, ` or `; ` (a name may hold one of its own).
+    let moved = regex_lite::Regex::new(r"moved per block \(.*?\)(, |; |$)").expect("pattern");
     let unmoved = regex_lite::Regex::new(r"(\d+) could not be moved: .*?(; \d+% put back|$)").expect("pattern");
-    let s = moved.replace_all(s, "moved per block");
+    let s = moved.replace_all(s, "moved per block$1");
     let s = unmoved.replace_all(&s, "$1 could not be moved$2");
+    // A covering window's title (`… covers the point (x, y): "<title>" of process <pid>`, `"<title>" of
+    // process <pid> covers the region`) is another program's: its process id stays.
+    let point = regex_lite::Regex::new(r#"another window covers the point \(([^)]*)\): "(?:[^"\\]|\\.)*" of process (\d+)"#).expect("pattern");
+    let region = regex_lite::Regex::new(r#""(?:[^"\\]|\\.)*" of process (\d+) covers the region"#).expect("pattern");
+    let s = point.replace_all(&s, "another window of process $2 covers the point ($1)");
+    let s = region.replace_all(&s, "another window of process $1 covers the region");
     let mut out = String::new();
     let mut rest: &str = &s;
     loop {
@@ -743,11 +753,23 @@ pub(crate) fn scrub_public(s: &str) -> String {
         };
         let wrapped = marker.starts_with('(');
         let list_start = at + marker.len();
-        // The list: to the parenthesis that closes it (or one around it), else to the next `; ` outside
-        // parentheses, else to the end.
+        // A list of shares (`name 130%, name 14%`) ends after its last share, whatever its names hold (a
+        // parenthesis of its own, `app).exe`). Any other list: to the parenthesis that closes it (or one
+        // around it), else to the next `; ` outside parentheses, else to the end.
+        let mut shared = list_start;
+        while let Some(m) = share.find(&rest[shared..]) {
+            shared += m.end();
+            if !rest[shared..].starts_with(", ") {
+                break;
+            }
+            shared += 2;
+        }
         let bytes = rest.as_bytes();
         let (mut depth, mut end) = (0i32, rest.len());
-        let mut i = list_start;
+        let mut i = if shared > list_start { bytes.len() } else { list_start };
+        if shared > list_start {
+            end = shared - if rest[..shared].ends_with(", ") { 2 } else { 0 };
+        }
         while i < bytes.len() {
             match bytes[i] {
                 b'(' => depth += 1,
@@ -992,6 +1014,7 @@ pub(super) fn warning_name(id: &str) -> &str {
         "TimerCoalescing" => "Timer coalescing",
         "StaleCalibration" => "Stale calibration",
         "VariantChanged" => "Variant changed",
+        "HarnessOverlay" => "Harness overlay",
         "ScreenChanged" => "Different screens",
         "NoPresentSource" => "Frame and latency metrics",
         other => other,

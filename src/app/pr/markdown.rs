@@ -1159,8 +1159,10 @@ impl<'a> Doc<'a> {
             .chain(self.series.iter().flat_map(|s| s["warnings"].as_array().into_iter().flatten().map(move |w| (self.title(s), w))))
         {
             let id = w["id"].as_str().unwrap_or("");
-            // `UserFolders` leads the block as a caution (`folder_caution`).
-            if id == "ReservedCpus" || id == "SessionLocked" && w["level"] != "warn" || id == "DisplayOff" || id == "UserFolders" {
+            // `UserFolders` leads the block as a caution (`folder_caution`). A `HarnessOverlay` that only placed
+            // a file base lacked (info) changed nothing base ran: only the warn level reaches a reviewer.
+            let context = (id == "SessionLocked" || id == "HarnessOverlay") && w["level"] != "warn";
+            if id == "ReservedCpus" || context || id == "DisplayOff" || id == "UserFolders" {
                 continue;
             }
             let raw = w["text"].as_str().unwrap_or("");
