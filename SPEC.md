@@ -8674,6 +8674,10 @@ what was built but not yet run on a device is in §21.
   'Security policy would not allow process'): the error says so with the fix 'open <app> once from the
   Finder', and the block is not launched 3 more times (it was 2 minutes a case). `look pid:` and `look
   cdp:` are usage errors naming `record` (they navigated to the text: `net::ERR_ABORTED`) (5.12, 13.1).
+  The OS input map takes a probe's landing once no other move followed for 50 ms (macOS Chromium
+  delivered the move from beside the point with the one onto it: every page measured from outside
+  was refused `InputMismatch`, 3 units off); `AnchorNotFound` for a shape found in other colours says
+  so and offers no lower threshold (9.6, 10.1).
 - 2026-11-11 · cleanup/prune · `strobe prune` (caches unused now, data when named and older than 30
   days, never a recording a kept experiment names; the plan first, `--force` without a terminal,
   `--dry-run`, measured `Total reclaimed space`); cache leases and stamps (`host::cache`); removal
