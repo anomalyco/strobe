@@ -2798,7 +2798,9 @@ address space, which holds its memory lock for a moment; never inside a timed ru
 `memory.app.host` is given only when every process of the tree was read (a process strobe cannot open
 is listed, never counted as 0). macOS gives another process's regions only to a debugger (its task
 port), so there is no reading there; `memory.app.private` is the physical footprint, GPU allocations
-included. Readings are taken at the end of the last measured run of every native bench block
+included, and the dirty pages of shared anonymous memory (`MAP_SHARED | MAP_ANON`) charged once to the
+process that created it (air, `known shm 150`: 151 MB, where Windows' private commit and Linux's
+`Anonymous` leave it out). Readings are taken at the end of the last measured run of every native bench block
 (before its reset, §9.6) and after `record exe:`,
 `record app:` and `record pid:` windows, stored in `memory.json`; `query <rec> memory` shows a reading
 by process (default) or by part (`--by layer`), `--at <i>` picks one, `a..b memory` diffs two by part.
@@ -4511,6 +4513,12 @@ discarded first, so the OS has read the build from disk before any timed launch.
   that loaded before strobe could attach (a browser opens its first page at startup) gets the
   observer late; that is still valid unless `until` already shows, which refuses the launch.
   The observer runs in a page's top document only: an element in a frame never ends a launch.
+  Each page has one session: auto-attach also attaches the pages already open, and those sessions
+  are the ones armed (observer and, for attribution, the CPU profiler), before strobe navigates; a
+  page it left out is attached once. Chromium's profiler is per session: from 0.13.0 to 0.31.0 the
+  first page got a second session, which was armed while the auto-attached one was read, so a page
+  launch's attribution block failed "Profiler.stop: No recording profiles found" (every time on air
+  and on vps; adais's Chromium still profiled, so not on every OS).
 - **Pages in each engine:** a `web` or `url` launch is a fresh browser with a fresh profile (no HTTP
   cache, storage, service worker or browser shader cache from an earlier visit; the GPU driver's own
   shader cache is the OS user's and stays), timed from strobe's navigation command on the host's wall
@@ -4637,8 +4645,16 @@ experiment's `script.log`.
   (`scripts/dev/known/script.bench.ts` case `child`). Warmup and pairs work as for pages.
 - **Memory:** `js.heap.retained` is the heap after a full collection (`Bun.gc(true)`, Node's
   `gc()` under `--expose-gc`) after a run minus before it, read outside the run's span: what each
-  run keeps alive. `memory.app.private` is the host tree's private bytes at the end of the last
-  measured run, before its reset (§9.6).
+  run keeps alive. It counts ArrayBuffer and Buffer contents: Bun's `heapUsed` holds them, Node's
+  `arrayBuffers` beside it (a kept 100 MiB `Uint8Array` read 0 on Node from `heapUsed` alone).
+  `memory.app.private` is the host tree's private bytes at the end of the last measured run, before
+  its reset (§9.6). On macOS a Bun host's is refused (`NotOnThisOs`, pointing to `js.heap.retained`):
+  Bun's allocator gives freed pages back as reusable, which takes them out of the footprint, and
+  writes them again without telling macOS, so the footprint misses memory the host holds (air,
+  harness.ts keeping 100 MiB after a collection freed an earlier 100 MiB: footprint 5.1 MiB, resident
+  116 MiB; a planted +100 MiB read +0.19 MB). Resident size cannot tell those pages from free ones
+  (both read 111 MiB above the footprint), so no reading detects it; Node's allocator tells macOS (the
+  same cycle read 114 MiB).
 - **Attribution:** the process starts with `--cpu-prof` (200 µs, 400 µs on Windows: §8.3), and Node's
   with `--heap-prof` (attribution blocks only: a clean timing block starts no profiler; Bun's
   `--heap-prof` writes a heap snapshot, every string the host holds, so a Bun host gets none and `query
@@ -5494,7 +5510,13 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   side.
 - **macOS.** A page or Electron side's window is brought to the front (as a native block's, after a
   minute without input) and must be the active app and uncovered at the start and end of the runs
-  (`WindowHidden`, which a bench waits out), so both sides run as the key window. Whether a person
+  (`WindowHidden`, which a bench waits out), so both sides run as the key window. A side with nothing
+  on screen (a headless page, an app with `window: false`) is neither raised before its runs nor
+  brought forward or checked: its browser still lists a hidden window, which never becomes the active
+  app. 0.11.0 to 0.31.0 refused it `WindowHidden` after five blocks: an implementation comparison with
+  a headless page side or a `window: false` app side, and a `--check` whose case spans a page and a
+  windowless target that is no page, or two engines (two headless page targets compared on air, and a
+  `window: false` app against a windowless native target). Whether a person
   used the Mac reads the HID system's idle clock less strobe's own posted input: a move posted at the
   session tap from a private event source, and a cursor warp, reset that clock as a person's input
   does (air, macOS 27), so strobe notes when it posts and a last event within 250 ms of its own post
@@ -5872,7 +5894,8 @@ not tests). Each plants work whose cost is known by construction and checks that
 | Fixture | Plants | Recovers |
 |---|---|---|
 | `known-web.bench.ts` with `known-server.ts` | pages: one 100 ms task, three 30 ms tasks, 25 forced layouts, known bytes over raw TCP, a 3:1 call split, a planted leak, a 30%-busy page | `main.work`, `main.tasks.long`, `main.script`, `layout.count`, `net.bytes` byte for byte, hotspot shares and totals, `+7.6 MB/run` leaks |
-| `known/known.rs` with `known/{cli,native,script,tty}.bench.ts` | native processes: spins, process trees (`tree`, `grand`), breakaway hops, `tick <hz> <work_ms>` (pure spin with a known wake cost; `tick <hz> 0` reads the wakes alone) | `cpu.work` of trees and ended children, wakes, launches |
+| `known/known.rs` with `known/{cli,native,script,tty}.bench.ts` | native processes: spins, process trees (`tree`, `grand`), breakaway hops, `tick <hz> <work_ms>` (pure spin with a known wake cost; `tick <hz> 0` reads the wakes alone), `burst <hz> <kiters>` (a fixed loop count a wake: instructions that do not move with the clock; a spin by time does on Apple silicon), `pulse <busy_ms> <idle_ms>` (`BEGIN`, a wall busy-wait, `END`: a wall answer no sleep blurs) | `cpu.work` of trees and ended children, wakes, launches |
+| `known/planted.bench.ts` with `pages/planted.html` | planted A/Bs: two targets that differ only in a planted cost (script and page spins, a page launch's busy-wait, a page frame's spin of 0.1 or 1.5 vsyncs, a click answered in a frame after a spin of 0, 50 or 150 ms, wake rates, burst counts and rates, held memory, a windowless app's busy-wait between two lines it prints) | each A/B's interval covers the plant (`--base <a> --head <b>`), and an A/A of one side is same; the header states the tolerances, the fixed-cost correction and which commands need counters or Apple silicon |
 | `derive/` | phases entered twice or nested, cross-site navigations, isolated frames, a 200 ms child that ends in a run, an orphaned grandchild | `phase.*`, frames per renderer, `frames.interval.n`, ended-process CPU (§9.6) |
 | `clocks/` | a heap and DOM growing at a known rate, a full trace buffer, thread churn | `js.heap.growth`, `dom.nodes.growth`, `RunIncomplete`, 64-bit wakes |
 | `chaos/` | load on the target's CPUs during one side's blocks, a CPU quota, Latin-1 output | `Background` and `Throttled` refusals, line decoding |
@@ -7951,7 +7974,7 @@ means the metric is not printed and the refusal says why (rule 1), never 0.
 | Signal | Windows | Linux | macOS |
 |---|---|---|---|
 | process CPU (`cpu.work`, `cpu.app.total`) | `QueryProcessCycleTime` over the cycle clock (below): the performance counter times the kernel's cycle factor from Windows 11 24H2, else the TSC on x64 (process times move in 15.6 ms ticks: an idle 5 s run read 0, 0.31% or 0.62% and nothing between) | the process's CPU clock (`clock_gettime` on `MAKE_PROCESS_CPUCLOCK(pid, CPUCLOCK_SCHED)`): ns, every thread live or exited, no permission needed; `/proc/<pid>/stat` only for names and parents | `proc_pid_rusage` user + system time (Mach time, charged at every context switch); this user's processes |
-| process memory (`memory.app.private`) | private commit (`PagefileUsage`) | `smaps_rollup` `Anonymous` + `Swap`, as Windows' commit charge counts private memory (`statm` resident − shared for `top`'s every process). Not private clean + dirty: they count a file's page cache and shared memory this process alone maps, so one bun process read 12 MB alone and 2 MB once a second bun process mapped the same executable (vps, 2026-11-08), and a read-only 150 MB file mapping read 151 MB "private" where Windows read 1 MB; `memory.app.pss`: its `Pss` summed over the set, each shared page split between the processes that map it (refused `NotOnThisOs` elsewhere) | physical footprint (`ri_phys_footprint`, Activity Monitor's Memory: dirty private, compressed, GPU allocations) |
+| process memory (`memory.app.private`) | private commit (`PagefileUsage`) | `smaps_rollup` `Anonymous` + `Swap`, as Windows' commit charge counts private memory (`statm` resident − shared for `top`'s every process). Not private clean + dirty: they count a file's page cache and shared memory this process alone maps, so one bun process read 12 MB alone and 2 MB once a second bun process mapped the same executable (vps, 2026-11-08), and a read-only 150 MB file mapping read 151 MB "private" where Windows read 1 MB; `memory.app.pss`: its `Pss` summed over the set, each shared page split between the processes that map it (refused `NotOnThisOs` elsewhere) | physical footprint (`ri_phys_footprint`, Activity Monitor's Memory: dirty private, compressed, GPU allocations, and shared anonymous memory charged once to the process that made it); refused for a Bun script host, whose allocator writes freed pages again without telling macOS, so they stay out of the footprint (air: 100 MiB held read as 5.1 MiB) |
 | memory by what holds it (`memory.app.host`, `query memory`, §8.6) | `VirtualQueryEx` walk of committed regions (type, protection, `GetMappedFileName`), `PROCESS_MEMORY_COUNTERS_EX2` | `/proc/<pid>/smaps` | refused: another process's regions need its task port (debuggers only) |
 | threads (`cpu.wakes`, `query threads`) | `NtQuerySystemInformation`: context switches per thread (32-bit, wrapping), each thread's create time to tell a reused id; names by `GetThreadDescription`, CPU by `QueryThreadCycleTime` | `/proc/<pid>/task/<tid>/schedstat`: times switched in to run (the same count, 64-bit) and exact CPU ns, the thread's start from its `stat` (a thread whose files go while they are read is left out, as one that exited); names from `comm` | per process only: `proc_taskinfo.pti_csw` (live and exited threads; one `(whole process)` row; the kernel holds it at 2^31 − 1, past which the wakes are unknown, `NoCounter`). Thread ids are 64-bit: a view's `tid` folds both halves into 32 bits, never 0 (the process row's). Per thread: CPU and names (`PROC_PIDTHREADID64INFO`: any same-user process, no permission; `task_threads` would need `task_for_pid`, which is root's), no wakes: no public per-thread switch count exists (`thread_info`, `PROC_PIDTHREADINFO` and `PROC_PIDTHREADCOUNTS` carry CPU time, scheduling state, cycles and energy; `getrusage` switches are the caller's own); the kernel's scheduler trace (kdebug through `ktrace`) has them for root only, not built |
 | per-core load, frequency | busy: idle cycles against the cycle clock each tick (PDH at 100 ms is clock-tick noise); frequency (`% Processor Performance`) and utility: PDH Processor Information once a second, MHz from each CPU's own `Processor Frequency` (a hybrid CPU's kinds of core differ; one value for all once came from whichever core PDH listed last) | busy: `/proc/stat` idle + iowait (10 ms ticks, unbiased over a run); frequency: `cpuinfo_avg_freq` (APERF/MPERF average, kernel 6.13+) of every online CPU at its own number, against its own base frequency (not CPUs 0 to n − 1 of the n strobe may run on, which under `taskset` read another CPU's); a CPU that cannot answer at a reading (`EAGAIN` from one deep in an idle state) is a hole in it, not the end of every CPU's; else none (an instantaneous `scaling_cur_freq` is not an average) | busy: `host_processor_info` ticks (10 ms); frequency: none (IOReport's P-state residency is not built) |

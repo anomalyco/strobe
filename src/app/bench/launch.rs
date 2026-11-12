@@ -211,8 +211,8 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         let (tx, samples) = channel();
         // An app's windows stay on top without focus (an occluded window never paints); `screen` also
         // captures their pixels. Timed to the window, each look goes to the wait below too, with the
-        // process set's cycles, as a native launch's does.
-        let sampler = (!web).then(|| {
+        // process set's cycles, as a native launch's does. An app with `window: false` has none to keep up.
+        let sampler = (!web && (window_until.is_some() || !super::windowless_target(&target, &ctx.config))).then(|| {
             let stop = stop.clone();
             let timed = window_until.is_some();
             std::thread::spawn(
@@ -963,6 +963,73 @@ fn arm(cdp: &Cdp, session: &str, observer: &str, profile: bool) {
     }
 }
 
+/// What the watch does with each page target it attaches: the first session to a target is the one it arms
+/// (observer and profiler), watches and later reads (`Watch::ready`, `Watch::page`); a second session to the
+/// same target is ignored. Chromium's profiler is per session: one armed and another read was every
+/// attribution launch's "Profiler.stop: No recording profiles found".
+struct Attacher {
+    cdp: Arc<Cdp>,
+    observer: String,
+    profile: bool,
+    tx: std::sync::mpsc::Sender<(f64, f64, String, String)>,
+    stop: Arc<AtomicBool>,
+    late: Arc<AtomicBool>,
+    pages: Arc<Mutex<Vec<(String, String)>>>,
+    seen: Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl Attacher {
+    /// A `Target.attachedToTarget` event; the target's id when it was a page this call took.
+    fn event(&self, ev: &Value) -> Option<String> {
+        if ev["method"] != "Target.attachedToTarget" {
+            return None;
+        }
+        let p = &ev["params"];
+        let session = p["sessionId"].as_str().unwrap_or("");
+        let taken = self.page(session, &p["targetInfo"]);
+        if p["waitingForDebugger"] == true {
+            let _ = self.cdp.send_timeout("Runtime.runIfWaitingForDebugger", json!({}), Some(session), Duration::from_secs(10));
+        }
+        taken
+    }
+
+    /// A page target attached on `session`: armed and watched once per target.
+    fn page(&self, session: &str, info: &Value) -> Option<String> {
+        let target = info["targetId"].as_str().unwrap_or("").to_string();
+        if !is_page(info) || !self.seen.lock().unwrap().insert(target.clone()) {
+            return None;
+        }
+        arm(&self.cdp, session, &self.observer, self.profile);
+        self.pages.lock().unwrap().push((session.to_string(), target.clone()));
+        let (cdp, tx, stop, late, observer) = (self.cdp.clone(), self.tx.clone(), self.stop.clone(), self.late.clone(), self.observer.clone());
+        let (session, id) = (session.to_string(), target.clone());
+        std::thread::spawn(move || {
+            let eval =
+                |expr: &str, wait: bool| cdp.send_timeout("Runtime.evaluate", json!({ "expression": expr, "awaitPromise": wait, "returnByValue": true }), Some(&session), Duration::from_secs(10));
+            while !stop.load(Ordering::Relaxed) {
+                match eval("window.__strobeLaunch", true) {
+                    Ok(r) if r["result"]["value"].is_number() => {
+                        let _ = tx.send((r["result"]["value"].as_f64().unwrap_or(0.0), epoch_ms(), session, id));
+                        return;
+                    }
+                    // A document that loaded before the init script was in: the observer goes in
+                    // now. Its time is valid unless `until` already shows.
+                    Ok(r) if r["result"]["type"] == "undefined" => {
+                        if eval(&observer, false).is_ok_and(|r| r["result"]["value"] == true) {
+                            late.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    // The page closed: nothing more to wait for here.
+                    Err(e) if e.message.contains("ession") && e.message.contains("not found") => return,
+                    // A document between navigations.
+                    _ => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+        Some(target)
+    }
+}
+
 impl Watch {
     fn start(cdp: &Arc<Cdp>, observer: String, profile: bool) -> Result<Watch> {
         let events = cdp.events();
@@ -979,67 +1046,34 @@ impl Watch {
             }
             cdp.send("Target.setAutoAttach", p, None)
         };
-        attach(true).or_else(|_| attach(false))?;
-        // Pages that already ran when strobe connected (a browser opens its first page at startup): armed
-        // here, before strobe navigates one, not when the thread below gets to their attach event.
-        let mut armed = std::collections::BTreeSet::new();
         let running = cdp.send("Target.getTargets", json!({}), None)?;
-        for t in running["targetInfos"].as_array().into_iter().flatten().filter(|t| is_page(t)) {
-            let attached = cdp.send("Target.attachToTarget", json!({ "targetId": t["targetId"], "flatten": true }), None);
-            if let Some(session) = attached.ok().as_ref().and_then(|a| a["sessionId"].as_str()) {
-                arm(cdp, session, &observer, profile);
-                armed.insert(t["targetId"].as_str().unwrap_or("").to_string());
+        attach(true).or_else(|_| attach(false))?;
+        let a = Arc::new(Attacher { cdp: cdp.clone(), observer, profile, tx, stop: stop.clone(), late: late.clone(), pages: pages.clone(), seen: Mutex::new(Default::default()) });
+        // Pages that already ran when strobe connected (a browser opens its first page at startup): armed
+        // here, before strobe navigates one. Auto-attach attaches them too; their sessions are the ones
+        // armed, so each page has one session. A browser whose auto-attach left one out gets it attached.
+        let mut open: std::collections::BTreeMap<String, Value> =
+            running["targetInfos"].as_array().into_iter().flatten().filter(|t| is_page(t)).map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t.clone())).collect();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !open.is_empty() {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
+            let Ok(ev) = events.recv_timeout(left) else { break };
+            if ev["method"] == "Target.attachedToTarget" {
+                open.remove(ev["params"]["targetInfo"]["targetId"].as_str().unwrap_or(""));
+            }
+            a.event(&ev);
+        }
+        for (id, info) in &open {
+            let attached = cdp.send("Target.attachToTarget", json!({ "targetId": id, "flatten": true }), None);
+            if let Some(session) = attached.ok().as_ref().and_then(|r| r["sessionId"].as_str()) {
+                a.page(session, info);
             }
         }
-        let watch = Watch { cdp: cdp.clone(), found, stop: stop.clone(), late: late.clone(), pages: pages.clone() };
-        let (cdp, stop2, late2, pages2) = (cdp.clone(), stop, late, pages);
+        let watch = Watch { cdp: cdp.clone(), found, stop: stop.clone(), late, pages };
         std::thread::spawn(move || {
-            let mut seen = std::collections::BTreeSet::new();
-            while !stop2.load(Ordering::Relaxed) {
-                let Ok(ev) = events.recv_timeout(Duration::from_millis(100)) else { continue };
-                if ev["method"] != "Target.attachedToTarget" {
-                    continue;
-                }
-                let p = &ev["params"];
-                let session = p["sessionId"].as_str().unwrap_or("").to_string();
-                let info = &p["targetInfo"];
-                let waiting = p["waitingForDebugger"] == true;
-                let send = |method: &str, params: Value| cdp.send_timeout(method, params, Some(&session), Duration::from_secs(10));
-                let target = info["targetId"].as_str().unwrap_or("").to_string();
-                if is_page(info) && seen.insert(target.clone()) {
-                    if !armed.contains(&target) {
-                        arm(&cdp, &session, &observer, profile);
-                    }
-                    pages2.lock().unwrap().push((session.clone(), target.clone()));
-                    let (cdp, tx, stop, late, observer) = (cdp.clone(), tx.clone(), stop2.clone(), late2.clone(), observer.clone());
-                    let session = session.clone();
-                    std::thread::spawn(move || {
-                        let eval = |expr: &str, wait: bool| {
-                            cdp.send_timeout("Runtime.evaluate", json!({ "expression": expr, "awaitPromise": wait, "returnByValue": true }), Some(&session), Duration::from_secs(10))
-                        };
-                        while !stop.load(Ordering::Relaxed) {
-                            match eval("window.__strobeLaunch", true) {
-                                Ok(r) if r["result"]["value"].is_number() => {
-                                    let _ = tx.send((r["result"]["value"].as_f64().unwrap_or(0.0), epoch_ms(), session, target));
-                                    return;
-                                }
-                                // A document that loaded before the init script was in: the observer goes in
-                                // now. Its time is valid unless `until` already shows.
-                                Ok(r) if r["result"]["type"] == "undefined" => {
-                                    if eval(&observer, false).is_ok_and(|r| r["result"]["value"] == true) {
-                                        late.store(true, Ordering::Relaxed);
-                                    }
-                                }
-                                // The page closed: nothing more to wait for here.
-                                Err(e) if e.message.contains("ession") && e.message.contains("not found") => return,
-                                // A document between navigations.
-                                _ => std::thread::sleep(Duration::from_millis(20)),
-                            }
-                        }
-                    });
-                }
-                if waiting {
-                    let _ = send("Runtime.runIfWaitingForDebugger", json!({}));
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(ev) = events.recv_timeout(Duration::from_millis(100)) {
+                    a.event(&ev);
                 }
             }
         });

@@ -7,6 +7,7 @@
   "required": ["id", "kind", "created"],
   "properties": {
     "id": { "type": "string", "description": "exp_ + 6 hex, or the name bench --id gave." },
+    "privacy": { "const": 1, "description": "1: every private part of the result's text is marked in a spans field beside it (SPEC 1 rule 9), so a public surface replaces the marks and guesses nothing. Absent in results that do not say so: a public surface then scrubs their text by pattern." },
     "kind": { "enum": ["experiment", "check", "pixels", "bisect"] },
     "file": { "type": "string", "description": "The bench file." },
     "file_repo": { "type": ["string", "null"], "description": "The bench file's path in its repository." },
@@ -14,6 +15,7 @@
     "text": { "type": "string", "description": "The text output." },
     "result": { "type": "string", "description": "--json only: the path of result.json." },
     "decided": { "type": "boolean", "description": "experiment: every series' primary got a verdict and nothing stopped the bench." },
+    "support": { "oneOf": [{ "$ref": "#/definitions/support" }, { "type": "null" }], "description": "The least support of the series that ran (SPEC 21.1); null when none ran. Absent in older results." },
     "passed": { "type": "boolean", "description": "check: every case passed." },
     "parity": { "type": ["string", "null"], "description": "check of several targets: the parity matrix, as the text output prints it." },
     "batch": {
@@ -131,7 +133,8 @@
           "oneOf": [{ "$ref": "#/definitions/validator" }, { "type": "null" }],
           "description": "The validator of a typed stop: SessionLocked or WindowHidden when --unlock-wait ran out (exit 124; a check's series not run are only in not_run), or the validator of a refusal that ended the bench part way (exit 4, such as Throttled); null for a stop, a lost device or a failure no validator gave. Absent in older results."
         },
-        "not_run": { "type": "array", "items": { "type": "string" } }
+        "not_run": { "type": "array", "items": { "type": "string" } },
+        "spans": { "$ref": "#/definitions/spans" }
       }
     },
     "metric": { "type": "string", "description": "bisect: the primary it follows." },
@@ -152,7 +155,27 @@
       "properties": {
         "id": { "type": "string", "description": "An analyser (SPEC 10.2) or validator id." },
         "level": { "enum": ["warn", "info"] },
-        "text": { "type": "string" }
+        "text": { "type": "string" },
+        "spans": { "$ref": "#/definitions/spans" }
+      }
+    },
+    "spans": {
+      "description": "The private parts of this object's text fields (SPEC 1 rule 9), by the field's key (text, summary, detail, fix, why, message, error, hint, reason, verdict; in refused_spans, the metric whose refused line it marks): what belongs to the machine (another program's name, a covering window's title, a local path, a phone's serial), each with the words a published surface shows in its place. The fields themselves are the local text, unchanged. Absent when nothing is marked.",
+      "type": "object",
+      "additionalProperties": { "type": "array", "items": { "$ref": "#/definitions/span" } }
+    },
+    "span": {
+      "description": "One private part: bytes at[0] up to at[1] of its field's UTF-8 text (sorted, never overlapping, on character boundaries); public replaces them on a published surface.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "kind", "public"],
+      "properties": {
+        "at": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2, "maxItems": 2 },
+        "kind": {
+          "enum": ["foreign_proc", "window_title", "foreign_element", "host_ancestor", "local_path", "user_account", "host_name", "device_id", "url_secret", "tool_output", "unknown"],
+          "description": "What the part is: another program (foreign_proc), its window (window_title) or element (foreign_element), what strobe runs under (host_ancestor), a folder outside the repository (local_path), an account (user_account), the machine's name (host_name), a phone's id (device_id), a URL's secrets (url_secret), another tool's output (tool_output); unknown: read back from a file that did not say."
+        },
+        "public": { "type": "string" }
       }
     },
     "validator": {
@@ -214,6 +237,60 @@
         "SharedRunner"
       ]
     },
+    "support": {
+      "enum": ["verified", "preview"],
+      "description": "How far a path is checked (SPEC 21.1): verified against a known answer on this host, or preview (its runtime checks held; no known-answer fixture has checked it here). A refused path has none."
+    },
+    "runtime": {
+      "enum": ["chromium_page", "firefox_page", "webkit_page", "android_chrome", "ios_safari", "chromium_app", "webview_app", "native", "native_windowless", "script", "cli", "tty"],
+      "description": "What a target runs on (src/support.rs Runtime)."
+    },
+    "capability": {
+      "enum": [
+        "wall_and_counts",
+        "page_engine",
+        "process_cpu",
+        "process_memory",
+        "hardware_counters",
+        "package_idle",
+        "frames",
+        "canvas",
+        "input_latency",
+        "gpu",
+        "pixels",
+        "launch",
+        "launch_signal",
+        "tty_grid",
+        "http_probe"
+      ],
+      "description": "The instrument a metric is read with (src/model.rs MetricDef.capability)."
+    },
+    "host": {
+      "enum": ["windows-x64", "windows-arm64", "macos-arm64", "macos-x64", "linux-x64", "linux-arm64"],
+      "description": "The OS and CPU architecture strobe ran on; off x64 Windows and Linux and Apple silicon every path is preview."
+    },
+    "pathSupport": {
+      "description": "A series' path (SPEC 21.1): its primary's runtime, capability and host, the pixels and OS input it went through, and the least support of its parts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "runtime", "capability", "host", "os_input", "pixels", "outside_page"],
+      "properties": {
+        "tier": { "$ref": "#/definitions/support" },
+        "runtime": { "$ref": "#/definitions/runtime", "description": "The only side's, or in an implementation comparison the less checked side's (base when alike)." },
+        "capability": { "$ref": "#/definitions/capability" },
+        "host": { "$ref": "#/definitions/host" },
+        "os_input": { "type": "boolean", "description": "strobe's input reached a side through the OS (fairness.input os, or a headed page measured from outside that took input)." },
+        "pixels": { "type": "boolean", "description": "A side read the window's pixels: in a run, a launch timed by them, or compared snapshots." },
+        "outside_page": { "type": "boolean", "description": "A page side was measured from outside (cross-engine: the host's clock, the OS's frames)." },
+        "preview_by": {
+          "type": "array",
+          "items": { "enum": ["capability", "pixels", "outside_page", "os_input", "architecture"] },
+          "description": "What made it preview: the runtime and capability themselves, pixels, an outside page, OS input, or a host off its OS's primary architecture. Absent when verified."
+        },
+        "base_runtime": { "$ref": "#/definitions/runtime", "description": "implementations: base's runtime." },
+        "head_runtime": { "$ref": "#/definitions/runtime", "description": "implementations: head's runtime." }
+      }
+    },
     "verdictKind": {
       "enum": ["better", "worse", "same", "no_worse", "unclear", "underpowered", "saturated", "stopped", "refused", "untested", "descriptive"],
       "description": "untested: a secondary the gate did not test (shown as —); descriptive: shown, never decided (·). A leak verdict: worse leaks, same does not grow or levels off."
@@ -227,7 +304,8 @@
         "summary": { "type": "string" },
         "detail": { "type": "string" },
         "fix": { "type": "string" },
-        "hidden": { "enum": ["covered", "not_active", "other"], "description": "WindowHidden: how the window was hidden." }
+        "hidden": { "enum": ["covered", "not_active", "other"], "description": "WindowHidden: how the window was hidden." },
+        "spans": { "$ref": "#/definitions/spans" }
       }
     },
     "sampling": {
@@ -266,7 +344,9 @@
         "across": { "enum": ["compared", "care", "per_side"], "description": "implementations: the metric's comparability class (SPEC 7.1); per_side never reaches a comparison (refused NotComparable when declared)." },
         "care_note": { "type": "string", "description": "across care: what the number sums on each side, printed wherever it is." },
         "p_repeated": { "type": ["number", "null"], "description": "implementations, primary: the p-value adjusted for the series' sequential looks." },
-        "holm_decided": { "type": ["boolean", "null"], "description": "implementations, primary: still decided after Holm across the journeys." }
+        "holm_decided": { "type": ["boolean", "null"], "description": "implementations, primary: still decided after Holm across the journeys." },
+        "spans": { "$ref": "#/definitions/spans", "description": "The private parts of verdict (a refusal's summary in it)." },
+        "support": { "$ref": "#/definitions/support", "description": "Its metric's path (SPEC 21.1); absent when refused, and in older results." }
       }
     },
     "perSide": {
@@ -287,7 +367,8 @@
         "metric": { "enum": ["js.heap.growth", "memory.app.host"] },
         "verdict": { "type": ["string", "null"] },
         "verdict_kind": { "$ref": "#/definitions/verdictKind" },
-        "decided": { "type": ["boolean", "null"] }
+        "decided": { "type": ["boolean", "null"] },
+        "support": { "$ref": "#/definitions/support", "description": "Its metric's path (SPEC 21.1); absent when refused, and in older results." }
       }
     },
     "checkPrimary": {
@@ -306,7 +387,8 @@
         "metric": { "type": "string" },
         "verdict": { "type": "string", "description": "refused (<validator>): <why>" },
         "verdict_kind": { "const": "refused" },
-        "refusal": { "$ref": "#/definitions/refusal" }
+        "refusal": { "$ref": "#/definitions/refusal" },
+        "spans": { "$ref": "#/definitions/spans", "description": "The private parts of verdict." }
       }
     },
     "gapPrimary": {
@@ -320,7 +402,8 @@
         "verdict_kind": { "const": "refused" },
         "decided": { "const": false },
         "holm_decided": { "type": ["boolean", "null"] },
-        "refusal": { "$ref": "#/definitions/refusal" }
+        "refusal": { "$ref": "#/definitions/refusal" },
+        "spans": { "$ref": "#/definitions/spans", "description": "The private parts of verdict." }
       }
     },
     "overhead": {
@@ -376,6 +459,7 @@
         "kind": { "type": "string", "description": "runs, launch or leak; check (--check), pixels (--pixels-only), blocks (--blocks: one build's timed blocks, nothing compared)." },
         "params": { "type": ["object", "null"] },
         "primary": { "anyOf": [{ "$ref": "#/definitions/comparison" }, { "$ref": "#/definitions/leakPrimary" }, { "$ref": "#/definitions/checkPrimary" }, { "$ref": "#/definitions/blocksPrimary" }, { "$ref": "#/definitions/gapPrimary" }] },
+        "support": { "oneOf": [{ "$ref": "#/definitions/pathSupport" }, { "type": "null" }], "description": "Its primary's path (SPEC 21.1); null for a parity gap or a series refused before it ran. Absent in older results." },
         "headless": { "type": "boolean", "description": "A page target ran in a headless browser (--headless, or the target's headless): no display, so its frame, input-to-screen latency, scroll, canvas and GPU-use metrics are refused (Headless); CPU, counters, memory and input pacing stay." },
         "engine": { "enum": ["chromium", "firefox", "webkit", null], "description": "A page target's browser engine (--engine, or the target's engine)." },
         "input": { "enum": ["desktop", "hybrid", "touch", "none", null], "description": "The input devices the series' pages saw (each block keeps its own). desktop: a fine pointer that hovers, nothing coarse, no touch, which a page target sees unless it emulates a device, headless too (checked before setup: DeviceMismatch); a page target with emulate: \"mobile\" sees touch and one with emulate: \"touch\" hybrid, checked the same way; an app's page (Electron, a webview, a command's browser) sees the machine's: hybrid (a fine pointer with touch beside it), touch (no fine pointer), none (no pointer at all). Sides that saw different ones are refused (VariantMismatch). Part of a page series' tracked fingerprint. Null without a page, and in results from before strobe recorded it." },
@@ -429,6 +513,7 @@
               "pair": { "type": "integer" },
               "values": { "type": "object", "additionalProperties": { "type": ["number", "null"] }, "description": "Each metric's value, and the block's own notes: warmup.unsteady (1 swung, 2 grew), warmup.stepped.first and warmup.stepped.last (the measured runs stepped down: the first measured run's work and the last half's median, NotSteady, SPEC 9.1), untimed.n and untimed.ms." },
               "refused": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Metrics the block refused: \"<validator>: <why>\"." },
+              "refused_spans": { "$ref": "#/definitions/spans", "description": "The private parts of refused's lines, by metric." },
               "gpu_cache": { "enum": ["cold", "warm", null], "description": "A native block: how its launch found the GPU shader caches, said only of an app that did GPU work in the runs, or for a launch case's block one that opened a window (SPEC 13.2). Absent otherwise and in older results." },
               "same": { "type": "object", "description": "implementations: what each expect.same element read, by its name: { setup, run[], reset[] }." },
               "ops": { "type": "object", "additionalProperties": { "type": "number" }, "description": "implementations: the measured runs' input calls, each call's median count per run (a typed character each)." },
@@ -464,7 +549,7 @@
         "halt": {
           "type": ["object", "null"],
           "description": "Why the series stopped part way or did not run; validator: SessionLocked or WindowHidden when --unlock-wait ran out (the rest of the file ran on, and --resume runs it).",
-          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] }, "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "The refusal that stopped it, whole (summary, detail, fix); absent in older results." } }
+          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] }, "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "The refusal that stopped it, whole (summary, detail, fix); absent in older results." }, "spans": { "$ref": "#/definitions/spans" } }
         },
         "not_run": { "type": "boolean" },
         "passed": { "type": "boolean", "description": "check: the case ran." },
@@ -504,8 +589,10 @@
         },
         "measured_run": { "type": ["integer", "null"], "description": "check: the run values came from, from 0: 1 when a process of the target ended in run 0 and the case has a reset with resetCheck on, so the values are a warm run's from the state the reset left (SPEC 9.1); null when the case failed. Absent in older results (then 0)." },
         "refused": { "type": ["object", "null"], "description": "check: metrics the run refused, \"<validator>: <why>\"." },
+        "refused_spans": { "$ref": "#/definitions/spans", "description": "check: the private parts of refused's lines, by metric." },
         "error": { "type": ["string", "null"] },
         "hint": { "type": ["string", "null"] },
+        "spans": { "$ref": "#/definitions/spans", "description": "The private parts of error and hint." },
         "log": { "type": "array", "items": { "type": "string" } },
         "log_path": { "type": "string" },
         "actions": {
@@ -540,7 +627,7 @@
         "gap": {
           "type": ["object", "null"],
           "description": "implementations: a journey one side cannot run (a parity gap): nothing ran, its primary is refused ParityGap.",
-          "properties": { "side": { "enum": ["base", "head"] }, "name": { "type": "string", "description": "That side's name." }, "missing": { "type": ["string", "null"] }, "reason": { "type": "string" } }
+          "properties": { "side": { "enum": ["base", "head"] }, "name": { "type": "string", "description": "That side's name." }, "missing": { "type": ["string", "null"] }, "reason": { "type": "string" }, "spans": { "$ref": "#/definitions/spans" } }
         }
       }
     }

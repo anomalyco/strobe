@@ -1,7 +1,9 @@
 // The script() target of script.bench.ts (dev only, not shipped): exports whose costs are known by construction.
-import { join } from "node:path"
+// keep and clear also run on Node (script.bench.ts's `node` target); the rest use Bun's APIs.
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 
-const bin = process.env.KNOWN_BIN ?? join(import.meta.dir, process.platform === "win32" ? "known.exe" : "known")
+const bin = process.env.KNOWN_BIN ?? join(dirname(fileURLToPath(import.meta.url)), process.platform === "win32" ? "known.exe" : "known")
 let kept: Uint8Array[] = []
 
 /** `ms` of wall time busy on this thread: its CPU when nothing else runs on its core. */
@@ -27,7 +29,8 @@ export function keep(mb: number) {
 
 export function clear() {
   kept = []
-  Bun.gc(true)
+  if (globalThis.Bun) Bun.gc(true)
+  else (globalThis as any).gc?.()
   return true
 }
 

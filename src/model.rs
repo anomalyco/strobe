@@ -1,60 +1,104 @@
 //! Plain data shared by every module: errors, metrics, verdicts.
 
+use crate::text::{IntoPiece, Marks, Piece, Text};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// An error with the exit code it maps to (SPEC §5.2) and an optional fix. A refusal carries what
 /// refused it, typed: `refusal` is set when it came from `Error::refused` or a `Refusal` (exit 4), or
 /// from `Error::usage_refused`, a question that cannot be asked at all (exit 2: `NotComparable`).
+/// `message` and `hint` are the local text; `spans` keeps their private parts (`message_text`).
 #[derive(Clone, Debug)]
 pub struct Error {
     pub code: i32,
     pub message: String,
     pub hint: Option<String>,
     pub refusal: Option<Box<Refusal>>,
+    pub spans: Marks,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
-    pub fn new(code: i32, message: impl Into<String>) -> Self {
-        Error { code, message: message.into(), hint: None, refusal: None }
+    pub fn new(code: i32, message: impl Into<Text>) -> Self {
+        let mut spans = Marks::default();
+        let message = spans.set("message", message.into());
+        Error { code, message, hint: None, refusal: None, spans }
     }
-    pub fn msg(message: impl Into<String>) -> Self {
+    pub fn msg(message: impl Into<Text>) -> Self {
         Error::new(1, message)
     }
-    pub fn usage(message: impl Into<String>) -> Self {
+    pub fn usage(message: impl Into<Text>) -> Self {
         Error::new(2, message)
     }
     /// Something did not happen in time (exit 124).
-    pub fn timeout(message: impl Into<String>) -> Self {
+    pub fn timeout(message: impl Into<Text>) -> Self {
         Error::new(124, message)
     }
     /// A refusal by the validator named `validator` (its SPEC §10.1 id). A name that is no validator
     /// is strobe's own bug: it fails as an internal error instead of refusing under a made-up id.
-    pub fn refused(validator: &str, message: impl Into<String>, hint: impl Into<String>) -> Self {
+    pub fn refused(validator: &str, message: impl Into<Text>, hint: impl Into<Text>) -> Self {
         match ValidatorId::from_name(validator) {
             Some(id) => Refusal::new(id, message).fix(hint).into(),
-            None => Error::msg(format!("internal: {validator} is not a validator: {}", message.into())),
+            None => {
+                let message: Text = message.into();
+                Error::msg(crate::msg!("internal: {} is not a validator: {}", validator, message))
+            }
         }
     }
     /// A usage error a validator names (exit 2, SPEC §10.1): what was asked cannot be answered at all,
     /// such as a diff of two implementations (`NotComparable`). Typed like a refusal, so callers read
     /// `validator()` and never the message.
     pub fn usage_refused(r: Refusal) -> Self {
-        Error { code: 2, message: r.message(), hint: r.fix.clone(), refusal: Some(Box::new(r)) }
+        Error { code: 2, ..Error::from(r) }
     }
     /// A wait for the machine's state that ran out (exit 124), typed by the validator whose state it
     /// waited out (`SessionLocked`, `WindowHidden`): what was not run for it is resumable.
     pub fn timeout_refused(r: Refusal) -> Self {
-        Error { code: 124, message: r.message(), hint: r.fix.clone(), refusal: Some(Box::new(r)) }
+        Error { code: 124, ..Error::from(r) }
     }
-    pub fn unreachable(message: impl Into<String>) -> Self {
+    pub fn unreachable(message: impl Into<Text>) -> Self {
         Error::new(255, message)
     }
-    pub fn hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+    pub fn hint(mut self, hint: impl Into<Text>) -> Self {
+        self.hint = Some(self.spans.set("hint", hint.into()));
         self
+    }
+    /// The message with its private parts marked.
+    pub fn message_text(&self) -> Text {
+        self.spans.text("message", &self.message)
+    }
+    pub fn hint_text(&self) -> Option<Text> {
+        self.hint.as_deref().map(|h| self.spans.text("hint", h))
+    }
+    /// `prefix` before the message (`launch 2 of 5: …`), its marks moved with it.
+    pub fn prefixed(mut self, prefix: impl Into<Text>) -> Self {
+        let mut t: Text = prefix.into();
+        t.push(&self.message_text());
+        self.message = self.spans.set("message", t);
+        self
+    }
+    /// `suffix` after the message (`… (the block was filmed)`), the message's marks kept.
+    pub fn suffixed(mut self, suffix: impl Into<Text>) -> Self {
+        let mut t = self.message_text();
+        t.push(&suffix.into());
+        self.message = self.spans.set("message", t);
+        self
+    }
+    /// `note` after what the error says: a refusal's detail (`<detail>; <note>`, so its validator and fix
+    /// stay, the message said again from it), else the message (`<message>; <note>`).
+    pub fn append_detail(mut self, note: impl Into<Text>) -> Self {
+        let note: Text = note.into();
+        match self.refusal.take() {
+            Some(r) => {
+                let r = r.append_detail(note);
+                self.message = self.spans.set("message", r.message_text());
+                self.refusal = Some(Box::new(r));
+                self
+            }
+            None => self.suffixed(crate::msg!("; {}", note)),
+        }
     }
     /// The validator that refused (an exit-4 error, or a usage error a validator names).
     pub fn validator(&self) -> Option<ValidatorId> {
@@ -230,29 +274,85 @@ pub enum Hidden {
     Other,
 }
 
-/// Why a validator refused: a run (in an `Error`) or one metric (in a `Comparison`).
-#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+/// Why a validator refused: a run (in an `Error`) or one metric (in a `Comparison`). `summary`,
+/// `detail` and `fix` are the local text; `spans` keeps their private parts, which result.json writes
+/// beside them (`"spans": { "summary": [...] }`) when there are any.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(from = "RefusalRead")]
 pub struct Refusal {
     pub validator: ValidatorId,
     /// What was wrong.
     pub summary: String,
     /// What strobe saw beyond the summary, such as the busiest processes.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// How to make the run valid.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
     /// `WindowHidden` only, when the producer knows: how the window was hidden.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden: Option<Hidden>,
+    pub spans: Marks,
+}
+
+/// A `Refusal` as result.json writes it.
+#[derive(Serialize)]
+struct RefusalWrite<'a> {
+    validator: ValidatorId,
+    summary: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hidden: Option<Hidden>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    spans: BTreeMap<String, Vec<crate::text::Span>>,
+}
+
+/// A `Refusal` as result.json holds it (`spans` absent in older results).
+#[derive(serde::Deserialize)]
+struct RefusalRead {
+    validator: ValidatorId,
+    summary: String,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    fix: Option<String>,
+    #[serde(default)]
+    hidden: Option<Hidden>,
+    #[serde(default)]
+    spans: BTreeMap<String, Vec<crate::text::Span>>,
+}
+
+impl From<RefusalRead> for Refusal {
+    fn from(r: RefusalRead) -> Self {
+        let spans = Marks::from_wire(r.spans, &[("summary", Some(&r.summary)), ("detail", r.detail.as_deref()), ("fix", r.fix.as_deref())]);
+        Refusal { validator: r.validator, summary: r.summary, detail: r.detail, fix: r.fix, hidden: r.hidden, spans }
+    }
+}
+
+/// Two refusals are the same when they say the same with the same marks, however their marks were kept
+/// (set in another order, carried through `..r`, read back from result.json).
+impl PartialEq for Refusal {
+    fn eq(&self, o: &Self) -> bool {
+        self.validator == o.validator && self.hidden == o.hidden && self.summary_text() == o.summary_text() && self.detail_text() == o.detail_text() && self.fix_text() == o.fix_text()
+    }
+}
+
+impl Serialize for Refusal {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        let (detail, fix) = (self.detail.as_deref(), self.fix.as_deref());
+        let spans = self.spans.wire(&[("summary", Some(&self.summary)), ("detail", detail), ("fix", fix)]);
+        RefusalWrite { validator: self.validator, summary: &self.summary, detail, fix, hidden: self.hidden, spans }.serialize(s)
+    }
 }
 
 impl Refusal {
-    pub fn new(validator: ValidatorId, summary: impl Into<String>) -> Self {
-        Refusal { validator, summary: summary.into(), detail: None, fix: None, hidden: None }
+    pub fn new(validator: ValidatorId, summary: impl Into<Text>) -> Self {
+        let mut spans = Marks::default();
+        let summary = spans.set("summary", summary.into());
+        Refusal { validator, summary, detail: None, fix: None, hidden: None, spans }
     }
     /// A `WindowHidden` refusal that says how the window was hidden.
-    pub fn window_hidden(hidden: Hidden, summary: impl Into<String>) -> Self {
+    pub fn window_hidden(hidden: Hidden, summary: impl Into<Text>) -> Self {
         Refusal { hidden: Some(hidden), ..Refusal::new(ValidatorId::WindowHidden, summary) }
     }
     /// A metric's refusal as a block's `refused` map writes it, `<validator>: <why>`, read back.
@@ -261,26 +361,91 @@ impl Refusal {
         let (id, why) = line.split_once(": ").unwrap_or((line, ""));
         Some(Refusal::new(ValidatorId::from_name(id)?, why))
     }
-    pub fn detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
+    pub fn detail(mut self, detail: impl Into<Text>) -> Self {
+        self.detail = Some(self.spans.set("detail", detail.into()));
         self
     }
-    pub fn fix(mut self, fix: impl Into<String>) -> Self {
-        self.fix = Some(fix.into());
+    pub fn fix(mut self, fix: impl Into<Text>) -> Self {
+        self.fix = Some(self.spans.set("fix", fix.into()));
         self
+    }
+    /// `prefix` before the summary (`<label>: …`, `on head: …`), its marks moved with it.
+    pub fn prefixed(mut self, prefix: impl Into<Text>) -> Self {
+        let mut t: Text = prefix.into();
+        t.push(&self.summary_text());
+        self.summary = self.spans.set("summary", t);
+        self
+    }
+    /// `suffix` after the summary (`… (the block was filmed: …)`), the summary's marks kept.
+    pub fn suffixed(mut self, suffix: impl Into<Text>) -> Self {
+        let mut t = self.summary_text();
+        t.push(&suffix.into());
+        self.summary = self.spans.set("summary", t);
+        self
+    }
+    /// `note` after the detail (`<detail>; <note>`), or as the detail when there is none.
+    pub fn append_detail(mut self, note: impl Into<Text>) -> Self {
+        let note: Text = note.into();
+        let detail = match self.detail_text() {
+            Some(d) => crate::msg!("{}; {}", d, note),
+            None => note,
+        };
+        self.detail = Some(self.spans.set("detail", detail));
+        self
+    }
+    pub fn summary_text(&self) -> Text {
+        self.spans.text("summary", &self.summary)
+    }
+    pub fn detail_text(&self) -> Option<Text> {
+        self.detail.as_deref().map(|d| self.spans.text("detail", d))
+    }
+    pub fn fix_text(&self) -> Option<Text> {
+        self.fix.as_deref().map(|f| self.spans.text("fix", f))
     }
     /// `<validator>: <summary>[; <detail>]`, as an error's message says it.
     pub fn message(&self) -> String {
-        match &self.detail {
-            Some(d) => format!("{}: {}; {d}", self.validator, self.summary),
-            None => format!("{}: {}", self.validator, self.summary),
+        self.message_text().into_local()
+    }
+    /// `message` with its private parts marked.
+    pub fn message_text(&self) -> Text {
+        match self.detail_text() {
+            Some(d) => crate::msg!("{}: {}; {}", self.validator, self.summary_text(), d),
+            None => crate::msg!("{}: {}", self.validator, self.summary_text()),
         }
     }
 }
 
 impl From<Refusal> for Error {
     fn from(r: Refusal) -> Self {
-        Error { code: 4, message: r.message(), hint: r.fix.clone(), refusal: Some(Box::new(r)) }
+        let mut spans = Marks::default();
+        let message = spans.set("message", r.message_text());
+        let hint = r.fix_text().map(|f| spans.set("hint", f));
+        Error { code: 4, message, hint, refusal: Some(Box::new(r)), spans }
+    }
+}
+
+/// An error goes into a message with its marks.
+impl IntoPiece for Error {
+    fn piece(&self) -> Piece<'_> {
+        Piece::Owned(self.message_text())
+    }
+}
+
+impl IntoPiece for Refusal {
+    fn piece(&self) -> Piece<'_> {
+        Piece::Owned(self.message_text())
+    }
+}
+
+impl IntoPiece for ValidatorId {
+    fn piece(&self) -> Piece<'_> {
+        Piece::Shown(self)
+    }
+}
+
+impl IntoPiece for WebEngine {
+    fn piece(&self) -> Piece<'_> {
+        Piece::Shown(self)
     }
 }
 
@@ -299,6 +464,17 @@ pub mod refusal_lines {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<BTreeMap<String, Refusal>, D::Error> {
         let lines = BTreeMap::<String, String>::deserialize(d)?;
         Ok(lines.into_iter().filter_map(|(k, l)| Some((k, Refusal::from_line(&l)?))).collect())
+    }
+
+    /// The marks of each line `serialize` writes, by metric, for result.json's `refused_spans` beside the
+    /// map; metrics whose line has none are left out.
+    pub fn spans(map: &BTreeMap<String, Refusal>) -> BTreeMap<String, Vec<crate::text::Span>> {
+        map.iter()
+            .filter_map(|(k, r)| {
+                let t = r.message_text();
+                t.is_marked().then(|| (k.clone(), t.spans().to_vec()))
+            })
+            .collect()
     }
 }
 
@@ -390,6 +566,9 @@ pub struct MetricDef {
     /// Whether it compares between two implementations (SPEC 7.1, 9.10).
     #[serde(skip)]
     pub across: Across,
+    /// The instrument it is read with: what its verified or preview path is of (SPEC §21.1).
+    #[serde(skip)]
+    pub capability: crate::support::Capability,
     pub about: &'static str,
 }
 
@@ -426,7 +605,7 @@ impl Across {
 const CARE_CPU: &str = "every process of each app's process set, per run; the fixture not included";
 const CARE_CPU_SHARE: &str = "every process of each app, as a share of one core over the run: compare it only where run.duration is the same";
 const CARE_WAKES: &str = "all threads of all processes of each app: more threads and processes wake more by design";
-const CARE_PRIVATE: &str = "the OS's private memory of every process of each app (Windows commit, macOS footprint, Linux private pages); memory shared between an app's processes is in neither";
+const CARE_PRIVATE: &str = "the OS's private memory of every process of each app (Windows commit, macOS footprint, Linux private pages); memory shared between an app's processes is in neither on Windows and Linux, while macOS counts shared anonymous memory once, in the process that made it";
 const CARE_HOST: &str = "what every process of each app allocated in its own address space, without GPU memory";
 const CARE_GPU_MEMORY: &str = "GPU memory of every process of each app";
 const CARE_FRAMES: &str = "descriptive: more frames can mean smoother or wasteful";
@@ -438,9 +617,12 @@ const COUNT: (&str, &str) = ("fewer", "more");
 const AMOUNT: (&str, &str) = ("less", "more");
 const SMOOTH: (&str, &str) = ("smoother", "choppier");
 
+use crate::support::Capability;
+
 pub const METRICS: &[MetricDef] = &[
     MetricDef {
         name: "frames.presented.p50",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -449,12 +631,53 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "median frame latency (begin of frame to presentation) of presented frames",
     },
-    MetricDef { name: "frames.presented.p90", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 100, across: Across::PerSide, about: "90th percentile frame cost" },
-    MetricDef { name: "frames.presented.p95", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 200, across: Across::PerSide, about: "95th percentile frame cost" },
-    MetricDef { name: "frames.presented.p99", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 1000, across: Across::PerSide, about: "99th percentile frame cost" },
-    MetricDef { name: "frames.presented.max", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 1, across: Across::PerSide, about: "worst presented frame cost" },
+    MetricDef {
+        name: "frames.presented.p90",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 100,
+        across: Across::PerSide,
+        about: "90th percentile frame cost",
+    },
+    MetricDef {
+        name: "frames.presented.p95",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 200,
+        across: Across::PerSide,
+        about: "95th percentile frame cost",
+    },
+    MetricDef {
+        name: "frames.presented.p99",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 1000,
+        across: Across::PerSide,
+        about: "99th percentile frame cost",
+    },
+    MetricDef {
+        name: "frames.presented.max",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 1,
+        across: Across::PerSide,
+        about: "worst presented frame cost",
+    },
     MetricDef {
         name: "frames.presented.count",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -465,6 +688,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.frames",
+        capability: Capability::Canvas,
         unit: "count",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -475,6 +699,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p50",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -485,6 +710,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p95",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -495,6 +721,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p99",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -505,6 +732,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.max",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -515,6 +743,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.interval.p50",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -525,6 +754,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.interval.p95",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -535,6 +765,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.interval.p99",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -543,9 +774,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::Compared,
         about: "99th percentile gap between presented frames",
     },
-    MetricDef { name: "frames.interval.max", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: SMOOTH, min_n: 1, across: Across::Compared, about: "longest gap between presented frames" },
+    MetricDef {
+        name: "frames.interval.max",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: SMOOTH,
+        min_n: 1,
+        across: Across::Compared,
+        about: "longest gap between presented frames",
+    },
     MetricDef {
         name: "frames.dropped.pct",
+        capability: Capability::Frames,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -556,6 +798,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.dropped",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -566,6 +809,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.discarded",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -576,6 +820,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.partial",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -584,9 +829,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "frames presented without all updates, per run",
     },
-    MetricDef { name: "main.busy", unit: "%", better: Better::Lower, kind: Kind::Timed, words: AMOUNT, min_n: 0, across: Across::PerSide, about: "renderer main thread busy share during runs" },
+    MetricDef {
+        name: "main.busy",
+        capability: Capability::PageEngine,
+        unit: "%",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "renderer main thread busy share during runs",
+    },
     MetricDef {
         name: "frames.renderer.p95",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -597,6 +853,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.viz.p95",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -607,6 +864,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.work",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -617,6 +875,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.script",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -627,6 +886,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.gc",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -635,9 +895,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "garbage collection on the renderer main thread per run (V8's top-level GC slices); traced only for series that declare it",
     },
-    MetricDef { name: "main.layout", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: AMOUNT, min_n: 0, across: Across::PerSide, about: "layout time on the renderer main thread per run" },
+    MetricDef {
+        name: "main.layout",
+        capability: Capability::PageEngine,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "layout time on the renderer main thread per run",
+    },
     MetricDef {
         name: "main.style",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -648,6 +919,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.paint",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -656,11 +928,42 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "prepaint and paint time on the renderer main thread per run",
     },
-    MetricDef { name: "layout.count", unit: "count", better: Better::Lower, kind: Kind::Timed, words: COUNT, min_n: 0, across: Across::PerSide, about: "layouts per run" },
-    MetricDef { name: "style.count", unit: "count", better: Better::Lower, kind: Kind::Timed, words: COUNT, min_n: 0, across: Across::PerSide, about: "style recalculations per run" },
-    MetricDef { name: "main.tasks.long", unit: "count", better: Better::Lower, kind: Kind::Timed, words: COUNT, min_n: 0, across: Across::PerSide, about: "main-thread tasks over 50 ms, per run" },
+    MetricDef {
+        name: "layout.count",
+        capability: Capability::PageEngine,
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "layouts per run",
+    },
+    MetricDef {
+        name: "style.count",
+        capability: Capability::PageEngine,
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "style recalculations per run",
+    },
+    MetricDef {
+        name: "main.tasks.long",
+        capability: Capability::PageEngine,
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "main-thread tasks over 50 ms, per run",
+    },
     MetricDef {
         name: "interaction.p50",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -671,6 +974,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "interaction.p95",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -681,6 +985,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "input.rate",
+        capability: Capability::WallAndCounts,
         unit: "/s",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -691,6 +996,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "input.gap.p95",
+        capability: Capability::WallAndCounts,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -701,6 +1007,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.reads",
+        capability: Capability::WallAndCounts,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -711,6 +1018,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.read_ms",
+        capability: Capability::WallAndCounts,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -721,6 +1029,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.pixel_reads",
+        capability: Capability::Pixels,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -731,6 +1040,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.pixel_ms",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -741,6 +1051,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.pixel_cpu_ms",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -751,6 +1062,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "scroll.latency.p50",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -761,6 +1073,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "scroll.latency.p95",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -771,6 +1084,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.latency.p50",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -781,6 +1095,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.latency.p95",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -791,6 +1106,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.settle.p50",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -801,6 +1117,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.settle.p95",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -811,6 +1128,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.updates",
+        capability: Capability::TtyGrid,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -821,6 +1139,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.frames",
+        capability: Capability::TtyGrid,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -831,6 +1150,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.frame.p50",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -841,6 +1161,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.frame.p95",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -851,6 +1172,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.bytes",
+        capability: Capability::TtyGrid,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -861,6 +1183,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.cells",
+        capability: Capability::TtyGrid,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -871,6 +1194,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.pty_host",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -879,9 +1203,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::Compared,
         about: "terminal targets on Windows: CPU of the console host ConPTY starts for the terminal, per run: the terminal's work, never in cpu.work",
     },
-    MetricDef { name: "run.duration", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 0, across: Across::Compared, about: "wall time of one run" },
+    MetricDef {
+        name: "run.duration",
+        capability: Capability::WallAndCounts,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 0,
+        across: Across::Compared,
+        about: "wall time of one run",
+    },
     MetricDef {
         name: "cpu.app.total",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -892,6 +1227,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.foreign",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -900,9 +1236,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::Compared,
         about: "other processes' work on the CPUs the target is pinned to during runs, % of one core: a validity signal, not the target's cost",
     },
-    MetricDef { name: "cpu.process.total", unit: "%", better: Better::Lower, kind: Kind::Timed, words: AMOUNT, min_n: 0, across: Across::Care(CARE_CPU_SHARE), about: "alias of cpu.app.total" },
+    MetricDef {
+        name: "cpu.process.total",
+        capability: Capability::ProcessCpu,
+        unit: "%",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::Care(CARE_CPU_SHARE),
+        about: "alias of cpu.app.total",
+    },
     MetricDef {
         name: "cpu.renderer",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -913,6 +1260,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.gpu",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -923,6 +1271,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.browser",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -933,16 +1282,18 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "memory.app.private",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
         words: AMOUNT,
         min_n: 0,
         across: Across::Care(CARE_PRIVATE),
-        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; Linux: anonymous resident and swapped pages; macOS: the physical footprint)",
+        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; Linux: anonymous resident and swapped pages; macOS: the physical footprint, which also holds the dirty pages of shared anonymous memory the process created, and is refused for a Bun script host, whose allocator reuses pages the footprint no longer counts)",
     },
     MetricDef {
         name: "memory.app.host",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -953,6 +1304,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "memory.app.pss",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -963,6 +1315,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.fixture",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -973,6 +1326,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.compile",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -983,6 +1337,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.process.3d",
+        capability: Capability::Gpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -993,6 +1348,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.vram",
+        capability: Capability::Gpu,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1003,6 +1359,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.shared",
+        capability: Capability::Gpu,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1013,6 +1370,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "js.heap.used",
+        capability: Capability::PageEngine,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1023,6 +1381,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "dom.nodes",
+        capability: Capability::PageEngine,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1033,6 +1392,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "js.heap.growth",
+        capability: Capability::PageEngine,
         unit: "MB/min",
         better: Better::Lower,
         kind: Kind::Sampled,
@@ -1043,6 +1403,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "dom.nodes.growth",
+        capability: Capability::PageEngine,
         unit: "count/min",
         better: Better::Lower,
         kind: Kind::Sampled,
@@ -1053,6 +1414,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "leak.suspects.retained",
+        capability: Capability::PageEngine,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Sampled,
@@ -1063,6 +1425,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.work",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1073,6 +1436,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.main",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1083,6 +1447,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.main.busy",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1093,6 +1458,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "ui.cpu",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1103,6 +1469,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "ui.wakes",
+        capability: Capability::ProcessCpu,
         unit: "/s",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1113,6 +1480,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.wakes",
+        capability: Capability::ProcessCpu,
         unit: "/s",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1123,6 +1491,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "energy.cpu",
+        capability: Capability::HardwareCounters,
         unit: "mJ",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1133,6 +1502,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.instructions",
+        capability: Capability::HardwareCounters,
         unit: "instructions",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1143,6 +1513,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.idle_wakes",
+        capability: Capability::PackageIdle,
         unit: "/s",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1153,6 +1524,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cli.launch",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1163,6 +1535,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "memory.peak",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1173,6 +1546,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "metric",
+        capability: Capability::WallAndCounts,
         unit: "value",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1183,6 +1557,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "io.read",
+        capability: Capability::ProcessCpu,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1193,6 +1568,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "io.write",
+        capability: Capability::ProcessCpu,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1203,16 +1579,18 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "js.heap.retained",
+        capability: Capability::PageEngine,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
         words: AMOUNT,
         min_n: 0,
         across: Across::PerSide,
-        about: "script targets: the JS heap a run leaves behind, after a full collection before and after it",
+        about: "script targets: the JS heap a run leaves behind, after a full collection before and after it, ArrayBuffer and Buffer contents included (Node keeps them off its heap; Bun counts them in it)",
     },
     MetricDef {
         name: "http.latency.p50",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1223,6 +1601,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.latency.p95",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1233,6 +1612,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.latency.max",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1243,6 +1623,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.timeouts",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1253,6 +1634,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.errors",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1263,6 +1645,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.missed_sends",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1273,6 +1656,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.probes",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -1283,6 +1667,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.idle.p50",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1293,6 +1678,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "layout.shift",
+        capability: Capability::PageEngine,
         unit: "score",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1303,6 +1689,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "net.requests",
+        capability: Capability::PageEngine,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -1313,6 +1700,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "net.bytes",
+        capability: Capability::PageEngine,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -1323,6 +1711,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "count",
+        capability: Capability::WallAndCounts,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -1333,6 +1722,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "app",
+        capability: Capability::WallAndCounts,
         unit: "value",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1343,6 +1733,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "phase",
+        capability: Capability::WallAndCounts,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1353,6 +1744,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "span",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1363,6 +1755,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.ready",
+        capability: Capability::Launch,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1373,6 +1766,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.painted",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1383,6 +1777,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.settled",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1393,6 +1788,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.milestone",
+        capability: Capability::Launch,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1407,6 +1803,7 @@ pub const METRICS: &[MetricDef] = &[
 /// the other direction (SPEC §9.6).
 pub const METRIC_HIGHER: MetricDef = MetricDef {
     name: "metric",
+    capability: Capability::WallAndCounts,
     unit: "value",
     better: Better::Higher,
     kind: Kind::Timed,
