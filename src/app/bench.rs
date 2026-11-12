@@ -7306,6 +7306,23 @@ pub(super) fn script_unread_refusal(m: &str) -> Refusal {
         .fix("measure cpu.work, or run the code as a cli() command, whose wakes and IO strobe counts")
 }
 
+/// What a page block (a browser's or an app's page over DevTools) gives no reading of: its run edges read
+/// the browser's processes' CPU and the OS's per-process counters, never their threads' switches or IO,
+/// and a page has no native UI thread.
+pub(super) fn page_unread(m: &str) -> bool {
+    matches!(m, "cpu.wakes" | "io.read" | "io.write" | "ui.cpu" | "ui.wakes")
+}
+
+pub(super) fn page_unread_refusal(m: &str) -> Refusal {
+    let r =
+        Refusal::new(ValidatorId::NotForTarget, format!("{m}: a page's runs read the browser's CPU and the OS's per-process counters, not its threads' context switches, IO or a native UI thread"));
+    if m == "cpu.wakes" && cfg!(target_os = "macos") {
+        r.fix("measure cpu.idle_wakes (the CPU package's wakes from idle the browser caused), or measure the app as a native() target, whose thread wakes strobe counts")
+    } else {
+        r.fix("measure cpu.work or main.work, or measure the app as a native() target, whose thread wakes and IO strobe counts")
+    }
+}
+
 /// What one case of a page launch ran (`run_chunk`), kept until the launch's trace is read.
 struct PageCase {
     /// Its first run's index among the launch's runs: its runs are `run:<base + i>`.
@@ -9218,7 +9235,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let real = deferred_ms >= 1.0 && deferred_ms >= 0.05 * work_ms;
                 let only_there = deferred_n > 0.0 && (layouts == 0.0 || layout_ms == 0.0);
                 let misses = |m: &str| {
-                    // `cpu.wakes` is counted from a reading after the frame.
+                    // A page refuses `cpu.wakes` (`page_unread`).
                     m == "run.duration"
                         || (m.starts_with("cpu.") && m != "cpu.wakes")
                         || matches!(m, "main.paint" | "main.gc" | "layout.shift" | "gpu.compile")
@@ -9325,6 +9342,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     if let Some(r) = validity::engine_refusal(engine, m).or(phone_side).or(webgpu).or(preload) {
                         values.remove(m);
                         refused.insert(m.clone(), r);
+                    }
+                    if page_unread(m) && !values.contains_key(m) && !refused.contains_key(m) {
+                        refused.insert(m.clone(), page_unread_refusal(m));
                     }
                 }
                 // A run in which a process of the browser ended and what it used is not known: the set's CPU
@@ -10911,6 +10931,9 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
     }
     if t["kind"] == "script" && script_unread(&s.primary) {
         return Ok(Some(script_unread_refusal(&s.primary)));
+    }
+    if !is_native(t) && !matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) && page_unread(&s.primary) {
+        return Ok(Some(page_unread_refusal(&s.primary)));
     }
     // An app's page traced over DevTools as a page is: lean unless --trace full.
     if matches!(t["kind"].as_str(), Some("app" | "exe" | "webview")) && s.primary == "main.tasks.long" && args.get("trace") != Some("full") {
