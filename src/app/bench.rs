@@ -1555,7 +1555,7 @@ struct Ctx<'a> {
     /// `state.json`: the command line and each series' finished pairs or result (`checkpoint`).
     saved: Value,
     /// Per series, the planned time of the series after it (ms), for the ETA (`plan`).
-    eta_after: BTreeMap<String, f64>,
+    eta_after: BTreeMap<String, Option<f64>>,
     /// Per series, variant and moment, the first block's screen and hash: a thumbnail is kept for it
     /// and for blocks that showed something else (`shown`).
     shown_seen: BTreeMap<String, (String, Option<u64>)>,
@@ -2467,9 +2467,10 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     // The plan (SPEC §9.1): pairs and minutes per series from earlier runs here, and the ETA it keeps.
     let estimate = if compares && !args.has("pixels-only") { plan::estimate(&series, &ctx.describe, &file, args, &config, &project, &variants, Some(&exp)) } else { Value::Null };
-    let planned: Vec<f64> = estimate["series"].as_array().into_iter().flatten().map(|s| s["ms"].as_f64().unwrap_or(0.0)).collect();
+    // A series no block of which ran here has no planned time (`null`): the time after it is unknown.
+    let planned: Vec<Option<f64>> = estimate["series"].as_array().into_iter().flatten().map(|s| s["ms"].as_f64()).collect();
     for (i, s) in series.iter().enumerate() {
-        ctx.eta_after.insert(s.label(), planned.iter().skip(i + 1).sum());
+        ctx.eta_after.insert(s.label(), planned.iter().skip(i + 1).copied().sum());
     }
     if estimate.is_object() {
         for line in plan::summary(&estimate) {
@@ -3942,7 +3943,13 @@ fn held_from(name: &str, blocks: &[Block], pairs: &[(usize, usize)]) -> Option<b
 fn eta(ctx: &mut Ctx, s: &Series, blocks: &[Block], pairs: &[(usize, usize)], target: usize) -> String {
     let block = |b: &Block| b.steps.iter().map(|x| x.1).sum::<f64>();
     let pair_ms = pairs.iter().map(|&(a, b)| block(&blocks[a]) + block(&blocks[b])).sum::<f64>() / pairs.len().max(1) as f64;
-    let ms = target.saturating_sub(pairs.len()) as f64 * pair_ms + ctx.eta_after.get(&s.label()).copied().unwrap_or(0.0);
+    // A later series with no planned time (nothing measured a block of it here) leaves the ETA unknown:
+    // none is said, and other benches' plans read the time left as unknown (0).
+    let Some(after) = ctx.eta_after.get(&s.label()).copied().unwrap_or(Some(0.0)) else {
+        ctx.reg.set_eta(0.0);
+        return String::new();
+    };
+    let ms = target.saturating_sub(pairs.len()) as f64 * pair_ms + after;
     ctx.reg.set_eta(ms);
     if ms < 1.0 { String::new() } else { format!(" · ETA ~{}", fmt::ms_duration(ms as u64)) }
 }
@@ -4842,12 +4849,15 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                     let hot = rec.as_ref().filter(|_| !script).and_then(|r| super::query::hotspots_of(r, "function", 1).ok());
                     if let Some(h) = hot.map(|o| o.json) {
                         let (scripts, mapped) = (h["script_samples"].as_f64().unwrap_or(0.0), h["mapped_samples"].as_f64().unwrap_or(0.0));
-                        if scripts > 0.0 && mapped / scripts < 0.95 {
+                        // The share of samples in minified scripts no map names (`query::rank`'s count; an
+                        // older reading's: every unmapped sample, an HTML page's own inline scripts too).
+                        let unmapped = h["minified_unmapped_samples"].as_f64().unwrap_or(scripts - mapped);
+                        if scripts > 0.0 && unmapped / scripts > 0.05 {
                             warnings.push(validity::warn(
                                 "Unresolved",
                                 format!(
                                     "{who}: {:.0}% of script samples have no source map, so their names and files stay minified; strobe builds with STROBE_SOURCEMAP=hidden: let the bundler read it (Vite: build: {{ sourcemap: process.env.STROBE_SOURCEMAP }}), which ships the same scripts",
-                                    100.0 * (1.0 - mapped / scripts)
+                                    100.0 * unmapped / scripts
                                 ),
                             ));
                         }
