@@ -1015,6 +1015,27 @@ fn windowless_target(t: &Value, config: &Value) -> bool {
     matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, config).ok()).is_some_and(|a| a.windowless)
 }
 
+/// An app whose page strobe drives over DevTools (`app`, `exe`, `webview`, `command`) declared with
+/// `window: false` (`windowless_target`): it may draw, but to no window anyone sees.
+fn windowless_app(t: &Value, config: &Value) -> bool {
+    matches!(t["kind"].as_str(), Some("app" | "exe" | "webview" | "command")) && windowless_target(t, config)
+}
+
+/// Why a windowless app (`windowless_app`) has no frame, input-latency, display or GPU-use metric.
+const WINDOWLESS_DRAWN: &str = "the app shows no window (window: false), so nothing it draws reaches a display";
+
+/// `window: false` on a target whose processes put a normal window on screen anyway (`pids`): none of a
+/// windowed target's guards held it (in front, uncovered, active), so its numbers may be a covered or
+/// inactive window's. A hidden window, a headless browser's and a tray icon are not on screen.
+fn windowless_shown(name: &str, pids: &[u32]) -> Result<()> {
+    match host::main_window(pids).filter(host::TopWindow::shown) {
+        Some(w) => Err(Refusal::new(ValidatorId::VariantMismatch, format!("the target {name} declares window: false, yet it showed a window on screen ({}×{} pixels)", w.client.0, w.client.1))
+            .fix("drop `window: false`, or keep the window hidden")
+            .into()),
+        None => Ok(()),
+    }
+}
+
 /// How a note names a side: an implementation's own name in an implementation comparison, else its
 /// role (`base`, `head`), which reports word as `before` and `this PR`.
 fn side_of<'a>(ctx: &Ctx, v: &'a Variant) -> &'a str {
@@ -1033,12 +1054,16 @@ const TITLE_BAR_PT: f64 = 32.0;
 /// difference there is not the implementation. Each refusal names the side.
 fn admit_window(ctx: &mut Ctx, s: &Series, v: &Variant, b: &Block) -> Result<()> {
     let target = &ctx.describe["targets"][v.target_of(s)];
-    let windowed = !matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) && target["window"] != false;
+    // A target with no window (its own `window: false` or its app profile's) has no size to hold to a
+    // viewport or to the other side's: a hidden window's is no one's.
+    if windowless_target(target, &ctx.config) {
+        return Ok(());
+    }
     // A phone's page is its own screen: a target's viewport sizes only an emulated one.
     let asked =
         target["viewport"].as_object().filter(|_| ctx.phone.is_none()).map(|vp| (vp.get("width").and_then(Value::as_f64).unwrap_or(0.0), vp.get("height").and_then(Value::as_f64).unwrap_or(0.0)));
     // A launch is timed in the window the app opens (never resized): its sides are held to each other.
-    match (asked.filter(|_| windowed && !s.launch.is_object()), b.client) {
+    match (asked.filter(|_| !s.launch.is_object()), b.client) {
         (Some((w, h)), Some(c)) if (c[0] - w).abs() > 2.0 || (c[1] - h).abs() > 2.0 => {
             let what = if b.frame { "window (its frame, title bar included)" } else { "page" };
             return Err(Error::refused(
@@ -1297,9 +1322,7 @@ fn has_video(rec: &str) -> bool {
 /// a screencast.
 fn no_video(ctx: &Ctx, name: &str) -> Option<String> {
     let t = &ctx.describe["targets"][name];
-    let windowless =
-        matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
-    if windowless {
+    if windowless_target(t, &ctx.config) {
         return Some(format!("{name} opens no window (a script, a command, a terminal program, or window: false)"));
     }
     let engine = engine_of(t);
@@ -3808,8 +3831,7 @@ fn secondary_names(s: &Series, extra: &[&str], rate_context: bool) -> Vec<String
 /// event loop a person waits on with no window to time: a script's host, a windowless native app.
 fn target_defaults(ctx: &Ctx, s: &Series, target: &Value) -> Vec<&'static str> {
     let outside = matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) || is_native(target) || s.sides.is_some() || engine_of(target) != WebEngine::Chromium;
-    let windowless = target["window"] == false || profile_of(target).and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
-    let main = target["kind"] == "script" || (is_native(target) && windowless);
+    let main = target["kind"] == "script" || (is_native(target) && windowless_target(target, &ctx.config));
     outside.then_some("cpu.work").into_iter().chain(if main { ["cpu.main", "cpu.main.busy"].as_slice() } else { &[] }.iter().copied()).collect()
 }
 
@@ -6989,8 +7011,8 @@ fn phase_ms(marks: &[(String, u64)], name: &str, run: &metrics::Timed) -> f64 {
 }
 
 /// Whether a series can run while the session is locked (SPEC §10.1 `SessionLocked`): nothing it
-/// measures needs a presenting window. Script targets; leak runs; and a native target with
-/// `window: false` (a tray app), or any native target under `--check` (no verdict: it validates the
+/// measures needs a presenting window. Script targets; leak runs; an app driven over DevTools with
+/// `window: false`; and a native target with `window: false` (a tray app), or any native target under `--check` (no verdict: it validates the
 /// file), whose metrics are all CPU (`ui.*` too), memory (GPU memory too), IO, counters, its run
 /// time, GPU use as a secondary (refused while locked) and launch milestones (not pixels).
 fn runs_locked(ctx: &Ctx, s: &Series, x: &Exec) -> bool {
@@ -7012,7 +7034,7 @@ fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
             || m == "run.duration"
             || (m.starts_with("launch.") && m != "launch.painted" && m != "launch.settled")
     };
-    let windowless = t["window"] == false || t["app"].as_str().and_then(|id| isolate::app(id, &ctx.config).ok()).is_some_and(|a| a.windowless);
+    let windowless = windowless_target(t, &ctx.config);
     // A pixels block compares what the window shows; only a headless page (or a phone's) draws it
     // without a screen, a terminal's grid is drawn by strobe itself, and Windows draws a native app's
     // window for its own rendering and its compositor's copy while locked (`host::window_image`).
@@ -7027,6 +7049,8 @@ fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
         // on the phone's.
         "web" | "url" if headless_of(ctx, s) || ctx.phone.is_some() => None,
         _ if x.set == Set::Memory => None,
+        // An app with no window: what it would draw is refused (`WINDOWLESS_DRAWN`), the rest needs no screen.
+        "app" | "exe" | "webview" | "command" if windowless => None,
         "native" if windowless || x.untimed => {
             let on: Vec<&str> = declared_metrics(s)
                 .into_iter()
@@ -7090,6 +7114,8 @@ fn restate_recording(ctx: &Ctx, s: &Series, b: &Block) {
     // Why the recording's frames are gone, as a `record` says it (`query summary`).
     let why = if headless_of(ctx, s) {
         Some("Headless: the page ran headless, so nothing it drew reached a display".to_string())
+    } else if windowless_app(&ctx.describe["targets"][&s.target], &ctx.config) {
+        Some(format!("NotForTarget: {WINDOWLESS_DRAWN}"))
     } else if b.browser.as_ref().is_some_and(|br| br.software) {
         Some("SoftwareGpu: a software adapter drew the page; the browser's CPU includes the rasterization a GPU would do".to_string())
     } else {
@@ -7104,9 +7130,11 @@ fn restate_recording(ctx: &Ctx, s: &Series, b: &Block) {
 /// A headless page (`--headless`, a target's `headless`): what reached no display is not kept. Frames,
 /// input-to-screen latencies, scrolling, canvas frames and GPU use go, and the declared ones show
 /// refused (`Headless`); CPU, main-thread work, counters, memory, milestones and strobe's own input
-/// pacing stay.
+/// pacing stay. So for an app driven over DevTools with `window: false` (`windowless_app`): what its
+/// hidden or headless window drew reached no display either (`NotForTarget`).
 fn headless_state(ctx: &Ctx, s: &Series, mut b: Block) -> Block {
-    if !headless_of(ctx, s) {
+    let windowless = windowless_app(&ctx.describe["targets"][&s.target], &ctx.config);
+    if !headless_of(ctx, s) && !windowless {
         return b;
     }
     // GPU memory too when this block's headless browser drew in software: no GPU held it.
@@ -7118,7 +7146,12 @@ fn headless_state(ctx: &Ctx, s: &Series, mut b: Block) -> Block {
     b.intervals.clear();
     b.phases.clear();
     for m in declared_metrics(s).into_iter().filter(|m| drawn(m)) {
-        b.refused.insert(m.clone(), Refusal::new(ValidatorId::Headless, format!("{m}: the page ran headless, so nothing it drew reached a display")));
+        let r = if windowless {
+            Refusal::new(ValidatorId::NotForTarget, format!("{m}: {WINDOWLESS_DRAWN}")).fix("measure CPU, memory or counters of a windowless app, or give it a window")
+        } else {
+            Refusal::new(ValidatorId::Headless, format!("{m}: the page ran headless, so nothing it drew reached a display"))
+        };
+        b.refused.insert(m.clone(), r);
     }
     b
 }
@@ -7479,6 +7512,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // Nothing of it on screen to bring forward: a headless page, or an app with `window: false` (a tray
     // app whose hidden window macOS still lists, and which never becomes the active app).
     let offscreen = headless || windowless_target(&target, &ctx.config);
+    // An app declared without a window, which must then show none (`windowless_shown`).
+    let declared_windowless = windowless_app(&target, &ctx.config);
     // What the cases declared beyond the default probes: counters, network counts, layout shift. One
     // browser runs every case of a launch, so it is set up for what any of them declared.
     let declared: Vec<&String> = cases.iter().flat_map(declared_metrics).collect();
@@ -7570,15 +7605,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let traceless = outside || page.cdp().is_none();
         // Whether the block traces at all (`traceless` aside, which measures without one). A lean trace
         // holds what reached a display (frames, input latency, paint) and what is read from the page's own
-        // marks (phases, spans, layout shifts, GC, GPU compiles). A headless page reaches no display, so
-        // its lean block traces only for a declared metric of the trace: the trace's stream cost strobe
-        // about 3 ms of CPU per page load, and its marks run in the page. Its main-thread work, counts,
-        // CPU and memory come from the Performance domain and the OS. Counter and memory blocks trace nothing.
+        // marks (phases, spans, layout shifts, GC, GPU compiles). A page with nothing on screen (`offscreen`:
+        // headless, or an app with `window: false`) reaches no display, so its lean block traces only for a
+        // declared metric of the trace: tracing costs the browser and strobe CPU in every run, and its marks
+        // run in the page. Its main-thread work, counts, CPU and memory come from the Performance domain and
+        // the OS. Counter and memory blocks trace nothing.
         let trace_on = !traceless
             && set != Set::Memory
             && !x.counters
             && (set != Set::Lean
-                || !headless
+                || !offscreen
                 || declared.iter().any(|m| m.starts_with("phase.") || m.starts_with("span.") || matches!(m.as_str(), "layout.shift" | "main.gc" | "gpu.compile" | "main.paint")));
         // Frames from the OS's presents: from outside, or headed in such an engine. Then `interaction.*`
         // too (a default secondary), from the page's own changes (`CHANGES_SCRIPT`, in every document
@@ -7639,8 +7675,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // An app's window (a webview's, an Electron app's) is placed like a native app's and sized to
         // a viewport (DevTools resizes no app window: the OS does). The block records the page's own
         // size, not the one asked for.
+        // An app with `window: false` has none to place: its hidden window stays as the app made it.
         if let (WebBrowser::Chromium(b), Page::Chromium(p)) = (&browser, &page)
             && (b.embedded || app)
+            && !offscreen
         {
             ctx.used = Some(crate::target::webview::fit(b, p, Some(&window), viewport)?);
         }
@@ -8220,6 +8258,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         if !hidden_ok {
             validity::window_visible(&page)?;
             front_page(s, &browser, offscreen)?;
+        }
+        // `window: false` holds only while the app shows none: no guard of a windowed one ran.
+        if declared_windowless {
+            windowless_shown(v.target_of(s), &browser.pids())?;
         }
         // From outside, every input of the block (setup's and reset's too) comes from the OS, as the
         // native side's does: set up once the window shows and is in front.
@@ -8948,6 +8990,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         validity::window_visible(&page)?;
                         front_page(s, &browser, offscreen)?;
                     }
+                    if declared_windowless {
+                        windowless_shown(v.target_of(s), &browser.pids())?;
+                    }
                     browser.own()?;
                     if let Some(first) = &first_slow {
                         match check()? {
@@ -9073,6 +9118,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             if !hidden_ok && !batch {
                 validity::window_visible(&page)?;
                 front_page(s0, &browser, offscreen)?;
+            }
+            if declared_windowless {
+                windowless_shown(v.target_of(s0), &browser.pids())?;
             }
             if !batch {
                 browser.own()?;
@@ -11038,6 +11086,26 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
         return Ok(Some(
             Refusal::new(ValidatorId::NotForTarget, format!("{on}a command's app takes reduced motion only from DevTools once strobe attaches to it, after its launch drew"))
                 .fix("time work after the launch in a run case, or have the command start the app with --force-prefers-reduced-motion and drop the target's motion"),
+        ));
+    }
+    // An app with no window (`window: false` on the target or its profile) draws to no display: a primary of
+    // frames, input latency, the display or GPU use is refused before anything launches, as its blocks would.
+    if (windowless_app(t, config) || (is_native(t) && windowless_target(t, config))) && (display_metric(&s.primary) || gpu_use(&s.primary)) {
+        let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
+        return Ok(Some(
+            Refusal::new(ValidatorId::NotForTarget, format!("{on}the primary {}: {WINDOWLESS_DRAWN}", s.primary))
+                .fix("choose a primary a windowless app has: cpu.work, cpu.app.total, run.duration, a memory metric or phase.<name>; or give the app a window"),
+        ));
+    }
+    // macOS keeps out of a Bun host's footprint what its allocator freed and wrote again (`script::chunk`
+    // refuses it per block): a primary of it is refused before the file's other targets run.
+    if cfg!(target_os = "macos") && t["kind"] == "script" && t["runtime"].as_str().unwrap_or("bun") == "bun" && s.primary == "memory.app.private" {
+        return Ok(Some(
+            Refusal::new(
+                ValidatorId::EngineUnsupported,
+                "memory.app.private: macOS leaves out of a Bun host's footprint the memory its allocator freed and then wrote again, so the footprint can miss what the host holds (100 MiB held read as 5.1 MiB)",
+            )
+            .fix("declare js.heap.retained (what a run leaves on the heap after a collection, buffers included), or host the module on Node (runtime: \"node\")"),
         ));
     }
     if args.has("mobile") {
