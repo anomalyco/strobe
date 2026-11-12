@@ -17,7 +17,7 @@ that it works.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/card-dark.png">
-  <img alt="44% less CPU time, 78% less memory, better in 8 of 8 pairs" src="docs/card-light.png">
+  <img alt="44% less CPU time, 78.0% less memory, better in 8 of 8 pairs; before 7,052 µs, this PR 3,904 µs" src="docs/card-light.png">
 </picture>
 
 ## In your project

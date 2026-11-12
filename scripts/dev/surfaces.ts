@@ -618,7 +618,8 @@ function checkSummary(r: J, md: string, text: string) {
   const rows = rowsOf(md).slice(1)
   // Names a published summary must never carry (SPEC §1 rule 9): what the reservation moved or could not move.
   // and the busiest other processes each block saw (`blocks[].background`), where no case or target has the name.
-  const own = new Set(seriesOf(r).flatMap((s: J) => [s.case, s.target, s.label]).filter(Boolean))
+  // The target's own: its cases and targets, and each side's executable (`exe:…/app.exe` names the target, not another).
+  const own = new Set([...seriesOf(r).flatMap((s: J) => [s.case, s.target, s.label]), r.args?.flags?.base, r.args?.flags?.head].filter(Boolean))
   const busy = seriesOf(r).flatMap((s: J) => [...(s.blocks ?? []), ...(s.pass?.blocks ?? [])].flatMap((b: J) => (Array.isArray(b.background) ? b.background.map((x: J) => x?.[0]) : [])))
   const names = [...new Set([...Object.keys(r.plan?.reserve?.moved ?? {}), ...Object.keys(r.plan?.reserve?.failed ?? {}), ...busy])].filter((n) => typeof n === "string" && n.length > 3 && ![...own].some((o: any) => String(o).includes(n)))
   for (const n of names) if (md.includes(n)) flagIt("CRIT", "summary", `names another process: ${n}`)
