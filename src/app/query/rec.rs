@@ -130,8 +130,24 @@ impl Rec {
         }
     }
 
+    /// A recording by its handle, or by the path of its folder or its meta.json (`query::by_path`).
     pub fn resolve(handle: &str) -> Result<Rec> {
-        Ok(Rec::open(&store::resolve(handle)?))
+        match super::by_path(handle) {
+            Some(super::ByPath::Recording(dir)) => Ok(Rec::open(&dir)),
+            Some(super::ByPath::Experiment(_)) => Err(Error::usage(format!("{handle} is an experiment's result, not a recording"))),
+            None => Ok(Rec::open(&store::resolve(handle)?)),
+        }
+    }
+
+    /// Whether the recording is one of strobe's own (`recordings/`): a folder named by its path is read
+    /// as it is, and nothing is written beside it.
+    pub fn stored(&self) -> bool {
+        self.dir.parent().is_some_and(|p| p == crate::host::paths::recordings())
+    }
+
+    /// What a printed command names the recording by: its id, or the path it was read from.
+    pub fn handle(&self) -> String {
+        if self.stored() { self.id.clone() } else { super::path_word(&self.dir) }
     }
 
     /// The measured runs the recording's profiles cover: its `runs`, else its duration over one run's.

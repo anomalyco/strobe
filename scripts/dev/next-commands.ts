@@ -18,14 +18,20 @@
 //   - every flag that chose how the experiment ran or what it measured (`--runs`, `--pin`, `--power`, `--engine`,
 //     `--headless`, `--mobile`, `--seed` when the hooks drew on it, `--probes waits` for a profile) stays, with its
 //     value, wherever the printed command takes it.
+//   - a `record` of a check of one build names that build (`--head <folder or ref>`), as the check ran it.
 // `--make` first builds scripts/dev/insights-repo.ts's repository in a folder named `O'Connor repo` (a `'` and a space
-// in every path) and runs cheap checks there for the shapes a real result has: a two-target check, a param swept with
-// `--params all`, a seeded workload with `--runs`, `--pin` and `--power` (needs the bench slot, a few seconds each).
+// in every path) and runs cheap checks there, in a state folder of this run's own, for the shapes a real result has
+// (`MAKE` below: two targets of one case on one build named by its folder or a ref, two targets checked against each
+// other, one target's variant, a param swept with `--params all`, a seeded workload with `--runs`, `--pin` and
+// `--power`, attribution blocks of a script and of a page, a failed case, `strobe run --check` of one command and of
+// two); a few seconds each, each takes strobe's bench slot. Each made result is then also read by its path, from a copy
+// strobe does not keep (`query <path>/result.json insights`), and one of its recordings from a copied folder
+// (`query <folder> insights`): their commands name those paths.
 //
 //   bun scripts/dev/next-commands.ts [--strobe <exe>] [--make] [--show] [exp_… …]
 //
 // Exit 1 when a command fails.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { homedir, platform, tmpdir } from "os"
 import { join } from "path"
 import { fileURLToPath } from "url"
@@ -103,9 +109,14 @@ function check(a: string[], state: string, missingOk: Set<string>): string | und
   }
   const bad = positional(cmd, words, flags)
   if (bad) return bad
-  for (const h of [...words, ...flags.values()].flatMap((w) => w.match(/\b(?:rec|exp)_[0-9a-z_]+/g) ?? [])) {
+  for (const h of [...words, ...flags.values()].filter((w) => !/[\\/]/.test(w)).flatMap((w) => w.match(/\b(?:rec|exp)_[0-9a-z_]+/g) ?? [])) {
     const kind = h.startsWith("rec_") ? "recordings" : "experiments"
     if (!missingOk.has(h) && !existsSync(join(state, kind, h.split("..")[0]))) return `${h} does not exist`
+  }
+  // A handle given as a path (a result or a recording strobe does not keep) names one that is there.
+  if ((cmd === "query" || cmd === "report") && words.length) {
+    const handle = cmd === "report" && ["experiment", "recording"].includes(words[0]) ? words[1] : words[0]
+    if (handle && /[\\/]/.test(handle) && !existsSync(handle)) return `no file or folder ${handle}`
   }
   const file = cmd === "bench" ? words[0] : flags.get("bench")?.split("#")[0]
   if (file && !existsSync(file)) return `no file ${file}`
@@ -123,6 +134,8 @@ function commandsOf(out: J): [string, number | null][] {
     for (const g of s.suspects ?? []) for (const h of g.hits ?? []) for (const c of h.handles ?? []) all.set(c, i)
   }
   for (const n of out.next ?? []) if (n.command) all.set(n.command, null)
+  // A recording's insights: each hit's handles.
+  for (const h of out.insights ?? []) for (const c of h.handles ?? []) all.set(c, null)
   return [...all]
 }
 
@@ -148,6 +161,14 @@ function semantic(a: string[], s: J, r: J): string | undefined {
     if (filtered !== undefined && filtered !== s.case) return `names case ${filtered}, under series ${s.label}`
     if (filtered !== undefined && own(s.params) && params(flags.get("params")) !== own(s.params)) return `--params ${flags.get("params") ?? "(none)"}, under series ${s.label} of params ${own(s.params)}`
     if (cmd === "record" && s.target && flags.get("target") !== s.target) return `--target ${flags.get("target") ?? "(none)"}, under series ${s.label} of target ${s.target}`
+    // A check of one build: the profile is of that build (a folder the check named, or a ref), never `.` instead.
+    const targets = new Set((r.series ?? []).map((x: J) => x.target))
+    const built = typeof given.head === "string" && !given.head.startsWith("cmd:") && !targets.has(given.head.split("=")[0]) ? given.head : undefined
+    const same = (a: string, b: string) => {
+      const n = (p: string) => p.replace(/^\\\\\?\\/, "").replace(/\\/g, "/").replace(/\/$/, "")
+      return win ? n(a).toLowerCase() === n(b).toLowerCase() : n(a) === n(b)
+    }
+    if (cmd === "record" && r.kind === "check" && !given.base && built && !same(flags.get("head") ?? ".", built)) return `--head ${flags.get("head") ?? "(none)"}, the check ran --head ${built}`
   }
   for (const k of MEASURED.filter((k) => given[k] !== undefined && takes(k))) {
     const want = String(given[k])
@@ -206,33 +227,88 @@ for (const [id, r] of synthetic) {
 // ---------- real results, made here (`--make`) ----------
 
 let failed = 0
+// Each made result, by id (in this run's state folder), and read again by its path from a copy strobe does not keep.
 const made: string[] = []
+const byPath: string[] = []
 if (argv.includes("--make")) {
   // A `'` and a space in every path: PowerShell and sh must both read the bench file's path whole.
   const repo = join(work, "O'Connor repo")
   const mk = Bun.spawnSync([bun, fileURLToPath(new URL("./insights-repo.ts", import.meta.url)), repo], { stdout: "pipe", stderr: "pipe" })
   if (mk.exitCode !== 0) throw new Error(`insights-repo.ts: ${mk.stderr.toString()}`)
-  for (const args of [
-    // Two targets of one file, checked: each case's line runs one of them.
-    ["--base", "lib", "--head", "lib2", "--check", "--filter", "port"],
+  // The trace engine the real state folder holds, copied (else each run downloads it into its own).
+  for (const v of existsSync(join(realState, "engine")) ? readdirSync(join(realState, "engine")) : []) {
+    for (const exe of ["trace_processor_shell", "trace_processor_shell.exe"].filter((e) => existsSync(join(realState, "engine", v, e)))) {
+      mkdirSync(join(fakeState, "engine", v), { recursive: true })
+      cpSync(join(realState, "engine", v, exe), join(fakeState, "engine", v, exe))
+    }
+  }
+  // A case that fails (its hint and the rerun of it alone).
+  writeFileSync(
+    join(repo, "fails.bench.ts"),
+    `import { bench, script } from "@hona/strobe"\n\nexport default bench({\n  targets: { lib: script("./harness.ts") },\n  cases: {\n    boom: { primary: "cpu.work", run: () => { throw new Error("planted failure") } },\n  },\n})\n`,
+  )
+  // The shapes a real result has, each a check (no timed pairs), from the repository's folder.
+  const MAKE: [string, string[]][] = [
+    // Two targets of one case on one build, named by its folder or by a ref: a parity matrix, whose sides are builds.
+    ["bench", ["more.bench.ts", "--head", repo, "--check", "--filter", "port"]],
+    ["bench", ["more.bench.ts", "--head", "c1", "--check", "--filter", "port"]],
+    // Two targets of one file, checked against each other: each case's line runs one of them.
+    ["bench", ["more.bench.ts", "--base", "lib", "--head", "lib2", "--check", "--filter", "port"]],
+    // One target's variant (`--head <target>=<variant>`).
+    ["bench", ["more.bench.ts", "--head", "lib2=c1", "--check", "--filter", "port"]],
     // A param swept (`--params all`): each series names its own value.
-    ["--head", "c1", "--check", "--filter", "sized", "--params", "all"],
+    ["bench", ["more.bench.ts", "--head", "c1", "--check", "--filter", "sized", "--params", "all"]],
     // A workload drawn from the seed, with how it ran: kept in every rerun and profile.
-    ["--base", "c0", "--head", "c1", "--check", "--filter", "rand", "--runs", "2", "--pin", "none", "--power", "keep"],
-  ]) {
-    const p = Bun.spawnSync([STROBE, "bench", "more.bench.ts", ...args, "--progress", "stdout"], { cwd: repo, stdout: "pipe", stderr: "pipe" })
+    ["bench", ["more.bench.ts", "--base", "c0", "--head", "c1", "--check", "--filter", "rand", "--runs", "2", "--pin", "none", "--power", "keep"]],
+    // Attribution blocks of a script (`--why always`): their recordings' hits and handles.
+    ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "regress,waits"]],
+    // A page whose time is restyling, headless: a lean check recording and an attribution one.
+    ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "restyle", "--headless"]],
+    // A failed case.
+    ["bench", ["fails.bench.ts", "--head", ".", "--check"]],
+    // `strobe run --check`: one command, and two.
+    ["run", ["--check", "--head", "bun -e 0"]],
+    ["run", ["--check", "--base", "bun -e 0", "--head", "bun -e 1"]],
+  ]
+  for (const [command, args] of MAKE) {
+    const p = Bun.spawnSync([STROBE, command, ...args, "--progress", "stdout"], { cwd: repo, stdout: "pipe", stderr: "pipe", env: { ...process.env, ...fakeEnv } })
     const id = (p.stdout.toString() + p.stderr.toString()).match(/\bexp_[0-9a-f]{6,}\b/g)?.pop()
-    console.log(`made ${id ?? "(none)"}: strobe bench more.bench.ts ${args.join(" ")} (exit ${p.exitCode})`)
-    if (p.exitCode !== 0) console.log(`     ${(p.stderr.toString() + p.stdout.toString()).trim().split("\n").filter((l) => /^strobe:|error/i.test(l)).slice(0, 3).join("\n     ")}`)
-    if (id && existsSync(join(realState, "experiments", id, "result.json"))) made.push(id)
+    const failing = command === "bench" && args[0] === "fails.bench.ts"
+    console.log(`made ${id ?? "(none)"}: strobe ${command} ${args.join(" ")} (exit ${p.exitCode})`)
+    if (p.exitCode !== 0 && !failing) console.log(`     ${(p.stderr.toString() + p.stdout.toString()).trim().split("\n").filter((l) => /^strobe:|error/i.test(l)).slice(0, 3).join("\n     ")}`)
+    if (id && existsSync(join(fakeState, "experiments", id, "result.json")) && (p.exitCode === 0 || (failing && p.exitCode === 1))) made.push(id)
     else failed++
+  }
+  // Each made result copied where strobe does not keep it, under an id it does not know: its commands name the copy.
+  for (const id of made) {
+    const r = JSON.parse(readFileSync(join(fakeState, "experiments", id, "result.json"), "utf8"))
+    const dir = join(work, "copied results", id)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ ...r, id: `exp_copied_${id.slice(4)}` }))
+    byPath.push(join(dir, "result.json"))
+  }
+  // A recording folder copied the same way: its hits' handles name the folder.
+  const recs = made.flatMap((id) => {
+    const r = JSON.parse(readFileSync(join(fakeState, "experiments", id, "result.json"), "utf8"))
+    return (r.series ?? []).flatMap((s: J) => [s.recording, typeof s.attribution === "string" ? s.attribution : undefined]).filter(Boolean)
+  })
+  for (const rec of recs.slice(0, 4)) {
+    const to = join(work, "copied recordings", `${rec} copy`)
+    Bun.spawnSync(win ? ["robocopy", join(fakeState, "recordings", rec), to, "/E", "/NFL", "/NDL", "/NJH", "/NJS"] : ["cp", "-R", join(fakeState, "recordings", rec), to])
+    if (existsSync(join(to, "meta.json"))) byPath.push(to)
   }
 }
 
 // ---------- run ----------
 
 let checked = 0
-const runs: [string, Record<string, string>, string][] = [...[...ids, ...made].map((id) => [id, {}, realState] as [string, Record<string, string>, string]), ...synthetic.map(([id]) => [id, fakeEnv, fakeState] as [string, Record<string, string>, string])]
+type Run = [string, Record<string, string>, string]
+const runs: Run[] = [
+  ...ids.map((id) => [id, {}, realState] as Run),
+  ...made.map((id) => [id, fakeEnv, fakeState] as Run),
+  ...byPath.map((p) => [p, fakeEnv, fakeState] as Run),
+  ...synthetic.map(([id]) => [id, fakeEnv, fakeState] as Run),
+]
 for (const [id, env, state] of runs) {
   let out: J
   try {
@@ -242,7 +318,9 @@ for (const [id, env, state] of runs) {
     failed++
     continue
   }
-  const result: J = JSON.parse(readFileSync(join(state, "experiments", id, "result.json"), "utf8"))
+  // The result each series' commands are judged against (a recording by its path: none).
+  const resultFile = /[\\/]/.test(id) ? (id.endsWith("result.json") ? id : null) : join(state, "experiments", id, "result.json")
+  const result: J = resultFile ? JSON.parse(readFileSync(resultFile, "utf8")) : {}
   for (const [c, i] of commandsOf(out)) {
     if (!c.startsWith("strobe ")) {
       console.log(`FAIL ${id}: not a strobe command: ${c}`)

@@ -25,6 +25,50 @@ use std::path::Path;
 pub use diff::{ATTRIBUTION_PARTS, diff_tree, series_insights, side_tree};
 pub use rec::{Part, Rec, Stacks, Weight};
 
+/// A result or a recording named by its path rather than its handle, as `report` reads them: read as it
+/// is, from anywhere (a copy, a fixture), and nothing is written beside it.
+pub(super) enum ByPath {
+    /// An experiment's result.json (named, or in the folder named).
+    Experiment(std::path::PathBuf),
+    /// A recording's folder (named, or its meta.json named).
+    Recording(std::path::PathBuf),
+}
+
+/// `handle` as a path: a result.json (any file holding an experiment's `series`), a meta.json, or a
+/// folder holding either. None when it names no such file or folder (a handle, `a..b`).
+pub(super) fn by_path(handle: &str) -> Option<ByPath> {
+    let p = std::path::absolute(handle).ok()?;
+    let p = p.as_path();
+    if p.is_dir() {
+        return if p.join("result.json").is_file() {
+            Some(ByPath::Experiment(p.join("result.json")))
+        } else if p.join("meta.json").is_file() {
+            Some(ByPath::Recording(p.to_path_buf()))
+        } else {
+            None
+        };
+    }
+    if !p.is_file() {
+        return None;
+    }
+    let dir = p.parent().map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d }).unwrap_or(Path::new(".")).to_path_buf();
+    if p.file_name().is_some_and(|n| n == "meta.json") {
+        return Some(ByPath::Recording(dir));
+    }
+    match store::read_json(p) {
+        Ok(v) if v["series"].is_array() => Some(ByPath::Experiment(p.to_path_buf())),
+        Ok(v) if v["kind"].is_string() && dir.join("meta.json").is_file() => Some(ByPath::Recording(dir)),
+        _ => None,
+    }
+}
+
+/// A path as a printed command's word: forward slashes (which Windows reads too), quoted for `sh` and
+/// PowerShell alike.
+pub(super) fn path_word(p: &Path) -> String {
+    let s = p.display().to_string();
+    exp_insights::quote(&s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/"))
+}
+
 pub fn run(args: &Args) -> Result<Output> {
     let handle = args.pos.first().ok_or_else(|| Error::usage("query needs a handle: strobe query rec_… <view>"))?;
     let view = args.pos.get(1).map(String::as_str).unwrap_or("summary");
@@ -41,7 +85,12 @@ pub fn run(args: &Args) -> Result<Output> {
     if view == "http" {
         return http::run(args, top);
     }
-    if let Some(dir) = store::resolve(handle).ok().filter(|d| store::is_experiment(d)) {
+    let path = by_path(handle);
+    if let Some(ByPath::Experiment(file)) = &path {
+        return experiment(store::read_json(file)?, Some(file.as_path()), args, view, top);
+    }
+    // (`store::resolve` marks what it resolves used: never a folder named by its path.)
+    if let Some(dir) = path.is_none().then(|| store::resolve(handle).ok()).flatten().filter(|d| store::is_experiment(d)) {
         if !dir.join("result.json").exists() {
             let log = std::fs::read_to_string(dir.join("progress.log")).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
@@ -57,97 +106,114 @@ pub fn run(args: &Args) -> Result<Output> {
             let text = format!("{handle} is running\n{}\n", tail.join("\n"));
             return Ok(Output::new(text, json!({ "id": handle, "state": "running", "progress": tail })));
         }
-        let mut result = store::read_json(&dir.join("result.json"))?;
-        return match view {
-            "summary" | "progress" => {
-                let text = live_ledger(&mut result);
-                Ok(Output::new(text, result))
-            }
-            "insights" => exp_insights::run(&result),
-            "actions" => actions::experiment(&result, args, top),
-            other => {
-                // A check of one case has one recording: its views answer for the experiment.
-                let mut recs: Vec<String> = result["series"].as_array().into_iter().flatten().filter_map(|s| s["recording"].as_str().map(str::to_string)).collect();
-                if result["kind"] == "check" && recs.len() == 1 {
-                    let mut a = args.clone();
-                    a.pos[0] = recs.remove(0);
-                    return run(&a);
-                }
-                // `--blocks N` compares nothing: its attribution recordings are head's alone (`--why
-                // always`), one per series, and one answers for the experiment.
-                let series = result["series"].as_array().cloned().unwrap_or_default();
-                // Beside series refused before they ran, or not run (the bench stopped).
-                let aside = |s: &Value| s["kind"] == "refused" || s["not_run"] == true;
-                if series.iter().any(|s| s["kind"] == "blocks") && series.iter().all(|s| s["kind"] == "blocks" || aside(s)) {
-                    let heads: Vec<String> = series.iter().filter_map(|s| s["attribution"]["head"].as_str().map(str::to_string)).collect();
-                    let id = result["id"].as_str().unwrap_or("this experiment");
-                    return match heads.as_slice() {
-                        [one] => {
-                            let mut a = args.clone();
-                            a.pos[0] = one.clone();
-                            run(&a)
-                        }
-                        [] => {
-                            let timed: Vec<&str> = series.iter().flat_map(|s| s["timing_recordings"].as_array().into_iter().flatten()).filter_map(|t| t["recording"].as_str()).collect();
-                            let others =
-                                if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): strobe query <rec> {other} with one of {}", timed.join(", ")) };
-                            Err(Error::usage(format!(
-                                "{id} kept no attribution recording: a timed block runs no profiler (it would weigh on its times), and bench --blocks N --why always adds one attribution block of head per series{others}"
-                            )))
-                        }
-                        _ => Err(Error::usage(format!("{id} kept one attribution recording per series: strobe query <rec> {other} with one of {}", heads.join(", ")))),
-                    };
-                }
-                // A view of two recordings answers for the experiment: each series' base..head.
-                if diff::VIEWS.contains(&other) {
-                    return diff::experiment(&result, other, args, top);
-                }
-                for s in result["series"].as_array().into_iter().flatten() {
-                    recs.extend(["base", "head"].iter().filter_map(|r| s["attribution"][r].as_str().map(str::to_string)));
-                    recs.extend(s["attribution"].as_str().map(str::to_string));
-                }
-                Err(Error::usage(format!(
-                    "experiments support summary, progress, insights, actions, http and the base..head views ({}); {other} reads a recording{}",
-                    diff::VIEWS.join(" "),
-                    if recs.is_empty() { " (this experiment kept none)".to_string() } else { format!(": strobe query <rec> {other} with one of {}", recs.join(", ")) }
-                )))
-            }
-        };
+        return experiment(store::read_json(&dir.join("result.json"))?, None, args, view, top);
     }
     // `a..b`: one view of two recordings, side by side and per run.
-    if let Some((a, b)) = handle.split_once("..") {
-        let (a, b) = (Rec::resolve(a)?, Rec::resolve(b)?);
-        let mut out = diff::run(&a, &b, view, args, top)?;
-        // A full trace costs the page main-thread time (SPEC §8.1): a lean and a full-trace recording's
-        // times differ by that alone. The level is the trace's probes: a bench block's lean set, or the
-        // full timing set of `--trace full` blocks and `strobe record` of a page.
-        let traced = |r: &Rec| -> Option<bool> {
-            let chromium = r.meta["engine"].as_str().is_none_or(|e| e == "chromium") && r.meta["native"] != true && r.dir.join("trace.pftrace").is_file();
-            match r.meta["probes"].as_str() {
-                Some("lean") if chromium => Some(false),
-                Some("timing") if chromium && r.meta["timing"] != "perturbed" => Some(true),
-                _ => None,
+    if let Some((a, b)) = handle.split_once("..").filter(|_| path.is_none()) {
+        return pair(a, b, view, args, top);
+    }
+    let dir = match path {
+        Some(ByPath::Recording(dir)) => dir,
+        _ => store::resolve(handle)?,
+    };
+    recording(&dir, view, args, top)
+}
+
+/// An experiment's view, from its result (stored, or read from a path).
+fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str, top: usize) -> Result<Output> {
+    match view {
+        "summary" | "progress" => {
+            let text = live_ledger(&mut result);
+            Ok(Output::new(text, result))
+        }
+        "insights" => exp_insights::run(&result, source),
+        "actions" => actions::experiment(&result, args, top),
+        other => {
+            // A check of one case has one recording: its views answer for the experiment.
+            let mut recs: Vec<String> = result["series"].as_array().into_iter().flatten().filter_map(|s| s["recording"].as_str().map(str::to_string)).collect();
+            if result["kind"] == "check" && recs.len() == 1 {
+                let mut a = args.clone();
+                a.pos[0] = recs.remove(0);
+                return run(&a);
             }
-        };
-        if let (Some(fa), Some(fb)) = (traced(&a), traced(&b))
-            && fa != fb
-        {
-            let (f, l) = if fa { (&a.id, &b.id) } else { (&b.id, &a.id) };
-            let note = format!("{f} traced the full timing set and {l} the lean one: the full set costs the page main-thread time, so their times do not compare");
-            out.text = format!("! ProbeOverhead  {note}\n{}", out.text);
-            if let Some(o) = out.json.as_object_mut() {
-                let w = serde_json::json!({ "id": "ProbeOverhead", "level": "warn", "text": note });
-                match o.get_mut("warnings").and_then(Value::as_array_mut) {
-                    Some(all) => all.push(w),
-                    None => {
-                        o.insert("warnings".into(), serde_json::json!([w]));
+            // `--blocks N` compares nothing: its attribution recordings are head's alone (`--why
+            // always`), one per series, and one answers for the experiment.
+            let series = result["series"].as_array().cloned().unwrap_or_default();
+            // Beside series refused before they ran, or not run (the bench stopped).
+            let aside = |s: &Value| s["kind"] == "refused" || s["not_run"] == true;
+            if series.iter().any(|s| s["kind"] == "blocks") && series.iter().all(|s| s["kind"] == "blocks" || aside(s)) {
+                let heads: Vec<String> = series.iter().filter_map(|s| s["attribution"]["head"].as_str().map(str::to_string)).collect();
+                let id = result["id"].as_str().unwrap_or("this experiment");
+                return match heads.as_slice() {
+                    [one] => {
+                        let mut a = args.clone();
+                        a.pos[0] = one.clone();
+                        run(&a)
                     }
+                    [] => {
+                        let timed: Vec<&str> = series.iter().flat_map(|s| s["timing_recordings"].as_array().into_iter().flatten()).filter_map(|t| t["recording"].as_str()).collect();
+                        let others = if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): strobe query <rec> {other} with one of {}", timed.join(", ")) };
+                        Err(Error::usage(format!(
+                            "{id} kept no attribution recording: a timed block runs no profiler (it would weigh on its times), and bench --blocks N --why always adds one attribution block of head per series{others}"
+                        )))
+                    }
+                    _ => Err(Error::usage(format!("{id} kept one attribution recording per series: strobe query <rec> {other} with one of {}", heads.join(", ")))),
+                };
+            }
+            // A view of two recordings answers for the experiment: each series' base..head.
+            if diff::VIEWS.contains(&other) {
+                return diff::experiment(&result, other, args, top);
+            }
+            for s in result["series"].as_array().into_iter().flatten() {
+                recs.extend(["base", "head"].iter().filter_map(|r| s["attribution"][r].as_str().map(str::to_string)));
+                recs.extend(s["attribution"].as_str().map(str::to_string));
+            }
+            Err(Error::usage(format!(
+                "experiments support summary, progress, insights, actions, http and the base..head views ({}); {other} reads a recording{}",
+                diff::VIEWS.join(" "),
+                if recs.is_empty() { " (this experiment kept none)".to_string() } else { format!(": strobe query <rec> {other} with one of {}", recs.join(", ")) }
+            )))
+        }
+    }
+}
+
+/// `a..b`: one view of two recordings, side by side and per run.
+fn pair(a: &str, b: &str, view: &str, args: &Args, top: usize) -> Result<Output> {
+    let (a, b) = (Rec::resolve(a)?, Rec::resolve(b)?);
+    let mut out = diff::run(&a, &b, view, args, top)?;
+    // A full trace costs the page main-thread time (SPEC §8.1): a lean and a full-trace recording's
+    // times differ by that alone. The level is the trace's probes: a bench block's lean set, or the
+    // full timing set of `--trace full` blocks and `strobe record` of a page.
+    let traced = |r: &Rec| -> Option<bool> {
+        let chromium = r.meta["engine"].as_str().is_none_or(|e| e == "chromium") && r.meta["native"] != true && r.dir.join("trace.pftrace").is_file();
+        match r.meta["probes"].as_str() {
+            Some("lean") if chromium => Some(false),
+            Some("timing") if chromium && r.meta["timing"] != "perturbed" => Some(true),
+            _ => None,
+        }
+    };
+    if let (Some(fa), Some(fb)) = (traced(&a), traced(&b))
+        && fa != fb
+    {
+        let (f, l) = if fa { (&a.id, &b.id) } else { (&b.id, &a.id) };
+        let note = format!("{f} traced the full timing set and {l} the lean one: the full set costs the page main-thread time, so their times do not compare");
+        out.text = format!("! ProbeOverhead  {note}\n{}", out.text);
+        if let Some(o) = out.json.as_object_mut() {
+            let w = serde_json::json!({ "id": "ProbeOverhead", "level": "warn", "text": note });
+            match o.get_mut("warnings").and_then(Value::as_array_mut) {
+                Some(all) => all.push(w),
+                None => {
+                    o.insert("warnings".into(), serde_json::json!([w]));
                 }
             }
         }
-        return Ok(out);
     }
-    let dir = store::resolve(handle)?;
+    Ok(out)
+}
+
+/// A recording's view.
+fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> {
+    let dir = dir.to_path_buf();
     let mut rec = Rec::open(&dir);
     let case = args.get("case").map(|c| one_case(&mut rec, c, view)).transpose()?;
     let meta = &rec.meta;
@@ -176,7 +242,14 @@ pub fn run(args: &Args) -> Result<Output> {
             let file = if trace.is_file() {
                 trace
             } else {
-                let built = dir.join("perfetto.pftrace");
+                // Beside a stored recording; one named by its path is left as it is (the run folder).
+                let built = if rec.stored() {
+                    dir.join("perfetto.pftrace")
+                } else {
+                    let d = crate::host::paths::run().join("query").join(&rec.id);
+                    std::fs::create_dir_all(&d)?;
+                    d.join("perfetto.pftrace")
+                };
                 if !built.is_file() {
                     super::progress(format!("building {}'s Perfetto trace (what strobe open shows) to query", rec.id));
                     crate::perfetto::build(&dir, &built).map_err(|e| {
@@ -456,7 +529,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     let mut checked: Vec<&str> = Vec::new();
     let mut hit =
         |rule: &str, level: &str, title: String, evidence: Value, handles: Vec<String>| hits.push(json!({ "rule": rule, "level": level, "title": title, "evidence": evidence, "handles": handles }));
-    let q = |view: &str| format!("strobe query {id} {view}");
+    // What the commands name it by: its id, or the path it was read from (`strobe open` reads strobe's
+    // own recordings only).
+    let handle = rec.handle();
+    let q = |view: &str| format!("strobe query {handle} {view}");
+    let open: Vec<String> = rec.stored().then(|| format!("strobe open {id}")).into_iter().collect();
     // Forced layout: geometry read after a DOM write makes the browser lay out mid-script.
     if let Ok(l) = layout(rec, 3).map(|o| o.json) {
         checked.push("forced-layout");
@@ -645,7 +722,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         } else if meta["native"] == true && dir.join("threads.json").is_file() {
             handles.push(q("threads"));
         } else if handles.is_empty() && dir.join("trace.pftrace").is_file() {
-            handles.push(format!("strobe open {id}"));
+            handles.extend(open.clone());
         } else if handles.is_empty() && dir.join("timeline.json.gz").is_file() {
             handles.push(q("threads --timeline"));
         }
@@ -673,6 +750,19 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         && sl >= 20.0
         && sl > script
     {
+        // Only the views this recording answers: forced layouts come from an attribution trace, what
+        // invalidated style from one that tracked invalidations too. A timed block's lean trace has
+        // neither: its trace in the Perfetto UI shows the restyles.
+        let mut restyle_handles: Vec<String> = Vec::new();
+        if layout(rec, 1).is_ok() {
+            restyle_handles.push(q("layout"));
+        }
+        if meta["probes"] == "attribution" && invalidation(rec).is_ok() {
+            restyle_handles.insert(0, q("style"));
+        }
+        if restyle_handles.is_empty() && dir.join("trace.pftrace").is_file() {
+            restyle_handles.extend(open.clone());
+        }
         hit(
             "style-layout-dominant",
             if sl >= 2.0 * script.max(1.0) && sl >= 50.0 { "warn" } else { "info" },
@@ -684,7 +774,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                 fmt::value(script, "ms")
             ),
             json!({ "style_ms": style, "layout_ms": layout_ms, "script_ms": script }),
-            vec![q("style"), q("layout")],
+            restyle_handles.clone(),
         );
     }
     // Long tasks: one task over 50 ms blocks input for that long.
@@ -699,9 +789,9 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                 format!("long tasks: {n:.0} main-thread tasks over 50 ms in the recording, the longest {}: input waits that long", fmt::value(worst, "ms")),
                 json!({ "count": n, "longest_ms": worst }),
                 if dir.join("trace.pftrace").is_file() {
-                    vec![format!("strobe query {id} sql \"select ts, dur / 1e6 as ms from slice where name = 'RunTask' and depth = 0 and dur > 50e6 order by dur desc limit 20\""), q("hotspots")]
+                    vec![q("sql \"select ts, dur / 1e6 as ms from slice where name = 'RunTask' and depth = 0 and dur > 50e6 order by dur desc limit 20\""), q("hotspots")]
                 } else {
-                    vec![q("hotspots"), format!("strobe open {id}")]
+                    [vec![q("hotspots")], open.clone()].concat()
                 },
             );
         }
@@ -769,7 +859,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                     c["says"].as_str().unwrap_or("")
                 ),
                 json!({ "cohorts": n, "outside_measured": others, "timeouts": timeouts, "first": c, "stall_threshold_ms": h["stall_threshold_ms"], "measured": h["measured"] }),
-                vec![q("http"), format!("strobe open {id}")],
+                [vec![q("http")], open.clone()].concat(),
             );
         }
     }
@@ -800,13 +890,15 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
         let (scripts, mapped) = (h["script_samples"].as_f64().unwrap_or(0.0), h["mapped_samples"].as_f64().unwrap_or(0.0));
-        // A script target's profile names its own source files: nothing is mapped, and nothing is missing.
-        if scripts > 0.0 && mapped / scripts < 0.95 && meta["script"] != true {
+        // Only minified scripts lack a map: a page's inline scripts and a script written as it runs
+        // name their own functions and lines. A script target's profile names its own source files.
+        let minified = h["minified_unmapped_samples"].as_f64().unwrap_or(0.0);
+        if scripts > 0.0 && minified / scripts > 0.05 && meta["script"] != true {
             hit(
                 "unresolved",
                 "info",
-                format!("unresolved script: {:.0}% of script samples have no source map, so names and files stay minified there", 100.0 * (1.0 - mapped / scripts)),
-                json!({ "script_samples": scripts, "mapped_samples": mapped, "subject": "script" }),
+                format!("unresolved script: {:.0}% of script samples are in minified scripts with no source map, so names and files stay minified there", 100.0 * minified / scripts),
+                json!({ "script_samples": scripts, "mapped_samples": mapped, "minified_unmapped_samples": minified, "subject": "script" }),
                 vec![q("hotspots --by file")],
             );
         }
@@ -2971,7 +3063,10 @@ fn run_phases_cached(rec: &Rec) -> Option<(String, Value)> {
         Some((t, rows)) => json!({ "text": t, "per_run": rows }),
         None => json!({ "text": null }),
     };
-    if let Ok(bytes) = serde_json::to_vec(&cache) {
+    // A recording named by its path is read as it is: nothing is written beside it.
+    if rec.stored()
+        && let Ok(bytes) = serde_json::to_vec(&cache)
+    {
         let _ = store::write_atomic(&path, &bytes);
     }
     got
@@ -3235,6 +3330,9 @@ pub(crate) fn no_profile(meta: &Value, what: &str, view: &str) -> Error {
                 "this recording has no {what}: it is a timed block of {exp}, and a timed block runs no profiler (it would weigh on the times it measures); attribution blocks have them: {read}, and bench --why always runs them (one per side, or one of head with --check or --blocks N)"
             ))
         }
+        // It ran under the profilers already: recording it again the same way adds nothing (a Bun
+        // script host's missing allocation samples are refused before this, `firefox_gap`).
+        None if meta["probes"] == "attribution" => Error::usage(format!("this recording has no {what}, though it ran with --probes attribution: its target gave none, or its profiler failed")),
         None => Error::usage(format!("this recording has no {what}; record with --probes attribution")),
     }
 }
@@ -3390,7 +3488,8 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
     type Row<'a> = ((String, String), (f64, u64, ByStack<'a>));
     let frame = |i: u32| &stacks.frames[i as usize];
     let mut rows: BTreeMap<(String, String), (f64, u64, ByStack)> = BTreeMap::new();
-    let (mut total, mut mapped, mut scripts) = (0.0, 0u64, 0u64);
+    let (mut total, mut mapped, mut scripts, mut minified_unmapped) = (0.0, 0u64, 0u64, 0u64);
+    let minified = minified_scripts(&stacks.frames);
     let samples: u64 = stacks.weights.iter().map(|w| w.n).sum();
     let mut packages: BTreeMap<String, String> = BTreeMap::new();
     let mut lines: BTreeMap<(String, String), BTreeMap<i64, f64>> = BTreeMap::new();
@@ -3405,6 +3504,9 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
         }
         if !f.url.is_empty() && driven.is_none() {
             scripts += hits;
+            if !f.mapped && minified.contains(&f.url) {
+                minified_unmapped += hits;
+            }
         }
         let key = match driven {
             Some(d) if by != "function" => d.label().to_string(),
@@ -3514,12 +3616,34 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
             callers_json.push(json!({ "name": k, "where": detail, "weight": own, "inclusive": incl, "total_share": incl / total }));
         }
     }
-    let mut out = json!({ "by": by, "samples": samples, "script_samples": scripts, "mapped_samples": mapped, "total": total, "rows": json_rows });
+    let mut out = json!({ "by": by, "samples": samples, "script_samples": scripts, "mapped_samples": mapped, "minified_unmapped_samples": minified_unmapped, "total": total, "rows": json_rows });
     if let Some(s) = total_by {
         out["sort"] = json!(if s == Sort::Total { "total" } else { "self" });
         out["callers"] = json!(callers_json);
     }
     Output::new(text, out)
+}
+
+/// The scripts whose frames read minified: a script file (not an HTML document, whose inline scripts
+/// are its own source) with a frame past column 300 (a bundle's long lines) or mostly one- and
+/// two-letter function names. A source map is what they lack; a script written as it runs lacks none.
+fn minified_scripts(frames: &[Frame]) -> std::collections::BTreeSet<String> {
+    // url → (largest column, named frames, short-named frames)
+    let mut seen: BTreeMap<&str, (i64, u64, u64)> = BTreeMap::new();
+    for f in frames.iter().filter(|f| !f.url.is_empty() && f.package.is_none()) {
+        let e = seen.entry(f.url.as_str()).or_default();
+        e.0 = e.0.max(f.column);
+        if !f.name.is_empty() && !f.name.starts_with('(') {
+            e.1 += 1;
+            e.2 += u64::from(f.name.chars().count() <= 2);
+        }
+    }
+    let document = |url: &str| {
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        let last = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+        last.is_empty() || [".html", ".htm", ".xhtml"].iter().any(|x| last.ends_with(x))
+    };
+    seen.into_iter().filter(|(url, (col, named, short))| !document(url) && (*col > 300 || (*named > 0 && 2 * short >= *named))).map(|(url, _)| url.to_string()).collect()
 }
 
 fn short_url(url: &str) -> String {

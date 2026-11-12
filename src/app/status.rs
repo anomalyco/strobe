@@ -100,7 +100,13 @@ pub fn run(args: &Args) -> Result<Output> {
     if bun.is_none() {
         problems.push("no Bun (bench files need it: https://bun.sh)".into());
     }
-    if !engine::installed() {
+    // A file there that is not the pinned build (a write cut short, another file in its place) is never
+    // run: the next trace query or strobe up fetches it again.
+    let engine_ok = engine::installed();
+    let engine_damaged = !engine_ok && engine::path().exists();
+    if engine_damaged {
+        problems.push("trace_processor damaged: the file there is not the pinned build (strobe up, or the next trace query, fetches it again)".into());
+    } else if !engine_ok {
         problems.push("trace_processor not downloaded yet (strobe up, or on first use)".into());
     }
     // Benches on this device and what each does: running a block, queued for the slot, waiting for an
@@ -145,7 +151,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let (disk_text, disk_json) = disk.status(args.has("disk"));
     let json = json!({
         "env": env, "topology": { "groups": groups, "vcache": vcache }, "busy": busy,
-        "browser": browser, "firefox": firefox, "webkit": if webkit { Value::String(webkit_text.clone()) } else { Value::Null }, "bun": bun, "bun_version": bun_version, "engine": { "installed": engine::installed(), "version": engine::VERSION, "path": engine::path() },
+        "browser": browser, "firefox": firefox, "webkit": if webkit { Value::String(webkit_text.clone()) } else { Value::Null }, "bun": bun, "bun_version": bun_version, "engine": { "installed": engine_ok, "damaged": engine_damaged, "version": engine::VERSION, "path": engine::path() },
         "calibration": calibration, "recordings": recordings.iter().map(|r| &r.0).collect::<Vec<_>>(),
         "experiments": experiments.iter().map(|r| &r.0).collect::<Vec<_>>(), "disk_bytes": disk_json["total_bytes"], "disk": disk_json,
         "session_locked": locked, "background_priority": qos, "timer_coalescing": timers, "valid": problems.is_empty(), "problems": problems,
@@ -223,7 +229,16 @@ pub fn run(args: &Args) -> Result<Output> {
     );
     t += &format!("  {} deep       {}\n", mark(deep.presents() && deep.helper), deep_text);
     t += &format!("  {} native     {}\n", mark(native_ok), native_text);
-    t += &format!("  {} engine     trace_processor {}{}\n", mark(engine::installed()), engine::VERSION, if engine::installed() { "" } else { " (not downloaded)" });
+    t += &format!(
+        "  {} engine     trace_processor {}{}\n",
+        mark(engine_ok),
+        engine::VERSION,
+        match (engine_ok, engine_damaged) {
+            (true, _) => "",
+            (false, true) => " (damaged: not the pinned build; the next trace query or strobe up fetches it again)",
+            (false, false) => " (not downloaded)",
+        }
+    );
     t += &format!(
         "  {} calibrate  {}\n",
         mark(!calibration.is_null() && calibration["ok"] != false),

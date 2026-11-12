@@ -18,8 +18,8 @@ use std::path::Path;
 /// The chance a planned run decides at the expected effect.
 const POWER: f64 = stats::PLAN_POWER;
 
-/// A block's wall time when nothing measured one here (October 2026, adais: a 2.7 s scroll case).
-const GUESS_BLOCK_MS: f64 = 22_000.0;
+/// Why a series has no block time: nothing of it ran here yet.
+const UNKNOWN_BLOCK: &str = "unknown: no earlier run or --check of this case here (a --check, a --pilot or this run's first pairs measure one)";
 
 pub fn run(args: &Args) -> Result<Output> {
     let file = args.pos.first().ok_or_else(|| Error::usage("plan needs a bench file: strobe plan perf/x.bench.ts [--base <variant>] [--head <variant>]"))?;
@@ -260,6 +260,8 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
     };
     let mut out = Vec::new();
     let mut total = 0.0;
+    // Series whose block time nothing measured here: the total is unknown.
+    let mut unknown = 0usize;
     let implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     let journeys = series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()).count();
     for s in series {
@@ -310,18 +312,20 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
             }
         };
         // A block's time comes only from this series: another case's blocks say nothing about this one's.
+        // None when nothing measured one here: no time is printed for it rather than a guess (a block
+        // of a command takes milliseconds, one of a page's scroll half a minute).
         let (block_ms, block_source) = match same.first() {
-            Some(_) => (same.iter().map(|p| p.block_ms).sum::<f64>() / same.len() as f64, format!("mean of {} earlier", same.len())),
+            Some(_) => (Some(same.iter().map(|p| p.block_ms).sum::<f64>() / same.len() as f64), format!("mean of {} earlier", same.len())),
             None => match check_block(&file_name, &s.label(), runs, &setup) {
-                Some((ms, id)) => (ms, format!("from the --check {id} plus warmup and {runs} runs; rough: a check's block is a cold launch")),
-                None => (GUESS_BLOCK_MS, "a guess: no earlier run of this case here".to_string()),
+                Some((ms, id)) => (Some(ms), format!("from the --check {id} plus warmup and {runs} runs; rough: a check's block is a cold launch")),
+                None => (None, UNKNOWN_BLOCK.to_string()),
             },
         };
         // Every timed series discards a first block per side (GPU caches, a launch's first launch, or
         // the series' slow first blocks): two at least.
         let (warmup_blocks, warmup_ms) = match same.first() {
-            Some(p) if p.warmup_blocks > 0.0 => (p.warmup_blocks, p.warmup_ms),
-            _ => (2.0, 2.0 * block_ms),
+            Some(p) if p.warmup_blocks > 0.0 => (p.warmup_blocks, Some(p.warmup_ms)),
+            _ => (2.0, block_ms.map(|b| 2.0 * b)),
         };
         // The expected effect: --effect, else what the latest run of this series measured, else none.
         let (effect, effect_source) = match args.num("effect").ok().flatten() {
@@ -383,9 +387,15 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
             (None, None) => LOOKS[0],
         };
         let attribution = why == "always" || (why == "auto" && differs);
-        let attribution_ms = if attribution { 2.0 * same.first().and_then(|p| p.attribution_ms).unwrap_or(1.5 * block_ms) } else { 0.0 };
-        let ms = 2.0 * pairs as f64 * block_ms + warmup_ms + attribution_ms;
-        total += ms;
+        let attribution_ms = if attribution { same.first().and_then(|p| p.attribution_ms).or(block_ms.map(|b| 1.5 * b)).map(|a| 2.0 * a) } else { Some(0.0) };
+        let ms = match (block_ms, warmup_ms, attribution_ms) {
+            (Some(b), Some(w), Some(a)) => Some(2.0 * pairs as f64 * b + w + a),
+            _ => None,
+        };
+        match ms {
+            Some(ms) => total += ms,
+            None => unknown += 1,
+        }
         let detectable = sigma.map(|sig| {
             let x = stats::detectable(sig, max_pairs, confidence, POWER);
             if relative { x.exp() - 1.0 } else { x }
@@ -404,10 +414,12 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
     let build_ms: f64 = builds.iter().filter_map(|b| b["ms"].as_f64()).sum();
     let others: Vec<Value> = slot::list().into_iter().filter(|b| me.is_none_or(|m| b["exp"] != m)).collect();
     let queue_ms: f64 = others.iter().filter_map(|b| b["eta_ms"].as_f64()).sum();
+    // A total with a series of unknown block time is unknown (null), never the known part as a whole.
+    let blocks_ms = (unknown == 0).then_some(total);
     json!({
         "series": out, "builds": builds, "build_ms": build_ms,
         "slot": { "others": others.iter().map(|b| json!({ "exp": b["exp"], "state": b["state"], "eta_ms": b["eta_ms"] })).collect::<Vec<_>>(), "wait_ms_max": queue_ms },
-        "blocks_ms": total, "total_ms": total + build_ms,
+        "blocks_ms": blocks_ms, "total_ms": blocks_ms.map(|b| b + build_ms), "blocks_unknown": unknown,
     })
 }
 
@@ -474,6 +486,10 @@ fn series_line(s: &Value) -> String {
     if let Some(r) = s["refused"].as_object() {
         return format!("{}: refused ({}), not run", s["label"].as_str().unwrap_or(""), r["validator"].as_str().unwrap_or(""));
     }
+    let time = match s["ms"].as_f64() {
+        Some(ms) => format!("~{}", minutes(ms)),
+        None => "time unknown until a block of it ran here".to_string(),
+    };
     let what = match (s["sigma"].as_f64(), s["look"].as_u64()) {
         (None, _) => format!("{} pairs at least; spread unknown, so no estimate of when it decides", s["pairs"]),
         (Some(_), Some(l)) => format!("{} by pair {l} (~{} pairs needed)", s["expect"].as_str().unwrap_or(""), s["pairs_needed"].as_f64().unwrap_or(0.0)),
@@ -481,11 +497,21 @@ fn series_line(s: &Value) -> String {
             format!("underpowered at the expected effect (~{} pairs needed); stops at about {} pairs saying so", s["pairs_needed"].as_f64().map_or("many".to_string(), |n| n.to_string()), s["pairs"])
         }
     };
-    format!("{}: {what}, ~{}", s["label"].as_str().unwrap_or(""), minutes(s["ms"].as_f64().unwrap_or(0.0)))
+    format!("{}: {what}, {time}", s["label"].as_str().unwrap_or(""))
 }
 
 fn total_line(plan: &Value) -> String {
-    let mut t = format!("total ~{} of blocks", minutes(plan["blocks_ms"].as_f64().unwrap_or(0.0)));
+    let mut t = match plan["blocks_ms"].as_f64() {
+        Some(ms) => format!("total ~{} of blocks", minutes(ms)),
+        None => {
+            let n = plan["blocks_unknown"].as_u64().unwrap_or(0);
+            let all = plan["series"].as_array().map_or(0, |a| a.iter().filter(|s| s["refused"].is_null()).count() as u64);
+            format!(
+                "total unknown: no block of {} ran here yet (a --check or --pilot first measures one)",
+                if n >= all { if all == 1 { "this series".to_string() } else { "these series".to_string() } } else { format!("{n} of the {all} series") }
+            )
+        }
+    };
     let build = plan["build_ms"].as_f64().unwrap_or(0.0);
     if build > 0.0 {
         t += &format!(" + ~{} of builds", minutes(build));
@@ -543,9 +569,11 @@ fn text(file: &Path, variants: &[Variant], plan: &Value, notes: &[String]) -> St
         );
         let warm = s["warmup_blocks"].as_f64().unwrap_or(0.0);
         t += &format!(
-            "  block    {} ({}){}\n",
-            fmt::ms_duration(s["block_ms"].as_f64().unwrap_or(0.0) as u64),
-            s["block_source"].as_str().unwrap_or(""),
+            "  block    {}{}\n",
+            match s["block_ms"].as_f64() {
+                Some(ms) => format!("{} ({})", fmt::ms_duration(ms as u64), s["block_source"].as_str().unwrap_or("")),
+                None => s["block_source"].as_str().unwrap_or("").to_string(),
+            },
             if warm > 0.0 { format!(" · {warm:.0} discarded warm-up blocks first") } else { String::new() }
         );
         if s["sigma"].is_number() {

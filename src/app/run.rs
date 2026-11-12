@@ -4,7 +4,9 @@
 //!
 //! `strobe run --base "<command>" --head "<command>"`: a paired A/B of two commands, as a bench of a
 //! `cli()` target whose variants are the command lines (`cmd:<line>`): the same blocks, looks,
-//! verdicts, result and report as any bench.
+//! verdicts, result and report as any bench. `--check` runs each command once (one side, or both
+//! with `--base`), its line showing run.duration and memory.peak beside cpu.work unless `--metrics`
+//! names others.
 
 use super::{Output, bench, progress};
 use crate::cli::{Args, duration_ms};
@@ -24,7 +26,9 @@ pub fn run(args: &Args) -> Result<Output> {
     // A harness under a bench block's conditions times something: on a shared CI runner nothing does.
     bench::refuse_shared("strobe run")?;
     let at = args.pos.iter().position(|a| a == "--").ok_or_else(|| {
-        Error::usage("run needs a command after --: strobe run [--pin auto] [--reserve-cpus on|off] [--power high|keep] -- <command> [args…], or two to compare: strobe run --base \"<command>\" --head \"<command>\"")
+        Error::usage(
+            "run needs commands: strobe run --base \"<command>\" --head \"<command>\" times two against each other (add --check to run each once first), or strobe run [--pin auto] [--reserve-cpus on|off] [--power high|keep] -- <command> [args…] runs your own harness under a bench's conditions",
+        )
     })?;
     let cmd = &args.pos[at + 1..];
     let (program, rest) = cmd.split_first().ok_or_else(|| Error::usage("run: nothing after --"))?;
@@ -71,6 +75,9 @@ pub fn run(args: &Args) -> Result<Output> {
     Ok(out)
 }
 
+/// What `strobe run --check` shows beside its primary (`cpu.work`) when `--metrics` names none.
+const CHECK_METRICS: [&str; 2] = ["run.duration", "memory.peak"];
+
 /// The bench file of a command A/B: one `cli()` target whose variants supply the command, one case
 /// that runs it once per run. Its text depends only on the declared metrics, so the rerun ledger sees
 /// the same harness for the same question.
@@ -88,13 +95,32 @@ fn paired(args: &Args) -> Result<Output> {
     let head = args.get("head").ok_or_else(|| Error::usage("strobe run --base \"<command>\" --head \"<command>\": --head names the command to measure"))?;
     match (args.get("base"), args.has("aa"), args.has("check")) {
         (Some(_), true, _) => return Err(Error::usage("--aa runs --head against itself; drop --base")),
-        (Some(_), _, true) => return Err(Error::usage("--check runs --head's command once; drop --base")),
         (None, false, false) => return Err(Error::usage("say what to compare: --base \"<command>\" (or --aa for the same command on both sides, or --check to run it once)")),
         _ => {}
     }
-    let metrics: Vec<String> = args.get("metrics").unwrap_or("").split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect();
+    let mut metrics: Vec<String> = args.get("metrics").unwrap_or("").split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect();
     if let Some(bad) = metrics.iter().find(|m| crate::model::metric(m).is_none()) {
         return Err(Error::usage(format!("--metrics: {bad} is no metric (a command gives cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.read, io.write and metric.<name>)")));
+    }
+    // A check reads each side once: only an exact counter compares that way. Said before anything runs,
+    // in this command's words.
+    if args.has("check")
+        && let Some(timed) = args.get("noworse").and_then(|n| {
+            n.split(',')
+                .map(|p| p.split_once('=').map_or(p, |(k, _)| k).trim())
+                .map(|k| if k.ends_with('%') || k.parse::<f64>().is_ok() { "cpu.work" } else { k })
+                .find(|k| !crate::model::is_ci_counter(k))
+        })
+    {
+        return Err(Error::usage(format!(
+            "--check --noworse {timed}: a check runs each command once, and compares only exact counters (count.*, net.*, tty.frames, dom.nodes), which a command gives none of; {timed} needs timed pairs: strobe run --base \"<command>\" --head \"<command>\" --noworse {timed}=2%"
+        )));
+    }
+    // A check times nothing against anything: its line shows what a person running a command first
+    // asks, how long it took and how much memory it used, beside its CPU. A comparison declares only
+    // what --metrics asks (each secondary widens the gate's Holm family).
+    if args.has("check") && args.get("metrics").is_none() {
+        metrics = CHECK_METRICS.iter().map(|m| m.to_string()).collect();
     }
     let text = bench_file(&metrics);
     use sha2::Digest;

@@ -10,13 +10,18 @@ use crate::model::{Result, VerdictKind};
 use crate::stats;
 use serde_json::{Value, json};
 
-pub fn run(r: &Value) -> Result<Output> {
+/// `source`: the result.json it was read from when named by its path (`query <path> insights`).
+pub fn run(r: &Value, source: Option<&std::path::Path>) -> Result<Output> {
     let id = r["id"].as_str().unwrap_or("");
     if r["kind"] == "bisect" {
         return Ok(bisect(r));
     }
     let series: Vec<&Value> = r["series"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
-    let cmd = Command::of(r);
+    let mut cmd = Command::of(r);
+    // A result read from a path that strobe does not keep: its commands name that path.
+    if let Some(f) = source.filter(|_| !crate::store::resolve(id).is_ok_and(|d| crate::store::is_experiment(&d) && d.join("result.json").is_file())) {
+        cmd.exp = super::path_word(f);
+    }
     let mut text = format!("insights · {id} · {}\n", what(r, &series));
     // The experiment's own warnings bear on every series: said once.
     let shared = warnings(&r["warnings"]);
@@ -173,7 +178,7 @@ fn section(r: &Value, s: &Value, cmd: &Command) -> Section {
         Some("check") => check(r, s, cmd, &mut sec),
         Some("blocks") => blocks(r, s, cmd, &mut sec),
         Some("leak") => leak(r, s, cmd, &mut sec),
-        Some("pixels") => pixels(r, s, &mut sec),
+        Some("pixels") => pixels(s, cmd, &mut sec),
         _ => comparison(r, s, cmd, &mut sec),
     }
     sec
@@ -336,7 +341,7 @@ fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     };
     let attr = &s["attribution"];
     let (b, h) = (attr["base"].as_str(), attr["head"].as_str());
-    let id = r["id"].as_str().unwrap_or("");
+    let id = cmd.exp.as_str();
     let profile = "untimed, under the profilers; one launch per side, so an interval covers sampling alone, not launch to launch";
     if r["comparison"] == "implementations" {
         // Two implementations share no code: each side's own hits, under its name.
@@ -660,7 +665,7 @@ fn growth(g: &Value) -> VerdictKind {
     }
 }
 
-fn pixels(r: &Value, s: &Value, sec: &mut Section) {
+fn pixels(s: &Value, cmd: &Command, sec: &mut Section) {
     let frames: Vec<&Value> = s["pixels"].as_array().into_iter().flatten().collect();
     let differ: Vec<&str> = frames.iter().filter(|p| p["state"] == "differ").filter_map(|p| p["name"].as_str()).collect();
     sec.result.push(if differ.is_empty() {
@@ -670,7 +675,7 @@ fn pixels(r: &Value, s: &Value, sec: &mut Section) {
     });
     sec.none.push("a pixels run compares screenshots; it times nothing to explain".into());
     if !differ.is_empty() {
-        sec.next.push(("the frames and their diffs side by side".into(), format!("strobe report experiment {} --open", r["id"].as_str().unwrap_or(""))));
+        sec.next.push(("the frames and their diffs side by side".into(), format!("strobe report experiment {} --open", cmd.exp)));
     }
 }
 
@@ -704,6 +709,8 @@ struct Command {
     file: Option<String>,
     flags: Vec<(String, String)>,
     implementations: bool,
+    /// What a command names the experiment by: its id, or the path of a result strobe does not keep.
+    exp: String,
 }
 
 /// Flags a rerun leaves out: its own id and cap, its output's form (`--unit` too: how it printed, not
@@ -744,21 +751,31 @@ impl Command {
         // `strobe run --base "<command>" --head "<command>"`: its bench file is strobe's own, its sides
         // `cmd:` variants.
         let run = flags.iter().any(|(k, v)| k == "head" && v.starts_with("cmd:"));
-        if run {
-            for (k, v) in &mut flags {
-                if (k == "head" || k == "base") && v.starts_with("cmd:") {
-                    *v = v["cmd:".len()..].to_string();
-                }
+        for (k, v) in &mut flags {
+            if k != "head" && k != "base" {
+                continue;
+            }
+            if let Some(line) = v.strip_prefix("cmd:") {
+                *v = line.to_string();
+            } else {
+                // A folder as the bench kept it (its full path) in forward slashes, as the file below: no
+                // git ref holds a `\`.
+                *v = v.strip_prefix(r"\\?\").unwrap_or(v).replace('\\', "/");
             }
         }
         let path = r["args"]["pos"][0].as_str().or(r["file"].as_str()).unwrap_or("");
         // Forward slashes, which Windows reads too: a path with a `'` then needs no `\` beside it in
         // double quotes, so PowerShell reads it as `sh` does.
         let file = (!run && !path.is_empty()).then(|| path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/"));
-        // Two targets of one file (`--base <target> --head <target>[=<variant>]`): a comparison of
-        // implementations, or a check of both (whose variants name their targets).
-        let implementations = r["comparison"] == "implementations" || r["parity"].is_string() || variants.iter().any(|v| v["target"].is_string());
-        Command { file, flags, implementations }
+        // Sides that name targets of the file (`--head <target>[=<variant>]`, `--base <target> --head
+        // <target>`): a comparison of implementations, a run of one target (its variant names it), or a
+        // check of two targets (`--check --base <target> --head <target>`, whose one variant is the bench
+        // file's own folder: both flags name targets its series ran). Not a parity matrix alone: two
+        // targets of one case checked on one build (`--head <folder> --check`) name builds, not targets.
+        let targets: Vec<&str> = r["series"].as_array().into_iter().flatten().filter_map(|s| s["target"].as_str()).collect();
+        let names_target = |k: &str| flags.iter().any(|(f, v)| f == k && targets.contains(&v.as_str()));
+        let implementations = r["comparison"] == "implementations" || variants.iter().any(|v| v["target"].is_string()) || (r["kind"] == "check" && names_target("base") && names_target("head"));
+        Command { file, flags, implementations, exp: r["id"].as_str().unwrap_or("").to_string() }
     }
 
     /// The side (`base` or `head`) whose target a check's series ran, for two targets; else `role`.
@@ -837,7 +854,10 @@ impl Command {
             }
             Some(t.trim_start_matches("target:").to_string()).filter(|t| !t.is_empty() && t != ".").or_else(|| s["target"].as_str().map(str::to_string))
         } else {
-            flags.push(("head".into(), side.unwrap_or(".").into()));
+            // A side `<target>=<variant>` of this series' own target: its variant on its target.
+            let side = side.unwrap_or(".");
+            let side = side.split_once('=').filter(|(t, _)| s["target"].as_str() == Some(t.trim_start_matches("target:"))).map_or(side, |(_, v)| v);
+            flags.push(("head".into(), side.into()));
             s["target"].as_str().map(str::to_string).or_else(|| self.get("target").map(str::to_string))
         };
         if let Some(t) = target {
@@ -893,7 +913,7 @@ fn line(command: &str, file: Option<&str>, flags: &[(String, String)]) -> String
 /// A word both `sh` and PowerShell pass whole and as written: bare when it holds only letters, digits
 /// and `_-./:=+%^`; else in single quotes (literal in both); a word with a `'` in double quotes, where
 /// it holds none of `"$\` and backtick (each shell's escapes), else as `sh` writes it.
-fn quote(w: &str) -> String {
+pub(super) fn quote(w: &str) -> String {
     if !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || "_-./:=+%^".contains(c)) {
         w.to_string()
     } else if !w.contains('\'') {
