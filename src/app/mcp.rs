@@ -222,7 +222,7 @@ const TOOLS: &[Tool] = &[
         flags: &[
             (
                 "format",
-                "html (default), md, pr (an experiment's pull request block), summary (short GitHub Markdown for a CI job's summary page: a check's exact counters, a leak run's growth, a comparison's PR block without images), card (its result as a 1200×630 PNG) or badge (an SVG badge); a recording's report is html or md. Any other is an error before anything is written",
+                "html (default), md, pr (an experiment's pull request block), summary (short GitHub Markdown for a CI job's summary page: a check's exact counters, a leak run's growth, a comparison's PR block without images), card (its result as a 1200×630 PNG) or badge (an SVG badge); a recording's report is html or md. Any other is an error before anything is written. pr, summary, card and badge are public: every string of the result is scrubbed first (no other program's name or window title, no person's folder; a plain folder variant reads <base folder> or <head folder>)",
             ),
             ("out", "where to write it"),
             ("theme", "card and badge: light, dark or auto"),

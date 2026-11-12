@@ -101,7 +101,8 @@ The design and every rule behind this file: SPEC.md.
 - `query <rec> threads`: wakes/s and CPU per thread, the module each started in, whose (app, driver,
   os, `unknown (?)`); `--timeline` per second. `query <rec> insights` rules include dominant-thread,
   off-cpu-bound, style-layout-dominant, wakes-while-idle (idle blocks too), hot-function (a named
-  function of the target's over 25% of busy samples, one hit each), http-stalls (measured runs only).
+  function of the target's over 25% of busy samples, one hit each; a native symbol without line
+  info counts), http-stalls (measured runs only).
 - Native hotspots of a tree pool every process: read `by process`, then `--pid <pid|exe>`.
   A native attribution recording (`record --bench`, `--why`) keeps frames too: `query <rec> inputs`.
   `! Coverage`: samples cover under 80% of the CPU (read shares, not totals); it names what the
@@ -155,8 +156,9 @@ The design and every rule behind this file: SPEC.md.
 - The step summary, the job's log and the artifacts never name the machine's other processes, other
   apps' windows or its user: the uploaded result.json is a scrubbed copy and its HTML report is drawn
   from that copy alone (no recordings, so no hotspots; the runner keeps them, `report-path`). The PR
-  block, summary and card name no other process, window title or person's folder either (a covering
-  window by its process id; `pr::public`, SPEC §11.2).
+  block, summary, card and badge name no other process, window title or person's folder either:
+  every string of the result is scrubbed before they read it (a covering window by its process id, a
+  plain folder variant as `<base folder>`/`<head folder>`; SPEC §11.2).
 
 ### No display, a locked session, a server
 

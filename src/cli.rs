@@ -551,7 +551,9 @@ Use
                                   put the block in PR n's body, with the result card and badges attached through gh;
                                   the sides read Before and This PR only when head is the working tree or HEAD, and
                                   with --update-pr at the PR's head commit; else each side's commit (A/A: Base (A/A),
-                                  Head (A/A)); --labels names them (pr and card)
+                                  Head (A/A)); --labels names them (pr and card); pr, summary, card and badge are public:
+                                  every string of the result is scrubbed first (no other program's name or window title,
+                                  no person's folder; a plain folder variant reads <base folder> or <head folder>)
   report experiment <exp> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto] [--badge-url]
                                   [--scoreboard] [--labels <base>,<head>]
                                   the result as an image: card 1200×630 (decided wins large, else what happened), badge one
