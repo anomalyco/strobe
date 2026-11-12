@@ -292,7 +292,13 @@ noisy discovery evidence, or leave them out.
   - `TailTooShort`: a percentile lacks its minimum n (`interaction.p95` needs 20 samples a block).
   - `AmbiguousInteraction`: over half the inputs came while the target was drawing.
   - `NotOnThisOs`, `NotForTarget`, `EngineUnsupported`, `Headless`, `NoCounter`: this OS, target,
-    engine or mode cannot give that metric; pick another primary (the message names one).
+    engine or mode cannot give that metric; pick another primary (the message names one). A page
+    (or an app over DevTools) has no `cpu.wakes`, `io.*` or `ui.*` (on macOS: `cpu.idle_wakes`).
+  - `WindowHidden` on a page: it stayed hidden 200 ms at a frame wait (a `window.open` popup hides
+    its opener on macOS): refused at once, never waited out. Close a popup the case opened before
+    such a wait, or measure the case without frame metrics.
+  - Exit 3 naming the step: macOS held the launch (Gatekeeper after a download or update): open the
+    app once from the Finder.
   - `OverheadBudget`: strobe's own work disturbed timed runs (a `--check` only warns).
   - `VariantMismatch`, `DisplayTooSmall`, `DeviceMismatch`, `InputMismatch`: the sides differ.
   - `SharedRunner`: a CI runner other jobs share; no timing there. `--check`, counters against base, leak
@@ -517,7 +523,7 @@ export default bench({
 - Waits that are not the journey: `await ctx.untimed(() => page.idle())`. Its time, CPU, frames and
   inputs leave the run; `gpu.process.3d`, `energy.*`, `net.*`, `canvas.*` refuse (`Untimed`).
 - `ctx.addInitScript(fn, arg)` and `ctx.mock(pattern, handler)` in `prepare` work in every engine;
-  Playwright (`ctx.playwright`) only on Chromium.
+  Playwright (`ctx.playwright`) only on Chromium, and only under Bun 1.4.0 or later (`bun upgrade`).
 - Random workloads: draw from `ctx.random()` (each hook call replays the same stream), never
   `Math.random()`; `--seed N` replays; `ctx.seed` seeds the app only if you pass it in.
 - `expect: { title, heading, url, visible }` on a case or target: a block on another screen is

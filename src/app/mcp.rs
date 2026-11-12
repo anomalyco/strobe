@@ -243,7 +243,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "look",
         description: "Look at a target without measuring it, as strobe sees it: a page in a headless Chromium (title, address, headings, visible text, console messages and uncaught errors, a screenshot), a native app in an isolated home (window titles, its accessibility tree's headings and keyed elements, what a case's expect matches), a windowless app (whether it kept running, how it ended, what it printed), a terminal program on strobe's own terminal (its grid and the modes it set), or an open Safari tab on a USB-cabled iPhone. Exit 124 (a result with problems) when it never loaded or --until never showed.",
-        args: &[("target", "https://…, a local page.html, app:<id>, exe:<absolute path>, tty:<command> or wir:[<selector>]")],
+        args: &[("target", "https://…, a local page.html, app:<id>, exe:<absolute path>, tty:<command> or wir:[<selector>]; pid:, proc:, cdp:, ws:// (record attaches to those) and node:, bun: (a bench file's script() target) are usage errors")],
         flags: &[
             ("until", "wait for this selector (a page's CSS, a native app's accessibility selector, text=… on a terminal; image=<png> an image anchor)"),
             ("wait", "settle time after the load or --until (page 1s, app 2s: a windowless app is watched that long)"),

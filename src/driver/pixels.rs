@@ -368,20 +368,35 @@ impl Pixels {
     /// `AnchorNotFound`, with the best place's score and where, and the capture kept for the step.
     fn not_found(&self, a: &Anchor, found: &Found, shot: Shot, rect: [f64; 4], t: Duration, src: &dyn Source) -> Error {
         let best = match found.best {
-            Some(b) => format!(
-                "; the best place scored {:.3} at ({:.0}, {:.0}) in the {}{}",
-                b.score,
-                rect[0] + b.x / shot.scale,
-                rect[1] + b.y / shot.scale,
-                src.what(),
-                found.colour.map(|c| format!(", its colours {c:.0} apart per channel")).unwrap_or_default()
-            ),
+            // `image::find`'s colour check: a place that matched the shape at the threshold, in other colours.
+            Some(b) if found.colour.is_some() => {
+                // The limit `image::find` holds the mean difference to, and the difference with as many
+                // decimals as it takes to print above it (33.54 against 33.5 is "33.54", not "33.5").
+                let allow = (1.0 - a.threshold) * 510.0 + 8.0;
+                let allowed = format!("{allow:.2}").trim_end_matches('0').trim_end_matches('.').to_string();
+                let shown: f64 = allowed.parse().unwrap_or(allow);
+                let d = found.colour.unwrap_or_default();
+                let apart = (1..=3).map(|n| format!("{d:.n$}")).find(|s| s.parse::<f64>().is_ok_and(|v| v > shown)).unwrap_or_else(|| format!("{d:.3}"));
+                format!(
+                    "; the best place matched its shape (score {:.3}) at ({:.0}, {:.0}) in the {} but not its colours: {apart} apart per channel, over the {allowed} the threshold allows",
+                    b.score,
+                    rect[0] + b.x / shot.scale,
+                    rect[1] + b.y / shot.scale,
+                    src.what(),
+                )
+            }
+            Some(b) => format!("; the best place scored {:.3} at ({:.0}, {:.0}) in the {}", b.score, rect[0] + b.x / shot.scale, rect[1] + b.y / shot.scale, src.what()),
             None => "; the image is larger than where strobe looked".to_string(),
         };
+        // A lower threshold also widens the colour check: for a shape found in other colours it would
+        // take the wrong place.
+        let fix = if found.colour.is_some() {
+            "compare the image with the capture saved for the failed step (failed-<step>-anchor.png): the screen shows that shape in other colours (another theme, state or tint), so take the image from the screen as it is when the step runs"
+        } else {
+            "compare the image with the capture saved for the failed step (failed-<step>-anchor.png); give scale: 2 for an image exported at @2x, a region to look in, or a lower threshold"
+        };
         FAILED.set(Some(shot.img));
-        Refusal::new(ValidatorId::AnchorNotFound, format!("image \"{}\": no match at threshold {} in {:.1} s{best}", a.name, a.threshold, t.as_secs_f64()))
-            .fix("compare the image with the capture saved for the failed step (failed-<step>-anchor.png); give scale: 2 for an image exported at @2x, a region to look in, or a lower threshold")
-            .into()
+        Refusal::new(ValidatorId::AnchorNotFound, format!("image \"{}\": no match at threshold {} in {:.1} s{best}", a.name, a.threshold, t.as_secs_f64())).fix(fix).into()
     }
 
     /// Where input for `a` goes: its one match, waited for up to `t`. Two or more matches are read again
