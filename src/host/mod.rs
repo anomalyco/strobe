@@ -1856,7 +1856,8 @@ pub fn display_of(hwnd: isize) -> Option<DisplayPath> {
     }
 }
 
-/// Finds an executable: on PATH, then in the given candidate paths.
+/// Finds an executable: in the given candidate paths, then on PATH (`~/.bun/bin/bun` wins over a
+/// `bun` earlier on PATH).
 pub fn find_exe(name: &str, candidates: &[PathBuf]) -> Option<PathBuf> {
     if let Some(found) = candidates.iter().find(|p| p.is_file()) {
         return Some(found.clone());

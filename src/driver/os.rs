@@ -466,15 +466,26 @@ impl OsInput {
         Ok(())
     }
 
-    /// The last trusted pointer move the page saw, once one came within `t`.
+    /// The last trusted pointer move the page saw, once one came within `t` and no other followed for
+    /// 50 ms: a move posted before (the one from beside the point) may reach the page only with the
+    /// next, in one frame's dispatch (macOS Chromium: probe 1 then read the move from beside it, 3
+    /// units off, and every case of a page measured from outside was refused InputMismatch).
     fn wait_move(&self, page: &Page, t: Duration) -> Result<Option<[f64; 2]>> {
         let until = Instant::now() + t;
+        let mut seen: Option<(Value, Instant)> = None;
         loop {
-            let m = page.eval("JSON.stringify(__strobeOs.moves.at(-1) ?? null)")?;
-            if let Some(p) = m.as_str().and_then(|s| serde_json::from_str::<Option<[f64; 2]>>(s).ok()).flatten() {
+            let v = page.eval("JSON.stringify([__strobeOs.moves.length, __strobeOs.moves.at(-1) ?? null])")?;
+            let now = Instant::now();
+            if seen.as_ref().is_none_or(|(was, _)| *was != v) {
+                seen = Some((v.clone(), now));
+            }
+            let last = seen.as_ref().and_then(|(v, _)| v.as_str()).and_then(|s| serde_json::from_str::<(usize, Option<[f64; 2]>)>(s).ok()).and_then(|(_, p)| p);
+            if let (Some(p), Some((_, since))) = (last, &seen)
+                && now.duration_since(*since) >= Duration::from_millis(50)
+            {
                 return Ok(Some(p));
             }
-            if Instant::now() >= until {
+            if last.is_none() && now >= until {
                 return Ok(None);
             }
             std::thread::sleep(Duration::from_millis(5));
