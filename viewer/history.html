@@ -34,7 +34,7 @@
   }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html { background: var(--canvas); color: var(--ink); font: 14px/20px var(--sans); -webkit-font-smoothing: antialiased; }
+html { scroll-padding-top: 76px; background: var(--canvas); color: var(--ink); font: 14px/20px var(--sans); -webkit-font-smoothing: antialiased; }
 .shell { max-width: 1040px; margin: 0 auto; padding: 28px 32px 80px; display: flex; flex-direction: column; gap: 26px; }
 .mono { font: 12px/18px var(--mono); font-variant-numeric: tabular-nums; }
 h1 { font: 600 22px/28px var(--display); letter-spacing: -0.01em; }
@@ -67,11 +67,13 @@ details summary { cursor: pointer; color: var(--ink-3); font-size: 13px; }
 <div class="shell" id="app"></div>
 <script>
 const DATA = /*STROBE_DATA*/null;
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+// Escaped for HTML, a time never breaking between its number and its unit (`4,000 µs` on one line).
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]).replace(/(\d) (µs|ms|s)(?!\w)/g, "$1\u00a0$2");
 
 /* ---------- Time units (shared: viewer/report.html and viewer/history.html carry this block alike) ---------- */
 // Rust's `{:.d}`, which the text and markdown print with: the nearest decimal, an exact tie to even
-// (toFixed breaks a tie away from zero, so 12.5 MB read 13 MB here and 12 MB in the text).
+// (toFixed breaks a tie away from zero, so 12.5 MB read 13 MB here and 12 MB in the text). One that
+// shows as zero has no sign (`0.00`, never `-0.00`).
 function rfix(v, d) {
   const dv = new DataView(new ArrayBuffer(8));
   dv.setFloat64(0, Math.abs(v));
@@ -79,9 +81,10 @@ function rfix(v, d) {
   let mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
   const e = exp === 0 ? -1074 : exp - 1075;
   if (exp !== 0) mant |= 1n << 52n;
-  if (!Number.isFinite(v) || e >= 0) return v.toFixed(d);
+  const fixed = () => { const s = v.toFixed(d); return Number.isFinite(v) && !/[1-9]/.test(s) ? s.replace(/^-/, "") : s; };
+  if (!Number.isFinite(v) || e >= 0) return fixed();
   const num = mant * 10n ** BigInt(d), den = 1n << BigInt(-e);
-  if ((num % den) * 2n !== den) return v.toFixed(d);
+  if ((num % den) * 2n !== den) return fixed();
   let q = num / den;
   if (q % 2n === 1n) q += 1n;
   const digits = q.toString().padStart(d + 1, "0");
@@ -149,22 +152,10 @@ const fmtTime = (ms, unit = TIME_UNIT) => timeText(ms, { unit });
 const fmtTimeNum = (ms, unit = TIME_UNIT) => timeText(ms, { num: true, unit });
 // A difference, signed (fmt::time_signed): `+1,234 µs`, `−42.0 µs`, `+<0.01 µs`, `0 µs`.
 const fmtTimeSigned = (ms, unit = TIME_UNIT) => timeText(ms, { signed: true, unit });
-// Times printed together, an estimate and its interval's ends (fmt::times): at the decimals the
-// largest of them prints with, so they line up (`+3.2 µs [−1.1 … +12.4 µs]`); one that would print as
-// 0 there keeps its first significant digit (`[0.03 … 52.0 µs]`).
-function fmtTimes(list, signed = false, unit = TIME_UNIT) {
-  const t = TIME_UNITS[unit];
-  const largest = list.map((v) => Math.abs(v * t.perMs)).filter(Number.isFinite).reduce((m, x) => Math.max(m, x), 0);
-  const common = timeDigits(largest, t.finest);
-  // fmt::digits_for(x, 0, finest): the decimals that show its first significant digit.
-  const first = (x) => {
-    const a = Math.abs(x);
-    if (!Number.isFinite(a) || a === 0) return 0;
-    for (let k = 0; k <= t.finest; k++) if (Math.round(a * 10 ** k) >= 1) return k;
-    return 0;
-  };
-  return list.map((v) => timeText(v, { d: Math.max(common, first(v * t.perMs)), signed, unit }));
-}
+// Times printed together, an estimate and its interval's ends (fmt::times): each as it prints alone
+// (`+3.20 µs [−1.10 … +12.4 µs]`). Shared decimals would print a small end with fewer digits than its
+// own (0.05 ms beside 250 ms as `0.1 ms`) or a large one with digits it does not have (`12.40`).
+const fmtTimes = (list, signed = false, unit = TIME_UNIT) => list.map((v) => timeText(v, { signed, unit }));
 
 // A comparison's verdict in words (stats::verdict_text): a time's absolute bound or margin (`same
 // (±520 µs)`, `no worse (≤1.20 ms, faster)`, `worse (>0.500 s)`) drawn again from `bound` in the shown
@@ -186,34 +177,100 @@ function verdictText(c, unit) {
 // An axis tick in ms, in `unit` at the decimals the ticks' step needs (`250,000 µs`, `0.25 s`), signed
 // when `signed`; a sign only on what shows a nonzero digit (never `−0 µs`).
 function fmtTimeTick(t, ticks, signed = false, unit = TIME_UNIT) {
-  const k = TIME_UNITS[unit].perMs;
+  const { perMs: k, finest } = TIME_UNITS[unit];
   const fin = ticks.filter(Number.isFinite);
   const step = (fin.length > 1 ? Math.abs(fin[1] - fin[0]) : Math.abs(fin[0] || 0)) * k;
-  const d = step > 0 ? Math.min(6, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) : 0;
+  // Never finer than a time prints (0.01 µs, 0.0001 ms, 0.000001 s): `timeAxis` keeps a step that large.
+  const d = step > 0 ? Math.min(finest, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) : 0;
   const body = `${groupDigits(rfix(Math.abs(t) * k, d))} ${timeLabel(unit)}`;
   if (!/[1-9]/.test(body)) return body;
   return t < 0 ? "−" + body : signed && t > 0 ? "+" + body : body;
 }
+
+// A time axis's range in ms, widened about its middle to at least four of the shown unit's finest
+// steps, so no two of its ticks print alike (`0.000004 s` three times on one axis).
+function timeAxis(lo, hi, unit = TIME_UNIT) {
+  const { perMs, finest } = TIME_UNITS[unit];
+  const min = (4 * 10 ** -finest) / perMs;
+  if (!(hi - lo < min)) return [lo, hi];
+  const mid = (lo + hi) / 2;
+  return [mid - min / 2, mid + min / 2];
+}
+
+// Rust's f64::round: half away from zero (Math.round takes −0.5 to 0).
+const rround = (x) => Math.sign(x) * Math.round(Math.abs(x));
+
+// fmt::digits_for: decimals that show a number's first significant digit, from `min` to `max`.
+function digitsFor(v, min, max) {
+  const a = Math.abs(v);
+  if (!Number.isFinite(a) || a === 0) return min;
+  // Dust no decimal up to max shows reads at min (fmt::digits_for), not `0.000`.
+  let d = 0;
+  while (d <= max && rround(a * 10 ** d) < 1) d++;
+  if (d > max) d = min;
+  return Math.min(max, Math.max(min, d));
+}
+
+// The text's `fmt::value`, so every surface prints a number the same way.
+function fmtVal(v, u) {
+  if (!Number.isFinite(v)) return "—";
+  if (u === "ms") return fmtTime(v);
+  const d0 = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4);
+  // A value that rounds to zero prints as 0 at two decimals, without a sign (fmt::value).
+  let d = d0;
+  if (rround(v * 10 ** d) === 0) { v = 0; d = Math.min(d, 2); }
+  if (u === "%") return rfix(v, d) + "%";
+  if (u === "pp") return rfix(v, d) + " pp";
+  // Like every unit (fmt::value): a 0.287 MB heap once printed `0 MB` beside a ±4% interval.
+  if (u === "MB") return rfix(v, d) + " MB";
+  if (u === "MB/min") return rfix(v, d) + " MB/min";
+  if (u === "count/min") return (Math.abs(v) >= 10 ? Math.round(v).toLocaleString("en-US") : rfix(v, 1)) + " /min";
+  if (u === "Hz") return rfix(v, 0) + " Hz";
+  if (u === "/s") return rfix(v, d) + "/s";
+  if (u === "value") return rfix(v, d);
+  if (u === "bytes") {
+    // fmt::bytes: three significant digits at most, the unit's whole number at least.
+    const a = Math.abs(v);
+    const scaled = (x, unit) => rfix(x, Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2) + " " + unit;
+    if (a >= 1024 ** 3) return scaled(v / 1024 ** 3, "GB");
+    if (a >= 1024 ** 2) return scaled(v / 1024 ** 2, "MB");
+    if (a >= 1024) return rfix(v / 1024, Math.abs(v / 1024) >= 10 ? 0 : 1) + " KB";
+    return rfix(v, 0) + " B";
+  }
+  // Grouped like a time (fmt::value): `1,234,567`.
+  if (u === "count") return groupDigits(Math.abs(v - Math.round(v)) < 1e-9 ? String(rround(v)) : rfix(v, 1));
+  if (u === "instructions") {
+    const a = Math.abs(v);
+    if (a >= 1e9) return rfix(v / 1e9, 2) + " G instr";
+    if (a >= 1e7) return rfix(v / 1e6, 1) + " M instr";
+    if (a >= 1e6) return rfix(v / 1e6, 2) + " M instr";
+    if (a >= 1e3) return rfix(v / 1e3, 0) + " k instr";
+    return rfix(v, 0) + " instr";
+  }
+  return rfix(v, d) + (u ? " " + u : "");
+}
+
+// Round ticks across [lo, hi], about `count` of them: 1, 2 or 5 times a power of ten apart.
+function niceTicks(lo, hi, count) {
+  if (!(hi > lo)) return [lo];
+  const raw = (hi - lo) / Math.max(1, count);
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const f = raw / mag;
+  const step = (f >= 7.5 ? 10 : f >= 3.5 ? 5 : f >= 1.5 ? 2 : 1) * mag;
+  const out = [];
+  for (let i = Math.ceil(lo / step - 1e-9); i * step <= hi + 1e-9; i++) {
+    out.push(i === 0 ? 0 : +(i * step).toPrecision(10));
+  }
+  return out;
+}
 /* ---------- end of the shared time units ---------- */
 
+// A point's value as the text prints it (fmt::value, the shared block's fmtVal); a port's point,
+// ln(head / base), as the change.
 function val(v, unit) {
   if (v == null || !isFinite(v)) return "—";
-  // A port's point: ln(head / base), shown as the change.
   if (unit === "ln_ratio") return pct(Math.exp(v) - 1);
-  if (unit === "ms") return fmtTime(v);
-  // fmt::value's digits: below 10, as many decimals as show the first significant digit (0.003, not 0.00).
-  const a = Math.abs(v);
-  let d = a >= 100 ? 0 : a >= 10 ? 1 : 2;
-  // Dust that no decimal up to 4 shows stays at 2 (fmt::digits_for).
-  if (a > 0 && a < 0.01) {
-    while (d <= 4 && Math.round(a * 10 ** d) < 1) d++;
-    if (d > 4) d = 2;
-  }
-  if (unit === "bytes") { const a = Math.abs(v); return a >= 1048576 ? rfix(v / 1048576, 1) + " MB" : a >= 1024 ? rfix(v / 1024, 0) + " KB" : rfix(v, 0) + " B"; }
-  if (unit === "%") return rfix(v, d) + "%";
-  // Grouped like a time (fmt::value): `1,234,567`.
-  if (unit === "count") return groupDigits(Number.isInteger(v) ? String(v) : rfix(v, 1));
-  return rfix(v, d) + (unit ? " " + unit : "");
+  return fmtVal(v, unit || "");
 }
 // Values printed together, a median and its interval's ends (fmt::values): times at one set of digits.
 const vals = (vs, unit) => unit === "ms" ? fmtTimes(vs) : vs.map(v => val(v, unit));
@@ -243,10 +300,20 @@ function chart(s, host) {
   if (!ys.length) { host.innerHTML = `<p class="note">No point with a value yet.</p>`; return; }
   let lo = Math.min(...ys), hi = Math.max(...ys);
   const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.05 || 1; lo -= pad; hi += pad;
-  // The y-axis's five labels: a time axis in the page's unit at the decimals its step needs (never
-  // promoted to seconds); the left margin as wide as the widest label.
-  const ticks = [0, 1, 2, 3, 4].map(k => lo + (hi - lo) * k / 4);
-  const labels = ticks.map(v => unit === "ms" ? fmtTimeTick(v, ticks) : val(v, unit));
+  if (unit === "ms") [lo, hi] = timeAxis(lo, hi);
+  // The y-axis's labels: round ticks (1, 2 or 5 times a power of ten apart), a time axis in the page's
+  // unit at the decimals its step needs (never promoted to seconds); the left margin as wide as the
+  // widest label.
+  // Bytes print in binary units: their ticks are round in the unit they print in (3.2, 3.3 MB), not in
+  // bytes (100,000 B apart reads 3.24, 3.34, 3.43 MB).
+  const big = Math.max(Math.abs(lo), Math.abs(hi));
+  const per = unit === "bytes" ? (big >= 1024 ** 3 ? 1024 ** 3 : big >= 1024 ** 2 ? 1024 ** 2 : big >= 1024 ? 1024 : 1) : 1;
+  const raw = niceTicks(lo / per, hi / per, 4).map(v => v * per);
+  const label = v => unit === "ms" ? fmtTimeTick(v, raw) : val(v, unit);
+  // A tick that prints like the one below it says nothing more (a score's 0.00002 steps read 0.00):
+  // left out.
+  const ticks = raw.filter((v, i) => i === 0 || label(v) !== label(raw[i - 1]));
+  const labels = ticks.map(label);
   const L = Math.max(64, Math.ceil(Math.max(...labels.map(l => l.length)) * 11 * 0.62) + 10);
   const x = i => L + (pts.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (pts.length - 1));
   const y = v => T + (hi - v) / (hi - lo) * (H - T - B);
@@ -355,9 +422,10 @@ function setTimeUnit(unit) {
 }
 
 TIME_UNIT = parseTimeUnit(new URLSearchParams((location.hash || "").replace(/^#/, "")).get("unit")) || parseTimeUnit(DATA?.default_unit) || "us";
+// An address edited by hand to another unit redraws in it; one without `unit=` goes back to the page's own.
 addEventListener("hashchange", () => {
-  const u = parseTimeUnit(new URLSearchParams(location.hash.replace(/^#/, "")).get("unit"));
-  if (u && u !== TIME_UNIT) { TIME_UNIT = u; render(); }
+  const u = parseTimeUnit(new URLSearchParams(location.hash.replace(/^#/, "")).get("unit")) || parseTimeUnit(DATA?.default_unit) || "us";
+  if (u !== TIME_UNIT) { TIME_UNIT = u; render(); }
 });
 render();
 </script>
