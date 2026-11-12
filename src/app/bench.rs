@@ -967,7 +967,10 @@ fn software_state(ctx: &Ctx, s: &Series, mut b: Block) -> Block {
     b.intervals.clear();
     b.phases.clear();
     for (m, r) in validity::software_refusals(&gpu, false, None, declared_metrics(s).into_iter().map(String::as_str)).unwrap_or_default() {
-        b.refused.insert(m, r);
+        // What the target can never have (a windowless app's frames) keeps that reason: no adapter changes it.
+        if b.refused.get(&m).is_none_or(|was| was.validator != ValidatorId::NotForTarget) {
+            b.refused.insert(m, r);
+        }
     }
     b
 }
@@ -1014,33 +1017,24 @@ fn series_windowless(ctx: &Ctx, s: &Series) -> bool {
     names.iter().all(|n| windowless_target(&ctx.describe["targets"][*n], &ctx.config))
 }
 
-/// A target that opens no window: a script, a command line, a terminal (its grid is strobe's own), or
-/// an app with `window: false` (on the target or its profile).
+/// A target that opens no window: a script, a command line, a terminal (its grid is strobe's own), or an
+/// app that shows none by `launch::app_windowless` (the target's own `window`, else its profile's).
 fn windowless_target(t: &Value, config: &Value) -> bool {
-    matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || t["window"] == false || profile_of(t).and_then(|id| isolate::app(id, config).ok()).is_some_and(|a| a.windowless)
+    matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || launch::app_windowless(t, profile_of(t).and_then(|id| isolate::app(id, config).ok()).as_ref())
+}
+
+/// `windowless_target` as one side runs it: an `app:<id>` variant runs that profile, not the target's.
+fn side_windowless(t: &Value, config: &Value, v: &Variant) -> bool {
+    match &v.kind {
+        Kind::App(id) if !matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) => launch::app_windowless(t, isolate::app(id, config).ok().as_ref()),
+        _ => windowless_target(t, config),
+    }
 }
 
 /// An app whose page strobe drives over DevTools (`app`, `exe`, `webview`, `command`) declared with
 /// `window: false` (`windowless_target`): it may draw, but to no window anyone sees.
 fn windowless_app(t: &Value, config: &Value) -> bool {
     matches!(t["kind"].as_str(), Some("app" | "exe" | "webview" | "command")) && windowless_target(t, config)
-}
-
-/// Why a windowless app (`windowless_app`) has no frame, input-latency, display or GPU-use metric.
-const WINDOWLESS_DRAWN: &str = "the app shows no window (window: false), so nothing it draws reaches a display";
-
-/// `window: false` on a target whose processes put a normal window on screen anyway (`pids`): none of a
-/// windowed target's guards held it (in front, uncovered, active), so its numbers may be a covered or
-/// inactive window's. A hidden window, a headless browser's and a tray icon are not on screen. A window
-/// other windows cover still counts (`cloaked` on macOS and X11 is that): it is the very case no guard
-/// caught. On Windows `cloaked` is the compositor's own hiding (a background shell window), not a cover.
-fn windowless_shown(name: &str, pids: &[u32]) -> Result<()> {
-    match host::main_window(pids).filter(|w| w.visible && !w.iconic && (!cfg!(windows) || !w.cloaked)) {
-        Some(w) => Err(Refusal::new(ValidatorId::VariantMismatch, format!("the target {name} declares window: false, yet it showed a window on screen ({}×{} pixels)", w.client.0, w.client.1))
-            .fix("drop `window: false`, or keep the window hidden")
-            .into()),
-        None => Ok(()),
-    }
 }
 
 /// How a note names a side: an implementation's own name in an implementation comparison, else its
@@ -6927,7 +6921,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         for (r, s) in taken.into_iter().zip(cases) {
             let r = r
                 .and_then(|b| priority_state(ctx, s, x, b))
-                .map(|b| headless_state(ctx, s, b))
+                .map(|b| headless_state(ctx, s, v, b))
                 .map(|b| software_state(ctx, s, b))
                 .map(|b| phase_state(ctx, s, b))
                 .map(|b| counter_state(s, x, b))
@@ -7141,7 +7135,7 @@ fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
         // on the phone's.
         "web" | "url" if headless_of(ctx, s) || ctx.phone.is_some() => None,
         _ if x.set == Set::Memory => None,
-        // An app with no window: what it would draw is refused (`WINDOWLESS_DRAWN`), the rest needs no screen.
+        // An app with no window: what it would draw is refused (`launch::WINDOWLESS_DRAWN`), the rest needs no screen.
         "app" | "exe" | "webview" | "command" if windowless => None,
         "native" if windowless || x.untimed => {
             let on: Vec<&str> = declared_metrics(s)
@@ -7207,7 +7201,7 @@ fn restate_recording(ctx: &Ctx, s: &Series, b: &Block) {
     let why = if headless_of(ctx, s) {
         Some("Headless: the page ran headless, so nothing it drew reached a display".to_string())
     } else if windowless_app(&ctx.describe["targets"][&s.target], &ctx.config) {
-        Some(format!("NotForTarget: {WINDOWLESS_DRAWN}"))
+        Some(format!("NotForTarget: {}", launch::WINDOWLESS_DRAWN))
     } else if b.browser.as_ref().is_some_and(|br| br.software) {
         Some("SoftwareGpu: a software adapter drew the page; the browser's CPU includes the rasterization a GPU would do".to_string())
     } else {
@@ -7223,9 +7217,11 @@ fn restate_recording(ctx: &Ctx, s: &Series, b: &Block) {
 /// input-to-screen latencies, scrolling, canvas frames and GPU use go, and the declared ones show
 /// refused (`Headless`); CPU, main-thread work, counters, memory, milestones and strobe's own input
 /// pacing stay. So for an app driven over DevTools with `window: false` (`windowless_app`): what its
-/// hidden or headless window drew reached no display either (`NotForTarget`).
-fn headless_state(ctx: &Ctx, s: &Series, mut b: Block) -> Block {
-    let windowless = windowless_app(&ctx.describe["targets"][&s.target], &ctx.config);
+/// hidden or headless window drew reached no display either (`NotForTarget`; a launch block's own
+/// refusal of its pixels, `launch::refusals`, stands as it is).
+fn headless_state(ctx: &Ctx, s: &Series, v: &Variant, mut b: Block) -> Block {
+    let t = &ctx.describe["targets"][v.target_of(s)];
+    let windowless = matches!(t["kind"].as_str(), Some("app" | "exe" | "webview" | "command")) && side_windowless(t, &ctx.config, v);
     if !headless_of(ctx, s) && !windowless {
         return b;
     }
@@ -7238,12 +7234,16 @@ fn headless_state(ctx: &Ctx, s: &Series, mut b: Block) -> Block {
     b.intervals.clear();
     b.phases.clear();
     for m in declared_metrics(s).into_iter().filter(|m| drawn(m)) {
-        let r = if windowless {
-            Refusal::new(ValidatorId::NotForTarget, format!("{m}: {WINDOWLESS_DRAWN}")).fix("measure CPU, memory or counters of a windowless app, or give it a window")
+        if windowless {
+            if b.refused.get(m).is_none_or(|r| r.validator != ValidatorId::NotForTarget) {
+                b.refused.insert(
+                    m.clone(),
+                    Refusal::new(ValidatorId::NotForTarget, format!("{m}: {}", launch::WINDOWLESS_DRAWN)).fix("measure CPU, memory or counters of a windowless app, or give it a window"),
+                );
+            }
         } else {
-            Refusal::new(ValidatorId::Headless, format!("{m}: the page ran headless, so nothing it drew reached a display"))
-        };
-        b.refused.insert(m.clone(), r);
+            b.refused.insert(m.clone(), Refusal::new(ValidatorId::Headless, format!("{m}: the page ran headless, so nothing it drew reached a display")));
+        }
     }
     b
 }
@@ -7664,9 +7664,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     let headless = headless_of(ctx, s);
     // Nothing of it on screen to bring forward: a headless page, or an app with `window: false` (a tray
     // app whose hidden window macOS still lists, and which never becomes the active app).
-    let offscreen = headless || windowless_target(&target, &ctx.config);
-    // An app declared without a window, which must then show none (`windowless_shown`).
-    let declared_windowless = windowless_app(&target, &ctx.config);
+    let offscreen = headless || side_windowless(&target, &ctx.config, v);
+    // An app declared without a window, which must then show none (`launch::windowless_shown`).
+    let declared_windowless = app && side_windowless(&target, &ctx.config, v);
     // What the cases declared beyond the default probes: counters, network counts, layout shift. One
     // browser runs every case of a launch, so it is set up for what any of them declared.
     let declared: Vec<&String> = cases.iter().flat_map(declared_metrics).collect();
@@ -10032,7 +10032,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
 /// (`windowless_shown`), and nothing waits for it to be visible.
 fn page_window(s: &Series, page: &Page, browser: &WebBrowser, offscreen: bool, windowless: Option<&str>, hidden_ok: bool) -> Result<()> {
     if let Some(name) = windowless {
-        return windowless_shown(name, &browser.pids());
+        return launch::windowless_shown(name, &browser.pids());
     }
     if !hidden_ok {
         validity::window_visible(page)?;
@@ -11308,12 +11308,21 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
     }
     // An app with no window (`window: false` on the target or its profile) draws to no display: a primary of
     // frames, input latency, the display or GPU use is refused before anything launches, as its blocks would.
-    if (windowless_app(t, config) || (is_native(t) && windowless_target(t, config))) && (display_metric(&s.primary) || gpu_use(&s.primary)) {
+    // A launch case: one that ends on a window, or whose primary is its pixels (`launch::windowless_refusal`).
+    if windowless_app(t, config) || (is_native(t) && windowless_target(t, config)) {
         let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
-        return Ok(Some(
-            Refusal::new(ValidatorId::NotForTarget, format!("{on}the primary {}: {WINDOWLESS_DRAWN}", s.primary))
-                .fix("choose a primary a windowless app has: cpu.work, cpu.app.total, run.duration, a memory metric or phase.<name>; or give the app a window"),
-        ));
+        if s.launch.is_object() {
+            let window_until = native::window_until(s, &s.launch["until"])?.is_some();
+            if let Err(e) = launch::windowless_refusal(s, window_until) {
+                let Some(r) = e.refusal else { return Err(e) };
+                return Ok(Some(Refusal { summary: format!("{on}{}", r.summary), ..*r }));
+            }
+        } else if display_metric(&s.primary) || gpu_use(&s.primary) {
+            return Ok(Some(
+                Refusal::new(ValidatorId::NotForTarget, format!("{on}the primary {}: {}", s.primary, launch::WINDOWLESS_DRAWN))
+                    .fix("choose a primary a windowless app has: cpu.work, cpu.app.total, run.duration, a memory metric or phase.<name>; or give the app a window"),
+            ));
+        }
     }
     // macOS keeps out of a Bun host's footprint what its allocator freed and wrote again (`script::chunk`
     // refuses it per block): a primary of it is refused before the file's other targets run.

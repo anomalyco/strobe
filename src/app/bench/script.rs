@@ -451,8 +451,23 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let procs0 = ctx.pin.map(|_| (host::now_ns(), host::all_processes()));
                 // Steady once two runs cost the same CPU (SPEC §9.2).
                 let mut warmup = super::block::Warmup::new(s, x);
+                // A host with no collector refuses js.heap.retained alone (`EngineUnsupported`), once: the
+                // block's other metrics stand, unless the heap is the primary (`slotted` refuses the block then).
+                let mut heap_refused: Option<Refusal> = None;
+                let heap_now = |heap_refused: &mut Option<Refusal>| -> Result<f64> {
+                    if !heap || heap_refused.is_some() {
+                        return Ok(f64::NAN);
+                    }
+                    match heap_mb() {
+                        Err(e) if e.validator() == Some(ValidatorId::EngineUnsupported) => {
+                            *heap_refused = e.refusal.map(|r| *r);
+                            Ok(f64::NAN)
+                        }
+                        r => r,
+                    }
+                };
                 while warmup.more(runs.len()) {
-                    let h0 = if heap { heap_mb()? } else { f64::NAN };
+                    let h0 = heap_now(&mut heap_refused)?;
                     hooks.begin(&format!("run:{}", base + runs.len()));
                     let listed = probe::wakes::wall_us();
                     let k0 = probe::wakes::Counters::take(listed, &host::tree_pids(pid), perf.as_ref());
@@ -530,7 +545,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let used = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
                     lost.push((timed_cpu.as_ref().map_or(0.0, |c| ms(c.ended)), timed_cpu.is_none()));
                     ended_exes.push(timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), ms(*cy), *k)).collect()).unwrap_or_default());
-                    let retained = if heap { heap_mb()? - h0 } else { f64::NAN };
+                    let retained = heap_now(&mut heap_refused)? - h0;
                     // The host's memory as the run left it, before its reset (SPEC §9.6), where this run may be
                     // the last measured one.
                     ends.push(warmup.may_end(runs.len()).then(|| {
@@ -567,7 +582,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     extra.insert("cpu.work".into(), measured.iter().enumerate().map(|(j, r)| (key(j), r.1)).collect());
                     extra.insert("cpu.app.total".into(), measured.iter().enumerate().filter(|(_, r)| r.0 > 0.0).map(|(j, r)| (key(j), 100.0 * r.1 / r.0)).collect());
                 }
-                if heap {
+                if heap && heap_refused.is_none() {
                     extra.insert("js.heap.retained".into(), measured.iter().enumerate().map(|(j, r)| (key(j), r.3)).collect());
                 }
                 let main_lost = mains[local.clone()].iter().find_map(|m| m.as_ref().err()).cloned();
@@ -601,14 +616,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 }
                 let mut refused = uncounted;
                 if footprint_short && declared_metrics(s).iter().any(|m| *m == "memory.app.private") {
-                    refused.insert(
-                        "memory.app.private".into(),
-                        Refusal::new(
-                            ValidatorId::EngineUnsupported,
-                            "memory.app.private: macOS leaves out of a Bun host's footprint the memory its allocator freed and then wrote again, so the footprint can miss what the host holds (100 MiB held read as 5.1 MiB)",
-                        )
-                        .fix("declare js.heap.retained (what a run leaves on the heap after a collection, buffers included), or host the module on Node (runtime: \"node\")"),
-                    );
+                    refused.insert("memory.app.private".into(), super::bun_footprint_refusal());
+                }
+                if let Some(r) = heap_refused.take() {
+                    refused.insert("js.heap.retained".into(), r);
                 }
                 if let Some(lost) = &main_lost {
                     for m in declared_metrics(s).into_iter().filter(|m| *m == "cpu.main" || *m == "cpu.main.busy") {
