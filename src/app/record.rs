@@ -1498,7 +1498,8 @@ fn memory(page: &chromium::Page, browser: &chromium::Browser, dir: &std::path::P
     }
     values.insert("memory.app.private", at(0, "private_bytes") / (1024.0 * 1024.0));
     if browser.phone.is_some() {
-        let r = crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "memory.app.private: the page's processes are on the phone, and strobe reads private memory from this computer's");
+        let r = crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "memory.app.private: the page's processes are on the phone, and strobe reads private memory from this computer's")
+            .fix("read the page's own memory here (js.heap.used, its growth, the leak suspects), or the processes' memory in a desktop browser's memory recording");
         refused.insert("memory.app.private".into(), json!(r.message()));
     }
     values.insert("leak.suspects.retained", leaks["retained_size"].as_f64().unwrap_or(0.0) / (1024.0 * 1024.0));

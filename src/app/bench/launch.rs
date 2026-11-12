@@ -597,7 +597,8 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
 pub(super) fn refusals(s: &Series, values: &BTreeMap<String, f64>, pixels: &str, web: bool) -> BTreeMap<String, Refusal> {
     let mut out = BTreeMap::new();
     for m in declared_metrics(s) {
-        if values.contains_key(m) || out.contains_key(m) {
+        // A counter only `--noworse` names is no launch's to measure, nor to refuse.
+        if values.contains_key(m) || out.contains_key(m) || (!s.case_declares(m) && m.starts_with("count.")) {
             continue;
         }
         let r = super::super::outside::not_on_this_os(m).unwrap_or_else(|| match m.as_str() {

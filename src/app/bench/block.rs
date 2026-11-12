@@ -112,8 +112,9 @@ impl Warmup {
                 return false;
             }
             // The work, and where it is one thread's, the whole tree's CPU too (a worker's or a browser
-            // service's plateau leaves a page's renderer alone): every run of it read, or none.
-            let tree: Option<&[f64]> = cpu.get(..=i).filter(|c| c.iter().all(|x| x.is_finite()));
+            // service's plateau leaves a page's renderer alone): every run of it from the first measured one
+            // read, or none (a warmup run before it that lost a process says nothing of them).
+            let tree: Option<&[f64]> = cpu.get(..=i).filter(|c| c[f..].iter().all(|x| x.is_finite()));
             let series = std::iter::once(work).chain(tree);
             // An untimed block (`--check --runs N`) measures from its first run whatever follows: its runs
             // that step down are only said.

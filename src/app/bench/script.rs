@@ -50,11 +50,15 @@ struct Measured {
     ended: (f64, bool, Vec<(String, f64, u32)>),
 }
 
-/// The harness module for `root`. The entry resolves from the bench file, like everything else in it,
-/// so both variants run the same harness; in a worktree strobe made for a git ref the file is placed
-/// at the same path, so its relative imports resolve to that variant's code. A directory variant is
-/// the user's own checkout: strobe never writes there, and the file must already exist.
-fn place(bench_file: &Path, entry: &str, root: &Path) -> Result<PathBuf> {
+/// The harness module for `root`, and whether strobe placed it there. The entry resolves from the bench
+/// file, like everything else in it, so both variants run the same harness: one in the harness (the
+/// bench file's folder, strobe.json's `harness` paths) is already the bench's copy (`overlay_harness`).
+/// In a worktree strobe made for a git ref, an entry the ref lacks is placed at the same path, so its
+/// relative imports resolve to that variant's code; one the ref holds is the variant's own and is never
+/// replaced (an entry outside the harness, `script("../src/x.ts")`, is code under test: its own copy on
+/// each side). A directory variant is the user's own checkout: strobe never writes there, and the file
+/// must already exist.
+fn place(bench_file: &Path, entry: &str, root: &Path) -> Result<(PathBuf, bool)> {
     let dir = bench_file.parent().unwrap_or(Path::new("."));
     let source = std::fs::canonicalize(dir.join(entry)).map_err(|_| Error::usage(format!("script entry {entry}: no such file next to {}", bench_file.display())))?;
     // Relative to the repository, not the folder with strobe.json: a variant's folder is a whole checkout (a git
@@ -64,19 +68,18 @@ fn place(bench_file: &Path, entry: &str, root: &Path) -> Result<PathBuf> {
     let rel = source.strip_prefix(&project).map_err(|_| Error::usage(format!("script entry {} is outside the project {}", source.display(), project.display())))?;
     let placed = root.join(rel);
     let owned = std::fs::canonicalize(root).ok().zip(std::fs::canonicalize(host::paths::sub("builds")).ok()).is_some_and(|(r, b)| r.starts_with(b));
-    if owned {
-        let body = std::fs::read(&source)?;
-        if std::fs::read(&placed).ok().as_deref() != Some(body.as_slice()) {
-            if let Some(p) = placed.parent() {
-                std::fs::create_dir_all(p)?;
-            }
-            std::fs::write(&placed, body)?;
+    let mut put = false;
+    if owned && !placed.exists() {
+        if let Some(p) = placed.parent() {
+            std::fs::create_dir_all(p)?;
         }
+        std::fs::write(&placed, std::fs::read(&source)?)?;
+        put = true;
     }
     if !placed.is_file() {
         return Err(Error::usage(format!("the harness {} is missing in {}: commit it there, or compare against a git ref", rel.display(), root.display())));
     }
-    Ok(placed)
+    Ok((placed, put))
 }
 
 impl Host {
@@ -316,7 +319,12 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     }
     let mut steps: Vec<(String, f64)> = Vec::new();
     let launched = Instant::now();
-    let entry = place(Path::new(ctx.describe["file"].as_str().unwrap_or(".")), target["entry"].as_str().unwrap_or(""), &root)?;
+    let (entry, put) = place(Path::new(ctx.describe["file"].as_str().unwrap_or(".")), target["entry"].as_str().unwrap_or(""), &root)?;
+    if put {
+        let file = entry.strip_prefix(&root).unwrap_or(&entry).to_string_lossy().replace('\\', "/");
+        let text = format!("{} ({}) had no {file}, which {} runs: strobe placed the bench's own copy there, so both sides run that one file", v.role, v.label, s.target);
+        super::say_overlay(ctx, vec![validity::info("HarnessOverlay", text)]);
+    }
     let log = store::experiment_dir(&ctx.exp)?.join("script.log");
     // What a profile is cut to, on strobe's clock: the host's life outside the measured runs
     // (`lifecycle_spans`), each passing case's measured runs, and its measured range of the launch's runs.
@@ -527,6 +535,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     return Err(super::super::record::exited(code, &format!("after {}'s runs", s.case), None));
                 }
                 let first = warmup.first().unwrap_or(0);
+                // A check that measured its second run (`Warmup::after`): run 1 is not what it measured.
+                if base == 0 && first > 0 {
+                    launch.first_run = None;
+                }
                 let local = first..warmup.measured().end.clamp(first, runs.len());
                 let (strobe_pct, runner_pct) = cost.share(base + local.start..base + local.end);
                 let mut steps = steps.clone();

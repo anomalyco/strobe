@@ -2799,22 +2799,33 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     }
     // Two builds (`--check --base <variant>`): the base once as the head is, before it.
     let head = variants.len() - 1;
-    let base = if head > 0 {
+    let mut base = if head > 0 {
         progress(format!("  {} base", s.label()));
-        let (mut r, launches, _) = check_launches(ctx, s, &variants[0], repeat, false, (split, main_counters));
+        let (r, launches, _) = check_launches(ctx, s, &variants[0], repeat, false, (split, main_counters));
+        Some((check_halt(ctx, r)?, launches))
+    } else {
+        None
+    };
+    let (r, mut launches, sent) = check_launches(ctx, s, &variants[head], repeat, film, (split, main_counters));
+    let mut r = check_halt(ctx, r)?;
+    // A counter only `--noworse` names, decided across both sides' launches.
+    let mut all: Vec<&mut Block> = r.iter_mut().chain(launches.iter_mut()).collect();
+    if let Some((br, bl)) = base.as_mut() {
+        all.extend(br.iter_mut().chain(bl.iter_mut()));
+    }
+    flagged_counts(s, all);
+    let base = base.map(|(mut r, launches)| {
         let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
-        let r = check_halt(ctx, r)?;
+        if let Ok(b) = &r {
+            ctx.warnings.extend(check_stepped(&format!("{} · base", s.label()), &b.values));
+        }
         let (mut b, counters) = base_check(r, &launches);
         if let Some(rep) = repeated {
             b["repeat"] = rep;
         }
-        Some((b, counters))
-    } else {
-        None
-    };
-    let (mut r, launches, sent) = check_launches(ctx, s, &variants[head], repeat, film, (split, main_counters));
+        (b, counters)
+    });
     let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
-    let r = check_halt(ctx, r)?;
     let held = r.as_ref().ok().map(|_| side_counters(&launches, &noworse));
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     let log = runner_log(ctx, log_from, None);
@@ -2910,6 +2921,26 @@ fn check_noworse(args: &Args, s: &Series) -> Result<BTreeMap<String, f64>> {
         )));
     }
     Ok(m)
+}
+
+/// A `count.<name>` only `--noworse` names (`Series::flagged`), across one series' blocks of one kind
+/// (both sides, every launch): a block none of whose runs counted the name has none (`per_run_hooks`).
+/// Once any block of them counted it, it is the series' counter, and a block that counted none of it
+/// (refusing nothing of it) read 0, with a 0 spread where the block keeps one: a code path that never ran
+/// on one side is a count of 0 there, not a counter that side lacks. None counted it: none has it.
+fn flagged_counts<'a>(s: &Series, blocks: impl IntoIterator<Item = &'a mut Block>) {
+    let mut blocks: Vec<&mut Block> = blocks.into_iter().collect();
+    for m in s.flagged.iter().filter(|m| m.starts_with("count.")) {
+        if !blocks.iter().any(|b| b.values.contains_key(m)) {
+            continue;
+        }
+        for b in blocks.iter_mut().filter(|b| !b.values.contains_key(m) && !b.refused.contains_key(m)) {
+            b.values.insert(m.clone(), 0.0);
+            if !b.spread.is_empty() {
+                b.spread.insert(m.clone(), [0.0, 0.0]);
+            }
+        }
+    }
 }
 
 /// Each `--noworse` counter's values on one side of a check: every launch's (with `--runs N` its lowest
@@ -3057,6 +3088,20 @@ fn runner_log(ctx: &Ctx, from: u64, to: Option<u64>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `NotSteady` for a check block (`--check --runs N`) whose measured runs stepped down (`Warmup::after`):
+/// `who` names the case, and the side in a two-build check.
+fn check_stepped(who: &str, values: &BTreeMap<String, f64>) -> Option<Warning> {
+    let (first, last) = (values.get("warmup.stepped.first")?, values.get("warmup.stepped.last")?);
+    Some(validity::warn(
+        "NotSteady",
+        format!(
+            "{who}: its measured runs stepped down (the first one's work {}, the last half's median {}): the first runs did work the later ones did not (a cold start's compiles and caches, or launch work still running), and each value is the runs' median; a timed bench measures after warmup",
+            fmt::value(*first, "ms"),
+            fmt::value(*last, "ms")
+        ),
+    ))
+}
+
 /// A check case's progress line: `  pass <label>`, or `  FAIL <label>  <why>`.
 fn case_line(s: &Series, passed: bool, error: &Value) -> String {
     format!("  {} {}{}", if passed { "pass" } else { "FAIL" }, s.label(), error.as_str().map(|e| format!("  {e}")).unwrap_or_default())
@@ -3090,18 +3135,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     let (passed, error, hint, values, refused, locked, recording, screen, shown) = match r {
         Ok(b) => {
             let shown = shown::summarize(std::slice::from_ref(&b), false).0;
-            // `--check --runs N`: measured runs that stepped down (`Warmup::after`).
-            if let (Some(first), Some(last)) = (b.values.get("warmup.stepped.first"), b.values.get("warmup.stepped.last")) {
-                ctx.warnings.push(validity::warn(
-                    "NotSteady",
-                    format!(
-                        "{}: its measured runs stepped down (the first one's work {}, the last half's median {}): the first runs did work the later ones did not (a cold start's compiles and caches, or launch work still running), and each value is the runs' median; a timed bench measures after warmup",
-                        s.label(),
-                        fmt::value(*first, "ms"),
-                        fmt::value(*last, "ms")
-                    ),
-                ));
-            }
+            ctx.warnings.extend(check_stepped(&s.label(), &b.values));
             (true, Value::Null, Value::Null, json!(b.values), refusal_map(&b.refused), b.locked, json!(b.recording), b.screen.unwrap_or(Value::Null), shown)
         }
         Err(e) => (false, json!(e.message), json!(e.hint), Value::Null, Value::Null, false, Value::Null, Value::Null, Value::Null),
@@ -3132,7 +3166,9 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     } else {
         (Value::Null, Value::Null)
     };
-    let declared = declared_metrics(s);
+    // A counter only `--noworse` names that no block of the series counted is none of this case's.
+    let declared: Vec<&String> =
+        declared_metrics(s).into_iter().filter(|m| s.case_declares(m) || !m.starts_with("count.") || values.get(m.as_str()).is_some() || refused.get(m.as_str()).is_some()).collect();
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "check", "until": launch::until_of(&s.launch), "primary": { "metric": s.primary }, "declared": declared,
         "passed": passed, "decided": passed, "error": error, "hint": hint, "refusal": failed_by, "values": values, "refused": refused, "measured_run": measured_run, "session_locked": locked, "headless": headless_series(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
@@ -4044,6 +4080,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 }
                 idx[v] = blocks.len();
                 blocks.push(b);
+                flagged_counts(s, blocks.iter_mut());
             }
             // Base and head of a pair share one lock state and one display state, or the pair runs again.
             if blocks[start].locked == blocks[start + 1].locked && blocks[start].display == blocks[start + 1].display {
@@ -4249,6 +4286,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             Err(e) if e.code == 130 || e.code == 124 || stop_requested() => halted = Some(if e.code == 124 { e } else { stop_error() }),
             Err(e) => http_note = Some(format!("the {} blocks failed: {}", if main_http { "timing" } else { "probe" }, e.message)),
         }
+    }
+    if let Some((pb, _)) = pass.as_mut() {
+        flagged_counts(s, pb.iter_mut());
     }
     // Which blocks measure a metric: the pass's for what the paired loop's kind does not.
     let apart = |name: &str| (split == Counting::Separate && counted_apart(name) != main_counters) || (probe == Probing::Separate && http_probe::metric(name) != main_http);
@@ -7862,15 +7902,20 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             }
         };
         // The speed check's stretch, its edges ticks of the timeline: strobe's work in the page, not the target's.
-        let check_from = host::now_ns();
-        if let Some(t) = &timeline {
-            t.mark_edge();
-        }
-        let (mut checked, mut other) = check()?;
-        if let Some(t) = &timeline {
-            t.mark_edge();
-        }
-        let checked_span = (check_from, host::now_ns());
+        let mut checked_spans: Vec<(u64, u64)> = Vec::new();
+        let mut timed_check = || {
+            let from = host::now_ns();
+            if let Some(t) = &timeline {
+                t.mark_edge();
+            }
+            let r = check();
+            if let Some(t) = &timeline {
+                t.mark_edge();
+            }
+            checked_spans.push((from, host::now_ns()));
+            r
+        };
+        let (mut checked, mut other) = timed_check()?;
         // A slow check runs once more after the CPUs settle: a burst passes (the page's own work just
         // after its load, a neighbour on a VM's host, a process that just ended), while throttling
         // (power, heat, a power plan) lasts. A second slow check refuses the block (`Background`, which
@@ -7890,7 +7935,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 validity::wait_quiet(pin, Duration::from_secs(10).min(time_left(ctx)));
             }
             nap_within(ctx, Duration::from_secs(2), "a slow page speed check waited to run again")?;
-            (checked, other) = check()?;
+            (checked, other) = timed_check()?;
             first_slow = Some(first);
         }
         let ratio = match checked {
@@ -8531,7 +8576,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     // view of the recording counts it.
                     let unmeasured = warmup.first().is_some() && i >= warmup.measured().end;
                     let key = if unmeasured { format!("warm:{g}") } else { format!("run:{g}") };
-                    runs.push(run_once(&mut ctx.runner, s, &same, &key, profile, profile && i + 1 == warmup.measured().end, set != Set::Memory && warmup.may_end(i))?);
+                    // The run's edges take ticks of the timeline, so none holds both the run's CPU and what
+                    // came before it (`block::startup_spill`).
+                    if let Some(t) = &timeline {
+                        t.mark_edge();
+                    }
+                    let ran = run_once(&mut ctx.runner, s, &same, &key, profile, profile && i + 1 == warmup.measured().end, set != Set::Memory && warmup.may_end(i));
+                    if let Some(t) = &timeline {
+                        t.mark_edge();
+                    }
+                    runs.push(ran?);
                     // The work that must hold steady is the renderer's main-thread time. `--check` measures the
                     // first run: it asks whether a case works, not what it costs. From outside or in an engine
                     // without that counter, the work is the processes' CPU, as a native app's; where this machine
@@ -8716,9 +8770,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let sampler_pct = samples.cpu_ms.map(|c| 100.0 * c / (sampled.elapsed().as_secs_f64() * 1e3).max(1.0));
             // A check's one cold run that measured the browser's or page's startup still running says so.
             if let (Some(t), Some((0, c))) = (timeline.map(probe::wakes::Timeline::stop), page_cases.first())
-                && let Some(r) = c.runs.first().filter(|_| c.base == 0)
+                // Run 1 measured: a check that measured its second run (`Warmup::after`) says nothing of run 1.
+                && let Some(r) = c.runs.first().filter(|_| c.base == 0 && c.warmup.first() == Some(0))
                 && let Some(why) =
-                    block::startup_spill_skipping(&t, r.t0, r.t1, if app { "the block began (before its prepare)" } else { "the block began (before its first page loaded)" }, &[checked_span])
+                    block::startup_spill_skipping(&t, r.t0, r.t1, if app { "the block began (before its prepare)" } else { "the block began (before its first page loaded)" }, &checked_spans)
             {
                 ctx.warnings.push(validity::warn("NotSteady", format!("{} · {side} block: {why}", s0.label())));
             }
@@ -11457,12 +11512,12 @@ fn overlay_harness(v: &mut Variant, root: &Path, h: &Harness) -> Result<()> {
 }
 
 /// `HarnessOverlay`: a harness file `overlay_harness` wrote into a variant's folder that its script, cli
-/// or tty target runs (`executed`). Over a file the variant's commit holds (git tracks it there), the
-/// variant runs the bench file's checkout's copy, not its own: what differs in that file is gone from
-/// the comparison (warn). Where the variant had none, both sides run that one copy (info).
-fn harness_overlay(v: &Variant, target: &Value, name: &str, bench_file: &Path, from: &Path) -> Vec<validity::Warning> {
+/// or tty target runs (`ran`: `executed`, and a cli case's `ctx.exec` lines). Over a file the variant's
+/// commit holds (git tracks it there), the variant runs the bench file's checkout's copy, not its own:
+/// what differs in that file is gone from the comparison (warn). Where the variant had none, both sides
+/// run that one copy (info).
+fn harness_overlay(v: &Variant, ran: &[PathBuf], name: &str, from: &Path) -> Vec<validity::Warning> {
     let Some(root) = v.root.as_deref().filter(|_| !v.overlaid.is_empty()) else { return Vec::new() };
-    let ran = executed(target, bench_file, from);
     let mut out = Vec::new();
     for rel in v.overlaid.iter().map(|p| lexical(Path::new(""), p)).filter(|p| ran.contains(p)) {
         let file = rel.to_string_lossy().replace('\\', "/");
@@ -11488,17 +11543,6 @@ fn harness_overlay(v: &Variant, target: &Value, name: &str, bench_file: &Path, f
 /// (beside the bench file, at the same place in each variant), and the words of a command line (`run`,
 /// a tty's from its `cwd`, and `build`) that name a file in the variant's folder.
 fn executed(target: &Value, bench_file: &Path, from: &Path) -> Vec<PathBuf> {
-    let words = |v: &Value| -> Vec<String> {
-        match v {
-            Value::String(s) => s.split_whitespace().map(str::to_string).collect(),
-            Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
-            _ => Vec::new(),
-        }
-    };
-    let file = |base: &Path, w: &str| -> Option<PathBuf> {
-        let w = w.trim_matches(|c| c == '"' || c == '\'').replace('\\', "/");
-        (!w.is_empty() && !w.starts_with('-') && !Path::new(&w).is_absolute()).then(|| lexical(base, Path::new(&w)))
-    };
     let mut out = Vec::new();
     match target["kind"].as_str() {
         Some("script") => {
@@ -11509,12 +11553,39 @@ fn executed(target: &Value, bench_file: &Path, from: &Path) -> Vec<PathBuf> {
         }
         Some(kind @ ("cli" | "tty")) => {
             let cwd = if kind == "tty" { PathBuf::from(target["cwd"].as_str().unwrap_or("")) } else { PathBuf::new() };
-            out.extend(words(&target["run"]).iter().filter_map(|w| file(&cwd, w)));
-            out.extend(words(&target["build"]).iter().filter_map(|w| file(Path::new(""), w)));
+            out.extend(line_files(&cwd, &target["run"]));
+            out.extend(line_files(Path::new(""), &target["build"]));
         }
         _ => {}
     }
     out
+}
+
+/// The words of a command line (a string, or its words) that could name a file of the variant's folder,
+/// relative to it from `base` (flags and absolute paths are none).
+fn line_files(base: &Path, line: &Value) -> Vec<PathBuf> {
+    let words: Vec<&str> = match line {
+        Value::String(s) => s.split_whitespace().collect(),
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    words
+        .into_iter()
+        .filter_map(|w| {
+            let w = w.trim_matches(|c| c == '"' || c == '\'').replace('\\', "/");
+            (!w.is_empty() && !w.starts_with('-') && !Path::new(&w).is_absolute()).then(|| lexical(base, Path::new(&w)))
+        })
+        .collect()
+}
+
+/// The `HarnessOverlay` notes not yet said, said: in the progress (`!` a warning, `i` a note) and the result.
+fn say_overlay(ctx: &mut Ctx, notes: Vec<validity::Warning>) {
+    for w in notes {
+        if !ctx.warnings.iter().any(|x| x.id == w.id && x.text == w.text) {
+            progress(format!("  {} {}  {}", if w.level == "warn" { "!" } else { "i" }, w.id, w.text));
+            ctx.warnings.push(w);
+        }
+    }
 }
 
 /// `base` joined with `p`, `.` and `..` taken out without touching the disk.
@@ -11574,12 +11645,9 @@ fn prepare_all(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Val
             Some((project, own)) => prepare_variant(v, &target, own, &Harness { from: project.clone(), paths: Vec::new() }, project)?,
             None => prepare_variant(v, &target, config, &ctx.harness, &ctx.project)?,
         }
-        for w in harness_overlay(v, &target, &name, Path::new(ctx.describe["file"].as_str().unwrap_or(".")), &ctx.harness.from) {
-            if !ctx.warnings.iter().any(|x| x.id == w.id && x.text == w.text) {
-                progress(format!("  ! {}  {}", w.id, w.text));
-                ctx.warnings.push(w);
-            }
-        }
+        let ran = executed(&target, Path::new(ctx.describe["file"].as_str().unwrap_or(".")), &ctx.harness.from);
+        let notes = harness_overlay(v, &ran, &name, &ctx.harness.from);
+        say_overlay(ctx, notes);
     }
     // Builds of one target, or each side on its own target.
     match &s.sides {

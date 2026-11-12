@@ -606,6 +606,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     return Err(super::super::record::exited(tty.exited().unwrap_or(-1), &format!("after {}'s runs", s.case), Some(&last_rows(&tty))));
                 }
                 let first = warmup.first().unwrap_or(0);
+                // A check that measured its second run (`Warmup::after`): run 1 is not what it measured.
+                if base == 0 && first > 0 {
+                    launch.first_run = None;
+                }
                 let local = first..warmup.measured().end.clamp(first, runs.len());
                 let (strobe_pct, runner_pct) = cost.share(base + local.start..base + local.end);
                 // Over the measured runs' timed parts only: what the reader did in warmup or an untimed
