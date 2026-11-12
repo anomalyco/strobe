@@ -90,6 +90,12 @@ The design and every rule behind this file: SPEC.md.
 - A case's leak: `bench <file> --filter <case> --head . --probes memory --repeat 10`: growth per run
   with an interval, and `query <rec> leaks` for what from the first half is still alive.
 - An app over time: `record <target> --probes memory --for 60s` while it does the suspect thing.
+- A script target: `js.heap.retained` (what a run keeps after a collection, buffers counted once). On
+  a Node host it adds ArrayBuffer contents in releases after 0.31.0 (which left them out): compare
+  across that upgrade as two histories (`track` starts a new series, `metric revision 2`; Bun series
+  keep theirs). It does not see add-ons' native memory, mapped files, or on Node WebAssembly memory
+  and strings outside the heap: read `memory.app.private` for those. On macOS a Bun host's
+  `memory.app.private` is refused (`EngineUnsupported`): Bun's allocator hides memory from the OS.
 - Sizes are binary: KB, MB and GB are 2^10, 2^20 and 2^30 bytes.
 
 ### A native app, or any process from outside

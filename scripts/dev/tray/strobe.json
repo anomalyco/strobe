@@ -1,0 +1,31 @@
+{
+  "apps": {
+    "tray": {
+      "kind": "electron",
+      "exe": "${STROBE_DEV_TRAY_EXE}",
+      "args": ["--headless=new", "--no-first-run", "--no-default-browser-check"],
+      "window": false
+    },
+    "desk": {
+      "kind": "electron",
+      "exe": "${STROBE_DEV_TRAY_EXE}",
+      "args": ["--no-first-run", "--no-default-browser-check", "--window-size=640,480"]
+    },
+    "liar": {
+      "kind": "electron",
+      "exe": "${STROBE_DEV_TRAY_EXE}",
+      "args": ["--no-first-run", "--no-default-browser-check", "--window-size=640,480"],
+      "window": false
+    },
+    "stub": {
+      "kind": "electron",
+      "exe": "${STROBE_DEV_ELECTRON}",
+      "window": false
+    },
+    "hidden-app": {
+      "kind": "native",
+      "exe": "${STROBE_DEV_WINDOW}",
+      "window": false
+    }
+  }
+}

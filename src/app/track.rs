@@ -80,17 +80,51 @@ fn seed_fingerprint(r: &Value, fingerprint: &mut Value) {
     }
 }
 
-/// A metric whose reading on this OS changed meaning carries its revision in the fingerprint, so its
-/// points from before are another series: Linux `memory.app.private` became anonymous + swapped pages
-/// (it was private clean + dirty, which counted a file's page cache). Only such a metric, so every
-/// other series keeps its history.
-fn metric_fingerprint(metric: &str, fingerprint: &mut Value) {
+/// A metric whose reading on this OS or runtime changed meaning carries its revision in the fingerprint,
+/// so its points from before are another series: Linux `memory.app.private` became anonymous + swapped
+/// pages (it was private clean + dirty, which counted a file's page cache); a Node host's
+/// `js.heap.retained` became the heap plus ArrayBuffer contents (it was the heap alone, which leaves
+/// them out: a kept 100 MiB buffer read 0, now 100 MiB; Bun's reading did not change). Only such a
+/// metric, so every other series keeps its history. `runtimes`: what `script_runtimes` read.
+fn metric_fingerprint(metric: &str, runtimes: &[String], fingerprint: &mut Value) {
     let revision = match metric {
         "memory.app.private" if cfg!(target_os = "linux") => Some(2),
+        "js.heap.retained" if runtimes.iter().any(|r| r == "node") => Some(2),
         _ => None,
     };
     if let Some(r) = revision {
         fingerprint["metric_revision"] = json!(r);
+    }
+}
+
+/// The script runtimes a series ran, sorted, each once. `sides`: its targets, with the role of the
+/// blocks that are each one's (`None`: every block). A script target's runtime is what its blocks' host
+/// reported running (`Block::runtime`, never a process's name: a `node` on PATH may be Bun's shim, and
+/// children or the other side run other programs); a point without its blocks (a parity gap, a series
+/// not run) takes the target's declared runtime (`script_runtimes` in the result), so it lands in the
+/// series of its neighbours. A target that is no script adds nothing.
+fn script_runtimes(r: &Value, s: &Value, sides: &[(&str, Option<&str>)]) -> Vec<String> {
+    let blocks: Vec<&Value> = s["blocks"].as_array().into_iter().flatten().collect();
+    let mut out = Vec::new();
+    for (target, role) in sides {
+        let ran: Vec<String> = blocks.iter().filter(|b| role.is_none_or(|r| b["variant"] == r)).filter_map(|b| b["runtime"].as_str().map(str::to_string)).collect();
+        if !ran.is_empty() {
+            out.extend(ran);
+        } else if let Some(declared) = r["script_runtimes"][*target].as_str() {
+            out.push(declared.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A script series' runtime in its fingerprint, when it is not the default (Bun): a module hosted on
+/// Node is another history (some metrics read differently there: the heap, the footprint on macOS),
+/// and every series on Bun keeps the identity it had before strobe recorded runtimes.
+fn runtime_fingerprint(runtimes: &[String], fingerprint: &mut Value) {
+    if !runtimes.is_empty() && runtimes != ["bun"] {
+        fingerprint["runtime"] = json!(runtimes.join("+"));
     }
 }
 
@@ -413,9 +447,11 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         if !s["display"].is_null() {
             fingerprint["native_display"] = s["display"].clone();
         }
+        let runtimes = script_runtimes(r, s, &[(s["target"].as_str().unwrap_or(""), None)]);
+        runtime_fingerprint(&runtimes, &mut fingerprint);
         motion_fingerprint(r, s, &mut fingerprint);
         seed_fingerprint(r, &mut fingerprint);
-        metric_fingerprint(&metric, &mut fingerprint);
+        metric_fingerprint(&metric, &runtimes, &mut fingerprint);
         let family = json!({ "device": statics["device"], "repo": repo, "file": file_rel, "label": label, "metric": metric });
         let id = history::series_id(&family, &fingerprint);
         if !history::exists(&id) {

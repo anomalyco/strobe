@@ -297,7 +297,7 @@ fn runs(
         lapped.set(Instant::now());
     };
     // A windowless app (a tray app, `window: false`) has no window to wait for, place or check.
-    let windowless = target["window"] == false || app.windowless;
+    let windowless = super::launch::app_windowless(target, Some(app));
     let gpu_cache = gpu_cache_of(home, s, target, app);
     if !windowless {
         n.wait_window(Duration::from_secs(60), guard)?;
@@ -451,6 +451,8 @@ fn runs(
         n.raise();
         n.check_visible()?;
         drive.follow(n);
+    } else {
+        super::launch::windowless_shown(v.target_of(s), &n.pids())?;
     }
     lap("checks", steps);
     // The window's client area before any `page.window` (`admit_window`).
@@ -905,6 +907,8 @@ fn runs(
         let procs1 = (host::now_ns(), host::all_processes());
         if !windowless {
             n.check_visible()?;
+        } else {
+            super::launch::windowless_shown(v.target_of(s), &n.pids())?;
         }
         // What the window showed after the runs, its tree included: every probe has stopped (a batch read
         // each case's before the next one ran).
@@ -1706,7 +1710,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         return Err(Error::usage(format!("{}: a native app has no page marks; read milestones from its output or a log file", s.case)));
     }
     let app = with_gpu_cache(ctx, s, v, &target, app(v, &target, &ctx.config)?)?;
-    let windowless = target["window"] == false || app.windowless;
+    let windowless = super::launch::app_windowless(&target, Some(&app));
     let until = match window_until(s, &spec["until"])? {
         // A milestone of the app's own (an output or log line): the launch needs no window at all.
         _ if spec["until"]["milestone"].is_string() => {
@@ -1716,14 +1720,19 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             }
             Until::Milestone(name)
         }
-        _ if windowless => return Err(Error::usage(format!("{}: a target with window: false times its launch to a milestone: until: {{ milestone: \"<name>\" }}", s.case))),
+        // Refused for this series alone (`launch::windowless_refusal`), so the file's other targets run.
+        _ if windowless => {
+            return Err(Refusal::new(ValidatorId::NotForTarget, format!("{}: the app shows no window (window: false), so its launch cannot end on one", s.case))
+                .fix("time it to a milestone: until: { milestone: \"<name>\" }")
+                .into());
+        }
         Some(w) => w,
         None => Until::Selector(spec["until"].clone()),
     };
-    let capture = spec["screen"] != false && !windowless;
-    if windowless && let Some(m) = declared_metrics(s).into_iter().find(|m| *m == "launch.painted" || *m == "launch.settled") {
-        return Err(Error::usage(format!("{}: {m} reads the window's pixels; this target has window: false", s.case)));
+    if windowless {
+        super::launch::windowless_refusal(s, false)?;
     }
+    let capture = spec["screen"] != false && !windowless;
     if !capture && matches!(until, Until::Painted | Until::Settled) {
         return Err(Error::usage(format!("{}: launch.until.window painted or settled reads the window's pixels; drop screen: false", s.case)));
     }
@@ -2104,8 +2113,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         if super::launch::declares(s, "memory.app.") {
             super::launch::memory(&n.processes(), &mut values);
         }
-        let why_no_pixels = if windowless { "the app shows no window (window: false)".to_string() } else { super::launch::no_pixels(capture) };
-        let mut refused = super::launch::refusals(s, &values, &why_no_pixels, false);
+        let why_no_pixels = if windowless { super::launch::WINDOWLESS_DRAWN.to_string() } else { super::launch::no_pixels(capture) };
+        let mut refused = super::launch::refusals(s, &values, &why_no_pixels, false, windowless);
         refused.extend(lost);
         if n.headless.is_some() {
             for m in declared_metrics(s).into_iter().filter(|m| *m == "launch.painted" || *m == "launch.settled") {
@@ -2184,6 +2193,9 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         };
         // The window the app opened, once ready (a launch is never resized): its sides are held to
         // each other (`admit_window`), and the result reports it.
+        if windowless {
+            super::launch::windowless_shown(v.target_of(s), &n.pids())?;
+        }
         let opened = (!windowless).then(|| host::main_window(&n.pids())).flatten();
         if let Some(w) = &opened {
             let c = client_of(w);
