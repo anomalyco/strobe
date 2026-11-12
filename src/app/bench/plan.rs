@@ -1,7 +1,7 @@
 //! `strobe plan <file>` (also `bench --plan`): before a run, what each series will cost (SPEC §9.1
 //! "Plan"). Per series the spread of the primary's per-pair differences and the time of a block come
 //! from earlier experiments of the same series on this device (else other series measuring that metric,
-//! a `--check`, a pilot, or a stated guess); from them the pairs that decide at the expected effect with
+//! a `--check` or a pilot; with none, the time is unknown and said so); from them the pairs that decide at the expected effect with
 //! an 80% chance, the look that happens at, and the minutes, with builds, warm-up blocks and the bench
 //! slot's queue. `bench` prints the same plan when it starts and keeps an ETA from it.
 
