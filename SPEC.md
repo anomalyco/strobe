@@ -8822,7 +8822,7 @@ did not move).
     the install line, then `## Changes since <previous tag>` with one line per commit since the
     previous `v<major>.<minor>.<patch>` tag (oldest first, read through the compare API, filtered
     with `jq`), and always the compare link. A work-package prefix goes (`W5-3: `, `W6-3 review
-    (wip): `); merges, version bumps (`release: 0.29.0`), formatting fixes (`fmt: rustfmt`, `fmt:
+    (wip): `, `w7b review 2: `); merges, version bumps (`release: 0.29.0`), formatting fixes (`fmt: rustfmt`, `fmt:
     <file>.rs`) and `ci:`, `docs:`, `chore:`, `SPEC …` and folded-text commits (`W6-1's text …`) are
     left out, and with nothing left there is no heading. So a commit's subject says the user-facing
     change, never the machine it was checked on, and anything else takes one of those prefixes. Each subject

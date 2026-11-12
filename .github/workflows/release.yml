@@ -199,7 +199,8 @@ jobs:
           set -o pipefail
           version="${TAG#v}"
           prev=$(gh api "repos/$REPO/tags?per_page=100" --paginate --jq '.[].name' | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | awk -v t="$TAG" '$0 == t { print p; exit } { p = $0 }')
-          # One line per commit, oldest first. A work-package prefix (`W5-3: `, `W6-3 review (wip): `) goes;
+          # One line per commit, oldest first. A work-package prefix (`W5-3: `, `W6-3 review (wip): `,
+          # `w7b review 2: `) goes;
           # merges, version bumps, formatting fixes and ci/docs/chore commits (`docs:`, `SPEC …`, one package
           # folding another's text: `W6-1's text …`) are left out. The subject is escaped: no HTML, emphasis,
           # code span, math, link or list syntax takes effect, and no `@name` notifies anyone. GitHub renders
@@ -207,7 +208,7 @@ jobs:
           notes_jq=$(cat <<'JQ'
           .commits[]
           | select(.parents | length == 1)
-          | (.commit.message | split("\n")[0] | gsub("\r"; "") | sub("^W[0-9]+-[0-9]+[^:']*: "; "")) as $s
+          | (.commit.message | split("\n")[0] | gsub("\r"; "") | sub("^[Ww][0-9]+(-[0-9]+|[a-z])[^:']*: "; "")) as $s
           | select($s | test("^(release: v?[0-9]|fmt: ([A-Za-z0-9_./-]+\\.rs|rustfmt|cargo fmt)|ci:|docs:|chore:|[Mm]erge |SPEC\\b|W[0-9]+-[0-9]+'s )") | not)
           | "- " + ($s
               | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")
