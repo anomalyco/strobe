@@ -293,14 +293,18 @@ export default bench({
   cases: {
     // The first load in a fresh browser profile until something in the page shows: launch.ready.
     load: { primary: "launch.ready", launch: { until: "body *" } },
-    // The page loaded again in the open browser: the main thread's work for one load.
-    reload: {
-      primary: "main.work",
-      run: async ({ page }) => {
-        await page.goto("/")
-        await page.waitFor("body *")
-      },
-    },
+    // The page left open for a second: the main thread's work while nothing happens (timers, animations).
+    idle: { primary: "main.work", run: ({ page }) => page.wait(1000) },
+    // The page loaded again in the open browser: the main thread's work for one load. strobe's driver and the
+    // bench runner spend a few ms of CPU on each load, so on a page that does little this case warns
+    // OverheadBudget (their share of the run): uncomment it once your page does more.
+    // reload: {
+    //   primary: "main.work",
+    //   run: async ({ page }) => {
+    //     await page.goto("/")
+    //     await page.waitFor("body *")
+    //   },
+    // },
   },
 })
 "#;
