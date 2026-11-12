@@ -24,7 +24,8 @@
 //     before W8-1 lands), where it should run.
 //   launch-window · tray: refused NotForTarget ("cannot end on one"); · desk: launch.ready at its window.
 //   launch-painted · tray: launch.ready measured, launch.painted refused NotForTarget; · desk: launch.painted read
-//     (or NoPresentSource without the screen's pixels).
+//     (or NoPresentSource without the screen's pixels, SoftwareGpu on a software adapter: Xvfb). tray's refusal is
+//     SoftwareGpu there too, until bench.rs keeps a windowless app's NotForTarget (W8-1).
 //   painted-primary · tray: refused NotForTarget before it launches (a primary of its pixels).
 //   liar · liar, stub-shown: declare window: false and show a window: refused VariantMismatch.
 //   plain (a bare exe, no profile; windowed): launch-window measured; with --head app:tray, refused NotForTarget.
