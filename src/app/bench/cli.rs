@@ -31,11 +31,6 @@ struct Ran {
     usage: host::spawn::Usage,
     metrics: BTreeMap<String, (f64, Option<Direction>)>,
     launch: f64,
-    /// Why the shell ran the line and stayed its parent (`Run::Shell`), or None: its commands are the
-    /// shell's children.
-    shelled: Option<String>,
-    /// A line started directly that holds what a cmd user would expect cmd to change (`Run::Direct`).
-    direct_note: Option<String>,
 }
 
 /// A run's commands summed, or None when one of them has no value.
@@ -53,380 +48,35 @@ fn line_for(asked: &Value, v: &Variant, target: &Value) -> Result<String> {
     line.ok_or_else(|| Error::usage("a cli target needs a command: cli(\"<line>\"), a cmd:<line> variant, or ctx.exec(\"<line>\")"))
 }
 
-/// How a command line runs. Its meaning (the table is `scripts/dev/shell/rows.ts`: `shell.bench.ts` runs
-/// every row and `check.ts` checks each on its OS): strobe never measures something other than what the line
-/// says without saying so. A line whose meaning is clear runs; one that two reasonable readings would run
-/// differently is refused before anything starts (`Err`: why, and what to write instead).
-/// - Unix: every line is an `sh` line. One simple command is `exec`ed (sh replaced by it); an operator, a
-///   substitution, a variable assignment in front or a shell builtin keeps sh as its parent. Refused: a
-///   single `&` outside quotes (not `&&`, not `>&`, `<&` or `2>&1`), which backgrounds the command so strobe
-///   would time a shell that exits at once, and `&>` (bash's redirection, which sh on Debian and Ubuntu,
-///   dash, reads as a background `&` then `>`).
-/// - Windows: a line with no shell syntax is started directly, its first word the program and the rest its
-///   argument string as written (`^`, `%NAME%` and single quotes literal, as in every release; `DirectLine`
-///   says so where a cmd user would expect otherwise). A line with `&&`, `||`, `|`, `<`, `>` (`2>&1`,
-///   `2>nul`) or a caret-escaped operator outside quotes, a leading `(`, or whose program is a `.cmd`/`.bat`
-///   by PATH and PATHEXT (or no program at all: a builtin such as `echo`) is a cmd line: cmd runs all of it by
-///   its rules and expands `%NAME%` (`ShellLine` says both). Refused: a single `&`; `;` and a new line outside
-///   quotes (PowerShell's separators, which neither cmd nor a direct start honours); `NAME=value command`;
-///   and in a cmd line a `\"` (cmd toggles on every quote), a `^` that escapes nothing (cmd removes it) and a
-///   new line anywhere. Quotes are a program's: `"…"`, a `"` after an odd run of `\` is a literal quote.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Run {
-    /// The program is started directly: Unix `sh -c "exec <line>"` (`exec`: the line starts with `exec`
-    /// itself and runs as written). `note`: on Windows, what a cmd user would expect cmd to change, passed as
-    /// written (`DirectLine`).
-    Direct { exec: bool, note: Option<String> },
-    /// The shell runs the whole line and stays its parent: why (`ShellLine`).
-    Shell { why: String },
-}
-
-/// How Windows finds a line's program (`resolve_program`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Program {
-    /// An `.exe` or `.com`: started directly.
-    Exe,
-    /// A `.cmd` or `.bat` (its file name): only cmd runs it.
-    Script(String),
-    /// Another file PATHEXT names (`.js`, `.vbs`): cmd opens it by its file type.
-    Other(String),
-    /// No file of that name: a cmd builtin (`echo`), or nothing.
-    Missing,
-}
-
-/// `Run` for this OS (`unix_run`, `windows_run`). `env`: the target's own environment, over strobe's.
-pub(super) fn plan(line: &str, root: &Path, env: &Value) -> std::result::Result<Run, String> {
-    if cfg!(windows) {
-        let var = |name: &str| env_var(env, name);
-        let path = var("PATH").unwrap_or_default();
-        let pathext = var("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-        windows_run(line, |p| resolve_program(p, root, &path, &pathext), |n| var(n).is_some())
-    } else {
-        unix_run(line)
-    }
-}
-
-/// A variable of the command's environment: the target's `env` (a name in any case, as Windows reads
-/// them), else strobe's own.
-fn env_var(env: &Value, name: &str) -> Option<String> {
-    env.as_object().and_then(|o| o.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).and_then(|(_, v)| v.as_str().map(str::to_string))).or_else(|| std::env::var(name).ok())
-}
-
-/// The words sh runs itself, which `exec` cannot replace it with (keywords, builtins with no program of their
-/// own, and `echo`/`printf`/`pwd`/`kill`/`true`/`false`, whose builtin and program differ).
-const SHELL_WORDS: &[&str] = &[
-    "if", "for", "while", "until", "case", "{", "!", "[", "[[", "cd", "export", "set", "unset", ".", "source", "eval", "test", "alias", "ulimit", "umask", "time", ":", "command", "type", "hash",
-    "read", "wait", "exit", "shift", "trap", "times", "getopts", "readonly", "local", "return", "echo", "pwd", "printf", "kill", "true", "false", "break", "continue",
-];
-
-/// A first word `NAME=value`: the variable it sets.
-fn assignment(word: &str) -> Option<&str> {
-    let (name, _) = word.split_once('=')?;
-    let mut c = name.chars();
-    (c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || x == '_')).then_some(name)
-}
-
-/// A single `&`: refused on both OSes, in their own words.
-fn single_amp(windows: bool) -> String {
-    format!(
-        "a single `&` outside quotes {}, so strobe would time something other than the line's commands: quote the argument if the `&` belongs to a URL or a string (\"http://h/?a=1&b=2\"); use {} to run commands in turn; for parallel jobs, start them and wait for them yourself ({})",
-        if windows {
-            "splits the line in cmd (an unquoted URL's query becomes a second command) and is an error or a background job in PowerShell"
-        } else {
-            "runs the command before it in the background, and sh exits at once"
-        },
-        if windows { "`&&`" } else { "`&&` or `;`" },
-        if windows { "a script file that does" } else { "sh -c '… & … & wait'" }
-    )
-}
-
-/// `Run` of a Unix line (`plan`).
-pub(super) fn unix_run(line: &str) -> std::result::Result<Run, String> {
-    let c: Vec<char> = line.chars().collect();
-    let (mut single, mut double, mut shell) = (false, false, false);
-    let mut i = 0;
-    while i < c.len() {
-        let (prev, next) = (i.checked_sub(1).map(|p| c[p]), c.get(i + 1).copied());
-        match c[i] {
-            '\\' if !single => i += 1,
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '`' if !single => shell = true,
-            '$' if !single && next == Some('(') => shell = true,
-            _ if single || double => {}
-            '&' if next == Some('&') => {
-                shell = true;
-                i += 1;
-            }
-            '&' if matches!(prev, Some('>' | '<')) => shell = true,
-            '&' if next == Some('>') => {
-                return Err(
-                    "`&>` is bash's redirection, but sh (dash on Debian and Ubuntu) reads it as a background `&` and then `>`, so strobe would time a shell that exits at once: write `> file 2>&1`"
-                        .into(),
-                );
-            }
-            '&' => return Err(single_amp(false)),
-            '|' | '<' | '>' | ';' | '(' | ')' | '\n' => shell = true,
-            _ => {}
-        }
-        i += 1;
-    }
+/// A line the shell can replace itself with (`exec`): one command, no variable assignment in front,
+/// nothing that joins commands (`;`, `&&`, `|`), redirects, subshells or command substitution, and no
+/// keyword or builtin that `exec` cannot run. Otherwise the shell runs the line and stays its parent.
+#[cfg(not(windows))]
+fn simple(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or("");
-    Ok(if shell {
-        Run::Shell { why: "it has a shell operator or a substitution outside quotes".into() }
-    } else if first == "exec" {
-        Run::Direct { exec: true, note: None }
-    } else if let Some(name) = assignment(first) {
-        Run::Shell { why: format!("it sets {name} for the command (a variable assignment in front)") }
-    } else if SHELL_WORDS.contains(&first) {
-        Run::Shell { why: format!("it starts with the shell's own `{first}`") }
-    } else {
-        Run::Direct { exec: false, note: None }
-    })
+    const SHELL_WORDS: &[&str] =
+        &["if", "for", "while", "until", "case", "{", "!", "[", "[[", "cd", "export", "set", "unset", ".", "source", "eval", "exec", "test", "alias", "ulimit", "umask", "time"];
+    !line.contains([';', '&', '|', '<', '>', '(', ')', '`', '\n']) && !line.contains("$(") && !first.contains('=') && !SHELL_WORDS.contains(&first)
 }
 
-/// The `%NAME%` references in a line, in or out of quotes, each once (cmd expands both).
-fn percent_names(line: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut rest = line;
-    while let Some(a) = rest.find('%') {
-        let after = &rest[a + 1..];
-        match after.find('%') {
-            Some(b) => {
-                let name = &after[..b];
-                let mut c = name.chars();
-                let ok = c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || matches!(x, '_' | '(' | ')'));
-                if ok {
-                    if !out.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-                        out.push(name.to_string());
-                    }
-                    rest = &after[b + 1..];
-                } else {
-                    rest = after;
-                }
-            }
-            None => break,
-        }
-    }
-    out
-}
-
-/// `Run` of a Windows line (`plan`): `resolve` finds its program, `defined` says whether a variable exists.
-pub(super) fn windows_run(line: &str, resolve: impl Fn(&str) -> Program, defined: impl Fn(&str) -> bool) -> std::result::Result<Run, String> {
-    let t = line.trim();
-    let c: Vec<char> = t.chars().collect();
-    let (mut double, mut slashes) = (false, 0usize);
-    let (mut op, mut escaped_quote, mut quoted_newline, mut lone_caret, mut caret_pair, mut single_quote) = (false, false, false, false, false, false);
-    let mut i = 0;
-    while i < c.len() {
-        let ch = c[i];
-        if ch == '\\' {
-            slashes += 1;
-            i += 1;
-            continue;
-        }
-        let literal = ch == '"' && slashes % 2 == 1;
-        slashes = 0;
-        let (prev, next) = (i.checked_sub(1).map(|p| c[p]), c.get(i + 1).copied());
-        match ch {
-            '"' if literal => escaped_quote = true,
-            '"' => double = !double,
-            '\n' | '\r' if double => quoted_newline = true,
-            _ if double => {}
-            '\n' | '\r' => return Err(WIN_NEWLINE.into()),
-            ';' => {
-                return Err("`;` outside quotes: PowerShell runs the commands on either side of it in turn, but neither cmd nor a direct start splits a line there, so the command after it would not run as a command: use `&&` to run commands in turn, or quote the `;` if it belongs to an argument".into());
-            }
-            '^' => match next {
-                Some('&' | '|' | '<' | '>') => {
-                    op = true;
-                    i += 1;
-                }
-                Some('^') => {
-                    caret_pair = true;
-                    i += 1;
-                }
-                _ => lone_caret = true,
-            },
-            '&' if next == Some('&') => {
-                op = true;
-                i += 1;
-            }
-            '&' if matches!(prev, Some('>' | '<')) => op = true,
-            '&' => return Err(single_amp(true)),
-            '|' | '<' | '>' => op = true,
-            '\'' => single_quote = true,
-            _ => {}
-        }
-        i += 1;
-    }
-    let program = match t.strip_prefix('"') {
-        Some(q) => q.split('"').next().unwrap_or(""),
-        None => t.split(char::is_whitespace).next().unwrap_or(""),
-    };
-    if !t.starts_with('"')
-        && let Some(name) = assignment(program)
-    {
-        return Err(format!(
-            "`{name}=…` in front of a command is sh's: Windows has no such form (cmd would look for a program named `{program}`): set {name} in the target's env (cli(\"…\", {{ env: {{ {name}: \"…\" }} }})), or before strobe runs (cmd: set {name}=…; PowerShell: $env:{name} = \"…\")"
-        ));
-    }
-    let vars: Vec<String> = percent_names(t).into_iter().filter(|n| defined(n)).map(|n| format!("%{n}%")).collect();
-    let why = if op {
-        Some("it has a cmd operator outside quotes: &&, ||, |, <, > or one a ^ escapes".to_string())
-    } else if t.starts_with('(') {
-        Some("it starts with `(`, a cmd group".into())
-    } else {
-        match resolve(program) {
-            Program::Exe => None,
-            Program::Script(f) => Some(format!("its program is {f}, a script only cmd runs")),
-            Program::Other(f) => Some(format!("its program {f} is no executable, so cmd opens it")),
-            Program::Missing => Some(format!("`{program}` is no program on PATH: a cmd builtin such as echo, or nothing")),
-        }
-    };
-    match why {
-        Some(why) => {
-            if escaped_quote {
-                return Err(format!(
-                    "this line goes to cmd ({why}), and cmd does not read `\\\"` as a quote inside quotes: it toggles on every `\"`, so an operator inside can come loose and a second command be swallowed: put the command in a script file (a .cmd, or bun run x.ts), or write the argument without escaped quotes"
-                ));
-            }
-            if quoted_newline {
-                return Err(format!("this line goes to cmd ({why}), and {WIN_NEWLINE}"));
-            }
-            if lone_caret {
-                return Err(format!(
-                    "this line goes to cmd ({why}), which removes a `^` that escapes nothing (`HEAD^` becomes `HEAD`): quote the argument (\"HEAD^\" is literal for cmd and for a direct start) or double the caret (`HEAD^^`)"
-                ));
-            }
-            let why = if vars.is_empty() { why } else { format!("{why}; cmd expands {} in it", vars.join(", ")) };
-            Ok(Run::Shell { why })
-        }
-        None => {
-            let mut kept = vars;
-            if lone_caret || caret_pair {
-                kept.push("^".into());
-            }
-            if single_quote {
-                kept.push("'".into());
-            }
-            let note = (!kept.is_empty()).then(|| {
-                format!(
-                    "a command line is started directly, without a shell: {} {} passed as written (no shell strips a caret, reads ^^ as one, expands a %NAME% or groups words in single quotes); to have cmd read the line, write cmd /c \"…\"",
-                    match kept.as_slice() {
-                        [one] => format!("`{one}`"),
-                        [rest @ .., last] => format!("{} and `{last}`", rest.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")),
-                        [] => String::new(),
-                    },
-                    if kept.len() == 1 { "is" } else { "are" }
-                )
-            });
-            Ok(Run::Direct { exec: false, note })
-        }
-    }
-}
-
-const WIN_NEWLINE: &str = "a new line outside quotes: cmd runs a line only up to its first new line, and a direct start passes the rest to the program as arguments, so the commands after it would not run: use `&&` to run commands in turn, or one ctx.exec per command";
-
-/// Where Windows finds `program`, as cmd does: a path (from `root` when relative) as named, else `root` then
-/// each folder of `path`; a name without an extension with each of `pathext`'s.
-pub(super) fn resolve_program(program: &str, root: &Path, path: &str, pathext: &str) -> Program {
-    if program.is_empty() {
-        return Program::Missing;
-    }
-    let exts: Vec<String> = pathext.split(';').map(|e| e.trim().to_ascii_lowercase()).filter(|e| e.starts_with('.')).collect();
-    let p = Path::new(program);
-    let bases: Vec<PathBuf> = if program.contains(['/', '\\', ':']) {
-        vec![if p.is_relative() { root.join(p) } else { p.to_path_buf() }]
-    } else {
-        std::iter::once(root.to_path_buf()).chain(path.split(';').filter(|d| !d.trim().is_empty()).map(|d| PathBuf::from(d.trim().trim_matches('"')))).map(|d| d.join(p)).collect()
-    };
-    let classify = |f: &Path| {
-        let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        match f.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-            Some("exe" | "com") => Program::Exe,
-            Some("cmd" | "bat") => Program::Script(name),
-            _ => Program::Other(name),
-        }
-    };
-    for base in bases {
-        if p.extension().is_some() {
-            if base.is_file() {
-                return classify(&base);
-            }
-            continue;
-        }
-        for e in &exts {
-            let f = PathBuf::from(format!("{}{e}", base.display()));
-            if f.is_file() {
-                return classify(&f);
-            }
-        }
-    }
-    Program::Missing
-}
-
-/// `ShellLine`, once per series: an info line when the shell ran a command line of a side (its own
-/// start-up, a few ms, is inside `run.duration` and `cpu.work`), a warning instead once one side of a
-/// comparison ran its lines through the shell and the other did not. `side`: how notes name the side.
-pub(super) fn shell_note(ctx: &mut Ctx, s: &Series, side: &str, why: Option<&str>) {
-    let label = s.label();
-    let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
-    let sides = ctx.shells.entry(label.clone()).or_default();
-    *sides.entry(side.to_string()).or_insert(false) |= why.is_some();
-    let shelled: Vec<String> = sides.iter().filter(|(_, on)| **on).map(|(r, _)| r.clone()).collect();
-    let direct: Vec<String> = sides.iter().filter(|(_, on)| !**on).map(|(r, _)| r.clone()).collect();
-    let prefix = format!("{label}: ");
-    let said = |ctx: &Ctx, level: &str| ctx.warnings.iter().any(|w| w.id == "ShellLine" && w.level == level && w.text.starts_with(&prefix));
-    if !shelled.is_empty() && !direct.is_empty() {
-        if said(ctx, "warn") {
-            return;
-        }
-        ctx.warnings.retain(|w| !(w.id == "ShellLine" && w.text.starts_with(&prefix)));
-        let w = validity::warn(
-            "ShellLine",
-            format!(
-                "{label}: {}'s command line runs through {shell} and {}'s does not, so only {}'s run.duration and cpu.work hold the shell's own start-up (a few ms a command line): the sides are not measured alike",
-                shelled.join(", "),
-                direct.join(", "),
-                shelled.join(", ")
-            ),
-        );
-        progress(format!("  ! ShellLine  {}", w.text));
-        ctx.warnings.push(w);
-    } else if let Some(why) = why.filter(|_| !said(ctx, "info") && !said(ctx, "warn")) {
-        let w = validity::info("ShellLine", format!("{label}: a command line runs through {shell} ({why}), so the shell's own start-up (a few ms) is inside run.duration and cpu.work"));
-        progress(format!("  i ShellLine  {}", w.text));
-        ctx.warnings.push(w);
-    }
-}
-
-/// `DirectLine`, once per series: a Windows line started directly that holds what a cmd user would expect
-/// cmd to change (`Run::Direct`'s note).
-fn direct_note(ctx: &mut Ctx, s: &Series, note: &str) {
-    let text = format!("{}: {note}", s.label());
-    if !ctx.warnings.iter().any(|w| w.id == "DirectLine" && w.text.starts_with(&format!("{}: ", s.label()))) {
-        let w = validity::info("DirectLine", text);
-        progress(format!("  i DirectLine  {}", w.text));
-        ctx.warnings.push(w);
-    }
-}
-
-/// The command for `line` as `run` says, in `root`. Unix: `sh -c`, as `exec <line>` when the program is
-/// started directly. Windows: the program itself with the rest of the line as its argument string (a
-/// relative path from `root`: Windows would resolve it from strobe's own folder), or the line under cmd.
-fn command(line: &str, run: &Run, root: &Path) -> Command {
+/// The command for `line`, run in `root`. Unix: `sh -c`, as `exec <line>` when the line is one simple
+/// command, so the command is the child, not a shell around it. Windows: the line's first word as the
+/// program, so the child is the program itself (a relative path from `root`: Windows would resolve it
+/// from strobe's own folder); `shell` (a `.cmd` or `.bat`, or a word that is no executable) runs the
+/// line under cmd.
+fn command(line: &str, shell: bool, root: &Path) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let line = line.trim();
-        if let Run::Shell { .. } = run {
-            return crate::target::command::shell(line);
-        }
         let (program, rest) = match line.strip_prefix('"') {
             Some(q) => q.split_once('"').map(|(p, r)| (p.to_string(), r.to_string())).unwrap_or((q.to_string(), String::new())),
             None => line.split_once(char::is_whitespace).map(|(p, r)| (p.to_string(), r.to_string())).unwrap_or((line.to_string(), String::new())),
         };
+        let script = Path::new(&program).extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+        if shell || script {
+            return crate::target::command::shell(line);
+        }
         let path = Path::new(&program);
         let program = if path.is_relative() && program.contains(['/', '\\']) {
             let joined = root.join(path);
@@ -443,11 +93,8 @@ fn command(line: &str, run: &Run, root: &Path) -> Command {
     }
     #[cfg(not(windows))]
     {
-        let _ = root;
-        match run {
-            Run::Direct { exec: false, .. } => crate::target::command::shell(&format!("exec {line}")),
-            _ => crate::target::command::shell(line),
-        }
+        let _ = (shell, root);
+        if simple(line) { crate::target::command::shell(&format!("exec {line}")) } else { crate::target::command::shell(line) }
     }
 }
 
@@ -486,8 +133,6 @@ struct Spawn<'a> {
 /// `cost`, strobe's own CPU counts while the command runs: from just after its launch (its pipes
 /// handed to the readers) to its exit.
 fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)> {
-    // What the line means, before anything starts: a line two readings would run differently is refused.
-    let run = plan(line, at.root, &at.target["env"]).map_err(|why| Error::usage(format!("`{line}`: {why}")))?;
     // The two readers start before the command and wait for its pipes, so creating their threads is
     // strobe's work before the command runs, not beside it.
     type Pipe = Box<dyn std::io::Read + Send>;
@@ -505,8 +150,8 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         .unzip();
     // The launch's CPU on this thread (`cli.launch`): the OS creating the process, which Windows does
     // in the launcher. NaN where thread cycles are not time.
-    let start = |run: &Run| -> std::io::Result<(host::spawn::Owned, Instant, f64)> {
-        let mut cmd = command(line, run, at.root);
+    let start = |shell: bool| -> std::io::Result<(host::spawn::Owned, Instant, f64)> {
+        let mut cmd = command(line, shell, at.root);
         for (k, val) in at.target["env"].as_object().into_iter().flatten() {
             cmd.env(k, val.as_str().unwrap_or(""));
         }
@@ -517,14 +162,9 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         let (t1, k1, c1) = (Instant::now(), host::tsc(), host::thread_cycles());
         Ok((child, t0, super::script::cpu_ms((c0, k0), (c1, k1), t1.duration_since(t0).as_secs_f64() * 1e3)))
     };
-    // Windows: a program the OS would not start after all (NotFound, InvalidInput) runs under cmd, as one
-    // that is no program does.
-    let mut run = run;
-    let (mut child, t0, launch) = match start(&run) {
-        Err(e) if cfg!(windows) && matches!(run, Run::Direct { .. }) && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) => {
-            run = Run::Shell { why: "Windows would not start its program directly".into() };
-            start(&run)
-        }
+    // Windows: a word that is no executable (NotFound), or a script `raw_arg` cannot pass (InvalidInput).
+    let (mut child, t0, launch) = match start(false) {
+        Err(e) if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) => start(true),
         r => r,
     }
     .map_err(|e| Error::msg(format!("start `{line}`: {e}")))?;
@@ -600,11 +240,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
     }
     let output: String = lines.join("\n");
     let output = if output.len() > 64 * 1024 { output[output.floor_char_boundary(output.len() - 64 * 1024)..].to_string() } else { output };
-    let (shelled, direct_note) = match run {
-        Run::Shell { why } => (Some(why), None),
-        Run::Direct { note, .. } => (None, note),
-    };
-    Ok((Ran { wall, usage, metrics, launch, shelled, direct_note }, output))
+    Ok((Ran { wall, usage, metrics, launch }, output))
 }
 
 /// Child processes' CPU from Windows' clock ticks needs this many ticks (15.6 ms each) per run before
@@ -741,15 +377,8 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     // started any needs enough ticks for its count to stand.
     let started = measured.iter().any(|r| r.0.iter().any(|x| x.usage.started > 0));
     let few_ticks = started && metrics::median(&ticks_ms) < TICKS_PER_RUN * tick_ms;
-    let shelled = measured.iter().flat_map(|r| r.0.iter()).find_map(|x| x.shelled.clone());
-    let kept_note = measured.iter().flat_map(|r| r.0.iter()).find_map(|x| x.direct_note.clone());
     let cpu_why = || {
-        let why = if let Some(why) = shelled.as_ref().filter(|_| few_ticks) {
-            format!(
-                "cmd.exe runs the command line ({why}), so its commands are cmd's children, whose CPU Windows counts only in 15.6 ms clock ticks; they took {} a run by that count, under the {TICKS_PER_RUN:.0} ticks a CPU time needs here (one tick more or less is several percent)",
-                fmt::value(metrics::median(&ticks_ms), "ms")
-            )
-        } else if few_ticks {
+        let why = if few_ticks {
             format!(
                 "the command started other processes (a shell around it, a .cmd, a child), whose CPU Windows counts only in 15.6 ms clock ticks, and they took {} a run by that count (under {TICKS_PER_RUN:.0} ticks: one more or less, or work under a tick that reads 0, is several percent)",
                 fmt::value(metrics::median(&ticks_ms), "ms")
@@ -757,12 +386,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         } else {
             first_why(&|u| u.cpu_refused.clone()).unwrap_or_else(|| "this OS gave no CPU time for the command's processes".into())
         };
-        let fix = if few_ticks && shelled.is_some() {
-            "time each command alone (a case's ctx.exec per command, or strobe run with one command a side), or give the run more work; run.duration still compares"
-        } else {
-            "run the program itself (an .exe, not a .cmd or a shell line), or longer runs; run.duration still compares"
-        };
-        Refusal::new(ValidatorId::NotOnThisOs, why).fix(fix)
+        Refusal::new(ValidatorId::NotOnThisOs, why).fix("run the program itself (an .exe, not a .cmd or a shell line), or longer runs; run.duration still compares")
     };
     let cpu_ok = |r: &[Ran]| cpu(r).filter(|_| !few_ticks);
     put("cpu.work", per(&cpu_ok), &|| Refusal { summary: format!("cpu.work: {}", cpu_why().summary), ..cpu_why() });
@@ -779,11 +403,6 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
                 share * 100.0
             ),
         ));
-    }
-    let side = super::side_of(ctx, v).to_string();
-    shell_note(ctx, s, &side, shelled.as_deref());
-    if let Some(note) = kept_note.as_deref() {
-        direct_note(ctx, s, note);
     }
     put("cpu.wakes", per(&|r| sum_of(r, |x| x.usage.switches.map(|n| n as f64)).map(|n| n / (wall(r) / 1e3).max(1e-9))), &|| {
         Refusal::new(ValidatorId::NotOnThisOs, "cpu.wakes: Windows keeps no context-switch count of a process that has ended (its job counts CPU and IO only)")
@@ -909,7 +528,6 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         browser: None,
         spread: super::run_spread(x, &extra),
         directions,
-        shelled: shelled.is_some(),
         ..Block::default()
     })
 }

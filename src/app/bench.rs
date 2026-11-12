@@ -895,10 +895,6 @@ struct Block {
     /// target declared or the `node` on PATH is (a shim of Bun's). `track` keys a series by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime: Option<String>,
-    /// A command block whose line the shell ran (`cli::Run::Shell`): the shell's start-up is in its time and
-    /// CPU. `track` keys a series by it, only when true, so a direct series keeps its identity.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    shelled: bool,
 }
 
 /// Each per-run metric's lowest and highest measured run (`Block::spread`), for an untimed block of
@@ -1618,8 +1614,6 @@ struct Ctx<'a> {
     inputs: BTreeMap<String, validity::InputClass>,
     /// Per series and side, whether its first page block matched reduced motion (`admit_motion`).
     motions: BTreeMap<String, bool>,
-    /// Per series, each side's cli runs and whether the shell ran a line of them (`cli::shell_note`).
-    shells: BTreeMap<String, BTreeMap<String, bool>>,
     /// Per side, the target it runs when its own and the app profile it names (`app:<id>`): what a
     /// check with no side in hand asks whether it shows a window (`ctx_windowless`).
     side_profiles: Vec<(Option<String>, Option<String>)>,
@@ -2256,7 +2250,6 @@ pub fn run(args: &Args) -> Result<Output> {
         windows: BTreeMap::new(),
         inputs: BTreeMap::new(),
         motions: BTreeMap::new(),
-        shells: BTreeMap::new(),
         side_profiles: Vec::new(),
         folders_first: Default::default(),
         folder_notes: Default::default(),
@@ -10142,7 +10135,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     spread: run_spread(x, &extra),
                     gpu_cache: None,
                     runtime: None,
-                    shelled: false,
                 });
             }
             // From outside there is no trace to keep: the block's numbers are in result.json. A Firefox block
@@ -11561,17 +11553,6 @@ fn headless_window(label: &str, name: &str, t: &Value) -> Error {
 fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variants: &[Variant], config: &Value) -> Result<Option<Refusal>> {
     let t = &describe["targets"][name];
     let windowless = |all: bool| sides_windowless(s, name, t, config, variants, all);
-    // A command line known before anything runs (the target's own, a `cmd:` side's) that two readings would
-    // run differently is the run's error, before anything starts (`cli::plan`); a line a case passes to
-    // ctx.exec is refused when it is run.
-    if t["kind"] == "cli" {
-        let sides = variants.iter().filter(|v| v.target_of(s) == name).filter_map(|v| if let Kind::Cmd(l) = &v.kind { Some(l.clone()) } else { None });
-        for line in t["run"].as_str().map(str::to_string).into_iter().chain(sides) {
-            if let Err(why) = cli::plan(&line, Path::new("."), &t["env"]) {
-                return Err(Error::usage(format!("{}: `{line}`: {why}", s.label())));
-            }
-        }
-    }
     let page = matches!(t["kind"].as_str(), Some("web" | "url"));
     if args.get("engine").is_some() && !page {
         return Err(Error::usage(format!("{}: --engine picks a page's browser; {} is a {} target (narrow the run with --target)", s.label(), name, t["kind"].as_str().unwrap_or("?"))));
