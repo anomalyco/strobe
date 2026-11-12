@@ -1,6 +1,12 @@
 //! Number formatting with precision that follows the interval width (SPEC §9.3 "Digits").
 
+/// A value in its unit as every surface prints it; one that rounds to nothing never reads as minus
+/// zero (`-0 B`, `-0 instr`, `-0.0` were printed for tiny negatives).
 pub fn value(v: f64, unit: &str) -> String {
+    crate::fmt::no_minus_zero(value_of(v, unit))
+}
+
+fn value_of(v: f64, unit: &str) -> String {
     if !v.is_finite() {
         return "—".into();
     }

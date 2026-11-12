@@ -1481,7 +1481,7 @@ fn native_leak(readings: &[memory::Reading], n: usize) -> Value {
     }
     let host: Vec<f64> = readings.iter().map(|r| r.host() as f64).collect();
     let private: Vec<f64> = readings.iter().map(|r| r.processes.iter().map(|m| m.private).sum::<u64>() as f64).collect();
-    let bytes = |v: f64| format!("{}{}", if v < 0.0 { "−" } else { "+" }, fmt::bytes(v.abs()));
+    let bytes = |v: f64| fmt::signed(v, "bytes");
     let bound = (0.001 * metrics::median(&host)).max(16_384.0);
     json!({ "runs": 2 * n, "readings": readings.len(), "native_host": growth(&host, n, bound, &bytes), "native_private": growth(&private, n, bound, &bytes), "host_bytes": host, "private_bytes": private })
 }

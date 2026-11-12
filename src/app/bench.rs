@@ -5677,8 +5677,8 @@ fn leak_analysis(census: &[Value], dir: &Path, n: usize) -> Result<Value> {
     let series = |key: &str| -> Vec<f64> { census.iter().map(|c| key.split('.').fold(c, |v, k| &v[k]).as_f64().unwrap_or(f64::NAN)).collect() };
     let js = series("js_heap_bytes");
     let dom = series("dom.nodes");
-    let bytes = |v: f64| format!("{}{}", if v < 0.0 { "−" } else { "+" }, fmt::bytes(v.abs()));
-    let nodes = |v: f64| format!("{v:+.1} nodes");
+    let bytes = |v: f64| fmt::signed(v, "bytes");
+    let nodes = |v: f64| format!("{} nodes", crate::fmt::signed_fixed(v, 1));
     let bound = (0.001 * metrics::median(&js)).max(16_384.0);
     let mut js_v = growth(&js, n, bound, &bytes);
     let dom_v = growth(&dom, n, 1.0, &nodes);
@@ -11921,8 +11921,8 @@ fn leak_text(r: &Value, s: &Value, file: &str) -> String {
         let range = |g: &Value, show: &dyn Fn(f64) -> String| {
             format!("{} [{} … {}] per run", show(g["slope"].as_f64().unwrap_or(f64::NAN)), show(g["lo"].as_f64().unwrap_or(f64::NAN)), show(g["hi"].as_f64().unwrap_or(f64::NAN)))
         };
-        let bytes = |x: f64| format!("{}{}", if x < 0.0 { "−" } else { "+" }, fmt::bytes(x.abs()));
-        let nodes = |x: f64| format!("{x:+.1}");
+        let bytes = |x: f64| fmt::signed(x, "bytes");
+        let nodes = |x: f64| crate::fmt::signed_fixed(x, 1);
         out += &format!("\n{role} {}\n", v["label"].as_str().unwrap_or(""));
         // A native target: its processes' memory read between runs, no heap snapshots.
         if l["native_host"].is_object() {

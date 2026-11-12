@@ -176,6 +176,27 @@ if (group("digits")) {
   for (const [i, q] of cis.entries()) console.log(`${JSON.stringify(q)}  ${bins.map((b, k) => `${short(b)} ${r2[k][i].text ?? r2[k][i].error}`).join("  ")}`)
 }
 
+if (group("zero")) {
+  console.log("\n## minus zero: no value or difference prints as -0 (truth: a text with a minus sign shows a nonzero digit)")
+  const units = ["ms", "bytes", "instructions", "count", "score", "value", "%", "pp", "MB", "/s", "mJ", ""]
+  const tiny = [-0, -1e-12, -1e-7, -0.0004, -0.004, -0.04, -0.3, -0.49]
+  const qs: Q[] = []
+  for (const time_unit of ["us", "ms", "s"])
+    for (const ascii of [false, true])
+      for (const unit of units)
+        for (const v of tiny) for (const op of ["value", "signed"]) qs.push({ op, v, unit, time_unit, ascii })
+  for (const time_unit of ["us", "ms", "s"]) for (const r of tiny) qs.push({ op: "pct", r, time_unit }, { op: "pct_ci", est: r, lo: r - 1e-9, hi: r + 1e-9, time_unit })
+  for (const time_unit of ["us", "ms", "s"]) qs.push({ op: "times", v: tiny, signed: true, time_unit }, { op: "times", v: tiny, signed: false, time_unit })
+  const res = all(qs)
+  const minusZero = (t: string) => /^[-\u2212]/.test(t.trim()) && !/[1-9]/.test(t)
+  for (const [k, b] of bins.entries()) {
+    const bad: string[] = []
+    for (const [i, q] of qs.entries()) for (const t of [res[k][i].text, ...(res[k][i].texts ?? [])].filter((x) => typeof x === "string")) if (minusZero(t)) bad.push(`${JSON.stringify(q)} → ${t}`)
+    console.log(`${short(b)}: ${qs.length} requests, ${bad.length} print minus zero${bad.length ? `\n    ${bad.slice(0, 20).join("\n    ")}` : ""}`)
+    if (bad.length) process.exitCode = 1
+  }
+}
+
 if (group("needed")) {
   console.log("\n## cstat-19 pairs a verdict needs (truth: the normal projection with a spread that is not 0)")
   // Over half the differences 0 (a quantized metric), the rest spread ±5%: its MAD is 0.

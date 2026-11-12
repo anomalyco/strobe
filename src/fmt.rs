@@ -252,10 +252,41 @@ pub fn time_number(ms: f64) -> String {
     t.rsplit_once(' ').map_or(t.clone(), |(n, _)| n.to_string())
 }
 
+/// `text` without a minus sign when every digit it shows is 0 (`-0 B`, `-0.0`, `−0 instr` → `0 B`,
+/// `0.0`, `0 instr`): a value that rounds to nothing has no direction, and nothing strobe prints
+/// reads as minus zero.
+pub fn no_minus_zero(text: String) -> String {
+    let zero = !text.chars().any(|c| c.is_ascii_digit() && c != '0');
+    match text.strip_prefix('-').or_else(|| text.strip_prefix('\u{2212}')) {
+        Some(rest) if zero => rest.to_string(),
+        _ => text,
+    }
+}
+
+/// `v` at `d` decimals with its sign, none on what prints as 0: `+1.5`, `−0.3`, `0.0` (never `+0.0` or
+/// `−0.0`).
+pub fn signed_fixed(v: f64, d: usize) -> String {
+    if !v.is_finite() {
+        return "—".into();
+    }
+    let body = format!("{:.d$}", v.abs());
+    if !body.chars().any(|c| c.is_ascii_digit() && c != '0') {
+        body
+    } else if v < 0.0 {
+        format!("{}{body}", minus())
+    } else {
+        format!("+{body}")
+    }
+}
+
 /// Bytes in binary units with three significant digits at most and at least the unit's whole number:
 /// `512 B`, `1.4 KB`, `12 KB`, `3.40 MB`, `34.5 MB`, `1.25 GB` (`—` when non-finite). Whole KB once
 /// printed 1.4 KB as `1 KB`.
 pub fn bytes(v: f64) -> String {
+    no_minus_zero(bytes_of(v))
+}
+
+fn bytes_of(v: f64) -> String {
     if !v.is_finite() {
         return "—".into();
     }

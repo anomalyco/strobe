@@ -1151,7 +1151,7 @@ pub fn memory_diff(a: &Path, b: &Path, top: usize) -> Result<Output> {
     rows.sort_by(|x, y| (y.2 - y.1).abs().total_cmp(&(x.2 - x.1).abs()));
     let mut text = String::from("memory diff · last census of each · by layer and process type\n        base        head        Δ  layer · process\n");
     for (k, x, y) in rows.iter().take(top) {
-        text += &format!("  {:>10}  {:>10}  {:>9}  {k}\n", fmt::bytes(*x), fmt::bytes(*y), format!("{}{}", if y < x { "−" } else { "+" }, fmt::bytes((y - x).abs())));
+        text += &format!("  {:>10}  {:>10}  {:>9}  {k}\n", fmt::bytes(*x), fmt::bytes(*y), fmt::signed(y - x, "bytes"));
     }
     if phone.get() {
         text += "a phone's page: its processes are on the phone, from Chromium's memory dump, with no OS private bytes (strobe reads no process memory of the phone's)\n";
