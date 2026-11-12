@@ -67,6 +67,8 @@ unsafe extern "C" {
     fn CFDictionaryGetValue(d: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
     fn CFDataGetBytePtr(d: CFTypeRef) -> *const u8;
     fn CFDataGetLength(d: CFTypeRef) -> CFIndex;
+    fn CFPreferencesAppSynchronize(app: CFTypeRef) -> u8;
+    fn CFPreferencesGetAppBooleanValue(key: CFTypeRef, app: CFTypeRef, valid: *mut u8) -> u8;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -119,6 +121,13 @@ unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> *mut c_void;
     fn sel_registerName(name: *const c_char) -> *mut c_void;
     fn objc_msgSend();
+    fn objc_autoreleasePoolPush() -> *mut c_void;
+    fn objc_autoreleasePoolPop(pool: *mut c_void);
+}
+
+// libSystem's block runtime: the class of a block made on the stack, which its receiver copies.
+unsafe extern "C" {
+    static _NSConcreteStackBlock: [*const c_void; 32];
 }
 
 #[repr(C)]
@@ -399,10 +408,11 @@ pub fn energy_counters() -> bool {
 /// runs nothing, and its children have left it. A process whose responsible process is in a tree
 /// joins it with its own tree (an XPC service launchd started for an app in it), when it started no
 /// earlier than that process; one responsible for itself or to anything outside the trees (another
-/// app, a shared system daemon, the terminal both were run from) never joins. `zombie_roots`: a
-/// root that exited and is not reaped yet still roots its tree, joined by its children that went to
-/// launchd and its services by their remembered responsible process (`responsible_pids`), for
-/// `kill_set` alone.
+/// app, a shared system daemon, the terminal both were run from) never joins; responsible means to
+/// a member's pid and start time both. `zombie_roots`: a root that exited and is not reaped yet still
+/// roots its tree, joined by its children that went to launchd and its services by their remembered
+/// responsible process (`responsible_pids`), never by a process whose parent is its pid (a zombie
+/// lends no children), for `kill_set` alone.
 fn tree_of(all: &[Bsd], roots: &[u32], zombie_roots: bool) -> Vec<usize> {
     let mut children: HashMap<u32, Vec<usize>> = HashMap::new();
     for (i, p) in all.iter().enumerate() {
@@ -419,6 +429,11 @@ fn tree_of(all: &[Bsd], roots: &[u32], zombie_roots: bool) -> Vec<usize> {
         out.push(r);
         let mut stack = vec![r];
         while let Some(i) = stack.pop() {
+            // A zombie lends no children: its own went to launchd as it exited, so a process whose
+            // parent is its pid is another process's child (a `kill_set` stand-in's pid reused).
+            if all[i].zombie {
+                continue;
+            }
             for &j in children.get(&all[i].pid).map(Vec::as_slice).unwrap_or(&[]) {
                 if all[j].start >= all[i].start && !std::mem::replace(&mut seen[j], true) {
                     out.push(j);
@@ -440,7 +455,9 @@ fn tree_of(all: &[Bsd], roots: &[u32], zombie_roots: bool) -> Vec<usize> {
     // disclaimed launch), whose services join after it.
     loop {
         let members: HashMap<u32, u64> = out.iter().map(|&i| (all[i].pid, all[i].start)).collect();
-        let joining: Vec<usize> = (0..all.len()).filter(|&i| !seen[i] && !all[i].zombie && responsible[i].and_then(|r| members.get(&r)).is_some_and(|&start| all[i].start >= start)).collect();
+        // Responsible to a member by its pid and its start time: a process responsible to another app
+        // that once had a member's pid never joins.
+        let joining: Vec<usize> = (0..all.len()).filter(|&i| !seen[i] && !all[i].zombie && responsible[i].is_some_and(|(r, rs)| members.get(&r) == Some(&rs) && all[i].start >= rs)).collect();
         if joining.is_empty() {
             return out;
         }
@@ -466,11 +483,17 @@ fn responsible_for() -> Option<unsafe extern "C" fn(libc::pid_t) -> libc::pid_t>
 /// exec): so it is read again during a process's first 2 s, and a failed read is never kept.
 /// macOS answers a process's own pid once its responsible process has exited, reaped or not, so
 /// `remembered` (for `kill_set`) gives a process's last other answer: what an exited app left.
-fn responsible_pids(all: &[Bsd], remembered: bool) -> Vec<Option<u32>> {
-    /// (answer, first seen, last answer naming another process).
-    type Seen = HashMap<(u32, u64), (Option<u32>, Instant, Option<u32>)>;
+///
+/// Each answer is the responsible process's pid and start time, the start time taken from a running
+/// process of `all` with that pid (never a zombie: `kill_set`'s stand-in for an exited launch is one):
+/// an answer naming a pid no running process of `all` has is no answer. So a process responsible to an
+/// app that later exited is tied to that app, never to a later process given its pid.
+fn responsible_pids(all: &[Bsd], remembered: bool) -> Vec<Option<(u32, u64)>> {
+    /// (answer, first seen, last answer naming another process): each a pid and its start time.
+    type Seen = HashMap<(u32, u64), (Option<(u32, u64)>, Instant, Option<(u32, u64)>)>;
     static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
     let Some(f) = responsible_for() else { return vec![None; all.len()] };
+    let running: HashMap<u32, u64> = all.iter().filter(|b| !b.zombie).map(|b| (b.pid, b.start)).collect();
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let old = seen.take().unwrap_or_default();
     let mut now = HashMap::with_capacity(all.len());
@@ -487,13 +510,20 @@ fn responsible_pids(all: &[Bsd], remembered: bool) -> Vec<Option<u32>> {
                 None => (Instant::now(), None),
             };
             let r = unsafe { f(p.pid as libc::pid_t) };
-            if r < 0 {
+            // None: no answer to keep (the call failed, or it named a pid no running process of the
+            // snapshot has, or one that started after this process: a later process given the pid of
+            // the one it was responsible to). Some(None): responsible for itself, or launchd is.
+            let answer = match r {
+                r if r < 0 => None,
+                r if r <= 1 || r as u32 == p.pid => Some(None),
+                r => running.get(&(r as u32)).filter(|&&s| s <= p.start).map(|&s| Some((r as u32, s))),
+            };
+            let Some(r) = answer else {
                 if let Some(&e) = old.get(&key) {
                     now.insert(key, e);
                 }
                 return if remembered { last } else { None };
-            }
-            let r = (r > 1 && r as u32 != p.pid).then_some(r as u32);
+            };
             let last = r.or(last);
             now.insert(key, (r, first, last));
             if remembered { r.or(last) } else { r }
@@ -538,7 +568,7 @@ pub fn own_responsibility(cmd: &mut std::process::Command) -> bool {
         return false;
     }
     let Ok(path) = std::path::absolute(cmd.get_current_dir().map(|d| d.join(program)).unwrap_or_else(|| program.to_path_buf())) else { return false };
-    if !path.to_string_lossy().contains(".app/Contents/MacOS/") {
+    if !path.to_string_lossy().to_ascii_lowercase().contains(".app/contents/macos/") {
         return false;
     }
     let disclaim = *F.get_or_init(|| {
@@ -627,7 +657,7 @@ pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {
         .map(|i| {
             let b = &all[i];
             let (cpu, footprint, resident, _, _) = rusage(b.pid).unwrap_or_default();
-            ProcTimes { pid: b.pid, parent: b.ppid, name: b.name.clone(), cpu_ns: cpu, cycles: cpu, private_bytes: footprint, working_set: resident }
+            ProcTimes { pid: b.pid, parent: b.ppid, start: b.start, name: b.name.clone(), cpu_ns: cpu, cycles: cpu, private_bytes: footprint, working_set: resident }
         })
         .collect()
 }
@@ -643,20 +673,43 @@ pub fn zombies_of(parents: &[u32]) -> std::collections::BTreeMap<(u32, u64), u32
     all_bsd().into_iter().filter(|b| b.zombie && parents.contains(&b.ppid)).map(|b| ((b.pid, b.start), b.ppid)).collect()
 }
 
-/// What `host::kill_tree` ends: `tree_pids`, and when `root` has exited but is not reaped (a launch
-/// strobe still owns, whose start time `start` its owner read at the launch), what it left running:
-/// processes responsible to it (its XPC services, its children that went to launchd) that started
-/// no earlier than it. Its pid cannot name another process while it is unreaped. macOS answers such a process's own pid once the root has exited, so
-/// this goes by the last answer strobe read while the root ran: a process the root started and left
-/// between two reads of the set is not found.
-pub fn kill_set(root: u32, start: Option<u64>) -> Vec<u32> {
+/// What `host::kill` ends, each process with its start time (checked again right before its signal):
+/// `root`'s tree and the processes responsible to it (`tree_of`), and when `root` has exited (a launch
+/// whose start time `start` its owner read at the launch) what it left running: processes responsible
+/// to it by its pid AND that start time (its XPC services, its children that went to launchd) that
+/// started no earlier than it. macOS answers such a process's own pid once the root has exited, so
+/// this goes by the last answer strobe read while the root ran (`responsible_pids`): a process the root
+/// started and left between two reads of the set is not found.
+///
+/// A `root` that now names another process (started at another time than `start`: an app Launch
+/// Services started, reaped by launchd, whose pid was reused) is left out with everything it started:
+/// the launch stands in for it as an exited root, which lends no children (a process whose parent is
+/// its pid is the other process's) and is joined only by what was responsible to the launch itself,
+/// and only what started before that other process is in the set. The caller never signals `root`
+/// then (`host::kill`).
+pub fn kill_set(root: u32, start: Option<u64>) -> Vec<(u32, u64)> {
     let mut all = all_bsd();
-    // macOS gives no BSD info of an exited, unreaped process: it stands in with the start time its
-    // owner read at the launch.
-    if let Some(start) = start.filter(|_| !all.iter().any(|b| b.pid == root)) {
-        all.push(Bsd { pid: root, ppid: 1, name: String::new(), start, zombie: true });
+    let mut reused_at = None;
+    if let Some(start) = start {
+        if let Some(i) = all.iter().position(|b| b.pid == root && b.start != start) {
+            reused_at = Some(all[i].start);
+            all.remove(i);
+        }
+        // macOS gives no BSD info of an exited, unreaped process: it stands in with the start time its
+        // owner read at the launch.
+        if !all.iter().any(|b| b.pid == root) {
+            all.push(Bsd { pid: root, ppid: 1, name: String::new(), start, zombie: true });
+        }
     }
-    tree_of(&all, &[root], true).into_iter().map(|i| all[i].pid).collect()
+    // The list is read process by process: a root that exited during the read lends no children found
+    // later in it (they could be a process's that took its pid since); what is responsible to the
+    // launch by its pid and start time is still in the set.
+    if let Some(s) = start.filter(|&s| start_time(root) != Some(s)) {
+        for b in all.iter_mut().filter(|b| b.pid == root && b.start == s) {
+            b.zombie = true;
+        }
+    }
+    tree_of(&all, &[root], true).into_iter().filter(|&i| reused_at.is_none_or(|r| all[i].start < r)).map(|i| (all[i].pid, all[i].start)).collect()
 }
 
 pub fn all_processes() -> Vec<ProcInfo> {
@@ -1693,3 +1746,686 @@ pub fn raise_windows(pids: &[u32]) -> usize {
     }
     usize::from(crate::target::a11y::ax::activate(w.pid).is_ok())
 }
+
+/// The Dock's settings now (`host::DockSettings`): two CFPreferences reads of the Dock's domain.
+pub fn dock_settings() -> super::DockSettings {
+    let read = |key: &str, unset: bool| {
+        let (key, app) = (cfstr(key), cfstr("com.apple.dock"));
+        if key.0.is_null() || app.0.is_null() {
+            return unset;
+        }
+        let mut valid = 0u8;
+        let on = unsafe {
+            CFPreferencesAppSynchronize(app.0);
+            CFPreferencesGetAppBooleanValue(key.0, app.0, &mut valid)
+        };
+        if valid != 0 { on != 0 } else { unset }
+    };
+    super::DockSettings { autohide: read("autohide", false), launch_animation: read("launchanim", true), reduce_motion: super::motion::reduced_motion() }
+}
+
+/// Whether an app shows a Dock icon, by its Info.plist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockIcon {
+    /// An ordinary app: a Dock icon that bounces while it launches.
+    Shown,
+    /// An agent app (`LSUIElement`): no Dock icon, no menu bar of its own.
+    Agent,
+    /// A background-only app (`LSBackgroundOnly`): no Dock icon, no windows.
+    Background,
+}
+
+/// An app bundle as Launch Services launches it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bundle {
+    /// The `.app` folder.
+    pub path: PathBuf,
+    /// `Contents/MacOS/<CFBundleExecutable>`: what a launch of the bundle runs.
+    pub executable: PathBuf,
+    /// `CFBundleIdentifier`, when the bundle has one.
+    pub id: Option<String>,
+    pub dock: DockIcon,
+}
+
+/// Why a path is no app bundle that Launch Services launches (`bundle_of`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotBundle {
+    /// Neither an `.app` folder nor a file in one's `Contents/MacOS`: a bare executable.
+    Bare,
+    /// The bundle has no readable `Contents/Info.plist` (or the folder does not exist).
+    NoInfo,
+    /// A file in the bundle's `Contents/MacOS` other than the executable the bundle launches
+    /// (`CFBundleExecutable`): a launch of the bundle would run that one instead.
+    NotMain,
+}
+
+/// The app bundle of `path`: the `.app` folder itself, or the executable in its `Contents/MacOS`
+/// (the innermost bundle, for a helper app inside another). Reads its `Info.plist` (XML or binary).
+pub fn bundle_of(path: &Path) -> Result<Bundle, NotBundle> {
+    let path = std::path::absolute(path).map_err(|_| NotBundle::Bare)?;
+    let is_app = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"));
+    let named = |p: Option<&Path>, name: &str| p.filter(|p| p.file_name().is_some_and(|n| n == name)).map(Path::to_path_buf);
+    let (app, inner) = if is_app(&path) {
+        (path.clone(), None)
+    } else {
+        let macos = named(path.parent(), "MacOS").ok_or(NotBundle::Bare)?;
+        let contents = named(macos.parent(), "Contents").ok_or(NotBundle::Bare)?;
+        let app = contents.parent().filter(|a| is_app(a)).ok_or(NotBundle::Bare)?.to_path_buf();
+        (app, Some(path.clone()))
+    };
+    let info = plist::Value::from_file(app.join("Contents").join("Info.plist")).map_err(|_| NotBundle::NoInfo)?;
+    let info = info.as_dictionary().ok_or(NotBundle::NoInfo)?;
+    let string = |k: &str| info.get(k).and_then(plist::Value::as_string).map(str::to_string).filter(|s| !s.is_empty());
+    // Launch Services reads these as booleans, numbers or strings ("1", "YES").
+    let flag = |k: &str| match info.get(k) {
+        Some(plist::Value::Boolean(b)) => *b,
+        Some(plist::Value::Integer(i)) => i.as_signed().is_some_and(|i| i != 0),
+        Some(plist::Value::String(s)) => matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "yes" | "true"),
+        _ => false,
+    };
+    let name = string("CFBundleExecutable").unwrap_or_else(|| app.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+    let executable = app.join("Contents").join("MacOS").join(name);
+    if inner.is_some_and(|i| i.file_name() != executable.file_name()) {
+        return Err(NotBundle::NotMain);
+    }
+    let dock = if flag("LSBackgroundOnly") {
+        DockIcon::Background
+    } else if flag("LSUIElement") {
+        DockIcon::Agent
+    } else {
+        DockIcon::Shown
+    };
+    Ok(Bundle { path: app, executable, id: string("CFBundleIdentifier"), dock })
+}
+
+/// AppKit for the calls below, loaded on first use (+0.85 MB and about 3 ms on its own, an Apple silicon
+/// Mac on macOS 27). Every strobe process already has it today: ScreenCaptureKit, which strobe links
+/// (`probe::present::sck`), loads AppKit with it, the daemon's too. This keeps these calls right if
+/// that link is ever made lazy.
+fn appkit() -> bool {
+    static LOADED: OnceLock<bool> = OnceLock::new();
+    *LOADED.get_or_init(|| !unsafe { libc::dlopen(c"/System/Library/Frameworks/AppKit.framework/AppKit".as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) }.is_null())
+}
+
+type Id = *mut c_void;
+
+fn class(name: &std::ffi::CStr) -> Id {
+    unsafe { objc_getClass(name.as_ptr()) }
+}
+
+/// `[obj sel]`, typed as the method is: arm64 calls `objc_msgSend` with the method's own signature.
+unsafe fn send<R>(obj: Id, sel: &std::ffi::CStr) -> R {
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Id) -> R = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        f(obj, sel_registerName(sel.as_ptr()))
+    }
+}
+
+unsafe fn send1<A, R>(obj: Id, sel: &std::ffi::CStr, a: A) -> R {
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Id, A) -> R = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        f(obj, sel_registerName(sel.as_ptr()), a)
+    }
+}
+
+unsafe fn send2<A, B, R>(obj: Id, sel: &std::ffi::CStr, a: A, b: B) -> R {
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Id, A, B) -> R = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        f(obj, sel_registerName(sel.as_ptr()), a, b)
+    }
+}
+
+unsafe fn send3<A, B, C, R>(obj: Id, sel: &std::ffi::CStr, a: A, b: B, c: C) -> R {
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Id, A, B, C) -> R = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        f(obj, sel_registerName(sel.as_ptr()), a, b, c)
+    }
+}
+
+/// An autoreleased NSString of `s`; None when it holds a NUL.
+unsafe fn ns_string(s: &str) -> Option<Id> {
+    let c = CString::new(s).ok()?;
+    Some(unsafe { send1::<*const c_char, Id>(class(c"NSString"), c"stringWithUTF8String:", c.as_ptr()) }).filter(|s| !s.is_null())
+}
+
+/// An NSString's text.
+unsafe fn rust_string(s: Id) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    let p: *const c_char = unsafe { send(s, c"UTF8String") };
+    if p.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().to_string() }
+}
+
+/// A file URL of `path`, from its bytes (any name a file may have).
+unsafe fn file_url(path: &Path, dir: bool) -> Id {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else { return std::ptr::null_mut() };
+    unsafe { send3::<*const c_char, u8, Id, Id>(class(c"NSURL"), c"fileURLWithFileSystemRepresentation:isDirectory:relativeToURL:", c.as_ptr(), u8::from(dir), std::ptr::null_mut()) }
+}
+
+/// Runs `f` inside an autorelease pool of its own, so the objects AppKit hands back go with it; the
+/// pool is popped however `f` ends (a panic unwinding through it included), so pools stay nested.
+fn pooled<T>(f: impl FnOnce() -> T) -> T {
+    struct Pool(*mut c_void);
+    impl Drop for Pool {
+        fn drop(&mut self) {
+            unsafe { objc_autoreleasePoolPop(self.0) };
+        }
+    }
+    let _pool = Pool(unsafe { objc_autoreleasePoolPush() });
+    f()
+}
+
+/// Why Launch Services started no app (`open_app`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenFailed {
+    /// AppKit could not be loaded, or gave none of the objects the call needs.
+    NoAppKit,
+    /// The bundle's path makes no file URL (a NUL in it).
+    BadPath,
+    /// Launch Services refused the launch: its error's domain, code and description (the description
+    /// may name the app: the caller decides what to show).
+    Refused { domain: String, code: i64, description: String },
+    /// Launch Services reported no running process of the launch within the time allowed, and none
+    /// stamped with its home was seen: an app that exits at once does so before Launch Services hands
+    /// it over (its completion handler never comes), so this is also how such an app ends.
+    NoProcess,
+    /// strobe was asked to stop (Ctrl-C, a signal) while it waited.
+    Stopped,
+    /// Launch Services answered with a process strobe cannot prove its launch's (`Unproven::Foreign`):
+    /// the app was already running, or the launch was handed to a running copy. Never touched.
+    Foreign { pid: u32, why: &'static str },
+}
+
+/// What `open_app` started.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Opened {
+    pub pid: u32,
+    /// Its start time, once the process the pid names was proven the launch's (`launched`): with the
+    /// pid, what names it. None when it had exited before it was proven (`unproven` says why): then
+    /// the pid is not adopted (`spawn::open_owned` tracks only what carries the launch's stamp), and
+    /// nothing is ever done by it. A foreign process fails the launch instead (`OpenFailed::Foreign`).
+    pub start: Option<u64>,
+    /// Why the pid was not adopted, when it was not.
+    pub unproven: Option<&'static str>,
+    /// The launch clock: `host::now_ns()` and the epoch in ms, read just before the request, after
+    /// all of strobe's own preparation.
+    pub at_ns: u64,
+    pub epoch_ms: f64,
+}
+
+/// What the completion handler answers on, shared by the block and every copy of it: the first
+/// invocation takes the sender, so a second one sends nothing and none leaks or frees it twice.
+/// `request` is the request's entry in `PENDING`.
+struct OpenReply {
+    tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<u32, OpenFailed>>>>,
+    request: u64,
+}
+
+/// A block's descriptor with copy and dispose helpers (each copy of the block holds one count of the
+/// `Arc` it captured) and its signature (`void (^)(NSRunningApplication *, NSError *)`).
+#[repr(C)]
+struct BlockDescriptor {
+    reserved: usize,
+    size: usize,
+    copy: unsafe extern "C" fn(*mut OpenBlock, *const OpenBlock),
+    dispose: unsafe extern "C" fn(*const OpenBlock),
+    signature: *const c_char,
+}
+
+// Read-only: a static the block runtime only reads.
+unsafe impl Sync for BlockDescriptor {}
+
+/// The completion handler, laid out as a block literal with one captured value: an `Arc` of the
+/// reply (`Arc::into_raw`). NSWorkspace copies the block (`Block_copy`: its bytes, then `copy`), and
+/// releases its copies (`dispose`); the block on strobe's stack holds its own count until the call
+/// returns.
+#[repr(C)]
+struct OpenBlock {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: unsafe extern "C" fn(*const OpenBlock, Id, Id),
+    descriptor: *const BlockDescriptor,
+    reply: *const OpenReply,
+}
+
+const BLOCK_HAS_COPY_DISPOSE: i32 = 1 << 25;
+const BLOCK_HAS_SIGNATURE: i32 = 1 << 30;
+
+static OPEN_BLOCK: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<OpenBlock>(), copy: copy_open, dispose: dispose_open, signature: c"v24@?0@8@16".as_ptr() };
+
+/// A copy of the block (its bytes already copied): one more count of the shared reply.
+unsafe extern "C" fn copy_open(_dst: *mut OpenBlock, src: *const OpenBlock) {
+    unsafe { std::sync::Arc::increment_strong_count((*src).reply) };
+}
+
+/// A copy of the block released: its count of the shared reply goes.
+unsafe extern "C" fn dispose_open(block: *const OpenBlock) {
+    unsafe { drop(std::sync::Arc::from_raw((*block).reply)) };
+}
+
+/// Each `open_app` request Launch Services has not answered (its completion handler not yet called):
+/// its number and when it went. One answered goes; one never answered (an app that exited before
+/// Launch Services handed it over) stops counting after 30 s.
+static PENDING: Mutex<Vec<(u64, Instant)>> = Mutex::new(Vec::new());
+
+/// Whether a request of `open_app` went to Launch Services in the last 30 s and has had no answer:
+/// Launch Services may still record the bundle after a stop ended strobe's wait for it.
+pub fn request_pending() -> bool {
+    let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    p.retain(|(_, t)| t.elapsed() < Duration::from_secs(30));
+    !p.is_empty()
+}
+
+fn answered(request: u64) {
+    PENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|(r, _)| *r != request);
+}
+
+/// The completion handler's body, on a queue of AppKit's: the first call answers, any later one does
+/// nothing. No panic leaves it (it would unwind into libdispatch), and what AppKit hands back goes
+/// with its own autorelease pool.
+unsafe extern "C" fn opened(block: *const OpenBlock, app: Id, error: Id) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pooled(|| {
+            let shared = unsafe { &*(*block).reply };
+            let Some(reply) = shared.tx.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+            answered(shared.request);
+            let answer = if !app.is_null() {
+                let pid: i32 = unsafe { send(app, c"processIdentifier") };
+                if pid > 0 { Ok(pid as u32) } else { Err(OpenFailed::NoProcess) }
+            } else if !error.is_null() {
+                unsafe {
+                    Err(OpenFailed::Refused { domain: rust_string(send(error, c"domain")), code: send::<isize>(error, c"code") as i64, description: rust_string(send(error, c"localizedDescription")) })
+                }
+            } else {
+                Err(OpenFailed::NoProcess)
+            };
+            let _ = reply.send(answer);
+        })
+    }));
+}
+
+/// The first argument a strobe binary is started with to answer `ls_registered` in a process of its own
+/// (`answer_query`), then the bundle's identifier and path.
+pub const LS_QUERY_ARG: &str = "__strobe-ls-registered";
+
+/// Whether Launch Services has a record of the bundle at its path (`URLsForApplicationsWithBundleIdentifier:`),
+/// asked in a new short-lived process of this binary (`LS_QUERY_ARG`, about 0.1 s; never inside a timed
+/// launch): a process's copy of Launch Services' database goes stale without a run loop, which strobe
+/// does not run (on macOS 27 a record added by `lsregister` read at once, one removed still read as
+/// present, and one a launch made read as absent), so a long-lived strobe (`strobe daemon`, a bench's
+/// later blocks) asking itself could take a person's record for one its launch made. None when it
+/// cannot be told (a bundle without an identifier, no AppKit, a binary that does not answer: a test
+/// harness), and the caller then leaves every record as it is.
+pub fn ls_registered(bundle: &Bundle) -> Option<bool> {
+    use std::io::Read;
+    let id = bundle.id.as_deref()?;
+    let exe = std::env::current_exe().ok()?;
+    let mut child = std::process::Command::new(exe)
+        .arg(LS_QUERY_ARG)
+        .arg(id)
+        .arg(&bundle.path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    match out.lines().find_map(|l| l.strip_prefix("strobe-ls-registered: ")) {
+        Some("yes") => Some(true),
+        Some("no") => Some(false),
+        _ => None,
+    }
+}
+
+/// In a process started to answer a query (`LS_QUERY_ARG`): answers it on stdout and returns the exit
+/// code; None in any other process. Call it first in `main`, before anything else runs.
+pub fn answer_query() -> Option<i32> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|a| a != LS_QUERY_ARG) || args.len() != 3 {
+        return None;
+    }
+    let answer = match ls_registered_here(&args[1].to_string_lossy(), Path::new(&args[2])) {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    println!("strobe-ls-registered: {answer}");
+    Some(0)
+}
+
+/// `ls_registered`, asked in this process.
+fn ls_registered_here(id: &str, path: &Path) -> Option<bool> {
+    if !appkit() {
+        return None;
+    }
+    let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    pooled(|| unsafe {
+        let ws: Id = send(class(c"NSWorkspace"), c"sharedWorkspace");
+        // macOS 12's selector: an unknown one would raise an exception through this call.
+        let lookup = c"URLsForApplicationsWithBundleIdentifier:";
+        if ws.is_null() || send1::<*mut c_void, u8>(ws, c"respondsToSelector:", sel_registerName(lookup.as_ptr())) == 0 {
+            return None;
+        }
+        let id = ns_string(id)?;
+        let urls: Id = send1(ws, lookup, id);
+        if urls.is_null() {
+            return None;
+        }
+        let n: usize = send(urls, c"count");
+        Some((0..n).any(|i| {
+            let url: Id = send1(urls, c"objectAtIndex:", i);
+            let path = PathBuf::from(rust_string(send(url, c"path")));
+            std::fs::canonicalize(&path).unwrap_or(path) == want
+        }))
+    })
+}
+
+/// Launch Services' registration tool.
+const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+/// Removes Launch Services' record of a bundle (`lsregister -u`): for a record a launch of strobe's
+/// made (`ls_registered` was `Some(false)` before it). Waits for the tool (10 s at most: right after a
+/// launch it waits for Launch Services).
+pub fn unregister(bundle: &Path) {
+    let child = std::process::Command::new(LSREGISTER).arg("-u").arg(bundle).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    let Ok(mut child) = child else { return };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Starts the app `bundle` through Launch Services, as the Dock, Finder and `open` start one
+/// (`NSWorkspace openApplicationAtURL:configuration:completionHandler:`): a new instance never
+/// substituted by a running one, with exactly `env` as its environment and `args` as its arguments,
+/// kept out of the Dock's and the system's recent items, never asking the person anything (a refusal
+/// is an error), made the active app when `activate`. The app is launchd's child, not strobe's: its
+/// pid comes from the completion handler, or from the processes of the bundle's executable stamped
+/// with `home` (`spawn::HOME_VAR`), looked at every 10 ms, whichever comes first (the handler came
+/// about when the app's `main` ran; never, within 30 s, for an app that exited before it reached
+/// Launch Services: then nothing is signalled, `NoProcess`). Launch Services adds about 30 ms before
+/// the app runs, as it does for a person's launch: with the clock read just before the request, its
+/// `main` came 17 to 42 ms after it in 9 launches, against 4 to 6 ms in 4 direct spawns of the same
+/// bundle (an Apple silicon Mac on macOS 27; 29 ms in 10 pairs before). Each launch was cleaned up
+/// whole: no process, Dock recent item or Launch Services record of strobe's left.
+///
+/// The pid is the launch's only once proven (`launched`): a foreign process fails the launch
+/// (`OpenFailed::Foreign`, never touched); one that had already exited is not adopted (`Opened::start`
+/// None). The wait holds no lock and ends at a stop (`host::stop_requested`, checked
+/// every 10 ms) with `Stopped`, after up to 2 s more for the request in flight to surface, which is then
+/// ended once proven: a stop must not leave the app starting on the person's screen after strobe has
+/// gone. On an error the caller ends what may have started late (stamped with `home`). Nothing
+/// that can raise an Objective-C exception is sent a nil (an exception through this call is undefined
+/// behaviour in Rust): a missing class, object or URL is an error before the request.
+pub fn open_app(bundle: &Bundle, args: &[String], env: &[(String, String)], activate: bool, home: Option<&Path>, timeout: Duration) -> Result<Opened, OpenFailed> {
+    use std::sync::Arc;
+    if !appkit() {
+        return Err(OpenFailed::NoAppKit);
+    }
+    static REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticket = REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _opening = Opening::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reply: Arc<OpenReply> = Arc::new(OpenReply { tx: std::sync::Mutex::new(Some(tx)), request: ticket });
+    let sent = pooled(|| unsafe {
+        let ws: Id = send(class(c"NSWorkspace"), c"sharedWorkspace");
+        let config: Id = send(class(c"NSWorkspaceOpenConfiguration"), c"configuration");
+        let list: Id = send(class(c"NSMutableArray"), c"array");
+        let vars: Id = send(class(c"NSMutableDictionary"), c"dictionary");
+        let request = c"openApplicationAtURL:configuration:completionHandler:";
+        if [ws, config, list, vars].iter().any(|o| o.is_null()) || send1::<*mut c_void, u8>(ws, c"respondsToSelector:", sel_registerName(request.as_ptr())) == 0 {
+            return Err(OpenFailed::NoAppKit);
+        }
+        let url = file_url(&bundle.path, true);
+        if url.is_null() {
+            return Err(OpenFailed::BadPath);
+        }
+        let set = |obj: Id, sel: &std::ffi::CStr, on: bool| send1::<u8, ()>(obj, sel, u8::from(on));
+        set(config, c"setActivates:", activate);
+        set(config, c"setAddsToRecentItems:", false);
+        set(config, c"setCreatesNewApplicationInstance:", true);
+        set(config, c"setAllowsRunningApplicationSubstitution:", false);
+        set(config, c"setPromptsUserIfNeeded:", false);
+        // `ns_string` is None for a string with a NUL: never added (an array or dictionary refuses nil).
+        for a in args.iter().filter_map(|a| ns_string(a)) {
+            send1::<Id, ()>(list, c"addObject:", a);
+        }
+        send1::<Id, ()>(config, c"setArguments:", list);
+        for (k, v) in env {
+            if let (Some(k), Some(v)) = (ns_string(k), ns_string(v)) {
+                send2::<Id, Id, ()>(vars, c"setObject:forKey:", v, k);
+            }
+        }
+        send1::<Id, ()>(config, c"setEnvironment:", vars);
+        let block = OpenBlock {
+            isa: (&raw const _NSConcreteStackBlock).cast(),
+            flags: BLOCK_HAS_COPY_DISPOSE | BLOCK_HAS_SIGNATURE,
+            reserved: 0,
+            invoke: opened,
+            descriptor: &OPEN_BLOCK,
+            reply: Arc::into_raw(reply.clone()),
+        };
+        // The launch's time starts here, after all of strobe's own preparation.
+        PENDING.lock().unwrap_or_else(|e| e.into_inner()).push((ticket, Instant::now()));
+        let at = (epoch_ms(), super::now_ns(), super::start_now().unwrap_or(u64::MAX));
+        send3::<Id, Id, *const OpenBlock, ()>(ws, request, url, config, &block);
+        // The stack block's own count; the copies NSWorkspace keeps hold theirs.
+        drop(Arc::from_raw(block.reply));
+        Ok(at)
+    });
+    drop(reply);
+    let sent = sent.inspect_err(|_| answered(ticket));
+    // `since`: the process the launch started began no earlier (µs since 1970, an integer clock, as
+    // `start_time` reads; unread, nothing is proven).
+    let (epoch_ms, at_ns, since) = sent?;
+    let opened = |pid: u32| Opened { pid, start: None, unproven: None, at_ns, epoch_ms };
+    // A pid proven the launch's; one that had already exited is not adopted (`Opened::start` None:
+    // `open_owned` then tracks only what carries the launch's stamp); a foreign one fails the launch.
+    let answer = |pid: u32| match launched(pid, bundle, home, since) {
+        Ok(start) => Ok(Opened { start: Some(start), ..opened(pid) }),
+        Err(Unproven::Exited(why)) => Ok(Opened { unproven: Some(why), ..opened(pid) }),
+        Err(Unproven::Foreign(why)) => Err(OpenFailed::Foreign { pid, why }),
+    };
+    // Stamped with the launch's home and this strobe: the stamp is the proof, never its absence.
+    let stamped = |p: &u32| home.is_some_and(|h| super::spawn::stamp_of(*p).is_some_and(|s| s.home == super::spawn::home_key(h) && ours(&s)));
+    let deadline = Instant::now() + timeout;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(Ok(pid)) => return answer(pid),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                if let Some(pid) = running(&bundle.executable).into_iter().find(stamped) {
+                    return answer(pid);
+                }
+                if super::stop_requested() {
+                    stopped(&rx, bundle, home, since, &stamped);
+                    return Err(OpenFailed::Stopped);
+                }
+                if Instant::now() >= deadline {
+                    return Err(OpenFailed::NoProcess);
+                }
+            }
+        }
+    }
+}
+
+/// A stop while `open_app` waited: the request is in flight, and Launch Services may start the app
+/// after strobe has gone. Waits for it (2 s at most) and ends it once proven the launch's; what it
+/// cannot prove, and a request still unanswered at the end, it leaves alone and says so
+/// (`spawn::left_alone`).
+fn stopped(rx: &std::sync::mpsc::Receiver<Result<u32, OpenFailed>>, bundle: &Bundle, home: Option<&Path>, since: u64, stamped: &dyn Fn(&u32) -> bool) {
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        let pid = match rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(Ok(pid)) => Some(pid),
+            Ok(Err(_)) => return,
+            Err(_) => running(&bundle.executable).into_iter().find(|p| stamped(p)),
+        };
+        let Some(pid) = pid else { continue };
+        match launched(pid, bundle, home, since) {
+            Ok(start) => super::kill_opened(pid, start),
+            Err(Unproven::Exited(_)) => {}
+            Err(Unproven::Foreign(why)) => super::spawn::leave(Some(pid), "the process Launch Services answered strobe's launch with, at a stop", why),
+        }
+        return;
+    }
+    super::spawn::leave(
+        None,
+        "a launch through Launch Services strobe was stopped during",
+        "Launch Services had not answered within 2 s of the stop, so an app it starts after strobe exits is not strobe's to end: look for it",
+    );
+}
+/// How many `open_app` calls are under way (`opening`).
+static OPENING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts an `open_app` call while it lasts.
+struct Opening;
+
+impl Opening {
+    fn new() -> Opening {
+        OPENING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Opening
+    }
+}
+
+impl Drop for Opening {
+    fn drop(&mut self) {
+        OPENING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Whether an `open_app` call is under way: at a stop it ends the launch it is waiting for once that
+/// surfaces (2 s at most), so a stop's own sweep waits for it before strobe exits.
+pub fn opening() -> bool {
+    OPENING.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
+/// Whether a stamp names this strobe (`spawn::OWNER_VAR`: its pid and start time).
+fn ours(s: &super::spawn::Stamp) -> bool {
+    super::spawn::parse_owner(super::spawn::owner_stamp()) == Some((s.pid, s.start))
+}
+
+/// Why `launched` did not prove a pid the launch's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unproven {
+    /// The process the pid names is not the launch's: it started before the request, its readable
+    /// environment carries no stamp of this launch, it is another user's, or (environment unreadable)
+    /// it runs another executable. Never touched in any way.
+    Foreign(&'static str),
+    /// It had exited before strobe read it: not adopted (only what carries the launch's stamp is
+    /// tracked).
+    Exited(&'static str),
+}
+
+/// Proves that `pid` is the process `open_app`'s request started (`host::kill`'s standard): it started
+/// no earlier than the request (`since`, µs since 1970) and has the same start time before and after
+/// the reads below, so they are of one process. Where its environment is readable, this launch's stamp
+/// in it (this strobe, `home`) is the proof, whatever executable runs (a bundle's launcher stub that
+/// re-executes a sibling binary keeps it), and a readable environment without it proves the process
+/// foreign at once. Where it is unreadable (an app with the hardened runtime), it must be this user's
+/// and run the bundle's executable.
+pub fn launched(pid: u32, bundle: &Bundle, home: Option<&Path>, since: u64) -> Result<u64, Unproven> {
+    let start = start_time(pid).ok_or(Unproven::Exited("it exited before strobe could read its start time"))?;
+    if start < since {
+        return Err(Unproven::Foreign("it started before the launch request: the app was already running, or Launch Services handed the launch to a running copy"));
+    }
+    // Foreign only while the pid still names the process whose start time was read: a read that failed
+    // or found another process because it exited meanwhile says it exited, not that it is someone else's.
+    let exited = Unproven::Exited("it exited while strobe read it");
+    let foreign = |why: &'static str| if start_time(pid) == Some(start) { Unproven::Foreign(why) } else { exited };
+    match env_of(pid) {
+        Some(env) => {
+            let stamp = super::spawn::stamp_in(&env).ok_or_else(|| foreign("its environment carries no stamp of this launch: a copy of the app strobe did not start"))?;
+            if !ours(&stamp) || home.is_some_and(|h| stamp.home != super::spawn::home_key(h)) {
+                return Err(foreign("it carries another launch's stamp"));
+            }
+        }
+        None => {
+            let (Some(uid), Some(exe)) = (uid_of(pid), exe_of(pid)) else { return Err(exited) };
+            if uid != unsafe { libc::geteuid() } {
+                return Err(foreign("it is another user's process"));
+            }
+            let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            if canon(&exe) != canon(&bundle.executable) {
+                return Err(foreign("its environment is unreadable and it runs another executable than the app's"));
+            }
+        }
+    }
+    if start_time(pid) != Some(start) {
+        return Err(exited);
+    }
+    Ok(start)
+}
+
+/// The user a process runs as (`pbi_uid`).
+fn uid_of(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    (unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) } == size).then_some(info.pbi_uid)
+}
+
+/// Unix epoch time in ms (`isolate::epoch_ms`'s clock).
+fn epoch_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64() * 1e3).unwrap_or(0.0)
+}
+
+/// `host::checkin`: `isFinishedLaunching` of a fresh `NSRunningApplication` of `pid` every 5 ms
+/// (`CHECKIN_EVERY`) from a plain thread (no run loop needed: each read asks Launch Services anew). It
+/// turns on inside AppKit's `finishLaunching` (in `-[NSApp run]`; `finishLaunching` called alone never
+/// checks in): the time read here fell 5 to 21 ms before the app's own `applicationDidFinishLaunching:`
+/// and 14 to 83 ms after its `applicationWillFinishLaunching:` (scripts/dev/bounce, about 80 launches
+/// planted at 0.12 to 0.9 s, through Launch Services and spawned directly, an Apple silicon Mac on macOS
+/// 27), up to 5 ms after the flag turned on. An app strobe spawned directly checks in the same way.
+///
+/// `start` is the start time read at the launch: the pid names the launch's process only while its
+/// start time is that, checked before and after each read, so a pid reused by another app that has
+/// checked in is `Ended`, never its check-in. No start time (the launch already exited): `Ended`.
+pub fn checkin(pid: u32, start: Option<u64>, deadline: Instant) -> super::Feedback {
+    let Some(start) = start else { return super::Feedback::none(super::NoFeedback::Ended) };
+    if !appkit() {
+        return super::Feedback::none(super::NoFeedback::Unreadable);
+    }
+    super::Feedback::start(move |stop| {
+        loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(super::NoFeedback::Deadline);
+            }
+            if start_time(pid) != Some(start) {
+                return Err(super::NoFeedback::Ended);
+            }
+            let finished = pooled(|| unsafe {
+                let app: Id = send1(class(c"NSRunningApplication"), c"runningApplicationWithProcessIdentifier:", pid as i32);
+                !app.is_null() && send::<u8>(app, c"isFinishedLaunching") != 0
+            });
+            let at = super::now_ns();
+            if start_time(pid) != Some(start) {
+                return Err(super::NoFeedback::Ended);
+            }
+            if finished {
+                return Ok(at);
+            }
+            if Instant::now() >= deadline {
+                return Err(super::NoFeedback::Deadline);
+            }
+            std::thread::sleep(CHECKIN_EVERY);
+        }
+    })
+}
+
+/// How often `checkin` asks Launch Services. Each read cost about 80 µs of strobe's CPU (an Apple
+/// silicon Mac, macOS 27): every 2 ms that was 4% of a core, every 5 ms it is about 2% (1.1 to 3.3%).
+const CHECKIN_EVERY: Duration = Duration::from_millis(5);

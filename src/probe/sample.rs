@@ -93,7 +93,10 @@ impl Capture {
             while !sampling(out) && child.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+            // Only a child not reaped (`try_wait` reaps one that exited): its pid is still its own.
+            if child.try_wait().ok().flatten().is_none() {
+                unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+            }
         }
         let mut late = 0;
         deep.unsampled = std::mem::take(&mut self.unsampled);

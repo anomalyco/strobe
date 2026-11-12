@@ -6,8 +6,7 @@
 //! webview (`webview.rs`) and native apps (`native.rs`) all launch through this.
 
 use crate::host;
-pub use crate::host::kill_tree;
-use crate::host::spawn::{HOME_VAR, OWNER_VAR, Owned, Stamp, home_key as key, owner_stamp, parse_owner, stamp_of, stamped};
+use crate::host::spawn::{HOME_VAR, OWNER_VAR, Owned, Stamp, Stamped, home_key as key, owner_stamp, parse_owner, stamp_of, stamped};
 use crate::model::{Error, Result};
 use serde_json::{Value, json};
 use std::net::{SocketAddr, TcpStream};
@@ -89,6 +88,47 @@ pub struct App {
     /// The display a native app opens its windows on (Linux): the profile's or the target's `display`,
     /// else Wayland when this session has no X11 display (`wayland`).
     display: Option<Display>,
+    /// How `spawn` starts the app (`with_launch_path`).
+    launch: LaunchPath,
+    /// `spawn` also watches the launch's OS launch feedback for this long (`with_feedback`).
+    feedback: Option<std::time::Duration>,
+}
+
+/// How a launch starts an app: as strobe's own child, or (macOS) through Launch Services as the Dock
+/// and Finder start one. Recorded on each launch block (`Spawned::path`): the two differ by about 30 ms
+/// before the app runs, so two sides launched on different paths are not compared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchPath {
+    /// strobe spawns the executable (`posix_spawn`, `CreateProcessW`): its output is strobe's to read.
+    #[default]
+    Spawn,
+    /// macOS: `NSWorkspace` opens the app bundle (`host::spawn::open_owned`): no output, no exit code.
+    LaunchServices,
+}
+
+impl LaunchPath {
+    pub fn name(self) -> &'static str {
+        match self {
+            LaunchPath::Spawn => "spawn",
+            LaunchPath::LaunchServices => "launch_services",
+        }
+    }
+}
+
+/// The path a launch of `app` takes (the rule, SPEC §9.6): on macOS an app bundle Launch Services can
+/// account for (its executable is the bundle's own, with a `CFBundleIdentifier`) goes through Launch
+/// Services, as a person's launch does, unless the case reads milestones from the app's output
+/// (`output`: Launch Services gives strobe none, so it is spawned directly, about 30 ms faster to
+/// `main` than a Dock click: its `launch.bounces` and `launch.checkin` are refused). Everything else is
+/// spawned.
+pub fn launch_path(app: &App, output: bool) -> LaunchPath {
+    #[cfg(target_os = "macos")]
+    if !output && host::macos::bundle_of(&app.exe).is_ok_and(|b| b.id.is_some()) {
+        return LaunchPath::LaunchServices;
+    }
+    let _ = (app, output);
+    LaunchPath::Spawn
 }
 
 /// Where a native app shows its windows on Linux (SPEC §13.7): the X server of the session, or a
@@ -136,7 +176,7 @@ impl App {
     /// An executable with no profile: generic isolation only. A relative one is from the current folder
     /// (`from_dir`).
     pub fn bare(exe: &Path) -> App {
-        App { id: exe.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), exe: from_cwd(exe), ..App::default() }
+        App { id: exe.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), exe: bundle_exe(from_cwd(exe)), ..App::default() }
     }
 
     /// The same profile reached another way (`exe:<path> --native`, a `webview(path)` target).
@@ -148,7 +188,7 @@ impl App {
     /// The same profile with another build of the app, such as a variant's `exe:<path>` (a relative one
     /// from the current folder, `from_dir`).
     pub fn with_exe(mut self, exe: &Path) -> App {
-        self.exe = from_cwd(exe);
+        self.exe = bundle_exe(from_cwd(exe));
         self
     }
 
@@ -222,6 +262,130 @@ impl App {
                 None => std::env::var_os("DISPLAY").is_none_or(|v| v.is_empty()),
             }
     }
+
+    /// How `spawn` starts the app (`launch_path` picks it). `LaunchServices` (macOS): through Launch
+    /// Services (`host::spawn::open_owned`), as the Dock and Finder start it, about 30 ms slower than
+    /// strobe's direct spawn before the app runs: what a person's launch pays. Its executable must be an
+    /// app bundle's with a bundle id, and the launch gives strobe none of the app's output; `spawn`
+    /// refuses it elsewhere.
+    pub fn with_launch_path(mut self, path: LaunchPath) -> App {
+        self.launch = path;
+        self
+    }
+
+    /// `with_launch_path(LaunchPath::LaunchServices)`.
+    pub fn through_launch_services(self) -> App {
+        self.with_launch_path(LaunchPath::LaunchServices)
+    }
+
+    /// `spawn` starts the launch's OS launch-feedback watch itself, at the launch, for `within`: the
+    /// X11 startup notification announced before the launch's time starts (its id in the app's
+    /// environment), Windows' input idle from right after the resume, macOS's check-in from the pid
+    /// and start time the launch read (`Spawned::feedback`). Only for a case that asks for that metric
+    /// (or an untimed check, `look`): the macOS watch wakes `launchservicesd` every 5 ms.
+    pub fn with_feedback(mut self, within: std::time::Duration) -> App {
+        self.feedback = Some(within);
+        self
+    }
+}
+
+/// How a launch case reports `launch.bounces` (`bounces`; the owner's ruling, design addendum).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bounces {
+    /// macOS, a Dock launch: recorded on every launch case, declared or not.
+    Dock,
+    /// Off macOS, declared by the case (`primary` or `metrics`): `launch.ready` ÷ `host::DOCK_BOUNCE_MS`,
+    /// with `borrowed_bounce_note()` beside the value on every surface that shows it.
+    Borrowed,
+    /// Not recorded: off macOS and not declared, or on macOS a launch with no Dock launch that the case
+    /// did not declare it for.
+    Off,
+}
+
+/// Whether and how a launch case reports `launch.bounces`: on macOS automatically for a Dock launch
+/// (`dock_launch`) the Dock sees as a person's (not one `output` milestones forced to `Spawn`); off
+/// macOS only when the case declares it, in a borrowed unit. A refusal only when the case declares it
+/// and macOS has no Dock launch to count (each `NoFeedback` maps to a refusal by `feedback_refusal`).
+/// The launch-case and windowed-target requirements (`web`, `command`, `tty`, `window: false`: `NotForTarget`)
+/// are the bench's, on every OS.
+pub fn bounces(app: &App, declared: bool, path: LaunchPath, output: bool) -> std::result::Result<Bounces, host::NoFeedback> {
+    if !cfg!(target_os = "macos") {
+        return Ok(if declared { Bounces::Borrowed } else { Bounces::Off });
+    }
+    let dock = dock_launch(app).and_then(|()| if output && path == LaunchPath::Spawn { Err(host::NoFeedback::OutputMilestones) } else { Ok(()) });
+    match dock {
+        Ok(()) => Ok(Bounces::Dock),
+        Err(why) if declared => Err(why),
+        Err(_) => Ok(Bounces::Off),
+    }
+}
+
+/// The note `Bounces::Borrowed` puts beside the value, in plain words.
+pub fn borrowed_bounce_note() -> String {
+    format!("this OS has no Dock: a bounce here is a borrowed unit, 1 bounce = {} ms, the macOS Dock's launch bounce", host::DOCK_BOUNCE_MS)
+}
+
+/// The refusal a launch-feedback metric (`launch.checkin`, `launch.input_idle`, `launch.startup_notify`,
+/// a declared `launch.bounces` on macOS) gets for each reason its watch gave no time.
+pub fn feedback_refusal(why: host::NoFeedback) -> crate::model::ValidatorId {
+    use crate::model::ValidatorId;
+    use host::NoFeedback::*;
+    match why {
+        NotOnThisOs => ValidatorId::NotOnThisOs,
+        NoDockIcon | BareExecutable | NoBundleInfo | NotMainExecutable | NoMessageQueue | OutputMilestones => ValidatorId::NotForTarget,
+        Wayland | NoDisplay => ValidatorId::Headless,
+        Deadline | Ended | Unreadable => ValidatorId::RunIncomplete,
+    }
+}
+
+/// Whether the app's launch has a Dock launch to count bounces of (macOS): its executable is an app
+/// bundle's (`host::macos::bundle_of`), and the bundle has a Dock icon. `NotOnThisOs` elsewhere, which
+/// is no refusal of `launch.bounces` there: a case may declare it in a borrowed unit (`bounces`).
+pub fn dock_launch(app: &App) -> std::result::Result<(), host::NoFeedback> {
+    #[cfg(target_os = "macos")]
+    {
+        use host::macos::{DockIcon, NotBundle};
+        match host::macos::bundle_of(&app.exe) {
+            // Without a bundle id strobe cannot tell a Launch Services record it made (`launch_path`).
+            Ok(b) if b.id.is_none() => Err(host::NoFeedback::NoBundleInfo),
+            Ok(b) if b.dock == DockIcon::Shown => Ok(()),
+            Ok(_) => Err(host::NoFeedback::NoDockIcon),
+            Err(NotBundle::Bare) => Err(host::NoFeedback::BareExecutable),
+            Err(NotBundle::NoInfo) => Err(host::NoFeedback::NoBundleInfo),
+            Err(NotBundle::NotMain) => Err(host::NoFeedback::NotMainExecutable),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err(host::NoFeedback::NotOnThisOs)
+    }
+}
+
+/// An app's launch announced for startup notification (Linux X11, `host::x11::announce_startup`): add
+/// `env` to the launch's environment (`spawn`'s `env`), and read `feedback` for the app's `remove:`.
+pub struct StartupNotice {
+    pub env: (String, String),
+    pub feedback: host::Feedback,
+}
+
+/// Announces `app`'s launch for startup notification before `spawn` (Linux on an X11 display), silently;
+/// the watch ends at `deadline`. `Wayland` when the launch runs on strobe's compositor, `NoDisplay`
+/// without an X11 display, `NotOnThisOs` off Linux.
+pub fn startup_notice(app: &App, deadline: std::time::Instant) -> std::result::Result<StartupNotice, host::NoFeedback> {
+    #[cfg(target_os = "linux")]
+    {
+        if app.wayland() {
+            return Err(host::NoFeedback::Wayland);
+        }
+        let n = host::x11::announce_startup(deadline)?;
+        Ok(StartupNotice { env: n.env(), feedback: n.feedback })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, deadline);
+        Err(host::NoFeedback::NotOnThisOs)
+    }
 }
 
 /// `NotForTarget` for reduced motion in a native app whose profile declares none: strobe knows no
@@ -255,7 +419,27 @@ pub fn from_dir(exe: &Path, dir: &Path) -> PathBuf {
             c => joined.push(c),
         }
     }
-    if exe.components().count() > 1 || joined.is_file() { joined } else { on_path(exe) }
+    // An app bundle's folder (`MyApp.app`) is the app itself, as its executable is (macOS).
+    if exe.components().count() > 1 || joined.is_file() || is_bundle_dir(&joined) { joined } else { on_path(exe) }
+}
+
+/// macOS: an app bundle's folder that `host::macos::bundle_of` reads; false elsewhere.
+fn is_bundle_dir(p: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        p.is_dir() && host::macos::bundle_of(p).is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = p;
+        false
+    }
+}
+
+/// The app bundle folder an executable is in (`Foo.app`, any case of the extension, as Launch
+/// Services and `host::macos::bundle_of` take it): the innermost one.
+pub fn app_bundle(exe: &Path) -> Option<&Path> {
+    exe.ancestors().find(|a| a.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")))
 }
 
 /// A bare executable name as the file on PATH it names (Windows: `.exe` added to a name without an
@@ -276,6 +460,18 @@ fn on_path(exe: &Path) -> PathBuf {
 /// `from_dir` from the current folder (unchanged when it cannot be read).
 fn from_cwd(exe: &Path) -> PathBuf {
     std::env::current_dir().map_or_else(|_| exe.to_path_buf(), |d| from_dir(exe, &d))
+}
+
+/// macOS: an app bundle's folder (`Foo.app`) as the executable it launches (`host::macos::bundle_of`),
+/// so a running copy is found by its executable and a direct spawn runs it; anything else unchanged.
+fn bundle_exe(exe: PathBuf) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if exe.is_dir()
+        && let Ok(b) = host::macos::bundle_of(&exe)
+    {
+        return b.executable;
+    }
+    exe
 }
 
 /// This OS's key in a per-OS value (`exe`, a build's `output`).
@@ -349,11 +545,11 @@ pub fn app(id: &str, config: &Value) -> Result<App> {
     // A project's profile (the one of the chain that gave the exe): a relative executable is its own build,
     // from the project's root. A user's profile has no root: a bare name is the one on PATH.
     let root = chain.iter().find(|c| per_os(&c["exe"]).is_some()).and_then(|c| c[crate::config::ROOT].as_str());
-    let exe = match root {
+    let exe = bundle_exe(match root {
         Some(root) => from_dir(&exe, Path::new(root)),
         None if exe.is_relative() && exe.components().count() == 1 => on_path(&exe),
         None => exe,
-    };
+    });
     let strings = |k: &str| p[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     let mut guards = Vec::new();
     for g in p["guard"].as_array().into_iter().flatten() {
@@ -407,6 +603,8 @@ pub fn app(id: &str, config: &Value) -> Result<App> {
         reduce_motion: false,
         merged_files: Vec::new(),
         display,
+        launch: LaunchPath::Spawn,
+        feedback: None,
     })
 }
 
@@ -638,7 +836,7 @@ const UNREADABLE: &str = "\u{0}strobe: unreadable";
 /// one whose CPU cannot be read, a wrapper whose child ran, a tiny program that ran and then waits.
 pub fn held_at_launch(pid: u32, home: Option<&Path>, exe: &Path, waited: &str) -> Option<Error> {
     let ns = held_cpu(pid, home)?;
-    let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
+    let bundle = app_bundle(exe);
     let step = match bundle {
         Some(app) => format!("open {} once from the Finder and allow it (if macOS still refuses, allow it in System Settings > Privacy & Security > Open Anyway), then run again", app.display()),
         None => format!("allow {} in System Settings > Privacy & Security > Open Anyway, then run again", exe.display()),
@@ -872,10 +1070,28 @@ fn held(dir: &str) -> bool {
     HELD.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|h| h == dir)
 }
 
+/// Makes a launch folder (a home or a profile) and names this strobe in its owner file at once, before
+/// a seed is copied or a helper started in it: another strobe's sweep (`reap_dead_owners`) never takes
+/// a folder being filled for a live strobe as a gone one's.
+pub fn claim(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    own(dir)
+}
+
+/// Names this strobe in `dir`'s owner file, unless it already does: a warm home's file is never
+/// truncated and rewritten under a sweep that may read it meanwhile.
+fn own(dir: &Path) -> std::io::Result<()> {
+    let file = dir.join(OWNER_FILE);
+    if std::fs::read_to_string(&file).is_ok_and(|s| s == owner_stamp()) {
+        return Ok(());
+    }
+    std::fs::write(file, owner_stamp())
+}
+
 /// The variables a launch for `dir` carries (`host::spawn::HOME_VAR`, `OWNER_VAR`); `dir` is held
 /// until it is released, and names this strobe in its owner file.
 pub fn launch_env(dir: &Path) -> [(String, String); 2] {
-    let _ = std::fs::write(dir.join(OWNER_FILE), owner_stamp());
+    let _ = own(dir);
     let k = key(dir);
     let mut h = HELD.lock().unwrap_or_else(|e| e.into_inner());
     if !h.contains(&k) {
@@ -900,25 +1116,32 @@ fn leftover(s: &Stamp) -> bool {
     if s.pid == std::process::id() { !held(&s.home) } else { !owner_alive(s.pid, s.start) }
 }
 
-/// Ends the trees of `procs` from their roots (a process whose parent is not among them), each
-/// checked again right before it ends (its stamp unchanged: not a reused pid). Returns the ended
+/// Ends the trees of `procs` from their roots (a process whose parent is not among them), each only
+/// while it is the process the scan found: its start time, its stamp, then its start time again, read
+/// right before it ends (`host::kill_opened`, which reads each process's start time once more right
+/// before its signal). Never a process group: a stamped process is no child of this strobe's (its
+/// children are ended by their `Owned`), so its group is not strobe's to signal. Returns the ended
 /// roots, named before any ended.
-fn end_roots(procs: &[(u32, u32, Stamp)]) -> Vec<(u32, String, Stamp)> {
-    let roots: Vec<(u32, String, Stamp)> = procs
-        .iter()
-        .filter(|(_, parent, _)| !procs.iter().any(|(p, _, _)| p == parent))
-        .map(|(pid, _, s)| (*pid, host::exe_of(*pid).map(|e| e.display().to_string()).unwrap_or_else(|| format!("process {pid}")), s.clone()))
-        .collect();
+pub fn end_roots(procs: &[Stamped]) -> Vec<(u32, String, Stamp)> {
+    let roots: Vec<(&Stamped, String)> =
+        procs.iter().filter(|p| !procs.iter().any(|q| q.pid == p.parent)).map(|p| (p, host::exe_of(p.pid).map(|e| e.display().to_string()).unwrap_or_else(|| format!("process {}", p.pid)))).collect();
     roots
         .into_iter()
-        .filter(|(pid, _, s)| {
-            let same = stamp_of(*pid).as_ref() == Some(s);
+        .filter(|(p, _)| {
+            let same = host::start_time(p.pid) == Some(p.start) && stamp_of(p.pid).as_ref() == Some(&p.stamp) && host::start_time(p.pid) == Some(p.start);
             if same {
-                kill_tree(*pid);
+                host::kill_opened(p.pid, p.start);
             }
             same
         })
+        .map(|(p, exe)| (p.pid, exe, p.stamp.clone()))
         .collect()
+}
+
+/// The processes stamped with `dir` now.
+pub fn stamped_home(dir: &Path) -> Vec<Stamped> {
+    let k = key(dir);
+    stamped().into_iter().filter(|s| s.stamp.home == k).collect()
 }
 
 /// Ends what dead strobes left behind, and the folders they left: every stamped process whose
@@ -926,7 +1149,7 @@ fn end_roots(procs: &[(u32, u32, Stamp)]) -> Vec<(u32, String, Stamp)> {
 /// this strobe released, then every home or profile under `run/` whose strobe is gone (its GPU
 /// caches go back, shared seeds unlink, URL schemes are restored). Returns a line per process ended.
 pub fn reap_dead_owners() -> Vec<String> {
-    let dead: Vec<(u32, u32, Stamp)> = stamped().into_iter().filter(|(_, _, s)| leftover(s)).collect();
+    let dead: Vec<Stamped> = stamped().into_iter().filter(|s| leftover(&s.stamp)).collect();
     let mut lines: Vec<String> = end_roots(&dead)
         .into_iter()
         .map(|(pid, exe, s)| {
@@ -953,6 +1176,8 @@ pub fn launch_folders() -> Vec<PathBuf> {
         .iter()
         .filter_map(|d| std::fs::read_dir(d).ok())
         .flat_map(|r| r.flatten())
+        // Folders only, never a link to one: a sweep never follows a link out of strobe's own folders.
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
         .filter(|p| p.file_name().is_some_and(|n| launch_pid(&n.to_string_lossy()).is_some()))
         .collect()
@@ -970,16 +1195,23 @@ pub fn folder_gone(dir: &Path) -> Option<bool> {
     let named = launch_pid(&dir.file_name()?.to_string_lossy())?;
     Some(match std::fs::read_to_string(dir.join(OWNER_FILE)).ok().as_deref().and_then(parse_owner) {
         Some((pid, start)) => pid != std::process::id() && !owner_alive(pid, start),
-        None => named != std::process::id() && !host::exe_of(named).is_some_and(|exe| exe.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase().starts_with("strobe"))),
+        // No owner file: a folder from before owner files, or one made a moment ago (`claim` writes the
+        // file right after the folder: one younger than a minute is left for its strobe).
+        None => {
+            // A time a little ahead of the clock (a coarse file system, a clock step back) is young too.
+            let young = std::fs::metadata(dir).and_then(|m| m.modified()).ok().is_some_and(|t| match t.elapsed() {
+                Ok(a) => a < Duration::from_secs(60),
+                Err(e) => e.duration() < Duration::from_secs(60),
+            });
+            !young && named != std::process::id() && !host::exe_of(named).is_some_and(|exe| exe.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase().starts_with("strobe")))
+        }
     })
 }
 
 /// Before a gone strobe's launch folder is removed: ends what still runs from it, restores the URL
 /// schemes saved in it and unlinks its shared seed files. A line per process ended.
 pub fn release_gone(dir: &Path) -> Vec<String> {
-    let k = key(dir);
-    let left: Vec<(u32, u32, Stamp)> = stamped().into_iter().filter(|(_, _, s)| s.home == k).collect();
-    let lines = end_roots(&left).into_iter().map(|(pid, exe, _)| format!("ended {exe} (pid {pid}): it ran from {}, a folder of a strobe that is gone", dir.display())).collect();
+    let lines = end_roots(&stamped_home(dir)).into_iter().map(|(pid, exe, _)| format!("ended {exe} (pid {pid}): it ran from {}, a folder of a strobe that is gone", dir.display())).collect();
     restore_protocols(dir);
     unshare(dir);
     lines
@@ -998,14 +1230,16 @@ pub fn borrowed(dir: &Path) -> Vec<PathBuf> {
 /// Ends what still runs from `home` (an app's detached service, anything stamped with it) and
 /// restores the URL schemes saved in it, without deleting it: a warm home is launched again.
 pub fn release_home(home: &Path) {
-    let k = key(home);
-    let left: Vec<(u32, u32, Stamp)> = stamped().into_iter().filter(|(_, _, s)| s.home == k).collect();
-    end_roots(&left);
+    end_roots(&stamped_home(home));
     restore_protocols(home);
+    // Again: what Launch Services started late (a request still in flight at a stop) surfaces while
+    // the record is removed.
+    end_roots(&stamped_home(home));
     let_go(home);
 }
 
-/// While alive, a stop of strobe (Ctrl-C, SIGINT, SIGTERM) ends every launch it owns (each one's tree
+/// While alive, a stop of strobe (Ctrl-C, SIGINT, SIGTERM) waits for a Launch Services launch under
+/// way to end what it started (macOS, `macos::opening`, 2.5 s at most), ends every launch it owns (each one's tree
 /// and group or job: `spawn::end_launches`), then what still runs from `home` (stamped with it),
 /// removes that home when `prepare_home` made it now, and exits 130: for a command with no stop
 /// points of its own (`look`), which leaves nothing running for the next strobe to reap. A browser's
@@ -1031,6 +1265,15 @@ pub fn end_on_stop(home: Option<&Home>) -> EndOnStop {
                 }
                 // Under the lock: the command cannot start closing meanwhile.
                 if flag.load(Ordering::SeqCst) {
+                    // macOS: a launch through Launch Services under way ends what it started once that
+                    // surfaces (`macos::open_app`, 2 s at most): strobe must not exit before.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+                        while host::macos::opening() && std::time::Instant::now() < until {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
                     host::spawn::end_launches();
                     if let Some((dir, fresh)) = &home {
                         release_home(dir);
@@ -1041,6 +1284,11 @@ pub fn end_on_stop(home: Option<&Home>) -> EndOnStop {
                     if let Some(dir) = &display {
                         release_home(dir);
                         remove_home(dir);
+                    }
+                    // What strobe left alone is said before it exits, as at the end of any run.
+                    let left = host::spawn::left_alone();
+                    if !left.is_empty() {
+                        eprint!("{}", host::spawn::left_alone_text(&left));
                     }
                     std::process::exit(130);
                 }
@@ -1350,6 +1598,7 @@ impl Home {
 pub fn prepare_home(app: &App, seed: Option<&Path>, home: Option<PathBuf>) -> Result<Home> {
     let home = home.unwrap_or_else(new_home);
     let fresh = !home.join(".strobe-home").exists();
+    claim(&home)?;
     let appdata = home.join("AppData").join("Roaming");
     let local = home.join("AppData").join("Local");
     let temp = local.join("Temp");
@@ -1518,21 +1767,33 @@ pub fn prepare_home(app: &App, seed: Option<&Path>, home: Option<PathBuf>) -> Re
     })
 }
 
-/// A spawned app: the child with its group, when it was spawned (epoch ms and the host clock), and
-/// its output lines when asked for.
+/// A spawned app: the child with its group, when it was spawned (epoch ms and the host clock, read
+/// just before the launch request), its output lines when asked for, how it was started, and its OS
+/// launch-feedback watch when the app asked for one (`App::with_feedback`).
 pub struct Spawned {
     pub child: Owned,
     pub pid: u32,
     pub epoch_ms: f64,
     pub at_ns: u64,
     pub output: Option<std::sync::mpsc::Receiver<crate::target::isolate::OutputLine>>,
+    pub path: LaunchPath,
+    /// Its time less `at_ns` is the metric (`host::ms_between(at_ns, t)`).
+    pub feedback: Option<host::Feedback>,
 }
 
 /// Starts `app` in `home`: strobe's environment less the profile's `unset`, then the home's, then
 /// `env`; the profile's `args`, then `args`; pinned to `cpus` when given (children inherit it); in a
-/// group of its own (`host::spawn_owned`).
+/// group of its own (`host::spawn_owned`), or through Launch Services (`App::with_launch_path`).
 pub fn spawn(app: &App, home: &Home, args: &[String], env: &[(String, String)], output: bool, cpus: Option<u64>) -> Result<Spawned> {
     installed(app)?;
+    if app.launch == LaunchPath::LaunchServices {
+        #[cfg(target_os = "macos")]
+        return open(app, home, args, env, output);
+        #[cfg(not(target_os = "macos"))]
+        return Err(crate::model::Refusal::new(crate::model::ValidatorId::NotOnThisOs, "Launch Services is macOS's: this OS launches an app by spawning it").into());
+    }
+    // Announced before the launch's time starts: its id goes into the app's environment.
+    let notice = app.feedback.filter(|_| cfg!(target_os = "linux")).map(|within| startup_notice(app, std::time::Instant::now() + within));
     let mut cmd = Command::new(&app.exe);
     for (k, _) in std::env::vars() {
         if app.unsets(&k) || home.unsets(&k) {
@@ -1542,15 +1803,104 @@ pub fn spawn(app: &App, home: &Home, args: &[String], env: &[(String, String)], 
     for (k, v) in home.env.iter().chain(env) {
         cmd.env(k, v);
     }
+    if let Some(Ok(n)) = &notice {
+        cmd.env(&n.env.0, &n.env.1);
+    }
     for a in app.args.iter().chain(args) {
         cmd.arg(home.fill(a));
     }
     let piped = || if output { Stdio::piped() } else { Stdio::null() };
     cmd.stdin(Stdio::null()).stdout(piped()).stderr(piped());
+    // macOS: an app bundle Launch Services has no record of gets one as its app checks in; asked before
+    // the launch's time starts, and removed when the home is released (`macos_library::forget`).
+    #[cfg(target_os = "macos")]
+    if let Ok(b) = host::macos::bundle_of(&app.exe) {
+        macos_library::note_unrecorded(&home.dir, &b);
+    }
     let (epoch, at_ns) = (epoch_ms(), host::now_ns());
     let mut child = host::spawn_owned(&mut cmd, cpus, 0, Some(&home.dir)).map_err(|e| Error::msg(format!("launch {}: {e}", app.exe.display())))?;
+    let feedback = app.feedback.map(|within| watch_feedback(&child, notice, within));
     let output = output.then(|| lines(&mut child));
-    Ok(Spawned { pid: child.pid(), child, epoch_ms: epoch, at_ns, output })
+    Ok(Spawned { pid: child.pid(), child, epoch_ms: epoch, at_ns, output, path: LaunchPath::Spawn, feedback })
+}
+
+/// The OS launch-feedback watch of a launch just made, for `within` from now: Windows' input idle on
+/// the child, macOS's check-in by the pid and start time the launch read, Linux's startup
+/// notification announced before it (`notice`; on Wayland or without a display, why not).
+fn watch_feedback(child: &Owned, notice: Option<std::result::Result<StartupNotice, host::NoFeedback>>, within: std::time::Duration) -> host::Feedback {
+    let deadline = std::time::Instant::now() + within;
+    if cfg!(windows) {
+        return child.input_idle(deadline);
+    }
+    if cfg!(target_os = "macos") {
+        return host::checkin(child.pid(), child.start(), deadline);
+    }
+    match notice {
+        Some(Ok(n)) => n.feedback,
+        Some(Err(why)) => host::Feedback::none(why),
+        None => host::Feedback::none(host::NoFeedback::NotOnThisOs),
+    }
+}
+
+/// `spawn` through Launch Services (macOS, `App::through_launch_services`): the same environment and
+/// arguments a direct spawn gives (strobe's environment less the profile's `unset`, then the home's,
+/// then `env`), the app made active as `host::raise_windows` would (nobody used the Mac for a minute).
+/// Its time starts just before the request (`macos::Opened::at_ns`), after all of strobe's own
+/// preparation, as a person's click does. A launch that fails ends what it may have started late
+/// (stamped with the home) and the Launch Services record it may have made.
+#[cfg(target_os = "macos")]
+fn open(app: &App, home: &Home, args: &[String], env: &[(String, String)], output: bool) -> Result<Spawned> {
+    use crate::model::{Refusal, ValidatorId};
+    use host::macos::{NotBundle, OpenFailed};
+    if output {
+        return Err(Error::usage(
+            "a launch through Launch Services gives strobe none of the app's output (launchd takes its stdout and stderr): read the app's milestones from a log file, or launch it directly",
+        ));
+    }
+    let refuse = |why: &str| -> Error {
+        Refusal::new(ValidatorId::NotForTarget, format!("Launch Services launches app bundles: {why}")).fix("give the .app bundle (or its main executable) as the app's exe").into()
+    };
+    let bundle = host::macos::bundle_of(&app.exe).map_err(|e| {
+        refuse(match e {
+            NotBundle::Bare => "the executable is not an app bundle's (an .app folder, or the executable in its Contents/MacOS)",
+            NotBundle::NoInfo => "the app bundle has no readable Contents/Info.plist",
+            NotBundle::NotMain => "the executable is not the one its app bundle launches (CFBundleExecutable)",
+        })
+    })?;
+    if bundle.id.is_none() {
+        return Err(refuse("the app bundle has no CFBundleIdentifier, so strobe cannot tell a Launch Services record its launch made from one already there"));
+    }
+    let mut vars = home.environment(app);
+    for (k, v) in env {
+        vars.retain(|name, _| !env_name_is(name, k));
+        vars.insert(k.clone(), v.clone());
+    }
+    let vars: Vec<(String, String)> = vars.into_iter().collect();
+    let args: Vec<String> = app.args.iter().chain(args).map(|a| home.fill(a)).collect();
+    let activate = host::macos::user_idle_s() >= host::macos::IDLE_BEFORE_ACTIVATE_S;
+    macos_library::note_unrecorded(&home.dir, &bundle);
+    let (child, opened) = match host::spawn::open_owned(&bundle, &args, &vars, &home.dir, activate) {
+        Ok(x) => x,
+        Err(e) => {
+            end_roots(&stamped_home(&home.dir));
+            macos_library::forget(&home.dir);
+            end_roots(&stamped_home(&home.dir));
+            return Err(match e {
+                OpenFailed::NoAppKit => Error::msg("AppKit could not be loaded, so Launch Services cannot be asked to launch the app"),
+                OpenFailed::BadPath => Error::msg("the app bundle's path makes no file URL"),
+                OpenFailed::Refused { domain, code, .. } => Error::msg(format!("Launch Services refused to launch the app ({domain} error {code})")),
+                OpenFailed::NoProcess => Error::unreachable("Launch Services reported no running process of the app within 30 s (or the app exited before checking in)"),
+                OpenFailed::Stopped => Error::new(130, "stopped while Launch Services launched the app"),
+                OpenFailed::Foreign { pid, why } => {
+                    Refusal::new(ValidatorId::LiveChannel, format!("Launch Services answered the launch with process {pid}, which is not this launch's ({why}): strobe touched nothing of it"))
+                        .fix("quit the app (a copy of it may already run, or it hands a launch to a running copy), then run again")
+                        .into()
+                }
+            });
+        }
+    };
+    let feedback = app.feedback.map(|within| host::checkin(child.pid(), child.start(), std::time::Instant::now() + within));
+    Ok(Spawned { pid: child.pid(), child, epoch_ms: opened.epoch_ms, at_ns: opened.at_ns, output: None, path: LaunchPath::LaunchServices, feedback })
 }
 
 /// A JSON seed file with placeholders filled; a string that is exactly `{port}` becomes a number.
@@ -1621,18 +1971,26 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
         }
         // A copy strobe launched (stamped) is not the user's: a leftover is ended; one that a
         // running strobe (this one included) still holds is named.
-        let stamps: Vec<(u32, Option<Stamp>)> = running.iter().map(|&p| (p, stamp_of(p))).collect();
-        let left: Vec<(u32, u32, Stamp)> = stamps.iter().filter_map(|(p, s)| s.clone().filter(leftover).map(|s| (*p, 0, s))).collect();
+        // Each with its start time, read before and after its stamp: the stamp is that process's.
+        let stamps: Vec<(u32, Option<u64>, Option<Stamp>)> = running
+            .iter()
+            .map(|&p| {
+                let start = host::start_time(p);
+                let s = stamp_of(p);
+                (p, start.filter(|&t| host::start_time(p) == Some(t)), s)
+            })
+            .collect();
+        let left: Vec<Stamped> = stamps.iter().filter_map(|(p, t, s)| Some(Stamped { pid: *p, parent: 0, start: (*t)?, stamp: s.clone().filter(leftover)? })).collect();
         if !end_roots(&left).is_empty() {
             for _ in 0..50 {
                 running = host::running(&app.exe);
-                if !running.iter().any(|p| left.iter().any(|l| l.0 == *p)) {
+                if !running.iter().any(|p| left.iter().any(|l| l.pid == *p)) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        if let Some((pid, Some(s))) = stamps.iter().find(|(p, s)| running.contains(p) && s.as_ref().is_some_and(|s| !leftover(s))) {
+        if let Some((pid, _, Some(s))) = stamps.iter().find(|(p, _, s)| running.contains(p) && s.as_ref().is_some_and(|s| !leftover(s))) {
             return Err(if s.pid == std::process::id() {
                 Error::refused(
                     "LiveChannel",
@@ -1658,7 +2016,7 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
         }
     }
     // The install folder: a macOS app's bundle, else the executable's folder.
-    let install = app.exe.ancestors().find(|a| a.extension().is_some_and(|e| e == "app")).or(app.exe.parent());
+    let install = app_bundle(&app.exe).or(app.exe.parent());
     let sep = std::path::MAIN_SEPARATOR;
     let dir = install.map(|d| d.to_string_lossy().to_lowercase()).unwrap_or_default();
     let folder = install.and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -1752,7 +2110,10 @@ fn reg_text(b: &[u8]) -> String {
 /// Puts every saved scheme back as it was before the launch (deleting one that did not exist).
 pub fn restore_protocols(home: &Path) {
     #[cfg(target_os = "macos")]
-    macos_library::restore(home);
+    {
+        macos_library::restore(home);
+        macos_library::forget(home);
+    }
     #[cfg(windows)]
     for e in std::fs::read_dir(home).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
@@ -1838,9 +2199,13 @@ mod macos_library {
     /// linked into it), else the executable's name, which is what Cocoa uses for a bare executable's
     /// preferences; and a bundle's name.
     fn ids(app: &App) -> (String, Option<String>) {
-        let bundle = app.exe.ancestors().find(|a| a.extension().is_some_and(|e| e == "app"));
+        let bundle = app_bundle(&app.exe);
         let id = match bundle {
-            Some(b) => host::output(Command::new("plutil").args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"]).arg(b.join("Contents/Info.plist"))),
+            // The bundle's own Info.plist (XML or binary), as Launch Services reads it.
+            Some(b) => host::macos::bundle_of(b)
+                .ok()
+                .and_then(|b| b.id)
+                .or_else(|| host::output(Command::new("plutil").args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"]).arg(b.join("Contents/Info.plist")))),
             None => embedded_id(&app.exe),
         };
         let name = bundle.and_then(|b| b.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| app.exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
@@ -1872,7 +2237,7 @@ mod macos_library {
 
     /// An executable outside any app bundle (a command-line program, a bare build).
     fn bare(app: &App) -> bool {
-        !app.exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app"))
+        app_bundle(&app.exe).is_none()
     }
 
     /// The Library folders Cocoa and its daemons key by an id: the folder and the suffix after the id.
@@ -1914,7 +2279,7 @@ mod macos_library {
     }
 
     fn sandboxed(app: &App) -> bool {
-        let bundle = app.exe.ancestors().find(|a| a.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf).unwrap_or_else(|| app.exe.clone());
+        let bundle = app_bundle(&app.exe).map(Path::to_path_buf).unwrap_or_else(|| app.exe.clone());
         host::output(Command::new("codesign").args(["-d", "--entitlements", "-", "--xml"]).arg(&bundle).stderr(Stdio::null())).is_some_and(|x| x.contains("com.apple.security.app-sandbox"))
     }
 
@@ -1946,6 +2311,105 @@ mod macos_library {
             ));
         }
         Ok(())
+    }
+
+    /// Where a launch for `home` records the app bundle whose Launch Services record it may make: beside
+    /// the home, never in it (the launched app may write its home, and this names what strobe removes).
+    fn unrecorded_file(home: &Path) -> Option<PathBuf> {
+        Some(home.parent()?.join(format!(".ls-{}", home.file_name()?.to_string_lossy())))
+    }
+
+    /// Before a launch's time starts: when Launch Services has no record of `bundle` (`ls_registered`
+    /// is `Some(false)`), notes it for `forget`, which removes the record the launch makes (a launch
+    /// through Launch Services, and an app bundle's executable spawned directly, which is recorded as it
+    /// checks in). A bundle Launch Services knows already, or one strobe cannot tell (no bundle id), is
+    /// not noted: strobe removes only a record it made.
+    pub fn note_unrecorded(home: &Path, bundle: &host::macos::Bundle) {
+        let Some(file) = unrecorded_file(home) else { return };
+        if host::macos::ls_registered(bundle) == Some(false) {
+            let _ = std::fs::write(&file, bundle.path.display().to_string());
+        }
+    }
+
+    /// Removes the Launch Services record a launch for `home` made (`note_unrecorded`), and the note.
+    /// Every end of a launch comes here: `release_home` (a close, a failed launch, a stop's
+    /// `end_on_stop`) and, after strobe was killed, the next strobe's `reap_dead_owners`. Only an app
+    /// bundle outside the system's and the person's Applications folders is unregistered, and only:
+    /// - once the launch's processes (stamped with the home, by pid and start time) are gone from the
+    ///   process list, not only their environment, which goes first (2 s at most);
+    /// - while no copy of the app that is not the launch's runs (one a person opened from Finder: the
+    ///   record is theirs too, so it stays, and `spawn::left_alone` says so).
+    ///
+    /// Then checked: Launch Services may record the bundle again after the first removal (its own
+    /// bookkeeping of the app's end, or a request still in flight at a stop: seen on macOS 27), so
+    /// strobe asks again (`ls_registered`, a fresh process: never its own stale view) every 0.25 s for
+    /// 1.5 s (3 s with a request in flight) and removes a record that came back, three times at most, each
+    /// time only while no copy of the app strobe did not launch runs (checked again before each removal:
+    /// a person may open it meanwhile). The launch's processes are matched by pid and start time, and a
+    /// bundle path that links into an installed app's folder is that installed app.
+    ///
+    /// The note goes only once that is done: a stop and a failed launch may end the same home at once
+    /// from two threads (`end_on_stop`'s and the launch's), and the one the process exits under must
+    /// still find it.
+    pub fn forget(home: &Path) {
+        let Some(file) = unrecorded_file(home) else { return };
+        let Ok(text) = std::fs::read_to_string(&file) else { return };
+        let path = PathBuf::from(text.lines().next().unwrap_or("").trim());
+        // Its real path: a link to an installed app is that installed app.
+        let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let installed = ["/Applications", "/System", "/Library"]
+            .iter()
+            .map(PathBuf::from)
+            .chain([host::home().join("Applications")])
+            .any(|d| path.starts_with(&d) || real.starts_with(std::fs::canonicalize(&d).unwrap_or(d)));
+        if let Some(b) = host::macos::bundle_of(&path).ok().filter(|b| !installed && b.path == path) {
+            unrecord(home, &b);
+        }
+        let _ = std::fs::remove_file(&file);
+    }
+
+    fn unrecord(home: &Path, bundle: &host::macos::Bundle) {
+        use std::time::Instant;
+        let k = key(home);
+        let launch: Vec<(u32, u64)> = stamped().into_iter().filter(|s| s.stamp.home == k).map(|s| (s.pid, s.start)).collect();
+        // A copy of the app that is neither one of the launch's processes (by pid and start time: a pid
+        // one of them left may be a person's copy's now) nor stamped with its home.
+        let others = || -> Vec<u32> {
+            host::running(&bundle.executable).into_iter().filter(|p| !launch.iter().any(|l| l.0 == *p && host::start_time(*p) == Some(l.1)) && stamp_of(*p).is_none_or(|s| s.home != k)).collect()
+        };
+        let keep = |left: Vec<u32>| {
+            for p in left {
+                host::spawn::leave(Some(p), "a copy of the app strobe did not launch", "it runs, so Launch Services' record of the app bundle (perhaps the person's) stays");
+            }
+        };
+        let until = Instant::now() + Duration::from_secs(2);
+        while (launch.iter().any(|&(p, s)| host::start_time(p) == Some(s)) || !others().is_empty()) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = others();
+        if !left.is_empty() {
+            return keep(left);
+        }
+        host::macos::unregister(&bundle.path);
+        let mut removed = 1;
+        let mut since = Instant::now();
+        loop {
+            let window = Duration::from_millis(if host::macos::request_pending() { 3000 } else { 1500 });
+            if since.elapsed() >= window || removed >= 3 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            if host::macos::ls_registered(bundle) == Some(true) {
+                // Before every removal, not only the first: a person may have opened the app meanwhile.
+                let left = others();
+                if !left.is_empty() {
+                    return keep(left);
+                }
+                host::macos::unregister(&bundle.path);
+                removed += 1;
+                since = Instant::now();
+            }
+        }
     }
 
     /// Records what the launch may create, for `restore`.

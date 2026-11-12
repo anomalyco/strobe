@@ -533,6 +533,15 @@ fn result(out: Output) -> Value {
     json!({ "content": [{ "type": "text", "text": out.text }], "structuredContent": out.json, "isError": false })
 }
 
+/// An error's structured content with what strobe left alone in the call (`left_alone`), absent when
+/// there was nothing (never null: `schema/result.v1.json`).
+fn with_left(mut v: Value, e: &Error) -> Value {
+    if let Some(l) = &e.left_alone {
+        v["left_alone"] = l.clone();
+    }
+    v
+}
+
 fn call_tool(name: &str, input: &Value) -> Value {
     let (argv, timeout, pending) = match to_args(name, input) {
         Ok(x) => x,
@@ -547,11 +556,11 @@ fn call_tool(name: &str, input: &Value) -> Value {
         Ok(Ok(out)) => result(out),
         Ok(Err(e)) if e.code == 4 => {
             let text = format!("refused: {}\nfix: {}", e.message, e.hint.clone().unwrap_or_default());
-            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "refused": true, "error": e.message, "hint": e.hint, "code": 4, "validator": e.validator() }, "isError": false })
+            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": with_left(json!({ "refused": true, "error": e.message, "hint": e.hint, "code": 4, "validator": e.validator() }), &e), "isError": false })
         }
         Ok(Err(e)) => {
             let text = format!("{}{}", e.message, e.hint.as_ref().map(|h| format!("\nfix: {h}")).unwrap_or_default());
-            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "error": e.message, "code": e.code, "validator": e.validator() }, "isError": true })
+            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": with_left(json!({ "error": e.message, "code": e.code, "validator": e.validator() }), &e), "isError": true })
         }
         Err(_) => {
             let id = pending.unwrap_or_default();
@@ -604,6 +613,7 @@ pub fn handle(msg: &Value) -> Option<Value> {
 
 pub fn stdio() -> Result<()> {
     super::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::host::spawn::shared_process();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines().map_while(std::result::Result::ok) {
@@ -659,6 +669,7 @@ pub fn daemon(_args: &Args) -> Result<()> {
     let _ = std::fs::create_dir_all(&log);
     super::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
     super::DAEMON.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::host::spawn::shared_process();
     // Tracked branches (`strobe track --schedule`): checked once a minute.
     std::thread::spawn(super::track::daemon_loop);
     std::thread::spawn(follow_installed);
@@ -666,7 +677,12 @@ pub fn daemon(_args: &Args) -> Result<()> {
     // buses): ended now and once a minute, so none outlives them for long.
     std::thread::spawn(|| {
         loop {
+            // Its own invocation: what it left alone is in the log, never in an MCP call's result.
+            let left = crate::host::spawn::left_scope();
             let _ = crate::target::isolate::reap_dead_owners();
+            // Already in the log (`spawn::leave`): taken here so no MCP call reports them.
+            let _ = left.take();
+            drop(left);
             // And caches unused for long, once a day while no bench runs (`prune.json` says what went).
             let _ = super::prune::auto();
             std::thread::sleep(Duration::from_secs(60));
@@ -714,22 +730,13 @@ fn follow_installed() {
 }
 
 fn serve(req: http::Request, port: u16, token: &str) -> http::Response {
-    let host = req.headers.get("host").map(String::as_str).unwrap_or("");
-    if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
-        return http::Response::text(403, "bad host");
-    }
-    // The daemon's own pages (the Perfetto UI fetches its fonts and wasm in CORS mode) may read it.
-    let same = |o: &str| o == format!("http://127.0.0.1:{port}") || o == format!("http://localhost:{port}");
-    if let Some(origin) = req.headers.get("origin")
-        && origin != "null"
-        && !(req.method == "GET" && same(origin))
-    {
-        return http::Response::text(403, "cross-origin requests are not allowed");
+    // Loopback by its own name, and the daemon's own pages (the Perfetto UI fetches its fonts and wasm
+    // in CORS mode): `strobe open`'s own server asks the same.
+    if let Some(r) = super::open::refused(&req, port) {
+        return r;
     }
     let path = req.path.split('?').next().unwrap_or("/").to_string();
-    if req.method == "GET"
-        && let Some(r) = super::open::serve(&req, port)
-    {
+    if let Some(r) = super::open::serve(&req, port, true) {
         return r;
     }
     // A report or a video holds the target's own pixels and data (rule 9): only the daemon's own pages
@@ -737,11 +744,14 @@ fn serve(req: http::Request, port: u16, token: &str) -> http::Response {
     if (path.starts_with("/report/") || path.starts_with("/video/")) && req.headers.get("sec-fetch-site").is_some_and(|s| s != "same-origin" && s != "none") {
         return http::Response::text(403, "cross-site requests are not allowed");
     }
-    if req.method == "GET" && path.starts_with("/report/") {
-        let handle = path.trim_start_matches("/report/");
+    // A stored id, exactly: anything else (a prefix, a path, an id not stored) is `not found`, which
+    // says nothing of the request or the store.
+    if req.method == "GET"
+        && let Some(handle) = path.strip_prefix("/report/")
+    {
         return match report_html(handle) {
             Ok(html) => http::Response::new(200, "text/html; charset=utf-8", html.into_bytes()),
-            Err(e) => http::Response::text(404, &e.message),
+            Err(_) => http::Response::text(404, "not found"),
         };
     }
     if req.method == "GET"
@@ -749,7 +759,7 @@ fn serve(req: http::Request, port: u16, token: &str) -> http::Response {
     {
         return video(&req, rec);
     }
-    if path == "/health" {
+    if req.method == "GET" && path == "/health" {
         return http::Response::new(200, "application/json", json!({ "strobe": env!("CARGO_PKG_VERSION"), "build": build_id() }).to_string().into_bytes());
     }
     if path != "/mcp" {
@@ -773,7 +783,9 @@ fn serve(req: http::Request, port: u16, token: &str) -> http::Response {
 }
 
 fn report_html(handle: &str) -> Result<String> {
-    let dir = store::resolve(handle)?;
+    // A request's handle reaches the store only as an exact stored id: never a folder anywhere on the
+    // disk, never a prefix.
+    let dir = super::open::stored(handle).ok_or_else(|| Error::usage("not found"))?;
     let experiment = store::is_experiment(&dir);
     let (view, mut data) = if experiment { ("experiment", store::read_json(&dir.join("result.json"))?) } else { ("recording", store::read_json(&dir.join("meta.json"))?) };
     super::report::attach_videos(&mut data, (!experiment).then_some(dir.as_path()), &super::report::Videos::Daemon)?;
@@ -782,12 +794,12 @@ fn report_html(handle: &str) -> Result<String> {
 
 /// `GET /video/<rec>`: a recording's video, with byte ranges (a player seeks through them).
 fn video(req: &http::Request, rec: &str) -> http::Response {
-    let file = store::resolve(rec).ok().filter(|d| !store::is_experiment(d)).and_then(|d| {
+    let file = super::open::stored(rec).filter(|d| !store::is_experiment(d)).and_then(|d| {
         let j = store::read_json(&d.join("video.json")).ok()?;
         let name = j["file"].as_str().filter(|n| matches!(*n, "video.mp4" | "video.webm"))?.to_string();
         Some(d.join(name))
     });
-    let Some((file, len)) = file.and_then(|f| Some((f.clone(), std::fs::metadata(&f).ok().filter(|m| m.is_file())?.len()))) else { return http::Response::text(404, "no video") };
+    let Some((file, len)) = file.and_then(|f| Some((f.clone(), std::fs::metadata(&f).ok().filter(|m| m.is_file())?.len()))) else { return http::Response::text(404, "not found") };
     let kind = if file.extension().is_some_and(|e| e == "webm") { "video/webm" } else { "video/mp4" };
     // The bytes are read from the file as they are sent (`Response::file`), never held whole.
     let body = |status: u16, a: u64, n: u64| http::Response { file: Some((file.clone(), a, n)), ..http::Response::new(status, kind, Vec::new()) };

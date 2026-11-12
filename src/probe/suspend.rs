@@ -246,7 +246,8 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
                     e.1 = t.cpu_ns;
                 };
                 if let std::collections::hash_map::Entry::Vacant(e) = processes.entry(t.pid) {
-                    let h = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, t.pid) };
+                    // The process the look found, by its creation time on the handle (`open_process`).
+                    let h = set.iter().find(|(p, _)| *p == t.pid).and_then(|&(p, c)| open_process(p, c)).unwrap_or(std::ptr::null_mut());
                     if h.is_null() || wow64(h) {
                         if !h.is_null() {
                             unsafe { CloseHandle(h) };
@@ -260,12 +261,12 @@ fn run(targets: &Targets, rx: mpsc::Receiver<()>) -> Result<Deep> {
                     }
                     e.insert(Process { handle: h, modules: images(h), read_at: std::time::Instant::now(), empty_reads: 0, unwind: HashMap::new() });
                 }
-                let h = unsafe { OpenThread(THREAD_ACCESS, 0, t.tid) };
-                if h.is_null() {
+                // The thread the look found (`open_thread`).
+                let Some(h) = open_thread(t.pid, t.tid, t.born) else {
                     unopened += 1;
                     unopenable(&mut never_opened);
                     continue;
-                }
+                };
                 let main = mains.get(&t.pid).copied().flatten() == Some(t.tid);
                 let thread = Thread::new(t.pid, t.tid, h, t.born < born_t0, main, &mut names);
                 late_cycles += thread.cycles - thread.base;
@@ -514,6 +515,50 @@ fn next_threads(process: HANDLE) -> Vec<HANDLE> {
         out.push(h);
     }
     out
+}
+
+/// Opens process `pid` to read its memory, only while it is the process created at `created` (FILETIME
+/// units, as the look gave it), checked on the handle itself: a pid another process took since the
+/// look is closed again, never read (`host::kill`, row 21).
+fn open_process(pid: u32, created: u64) -> Option<HANDLE> {
+    let h = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
+    if h.is_null() {
+        return None;
+    }
+    if times(h).is_some_and(|t| t.0 == created) {
+        Some(h)
+    } else {
+        unsafe { CloseHandle(h) };
+        None
+    }
+}
+
+/// Opens thread `tid` to suspend, read and resume it, only while it is a thread of process `pid`
+/// created at `born` (0: the look gave no time, not checked), both checked on the handle: a thread id
+/// another app's thread took since the look is closed again and never suspended (`host::kill`, row 21).
+fn open_thread(pid: u32, tid: u32, born: u64) -> Option<HANDLE> {
+    let h = unsafe { OpenThread(THREAD_ACCESS, 0, tid) };
+    if h.is_null() {
+        return None;
+    }
+    if unsafe { windows_sys::Win32::System::Threading::GetProcessIdOfThread(h) } == pid && (born == 0 || thread_born(h) == Some(born)) {
+        Some(h)
+    } else {
+        unsafe { CloseHandle(h) };
+        None
+    }
+}
+
+/// For the dev harness (`scripts/dev/bounce`): whether the sampler would open process `pid` created at
+/// `created` and its thread `tid` created at `born` now (each handle closed again at once).
+pub fn would_open(pid: u32, created: u64, tid: u32, born: u64) -> (bool, bool) {
+    let close = |h: Option<HANDLE>| {
+        h.inspect(|&h| {
+            unsafe { CloseHandle(h) };
+        })
+        .is_some()
+    };
+    (close(open_process(pid, created)), close(open_thread(pid, tid, born)))
 }
 
 /// A process's creation and exit times (FILETIME units; exit 0 while it runs).

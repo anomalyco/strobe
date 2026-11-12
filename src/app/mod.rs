@@ -47,6 +47,9 @@ impl Output {
 }
 
 pub fn main() -> i32 {
+    if let Some(code) = crate::host::answer_query() {
+        return code;
+    }
     let args = match Args::parse(std::env::args().skip(1).collect()) {
         Ok(a) => a,
         Err(e) => return fail(&e, false),
@@ -82,12 +85,16 @@ pub fn main() -> i32 {
                 for h in &made {
                     println!("{h}");
                 }
+                // What strobe left alone is said under -q too, once, on stderr after why the command
+                // failed (stdout stays the handles); the failure is judged from the text before it.
+                let (text, left) = out.text.find(host::spawn::LEFT_ALONE_HEADER).map_or((out.text.as_str(), ""), |i| out.text.split_at(i));
                 if out.code != 0 {
-                    let why = if made.is_empty() { out.text.trim_end().to_string() } else { failure_summary(&out) };
+                    let why = if made.is_empty() { text.trim_end().to_string() } else { failure_summary(&out.json, text) };
                     if !why.is_empty() {
                         eprintln!("{why}");
                     }
                 }
+                eprint!("{left}");
             }
             out.code
         }
@@ -104,15 +111,15 @@ fn handles(out: &Value) -> Vec<String> {
     out_ids
 }
 
-/// Why a command that made a recording or experiment exited non-zero, for `-q`'s stderr: what halted
-/// it, else its failed cases (a `FAIL` line and the indented lines under it), else its last line.
-fn failure_summary(out: &Output) -> String {
-    if let Some(why) = out.json["stopped"]["why"].as_str() {
+/// Why a command that made a recording or experiment exited non-zero, for `-q`'s stderr, from its JSON
+/// and its text without what strobe left alone: what halted it, else its failed cases (a `FAIL` line and the indented lines under it), else its last line.
+fn failure_summary(json: &Value, text: &str) -> String {
+    if let Some(why) = json["stopped"]["why"].as_str() {
         return format!("strobe: {why}");
     }
     let mut failed = Vec::new();
     let mut taking = false;
-    for l in out.text.lines() {
+    for l in text.lines() {
         if l.starts_with("FAIL") {
             taking = true;
         } else if !l.starts_with(' ') {
@@ -122,10 +129,49 @@ fn failure_summary(out: &Output) -> String {
             failed.push(l);
         }
     }
-    if failed.is_empty() { out.text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string() } else { failed.join("\n") }
+    if failed.is_empty() { text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string() } else { failed.join("\n") }
 }
 
+/// Runs one invocation (the CLI's, an MCP call's, a command a command runs). The outermost one on its
+/// thread reports what strobe left alone while it ran (`host::spawn::left_alone`: a process it could
+/// not prove its own, a record it kept): one line per process at the end of the text, and
+/// `left_alone` in the JSON (absent when there is none).
 pub fn dispatch(args: &Args) -> Result<Output> {
+    let left = host::spawn::left_scope();
+    let out = run(args);
+    if !left.outermost() {
+        return out;
+    }
+    let notes = left.take();
+    if notes.is_empty() {
+        return out;
+    }
+    let field = serde_json::to_value(&notes).unwrap_or(Value::Null);
+    let text = host::spawn::left_alone_text(&notes);
+    match out {
+        Ok(mut o) => {
+            if !o.text.is_empty() && !o.text.ends_with('\n') {
+                o.text.push('\n');
+            }
+            o.text.push_str(&text);
+            match &mut o.json {
+                Value::Object(m) => {
+                    m.insert("left_alone".into(), field);
+                }
+                Value::Null => o.json = json!({ "left_alone": field }),
+                _ => {}
+            }
+            Ok(o)
+        }
+        Err(mut e) => {
+            e.message = format!("{}\n{}", e.message, text.trim_end());
+            e.left_alone = Some(field);
+            Err(e)
+        }
+    }
+}
+
+fn run(args: &Args) -> Result<Output> {
     if args.has("help") {
         let help = crate::cli::help(&args.command);
         return Ok(Output::new(help.clone(), json!({ "help": help })));
@@ -265,7 +311,11 @@ fn project_of(args: &Args) -> Option<PathBuf> {
 
 fn fail(e: &Error, json: bool) -> i32 {
     if json {
-        println!("{}", json!({ "error": e.message, "hint": e.hint, "code": e.code, "validator": e.validator() }));
+        let mut j = json!({ "error": e.message, "hint": e.hint, "code": e.code, "validator": e.validator() });
+        if let Some(l) = &e.left_alone {
+            j["left_alone"] = l.clone();
+        }
+        println!("{j}");
     } else {
         eprintln!("strobe: {}", e.message);
         if let Some(h) = &e.hint {

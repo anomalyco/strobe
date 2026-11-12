@@ -997,7 +997,8 @@ mod win {
                 return;
             }
             host::spawn::unlist_launch(self.pid, self.job.map(|j| j as isize));
-            host::kill_tree(self.pid);
+            // strobe's own child, its handle still held (`self.process`): its pid names it.
+            host::kill_launch(self.pid, None);
             unsafe {
                 if let Some(job) = self.job.take() {
                     TerminateJobObject(job, 1);

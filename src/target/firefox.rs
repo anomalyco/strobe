@@ -263,6 +263,7 @@ pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, emulation: 
         host::paths::owner_only_dir(root);
     }
     host::paths::owner_only_dir(&profile);
+    super::isolate::claim(&profile)?;
     let over = emulation_prefs(emulation, &exe);
     let mut prefs: Vec<(String, String)> = USER_JS.iter().filter(|(k, _)| !over.iter().any(|o| o.0 == *k)).map(|(k, v)| (k.to_string(), v.to_string())).collect();
     prefs.extend(over);

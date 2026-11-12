@@ -705,7 +705,7 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     let (id, draft) = claim(args)?;
     let dir = draft.dir().to_path_buf();
     std::thread::sleep(Duration::from_millis(300));
-    let sampler = probe::os::Sampler::start(browser.pid(), browser.profile());
+    let sampler = probe::os::Sampler::start_of(browser.pid(), browser.root_start(), browser.profile());
     // The capture follows the browser's windows (macOS and X11 stream them by window).
     let presents = (!headless).then(|| {
         crate::probe::present::PresentCapture::start().map(|mut c| {

@@ -389,8 +389,11 @@ try {
   check(within(st2.total_bytes - st2.outside_bytes, truth2, 1), "status total after pruning = du (1%)", `strobe ${st2.total_bytes - st2.outside_bytes}, du ${truth2}`)
 } finally {
   // One holder that already ended (ESRCH) must not keep the rest, or the unmounts, from running.
+  // A holder's group is signalled only while the holder is not reaped (no exit code or signal yet):
+  // once the runtime reaped it, its group id may be another process's (src/host/kill.rs).
   for (const h of holders) {
     try {
+      if (h.exitCode !== null || h.signalCode !== null) continue
       if (win || !h.pid) h.kill()
       else process.kill(-h.pid)
     } catch {}

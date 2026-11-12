@@ -301,6 +301,18 @@ impl WebBrowser {
         }
     }
 
+    /// The start time that proves `pid` the launched browser, where its pid is not pinned by strobe:
+    /// WebKit's (Safari is launchd's child, MiniBrowser the WebDriver server's), proven at the launch
+    /// (`webkit::browser_proof`). None for Chromium and Firefox, strobe's own unreaped children. Every
+    /// reading of the browser's processes starts from `pid` only while it holds
+    /// (`host::process_set_pids_of`).
+    pub fn root_start(&self) -> Option<u64> {
+        match self {
+            WebBrowser::Webkit(b) => Some(b.start()),
+            _ => None,
+        }
+    }
+
     /// The launch's home or profile, which its process set follows.
     pub fn profile(&self) -> Option<PathBuf> {
         match self {

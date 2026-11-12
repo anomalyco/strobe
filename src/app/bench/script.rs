@@ -230,6 +230,8 @@ impl Host {
                 Some(host::spawn::Ended::Code(c)) => break ExitState::Exited(c),
                 #[cfg(unix)]
                 Some(host::spawn::Ended::Signal(s)) => break ExitState::Signaled(s),
+                // Never: a script's host is strobe's own child.
+                Some(host::spawn::Ended::Unreported) => break ExitState::Exited(-1),
                 None => {}
             }
             if stop_requested() {

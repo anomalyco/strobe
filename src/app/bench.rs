@@ -8514,8 +8514,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // what they did then, less strobe's speed check, is what a check's run 1 is judged against
         // (`block::startup_spill`).
         let timeline = (x.untimed && on_phone.is_none()).then(|| {
-            let (pid, profile) = (browser.pid(), browser.profile());
-            probe::wakes::Timeline::start(move || host::process_set_pids(pid, profile.as_deref()))
+            let (pid, start, profile) = (browser.pid(), browser.root_start(), browser.profile());
+            probe::wakes::Timeline::start(move || host::process_set_pids_of(pid, start, profile.as_deref()))
         });
         let t = cases.iter().map(Series::hook_timeout).max().unwrap_or_default();
         let mut block = json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": url, "root": v.root.as_deref().map(host::paths::plain), "engine": engine });
@@ -8687,7 +8687,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         lap("checks");
         // GPU engines and VRAM of the target's process tree, read from the OS (SPEC §13.6); none of this
         // computer's is a phone's page's.
-        let sampler = on_phone.is_none().then(|| probe::os::Sampler::start(browser.pid(), browser.profile()));
+        let sampler = on_phone.is_none().then(|| probe::os::Sampler::start_of(browser.pid(), browser.root_start(), browser.profile()));
         let sampled = Instant::now();
         // `page.window` in setup sizes the browser's window: the driver follows its processes from now.
         driver.set_pids(browser.pids());

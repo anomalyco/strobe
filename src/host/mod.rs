@@ -16,6 +16,7 @@ pub mod http;
 pub mod ios;
 #[cfg(windows)]
 pub mod jobs;
+pub mod kill;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -33,6 +34,7 @@ pub mod win;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
+pub use kill::{kill_launch, kill_opened};
 pub use spawn::{spawn_owned, spawn_pinned};
 
 #[cfg(target_os = "linux")]
@@ -45,6 +47,20 @@ use win as os;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// In a process a strobe started only to answer a question of its own (macOS: whether Launch Services
+/// has a record of a bundle, `macos::ls_registered`): answers it and returns the exit code; None in any
+/// other process. A binary that launches through strobe calls it first in `main`.
+pub fn answer_query() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::answer_query()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
 
 /// Monotonic nanoseconds (QPC on Windows).
 pub fn now_ns() -> u64 {
@@ -200,6 +216,9 @@ impl Drop for Awake {
 pub struct ProcTimes {
     pub pid: u32,
     pub parent: u32,
+    /// Its start time (`start_time`'s units) from the same snapshot as its parent: with its pid, the
+    /// process the set found (`host::kill`: a member of a set walked from a proven root).
+    pub start: u64,
     pub name: String,
     pub cpu_ns: u64,
     /// CPU cycles charged so far (`tsc` units): exact, where `cpu_ns` moves in clock ticks.
@@ -273,45 +292,6 @@ pub fn process_list() -> Vec<(u32, u32, u64)> {
     #[cfg(not(windows))]
     {
         os::process_list()
-    }
-}
-
-/// Ends a running process and every process of its tree now: Windows terminates each (when its
-/// creation time is still the snapshot's), Unix sends SIGKILL to the process group it leads (when it
-/// runs and leads one) and to each process of the tree, children first.
-pub fn kill_tree(pid: u32) {
-    kill_launch(pid, None);
-}
-
-/// `kill_tree` of a launch strobe owns and has not reaped; `start` is its start time, read at the
-/// launch: on macOS a launch that exited still roots what it left running (`macos::kill_set`).
-pub(crate) fn kill_launch(pid: u32, start: Option<u64>) {
-    if pid == 0 {
-        return;
-    }
-    #[cfg(windows)]
-    {
-        let _ = start;
-        win::kill_tree(pid);
-    }
-    #[cfg(unix)]
-    {
-        #[cfg(target_os = "macos")]
-        let tree = macos::kill_set(pid, start);
-        #[cfg(not(target_os = "macos"))]
-        let tree = {
-            let _ = start;
-            tree_pids(pid)
-        };
-        if tree.is_empty() {
-            return;
-        }
-        if unsafe { libc::getpgid(pid as i32) } == pid as i32 {
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        }
-        for p in tree.iter().rev() {
-            unsafe { libc::kill(*p as i32, libc::SIGKILL) };
-        }
     }
 }
 
@@ -1305,14 +1285,22 @@ pub fn enable_ansi() -> bool {
     }
 }
 
+/// What `ctrl_c`'s handler sets.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Installs a Ctrl+C handler (once) and returns the flag it sets instead of killing the process.
 pub fn ctrl_c() -> &'static std::sync::atomic::AtomicBool {
-    static FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     #[cfg(windows)]
-    win::on_ctrl_c(&FLAG);
+    win::on_ctrl_c(&STOP);
     #[cfg(not(windows))]
-    unix_ctrl_c(&FLAG);
-    &FLAG
+    unix_ctrl_c(&STOP);
+    &STOP
+}
+
+/// Whether a stop was asked for (`ctrl_c`'s flag), without installing the handler: for a wait that
+/// must end at once when it was (a launch through Launch Services).
+pub fn stop_requested() -> bool {
+    STOP.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The tree rooted at `root` plus everything launched for `home` and their trees: every process
@@ -1329,6 +1317,28 @@ pub fn process_set(root: u32, home: Option<&Path>) -> Vec<ProcTimes> {
     set.retain(|p| p.pid != me || root == me);
     set.sort_by_key(|p| p.pid);
     set
+}
+
+/// `process_set` from a root strobe proved by the start time it read when it identified it (`start`):
+/// the root's tree (and on macOS what is responsible to it) only while the snapshot has the root at
+/// that start time, so a pid another process took since roots nothing; what carries `home`'s stamp
+/// either way. Each member's `start` is from the walk's own snapshot (`host::kill`).
+pub fn process_set_of(root: u32, start: u64, home: Option<&Path>) -> Vec<ProcTimes> {
+    let set = process_set(root, home);
+    if root == 0 || set.iter().any(|p| p.pid == root && p.start == start) { set } else { process_set(0, home) }
+}
+
+/// `process_set_pids` from a root that is not strobe's pinned child: with `start` (the start time
+/// proven when strobe identified it), the root's tree only while the root has it, checked before and
+/// after the read, so a pid another process took since roots nothing (what carries `home`'s stamp is
+/// still read). None: strobe's own unreaped child, pinned.
+pub fn process_set_pids_of(root: u32, start: Option<u64>, home: Option<&Path>) -> Vec<u32> {
+    let proven = || start.is_none_or(|s| root != 0 && start_time(root) == Some(s));
+    if !proven() {
+        return process_set_pids(0, home);
+    }
+    let set = process_set_pids(root, home);
+    if proven() { set } else { process_set_pids(0, home) }
 }
 
 /// The pids of `process_set`, sorted, for a reader that needs no more (the OS sampler's re-read of a
@@ -1595,8 +1605,20 @@ pub fn set_affinity(mask: u64) -> Option<u64> {
     }
 }
 
+thread_local! {
+    /// The mask `set_thread_affinity` last gave this thread: what a helper thread it starts takes too
+    /// (`thread_mask`). Windows starts a thread on the process's mask, not its starter's.
+    static THREAD_MASK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The mask `set_thread_affinity` last gave the calling thread, if it gave one.
+pub fn thread_mask() -> Option<u64> {
+    THREAD_MASK.with(|m| m.get())
+}
+
 /// Restricts the calling thread to `mask`.
 pub fn set_thread_affinity(mask: u64) {
+    THREAD_MASK.with(|m| m.set(Some(mask)));
     allowed();
     #[cfg(windows)]
     win::set_thread_affinity(mask);
@@ -1751,6 +1773,243 @@ pub fn raise_windows(pids: &[u32]) -> usize {
     #[cfg(not(windows))]
     {
         os::raise_windows(pids)
+    }
+}
+
+/// How often a launch's watcher raises the app's windows again once it has (`Raiser`).
+pub const RAISE_EVERY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// When a launch's watcher raises the app's windows (`raise_windows`): on the first look that sees its
+/// main window, then every `RAISE_EVERY`. A watcher that raised on a timer from its first look, window
+/// or not, reset that timer on a look before the app had a window, so the window waited up to 300 ms to
+/// be raised (macOS: to be made the active app, about 0.4 Dock bounces of a launch).
+#[derive(Debug, Default)]
+pub struct Raiser {
+    last: Option<std::time::Instant>,
+}
+
+impl Raiser {
+    pub fn new() -> Raiser {
+        Raiser::default()
+    }
+
+    /// One look of the watcher: `shown` says whether it saw the app's main window on this look (read
+    /// before this call). Raises `pids`' windows when the window shows and none were raised within
+    /// `RAISE_EVERY`; returns how many were raised (0 when it did not raise). A look without the window
+    /// raises nothing and leaves the timer alone. No OS call beyond `raise_windows`.
+    pub fn look(&mut self, pids: &[u32], shown: bool) -> usize {
+        if !shown || self.last.is_some_and(|t| t.elapsed() < RAISE_EVERY) {
+            return 0;
+        }
+        let n = raise_windows(pids);
+        if n > 0 {
+            self.last = Some(std::time::Instant::now());
+        }
+        n
+    }
+
+    /// Whether it has raised the app's windows yet: a watcher that reads the process set and the
+    /// window less often once they are raised looks every time until then.
+    pub fn raised(&self) -> bool {
+        self.last.is_some()
+    }
+}
+
+/// The ms from `from_ns` to `to_ns` (both `now_ns`), 0 when `to_ns` is earlier: a launch-feedback
+/// stamp less a launch's `at_ns` never underflows.
+pub fn ms_between(from_ns: u64, to_ns: u64) -> f64 {
+    to_ns.saturating_sub(from_ns) as f64 / 1e6
+}
+
+/// The macOS Dock settings that decide whether a launch bounce shows, read and never written (SPEC
+/// rule 10; `macos::dock_settings`); `dock_settings` gives None off macOS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct DockSettings {
+    /// "Automatically hide and show the Dock" (`com.apple.dock autohide`, off when unset): a hidden
+    /// Dock shows no launch bounce at all (Package 0: zero Dock frames of a launch).
+    pub autohide: bool,
+    /// "Animate opening applications" (`com.apple.dock launchanim`, on when unset).
+    pub launch_animation: bool,
+    /// Accessibility's Reduce motion (`motion::reduced_motion`); None when unreadable. Not shown to
+    /// change the Dock's bounce: it was off where the bounce was measured.
+    pub reduce_motion: Option<bool>,
+}
+
+impl DockSettings {
+    /// Why a person sees no launch bounce, when a setting proven to hide it is on: auto-hide or the
+    /// launch animation turned off. Reduce motion is not one (never tested against the bounce).
+    pub fn hides_bounce(&self) -> Option<&'static str> {
+        if self.autohide {
+            Some("the Dock hides itself (auto-hide), so a launch shows no bounce")
+        } else if !self.launch_animation {
+            Some("\"Animate opening applications\" is off, so the Dock does not bounce")
+        } else {
+            None
+        }
+    }
+}
+
+/// The Dock's settings now (macOS); None elsewhere.
+pub fn dock_settings() -> Option<DockSettings> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::dock_settings())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// One launch bounce of the macOS Dock, in ms: the unit of `launch.bounces` on every OS (off macOS only
+/// when a case declares it, a borrowed unit said beside the value: `isolate::bounces`). Measured on
+/// an Apple silicon Mac (M4, macOS 27.0.1, 60 Hz panel) from a ScreenCaptureKit trace of the Dock's
+/// window while a probe app launched with planted check-in times of 0.1 to 3 s, through Launch Services
+/// and through `posix_spawn` alike: nine landing-to-landing intervals of 699 to 717 ms, median 700 (one
+/// frame there is 16.7 ms); every bounce the same length, the next lifting in the frame after a landing,
+/// its top held at half the period. The first bounce lands about 765 ms after the launch request, and
+/// the Dock finishes the bounce in the air when the app checks in, so a person sees whole bounces only:
+/// a fraction of one exists only as a time divided by this period. With the Dock hidden there is no
+/// bounce to see at all. Not measured at 120 Hz (no such display there).
+pub const DOCK_BOUNCE_MS: f64 = 700.0;
+
+/// Why a launch has no time of its OS's launch feedback (`Feedback`): the macOS Dock's check-in, the
+/// Windows shell's input idle, the X11 startup notification's `remove`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoFeedback {
+    /// This OS has no such signal.
+    NotOnThisOs,
+    /// macOS: the app has no Dock icon (an agent or background app: `LSUIElement`, `LSBackgroundOnly`).
+    NoDockIcon,
+    /// macOS: an executable outside an app bundle, which Launch Services gives no Dock launch.
+    BareExecutable,
+    /// macOS: an app bundle without a readable `Contents/Info.plist` (or a `CFBundleIdentifier`).
+    NoBundleInfo,
+    /// macOS: a file in an app bundle's `Contents/MacOS` other than the executable it launches
+    /// (`CFBundleExecutable`): a Dock launch of the bundle runs that one instead.
+    NotMainExecutable,
+    /// macOS: the case reads its milestones from the app's output, so strobe spawned the app directly
+    /// (`isolate::launch_path`), not as the Dock launches it.
+    OutputMilestones,
+    /// Windows: a console program, for which Windows keeps no input idle (`ERROR_NOT_GUI_PROCESS`), so
+    /// the shell has none to wait for. A GUI program that never waits for a message is `Deadline`.
+    NoMessageQueue,
+    /// Linux: no X11 display to announce the launch on.
+    NoDisplay,
+    /// Linux: the launch runs on strobe's headless Wayland compositor, where another client gets no
+    /// event when the app uses its activation token (`xdg_activation_v1`).
+    Wayland,
+    /// The signal did not come by the deadline.
+    Deadline,
+    /// The process ended before it gave the signal.
+    Ended,
+    /// The OS refused what the watch needs (a handle, a connection to the display).
+    Unreadable,
+}
+
+impl NoFeedback {
+    /// The reason in words.
+    pub fn why(self) -> &'static str {
+        match self {
+            NoFeedback::NotOnThisOs => "this OS has no such launch signal",
+            NoFeedback::NoDockIcon => "the app has no Dock icon (an agent or background app: LSUIElement or LSBackgroundOnly in its Info.plist)",
+            NoFeedback::BareExecutable => "the executable is outside an app bundle, so Launch Services gives it no Dock launch",
+            NoFeedback::NoBundleInfo => "the app bundle has no readable Contents/Info.plist with a CFBundleIdentifier",
+            NoFeedback::NotMainExecutable => "the executable is not the one its app bundle launches (CFBundleExecutable), so a Dock launch runs another",
+            NoFeedback::OutputMilestones => "the case reads its milestones from the app's output, so strobe spawned the app directly, about 30 ms faster to main than the Dock launches it",
+            NoFeedback::NoMessageQueue => "the process is a console program, for which Windows keeps no input idle, so the shell has none to wait for",
+            NoFeedback::NoDisplay => "there is no X11 display to announce the launch on",
+            NoFeedback::Wayland => "on strobe's headless Wayland compositor another client gets no event when the app uses its activation token (xdg_activation_v1)",
+            NoFeedback::Deadline => "the signal did not come by the deadline",
+            NoFeedback::Ended => "the process ended before it gave the signal",
+            NoFeedback::Unreadable => "the OS refused what the watch needs",
+        }
+    }
+}
+
+/// A watch for one launch's OS launch-feedback signal, on a thread of its own that blocks or polls off
+/// the launch's path: the time it came on `now_ns`'s clock (the clock of a launch's `at_ns`), or why
+/// not. Dropped, the watch ends.
+pub struct Feedback {
+    rx: std::sync::mpsc::Receiver<Result<u64, NoFeedback>>,
+    got: std::sync::Mutex<Option<Result<u64, NoFeedback>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Feedback {
+    /// Runs `watch` on a thread of its own until it returns; it sees `stop` set when the watch is
+    /// dropped or its caller stopped waiting. The thread keeps the CPUs its starter was given
+    /// (`thread_mask`: a bench in the daemon keeps its own thread off the target's CPUs, and Windows
+    /// starts a thread on the process's mask), so it never runs where the target does.
+    pub(crate) fn start(watch: impl FnOnce(&std::sync::atomic::AtomicBool) -> Result<u64, NoFeedback> + Send + 'static) -> Feedback {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = stop.clone();
+        let mask = thread_mask();
+        let spawned = std::thread::Builder::new().name("strobe-feedback".into()).spawn(move || {
+            if let Some(m) = mask {
+                set_thread_affinity(m);
+            }
+            let _ = tx.send(watch(&seen));
+        });
+        let got = std::sync::Mutex::new(spawned.is_err().then_some(Err(NoFeedback::Unreadable)));
+        Feedback { rx, got, stop }
+    }
+
+    /// A watch that already has its answer: a launch with no such signal.
+    pub fn none(why: NoFeedback) -> Feedback {
+        let (_, rx) = std::sync::mpsc::channel();
+        Feedback { rx, got: std::sync::Mutex::new(Some(Err(why))), stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)) }
+    }
+
+    /// The answer if the watch has one now, without waiting.
+    pub fn get(&self) -> Option<Result<u64, NoFeedback>> {
+        let mut got = self.got.lock().unwrap_or_else(|e| e.into_inner());
+        if got.is_none() {
+            *got = self.rx.try_recv().ok();
+        }
+        *got
+    }
+
+    /// The answer, waiting for it until `until` at most: then the watch ends with `Deadline`.
+    pub fn wait(&self, until: std::time::Instant) -> Result<u64, NoFeedback> {
+        if let Some(r) = self.get() {
+            return r;
+        }
+        let r = match self.rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            Ok(r) => r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NoFeedback::Deadline),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NoFeedback::Unreadable),
+        };
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        *self.got.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        r
+    }
+}
+
+impl Drop for Feedback {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// When the app `pid` (started at `start`, read at its launch: `Owned::start`) checked in with Launch
+/// Services (macOS: `NSRunningApplication.isFinishedLaunching` turned on, AppKit's `finishLaunching`
+/// inside `-[NSApp run]`, which stops the Dock's bounce after the one in the air), read every 5 ms from
+/// a thread of its own until `deadline`. Each read wakes `launchservicesd`, which the launch itself
+/// uses, and costs strobe about 2% of a core: run it only for a case that asks for `launch.checkin`
+/// (or an untimed check, `look`), never on an ordinary timed launch. An app strobe spawned directly
+/// checks in as one Launch Services started. `NotOnThisOs` elsewhere.
+pub fn checkin(pid: u32, start: Option<u64>, deadline: std::time::Instant) -> Feedback {
+    #[cfg(target_os = "macos")]
+    {
+        macos::checkin(pid, start, deadline)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, start, deadline);
+        Feedback::none(NoFeedback::NotOnThisOs)
     }
 }
 
@@ -1954,6 +2213,31 @@ pub fn env_of(pid: u32) -> Option<Vec<String>> {
 /// one process, since a reused pid starts later.
 pub fn start_time(pid: u32) -> Option<u64> {
     os::start_time(pid)
+}
+
+/// Now, in `start_time`'s units, from an integer clock: a process with a start time no earlier than
+/// this one read before a request started after it (Windows: 100 ns since 1601; macOS: µs since
+/// 1970; Linux: clock ticks since boot, 10 ms each, so a process started in the same tick just before
+/// reads the same). None where the clock could not be read.
+pub fn start_now() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some((now.as_nanos() / 100) as u64 + 116_444_736_000_000_000)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_micros() as u64)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) } != 0 {
+            return None;
+        }
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+        Some(ts.tv_sec as u64 * hz + ts.tv_nsec as u64 * hz / 1_000_000_000)
+    }
 }
 
 /// SIGINT and SIGTERM set `flag` instead of ending strobe; a second one while the flag is still set
