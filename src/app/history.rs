@@ -125,6 +125,10 @@ fn fingerprint_text(s: &Series) -> String {
         f["browser"].as_str().unwrap_or("").to_string(),
         if f["headless"] == true { "headless".to_string() } else { String::new() },
         f["input"].as_str().map(|i| format!("{i} input")).unwrap_or_default(),
+        // A script series on Node (Bun, the default, is written as nothing), and a metric whose meaning
+        // changed: series that differ only there read apart.
+        f["runtime"].as_str().map(|r| format!("runtime {r}")).unwrap_or_default(),
+        f["metric_revision"].as_u64().map(|v| format!("metric revision {v}")).unwrap_or_default(),
         if f["motion"] == "reduce" {
             crate::target::motion::LABEL.to_string()
         } else if f["os_reduced_motion"] == true {

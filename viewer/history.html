@@ -425,7 +425,7 @@ function render() {
     const port = s.meta.comparison === "implementations";
     html += `<section class="card"><div><h2>${esc(s.meta.label)} · ${esc(s.meta.metric)}${port ? ` · ${esc(s.meta.head_name)} / ${esc(s.meta.base_name)}` : ""}</h2>
       <div class="sub mono">${esc(s.id)} · ${esc(s.meta.file)}</div>
-      <div class="sub">${esc([m.os, m.cpu, m.gpu, "strobe " + m.strobe, "power " + fp.power, "session " + fp.session, "display " + fp.display, fp.pin].filter(Boolean).join(" · "))}</div></div>
+      <div class="sub">${esc([m.os, m.cpu, m.gpu, "strobe " + m.strobe, "power " + fp.power, "session " + fp.session, "display " + fp.display, fp.pin, fp.runtime && "runtime " + fp.runtime, fp.metric_revision && "metric revision " + fp.metric_revision].filter(Boolean).join(" · "))}</div></div>
       <div class="chart" id="c${k}"></div>
       ${s.changes.length ? `<table><tr><th>change</th><th>state</th><th>range</th><th>history</th><th>paired A/B</th><th>culprit</th></tr>${s.changes.map(c => changeRow(s, c)).join("")}</table>` : `<p class="note">No change points.</p>`}
       <details><summary>${s.points.length} points</summary><table><tr><th>date</th><th>commit</th><th>subject</th><th>median</th><th>interval</th><th>n</th><th>experiment</th></tr>

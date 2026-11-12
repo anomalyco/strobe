@@ -52,6 +52,7 @@
       "description": "builds: both sides are builds of one target (an A/B). implementations: each side is a target of its own (SPEC 9.10); every text names the sides by variants[].name, never before/after."
     },
     "phone": { "type": ["object", "null"], "description": "bench --mobile: the phone's facts read when it was picked (model, Android, Chrome, transport, temperature, emulator); its text prints them and leaves this computer's pin, reservation and power plan off the plan line. Null otherwise; absent in older results." },
+    "script_runtimes": { "type": "object", "additionalProperties": { "enum": ["bun", "node"] }, "description": "Each script target's declared runtime (bun unless it says node), by target name; each block says what ran (blocks[].runtime). Absent in older results." },
     "variants": {
       "description": "The builds the experiment ran (a check's too: role, name, spec, label, kind, commit, dirty, target; absent in checks from before).",
       "type": "array",

@@ -15,11 +15,26 @@ await new Promise((resolve, reject) => {
 socket.setNoDelay(true)
 const write = (message) => socket.write(JSON.stringify(message) + "\n")
 
+// The runtime that runs, from its own version record and before the module loads (a module may define
+// a `globalThis.Bun` of its own on Node, or replace `gc`): its collector is taken now too. Node runs
+// with --expose-gc; a Node started without it (a wrapper of strobe's) exposes it through V8's flag.
+const bun = typeof process.versions?.bun === "string"
+const version = bun ? process.versions.bun : process.versions.node
+const bunGc = bun ? globalThis.Bun?.gc : undefined
+let nodeGc = bun ? undefined : globalThis.gc
+if (!bun && typeof nodeGc !== "function") {
+  try {
+    const { setFlagsFromString } = await import("node:v8")
+    const { runInNewContext } = await import("node:vm")
+    setFlagsFromString("--expose-gc")
+    nodeGc = runInNewContext("gc")
+  } catch {}
+}
+
 const mod = await import(pathToFileURL(process.argv[2]).href)
 
 // The runtime's monotonic clock (µs): the one Node's CPU profile counts in, and Bun's
 // `performance.now()` (Bun's profile counts in wall µs: `strobeClockMark` reads the two together).
-const bun = !!globalThis.Bun
 const mono = () => {
   if (bun) return performance.now() * 1000
   const ns = process.hrtime.bigint()
@@ -64,7 +79,7 @@ createInterface({ input: socket }).on("line", async (line) => {
   const { id, op, name, args, mark } = JSON.parse(line)
   if (op === "clock") {
     const edge = mark ? strobeClockMark(5) : {}
-    write({ id, ok: { ...edge, mono_us: mono(), runtime: bun ? "bun" : "node", version: bun ? Bun.version : process.versions.node } })
+    write({ id, ok: { ...edge, mono_us: mono(), runtime: bun ? "bun" : "node", version } })
     return
   }
   // `js.heap.retained`: the heap after a full collection, between runs, buffer contents included, once.
@@ -73,15 +88,26 @@ createInterface({ input: socket }).on("line", async (line) => {
   // sum read 200 MiB for 100 MiB. Node's `heapUsed` counts none of them and `arrayBuffers` all of them,
   // once a second collection after a turn of the event loop has freed the backing stores the first one
   // left (Response.arrayBuffer()'s copies read 200-300 MiB for 100 MiB after one collection).
+  // On Bun the figure is what `Bun.gc(true)` returns: the heap's size after that full collection. Before
+  // Bun 1.4.0 `heapUsed` was the size after the last eden collection, which a full one never updated
+  // (0, or bytes the collection freed); from 1.4.0 the two are the same number. Without a collector to
+  // call the heap would hold uncollected garbage: refused, never read.
   if (op === "heap") {
     let used
     if (bun) {
-      Bun.gc(true)
-      used = process.memoryUsage().heapUsed
+      used = typeof bunGc === "function" ? bunGc(true) : undefined
+      if (typeof used !== "number") {
+        write({ id, error: `js.heap.retained: Bun ${version}'s Bun.gc(true) gave no heap size, so the heap after a collection cannot be read` })
+        return
+      }
     } else {
-      globalThis.gc?.()
+      if (typeof nodeGc !== "function") {
+        write({ id, error: `js.heap.retained: Node ${version} gives no garbage collector to call (no --expose-gc), so the heap would hold uncollected garbage` })
+        return
+      }
+      nodeGc()
       await new Promise((r) => setImmediate(r))
-      globalThis.gc?.()
+      nodeGc()
       const m = process.memoryUsage()
       used = m.heapUsed + (m.arrayBuffers ?? 0)
     }

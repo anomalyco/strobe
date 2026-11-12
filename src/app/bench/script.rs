@@ -356,7 +356,17 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     // untimed block, whose one cold run it checks for startup still running (`block::startup_spill`).
     let timeline = (profiles.is_some() || x.untimed).then(|| probe::wakes::Timeline::start(move || host::tree_pids(pid)));
     let host = RefCell::new(spawned);
-    let heap_mb = || -> Result<f64> { Ok(host.borrow_mut().request(json!({ "op": "heap" }), Duration::from_secs(120))?.as_f64().unwrap_or(f64::NAN) / (1024.0 * 1024.0)) };
+    // A host that cannot collect garbage (no collector to call) says so: refused, never a heap of garbage.
+    let heap_mb = || -> Result<f64> {
+        let used = host.borrow_mut().request(json!({ "op": "heap" }), Duration::from_secs(120)).map_err(|e| {
+            if e.message.starts_with("js.heap.retained:") {
+                Refusal::new(ValidatorId::EngineUnsupported, e.message).fix("host the module on a runtime strobe can collect: Bun, or Node started with --expose-gc").into()
+            } else {
+                e
+            }
+        })?;
+        Ok(used.as_f64().unwrap_or(f64::NAN) / (1024.0 * 1024.0))
+    };
     steps.push(("launch".into(), launched.elapsed().as_secs_f64() * 1e3));
     let main_read = || -> std::result::Result<host::MainCpu, host::MainLost> { main_thread.as_ref().map_err(Clone::clone)?.read() };
     let main_edges: RefCell<Vec<std::result::Result<host::MainCpu, host::MainLost>>> = RefCell::new(Vec::new());
@@ -695,6 +705,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     browser: None,
                     directions: BTreeMap::new(),
                     spread: super::run_spread(x, &extra),
+                    runtime: Some(if host.borrow().bun { "bun" } else { "node" }.to_string()),
                     ..Block::default()
                 })
             })();
