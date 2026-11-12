@@ -1524,7 +1524,14 @@ falls in one category (`app::prune::CATEGORIES`):
   adais every folder removal held its folder open without `FILE_SHARE_DELETE` (the checks above all
   pass through it). The hostile `.strobe-macos-library.json` cases (an id `-g`, an id `../Other`, a
   place outside the Library, a place through `..`, a link at an expected place, places older than
-  the home) are in the script for macOS and not yet run there.
+  the home) pass on air (macOS 27, M4): places older than the launch and another app's named in the
+  record stay, the place the launch made goes, a link at an expected place is neither removed nor
+  followed; there prune-check passes 34 of 34 (status and `Total reclaimed space` equal to `du -k`;
+  macOS has no `flock` command, so its lease holders use perl's `flock`, the same flock(2)),
+  prune-lease 11 of 11 (macOS moves no driver cache, so a prune between launches keeps the seed copy
+  and no launch claims a GPU cache state) and prune-auto 11 of 11. air's real state, read only:
+  `status --disk` 55.6 GB (binary; `du` 59.7 GB decimal, the same bytes), `prune --dry-run` 179
+  entries, 51.1 GB (builds 48.5 GB in 19), recordings and experiments kept.
   `scripts/dev/prune-lease.ts` on both: while a `bench --check` of a git ref runs, the plan keeps its
   worktree `in use` and `prune --force` leaves it; the bench made the worktree over a stale entry;
   once it ended the worktree was a cache the plan removes; the bench's `reap_dead_owners` of a dead
@@ -8612,8 +8619,13 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   renderer's perf refusal, X11 video, a headed WebKitGTK under a desktop's settings daemon.
 - macOS: screen video (ScreenCaptureKit into AVAssetWriter), GPU time against a GPU-bound app,
   `ri_child_*_time` in ns, `interaction.*` from a pixel proof under the 2% budget, a visible Dock's
-  work area, Safari Technology Preview, plain `bun` under the terminal bench with its cache, an
-  app bundle that needs a permission its parent had, and the HTTP probe (§8.9).
+  work area, Safari Technology Preview, an app bundle that needs a permission its parent had, the
+  HTTP probe (§8.9), Firefox on macOS (on air 159.0.1 is held by Gatekeeper until a person opens it
+  once) and the focus case whose popup leaves the opener page `hidden` on macOS Chromium (its frame
+  waits hang 60 s). Checked on air (macOS 27, M4, 60 Hz) on 2026-11-12: plain `bun` under the
+  terminal bench leaves its Library cache as it was, OS input to headed Chromium (9 of 9), a native
+  app's pixel anchors, waits and input latency, a page measured from outside, startup still running
+  into run 1 (`NotSteady` naming the thread), `query inputs`, `look exe:`, the prune checks.
 - Phones: everything on a real Android phone (thermal and battery readings, a PIN lock, Wi-Fi adb,
   a channel given to strobe, touch slop and timing, a fixture through `adb reverse`, the 10-pair
   `--aa` and calibration); a headed phone's touch `interaction.*`; on an iPhone, driven Safari
@@ -8664,7 +8676,7 @@ describe it now. The sections above say what strobe does; this list only dates i
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
 
-**After 0.28.0**
+**After 0.29.0**
 
 - 2026-11-12 · cleanup/mac · under a Bun before 1.4.0 the runner does not connect Playwright (its
   `connectOverCDP` hangs 30 s there: an outside bench read 0 of 4 cases); reading `ctx.playwright`
@@ -8677,7 +8689,11 @@ what was built but not yet run on a device is in §21.
   The OS input map takes a probe's landing once no other move followed for 50 ms (macOS Chromium
   delivered the move from beside the point with the one onto it: every page measured from outside
   was refused `InputMismatch`, 3 units off); `AnchorNotFound` for a shape found in other colours says
-  so and offers no lower threshold (9.6, 10.1).
+  so and offers no lower threshold (9.6, 10.1). The prune checks run on macOS (`du -k`, perl's
+  `flock`, no driver cache store there): air 34 of 34, 11 of 11, 11 of 11.
+
+**0.29.0** (1c9e9b3, 2026-11-12)
+
 - 2026-11-11 · cleanup/prune · `strobe prune` (caches unused now, data when named and older than 30
   days, never a recording a kept experiment names; the plan first, `--force` without a terminal,
   `--dry-run`, measured `Total reclaimed space`); cache leases and stamps (`host::cache`); removal
