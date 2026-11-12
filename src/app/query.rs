@@ -428,8 +428,8 @@ fn firefox_gap(rec: &Rec, gap: Gap) -> Result<()> {
 /// Insights (SPEC §11.3): rules over one recording's own data, each hit with its numbers and the
 /// commands that show the evidence. Facts with thresholds, never a verdict strobe cannot back.
 pub fn insights(rec: &Rec) -> Result<Output> {
-    // The trace's rules read one pass, not three.
-    rec.prefetch(&[Part::Layout, Part::Gc, Part::LongTasks]);
+    // The trace's rules read one pass, not three; the profiles and the snapshot load beside it.
+    rec.preload(&[Part::Layout, Part::Gc, Part::LongTasks], true, true, true);
     let dir = rec.dir.as_path();
     let meta = &rec.meta;
     let id = rec.id.clone();
@@ -437,11 +437,15 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     let v = &meta["values"];
     let work = v["main.work"].as_f64().unwrap_or(f64::NAN);
     let mut hits: Vec<Value> = Vec::new();
+    // The rules whose source this recording holds, hit or not: a comparison says a rule fired on one
+    // side only where the other side was read for it too.
+    let mut checked: Vec<&str> = Vec::new();
     let mut hit =
         |rule: &str, level: &str, title: String, evidence: Value, handles: Vec<String>| hits.push(json!({ "rule": rule, "level": level, "title": title, "evidence": evidence, "handles": handles }));
     let q = |view: &str| format!("strobe query {id} {view}");
     // Forced layout: geometry read after a DOM write makes the browser lay out mid-script.
     if let Ok(l) = layout(rec, 3).map(|o| o.json) {
+        checked.push("forced-layout");
         let ms = l["forced"]["layout"]["ms_per_run"].as_f64().unwrap_or(0.0) + l["forced"]["style"]["ms_per_run"].as_f64().unwrap_or(0.0);
         let share = if work > 0.0 { ms / work } else { f64::NAN };
         if ms >= 5.0 || share >= 0.05 {
@@ -465,6 +469,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     }
     // GC pressure: collections pause the main thread; allocation sites say who causes them.
     if let Ok(g) = gc(rec).map(|o| o.json) {
+        checked.push("gc-pressure");
         let ms = g["values"]["main_ms_per_run"].as_f64().unwrap_or(0.0);
         let share = if work > 0.0 { ms / work } else { f64::NAN };
         if share >= 0.05 || ms >= 10.0 {
@@ -502,6 +507,9 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     // threads keep waking (a polling loop, a short timer) costs power and CPU all day; the threads that
     // wake most are named.
     let wakes = v["cpu.wakes"].as_f64().unwrap_or(0.0);
+    if meta["native"] == true && (meta["kind"] == "record" || idle_block) && v["cpu.wakes"].is_number() {
+        checked.push("wakes-while-idle");
+    }
     if meta["native"] == true && (meta["kind"] == "record" || idle_block) && wakes >= 50.0 {
         // Rows with a wake count: macOS counts wakes per process, and its thread rows carry none.
         let threads: Vec<Value> = all_threads.iter().filter(|t| t["wakes_per_s"].is_number()).cloned().collect();
@@ -554,6 +562,9 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         .iter()
         .filter(|t| t["cpu_ms_per_run"].is_number() && (ui_tid.is_none() || t["tid"].as_u64() != ui_tid))
         .max_by(|a, b| a["cpu_ms_per_run"].as_f64().unwrap_or(0.0).total_cmp(&b["cpu_ms_per_run"].as_f64().unwrap_or(0.0)));
+    if busiest.is_some() && total > 0.0 && ui_ms.is_finite() {
+        checked.push("dominant-thread");
+    }
     if let Some(t) = busiest
         && total > 0.0
         && ui_ms.is_finite()
@@ -581,7 +592,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                     100.0 * ui_share,
                     fmt::value(ui_ms, "ms")
                 ),
-                json!({ "thread": name, "tid": t["tid"], "pid": t["pid"], "module": t["module"], "origin": origin, "cpu_ms": ms, "share": share, "processes_cpu_ms": total, "ui_thread": ui_name, "ui_cpu_ms": ui_ms, "ui_share": ui_share }),
+                json!({
+                    "thread": name, "tid": t["tid"], "pid": t["pid"], "module": t["module"], "origin": origin, "cpu_ms": ms, "share": share, "processes_cpu_ms": total, "ui_thread": ui_name, "ui_cpu_ms": ui_ms, "ui_share": ui_share,
+                    // Which thread, as two launches share it: its name and start module (ids differ).
+                    "subject": format!("{name} {}", t["module"].as_str().unwrap_or("")),
+                }),
                 vec![q("threads"), q(&format!("hotspots --thread {}", t["tid"]))],
             );
         }
@@ -594,7 +609,13 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     let profiled_script = meta["script"] == true && meta["timing"] == "perturbed";
     let (cpu_metric, whose) = if profiled_script { ("cpu.main", "the host's main thread ran") } else { ("cpu.work", "the target's processes used") };
     let (duration, cpu) = (v["run.duration"].as_f64().unwrap_or(f64::NAN), v[cpu_metric].as_f64().unwrap_or(f64::NAN));
-    if meta["kind"] == "block" && duration >= 100.0 && cpu.is_finite() && cpu < 0.25 * duration && !idle_block {
+    // Its main thread alone says nothing of threads the script started: when the host used more than
+    // the sampler's one core besides, other threads were on a CPU, and the rule cannot tell.
+    let workers = profiled_script && v["cpu.work"].as_f64().is_some_and(|w| w - duration >= 0.25 * duration);
+    if meta["kind"] == "block" && duration.is_finite() && cpu.is_finite() && !workers {
+        checked.push("off-cpu-bound");
+    }
+    if meta["kind"] == "block" && duration >= 100.0 && cpu.is_finite() && cpu < 0.25 * duration && !idle_block && !workers {
         let mut handles = Vec::new();
         if crate::probe::http_probe::read(dir).is_some() {
             handles.push(q("http"));
@@ -602,17 +623,17 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         if dir.join(crate::probe::webkit_inspector::NETWORK_FILE).is_file() {
             handles.push(q("network"));
         }
-        // Where the threads waited and who woke them comes with a native capture; a page's trace shows
-        // its requests and timers.
-        if meta["native"] == true || dir.join("deep.json.gz").is_file() {
+        // Where the threads waited and who woke them comes with a native capture alone; a native
+        // block without one has its threads, a page's trace its requests and timers, a script host its
+        // threads over time.
+        if dir.join("deep.json.gz").is_file() {
             handles.push(q("waits"));
+        } else if meta["native"] == true && dir.join("threads.json").is_file() {
+            handles.push(q("threads"));
         } else if handles.is_empty() && dir.join("trace.pftrace").is_file() {
             handles.push(format!("strobe open {id}"));
         } else if handles.is_empty() && dir.join("timeline.json.gz").is_file() {
-            // A script host: its threads over time (no native capture to say where each waited).
             handles.push(q("threads --timeline"));
-        } else if handles.is_empty() {
-            handles.push(q("waits"));
         }
         hit(
             "off-cpu-bound",
@@ -651,6 +672,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     }
     // Long tasks: one task over 50 ms blocks input for that long.
     if let Ok(rows) = rec.part(Part::LongTasks) {
+        checked.push("long-tasks");
         let cell = |i: usize| rows.first().and_then(|r| r.get(i).cloned().flatten()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         let (n, worst) = (cell(0), cell(1) / 1e6);
         if n > 0.0 {
@@ -685,6 +707,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     }
     // Detached DOM: removed from the document but kept alive by script.
     if let Ok(h) = heap(rec, 3, false).map(|o| o.json) {
+        checked.push("detached-dom");
         let d = &h["detached"];
         if d["count"].as_u64().unwrap_or(0) > 0 {
             let largest = &d["classes"][0];
@@ -703,37 +726,39 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
     }
-    // Stalled HTTP probes: probes in a row the server held past the stall threshold (`query http`).
-    if let Some(h) = http::recording_json(dir, usize::MAX)
-        && let Some(n) = h["cohorts_total"].as_u64().filter(|n| *n > 0)
-    {
-        // The first in a measured run says what the runs saw; warmup runs hold cohorts too.
+    // Stalled HTTP probes in the measured runs: probes in a row the server held past the stall threshold
+    // (`query http`). A cohort counts where any of its probes was due in a measured run's timed part
+    // (one may open just before the run); stalls in warmup, untimed parts or between runs are no suspect.
+    if let Some(h) = http::recording_json(dir, usize::MAX) {
+        checked.push("http-stalls");
         let all = h["cohorts"].as_array().cloned().unwrap_or_default();
-        let measured = all.iter().filter(|c| c["when"] == "measured").count();
-        let c = all.iter().find(|c| c["when"] == "measured").or(all.first()).cloned().unwrap_or(Value::Null);
-        let at = match (c["run"].as_str(), c["when"].as_str().unwrap_or("")) {
-            (Some(r), "measured") => r.to_string(),
-            (Some(r), when) => format!("{r} ({})", if when == "warmup" { "not measured" } else { when }),
-            (None, when) => when.to_string(),
-        };
-        let timeouts = h["cohorts"].as_array().into_iter().flatten().filter_map(|c| c["timeouts"].as_u64()).sum::<u64>();
-        hit(
-            "http-stalls",
-            if timeouts > 0 { "warn" } else { "info" },
-            format!(
-                "HTTP probe: {n} stalled cohort{} ({measured} in measured runs; probes in a row over {}); the first{}, {at} +{:.2} s, {} probes: {}",
-                if n == 1 { "" } else { "s" },
-                fmt::value(h["stall_threshold_ms"].as_f64().unwrap_or(f64::NAN), "ms"),
-                if measured > 0 { " measured" } else { "" },
-                c["at_s"].as_f64().unwrap_or(0.0),
-                c["probes"],
-                c["says"].as_str().unwrap_or("")
-            ),
-            json!({ "cohorts": n, "measured_cohorts": measured, "first": c, "stall_threshold_ms": h["stall_threshold_ms"], "measured": h["measured"] }),
-            vec![q("http"), format!("strobe open {id}")],
-        );
+        let measured: Vec<&Value> = all.iter().filter(|c| c["in_measured"] == true).collect();
+        if let Some(c) = measured.first() {
+            let n = measured.len();
+            let timeouts = measured.iter().filter_map(|c| c["measured_timeouts"].as_u64()).sum::<u64>();
+            let others = all.len() - n;
+            hit(
+                "http-stalls",
+                if timeouts > 0 { "warn" } else { "info" },
+                format!(
+                    "HTTP probe: {n} stalled cohort{} in the measured runs (probes in a row over {}{}); the first, {} +{:.2} s, {} probes: {}",
+                    if n == 1 { "" } else { "s" },
+                    fmt::value(h["stall_threshold_ms"].as_f64().unwrap_or(f64::NAN), "ms"),
+                    if others > 0 { format!("; {others} more outside them") } else { String::new() },
+                    c["measured_run"].as_str().or(c["run"].as_str()).unwrap_or("?"),
+                    c["at_s"].as_f64().unwrap_or(0.0),
+                    c["probes"],
+                    c["says"].as_str().unwrap_or("")
+                ),
+                json!({ "cohorts": n, "outside_measured": others, "timeouts": timeouts, "first": c, "stall_threshold_ms": h["stall_threshold_ms"], "measured": h["measured"] }),
+                vec![q("http"), format!("strobe open {id}")],
+            );
+        }
     }
     // Background load on the measured CPUs.
+    if v["cpu.foreign.max"].is_number() {
+        checked.push("background");
+    }
     if v["cpu.foreign.max"].as_f64().is_some_and(|f| f >= 25.0) {
         hit(
             "background",
@@ -745,13 +770,14 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     }
     // Unresolved time: script without source maps, and native time strobe cannot name without deep.
     if let Ok(h) = hotspots_of(rec, "function", 400).map(|o| o.json) {
+        checked.extend(["unresolved", "native-time"]);
         if h["native"] == true && h["resolved_share"].as_f64().is_some_and(|s| s < 0.95) {
             let share = h["resolved_share"].as_f64().unwrap_or(0.0);
             hit(
                 "unresolved",
                 "info",
                 format!("unresolved native: {:.0}% of native samples have no symbol (no matching PDB), mostly in {}", 100.0 * (1.0 - share), h["unsymbolized"][0]["module"].as_str().unwrap_or("?")),
-                json!({ "resolved_share": share, "unsymbolized": h["unsymbolized"] }),
+                json!({ "resolved_share": share, "unsymbolized": h["unsymbolized"], "subject": "native" }),
                 vec![q("hotspots --by package")],
             );
         }
@@ -762,36 +788,68 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                 "unresolved",
                 "info",
                 format!("unresolved script: {:.0}% of script samples have no source map, so names and files stay minified there", 100.0 * (1.0 - mapped / scripts)),
-                json!({ "script_samples": scripts, "mapped_samples": mapped }),
+                json!({ "script_samples": scripts, "mapped_samples": mapped, "subject": "script" }),
                 vec![q("hotspots --by file")],
             );
         }
         let rows = h["rows"].as_array().cloned().unwrap_or_default();
-        let busy: f64 = rows.iter().filter(|r| r["name"] != "(idle)").map(|r| r["weight"].as_f64().unwrap_or(0.0)).sum();
-        // One function holding a large part of the sampled CPU: where a change pays first. A profile's
-        // pseudo-frames and strobe's page driver name no function to change.
-        let named = rows.iter().find(|r| {
+        // strobe's page driver at work (its frames' location `strobe-driver.js:43:11`, or the browser's
+        // work it called): never the target's time.
+        let driver = |r: &Value| {
             let at = r["where"].as_str().unwrap_or("");
-            !r["name"].as_str().unwrap_or("(").starts_with('(') && at != VIA_DRIVER && !at.ends_with(crate::driver::SOURCE_URL)
+            at == VIA_DRIVER || at == crate::driver::SOURCE_URL || at.starts_with(&format!("{}:", crate::driver::SOURCE_URL))
+        };
+        let busy: f64 = rows.iter().filter(|r| r["name"] != "(idle)" && !driver(r)).map(|r| r["weight"].as_f64().unwrap_or(0.0)).sum();
+        // A module's name or `module+0x…` with no symbol: no function strobe can name.
+        let unsymbolized = |r: &Value| {
+            let name = r["name"].as_str().unwrap_or("");
+            h["native"] == true
+                && (r["where"].as_str().is_none_or(|w| w.is_empty() || w == "(native)")
+                    || name.contains("+0x")
+                    || h["unsymbolized"].as_array().into_iter().flatten().any(|u| u["module"].as_str() == Some(name)))
+        };
+        // One function holding a large part of the sampled CPU: where a change pays first. Not from
+        // untimed snapshots (macOS `sample`: every thread, waiting ones too, no CPU time), and only a
+        // named function of the target's with enough samples to say so (20, and 1 ms a run in a block).
+        let per_run = (meta["kind"] == "block" && h["scope"] != "whole_host").then(|| rec.runs()).flatten().filter(|n| *n > 0);
+        // Each such function over the threshold (at most four can be), so a comparison reads one side's
+        // function against the same function on the other, never against whichever came first.
+        let named = rows.iter().filter(|_| h["untimed"] != true && busy > 0.0).filter(|r| {
+            let w = r["weight"].as_f64().unwrap_or(0.0);
+            !r["name"].as_str().unwrap_or("(").starts_with('(')
+                && !driver(r)
+                && !unsymbolized(r)
+                && r["samples"].as_u64().unwrap_or(0) >= 20
+                && per_run.is_none_or(|n| w / 1e3 / n as f64 >= 1.0)
+                && w / busy >= 0.25
         });
-        if let Some(r) = named
-            && busy > 0.0
-        {
+        if h["untimed"] != true {
+            checked.push("hot-function");
+        }
+        for r in named {
             let (w, samples) = (r["weight"].as_f64().unwrap_or(0.0), r["samples"].as_u64().unwrap_or(0));
-            if w / busy >= 0.25 && samples >= 20 {
-                // Weights are µs; untimed native samples and a recording's window have no runs to divide by.
-                let per_run = (meta["kind"] == "block" && h["untimed"] != true).then(|| rec.runs()).flatten().filter(|n| *n > 0);
+            {
+                // Weights are µs; a recording's window, and a script profile of the whole host, have no
+                // runs to divide by.
                 let amount = match per_run {
                     Some(n) => format!("{} per run", fmt::value(w / 1e3 / n as f64, "ms")),
+                    None if h["scope"] == "whole_host" => format!("{} over the whole host process", fmt::value(w / 1e3, "ms")),
                     None => format!("{} over the recording", fmt::value(w / 1e3, "ms")),
                 };
-                // Its file by name, as the movers say it (the hotspots view keeps the whole location).
-                let at = r["where"].as_str().and_then(|w| w.rsplit(['/', '\\']).next()).filter(|w| !w.is_empty()).map(|w| format!(" ({w})")).unwrap_or_default();
+                // Its file from its checkout's root, as two builds share it (the hotspots view keeps the
+                // whole location and line).
+                let file = r["where"].as_str().map(diff::portable_location).filter(|w| !w.is_empty() && w != "(native)");
+                let at = file.as_deref().map(|w| format!(" ({w})")).unwrap_or_default();
                 hit(
                     "hot-function",
                     "info",
                     format!("hot function: {}{at} holds {:.0}% of the sampled CPU ({amount}, {samples} samples)", r["name"].as_str().unwrap_or("?"), 100.0 * w / busy),
-                    json!({ "function": r["name"], "where": r["where"], "share": w / busy, "weight_us": w, "samples": samples, "runs": per_run }),
+                    json!({
+                        "function": r["name"], "where": r["where"], "share": w / busy, "weight_us": w, "samples": samples, "runs": per_run,
+                        // Which function, as two launches of two builds share it (its file from the
+                        // checkout's root, no line).
+                        "subject": format!("{} {}", r["name"].as_str().unwrap_or(""), file.as_deref().unwrap_or("")),
+                    }),
                     vec![q("hotspots"), q("hotspots --by package")],
                 );
             }
@@ -814,13 +872,18 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
     }
-    // Memory recordings and leak runs: what grew and what stayed (facts only).
+    // Memory recordings and leak runs: what grew and what stayed (facts only). A `record --probes memory`
+    // keeps its suspects' classes in leaks.json, not in its meta.
+    let leaks = if meta["leaks"]["classes"].is_array() { meta["leaks"].clone() } else { store::read_json(&dir.join("leaks.json")).unwrap_or(Value::Null) };
+    if meta["leak"]["js_heap"].is_object() || meta["probes"] == "memory" {
+        checked.push("leak");
+    }
     if let Some(l) = meta["leak"]["js_heap"].as_object() {
         let grows = crate::stats::kind_of(&meta["leak"]["js_heap"]) == crate::model::VerdictKind::Worse;
         hit(
             "leak",
             if grows { "warn" } else { "info" },
-            format!("js heap: {}{}", l["verdict"].as_str().unwrap_or(""), if grows { retainer(&meta["leaks"]).map(|r| format!("; {r}")).unwrap_or_default() } else { String::new() }),
+            format!("js heap: {}{}", l["verdict"].as_str().unwrap_or(""), if grows { retainer(&leaks).map(|r| format!("; {r}")).unwrap_or_default() } else { String::new() }),
             json!(l),
             // Firefox keeps about:memory censuses, no heap snapshots to list leaks from.
             if meta["engine"] == "firefox" { vec![q("memory --at 0"), q("memory")] } else { vec![q("leaks"), q("memory")] },
@@ -833,7 +896,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                 "{} objects from the first half are still alive at the end, retaining {}{}",
                 meta["leaks"]["count"],
                 fmt::bytes(meta["leaks"]["retained_size"].as_f64().unwrap_or(0.0)),
-                retainer(&meta["leaks"]).map(|r| format!("; {r}")).unwrap_or_default()
+                retainer(&leaks).map(|r| format!("; {r}")).unwrap_or_default()
             ),
             meta["leaks"].clone(),
             vec![q("leaks"), q("memory")],
@@ -849,17 +912,18 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     if hits.is_empty() {
         text += "nothing stood out: no rule crossed its threshold\n";
     }
-    Ok(Output::new(text, json!({ "recording": id, "insights": hits })))
+    Ok(Output::new(text, json!({ "recording": id, "insights": hits, "checked": checked })))
 }
 
 /// Insight hits as text: `! title` (warn) or `i title`, then the commands that show its evidence. A hit
-/// of a comparison's head says whether base's recording has the same rule's hit (`sides`).
+/// of a comparison's head says what base's recording showed for the same rule and subject (`sides`).
 fn hits_text(hits: &[Value]) -> String {
     let mut text = String::new();
     for h in hits {
         let sides = match h["sides"].as_str() {
-            Some("both") => " (base too)",
-            Some("head only") => " (head only)",
+            Some("both") => " (over its threshold on base too)",
+            Some("head only") => " (over its threshold on head only)",
+            Some("base unread") => " (base not read for it)",
             _ => "",
         };
         text += &format!("{} {}{sides}\n", if h["level"] == "warn" { "!" } else { "i" }, h["title"].as_str().unwrap_or(""));
@@ -870,25 +934,51 @@ fn hits_text(hits: &[Value]) -> String {
     text
 }
 
-/// Marks each of head's hits by whether base's recording has a hit of the same rule (`sides`: both,
-/// or head only); returns base's hits of rules head has none of.
-fn mark_sides(head: &mut [Value], base: Vec<Value>) -> Vec<Value> {
-    let rule = |h: &Value| h["rule"].as_str().unwrap_or("").to_string();
-    for h in head.iter_mut() {
-        h["sides"] = json!(if base.iter().any(|b| rule(b) == rule(h)) { "both" } else { "head only" });
-    }
-    base.into_iter().filter(|b| !head.iter().any(|h| rule(h) == rule(b))).collect()
+/// A hit's identity across two recordings: its rule and what it is about (`evidence.subject`: which
+/// function, which thread, native or script), so one function's hit never stands for another's.
+fn hit_key(h: &Value) -> (String, String) {
+    (h["rule"].as_str().unwrap_or("").to_string(), h["evidence"]["subject"].as_str().unwrap_or("").to_string())
 }
 
-/// The suspect a leak's census names first: the largest class of objects from the first half still
-/// alive at the end whose constructor the page's script defines (it has a source location), else
-/// the largest of any, with its count, retained size and what holds its largest object.
-fn retainer(leaks: &Value) -> Option<String> {
-    let classes = leaks["classes"].as_array()?;
-    let c = classes.iter().find(|c| c["location"].is_object()).or(classes.first())?;
-    // At the location `query leaks` prints (V8's line and column).
+/// Marks each of head's hits by what base's recording showed (`sides`): the same rule over its
+/// threshold on the same subject (`both`), base read for that rule and not over it there (`head only`),
+/// or base not read for it (`base unread`: its recording lacks that rule's source). Returns base's hits
+/// head has none of. `base` is base's insights JSON (`insights`, `checked`).
+fn mark_sides(head: &mut [Value], base: &Value) -> Vec<Value> {
+    let hits = base["insights"].as_array().cloned().unwrap_or_default();
+    let read = |rule: &str| base["checked"].as_array().is_some_and(|c| c.iter().any(|r| r == rule));
+    for h in head.iter_mut() {
+        let k = hit_key(h);
+        h["sides"] = json!(if hits.iter().any(|b| hit_key(b) == k) {
+            "both"
+        } else if read(&k.0) {
+            "head only"
+        } else {
+            "base unread"
+        });
+    }
+    hits.into_iter().filter(|b| !head.iter().any(|h| hit_key(h) == hit_key(b))).collect()
+}
+
+/// One class of objects from the first half still alive at the end, as a leak's suspects list it:
+/// `Retained ×10000 (its constructor at <url>:4:29), 1.03 MB, held by … › kept Array › 14000 Retained`,
+/// at the location `query leaks` prints (V8's line and column).
+fn leak_class(c: &Value) -> String {
     let at = c["location"]["url"].as_str().filter(|u| !u.is_empty()).map(|u| format!(" (its constructor at {u}:{}:{})", c["location"]["line"], c["location"]["column"])).unwrap_or_default();
-    Some(format!("most retained: {} ×{}{at}, {}, held by {}", c["class"].as_str().unwrap_or("?"), c["count"], fmt::bytes(c["retained_size"].as_f64().unwrap_or(0.0)), path_tail(&c["largest"]["path"])))
+    format!("{} ×{}{at}, {}, held by {}", c["class"].as_str().unwrap_or("?"), c["count"], fmt::bytes(c["retained_size"].as_f64().unwrap_or(0.0)), path_tail(&c["largest"]["path"]))
+}
+
+/// A leak's classes, the page's own first (their constructor has a source location: its script made
+/// them) over V8's internals, each group in its retained order.
+fn leak_classes(leaks: &Value) -> Vec<&Value> {
+    let all: Vec<&Value> = leaks["classes"].as_array().into_iter().flatten().collect();
+    let own = |c: &&Value| c["location"]["url"].as_str().is_some_and(|u| !u.is_empty());
+    all.iter().copied().filter(own).chain(all.iter().copied().filter(|c| !own(c))).collect()
+}
+
+/// The suspect a leak's census names first (`leak_classes`).
+fn retainer(leaks: &Value) -> Option<String> {
+    leak_classes(leaks).first().map(|c| format!("most retained: {}", leak_class(c)))
 }
 
 /// The last two steps of a retainer path, as `… › parent › object`.

@@ -18,15 +18,31 @@
 //                first suspect, with its constructor's location in page.html; base's census lists no suspect
 //   http-stall   the server's thread held 450 ms twice a run: http-stalls fires (two cohorts a run)
 //   http-calm    the server idles 800 ms: http-stalls silent
+//   http-untimed the server's thread held 450 ms in each run's ctx.untimed part only: http-stalls silent (its cohorts
+//                are outside the measured runs' timed parts)
+//   swap         c0 spins 30 ms in fnA, c1 in fnB (same cost): hot-function on head's fnB "over its threshold on head
+//                only", base's fnA "base only", never "(base too)" (same rule, another function)
+//   twofiles     work() of server/auth/util.ts and of client/auth/util.ts, 10 ms each: two rows in a..b hotspots (a
+//                path cut to its last two steps made them one)
+//   long-task    (batch.bench.ts) a click that spins 80 ms: one long task; noop: nothing. With --check --batch 2
+//                they share one launch's recording: no case is given the other's long task
+//   wait-driver  a page run that waits 300 ms for an element strobe's driver polls for: hot-function never names
+//                strobe-driver.js
 //
 // Commands (from <dir>; --headless keeps the page off the screen):
 //   strobe bench insights.bench.ts --base c0 --head c1 --filter regress,steady,cli-regress --pairs 6 --runs 3
 //   strobe bench insights.bench.ts --base c0 --head c1 --filter regress --pairs 6 --runs 3 --why never
 //   strobe bench insights.bench.ts --aa --head c1 --filter steady --pairs 3 --runs 3
-//   strobe bench insights.bench.ts --head c1 --check --why always --filter regress,spread,waits,busy,http-stall,http-calm
+//   strobe bench insights.bench.ts --head c1 --check --why always --filter regress,spread,waits,busy,http-stall,http-calm,http-untimed
 //   strobe bench insights.bench.ts --head c1 --check --filter regress,waits
 //   strobe bench insights.bench.ts --head c1 --blocks 2 --why always --filter regress --runs 3
 //   strobe bench insights.bench.ts --base c0 --head c1 --probes memory --filter leak --headless --repeat 5
+//   strobe bench insights.bench.ts --base c0 --head c1 --filter swap --pairs 6 --runs 3 --why always
+//   strobe bench insights.bench.ts --aa --head c1 --filter steady --pairs 6 --runs 3 --why always   (A/A: no mover is a suspect)
+//   strobe bench insights.bench.ts --base c0 --head . --filter regress,twofiles --pairs 6 --runs 3 --why always
+//                (head the working tree at c1: one hotPath row, harness.ts on both sides; two work rows)
+//   strobe bench batch.bench.ts --head c1 --check --batch 2 --headless
+//   strobe bench insights.bench.ts --head c1 --check --why always --filter wait-driver --headless
 // then `strobe query <exp> insights` of each.
 import { execFileSync } from "node:child_process"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
@@ -56,6 +72,11 @@ function partD(ms: number) { const end = performance.now() + ms; let x = 0; whil
 function partE(ms: number) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 5); return x }
 export function spread(ms: number) { const each = ms / 5; return partA(each) + partB(each) + partC(each) + partD(each) + partE(each) > 0 }
 export async function sleepFor(ms: number) { await Bun.sleep(ms); return true }
+export function fnA(ms: number) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 6); return x > 0 }
+export function fnB(ms: number) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 7); return x > 0 }
+import { work as workA } from "./server/auth/util.ts"
+import { work as workB } from "./client/auth/util.ts"
+export function twoFiles(ms: number) { return workA(ms) + workB(ms) > 0 }
 /** Holds this thread (the server's event loop) for \`ms\`: no request is answered meanwhile. */
 export function stall(ms: number) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 1); return x > 0 }
 let server: ReturnType<typeof Bun.serve> | undefined
@@ -65,6 +86,11 @@ export function startServer() {
 }
 `,
 )
+// Two files whose last two steps are the same, one function name each: two functions, never one row.
+for (const d of ["server", "client"]) {
+  mkdirSync(`${dir}/${d}/auth`, { recursive: true })
+  writeFileSync(`${dir}/${d}/auth/util.ts`, `export function work(ms: number) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + ${d === "server" ? 8 : 9}); return x }\n`)
+}
 writeFileSync(
   `${dir}/spin.ts`,
   `// The cli() target: spins level.json's cli milliseconds.
@@ -80,10 +106,15 @@ writeFileSync(
   `${dir}/page.html`,
   `<!doctype html><title>insights</title>
 <p>leak page</p>
+<button id="spin" onclick="longTask(80)">spin</button>
 <script>
 class Retained { constructor(i) { this.i = i; this.payload = new Array(16).fill(i) } }
 window.kept = []
 window.leakStep = (n) => { for (let i = 0; i < n; i++) window.kept.push(new Retained(i)); const tmp = []; for (let i = 0; i < 2000; i++) tmp.push(new Retained(i)); return window.kept.length + tmp.length }
+// One task of \`ms\` on the main thread.
+window.longTask = (ms) => { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 1); return x > 0 }
+// An element that appears after \`ms\`, for strobe's driver to wait for (and taken away again).
+window.later = (ms) => { document.getElementById("late")?.remove(); setTimeout(() => { const p = document.createElement("p"); p.id = "late"; p.textContent = "late"; document.body.append(p) }, ms); return true }
 </script>`,
 )
 writeFileSync(
@@ -135,14 +166,65 @@ export default bench({
       },
     },
     "http-calm": { targets: ["lib"], primary: "http.latency.p95", metrics: ["http.timeouts"], run: ({ call }: any) => call("sleepFor", 1200) },
+    "http-untimed": {
+      targets: ["lib"],
+      primary: "http.latency.p95",
+      metrics: ["http.timeouts"],
+      run: async (ctx: any) => {
+        await ctx.untimed(() => ctx.call("stall", 450))
+        await ctx.call("sleepFor", 600)
+      },
+    },
+    swap: { targets: ["lib"], primary: "cpu.work", run: (ctx: any) => ctx.call(level(ctx.root).swap === "a" ? "fnA" : "fnB", 30) },
+    twofiles: { targets: ["lib"], primary: "cpu.work", run: (ctx: any) => ctx.call("twoFiles", 10) },
+    "wait-driver": {
+      targets: ["page"],
+      primary: "run.duration",
+      run: async (ctx: any) => {
+        await ctx.page.eval((ms: number) => (window as any).later(ms), 300)
+        await ctx.page.waitFor({ selector: "#late" }, { timeout: 5000 })
+      },
+    },
+  },
+})
+`,
+)
+// The batch cases in a file of their own: insights.bench.ts's setup reads ctx.case (its HTTP probe), which a
+// launch shared by several cases cannot.
+writeFileSync(
+  `${dir}/batch.bench.ts`,
+  `import { bench, web } from "@hona/strobe"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+
+let server: { stop(force?: boolean): unknown; port?: number } | null = null
+
+export default bench({
+  targets: {
+    page: web({
+      prepare(ctx) {
+        const html = readFileSync(join(ctx.root, "page.html"), "utf8")
+        server ??= Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(html, { headers: { "content-type": "text/html", "cache-control": "no-store" } }) })
+        return { url: \`http://127.0.0.1:\${server.port}/\` }
+      },
+      url: (ctx) => ctx.prepared.url,
+      teardown() {
+        server?.stop(true)
+        server = null
+      },
+    }),
+  },
+  cases: {
+    "long-task": { primary: "main.work", run: ({ page }: any) => page.click("#spin") },
+    noop: { primary: "main.work", run: ({ page }: any) => page.eval(() => true) },
   },
 })
 `,
 )
 writeFileSync(`${dir}/strobe.json`, "{}\n")
 for (const [k, l] of [
-  [0, { hot: 20, cli: 30, leak: 0 }],
-  [1, { hot: 32, cli: 45, leak: 2000 }],
+  [0, { hot: 20, cli: 30, leak: 0, swap: "a" }],
+  [1, { hot: 32, cli: 45, leak: 2000, swap: "b" }],
 ] as const) {
   writeFileSync(`${dir}/level.json`, JSON.stringify(l) + "\n")
   git("add", "-A")

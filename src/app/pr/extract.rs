@@ -702,7 +702,7 @@ pub(super) fn plain_refusal(id: &str, why: &str) -> String {
         "DisplayOff" => "display off".into(),
         "PatternInput" => "acted through accessibility, no input to time".into(),
         _ if why.is_empty() => id.to_string(),
-        _ => first_clause(&scrub_paths(&why), 90),
+        _ => first_clause(&why, 90),
     }
 }
 
@@ -731,19 +731,15 @@ pub(crate) fn scrub_public(s: &str) -> String {
     ];
     let pct = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").expect("pattern");
     // One share of a list: a name (anything but `; `), then its percentage.
-    let share = regex_lite::Regex::new(r"^[^;]*?\s\d+(?:\.\d+)?%").expect("pattern");
-    // `ReservedCpus` (a context note): the processes it moved, and those it could not, by name; the list
-    // ends at the parenthesis before `, ` or `; ` (a name may hold one of its own).
-    let moved = regex_lite::Regex::new(r"moved per block \(.*?\)(, |; |$)").expect("pattern");
-    let unmoved = regex_lite::Regex::new(r"(\d+) could not be moved: .*?(; \d+% put back|$)").expect("pattern");
+    let share = regex_lite::Regex::new(r"^(?:[^;]|;[^ ])*?\s\d+(?:\.\d+)?%").expect("pattern");
+    // `ReservedCpus` (a context note): the processes it moved, and those it could not, by name; the moved
+    // list ends where the note goes on (`, N more started`, `; N could not be moved`, `; N% put back`),
+    // whatever its names hold.
+    let moved = regex_lite::Regex::new(r"moved per block \((?s:.*?)\)(, \d+ more started|; \d+ could not be moved|; \d+% put back|$)").expect("pattern");
+    let unmoved = regex_lite::Regex::new(r"(\d+) could not be moved: (?s:.*?)(; \d+% put back|$)").expect("pattern");
     let s = moved.replace_all(s, "moved per block$1");
     let s = unmoved.replace_all(&s, "$1 could not be moved$2");
-    // A covering window's title (`… covers the point (x, y): "<title>" of process <pid>`, `"<title>" of
-    // process <pid> covers the region`) is another program's: its process id stays.
-    let point = regex_lite::Regex::new(r#"another window covers the point \(([^)]*)\): "(?:[^"\\]|\\.)*" of process (\d+)"#).expect("pattern");
-    let region = regex_lite::Regex::new(r#""(?:[^"\\]|\\.)*" of process (\d+) covers the region"#).expect("pattern");
-    let s = point.replace_all(&s, "another window of process $2 covers the point ($1)");
-    let s = region.replace_all(&s, "another window of process $1 covers the region");
+    let s = foreign_windows(&s);
     let mut out = String::new();
     let mut rest: &str = &s;
     loop {
@@ -804,40 +800,94 @@ pub(crate) fn scrub_public(s: &str) -> String {
     }
 }
 
-/// Local paths out: a user's home as `~`, other absolute paths by their last part.
-pub(super) fn scrub_paths(s: &str) -> String {
-    // This machine's home first, wherever it is (`/root`, a home below another folder), and only as a
-    // whole path at its start: never inside a longer name (`/home/ann` in `/home/anna`) or a deeper path.
-    let mut s = s.to_string();
-    let home = crate::host::home().display().to_string();
-    if home.len() > 3 && home != "/" {
-        for h in [home.clone(), home.replace('\\', "/")] {
-            s = whole_path(&s, &h, "~");
+/// What another program shows, out of public text: a title, element or class name strobe quoted (`"…"`)
+/// in a clause that names that program's process (`… of process 4120`, `(pid 4120)`, before the next
+/// `; `), and the app in `a window of <app> of process <pid>`. The process id stays. Covers every way
+/// strobe names what covered or overlaid the target (`another window covers the point (x, y): "<title>" of
+/// process <pid>`, `window "<title>" of process <pid>`, `pane "<name>" (key "<id>") of process <pid>`,
+/// `a "<class>" window of process <pid>`, `"<title>" (pid <pid>) is …`, `"<title>" of process <pid> covers
+/// the region`).
+fn foreign_windows(s: &str) -> String {
+    // Within its line and clause; what it gave (`a window of process N`) is left as it is.
+    let owner = regex_lite::Regex::new(r"a window of ([^;\n|<]*?) of process (\d+)").expect("pattern");
+    let s = owner.replace_all(s, |c: &regex_lite::Captures| if c[1].starts_with("process ") { c[0].to_string() } else { format!("a window of process {}", &c[2]) }).to_string();
+    let pid = regex_lite::Regex::new(r" of process \d+|\(pid \d+\)").expect("pattern");
+    // The text as runs of plain text and Debug-quoted strings (`\"` and `\\` inside).
+    let b = s.as_bytes();
+    let mut tokens: Vec<(bool, &str)> = Vec::new();
+    let (mut i, mut start) = (0, 0);
+    while i < b.len() {
+        if b[i] == b'"' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'"' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            if j >= b.len() {
+                break;
+            }
+            tokens.push((false, &s[start..i]));
+            tokens.push((true, &s[i..=j]));
+            (i, start) = (j + 1, j + 1);
+            continue;
         }
+        i += 1;
     }
-    // Any other user's home at the start of a path: after a delimiter, never mid-path (a folder named
-    // `home` below another). `C:/Users/x/…` too, or the drive letter stayed behind (`C:~/…`).
-    let home = regex_lite::Regex::new(r#"(^|[\s"'`(\[=,:|<>])([A-Za-z]:)?(/Users|/home)/[^/\s`|)]+"#).expect("pattern");
-    let s = home.replace_all(&s, "${1}~");
-    let drive = regex_lite::Regex::new(r#"(\\\\\?\\)?\b[A-Za-z]:[\\/](?:[^\s\\/|`)<>"]+[\\/])+"#).expect("pattern");
-    drive.replace_all(&s, "…/").to_string()
+    tokens.push((false, &s[start..]));
+    let mut out = String::new();
+    for (k, (quoted, t)) in tokens.iter().enumerate() {
+        if !quoted {
+            out += t;
+            continue;
+        }
+        // The rest of its clause, outside quotes.
+        let mut after = String::new();
+        for (_, t) in tokens[k + 1..].iter().filter(|(q, _)| !q) {
+            match t.find("; ") {
+                Some(end) => {
+                    after += &t[..end];
+                    break;
+                }
+                None => after += t,
+            }
+        }
+        out += if pid.is_match(&after) { "\"…\"" } else { t };
+    }
+    out
 }
 
-/// `path` replaced by `with` where it is a whole path or a path's first part: nothing of a name or a
-/// path before it (start, a space, a quote, a parenthesis, `=`), and a separator or the name's end after.
-fn whole_path(s: &str, path: &str, with: &str) -> String {
-    let named = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | '~' | '/' | '\\' | '?');
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(at) = rest.find(path) {
-        let before = rest[..at].chars().next_back();
-        let after = rest[at + path.len()..].chars().next();
-        let whole = before.is_none_or(|c| !named(c) && c != ':') && after.is_none_or(|c| c == '/' || c == '\\' || !named(c));
-        out += &rest[..at];
-        out += if whole { with } else { path };
-        rest = &rest[at + path.len()..];
+/// Text for a public surface (a PR block, a step summary, a card): other programs' names and a
+/// person's folders out (`scrub_paths`, then `scrub_public`). Everything published passes here before
+/// anything cuts it short.
+pub(crate) fn public(s: &str) -> String {
+    scrub_public(&scrub_paths(s))
+}
+
+/// Where a path starts in text: the text's start, a delimiter, a `file:` URL's `//` (and the `/` before a
+/// drive), or Windows' `\\?\`; never inside a longer path (a folder named `home` below another).
+const PATH_START: &str = r#"(^|file:///?|\\\\\?\\|[\s"'`(\[=,:|<>])"#;
+
+/// Local paths out: a user's home as `~` (this machine's wherever it is, `/root` or a home below another
+/// folder, and any `…/Users/<name>` or `/home/<name>`, either separator, any case), then other absolute
+/// Windows paths by their last part.
+pub(super) fn scrub_paths(s: &str) -> String {
+    // `\\?\` goes with the home it led; a `file:` URL keeps its scheme.
+    let keep = |c: &regex_lite::Captures| if c[1].starts_with('\\') { String::new() } else { c[1].to_string() };
+    let mut s = s.to_string();
+    let home = crate::host::home().display().to_string();
+    let home = home.trim_end_matches(['/', '\\']);
+    let parts: Vec<&str> = home.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 || (parts.len() == 1 && !parts[0].ends_with(':')) {
+        // The whole home, then a separator or the name's end: `/home/ann` never matches in `/home/anna`.
+        let lead = if home.starts_with(['/', '\\']) { r"[\\/]" } else { "" };
+        let pattern = format!(r"(?i){PATH_START}{lead}{}([\\/]|[^\w.\-~?]|$)", parts.iter().map(|p| regex_lite::escape(p)).collect::<Vec<_>>().join(r"[\\/]"));
+        if let Ok(re) = regex_lite::Regex::new(&pattern) {
+            s = re.replace_all(&s, |c: &regex_lite::Captures| format!("{}~{}", keep(c), &c[2])).to_string();
+        }
     }
-    out + rest
+    let other = regex_lite::Regex::new(&format!(r#"(?i){PATH_START}(?:[A-Z]:)?[\\/](?:Users|home)[\\/][^/\\\s"'`|)<>]+"#)).expect("pattern");
+    let s = other.replace_all(&s, |c: &regex_lite::Captures| format!("{}~", keep(c)));
+    let drive = regex_lite::Regex::new(r#"(\\\\\?\\)?\b[A-Za-z]:[\\/](?:[^\s\\/|`)<>"]+[\\/])+"#).expect("pattern");
+    drive.replace_all(&s, "…/").to_string()
 }
 
 /// A prebuilt executable as a report names it in public: `exe:…/base/app`, the last two parts of
@@ -1135,9 +1185,11 @@ pub(super) fn short_label(label: &str) -> &str {
     label.rsplit_once(" · ").map(|(a, _)| a).unwrap_or(label)
 }
 
-/// A warning's text up to its first `: ` detail list, at most `max` characters.
+/// A warning's text up to its first `: ` detail list, at most `max` characters. Only public text is cut
+/// (`public` first), so no cut leaves part of a name the scrub would have found whole.
 pub(super) fn first_clause(text: &str, max: usize) -> String {
-    let t = text.trim();
+    let t = public(text);
+    let t = t.trim();
     if t.chars().count() <= max {
         return t.to_string();
     }

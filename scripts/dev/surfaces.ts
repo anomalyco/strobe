@@ -523,7 +523,10 @@ function checkSummary(r: J, md: string, text: string) {
   const rowsOf = (t: string) => t.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| ---")).map((l) => l.split(/(?<!\\)\|/).slice(1, -1).map(strip))
   const rows = rowsOf(md).slice(1)
   // Names a published summary must never carry (SPEC §1 rule 9): what the reservation moved or could not move.
-  const names = [...Object.keys(r.plan?.reserve?.moved ?? {}), ...Object.keys(r.plan?.reserve?.failed ?? {})].filter((n) => n.length > 3)
+  // and the busiest other processes each block saw (`blocks[].background`), where no case or target has the name.
+  const own = new Set(seriesOf(r).flatMap((s: J) => [s.case, s.target, s.label]).filter(Boolean))
+  const busy = seriesOf(r).flatMap((s: J) => [...(s.blocks ?? []), ...(s.pass?.blocks ?? [])].flatMap((b: J) => (Array.isArray(b.background) ? b.background.map((x: J) => x?.[0]) : [])))
+  const names = [...new Set([...Object.keys(r.plan?.reserve?.moved ?? {}), ...Object.keys(r.plan?.reserve?.failed ?? {}), ...busy])].filter((n) => typeof n === "string" && n.length > 3 && ![...own].some((o: any) => String(o).includes(n)))
   for (const n of names) if (md.includes(n)) flagIt("CRIT", "summary", `names another process: ${n}`)
   const series = seriesOf(r)
   if (r.kind === "check") {

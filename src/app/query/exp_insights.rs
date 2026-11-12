@@ -2,9 +2,10 @@
 //! a check's, a `--blocks` run's or a leak run's status), the suspects its kept recordings show,
 //! ranked, the warnings that bear on that result, and the commands that go further. Facts and
 //! pointers only: each line is a number the experiment holds, a rule's hit over a recording it kept,
-//! or a command that shows more.
+//! or a command that shows more. When in doubt it says less: what is pooled across cases, untimed or
+//! read from one profiled launch beside a "no change" verdict is no suspect.
 
-use super::{Output, Rec, fmt, hits_text, insights, mark_sides, series_insights};
+use super::{Output, Rec, fmt, hits_text, insights, leak_class, leak_classes, mark_sides, series_insights};
 use crate::model::{Result, VerdictKind};
 use crate::stats;
 use serde_json::{Value, json};
@@ -15,7 +16,7 @@ pub fn run(r: &Value) -> Result<Output> {
         return Ok(bisect(r));
     }
     let series: Vec<&Value> = r["series"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
-    let cmd = Command::of(r, series.len());
+    let cmd = Command::of(r);
     let mut text = format!("insights · {id} · {}\n", what(r, &series));
     // The experiment's own warnings bear on every series: said once.
     let shared = warnings(&r["warnings"]);
@@ -27,7 +28,7 @@ pub fn run(r: &Value) -> Result<Output> {
     }
     let mut out = Vec::new();
     for s in series {
-        let sec = section(r, s, &cmd)?;
+        let sec = section(r, s, &cmd);
         text += &sec.text();
         out.push(sec.json());
     }
@@ -43,8 +44,8 @@ struct Section {
     result: Vec<String>,
     /// Where the suspects come from, and each source's hits, ranked.
     suspects: Vec<(String, Vec<Value>)>,
-    /// Why there are no suspects, when there are none.
-    none: Option<String>,
+    /// Why there are no suspects (from a source, or at all).
+    none: Vec<String>,
     warnings: Vec<Value>,
     /// (why, command): what to run next and what it shows.
     next: Vec<(String, String)>,
@@ -65,7 +66,7 @@ impl Section {
             }
             t += &hits_text(hits).lines().map(|l| format!("  {l}\n")).collect::<String>();
         }
-        if let Some(n) = &self.none {
+        for n in &self.none {
             t += &format!("suspects  none: {n}\n");
         }
         if !self.warnings.is_empty() {
@@ -99,6 +100,35 @@ impl Section {
         }
         j
     }
+
+    /// A kept recording's hits under `source`, or why it gives none.
+    fn read(&mut self, source: String, rec: &str) {
+        match kept(rec) {
+            Kept::Hits(hits) => self.suspects.push((source, ranked(hits))),
+            Kept::Gone => self.none.push(format!("{source}: not on this machine (pruned, or the result came from another)")),
+            Kept::Pooled(n) => self.none.push(format!("{source}: {rec} holds the runs of {n} cases of one --batch launch, so its rules would pool them (record --bench profiles one case alone)")),
+        }
+    }
+}
+
+/// What a kept recording gives the insights.
+enum Kept {
+    Hits(Vec<Value>),
+    /// Not on this machine any more (pruned), or never was (a result from another machine).
+    Gone,
+    /// One launch's recording shared by this many `--batch` cases: its views pool every case's runs.
+    Pooled(usize),
+}
+
+fn kept(id: &str) -> Kept {
+    let Ok(rec) = Rec::resolve(id) else { return Kept::Gone };
+    if let Some(n) = rec.meta["batch"].as_array().map(Vec::len).filter(|n| *n > 1) {
+        return Kept::Pooled(n);
+    }
+    match insights(&rec) {
+        Ok(o) => Kept::Hits(o.json["insights"].as_array().cloned().unwrap_or_default()),
+        Err(_) => Kept::Gone,
+    }
 }
 
 /// The header's words for what the experiment ran.
@@ -122,7 +152,7 @@ fn what(r: &Value, series: &[&Value]) -> String {
     format!("{what} · {count}")
 }
 
-fn section(r: &Value, s: &Value, cmd: &Command) -> Result<Section> {
+fn section(r: &Value, s: &Value, cmd: &Command) -> Section {
     let mut sec = Section { label: s["label"].as_str().unwrap_or("").to_string(), kind: s["kind"].as_str().unwrap_or("").to_string(), ..Default::default() };
     sec.warnings = warnings(&s["warnings"]);
     match s["kind"].as_str() {
@@ -140,13 +170,13 @@ fn section(r: &Value, s: &Value, cmd: &Command) -> Result<Section> {
                 sec.next.push((format!("the refusal's fix: {fix}"), String::new()));
             }
         }
-        Some("check") => check(r, s, cmd, &mut sec)?,
-        Some("blocks") => blocks(r, s, cmd, &mut sec)?,
-        Some("leak") => leak(r, s, cmd, &mut sec)?,
+        Some("check") => check(r, s, cmd, &mut sec),
+        Some("blocks") => blocks(r, s, cmd, &mut sec),
+        Some("leak") => leak(r, s, cmd, &mut sec),
         Some("pixels") => pixels(r, s, &mut sec),
-        _ => comparison(r, s, cmd, &mut sec)?,
+        _ => comparison(r, s, cmd, &mut sec),
     }
-    Ok(sec)
+    sec
 }
 
 /// The warnings that bear on a result: every warn-level one, and why an attribution block is missing
@@ -171,16 +201,21 @@ fn warnings_text(list: &[Value]) -> String {
         .collect()
 }
 
-/// A recording's rule hits, or none when it cannot be read (pruned, moved).
-fn hits_of(id: &str) -> Option<Vec<Value>> {
-    let rec = Rec::resolve(id).ok()?;
-    insights(&rec).ok().map(|o| o.json["insights"].as_array().cloned().unwrap_or_default())
-}
-
 /// Warn-level hits first, each level in the rules' own order.
 fn ranked(mut hits: Vec<Value>) -> Vec<Value> {
     hits.sort_by_key(|h| h["level"] != "warn");
     hits
+}
+
+/// Base's hits head has none of: facts of base, never suspects of head's change (info, said as base's).
+fn base_only(hits: impl IntoIterator<Item = Value>) -> Vec<Value> {
+    hits.into_iter()
+        .map(|mut x| {
+            x["title"] = json!(format!("base only: {}", x["title"].as_str().unwrap_or("")));
+            x["level"] = json!("info");
+            x
+        })
+        .collect()
 }
 
 /// A comparison's primary as one line: `★ cpu.work more: 244 ms → 256 ms, +4.6% [+4.1% … +5.8%] over 8 pairs`.
@@ -220,24 +255,44 @@ fn verdict_line(c: &Value, aa: bool) -> String {
     line
 }
 
-/// Why a comparison series kept no attribution recordings, from what the result says.
-fn why_none(r: &Value, s: &Value, differs: bool) -> (String, bool) {
+/// Why strobe has no attribution block for a series' target, when it has none to give: a command ends
+/// inside each run, a terminal program and a WebKit page have no profiler in strobe, a Firefox page's
+/// launch has no profile (`bench::no_profiler`).
+fn unprofiled(s: &Value) -> Option<String> {
     let kinds = [&s["target_kind"], &s["target_kinds"]["base"], &s["target_kinds"]["head"]];
+    let launch = s["kind"] == "launch" || !s["until"].is_null();
+    let engines = [&s["engine"], &s["engines"]["base"], &s["engines"]["head"]];
     if kinds.iter().any(|k| *k == "cli") {
-        return ("a command ends inside each run: there is nothing to profile it with".into(), false);
+        Some("a command ends inside each run: there is nothing to profile it with".into())
+    } else if kinds.iter().any(|k| *k == "tty") {
+        Some("a terminal program has no profiler in strobe yet".into())
+    } else if engines.iter().any(|e| *e == "webkit") {
+        Some("WebKit pages have no profilers in strobe yet".into())
+    } else if launch && engines.iter().any(|e| *e == "firefox") {
+        Some("a Firefox page's launch has no profile in strobe yet".into())
+    } else {
+        None
     }
-    if kinds.iter().any(|k| *k == "tty") {
-        return ("a terminal program has no profiler in strobe yet (strobe record pid:<n> --probes deep profiles a running one)".into(), false);
-    }
+}
+
+/// The `Attribution` or `MaxTime` warning that says why a series' attribution block is missing.
+fn attribution_note(r: &Value, s: &Value) -> Option<String> {
     let label = s["label"].as_str().unwrap_or("");
-    let said = s["warnings"].as_array().into_iter().flatten().chain(r["warnings"].as_array().into_iter().flatten()).find(|w| {
-        let t = w["text"].as_str().unwrap_or("");
-        (w["id"] == "Attribution" || w["id"] == "MaxTime") && t.contains("attribution") && (t.starts_with(label) || s["warnings"].as_array().is_some_and(|a| a.contains(w)))
-    });
-    if let Some(w) = said {
-        let t = w["text"].as_str().unwrap_or("");
-        let profilable = !t.contains("no profilers") && !t.contains("has no profile");
-        return (format!("{} {t}", w["id"].as_str().unwrap_or("")), profilable);
+    let own = s["warnings"].as_array().into_iter().flatten();
+    let theirs = r["warnings"].as_array().into_iter().flatten().filter(|w| w["text"].as_str().is_some_and(|t| t.starts_with(label) || t.starts_with("base") || t.starts_with("head")));
+    own.chain(theirs)
+        .find(|w| (w["id"] == "Attribution" || w["id"] == "MaxTime") && w["text"].as_str().is_some_and(|t| t.contains("attribution block")))
+        .map(|w| format!("{} {}", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or("")))
+}
+
+/// Why a comparison series kept no attribution recordings, from what the result says, and whether
+/// `record --bench` could profile it.
+fn why_none(r: &Value, s: &Value, differs: bool) -> (String, bool) {
+    if let Some(no) = unprofiled(s) {
+        return (no, false);
+    }
+    if let Some(note) = attribution_note(r, s) {
+        return (note, true);
     }
     if s["halt"].is_object() || s["halt"].is_string() {
         return ("the bench stopped before its attribution blocks".into(), true);
@@ -252,7 +307,7 @@ fn why_none(r: &Value, s: &Value, differs: bool) -> (String, bool) {
     ("no attribution recording was kept".into(), true)
 }
 
-fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<()> {
+fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     sec.kind = "comparison".into();
     let p = &s["primary"];
     let kind = stats::kind_of(p);
@@ -266,81 +321,82 @@ fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<
         sec.result.push(format!("· {}", verdict_line(c, aa)));
     }
     let (lo, hi) = (p["lo"].as_f64().unwrap_or(0.0), p["hi"].as_f64().unwrap_or(0.0));
-    let differs = p["decided"] == true && (lo > 0.0 || hi < 0.0);
-    // The way the primary moved, for a lower-is-better time or count: movers that went the same way
-    // explain it, the others moved against it.
+    let differs = p["decided"] == true && (lo > 0.0 || hi < 0.0) && !aa;
+    // Which way head's cost went: a worse primary (slower, more, fewer frames) means more of it, a
+    // better one less, whichever way the metric counts. A mover (CPU, layout, allocations: costs) that
+    // went that way can explain the change; one that went the other way cannot.
     let way = match kind {
-        VerdictKind::Better | VerdictKind::Worse if p["better"] != "higher" && !aa => p["estimate"].as_f64().unwrap_or(0.0).signum(),
+        VerdictKind::Worse if differs => 1.0,
+        VerdictKind::Better if differs => -1.0,
         _ => 0.0,
     };
     let attr = &s["attribution"];
     let (b, h) = (attr["base"].as_str(), attr["head"].as_str());
     let id = r["id"].as_str().unwrap_or("");
+    let profile = "untimed, under the profilers; one launch per side, so an interval covers sampling alone, not launch to launch";
     if r["comparison"] == "implementations" {
         // Two implementations share no code: each side's own hits, under its name.
         for (i, role) in ["base", "head"].into_iter().enumerate() {
             let Some(rec) = attr[role].as_str() else { continue };
             let name = r["variants"][i]["name"].as_str().unwrap_or(role);
-            if let Some(hits) = hits_of(rec) {
-                sec.suspects.push((format!("{name}'s attribution block {rec} (on its own: two implementations share no code)"), ranked(hits)));
-            }
+            sec.read(format!("{name}'s attribution block {rec} (on its own: two implementations share no code; {profile})"), rec);
         }
-        if sec.suspects.is_empty() {
-            sec.none = Some(format!("no attribution blocks: {}", why_none(r, s, differs).0));
+        if b.is_none() && h.is_none() {
+            sec.none.push(format!("no attribution blocks: {}", why_none(r, s, differs).0));
         } else {
             sec.next.push(("both sides side by side".into(), format!("strobe report experiment {id} --open")));
         }
     } else if let (Some(b), Some(h)) = (b, h) {
-        let (base, head) = (Rec::resolve(b)?, Rec::resolve(h)?);
-        let o = series_insights(&base, &head, r["plan"]["runs_per_block"].as_u64())?;
-        let movers = o.json["movers"].as_array().cloned().unwrap_or_default();
-        let along = |m: &Value| way == 0.0 || (m["head_per_run"].as_f64().unwrap_or(0.0) - m["base_per_run"].as_f64().unwrap_or(0.0)).signum() == way;
-        let as_hit = |m: &Value, against: bool| json!({ "rule": "mover", "level": "info", "title": format!("{}{}", m["title"].as_str().unwrap_or(""), if against { " (against the primary's change)" } else { "" }), "evidence": m, "handles": m["handles"] });
-        let heads = o.json["head"].as_array().cloned().unwrap_or_default();
-        let (only, both): (Vec<Value>, Vec<Value>) = heads.into_iter().partition(|h| h["sides"] == "head only");
-        let mut hits: Vec<Value> = movers.iter().filter(|m| along(m)).map(|m| as_hit(m, false)).collect();
-        hits.extend(ranked(only));
-        hits.extend(movers.iter().filter(|m| !along(m)).map(|m| as_hit(m, true)));
-        hits.extend(ranked(both));
-        hits.extend(o.json["base_only"].as_array().into_iter().flatten().map(|x| {
-            let mut x = x.clone();
-            x["title"] = json!(format!("base only: {}", x["title"].as_str().unwrap_or("")));
-            x["level"] = json!("info");
-            x
-        }));
-        sec.suspects.push((format!("the attribution blocks, one profiled launch per side: base {b} · head {h}"), hits));
-        sec.extra = json!({ "movers": o.json["movers"], "head": o.json["head"], "base_only": o.json["base_only"] });
-        let views: Vec<&str> = ["hotspots", "layout", "alloc"].into_iter().filter(|v| movers.iter().any(|m| m["handles"][0].as_str().is_some_and(|c| c.ends_with(&format!(" {v}"))))).collect();
-        for v in if views.is_empty() { vec!["hotspots"] } else { views } {
-            sec.next.push((format!("what moved, by function ({v}, per run, with the stacks it moved in)"), format!("strobe query {b}..{h} {v}")));
+        match (Rec::resolve(b), Rec::resolve(h)) {
+            (Ok(base), Ok(head)) => match series_insights(&base, &head, r["plan"]["runs_per_block"].as_u64()) {
+                Ok(o) => attributed(o.json, (b, h), way, differs, profile, id, sec),
+                Err(e) => sec.none.push(format!("the attribution blocks {b} and {h} could not be read: {}", e.message)),
+            },
+            (base, head) => {
+                // One side's recording is gone: the other's hits alone, said as that side's.
+                for (role, rec, ok) in [("base", b, base.is_ok()), ("head", h, head.is_ok())] {
+                    if ok {
+                        sec.read(format!("{role}'s attribution block {rec} alone ({profile})"), rec);
+                    } else {
+                        sec.none.push(format!("{role}'s attribution block {rec} is not on this machine (pruned, or the result came from another)"));
+                    }
+                }
+            }
         }
-        sec.next.push(("both sides and the diff flame".into(), format!("strobe report experiment {id} --open")));
     } else {
         let (why, profilable) = why_none(r, s, differs);
-        // Without a profile, the timed blocks' kept recordings still hold their counters and trace.
-        let timed: Vec<(&str, &str)> = s["timing_recordings"].as_array().into_iter().flatten().filter_map(|t| Some((t["variant"].as_str().unwrap_or("head"), t["recording"].as_str()?))).collect();
-        let pick = |role: &str| timed.iter().find(|t| t.0 == role).map(|t| t.1);
-        if let Some(hr) = pick("head")
-            && let Some(mut hits) = hits_of(hr)
-        {
-            let base_only = pick("base").and_then(hits_of).map(|bh| mark_sides(&mut hits, bh)).unwrap_or_default();
-            hits = ranked(hits);
-            hits.extend(base_only.into_iter().map(|mut x| {
-                x["title"] = json!(format!("base only: {}", x["title"].as_str().unwrap_or("")));
-                x
-            }));
-            sec.suspects.push((format!("head's timed block recording {hr} (no profiler: its counters and trace; no attribution blocks: {why})"), hits));
+        // One side's attribution block ran and the other's did not: its hits, and the missing side's command.
+        if let Some((role, rec)) = b.map(|x| ("base", x)).or(h.map(|x| ("head", x))) {
+            sec.read(format!("{role}'s attribution block {rec} alone (the other side's: {why}; {profile})"), rec);
         } else {
-            sec.none = Some(format!("no attribution blocks: {why}"));
+            // Without a profile, the timed blocks' kept recordings still hold their counters and trace.
+            let timed: Vec<(&str, &str)> = s["timing_recordings"].as_array().into_iter().flatten().filter_map(|t| Some((t["variant"].as_str().unwrap_or("head"), t["recording"].as_str()?))).collect();
+            let pick = |role: &str| timed.iter().find(|t| t.0 == role).map(|t| t.1);
+            match pick("head").map(|hr| (hr, kept(hr))) {
+                Some((hr, Kept::Hits(mut hits))) => {
+                    let theirs = pick("base").and_then(|br| Rec::resolve(br).ok()).and_then(|r| insights(&r).ok());
+                    let only = theirs.map(|t| mark_sides(&mut hits, &t.json)).unwrap_or_default();
+                    hits = ranked(hits);
+                    hits.extend(base_only(only));
+                    sec.suspects.push((format!("head's timed block recording {hr} (no profiler: its counters and trace; no attribution blocks: {why})"), hits));
+                }
+                Some((hr, _)) => sec.none.push(format!("no attribution blocks ({why}), and head's timed block recording {hr} is not on this machine")),
+                None => sec.none.push(format!("no attribution blocks: {why}")),
+            }
         }
-        if differs && profilable && !aa {
+        if differs && profilable {
             let case = s["case"].as_str().unwrap_or("");
-            sec.next.push((
-                format!("profile {case} on each side (one attribution block each: CPU and allocation stacks, forced layouts, GC), then diff them with strobe query <base rec>..<head rec> hotspots"),
-                String::new(),
-            ));
-            for role in ["base", "head"] {
-                if let Some(c) = cmd.record(s, role) {
+            let roles: Vec<&str> = ["base", "head"].into_iter().filter(|r| attr[*r].is_null()).collect();
+            let cmds: Vec<String> = roles.iter().filter_map(|role| cmd.record(s, role)).collect();
+            if !cmds.is_empty() {
+                sec.next.push((
+                    format!(
+                        "profile {case} on {} (one attribution block each: CPU and allocation stacks, forced layouts, GC), then compare the two with strobe query <base rec>..<head rec> hotspots",
+                        roles.join(" and ")
+                    ),
+                    String::new(),
+                ));
+                for c in cmds {
                     sec.next.push((String::new(), c));
                 }
             }
@@ -368,13 +424,46 @@ fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<
     if s["pairs"].as_u64().unwrap_or(0) < holm && s["decided"] == true {
         sec.next.push((format!("the secondaries can only clear Holm's correction from {holm} pairs"), cmd.bench(s, &[("pairs", Some(&holm.to_string()))])));
     }
-    if sec.suspects.is_empty() && sec.none.is_none() {
-        sec.none = Some("no recording kept".into());
+    if sec.suspects.is_empty() && sec.none.is_empty() {
+        sec.none.push("no recording kept".into());
     }
-    Ok(())
 }
 
-fn check(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<()> {
+/// A comparison's two attribution blocks: the movers that can explain a decided change first (those
+/// along it, then head's hits over their threshold there alone, the movers against it, the hits base
+/// has too, base's alone). Beside no decided change (same, unclear, A/A), the one profiled launch per
+/// side differs by sampling and launch to launch alone: no mover is a suspect.
+fn attributed(o: Value, (b, h): (&str, &str), way: f64, differs: bool, profile: &str, id: &str, sec: &mut Section) {
+    let movers = o["movers"].as_array().cloned().unwrap_or_default();
+    let along = |m: &Value| (m["head_per_run"].as_f64().unwrap_or(0.0) - m["base_per_run"].as_f64().unwrap_or(0.0)).signum() == way;
+    let as_hit = |m: &Value, against: bool| json!({ "rule": "mover", "level": "info", "title": format!("{}{}", m["title"].as_str().unwrap_or(""), if against { " (against the primary's change)" } else { "" }), "evidence": m, "handles": m["handles"] });
+    let heads = o["head"].as_array().cloned().unwrap_or_default();
+    let (only, both): (Vec<Value>, Vec<Value>) = heads.into_iter().partition(|h| h["sides"] != "both");
+    let mut hits: Vec<Value> = Vec::new();
+    if differs {
+        hits.extend(movers.iter().filter(|m| along(m)).map(|m| as_hit(m, false)));
+    }
+    hits.extend(ranked(only));
+    if differs {
+        hits.extend(movers.iter().filter(|m| !along(m)).map(|m| as_hit(m, true)));
+    }
+    hits.extend(ranked(both));
+    hits.extend(base_only(o["base_only"].as_array().cloned().unwrap_or_default()));
+    let skipped = if !differs && !movers.is_empty() {
+        format!("; no movers: the timed pairs decided no change, so what the two launches differ by is no suspect (strobe query {b}..{h} hotspots shows it)")
+    } else {
+        String::new()
+    };
+    sec.suspects.push((format!("the attribution blocks, base {b} · head {h} ({profile}){skipped}"), hits));
+    sec.extra = json!({ "movers": if differs { o["movers"].clone() } else { json!([]) }, "head": o["head"], "base_only": o["base_only"] });
+    let views: Vec<&str> = ["hotspots", "layout", "alloc"].into_iter().filter(|v| differs && movers.iter().any(|m| m["handles"][0].as_str().is_some_and(|c| c.ends_with(&format!(" {v}"))))).collect();
+    for v in if views.is_empty() { vec!["hotspots"] } else { views } {
+        sec.next.push((format!("the two launches by function ({v}, per run, with the stacks each row moved in)"), format!("strobe query {b}..{h} {v}")));
+    }
+    sec.next.push(("both sides and the diff flame".into(), format!("strobe report experiment {id} --open")));
+}
+
+fn check(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     let m = s["primary"]["metric"].as_str().unwrap_or("");
     let unit = crate::model::metric(m).map_or("", |d| d.unit);
     let runs = s["runs"].as_u64().unwrap_or(1);
@@ -403,38 +492,38 @@ fn check(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<()> {
     for c in s["counters"].as_array().into_iter().flatten().filter(|c| c["passed"] == false) {
         sec.result.push(format!("--noworse {}: {}", c["metric"].as_str().unwrap_or(""), c["text"].as_str().or(c["state"].as_str()).unwrap_or("")));
     }
-    if let Some(rec) = s["attribution"].as_str()
-        && let Some(hits) = hits_of(rec)
-    {
-        sec.suspects.push((format!("the attribution block {rec} (warmed, its measured runs under the profilers, untimed)"), ranked(hits)));
-        sec.next.push(("where its time goes, by package and function".into(), format!("strobe query {rec} hotspots --by package")));
-        sec.next.push(("the recording's report".into(), format!("strobe report recording {rec} --open")));
+    if let Some(rec) = s["attribution"].as_str() {
+        sec.read(format!("the attribution block {rec} (warmed, its measured runs under the profilers, untimed)"), rec);
+        if sec.suspects.iter().any(|(src, _)| src.contains(rec)) {
+            sec.next.push(("where its time goes, by package and function".into(), format!("strobe query {rec} hotspots --by package")));
+            sec.next.push(("the recording's report".into(), format!("strobe report recording {rec} --open")));
+        }
     }
-    if let Some(rec) = s["recording"].as_str()
-        && let Some(hits) = hits_of(rec)
-    {
-        sec.suspects.push((format!("the check run's recording {rec} ({how}, no profiler)"), ranked(hits)));
+    if let Some(rec) = s["recording"].as_str() {
+        sec.read(format!("the check run's recording {rec} ({how}, no profiler)"), rec);
     }
-    let kind = s["target_kind"].as_str().unwrap_or("");
-    if passed && s["attribution"].is_null() {
-        if matches!(kind, "cli" | "tty") {
-            sec.none = Some(format!("a {} case has no attribution block in strobe", if kind == "cli" { "cli()" } else { "tty()" }));
-        } else {
-            if sec.suspects.is_empty() {
-                sec.none = Some("a check keeps no profile (--why always adds an attribution block of each case)".into());
-            }
-            if let Some(c) = cmd.record(s, "head") {
-                sec.next.push(("profile this case (one attribution block: CPU and allocation stacks, forced layouts, GC)".into(), c));
+    let pooled = sec.none.iter().any(|n| n.contains("--batch"));
+    if passed && (s["attribution"].is_null() || pooled) {
+        match (unprofiled(s), attribution_note(r, s)) {
+            (Some(no), _) => sec.none.push(no),
+            // `--why always` ran and its block failed or was skipped: why, never "add --why always".
+            (None, Some(note)) => sec.none.push(note),
+            (None, None) => {
+                if sec.suspects.is_empty() && sec.none.is_empty() {
+                    sec.none.push("a check keeps no profile (--why always adds an attribution block of each case)".into());
+                }
+                if let Some(c) = cmd.record(s, "head") {
+                    sec.next.push(("profile this case alone (one attribution block: CPU and allocation stacks, forced layouts, GC)".into(), c));
+                }
             }
         }
     }
-    if passed {
-        sec.next.push(("time it against another build (pairs of fresh launches, a verdict)".into(), cmd.compare(s)));
+    if passed && let Some(c) = cmd.compare(s) {
+        sec.next.push(("time it against base (pairs of fresh launches, a verdict)".into(), c));
     }
-    Ok(())
 }
 
-fn blocks(_r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<()> {
+fn blocks(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     let m = s["primary"]["metric"].as_str().unwrap_or("");
     let unit = crate::model::metric(m).map_or("", |d| d.unit);
     let all = s["blocks"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -450,29 +539,35 @@ fn blocks(_r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<()>
         format!("★ {m} no value")
     };
     sec.result.push(line);
-    if let Some(rec) = s["attribution"]["head"].as_str()
-        && let Some(hits) = hits_of(rec)
-    {
-        sec.suspects.push((format!("head's attribution block {rec} (after its timed blocks, profiled, untimed)"), ranked(hits)));
+    if let Some(rec) = s["attribution"]["head"].as_str() {
+        sec.read(format!("head's attribution block {rec} (after its timed blocks, profiled, untimed)"), rec);
         sec.next.push(("where its time goes, by package and function".into(), format!("strobe query {rec} hotspots --by package")));
-    } else {
-        let timed: Vec<&str> = s["timing_recordings"].as_array().into_iter().flatten().filter_map(|t| t["recording"].as_str()).collect();
-        if let Some(hits) = timed.first().and_then(|t| hits_of(t)) {
-            sec.suspects.push((format!("the first timed block's recording {} (no profiler: its counters and trace)", timed[0]), ranked(hits)));
-        } else {
-            sec.none = Some("a timed block runs no profiler, and no attribution block ran (--why always adds one)".into());
-        }
-        if !matches!(s["target_kind"].as_str(), Some("cli" | "tty")) {
+        return;
+    }
+    let timed: Vec<&str> = s["timing_recordings"].as_array().into_iter().flatten().filter_map(|t| t["recording"].as_str()).collect();
+    if let Some(t) = timed.first() {
+        sec.read(format!("the first timed block's recording {t} (no profiler: its counters and trace)"), t);
+    }
+    match (unprofiled(s), attribution_note(r, s)) {
+        (Some(no), _) => sec.none.push(format!("no attribution block: {no}")),
+        (None, Some(note)) => sec.none.push(format!("no attribution block: {note}")),
+        (None, None) if r["args"]["flags"]["why"] == "always" => sec.none.push("no attribution block was kept".into()),
+        (None, None) => {
+            if timed.is_empty() {
+                sec.none.push("a timed block runs no profiler, and no attribution block ran".into());
+            }
             sec.next.push(("profile head after its timed blocks (one attribution block)".into(), cmd.bench(s, &[("why", Some("always"))])));
         }
     }
-    sec.next.push(("time it against another build (pairs of fresh launches, a verdict)".into(), cmd.compare(s)));
-    Ok(())
 }
 
-fn leak(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<()> {
+fn leak(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     let roles: Vec<&str> = ["base", "head"].into_iter().filter(|role| s["leak"][*role].is_object()).collect();
+    let implementations = r["comparison"] == "implementations";
     let mut unclear = false;
+    // Snapshots: a page in Chromium. A native app's host memory and a Firefox page's about:memory name
+    // no object.
+    let mut snapshots = true;
     for role in &roles {
         let l = &s["leak"][*role];
         let side = if roles.len() > 1 { format!("{role} ") } else { String::new() };
@@ -493,45 +588,59 @@ fn leak(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) -> Result<()> {
         let rec = l["recording"].as_str();
         let kinds: Vec<VerdictKind> = ["native_host", "js_heap", "dom_nodes"].iter().filter(|k| l[**k].is_object()).map(|k| growth(&l[*k])).collect();
         let grows = kinds.contains(&VerdictKind::Worse);
-        let mut hits: Vec<Value> = Vec::new();
+        let named = !l["native_host"].is_object() && !l["suspects"]["refused"].is_string();
+        snapshots &= named;
         if let Some(why) = l["suspects"]["refused"].as_str() {
             sec.result.push(format!("{side}suspects: {why}"));
         }
-        // What stayed alive is a suspect only while memory grows or may (no growth: nothing to explain).
-        let suspect = grows || kinds.contains(&VerdictKind::Unclear);
-        for c in l["suspects"]["classes"].as_array().into_iter().flatten().filter(|_| suspect).take(3) {
-            let at = c["location"]["url"].as_str().filter(|u| !u.is_empty()).map(|u| format!(", its constructor at {u}:{}:{}", c["location"]["line"], c["location"]["column"])).unwrap_or_default();
-            // The page's own objects (their constructor has a source location) over V8's internals.
+        // What stayed alive is a suspect only while memory grows or may (no growth: nothing to explain);
+        // the page's own objects first (`leak_classes`).
+        let suspect = named && (grows || kinds.contains(&VerdictKind::Unclear));
+        let mut hits: Vec<Value> = Vec::new();
+        for c in leak_classes(&l["suspects"]).into_iter().filter(|_| suspect).take(3) {
+            let own = c["location"]["url"].as_str().is_some_and(|u| !u.is_empty());
             hits.push(json!({
-                "rule": "leak-suspect", "level": if grows && c["location"]["url"].as_str().is_some_and(|u| !u.is_empty()) { "warn" } else { "info" },
-                "title": format!("{} ×{} from the first half still alive at the end, retaining {}{at}; its largest held by {}", c["class"].as_str().unwrap_or("?"), c["count"], fmt::bytes(c["retained_size"].as_f64().unwrap_or(0.0)), super::path_tail(&c["largest"]["path"])),
+                "rule": "leak-suspect", "level": if grows && own { "warn" } else { "info" },
+                "title": format!("{} from the first half still alive at the end", leak_class(c)),
                 "evidence": c, "handles": rec.map(|r| vec![format!("strobe query {r} leaks")]).unwrap_or_default(),
             }));
         }
+        let Some(rec) = rec else { continue };
         // The recording's other rules (its growth is the result above).
-        if let Some(rest) = rec.and_then(hits_of) {
-            hits.extend(ranked(rest.into_iter().filter(|h| h["rule"] != "leak").collect()));
+        match kept(rec) {
+            Kept::Hits(rest) => hits.extend(ranked(rest.into_iter().filter(|h| h["rule"] != "leak").collect())),
+            _ => sec.none.push(format!("{side}memory block {rec} is not on this machine (pruned, or the result came from another)")),
         }
-        if let Some(rec) = rec {
-            let what = if suspect { " (objects from the first half alive at the end, largest retained first)" } else { "" };
+        if hits.is_empty() && !suspect && !sec.none.iter().any(|n| n.contains(rec)) {
+            sec.none.push(format!(
+                "{side}memory block {rec}: {}",
+                if grows || kinds.contains(&VerdictKind::Unclear) { "its objects are not named (no heap snapshot)" } else { "no memory growth to explain" }
+            ));
+        } else if !hits.is_empty() {
+            let what = if suspect { " (objects from the first half alive at the end, the page's own first)" } else { "" };
             sec.suspects.push((format!("{side}memory block {rec}{what}"), hits));
-            if grows {
-                let whose = if roles.len() > 1 { format!("{role}: ") } else { String::new() };
-                sec.next.push((format!("{whose}retainer paths of what stayed alive"), format!("strobe query {rec} leaks")));
-                sec.next.push((format!("{whose}the live heap at the end, by class"), format!("strobe query {rec} heap")));
-            }
+        }
+        let whose = if roles.len() > 1 { format!("{role}: ") } else { String::new() };
+        if grows && named {
+            sec.next.push((format!("{whose}retainer paths of what stayed alive"), format!("strobe query {rec} leaks")));
+            sec.next.push((format!("{whose}the live heap at the end, by class"), format!("strobe query {rec} heap")));
+        } else if grows {
+            // No heap snapshot: the memory census by process and layer, first and last.
+            sec.next.push((format!("{whose}memory at the first census and at the end"), format!("strobe query {rec} memory --at 0")));
+            sec.next.push((String::new(), format!("strobe query {rec} memory")));
         }
     }
     if let [b, h] = roles[..]
         && let (Some(b), Some(h)) = (s["leak"][b]["recording"].as_str(), s["leak"][h]["recording"].as_str())
+        && !implementations
     {
-        sec.next.push(("the two live heaps by class, side by side".into(), format!("strobe query {b}..{h} heap")));
+        let view = if snapshots { "heap" } else { "memory" };
+        sec.next.push((format!("the two sides' {}, side by side", if snapshots { "live heaps by class" } else { "memory by process" }), format!("strobe query {b}..{h} {view}")));
     }
     if unclear {
         let n = s["runs_per_half"].as_u64().or(r["args"]["flags"]["repeat"].as_str().and_then(|x| x.parse().ok())).unwrap_or(5);
         sec.next.push((format!("an unclear growth narrows with more runs (this ran {n} per half)"), cmd.bench(s, &[("repeat", Some(&(2 * n).to_string()))])));
     }
-    Ok(())
 }
 
 /// A growth verdict's kind: its `verdict_kind`, or in results from before it, what its words say.
@@ -554,7 +663,7 @@ fn pixels(r: &Value, s: &Value, sec: &mut Section) {
     } else {
         format!("{} of {} frames differ beyond launch noise: {}", differ.len(), frames.len(), differ.join(", "))
     });
-    sec.none = Some("a pixels run compares screenshots; it times nothing to explain".into());
+    sec.none.push("a pixels run compares screenshots; it times nothing to explain".into());
     if !differ.is_empty() {
         sec.next.push(("the frames and their diffs side by side".into(), format!("strobe report experiment {} --open", r["id"].as_str().unwrap_or(""))));
     }
@@ -580,94 +689,183 @@ fn bisect(r: &Value) -> Output {
     Output::new(text, json!({ "experiment": id, "kind": "bisect", "verdict": r["verdict"], "culprit": r["culprit"], "next": next }))
 }
 
-/// The bench command that ran the experiment, to run again with a change: its file and flags as given
-/// (a check from before results kept them: its variants), less what made that run one of a kind.
+/// The command that ran the experiment, to run again with a change: a bench file and its flags as
+/// given (results that kept no flags: their variants), or a `strobe run` of two commands, less what
+/// made that run one of a kind. Every command it prints parses as strobe's own parser reads it
+/// (`scripts/dev/next-commands.ts` checks them under `sh` and PowerShell).
 struct Command {
-    file: String,
+    /// The bench file; None for `strobe run`, whose file is strobe's own.
+    file: Option<String>,
     flags: Vec<(String, String)>,
-    /// More than one series ran: a rerun of one names its case.
-    several: bool,
+    implementations: bool,
 }
 
-/// Flags a rerun of one series leaves out: its own id, seed and cap, its output's form, and what it asks for itself.
-const DROP: [&str; 10] = ["id", "seed", "pairs", "filter", "why", "max-time", "resume", "json", "quiet", "plan"];
+/// Flags a rerun leaves out: its own id, seed and cap, its output's form, and what it asks for itself.
+/// `--filter` stays (a rerun of a series of several names its case instead).
+const DROP: [&str; 12] = ["id", "seed", "pairs", "why", "max-time", "resume", "json", "quiet", "plan", "verbose", "progress", "stop"];
 
 impl Command {
-    fn of(r: &Value, series: usize) -> Command {
-        let path = r["args"]["pos"][0].as_str().or(r["file"].as_str()).unwrap_or("<file.bench.ts>");
-        let file = path.strip_prefix(r"\\?\").unwrap_or(path).to_string();
+    fn of(r: &Value) -> Command {
         let mut flags: Vec<(String, String)> = r["args"]["flags"]
             .as_object()
             .map(|o| o.iter().filter(|(k, _)| !DROP.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string))).collect())
             .unwrap_or_default();
-        if flags.is_empty() && r["kind"] == "check" {
-            let v = r["variants"].as_array().cloned().unwrap_or_default();
-            if let [b, _, ..] = v.as_slice() {
-                flags.push(("base".into(), b["spec"].as_str().unwrap_or(".").into()));
+        // A result that kept no flags (a check, an older comparison): each side from its variant.
+        let variants = r["variants"].as_array().cloned().unwrap_or_default();
+        let spec = |v: &Value| v["spec"].as_str().map(str::to_string);
+        if !flags.iter().any(|(k, _)| k == "head")
+            && let Some(h) = variants.last().and_then(spec)
+        {
+            if r["plan"]["aa"] == true {
+                flags.push(("aa".into(), "true".into()));
+            } else if let [b, _, ..] = variants.as_slice()
+                && let Some(b) = spec(b)
+            {
+                flags.push(("base".into(), b));
             }
-            flags.push(("head".into(), v.last().and_then(|h| h["spec"].as_str()).unwrap_or(".").into()));
-            flags.push(("check".into(), "true".into()));
+            flags.push(("head".into(), h));
+            if r["kind"] == "check" {
+                flags.push(("check".into(), "true".into()));
+            }
         }
-        Command { file, flags, several: series > 1 }
+        // `strobe run --base "<command>" --head "<command>"`: its bench file is strobe's own, its sides
+        // `cmd:` variants.
+        let run = flags.iter().any(|(k, v)| k == "head" && v.starts_with("cmd:"));
+        if run {
+            for (k, v) in &mut flags {
+                if (k == "head" || k == "base") && v.starts_with("cmd:") {
+                    *v = v["cmd:".len()..].to_string();
+                }
+            }
+        }
+        let path = r["args"]["pos"][0].as_str().or(r["file"].as_str()).unwrap_or("");
+        let file = (!run && !path.is_empty()).then(|| path.strip_prefix(r"\\?\").unwrap_or(path).to_string());
+        Command { file, flags, implementations: r["comparison"] == "implementations" }
     }
 
     fn get(&self, k: &str) -> Option<&str> {
         self.flags.iter().find(|(f, _)| f == k).map(|(_, v)| v.as_str())
     }
 
-    /// `strobe bench <file> …` for this series alone, with `set` (None: the flag left out).
-    fn bench(&self, s: &Value, set: &[(&str, Option<&str>)]) -> String {
-        let mut flags: Vec<(String, String)> = self.flags.iter().filter(|(k, _)| !set.iter().any(|(s, _)| s == k)).cloned().collect();
-        flags.extend(set.iter().filter_map(|(k, v)| Some((k.to_string(), (*v)?.to_string()))));
-        if self.several {
-            flags.push(("filter".into(), s["case"].as_str().unwrap_or("").into()));
+    /// This series alone: `--filter <case>` (exact), its target and its params, whatever else the file holds.
+    fn narrow(&self, s: &Value, flags: &mut Vec<(String, String)>) {
+        if self.file.is_none() || s["case"].as_str().is_none_or(str::is_empty) {
+            return;
         }
-        format!("strobe bench {}{}", quote(&self.file), flag_text(&flags))
-    }
-
-    /// The command that times this series' case against another build: `--base <ref>` for the ref
-    /// to compare with.
-    fn compare(&self, s: &Value) -> String {
-        let keep = |k: &str| !matches!(k, "check" | "blocks" | "base" | "runs" | "repeat" | "batch" | "aa");
-        let mut flags: Vec<(String, String)> = vec![("base".into(), "<ref>".into())];
-        flags.extend(self.flags.iter().filter(|(k, _)| keep(k)).cloned());
-        if self.several {
-            flags.push(("filter".into(), s["case"].as_str().unwrap_or("").into()));
-        }
-        format!("strobe bench {}{}", quote(&self.file), flag_text(&flags))
-    }
-
-    /// `strobe record --bench <file>#<case> --head <variant>`: one attribution block of the case on a side.
-    fn record(&self, s: &Value, role: &str) -> Option<String> {
-        let spec = match role {
-            "base" if self.get("aa").is_some() => self.get("head"),
-            other => self.get(other),
-        }
-        .unwrap_or(".");
-        let mut flags: Vec<(String, String)> = vec![("head".into(), spec.into())];
-        for k in ["target", "headless", "mobile", "engine", "wayland"] {
-            if let Some(v) = self.get(k) {
-                flags.push((k.into(), v.into()));
-            }
-        }
+        flags.retain(|(k, _)| k != "filter");
+        flags.push(("filter".into(), s["case"].as_str().unwrap_or("").into()));
         if self.get("target").is_none()
+            && !self.implementations
             && let Some(t) = s["target"].as_str()
         {
             flags.push(("target".into(), t.into()));
         }
-        if let Some(p) = s["params"].as_object().filter(|p| !p.is_empty()) {
-            flags.push(("params".into(), p.iter().map(|(k, v)| format!("{k}={}", v.as_str().map_or_else(|| v.to_string(), str::to_string))).collect::<Vec<_>>().join(",")));
+        if self.get("params").is_none()
+            && let Some(p) = params(s)
+        {
+            flags.push(("params".into(), p));
         }
+    }
+
+    /// The experiment again for this series alone, with `set` (None: the flag left out).
+    fn bench(&self, s: &Value, set: &[(&str, Option<&str>)]) -> String {
+        let mut flags: Vec<(String, String)> = self.flags.iter().filter(|(k, _)| !set.iter().any(|(s, _)| s == k)).cloned().collect();
+        flags.extend(set.iter().filter_map(|(k, v)| Some((k.to_string(), (*v)?.to_string()))));
+        self.narrow(s, &mut flags);
+        match &self.file {
+            Some(f) => line("bench", Some(f), &flags),
+            None => line("run", None, &flags),
+        }
+    }
+
+    /// A check of base and head (`--check --base`) timed as a comparison of the same two: pairs of fresh
+    /// launches and a verdict. None when the check ran one side (no base to compare with).
+    fn compare(&self, s: &Value) -> Option<String> {
+        self.get("base")?;
+        let mut flags: Vec<(String, String)> = self.flags.iter().filter(|(k, _)| !matches!(k.as_str(), "check" | "runs" | "repeat" | "batch" | "noworse")).cloned().collect();
+        self.narrow(s, &mut flags);
+        Some(match &self.file {
+            Some(f) => line("bench", Some(f), &flags),
+            None => line("run", None, &flags),
+        })
+    }
+
+    /// `strobe record --bench <file>#<case>` on one side: that side's variant (an implementation's
+    /// `target[=variant]`: its target and variant). None for `strobe run` (commands have no profile).
+    fn record(&self, s: &Value, role: &str) -> Option<String> {
+        let file = self.file.as_ref()?;
         let case = s["case"].as_str()?;
-        Some(format!("strobe record --bench {}{}", quote(&format!("{}#{case}", self.file)), flag_text(&flags)))
+        let side = match role {
+            "base" if self.get("aa").is_some() => self.get("head"),
+            other => self.get(other),
+        };
+        let mut flags: Vec<(String, String)> = Vec::new();
+        let target = if self.implementations {
+            let (t, v) = side.map(|x| x.split_once('=').map_or((x, None), |(t, v)| (t, Some(v)))).unwrap_or(("", None));
+            if let Some(v) = v {
+                flags.push(("head".into(), v.into()));
+            }
+            Some(t.trim_start_matches("target:").to_string()).filter(|t| !t.is_empty())
+        } else {
+            flags.push(("head".into(), side.unwrap_or(".").into()));
+            self.get("target").map(str::to_string).or_else(|| s["target"].as_str().map(str::to_string))
+        };
+        if let Some(t) = target {
+            flags.push(("target".into(), t));
+        }
+        for k in ["headless", "mobile", "engine", "wayland", "style"] {
+            if let Some(v) = self.get(k) {
+                flags.push((k.into(), v.into()));
+            }
+        }
+        if let Some(p) = self.get("params").map(str::to_string).or_else(|| params(s)) {
+            flags.push(("params".into(), p));
+        }
+        Some(line("record", None, &[vec![("bench".to_string(), format!("{file}#{case}"))], flags].concat()))
     }
 }
 
-fn flag_text(flags: &[(String, String)]) -> String {
-    flags.iter().map(|(k, v)| if v == "true" { format!(" --{k}") } else { format!(" --{k} {}", quote(v)) }).collect()
+/// A series' params as `--params` takes them: `k=v,k2=v2`.
+fn params(s: &Value) -> Option<String> {
+    let p = s["params"].as_object().filter(|p| !p.is_empty())?;
+    Some(p.iter().map(|(k, v)| format!("{k}={}", v.as_str().map_or_else(|| v.to_string(), str::to_string))).collect::<Vec<_>>().join(","))
 }
 
-/// A word as a shell takes it whole: in double quotes when it holds a space, `#` or a quote.
+/// `strobe <command> [<file>] --flag value …`: only the flags that command reads (`cli::FLAGS`), each as
+/// its kind is written (a switch bare, `--mobile` or `--mobile=<serial>`), every word quoted for `sh`
+/// and PowerShell alike.
+fn line(command: &str, file: Option<&str>, flags: &[(String, String)]) -> String {
+    let mut out = format!("strobe {command}");
+    if let Some(f) = file {
+        out += &format!(" {}", quote(f));
+    }
+    for (k, v) in flags {
+        let Some((_, kind, commands)) = crate::cli::FLAGS.iter().find(|(n, _, _)| n == k) else { continue };
+        if *commands != "*" && !commands.split(' ').any(|c| c == command) {
+            continue;
+        }
+        out += &match kind {
+            crate::cli::Kind::Switch if v == "false" => continue,
+            crate::cli::Kind::Switch => format!(" --{k}"),
+            crate::cli::Kind::Optional if v.is_empty() || v == "true" => format!(" --{k}"),
+            crate::cli::Kind::Optional => format!(" {}", quote(&format!("--{k}={v}"))),
+            _ => format!(" --{k} {}", quote(v)),
+        };
+    }
+    out
+}
+
+/// A word both `sh` and PowerShell pass whole and as written: bare when it holds only letters, digits
+/// and `_-./:=+%^`; else in single quotes (literal in both); a word with a `'` in double quotes, where
+/// it holds none of `"$\` and backtick (each shell's escapes), else as `sh` writes it.
 fn quote(w: &str) -> String {
-    if w.is_empty() || w.contains([' ', '"', '\'', '&', '|', ';', '#', '(', ')']) && !(w.starts_with('<') && w.ends_with('>')) { format!("\"{}\"", w.replace('"', "\\\"")) } else { w.to_string() }
+    if !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || "_-./:=+%^".contains(c)) {
+        w.to_string()
+    } else if !w.contains('\'') {
+        format!("'{w}'")
+    } else if !w.contains(['"', '$', '\\', '`']) {
+        format!("\"{w}\"")
+    } else {
+        format!("'{}'", w.replace('\'', r"'\''"))
+    }
 }

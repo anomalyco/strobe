@@ -20,7 +20,7 @@ pub fn summary(r: &Value) -> String {
         // attaches no images).
         _ => return block(r),
     };
-    scrub_public(&scrub_paths(&body))
+    public(&body)
 }
 
 /// `### strobe check · perf/app.bench.ts`: the section's heading, with the bench file.

@@ -259,22 +259,117 @@ fn side<'a>(rec: &'a Rec, kind: Kind, plan_runs: Option<u64>, over: Option<&'a N
     }
 }
 
-/// Where a frame is, as two checkouts and two builds share it: its path from the first step a checkout
-/// does not name (a monorepo's `packages/`, `crates/`, `apps/`, a toolchain's `library/`, else the
-/// last `src/` or `lib/`), a dependency's from its package (`node_modules/…`, a cargo crate without
-/// its version or hash), or a script URL without origin, query and bundler hash. The checkout's own
-/// folder (a worktree named after a branch or a commit) never takes part.
+/// Where a frame is, as two checkouts and two builds share it: a dependency's path from its package
+/// (`node_modules/…`, a cargo crate without its version or hash); a file of the side's own checkout
+/// from that checkout's root (`Checkout`); else its path from the first step a checkout does not name
+/// (strobe's `builds/<commit>/`, a monorepo's `packages/`, `crates/`, `apps/`, a toolchain's `library/`,
+/// else the last `src/` or `lib/`), or a script URL without origin, query and bundler hash. The
+/// checkout's own folder (a worktree named after a branch or a commit, `.`) never takes part.
 fn portable_file(f: &Frame) -> String {
+    portable_in(f, None)
+}
+
+fn portable_in(f: &Frame, root: Option<&str>) -> String {
     if f.file.is_empty() && f.url.is_empty() {
         return "(native)".into();
     }
     if !f.mapped && !f.url.is_empty() {
-        return portable_path(&crate::heapsnap::portable_url(&f.url));
+        return portable_path(&crate::heapsnap::portable_url(&f.url.replace('\\', "/")), root.filter(|_| f.url.starts_with("file:")));
     }
-    portable_path(&f.file.replace('\\', "/"))
+    portable_path(&f.file.replace('\\', "/"), root)
 }
 
-fn portable_path(p: &str) -> String {
+/// A frame's file on this computer, `/`-separated (a `file:` script URL's path, or a native frame's
+/// source file), when it names one.
+fn local_path(f: &Frame) -> Option<String> {
+    let raw = if !f.mapped && !f.url.is_empty() {
+        let p = f.url.strip_prefix("file://")?;
+        p.replace("%20", " ")
+    } else {
+        f.file.clone()
+    };
+    let p = raw.replace('\\', "/");
+    let p = p.strip_prefix("//?/").unwrap_or(&p);
+    // `/C:/…` from a URL is `C:/…`.
+    let p = if p.len() > 2 && p.as_bytes()[0] == b'/' && p.as_bytes()[2] == b':' { &p[1..] } else { p };
+    (p.starts_with('/') || (p.len() > 2 && p.as_bytes()[1] == b':' && p.as_bytes()[2] == b'/')).then(|| p.to_string())
+}
+
+/// A dependency's file, which `portable_path` names by its package.
+fn dependency(p: &str) -> bool {
+    ["/node_modules/", "/registry/src/", "/git/checkouts/"].iter().any(|d| p.contains(d))
+}
+
+/// Where one side's own files are checked out, so a file is named from its checkout's root on both sides
+/// (`harness.ts` in `builds/<commit>/` and in `.` is one file): the folder holding the `.git` above it
+/// (a repository, or strobe's worktree of a ref), found on disk; else, for a recording read where its
+/// files are not (pruned builds, another machine), the folder the side's own script files share.
+#[derive(Default)]
+struct Checkout {
+    roots: HashMap<String, Option<String>>,
+    shared: Option<String>,
+}
+
+impl Checkout {
+    fn of(stacks: &Stacks) -> Checkout {
+        let mut c = Checkout::default();
+        let mut shared: Option<Vec<String>> = None;
+        for f in stacks.frames.iter().filter(|f| !f.mapped && f.url.starts_with("file:")) {
+            let Some(p) = local_path(f).filter(|p| !dependency(p)) else { continue };
+            if c.root(&p).is_some() {
+                continue;
+            }
+            let dir: Vec<String> = p.split('/').map(str::to_string).collect::<Vec<_>>().split_last().map(|(_, d)| d.to_vec()).unwrap_or_default();
+            shared = Some(match shared {
+                None => dir,
+                Some(s) => s.iter().zip(&dir).take_while(|(a, b)| a == b).map(|(a, _)| a.clone()).collect(),
+            });
+        }
+        // Never a file system's root or a drive alone.
+        c.shared = shared.filter(|s| s.iter().filter(|x| !x.is_empty()).count() >= 2).map(|s| s.join("/"));
+        c
+    }
+
+    /// The checkout root above a file: the nearest folder with a `.git` in it.
+    fn root(&mut self, file: &str) -> Option<String> {
+        let dir = file.rsplit_once('/').map(|(d, _)| d.to_string())?;
+        if let Some(r) = self.roots.get(&dir) {
+            return r.clone();
+        }
+        let found = std::path::Path::new(&dir).ancestors().find(|a| !a.as_os_str().is_empty() && a.join(".git").exists()).map(|a| a.display().to_string().replace('\\', "/"));
+        self.roots.insert(dir, found.clone());
+        found
+    }
+
+    fn file(&mut self, f: &Frame) -> String {
+        let root = local_path(f).filter(|p| !dependency(p)).and_then(|p| self.root(&p)).or_else(|| self.shared.clone());
+        portable_in(f, root.as_deref())
+    }
+}
+
+/// A hotspots row's location (`file:///…/server/auth/util.ts:1:21`, a URL, a native frame's file) as
+/// two checkouts share it, without its line: `server/auth/util.ts`.
+pub(super) fn portable_location(at: &str) -> String {
+    let line = regex_lite::Regex::new(r"(:\d+){1,2}$").expect("pattern");
+    let at = line.replace(at, "").to_string();
+    let url = at.contains("://");
+    let f = Frame {
+        name: String::new(),
+        file: if url { String::new() } else { at.clone() },
+        line: 0,
+        column: 0,
+        url: if url { at.clone() } else { String::new() },
+        mapped: false,
+        name_from: None,
+        package: None,
+    };
+    let root = local_path(&f).filter(|p| !dependency(p)).and_then(|p| Checkout::default().root(&p));
+    portable_in(&f, root.as_deref())
+}
+
+fn portable_path(p: &str, root: Option<&str>) -> String {
+    let p = p.replace('\\', "/");
+    let p = p.strip_prefix("//?/").unwrap_or(&p);
     let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
     let from = |i: usize| parts[i..].join("/");
     // A JavaScript dependency: its package path (bun's `.bun/<pkg>@<version>/node_modules/` too).
@@ -286,22 +381,26 @@ fn portable_path(p: &str) -> String {
     if let Some(i) = parts.windows(2).rposition(|w| w == ["registry", "src"]).filter(|i| parts.len() > i + 3) {
         return format!("{}/{}", unversioned(parts[i + 3]), parts[i + 4..].join("/"));
     }
-    let rest: &[&str] = match parts.windows(2).rposition(|w| w == ["git", "checkouts"]) {
-        Some(i) if parts.len() > i + 4 => &parts[i + 4..],
-        _ => &parts,
-    };
-    // A git ref strobe checked out (`<state>/builds/<commit>/…`): the commit's folder names the
-    // checkout, so a file at its root keeps its own name alone.
-    let commit = |s: &str| (7..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit());
-    let rest: &[&str] = match rest.windows(2).rposition(|w| w[0] == "builds" && commit(w[1])) {
-        Some(i) if rest.len() > i + 2 => &rest[i + 2..],
-        _ => rest,
-    };
     // A build script's output: `<crate>-<16 hex>/out/…` keeps the crate.
     let hashless = |s: &str| match s.rsplit_once('-') {
         Some((n, h)) if h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()) => n.to_string(),
         _ => s.to_string(),
     };
+    let rest: &[&str] = match parts.windows(2).rposition(|w| w == ["git", "checkouts"]) {
+        Some(i) if parts.len() > i + 4 => return parts[i + 4..].iter().map(|s| hashless(s)).collect::<Vec<_>>().join("/"),
+        _ => &parts,
+    };
+    // A file of the side's own checkout: its whole path from the checkout's root (`/C:/…` from a URL is `C:/…`).
+    let bare = p.strip_prefix('/').filter(|q| q.as_bytes().get(1) == Some(&b':')).unwrap_or(p);
+    if let Some(rel) = root.and_then(|r| bare.strip_prefix(r)).and_then(|r| r.strip_prefix('/')) {
+        return rel.split('/').filter(|s| !s.is_empty()).map(hashless).collect::<Vec<_>>().join("/");
+    }
+    // A git ref strobe checked out (`<state>/builds/<commit>/…`) read where it is no longer: the path
+    // from the commit's folder, whole.
+    let commit = |s: &str| (7..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit());
+    if let Some(i) = rest.windows(2).rposition(|w| w[0] == "builds" && commit(w[1])).filter(|i| rest.len() > i + 2) {
+        return rest[i + 2..].iter().map(|s| hashless(s)).collect::<Vec<_>>().join("/");
+    }
     let tail = |i: usize| rest[i..].iter().map(|s| hashless(s)).collect::<Vec<_>>().join("/");
     if let Some(i) = rest.iter().rposition(|s| matches!(*s, "packages" | "crates" | "apps" | "library")) {
         return tail(i);
@@ -320,8 +419,8 @@ struct Portable {
 }
 
 impl Portable {
-    fn ids(&mut self, stacks: &Stacks) -> Vec<u32> {
-        stacks.frames.iter().map(|f| self.key((f.name.clone(), portable_file(f)))).collect()
+    fn ids(&mut self, stacks: &Stacks, at: &mut Checkout) -> Vec<u32> {
+        stacks.frames.iter().map(|f| self.key((f.name.clone(), at.file(f)))).collect()
     }
 
     fn key(&mut self, key: (String, String)) -> u32 {
@@ -382,7 +481,8 @@ fn weighted(sides: [Side; 2], kind: Kind, by: &str) -> Weighted {
     let mut rows: BTreeMap<(String, String), Row> = BTreeMap::new();
     let (mut total, mut samples) = ([0.0; 2], [0u64; 2]);
     for (s, side) in sides.iter().enumerate() {
-        let ids = portable.ids(side.stacks);
+        let mut checkout = Checkout::of(side.stacks);
+        let ids = portable.ids(side.stacks, &mut checkout);
         let mut packages = BTreeMap::new();
         for wt in &side.stacks.weights {
             let Some(f) = wt.stack.last().map(|&i| &side.stacks.frames[i as usize]) else { continue };
@@ -394,9 +494,9 @@ fn weighted(sides: [Side; 2], kind: Kind, by: &str) -> Weighted {
             let driven = super::Driven::of(&wt.stack, &side.stacks.frames);
             let (name, at) = match by {
                 "function" if driven == Some(super::Driven::Native) => (f.name.clone(), super::VIA_DRIVER.to_string()),
-                "function" => (f.name.clone(), portable_file(f)),
+                "function" => (f.name.clone(), checkout.file(f)),
                 _ if driven.is_some() => (driven.map_or("", super::Driven::label).to_string(), String::new()),
-                "file" if !f.file.is_empty() || !f.url.is_empty() => (portable_file(f), String::new()),
+                "file" if !f.file.is_empty() || !f.url.is_empty() => (checkout.file(f), String::new()),
                 _ => (super::row_key(f, by, &mut packages), String::new()),
             };
             let row = rows.entry((name.clone(), at.clone())).or_insert_with(|| Row { name, at, v: [0.0; 2], n: [0; 2], var: [0.0; 2], stacks: HashMap::new() });
@@ -589,9 +689,13 @@ pub fn series_insights(base: &Rec, head: &Rec, plan_runs: Option<u64>) -> Result
         }
     }
     let own = super::insights(head)?;
-    let theirs = super::insights(base).map(|o| o.json["insights"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
     let mut hits = own.json["insights"].as_array().cloned().unwrap_or_default();
-    let base_only = super::mark_sides(&mut hits, theirs);
+    // Head's hits are marked against base's only where base's recording was read: one that could not
+    // be says nothing of base.
+    let base_only = match super::insights(base) {
+        Ok(theirs) => super::mark_sides(&mut hits, &theirs.json),
+        Err(_) => Vec::new(),
+    };
     text += &super::hits_text(&hits);
     for b in &base_only {
         text += &format!("i base only: {}\n", b["title"].as_str().unwrap_or(""));
@@ -643,7 +747,7 @@ fn tree<const N: usize>(sides: [Side; N], kind: Kind) -> Value {
     let mut portable = Portable::default();
     let mut nodes = vec![Node { frame: u32::MAX, parent: usize::MAX, v: [0.0; N], kids: HashMap::new() }];
     for (s, side) in sides.iter().enumerate() {
-        let ids = portable.ids(side.stacks);
+        let ids = portable.ids(side.stacks, &mut Checkout::of(side.stacks));
         for wt in &side.stacks.weights {
             if wt.stack.last().is_none_or(|&i| skipped(&side.stacks.frames[i as usize].name)) {
                 continue;

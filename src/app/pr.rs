@@ -16,8 +16,8 @@ mod summary;
 use crate::model::{self, Better, Error, Result, VerdictKind};
 use crate::stats;
 use crate::store;
-pub(crate) use extract::judged;
 use extract::*;
+pub(crate) use extract::{judged, public};
 use github::*;
 pub use github::{Updated, head_commit, hero_level, relevel, splice, update_pr};
 pub use implementations::{claim, cpu_scope, factor_or_pct, fairness, range_x, ready_noun};
@@ -178,7 +178,7 @@ fn framed(r: &Value, level: u8) -> String {
     let bottom = format!("<sub>strobe · {id} · end of generated report</sub>");
     let body = if r["kind"] == "bisect" { bisect(r) } else { Doc::new(r, level).render() };
     // No machine's paths and no other process's name in a pull request, whatever a note or a refusal quoted.
-    format!("{top}\n\n{}\n\n{bottom}", scrub_public(&scrub_paths(body.trim())))
+    format!("{top}\n\n{}\n\n{bottom}", public(body.trim()))
 }
 
 /// `strobe 0.6.0 (a1b2c3d4e5)`: Cargo.toml's version and, for a build from a checkout, its commit, so
