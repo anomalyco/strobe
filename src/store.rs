@@ -555,7 +555,9 @@ pub fn read_named_json(path: &Path) -> Result<Value> {
     if head[..n].iter().find(|c| !c.is_ascii_whitespace()) != Some(&b'{') {
         return Err(Error::usage(format!("{shown}: not a result.json or meta.json (no JSON object)")));
     }
-    let bytes = std::fs::read(path)?;
+    // The rest from the same handle: one open, one read, one parse.
+    let mut bytes = head[..n].to_vec();
+    f.take(MAX_NAMED_JSON).read_to_end(&mut bytes)?;
     // serde_json's own limit (128 levels) refuses a deeper file with an error, not a stack overflow.
     serde_json::from_slice(&bytes).map_err(|e| Error::usage(format!("{shown}: not a result.json or meta.json strobe can read: {e}")))
 }
