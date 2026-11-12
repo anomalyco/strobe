@@ -245,7 +245,9 @@ impl OsInput {
             c.resized(&pids);
         }
         // The page's resize events come on its next frames.
-        page.eval("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))")?;
+        if super::hidden(&page.eval(super::NEXT_FRAME)?) {
+            return Err(super::page_hidden("the frames after strobe sized the window"));
+        }
         let (old, new) = (self.frame.get(), self.poster.frame(w.hwnd)?);
         let view = viewport(page)?;
         let at = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(0.0);
@@ -467,26 +469,40 @@ impl OsInput {
     }
 
     /// The last trusted pointer move the page saw, once one came within `t` and no other followed for
-    /// 50 ms: a move posted before (the one from beside the point) may reach the page only with the
-    /// next, in one frame's dispatch (macOS Chromium: probe 1 then read the move from beside it, 3
-    /// units off, and every case of a page measured from outside was refused InputMismatch).
+    /// `MOVE_QUIET`: a move posted before (the one from beside the point) may reach the page only with
+    /// the next, in one frame's dispatch (macOS Chromium: probe 1 then read the move from beside it, 3
+    /// units off, and every case of a page measured from outside was refused InputMismatch). Moves are
+    /// counted by the page's uncapped trusted-move count (`SCRIPT`'s `n`), and the wait ends by
+    /// `t + MOVE_QUIET` whatever comes: moves that keep arriving past it are someone else's (a person,
+    /// a trackpad's inertia, another program), and the map cannot tell which landing was strobe's.
     fn wait_move(&self, page: &Page, t: Duration) -> Result<Option<[f64; 2]>> {
-        let until = Instant::now() + t;
-        let mut seen: Option<(Value, Instant)> = None;
+        const MOVE_QUIET: Duration = Duration::from_millis(50);
+        let start = Instant::now();
+        let (until, hard) = (start + t, start + t + MOVE_QUIET);
+        // (moves counted, the last landing) as last read, and when that changed.
+        type Read = (u64, Option<[f64; 2]>);
+        let mut seen: Option<(Read, Instant)> = None;
+        let mut changes = 0u32;
         loop {
-            let v = page.eval("JSON.stringify([__strobeOs.moves.length, __strobeOs.moves.at(-1) ?? null])")?;
+            let v = page.eval(&format!("JSON.stringify([__strobeOs.n[{MOVE}], __strobeOs.moves.at(-1) ?? null])"))?;
             let now = Instant::now();
-            if seen.as_ref().is_none_or(|(was, _)| *was != v) {
-                seen = Some((v.clone(), now));
+            let read = v.as_str().and_then(|s| serde_json::from_str::<Read>(s).ok()).unwrap_or((0, None));
+            if seen.as_ref().is_none_or(|(was, _)| *was != read) {
+                changes += u32::from(seen.is_some());
+                seen = Some((read, now));
             }
-            let last = seen.as_ref().and_then(|(v, _)| v.as_str()).and_then(|s| serde_json::from_str::<(usize, Option<[f64; 2]>)>(s).ok()).and_then(|(_, p)| p);
-            if let (Some(p), Some((_, since))) = (last, &seen)
-                && now.duration_since(*since) >= Duration::from_millis(50)
-            {
-                return Ok(Some(p));
-            }
-            if last.is_none() && now >= until {
-                return Ok(None);
+            let since = seen.as_ref().map_or(now, |(_, at)| *at);
+            match read.1 {
+                Some(p) if now.duration_since(since) >= MOVE_QUIET => return Ok(Some(p)),
+                Some(_) if now >= hard => {
+                    return Err(refused(format!(
+                        "pointer moves kept reaching the page while strobe mapped it ({changes} changes in {} ms, the last {} ms ago): something else moves the pointer (a person, a trackpad's inertia, another program), so strobe cannot tell where its own move landed",
+                        now.duration_since(start).as_millis(),
+                        now.duration_since(since).as_millis()
+                    )));
+                }
+                None if now >= until => return Ok(None),
+                _ => {}
             }
             std::thread::sleep(Duration::from_millis(5));
         }

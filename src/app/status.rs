@@ -65,12 +65,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let webkit = [false, true].into_iter().any(|h| crate::target::webkit::find(h).is_some());
     let webkit_text = crate::target::webkit::describe();
     let bun = runner::find_bun();
-    let bun_version = bun.as_ref().and_then(|b| host::output(std::process::Command::new(b).arg("--version")));
-    // Under Bun 1.3 Playwright's connectOverCDP never connects (the runner refuses ctx.playwright there).
-    let bun_old = bun_version.as_deref().is_some_and(|v| {
-        let n: Vec<u32> = v.split(['.', '-', '+']).take(3).map_while(|p| p.parse().ok()).collect();
-        n.len() == 3 && (n[0], n[1]) < (1, 4)
-    });
+    let (bun_version, bun_old) = bun.as_deref().and_then(runner::bun_version).map_or((None, false), |(v, old)| (Some(v), old));
     let state: Value = std::fs::read_to_string(host::paths::state_dir().join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let recordings = store::list("rec", 5);
     let experiments = store::list("exp", 5);
@@ -224,7 +219,7 @@ pub fn run(args: &Args) -> Result<Output> {
         mark(bun.is_some() && !bun_old),
         bun.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into()),
         bun_version.as_deref().map(|v| format!(" · {v}")).unwrap_or_default(),
-        if bun_old { " (ctx.playwright needs Bun 1.4.0 or later: bun upgrade)" } else { "" }
+        if bun_old { " (ctx.playwright needs Bun 1.4.0 or later: update this Bun)" } else { "" }
     );
     t += &format!("  {} deep       {}\n", mark(deep.presents() && deep.helper), deep_text);
     t += &format!("  {} native     {}\n", mark(native_ok), native_text);

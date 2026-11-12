@@ -152,6 +152,26 @@ impl Typing {
 /// frame pacer does) and so delay the driver's waits on its own schedule.
 pub const NATIVE_RAF: &str = "window.__strobeRaf ??= window.requestAnimationFrame.bind(window)";
 
+/// `__strobe.frame()` for a page evaluated without strobe's helper (any engine): the next frame, or
+/// "hidden" once the page has been hidden for 200 ms.
+pub const NEXT_FRAME: &str = "new Promise((r) => { const raf = window.__strobeRaf ?? requestAnimationFrame.bind(window); let done = false, since = null, t = 0; const end = (v) => { if (!done) { done = true; clearTimeout(t); r(v) } }; raf(() => raf(() => end(true))); const look = () => { if (done) return; if (!document.hidden) since = null; else if ((since ??= performance.now()) <= performance.now() - 200) return end('hidden'); t = setTimeout(look, 100) }; look() })";
+
+/// Whether a frame wait answered that the page is hidden (`__strobe.frame`, `NEXT_FRAME`).
+pub fn hidden(v: &Value) -> bool {
+    v.as_str() == Some("hidden")
+}
+
+/// `WindowHidden` for a frame wait on a page that became hidden (`document.hidden`): the browser draws
+/// it no frames, so the wait would never end (macOS Chromium hides a popup's opener; it hung 60 s).
+pub fn page_hidden(what: &str) -> Error {
+    Refusal::window_hidden(
+        crate::model::Hidden::Other,
+        format!("{what}: the page became hidden (document.visibilityState is \"hidden\": a popup or another window over it, minimized, a background tab, or the display off), and a hidden page draws no frames"),
+    )
+    .fix("keep the page visible while strobe waits for its frames: close a popup the case opened before such a wait, or measure the case without frame metrics")
+    .into()
+}
+
 /// Installed in every document of a page strobe drives over DevTools or WebDriver on this computer (not
 /// through the OS, not on a phone) before its scripts run: when a key last went down or up in it, on the
 /// document's own monotonic clock (`performance.now`, bound before the page's scripts could replace it;
@@ -619,7 +639,20 @@ pub(crate) const HELPER: &str = r#"window.__strobe ??= (() => {
     const v = !el ? null : /^(input|textarea|select)$/.test(el.localName) ? el.value : (el.innerText ?? el.textContent)
     return v == null ? null : String(v).trim().replace(/\s+/g, " ")
   }, () => null)
-  s.frame = () => new Promise((r) => raf(() => raf(() => r(true))))
+  // The next frame, or "hidden" once the page has been hidden for 200 ms (a hidden page draws none: on
+  // macOS a popup hides its opener). Its one timer is cleared at the frame, before it fires.
+  s.frame = () => new Promise((r) => {
+    let done = false, since = null, t = 0
+    const end = (v) => { if (!done) { done = true; clearTimeout(t); r(v) } }
+    raf(() => raf(() => end(true)))
+    const look = () => {
+      if (done) return
+      if (!document.hidden) since = null
+      else if ((since ??= performance.now()) <= performance.now() - 200) return end("hidden")
+      t = setTimeout(look, 100)
+    }
+    look()
+  })
   // Between paced keys where strobe follows no presents: the frame after the key, then until a frame passes
   // with no DOM change; true when one did within `ms`, false while the page kept changing.
   s.settled = (ms) => new Promise((r) => {
@@ -1474,7 +1507,13 @@ impl Driver {
             self.frame_ms.set(Some(ms));
             return Ok(ms);
         }
-        let t = self.wait("new Promise((r) => { const raf = window.__strobeRaf ?? requestAnimationFrame.bind(window); const t = []; const f = (ts) => { t.push(ts); if (t.length < 11) raf(f); else r(t) }; raf(f) })", Duration::from_secs(5))?;
+        let t = self.wait(
+            "new Promise((r) => { const raf = window.__strobeRaf ?? requestAnimationFrame.bind(window); const t = []; let done = false, since = null, h = 0; const end = (v) => { if (!done) { done = true; clearTimeout(h); r(v) } }; const f = (ts) => { t.push(ts); if (t.length < 11) raf(f); else end(t) }; raf(f); const look = () => { if (done) return; if (!document.hidden) since = null; else if ((since ??= performance.now()) <= performance.now() - 200) return end('hidden'); h = setTimeout(look, 100) }; look() })",
+            Duration::from_secs(5),
+        )?;
+        if hidden(&t) {
+            return Err(page_hidden("the display's frame period (ten of the page's frames, before paced input)"));
+        }
         let ts: Vec<f64> = t.as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
         let mut d: Vec<f64> = ts.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0.0).collect();
         d.sort_by(f64::total_cmp);
@@ -1912,7 +1951,9 @@ impl Driver {
             return Ok((0.0, 0.0, true));
         }
         if scrolled {
-            self.call("__strobe.frame()")?;
+            if hidden(&self.call("__strobe.frame()")?) {
+                return Err(page_hidden("the frame after scrolling the element into view"));
+            }
             b = self.read(&expr, t)?;
             let frames = self.refresh.get() * 2;
             match self.os.get() {
@@ -1978,7 +2019,10 @@ impl Driver {
         match opts.get("until") {
             None | Some(Value::Null) => Ok(Value::Bool(true)),
             Some(Value::String(u)) if u == "idle" => self.wait(&format!("__strobe.idle(300, {})", t.as_millis()), t),
-            Some(Value::String(u)) if u == "frame" => self.call("__strobe.frame()"),
+            Some(Value::String(u)) if u == "frame" => {
+                let v = self.call("__strobe.frame()")?;
+                if hidden(&v) { Err(page_hidden("until: \"frame\"")) } else { Ok(v) }
+            }
             Some(Value::String(u)) if u == "animations" => self.wait(&format!("__strobe.animations({})", t.as_millis()), t),
             Some(u) => self.wait_for(&Self::sel(u)?, t),
         }

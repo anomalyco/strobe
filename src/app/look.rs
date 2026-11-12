@@ -564,11 +564,15 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         return terminal(args, line);
     }
-    // A running process or browser is record's to attach to: never a page address to navigate to.
-    if let Some(kind) = ["pid:", "cdp:"].into_iter().find(|k| target.starts_with(k)) {
-        return Err(Error::usage(format!(
-            "look opens a page or launches an app, so it takes no {kind} target: strobe look <url | file | wir:[sel] | app:<id> | exe:<path> | tty:<command>>; strobe record {target} attaches to what runs"
-        )));
+    // A running process or browser is record's to attach to, and a script runtime a bench's: never a
+    // page address to navigate to.
+    const LOOKS: &str = "look opens a page, launches an app or reads an iPhone's Safari tab (wir:)";
+    const USAGE: &str = "strobe look <url | file | wir:[sel] | app:<id> | exe:<path> | tty:<command>>";
+    if let Some(kind) = ["pid:", "proc:", "cdp:", "ws://"].into_iter().find(|k| target.starts_with(k)) {
+        return Err(Error::usage(format!("{LOOKS}, so it takes no {kind} target: {USAGE}; strobe record {target} attaches to what runs")));
+    }
+    if let Some(kind) = ["node:", "bun:"].into_iter().find(|k| target.starts_with(k)) {
+        return Err(Error::usage(format!("{LOOKS}, so it takes no {kind} target: {USAGE}; a script runs in a bench file's script() target, and a running one is strobe record pid:<pid>")));
     }
     for tty_only in ["type", "press"] {
         if args.has(tty_only) {

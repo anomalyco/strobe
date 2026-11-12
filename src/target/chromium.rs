@@ -287,17 +287,10 @@ pub fn last_words(log: &Path) -> String {
     format!(": {}", lines[lines.len().saturating_sub(3)..].join(" · "))
 }
 
-/// A browser that opened no port in 30 s: when it used no CPU at all (macOS held it before its first
-/// instruction, as Gatekeeper does with an app not yet opened since it was downloaded or updated:
-/// the kernel logs 'Security policy would not allow process'), the error says so and is no passing
-/// failure; else the passing `waited` error (a browser slow under load), which a bench retries.
-pub fn no_port(pid: u32, exe: &Path, waited: String) -> Error {
-    if cfg!(target_os = "macos") && host::process_cycles(pid).is_some_and(|ns| ns < 10_000_000) {
-        let app = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).unwrap_or(exe);
-        return Error::msg(format!("{waited}: it never ran (no CPU time): macOS held it at launch"))
-            .hint(format!("open {} once from the Finder and allow it (Gatekeeper asks a person after a download or an update), then run again", app.display()));
-    }
-    Error::unreachable(waited)
+/// A browser that opened no port in time: held at launch on macOS (`isolate::held_at_launch`, exit 3),
+/// else the passing `waited` error (a browser slow under load), which a bench retries.
+pub fn no_port(pid: u32, profile: &Path, exe: &Path, waited: String) -> Error {
+    super::isolate::held_at_launch(pid, Some(profile), exe, &waited).unwrap_or_else(|| Error::unreachable(waited))
 }
 
 /// Launches a fresh Chromium. `cpus`, when set, is the affinity mask the browser and its children get.
@@ -388,7 +381,7 @@ pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, extra: &[St
             return Err(Error::msg(format!("{} exited ({code}) before it opened its debugging port{}", exe.display(), last_words(&log))));
         }
         if std::time::Instant::now() > deadline {
-            return Err(no_port(pid, &exe, format!("Chromium did not open its debugging port in 30 s{}", last_words(&log))));
+            return Err(no_port(pid, &profile, &exe, format!("Chromium did not open its debugging port in 30 s{}", last_words(&log))));
         }
         std::thread::sleep(Duration::from_millis(25));
     };

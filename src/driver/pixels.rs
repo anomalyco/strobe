@@ -369,15 +369,22 @@ impl Pixels {
     fn not_found(&self, a: &Anchor, found: &Found, shot: Shot, rect: [f64; 4], t: Duration, src: &dyn Source) -> Error {
         let best = match found.best {
             // `image::find`'s colour check: a place that matched the shape at the threshold, in other colours.
-            Some(b) if found.colour.is_some() => format!(
-                "; the best place matched its shape (score {:.3}) at ({:.0}, {:.0}) in the {} but not its colours: {:.0} apart per channel, over the {:.0} the threshold allows",
-                b.score,
-                rect[0] + b.x / shot.scale,
-                rect[1] + b.y / shot.scale,
-                src.what(),
-                found.colour.unwrap_or_default(),
-                (1.0 - a.threshold) * 510.0 + 8.0
-            ),
+            Some(b) if found.colour.is_some() => {
+                // The limit `image::find` holds the mean difference to, and the difference with as many
+                // decimals as it takes to print above it (33.54 against 33.5 is "33.54", not "33.5").
+                let allow = (1.0 - a.threshold) * 510.0 + 8.0;
+                let allowed = format!("{allow:.2}").trim_end_matches('0').trim_end_matches('.').to_string();
+                let shown: f64 = allowed.parse().unwrap_or(allow);
+                let d = found.colour.unwrap_or_default();
+                let apart = (1..=3).map(|n| format!("{d:.n$}")).find(|s| s.parse::<f64>().is_ok_and(|v| v > shown)).unwrap_or_else(|| format!("{d:.3}"));
+                format!(
+                    "; the best place matched its shape (score {:.3}) at ({:.0}, {:.0}) in the {} but not its colours: {apart} apart per channel, over the {allowed} the threshold allows",
+                    b.score,
+                    rect[0] + b.x / shot.scale,
+                    rect[1] + b.y / shot.scale,
+                    src.what(),
+                )
+            }
             Some(b) => format!("; the best place scored {:.3} at ({:.0}, {:.0}) in the {}", b.score, rect[0] + b.x / shot.scale, rect[1] + b.y / shot.scale, src.what()),
             None => "; the image is larger than where strobe looked".to_string(),
         };

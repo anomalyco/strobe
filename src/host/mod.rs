@@ -1856,14 +1856,11 @@ pub fn display_of(hwnd: isize) -> Option<DisplayPath> {
     }
 }
 
-/// Finds an executable: in the given candidate paths, then on PATH (`~/.bun/bin/bun` wins over a
-/// `bun` earlier on PATH).
+/// Finds an executable: on PATH, as the user's shell would, then in the given candidate paths (known
+/// install places, for a desktop-app shell or a launchd job whose PATH lacks them, §2).
 pub fn find_exe(name: &str, candidates: &[PathBuf]) -> Option<PathBuf> {
-    if let Some(found) = candidates.iter().find(|p| p.is_file()) {
-        return Some(found.clone());
-    }
     let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|p| p.join(&exe)).find(|p| p.is_file()))
+    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|p| p.join(&exe)).find(|p| p.is_file())).or_else(|| candidates.iter().find(|p| p.is_file()).cloned())
 }
 
 /// Runs a command and returns stdout when it succeeds.

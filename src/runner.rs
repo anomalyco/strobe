@@ -38,10 +38,39 @@ pub fn sdk_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Whether a Bun version is before 1.4.0 by SemVer's order (a pre-release of 1.4.0 is before it), under
+/// which Playwright's `connectOverCDP` never connects (the runner's `beforeBun14`, the same rule). A
+/// version with no three numbers (a custom build) is not called old.
+pub fn before_bun_14(version: &str) -> bool {
+    let full = version.trim();
+    let core_pre = full.split('+').next().unwrap_or(full);
+    let (core, pre) = core_pre.split_once('-').map_or((core_pre, false), |(c, _)| (c, true));
+    let n: Vec<u64> = core.split('.').take(3).map_while(|p| p.parse().ok()).collect();
+    if n.len() < 3 {
+        return false;
+    }
+    (n[0], n[1]) < (1, 4) || ((n[0], n[1], n[2]) == (1, 4, 0) && pre)
+}
+
+/// The Bun version as its own `--version` prints it, and whether it is before 1.4.0, for `status` and
+/// `up`: `(version, old)`.
+pub fn bun_version(bun: &std::path::Path) -> Option<(String, bool)> {
+    host::output(std::process::Command::new(bun).arg("--version")).map(|v| {
+        let old = before_bun_14(&v);
+        (v, old)
+    })
+}
+
+/// The Bun that runs bench files: the one on PATH (the user's `bun`), else Bun's own installer's
+/// place, else Homebrew's on macOS (a desktop app's or launchd's PATH may hold neither).
 pub fn find_bun() -> Option<PathBuf> {
     let home = host::home();
     let exe = if cfg!(windows) { "bun.exe" } else { "bun" };
-    host::find_exe("bun", &[home.join(".bun").join("bin").join(exe)])
+    let mut places = vec![home.join(".bun").join("bin").join(exe)];
+    if cfg!(target_os = "macos") {
+        places.extend(["/opt/homebrew/bin/bun", "/usr/local/bin/bun"].map(PathBuf::from));
+    }
+    host::find_exe("bun", &places)
 }
 
 /// A bench hook that failed, as `RunIncomplete`: `what` names it once (the runner's own `<op>: `

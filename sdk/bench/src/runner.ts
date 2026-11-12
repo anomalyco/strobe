@@ -515,7 +515,7 @@ const prepareContext = () => seeded({
   root: state.root,
   get playwright() {
     if (state.engine === "chromium") {
-      if (state.playwrightError) throw state.playwrightError
+      if (state.playwrightError !== null) throw state.playwrightError
       if (!state.playwright) throw new Error(`ctx.playwright needs Playwright: install playwright or @playwright/test next to ${file}`)
       return state.playwright
     }
@@ -603,15 +603,40 @@ async function playwright(endpoint: string, target: string) {
   if (!resolved) return null
   // Under Bun 1.3 Playwright's DevTools WebSocket never opens: connectOverCDP waits out its 30 s and
   // times out (macOS and Windows, Playwright 1.56 and 1.65; Bun 1.4.0 connects in about 0.1 s).
-  if (Bun.semver.order(Bun.version, "1.4.0") < 0)
-    throw Object.assign(new Error(`ctx.playwright needs Bun 1.4.0 or later: under Bun ${Bun.version} Playwright's connectOverCDP never connects to the browser (it times out after 30 s)`), {
-      hint: "update Bun (bun upgrade), which runs bench files; a prepare that uses only ctx.addInitScript and ctx.mock works under this Bun",
+  if (beforeBun14(Bun.version))
+    throw Object.assign(new Error(`ctx.playwright needs Bun 1.4.0 or later: under Bun ${Bun.version} (${process.execPath}) Playwright's connectOverCDP never connects to the browser (it times out after 30 s)`), {
+      hint: `update the Bun strobe runs bench files with, ${process.execPath} (strobe takes the first bun on PATH, else ~/.bun/bin's): \`${process.execPath} upgrade\` for Bun's own install, else its package manager; a prepare that uses only ctx.addInitScript and ctx.mock works under this Bun`,
     })
   // A bench path canonicalized on Windows starts with \\?\, which Bun's import() cannot load.
   const { chromium } = await import(resolved.replace(/^\\\\\?\\/, ""))
   const browser = await chromium.connectOverCDP(endpoint)
-  const context = browser.contexts()[0]
-  return { browser, context, page: await strobePage(context, target) }
+  try {
+    const context = browser.contexts()[0]
+    if (!context) throw new Error("Playwright saw no browser context to attach to")
+    return { browser, context, page: await strobePage(context, target) }
+  } catch (e) {
+    await browser.close().catch(() => {})
+    throw e
+  }
+}
+
+// Ends the block's own connections to its browser (the Fetch session, Playwright, another engine's
+// relay) and forgets them, so no later block's hook sees them.
+async function dropBlockConnections() {
+  if (state.session) await state.session.detach().catch(() => {})
+  if (state.playwright) await state.playwright.browser.close().catch(() => {})
+  if (state.relay) state.relay.end()
+  Object.assign(state, { playwright: null, playwrightError: null, session: null, mocks: [], relay: null, devtools: null })
+}
+
+// Whether a Bun version is before 1.4.0 by SemVer's order (a pre-release of 1.4.0 is before it), read
+// from its numbers as `strobe status` reads them: no Bun.semver (Bun 1.0.15+, and it throws on a custom
+// build's version). A version with no three numbers is not called old.
+function beforeBun14(version: string) {
+  const [core, ...pre] = version.split("+")[0].split("-")
+  const n = core.split(".").map(Number)
+  if (n.length < 3 || n.slice(0, 3).some((x) => !Number.isInteger(x))) return false
+  return n[0] < 1 || (n[0] === 1 && n[1] < 4) || (n[0] === 1 && n[1] === 4 && n[2] === 0 && pre.length > 0)
 }
 
 // The page strobe drives, by CDP target id: Playwright may attach to pages late, and a page of
@@ -778,6 +803,8 @@ async function handle(op: string, args: any) {
         }
       })
     case "block":
+      // A block that ended before its `close` (a refusal, a retry, a hook that threw) left its connections.
+      await dropBlockConnections()
       Object.assign(state, {
         caseSeed: mix(state.seed, `${args.case ?? ""}\n${canonical(args.params ?? {})}`),
         case: args.case ?? "",
@@ -873,10 +900,7 @@ async function handle(op: string, args: any) {
       await Promise.resolve(spec.teardown?.(context())).catch((e) => errors.push(e))
       stream("target-teardown")
       await Promise.resolve(spec.targets[state.target]?.teardown?.(prepareContext())).catch((e) => errors.push(e))
-      if (state.session) await state.session.detach().catch(() => {})
-      if (state.playwright) await state.playwright.browser.close().catch(() => {})
-      if (state.relay) state.relay.end()
-      Object.assign(state, { playwright: null, playwrightError: null, session: null, mocks: [], relay: null, devtools: null })
+      await dropBlockConnections()
       if (errors.length) throw new AggregateError(errors, `teardown failed: ${errors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`)
       return true
     }

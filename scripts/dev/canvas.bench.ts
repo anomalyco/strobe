@@ -60,9 +60,10 @@ export default bench({
   },
   async setup({ page, target }) {
     if (target === "page") {
-      // Keys reach a page only once it has the focus: a click on the canvas's empty right edge gives it
-      // (not its corner: on macOS a press 10 px inside the window's corner starts a resize, and the page gets none).
-      await page.click([570, 120])
+      // Keys reach a page only once it has the focus: a click on the canvas's empty strip below the bars
+      // gives it (not its corner: on macOS a press 10 px inside the window's corner starts a resize, and the
+      // page gets none).
+      await page.click([300, 340])
       // At the page's own scale, as its canvas draws them (a 1x tile scaled up matches no sharp one).
       pageScale = await page.eval(() => devicePixelRatio)
       for (const name of ["play", "item", "square", "missing"]) {

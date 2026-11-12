@@ -334,7 +334,7 @@ pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, emulation: 
             return Err(Error::msg(format!("{} exited ({code}) before it opened its WebDriver BiDi port{}", exe.display(), super::chromium::last_words(&log))));
         }
         if std::time::Instant::now() > deadline {
-            return Err(super::chromium::no_port(pid, &exe, format!("Firefox did not open its WebDriver BiDi port in 30 s{}", super::chromium::last_words(&log))));
+            return Err(super::chromium::no_port(pid, &profile, &exe, format!("Firefox did not open its WebDriver BiDi port in 30 s{}", super::chromium::last_words(&log))));
         }
         std::thread::sleep(Duration::from_millis(25));
     };

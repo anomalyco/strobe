@@ -629,6 +629,31 @@ impl Guard {
 /// What a guard holds for a file it may not read.
 const UNREADABLE: &str = "\u{0}strobe: unreadable";
 
+/// A launch that never showed what it waited for (`waited`: a debugging port, a window): on macOS, when
+/// nothing launched for it ran (the root `pid` and every process of its set by `home`, under 1 ms of
+/// CPU in all), macOS held it before its first instruction, as Gatekeeper does with an app not yet
+/// opened since it was downloaded or updated (the kernel logs 'Security policy would not allow
+/// process'). On air a held Firefox had used 0.32 ms (its exec, in the kernel) after 5 s, and the
+/// smallest program that ran and then slept (`sleep`) 1.55 ms. That needs a person: exit 3 with the
+/// step, never retried. Else `None`: a slow launch, which a bench retries. A wrapper script that
+/// started the app is not held: the app's CPU counts.
+pub fn held_at_launch(pid: u32, home: Option<&Path>, exe: &Path, waited: &str) -> Option<Error> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let set = host::process_set(pid, home);
+    let ns: u64 = set.iter().map(|p| p.cpu_ns).sum();
+    if set.is_empty() || ns >= 1_000_000 {
+        return None;
+    }
+    let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
+    let step = match bundle {
+        Some(app) => format!("open {} once from the Finder and allow it (if macOS still refuses, allow it in System Settings > Privacy & Security > Open Anyway), then run again", app.display()),
+        None => format!("allow {} in System Settings > Privacy & Security > Open Anyway, then run again", exe.display()),
+    };
+    Some(Error::new(3, format!("{waited}; it used {:.1} ms of CPU in all, so macOS held it at launch (Gatekeeper asks a person after a download or an update)", ns as f64 / 1e6)).hint(step))
+}
+
 pub fn alive(pid: u32) -> bool {
     host::exe_of(pid).is_some()
 }

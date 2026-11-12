@@ -116,7 +116,11 @@ pub fn run(args: &Args) -> Result<Output> {
         s.line(mark, &if i == 0 { "android".to_string() } else { format!("android {}", i + 1) }, line);
     }
     match runner::find_bun() {
-        Some(p) => s.line("✓", "bun", p.display().to_string()),
+        Some(p) => match runner::bun_version(&p) {
+            Some((v, true)) => s.line("!", "bun", format!("{} · {v} (ctx.playwright needs Bun 1.4.0 or later: update this Bun)", p.display())),
+            Some((v, false)) => s.line("✓", "bun", format!("{} · {v}", p.display())),
+            None => s.line("✓", "bun", p.display().to_string()),
+        },
         None => s.line("!", "bun", "missing: bench files need Bun (https://bun.sh)"),
     }
     if check {

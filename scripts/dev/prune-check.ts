@@ -388,9 +388,12 @@ try {
   const st2 = strobe("status", "--fast", "--disk", "--json").json.disk
   check(within(st2.total_bytes - st2.outside_bytes, truth2, 1), "status total after pruning = du (1%)", `strobe ${st2.total_bytes - st2.outside_bytes}, du ${truth2}`)
 } finally {
+  // One holder that already ended (ESRCH) must not keep the rest, or the unmounts, from running.
   for (const h of holders) {
-    if (win || !h.pid) h.kill()
-    else process.kill(-h.pid)
+    try {
+      if (win || !h.pid) h.kill()
+      else process.kill(-h.pid)
+    } catch {}
   }
   if (root) {
     spawnSync("umount", [mountDir])

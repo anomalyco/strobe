@@ -490,8 +490,14 @@ const LAUNCH_RETRIES: u32 = 3;
 /// as opposed to a run that failed or a validator that refused.
 fn transient(e: &Error) -> bool {
     // Unreachable (255): no debugging port, a connection that closed. A timeout (124) only from CDP or
-    // BiDi: a call with no reply; a hook or a wait that timed out is the bench's own.
-    e.validator().is_none() && !bad_address(e) && (e.code == 255 || (e.code == 124 && (e.message.starts_with("cdp ") || e.message.starts_with("bidi "))))
+    // BiDi: a call with no reply; a hook or a wait that timed out is the bench's own. Not an evaluation
+    // in the page that never ended: the browser answered, the page's own work (a promise it never
+    // settled: a frame wait on a page that stopped drawing, mac-4) did not, and a new launch meets the
+    // same page (macOS: a popup's opener hidden, 6 minutes a case in 4 tries).
+    const IN_PAGE: [&str; 5] = ["cdp Runtime.evaluate:", "cdp Runtime.callFunctionOn:", "cdp Runtime.awaitPromise:", "bidi script.evaluate:", "bidi script.callFunction:"];
+    e.validator().is_none()
+        && !bad_address(e)
+        && (e.code == 255 || (e.code == 124 && (e.message.starts_with("cdp ") || e.message.starts_with("bidi ")) && !IN_PAGE.iter().any(|p| e.message.starts_with(p))))
 }
 
 /// A navigation the browser refused for its address (a port it blocks, a scheme or URL it cannot
@@ -7360,6 +7366,8 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let nav_at = Cell::new(f64::NAN);
         let doc_expected: Cell<Option<f64>> = Cell::new(None);
         let doc_lost = Cell::new(false);
+        // Per series: runs that ended on a page left hidden, with no frame waited for (`PageHidden`).
+        let hidden_ends: RefCell<BTreeMap<String, u32>> = RefCell::new(BTreeMap::new());
         let counters = || -> [f64; 6] {
             // Chromium's Performance domain; an engine without it has no such counters (NaN, never 0).
             let m = page.cdp().map_or(Value::Null, |p| p.send("Performance.getMetrics", json!({})).unwrap_or(Value::Null));
@@ -8136,8 +8144,19 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // step: its frames come from a clock of the browser's own, which with the display off took
             // 60 to 165 ms for two (SPEC 7.2); the frame is waited for after the run, untimed.
             let frame_after = !outside && !hooks.ended_untimed();
-            if frame_after && !headless {
-                driver.dispatch("frame", &[])?;
+            // A page the run left hidden (macOS hides a popup's opener) draws no frame: a series that
+            // reads frames refuses, and one that does not ends the run at its last step, said once
+            // (`PageHidden`). A frame wait that times out is the run's, never a failed launch.
+            let frame_wait = |what: &str| {
+                driver
+                    .dispatch("frame", &[])
+                    .map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), what, e, "", "the page drew no frame after the run; see what keeps its main thread busy"))
+            };
+            if frame_after && !headless && crate::driver::hidden(&frame_wait("frame")?) {
+                if let Some(m) = declared_metrics(s).into_iter().find(|m| validity::display_metric(m)) {
+                    return Err(crate::driver::page_hidden(&format!("{} run, which declares {m}", s.case)));
+                }
+                *hidden_ends.borrow_mut().entry(s.label()).or_insert(0) += 1;
             }
             let t1 = host::now_ns();
             let (fast1, tsc1) = fast_read(true);
@@ -8161,7 +8180,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // holds its frame. What the frame did after `c1` is what `HeadlessFrame` names.
             let mut left = (f64::NAN, f64::NAN);
             if frame_after && headless {
-                driver.dispatch("frame", &[])?;
+                frame_wait("frame")?;
                 let c2 = counters();
                 left = (c2[2] - c1[2] + c2[3] - c1[3], c2[4] - c1[4]);
                 if c2.iter().all(|v| v.is_finite()) {
@@ -9022,6 +9041,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             fmt::value(work_ms, "ms"),
                             missed.join(", "),
                             if missed.len() == 1 { "does" } else { "do" },
+                        ),
+                    ));
+                }
+                let hidden_runs = hidden_ends.borrow().get(&s.label()).copied().unwrap_or(0);
+                if hidden_runs > 0 && !ctx.warnings.iter().any(|w| w.id == "PageHidden" && w.text.starts_with(&s.label())) {
+                    ctx.warnings.push(validity::warn(
+                        "PageHidden",
+                        format!(
+                            "{}: {hidden_runs} run(s) left the page hidden (document.visibilityState \"hidden\": on macOS a popup hides its opener), and a hidden page draws no frame, so those runs ended at their last step without the frame a visible page's run ends with; keep the page visible (close the popup in the run) to time that frame",
+                            s.label()
                         ),
                     ));
                 }
