@@ -447,6 +447,11 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         if !s["display"].is_null() {
             fingerprint["native_display"] = s["display"].clone();
         }
+        // A command series whose line the shell ran (`Block::shelled`): the shell's start-up is in its time
+        // and CPU, so it is another history. Only when so, so every direct series keeps its identity.
+        if blocks_v.iter().any(|b| b["shelled"] == true) {
+            fingerprint["shell_line"] = json!(true);
+        }
         let runtimes = script_runtimes(r, s, &[(s["target"].as_str().unwrap_or(""), None)]);
         runtime_fingerprint(&runtimes, &mut fingerprint);
         motion_fingerprint(r, s, &mut fingerprint);

@@ -908,6 +908,11 @@ pub fn measures(runtime: Runtime, metric: &str, os: Os) -> bool {
         // A script's runs are timed on its host's CPU and clock, a page's on the browser's CPU: neither's
         // threads' context switches or IO are read (`script_unread`, `page_unread`).
         "cpu.wakes" | "io.read" | "io.write" => only(&[Native, NativeWindowless, Cli, Tty]),
+        // strobe's own input pacing and its driver's reads of a page or a windowed app's UI.
+        "input.rate" | "input.gap.p95" | "driver.reads" | "driver.read_ms" => only(&[ChromiumPage, FirefoxPage, WebkitPage, AndroidChrome, ChromiumApp, WebviewApp, Native]),
+        // A browser's processes by their role.
+        "cpu.renderer" | "cpu.gpu" | "cpu.browser" => only(&[ChromiumPage, FirefoxPage, WebkitPage, ChromiumApp, WebviewApp]),
+        "memory.app.pss" => !matches!(runtime, Cli | Tty),
         _ => match Capability::of(metric) {
             Some(Capability::ProcessMemory) => runtime != Cli,
             Some(Capability::PageEngine) => runtime != Script,

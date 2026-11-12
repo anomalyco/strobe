@@ -445,7 +445,105 @@ const CASES: Case[] = [
   ["status linux arm64", `status_summary(Host::LinuxArm64).line()`, "every path is preview on Linux arm64: known answers are checked on Linux x64 only"],
 ]
 
+// Where each catalog metric is read beyond its capability's row (`support::measures`): the runtimes that read
+// it (`only`, else every runtime with the row; `not` takes some out) and the OSes (`os`, else every one). Every
+// metric of the catalog (src/model.rs) must have an entry here, an empty one when its row says it all, so a new
+// metric is placed by someone and `runtime_reads` is held to it for every runtime and OS. A family is read
+// through one name of it (`count.x`).
+type Where = { only?: string[]; not?: string[]; os?: ("windows" | "macos" | "linux")[] }
+const PAGES_APPS = ["chromium_page", "firefox_page", "webkit_page", "chromium_app", "webview_app"]
+const WINDOWED = ["native"]
+const NATIVES = ["native", "native_windowless"]
+const NOT_MAC: Where["os"] = ["windows", "linux"]
+const WHERE: Record<string, Where> = {
+  // Families.
+  count: {},
+  phase: {},
+  span: { not: ["script"] },
+  metric: { only: ["cli"] },
+  app: { only: ["tty"] },
+  "launch.milestone": {},
+  // Wall time and strobe's own looks.
+  "run.duration": {},
+  "input.rate": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
+  "input.gap.p95": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
+  "driver.reads": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
+  "driver.read_ms": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
+  // The OS's accounting.
+  "cpu.pty_host": { only: ["tty"], os: ["windows"] },
+  "cpu.app.total": {},
+  "cpu.foreign": { os: NOT_MAC },
+  "cpu.process.total": {},
+  "cpu.renderer": { only: PAGES_APPS },
+  "cpu.gpu": { only: PAGES_APPS },
+  "cpu.browser": { only: PAGES_APPS },
+  "cpu.fixture": {},
+  "cpu.work": {},
+  "cpu.main": { only: ["script", ...NATIVES] },
+  "cpu.main.busy": { only: ["script", ...NATIVES] },
+  "ui.cpu": { only: WINDOWED },
+  "ui.wakes": { only: WINDOWED, os: NOT_MAC },
+  "cpu.wakes": { only: [...NATIVES, "cli", "tty"] },
+  "cli.launch": { only: ["cli"] },
+  "io.read": { only: [...NATIVES, "cli", "tty"] },
+  "io.write": { only: [...NATIVES, "cli", "tty"] },
+  "memory.app.private": { not: ["cli"] },
+  "memory.app.host": { only: NATIVES, os: NOT_MAC },
+  "memory.app.pss": { not: ["cli", "tty"], os: ["linux"] },
+  "memory.peak": { only: ["cli"] },
+  "energy.cpu": { os: ["macos"] },
+  "cpu.instructions": { os: ["macos", "linux"] },
+  "cpu.idle_wakes": { os: ["macos"] },
+  "gpu.process.3d": {},
+  "gpu.vram": { os: NOT_MAC },
+  "gpu.shared": { os: NOT_MAC },
+  "js.heap.retained": { only: ["script"] },
+}
+// The metrics read wherever their capability's row is (a page engine's not on a script): each named, so a new
+// metric of the catalog is placed here or in WHERE by someone.
+const ROW_ONLY = new Set(
+  [
+    "canvas.frames canvas.interval.p50 canvas.interval.p95 canvas.interval.p99 canvas.interval.max",
+    "frames.presented.p50 frames.presented.p90 frames.presented.p95 frames.presented.p99 frames.presented.max frames.presented.count",
+    "frames.interval.p50 frames.interval.p95 frames.interval.p99 frames.interval.max frames.dropped.pct frames.dropped frames.discarded frames.partial",
+    "frames.renderer.p95 frames.viz.p95",
+    "http.latency.p50 http.latency.p95 http.latency.max http.timeouts http.errors http.missed_sends http.probes http.idle.p50",
+    "interaction.p50 interaction.p95 scroll.latency.p50 scroll.latency.p95",
+    "launch.ready",
+    "main.busy main.work main.script main.gc main.layout main.style main.paint layout.count style.count main.tasks.long gpu.compile",
+    "js.heap.used dom.nodes js.heap.growth dom.nodes.growth leak.suspects.retained layout.shift net.requests net.bytes",
+    "driver.pixel_reads driver.pixel_ms driver.pixel_cpu_ms launch.painted launch.settled",
+    "tty.latency.p50 tty.latency.p95 tty.settle.p50 tty.settle.p95 tty.updates tty.frames tty.frame.p50 tty.frame.p95 tty.bytes tty.cells",
+  ].flatMap((l) => l.split(" ")),
+)
+// The page engine's metrics are a script's only where said (js.heap.retained); everything else of the row.
+const PAGE_ENGINE_NOT_SCRIPT = { not: ["script"] }
+const PROBE: Record<string, string> = { count: "count.x", phase: "phase.x", span: "span.x", metric: "metric.x", app: "app.x", "launch.milestone": "launch.x" }
+
+// The catalog's metrics and their capabilities, read from src/model.rs.
+function catalog(): [name: string, capability: string][] {
+  const text = readFileSync(join(root, "src", "model.rs"), "utf8")
+  const snake = (c: string) => c.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase()
+  const seen = new Map<string, string>()
+  for (const m of text.matchAll(/name: "([^"]+)",\s*capability: Capability::(\w+)/g)) seen.set(m[1], snake(m[2]))
+  return [...seen]
+}
+
+// What `runtime_reads` must answer for a metric on a runtime and OS, by WHERE and the matrix's rows.
+function expectedReads(s: Support, name: string, capability: string, runtime: string, os: "windows" | "macos" | "linux"): string {
+  const w = WHERE[name] ?? (capability === "page_engine" ? PAGE_ENGINE_NOT_SCRIPT : {})
+  const where = capability === "page_engine" && WHERE[name] && !WHERE[name].only && !WHERE[name].not ? { ...WHERE[name], ...PAGE_ENGINE_NOT_SCRIPT } : w
+  const row = s.rows.find((r) => r.runtime === runtime && r.capability === capability)
+  const reads = (o: "windows" | "macos" | "linux") =>
+    !!row && row[o].kind !== "refused" && (!where.only || where.only.includes(runtime)) && !(where.not ?? []).includes(runtime) && (!where.os || where.os.includes(o))
+  if (reads(os)) return "yes"
+  return (["windows", "macos", "linux"] as const).some(reads) ? "not_here" : "never"
+}
+
 function rustChecks(s: Support, fail: (m: string) => void) {
+  const metrics = catalog()
+  for (const [name] of metrics) if (!(name in WHERE) && !ROW_ONLY.has(name)) fail(`reads: ${name} is in the catalog and not in WHERE or ROW_ONLY (scripts/dev/support-matrix.ts): say where it is read`)
+  for (const name of [...Object.keys(WHERE), ...ROW_ONLY]) if (!metrics.some(([n]) => n === name)) fail(`reads: ${name} is in this file's table and not in the catalog`)
   const dir = join(tmpdir(), "strobe-support-check")
   mkdirSync(join(dir, "src"), { recursive: true })
   const repo = root.replace(/\\/g, "/")
@@ -481,6 +579,14 @@ fn main() {
     assert_eq!(serde_json::from_value::<PathSupport>(serde_json::to_value(&ps).unwrap()).unwrap(), ps);
     println!("roundtrip\\tok");
 ${CASES.map(([k, e]) => `    println!("case\\t{}\\t{}", ${JSON.stringify(k)}, ${e});`).join("\n")}
+    for (name, probe) in [${metrics.map(([n]) => `(${JSON.stringify(n)}, ${JSON.stringify(PROBE[n] ?? n)})`).join(", ")}] {
+        for r in Runtime::ALL {
+            for os in Os::ALL {
+                let got = match runtime_reads(r, probe, os) { Reads::Yes => "yes", Reads::NotHere(_) => "not_here", Reads::Never => "never" };
+                println!("reads\\t{}\\t{}\\t{}\\t{}", name, r.name(), os.label().to_lowercase(), got);
+            }
+        }
+    }
 }
 `
   writeFileSync(join(dir, "src", "main.rs"), main)
@@ -509,7 +615,16 @@ ${CASES.map(([k, e]) => `    println!("case\\t{}\\t{}", ${JSON.stringify(k)}, ${
     if (!got.has(k)) fail(`rust: case ${k} printed nothing`)
     else if (got.get(k) !== want) fail(`rust: ${k}: ${got.get(k)}, expected ${want}`)
   }
-  console.log(`rust: ${cells} cells, ${CASES.length} cases`)
+  let reads = 0
+  const capOf = new Map(metrics)
+  for (const l of lines.filter((l) => l.startsWith("reads\t"))) {
+    const [, name, runtime, os, got] = l.split("\t")
+    const want = expectedReads(s, name, capOf.get(name)!, runtime, os as "windows" | "macos" | "linux")
+    if (want !== got) fail(`rust: runtime_reads(${runtime}, ${PROBE[name] ?? name}, ${os}) is ${got}; this file's table and the matrix say ${want}`)
+    reads++
+  }
+  if (reads !== metrics.length * s.runtimes.length * 3) fail(`rust: ${reads} runtime_reads lines for ${metrics.length} metrics × ${s.runtimes.length} runtimes × 3 OSes`)
+  console.log(`rust: ${cells} cells, ${CASES.length} cases, ${reads} runtime_reads`)
 }
 
 // ---------- main ----------

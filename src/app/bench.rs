@@ -895,6 +895,10 @@ struct Block {
     /// target declared or the `node` on PATH is (a shim of Bun's). `track` keys a series by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime: Option<String>,
+    /// A command block whose line the shell ran (`cli::Run::Shell`): the shell's start-up is in its time and
+    /// CPU. `track` keys a series by it, only when true, so a direct series keeps its identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    shelled: bool,
 }
 
 /// Each per-run metric's lowest and highest measured run (`Block::spread`), for an untimed block of
@@ -2743,7 +2747,8 @@ pub fn run(args: &Args) -> Result<Output> {
     for text in variants.iter().flat_map(|v| v.changed.iter()) {
         ctx.warnings.push(validity::warn("VariantChanged", text.clone()));
     }
-    ctx.warnings.extend(uncounted(&series, &series_out, &ctx.noworse_seen));
+    let names = counted_names(&ctx.describe);
+    ctx.warnings.extend(uncounted(&series, &series_out, &ctx.noworse_seen, &names));
     // Now it is known whether a hook used the seed: only then is another `--seed` another workload.
     // A resumed bench keeps what the runs before the resume found (`checkpoint`).
     let used_random = ctx.runner.used_random() || ctx.saved["used_random"] == true;
@@ -3021,7 +3026,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         }
         out["base"] = b;
         if let Some(head) = held {
-            noworse_state(s, &noworse, counters.as_deref(), (&head, &launches), &mut out);
+            noworse_state(s, &noworse, counters.as_deref(), (&head, &launches), &counted_names(&ctx.describe), &mut out);
         }
     }
     if out["kind"] == "check" {
@@ -3141,16 +3146,74 @@ fn flagged_counts<'a>(s: &Series, blocks: impl IntoIterator<Item = &'a mut Block
     seen
 }
 
-/// What turns a `--noworse` counter that nothing compared into one compared: said by `Uncounted` and by a
-/// check's summary when it compared none (exit 4).
-const NOWORSE_DECLARE: &str =
-    "a counter the case declares in its metrics reads 0 when it never fires, so 0 on both sides compares as no worse; one it does not declare cannot be told from a misspelled name.";
+/// The names the bench file passes to `ctx.count` as a string literal (`count("fallbacks")`, any quote):
+/// what a `--noworse count.<name>` is checked against for its spelling, whether a run counted it or not.
+/// A name built at run time, or counted in a module the file imports, is not among them.
+fn counted_names(describe: &Value) -> std::collections::BTreeSet<String> {
+    let text = describe["file"].as_str().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+    let mut names = std::collections::BTreeSet::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("count(") {
+        rest = &rest[i + "count(".len()..];
+        let after = rest.trim_start();
+        let Some(q) = after.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) else { continue };
+        if let Some(end) = after[1..].find(q) {
+            let name = &after[1..1 + end];
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')) {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Two names one typo apart: equal but for case, or within two edits (a letter left out, added,
+/// changed or two swapped) of each other, neither under three letters.
+fn near_name(a: &str, b: &str) -> bool {
+    if a == b || a.len() < 3 || b.len() < 3 {
+        return false;
+    }
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 2 {
+        return false;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut row = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            row.push((prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(row[j] + 1));
+        }
+        prev = row;
+    }
+    prev[b.len()] <= 2
+}
+
+/// `count.<name>` names a case counts or declares that are one typo from `m`'s (`near_name`): the bench
+/// file's literal `ctx.count` names (`counted_names`), the declared counters, and the counted ones.
+fn similar_counters<'a>(m: &str, names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let Some(x) = m.strip_prefix("count.") else { return Vec::new() };
+    let mut out: Vec<String> = names.into_iter().filter_map(|n| n.strip_prefix("count.").or(Some(n))).filter(|n| near_name(n, x)).map(|n| format!("count.{n}")).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The texts of a result's `Uncounted` notes.
+fn uncounted_texts(r: &Value) -> impl Iterator<Item = &str> + Clone {
+    r["warnings"].as_array().into_iter().flatten().filter(|w| w["id"] == "Uncounted").filter_map(|w| w["text"].as_str())
+}
 
 /// `Uncounted`: an exact counter (`count.<name>`, `net.*`, `tty.frames`, `dom.nodes`) only `--noworse`
-/// names that no case declares and no block of the whole experiment counted or refused (`seen`, and the outputs of series done before a resume): nothing compared it,
-/// which is right when what it counts never happened on either side, and hides a regression when the
-/// name is not the one the cases count. Said once per name, with the counters the cases declare.
-fn uncounted(series: &[Series], outs: &[Value], seen: &std::collections::BTreeSet<String>) -> Vec<Warning> {
+/// names that no case declares and no block of the whole experiment counted or refused (`seen`, and the
+/// outputs of series done before a resume): nothing compared it. Its text leads with what is most
+/// likely: only launch cases ran (which count nothing), the name is one typo from one the cases count or
+/// declare (`similar_counters`), the file does count it on a path no run took, or neither. The advice to
+/// declare it comes only after the spelling, and a declared name the file never counts while it counts a
+/// near one fails its row (`noworse_state`): following the advice never turns a typo into a pass.
+fn uncounted(series: &[Series], outs: &[Value], seen: &std::collections::BTreeSet<String>, names: &std::collections::BTreeSet<String>) -> Vec<Warning> {
     let flagged: std::collections::BTreeSet<&String> = series.iter().flat_map(|s| s.flagged.iter()).filter(|m| model::is_ci_counter(m)).collect();
     let declared: std::collections::BTreeSet<&String> = series.iter().flat_map(|s| declared_metrics(s).into_iter().filter(|m| model::is_ci_counter(m) && s.case_declares(m))).collect();
     let measured = |m: &str| {
@@ -3159,17 +3222,41 @@ fn uncounted(series: &[Series], outs: &[Value], seen: &std::collections::BTreeSe
                 || o["blocks"].as_array().into_iter().flatten().any(|b| b["values"].get(m).is_some() || b["refused"].get(m).is_some())
         })
     };
+    // What the outputs counted, beside what the file and the cases name.
+    let counted: std::collections::BTreeSet<String> = outs
+        .iter()
+        .flat_map(|o| [&o["values"], &o["base_values"]].into_iter().chain(o["blocks"].as_array().into_iter().flatten().map(|b| &b["values"])).cloned().collect::<Vec<_>>())
+        .filter_map(|v| v.as_object().map(|o| o.keys().filter(|k| k.starts_with("count.")).cloned().collect::<Vec<_>>()))
+        .flatten()
+        .collect();
     flagged
         .into_iter()
         .filter(|m| series.iter().all(|s| s.flagged.contains(*m)) && !seen.contains(*m) && !measured(m))
         .map(|m| {
             let known = if declared.is_empty() { "no case declares a counter".to_string() } else { format!("the cases declare {}", declared.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")) };
-            validity::warn(
-                "Uncounted",
+            let ran = series.iter().filter(|s| s.gap.is_none() && s.refused.is_none());
+            let only_launches = m.starts_with("count.") && ran.clone().count() > 0 && ran.clone().all(|s| s.launch.is_object());
+            let name = m.strip_prefix("count.").unwrap_or(m);
+            let similar = similar_counters(m, names.iter().map(String::as_str).chain(declared.iter().map(|d| d.as_str())).chain(counted.iter().map(String::as_str)));
+            let text = if only_launches {
                 format!(
-                    "--noworse {m}: no run of any case counted it, so nothing compared it: {NOWORSE_DECLARE} Declare it in the metrics of the case that counts it (metrics: [\"{m}\"]), or check the name ({known})"
-                ),
-            )
+                    "--noworse {m}: only launch cases ran, and a count.<name> counter is a run case's (ctx.count in its run): a launch counts none, so nothing compared it; name a counter of a run case, or drop {m} from --noworse for these cases"
+                )
+            } else if !similar.is_empty() && !names.contains(name) {
+                format!(
+                    "--noworse {m}: no run of any case counted it, so nothing compared it. Did you mean {}? The cases count or declare that name, not {m}: name the counter as the run's ctx.count(\"…\") spells it. Only when a run case's ctx.count(\"{name}\") call fires on some path alone, declare metrics: [\"{m}\"] on that case, spelled as that call spells it, so 0 on both sides compares as no worse (a declared name the file does not count fails its check)",
+                    similar.join(" or ")
+                )
+            } else if m.starts_with("count.") && names.contains(name) {
+                format!(
+                    "--noworse {m}: the bench file counts it (ctx.count(\"{name}\")), but no run of any case did, so nothing compared it: the path that counts it ran on neither side. Declare metrics: [\"{m}\"] on the case whose run counts it: a declared counter reads 0 when it never fires, so 0 on both sides compares as no worse"
+                )
+            } else {
+                format!(
+                    "--noworse {m}: no case counts or declares it, so nothing compared it: check the name against the runs' ctx.count(\"…\") calls ({known}). Only when a run case counts {m} on some path alone (a name the file builds at run time), declare metrics: [\"{m}\"] on that case so 0 on both sides compares as no worse"
+                )
+            };
+            validity::warn("Uncounted", text)
         })
         .collect()
 }
@@ -3234,10 +3321,15 @@ fn first_error(error: &str) -> String {
 /// refused it for what they are (`cannot_read`: another engine, target or OS): those rows are left out,
 /// and a check whose cases compared no counter at all exits 4 (`check_output`). `out["counters"]` holds the
 /// rows, an empty list when none was compared.
-fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Block]>, head: (&BTreeMap<String, Vec<f64>>, &[Block]), out: &mut Value) {
+/// `names`: the bench file's literal `ctx.count` names (`counted_names`).
+fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Block]>, head: (&BTreeMap<String, Vec<f64>>, &[Block]), names: &std::collections::BTreeSet<String>, out: &mut Value) {
     if noworse.is_empty() {
         return;
     }
+    let typo_of = |m: &str| -> Option<String> {
+        let x = m.strip_prefix("count.")?;
+        (!names.is_empty() && !names.contains(x)).then(|| similar_counters(m, names.iter().map(String::as_str)).into_iter().next()).flatten()
+    };
     let (head, head_blocks) = head;
     let cannot = |blocks: &[Block], m: &str| blocks.iter().any(|b| b.refused.get(m).is_some_and(|r| cannot_read(r.validator)));
     let both_cannot = |m: &str| base.is_some_and(|b| cannot(b, m)) && cannot(head_blocks, m);
@@ -3264,6 +3356,12 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
             (_, [_, _, ..]) => ("unstable", format!("{m}: head did not hold one value ({}), so no difference of it holds", list(&h_runs, m))),
             (Some(b), _) if b.is_empty() => ("not_compared", format!("{m}: base measured no value, so nothing compared it")),
             (Some(b), _) if b.len() > 1 => ("unstable", format!("{m}: base did not hold one value ({}), so no difference of it holds", list(b_runs.as_deref().unwrap_or_default(), m))),
+            // A declared counter 0 on both sides that the bench file never counts, while it counts a name one
+            // typo away: the declaration is that typo, and 0 against 0 would hold nothing.
+            (Some(b), [hv]) if b[0] == 0.0 && *hv == 0.0 && typo_of(m).is_some() => {
+                let near = typo_of(m).unwrap_or_default();
+                ("not_compared", format!("{m}: 0 on both sides, and the bench file counts {near}, never {m}: did you mean {near}? A declared name no run counts compares nothing"))
+            }
             (Some(b), [hv]) => {
                 let def = model::metric(m).map_or(&model::METRICS[0], model::as_counter);
                 // Each side held one value: the exact comparison a bench makes of a counter that held through
@@ -3291,7 +3389,10 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
         out["passed"] = json!(false);
         out["decided"] = json!(false);
         out["error"] = json!(format!("--noworse: {}", failed.join("; ")));
-        out["hint"] = json!(if moved {
+        let typo = noworse.keys().filter(|m| failed.iter().any(|t| t.starts_with(&format!("{m}: 0 on both sides")))).find_map(|m| typo_of(m).map(|near| (m.clone(), near)));
+        out["hint"] = json!(if let Some((m, near)) = typo {
+            format!("{}: name the counter as the run's ctx.count call spells it: {near}, not {m}, in --noworse and in the case's metrics", s.label())
+        } else if moved {
             format!("{}: a counter that moves between launches is no exact count (make it count the work, not time-dependent events); one that grew is what this change does", s.label())
         } else {
             format!("{}: a counter is compared only where each side measured it: the refused lines say why one did not", s.label())
@@ -3864,11 +3965,16 @@ pub(crate) fn check_text(r: &Value) -> String {
         1 => "; 1 case measured run 2 instead, since a process of the target ended in its run 1".to_string(),
         n => format!("; {n} cases measured run 2 instead, since a process of the target ended in their run 1"),
     };
-    let compared = match noworse_compared(&r["series"]) {
+    let compared: String = match noworse_compared(&r["series"]) {
         // Refused on both sides (said on the case lines), or counted nowhere (`Uncounted`), or both.
-        Some(0) if r["warnings"].as_array().into_iter().flatten().any(|w| w["id"] == "Uncounted") => {
-            format!("base and head each checked; no --noworse counter was measured on both sides, so nothing was compared (exit 4): {}", NOWORSE_DECLARE.trim_end_matches('.'))
+        // A declared counter neither side gave (refused, or a typo of one the file counts): the case failed for it.
+        Some(0) if series.iter().any(|s| s["counters"].as_array().into_iter().flatten().any(|c| matches!(c["state"].as_str(), Some("not_compared" | "missing")))) => {
+            "base and head each checked; no --noworse counter was compared, and a case that declares one failed for it (its line says why)".into()
         }
+        Some(0) if uncounted_texts(r).next().is_some() && uncounted_texts(r).all(|t| t.contains("only launch cases ran")) => {
+            "base and head each checked; no --noworse counter was measured on both sides, so nothing was compared (exit 4): only launch cases ran, and a count.<name> counter is a run case's".into()
+        }
+        Some(0) if uncounted_texts(r).next().is_some() => "base and head each checked; no --noworse counter was measured on both sides, so nothing was compared (exit 4): check each name against the runs' ctx.count calls first (the Uncounted note says which names the cases count); only a counter a run case counts on some path alone is declared in that case's metrics, spelled as its call spells it, to compare 0 with 0".into(),
         Some(0) => "base and head each checked; every --noworse counter was refused on both sides (the refused lines say why), so nothing was compared (exit 4)".into(),
         Some(_) => "base and head each checked; only the --noworse counters compared, exactly".into(),
         None if series.iter().any(|s| s["base"].is_object()) => "base and head each checked; nothing compared: the same command without --check times head against base".into(),
@@ -9976,6 +10082,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     spread: run_spread(x, &extra),
                     gpu_cache: None,
                     runtime: None,
+                    shelled: false,
                 });
             }
             // From outside there is no trace to keep: the block's numbers are in result.json. A Firefox block
@@ -11394,6 +11501,17 @@ fn headless_window(label: &str, name: &str, t: &Value) -> Error {
 fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variants: &[Variant], config: &Value) -> Result<Option<Refusal>> {
     let t = &describe["targets"][name];
     let windowless = |all: bool| sides_windowless(s, name, t, config, variants, all);
+    // A command line known before anything runs (the target's own, a `cmd:` side's) that two readings would
+    // run differently is the run's error, before anything starts (`cli::plan`); a line a case passes to
+    // ctx.exec is refused when it is run.
+    if t["kind"] == "cli" {
+        let sides = variants.iter().filter(|v| v.target_of(s) == name).filter_map(|v| if let Kind::Cmd(l) = &v.kind { Some(l.clone()) } else { None });
+        for line in t["run"].as_str().map(str::to_string).into_iter().chain(sides) {
+            if let Err(why) = cli::plan(&line, Path::new("."), &t["env"]) {
+                return Err(Error::usage(format!("{}: `{line}`: {why}", s.label())));
+            }
+        }
+    }
     let page = matches!(t["kind"].as_str(), Some("web" | "url"));
     if args.get("engine").is_some() && !page {
         return Err(Error::usage(format!("{}: --engine picks a page's browser; {} is a {} target (narrow the run with --target)", s.label(), name, t["kind"].as_str().unwrap_or("?"))));

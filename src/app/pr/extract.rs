@@ -1147,6 +1147,7 @@ pub(super) fn warning_name(id: &str) -> &str {
         "HarnessOverlay" => "Harness overlay",
         "Uncounted" => "Counter not counted",
         "ShellLine" => "Shell line",
+        "DirectLine" => "Direct line",
         "ScreenChanged" => "Different screens",
         "NoPresentSource" => "Frame and latency metrics",
         other => other,

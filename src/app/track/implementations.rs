@@ -341,6 +341,11 @@ pub(super) fn point(args: &Args, sides: &Sides, file: &Path, root: &Path, commit
         if !s["input"].is_null() {
             fingerprint["input"] = s["input"].clone();
         }
+        // Which side's command line the shell ran (`Block::shelled`), only when one did.
+        let shelled: Vec<&str> = ["base", "head"].into_iter().filter(|role| blocks.iter().any(|b| b["variant"] == *role && b["shelled"] == true)).collect();
+        if !shelled.is_empty() {
+            fingerprint["shell_line"] = json!(shelled.join("+"));
+        }
         let runtimes = super::script_runtimes(r, s, &[(sides.base_target.as_str(), Some("base")), (sides.head_target.as_str(), Some("head"))]);
         super::runtime_fingerprint(&runtimes, &mut fingerprint);
         super::motion_fingerprint(r, s, &mut fingerprint);
