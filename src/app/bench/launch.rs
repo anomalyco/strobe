@@ -277,7 +277,11 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                     (Some(b), Some(p)) => (json!(b.ws), json!(p.target)),
                     _ => (Value::Null, Value::Null),
                 };
-                let r = ctx.runner.call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &init)?;
+                // A prepare that throws (`ctx.playwright` under an old Bun, say) refuses its series, as a run case's does.
+                let r = ctx
+                    .runner
+                    .call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &init)
+                    .map_err(|e| crate::runner::incomplete("prepare", "prepare", e, "", "fix the target's prepare in the bench file"))?;
                 super::first_page(&variant_url(v, &target)?, r.get("url").and_then(Value::as_str))?
             } else {
                 variant_url(v, &target)?
@@ -601,7 +605,8 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
 pub(super) fn refusals(s: &Series, values: &BTreeMap<String, f64>, pixels: &str, web: bool) -> BTreeMap<String, Refusal> {
     let mut out = BTreeMap::new();
     for m in declared_metrics(s) {
-        if values.contains_key(m) || out.contains_key(m) {
+        // A counter only `--noworse` names is no launch's to measure, nor to refuse.
+        if values.contains_key(m) || out.contains_key(m) || (!s.case_declares(m) && m.starts_with("count.")) {
             continue;
         }
         let r = super::super::outside::not_on_this_os(m).unwrap_or_else(|| match m.as_str() {

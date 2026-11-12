@@ -18,8 +18,10 @@ The design and every rule behind this file: SPEC.md.
    the folder's package.json (`build`, `preview`, `start`, `dev`, `exports`, `module`, `types`, `main`,
    `bin`, an electron dependency), Cargo.toml binaries or index.html.
    `--target web|lib|server|native|electron|tty|cli` overrides the guess: web serves the build with
-   `perf/serve.ts`, lib imports the package's entry from `perf/lib.ts` (a cold import per run; a
-   commented `work` case calls an export with `ctx.call`), server hosts it in `perf/server.ts` (`PORT`),
+   `perf/serve.ts` (a cold load, an idle second, and a commented reload: a small page's reload is
+   mostly strobe's own driver work, `OverheadBudget`), lib imports the package's entry from
+   `perf/lib.ts` (a cold import per run; a commented `work` case calls an export with `ctx.call`),
+   server hosts it in `perf/server.ts` (`PORT`),
    native builds and launches the Cargo app, cli runs the command to its exit. It never replaces a file
    without `--force`.
 3. Run what it prints: `strobe config`, then `strobe bench perf/smoke.bench.ts --head . --check`
@@ -35,6 +37,11 @@ The design and every rule behind this file: SPEC.md.
      `unclear`, `underpowered` (more pairs or a quieter machine, not "no change"), `refused`.
    - Secondaries get words only after the primary decided (Holm-corrected); `·` is descriptive.
    - `ledger  3rd experiment on these variants; earlier: …`: reruns count. Paste it as it is.
+   - `strobe query <exp> insights`: per series the verdict (or a check's status), ranked suspects
+     with their source, the warnings that bear on it, and commands to run next as printed (`--pairs
+     N`, `record --bench <file>#<case>` for a side nothing profiled). Any kind: check, `--blocks`, leak
+     run. Head's hits read `(over its threshold on head only)`, `(… on base too)` or `(base not read
+     for it)`; beside `same`, `unclear` or an A/A no mover is a suspect (two launches differ anyway).
 4. Put the evidence in the PR (below).
 
 - Refactor or dependency bump? `--noworse 2%` (or `noworse: "2%"` on the case;
@@ -93,7 +100,9 @@ The design and every rule behind this file: SPEC.md.
   `record pid:<n>` or `proc:<name>` for a process strobe did not start.
 - `query <rec> threads`: wakes/s and CPU per thread, the module each started in, whose (app, driver,
   os, `unknown (?)`); `--timeline` per second. `query <rec> insights` rules include dominant-thread,
-  off-cpu-bound, style-layout-dominant, wakes-while-idle (idle blocks too).
+  off-cpu-bound, style-layout-dominant, wakes-while-idle (idle blocks too), hot-function (a named
+  function of the target's over 25% of busy samples, one hit each; a native symbol without line
+  info counts), http-stalls (measured runs only).
 - Native hotspots of a tree pool every process: read `by process`, then `--pid <pid|exe>`.
   A native attribution recording (`record --bench`, `--why`) keeps frames too: `query <rec> inputs`.
   `! Coverage`: samples cover under 80% of the CPU (read shares, not totals); it names what the
@@ -144,8 +153,12 @@ The design and every rule behind this file: SPEC.md.
   goes in a same-repository PR's body (never a fork's). Never `pull_request_target`.
 - The action installs nothing into the runner user's profile (its own strobe, no PATH entry or skill):
   it runs `up --skip self,skill,daemon,mcp,deep,calibrate`, which only fetches the engine.
-- The PR block, step summary, card and badge never name the machine's other processes; result.json and
-  the HTML report do: on a personal self-hosted runner with a public repo, `upload-artifacts: never`.
+- The step summary, the job's log and the artifacts never name the machine's other processes, other
+  apps' windows or its user: the uploaded result.json is a scrubbed copy and its HTML report is drawn
+  from that copy alone (no recordings, so no hotspots; the runner keeps them, `report-path`). The PR
+  block, summary, card and badge name no other process, window title or person's folder either:
+  every string of the result is scrubbed before they read it (a covering window by its process id, a
+  plain folder variant as `<base folder>`/`<head folder>`; SPEC §11.2).
 
 ### No display, a locked session, a server
 
@@ -233,7 +246,9 @@ export default bench({
     `strobe up --mobile=<serial> --channel canary`. strobe never drives the phone's own Chrome.
   - An emulator runs `--check`, `look`, attribution and leak runs (`--probes memory`) only (`Emulator`);
     timed runs refuse Wi-Fi adb, Battery Saver, under 20% battery, and wait up to 3 min for a hot phone.
-  - Leak runs work on a phone (the phone's heap and snapshots). Loopback addresses `prepare` returns
+  - Leak runs and `record --mobile --probes memory` work on a phone (the phone's heap and snapshots;
+    no `memory.app.private`: read `js.heap.used`, its growth and the leak suspects, or a desktop
+    browser's memory recording). Loopback addresses `prepare` returns
     (an API, a WebSocket) are reversed to the phone, like `serve`.
   - `cpu.*`, `memory.*`, `gpu.*` refuse `NotForTarget` (this computer's processes): measure
     `main.work`, `frames.*`, `interaction.*`, `run.duration`. A lost phone ends the bench (exit 255).
@@ -279,7 +294,13 @@ noisy discovery evidence, or leave them out.
   - `TailTooShort`: a percentile lacks its minimum n (`interaction.p95` needs 20 samples a block).
   - `AmbiguousInteraction`: over half the inputs came while the target was drawing.
   - `NotOnThisOs`, `NotForTarget`, `EngineUnsupported`, `Headless`, `NoCounter`: this OS, target,
-    engine or mode cannot give that metric; pick another primary (the message names one).
+    engine or mode cannot give that metric; pick another primary (the message names one). A page
+    (or an app over DevTools) has no `cpu.wakes`, `io.*` or `ui.*` (on macOS: `cpu.idle_wakes`).
+  - `WindowHidden` on a page: it stayed hidden 200 ms at a frame wait (a `window.open` popup hides
+    its opener on macOS): refused at once, never waited out. Close a popup the case opened before
+    such a wait, or measure the case without frame metrics.
+  - Exit 3 naming the step: macOS held the launch (Gatekeeper after a download or update): open the
+    app once from the Finder.
   - `OverheadBudget`: strobe's own work disturbed timed runs (a `--check` only warns).
   - `VariantMismatch`, `DisplayTooSmall`, `DeviceMismatch`, `InputMismatch`: the sides differ.
   - `SharedRunner`: a CI runner other jobs share; no timing there. `--check`, counters against base, leak
@@ -514,7 +535,7 @@ export default bench({
 - Waits that are not the journey: `await ctx.untimed(() => page.idle())`. Its time, CPU, frames and
   inputs leave the run; `gpu.process.3d`, `energy.*`, `net.*`, `canvas.*` refuse (`Untimed`).
 - `ctx.addInitScript(fn, arg)` and `ctx.mock(pattern, handler)` in `prepare` work in every engine;
-  Playwright (`ctx.playwright`) only on Chromium.
+  Playwright (`ctx.playwright`) only on Chromium, and only under Bun 1.4.0 or later (`bun upgrade`).
 - Random workloads: draw from `ctx.random()` (each hook call replays the same stream), never
   `Math.random()`; `--seed N` replays; `ctx.seed` seeds the app only if you pass it in.
 - `expect: { title, heading, url, visible }` on a case or target: a block on another screen is
@@ -527,7 +548,19 @@ export default bench({
   `ctx.setupKey` in `prepare`, `url` and `setup`. Only `--check`: a verdict needs a fresh launch.
 - Several untimed known-answer runs without a verdict: `--check --runs 5` (5 runs in the one launch,
   the median and `[lowest … highest run]`) or `--check --repeat 3` (3 fresh cold launches per case,
-  each launch's value listed). Still a check: nothing is decided.
+  each launch's value listed). Still a check: nothing is decided. With `--runs N` a first run that
+  did work the later ones did not warns `NotSteady … stepped down` (base's too, with `--base`); one
+  cold run under 2 s cannot tell startup from the case's own first-run work. `--check --probes memory`
+  exits 2: a case's heap is `record --bench <file>#<case>`, a leak run `bench <file> --probes memory`.
+- `! HarnessOverlay`: the bench's folder (and strobe.json's `harness` paths) is copied onto base, so a
+  file there that a `script()`, `cli()` or `tty()` target (or a `cli()` case's `ctx.exec` line) runs
+  is the same on both sides. Keep the code under test out of `perf/`, or import the variant's own file
+  from there. `script("../src/x.mjs")` outside the harness runs each side's own copy; `i
+  HarnessOverlay` means strobe placed a file base lacked, so both run that one.
+- A `count.*` only `--noworse` names is decided per series over both sides: once any block counted it,
+  a block that counted none reads 0 (`0 → 5 · worse`); a case that never counts it prints nothing of it
+  (native cases too). `! Uncounted`: no run of any case counted it, so nothing compared it: it never
+  happened on either side, or the name is wrong (the warning lists the counters the cases declare).
 
 ### Native apps, webviews, terminals
 

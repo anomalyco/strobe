@@ -184,7 +184,12 @@ impl View {
         // A probe still out where a later silence began: it waited across the answers between them.
         let carried = c.iter().filter(|s| silences.iter().skip(1).any(|(t, _)| s.dispatch_ns.is_some_and(|d| d < *t) && self.end_ns(s).is_none_or(|e| e > *t))).count();
         let timeouts = c.iter().filter(|s| s.outcome == Outcome::Timeout).count();
+        // A cohort that opened just before a run and held its probes into it is that run's: any probe
+        // due in a measured run's timed part puts it there (`when` stays its first probe's).
+        let in_run = c.iter().find(|s| s.when == When::Measured);
         json!({
+            "in_measured": in_run.is_some(), "measured_run": in_run.map(|s| &s.run),
+            "measured_timeouts": c.iter().filter(|s| s.when == When::Measured && s.outcome == Outcome::Timeout).count(),
             "run": first.run, "when": first.when, "at_s": self.rel_s(first.scheduled_ns), "probes": c.len(),
             "timeouts": timeouts, "any_timeout": timeouts > 0, "answered": answers.len(),
             // Timeouts whose deadline ran past every answer of the cohort (when it held past one).

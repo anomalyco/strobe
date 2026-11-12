@@ -310,6 +310,31 @@ fn rusage(pid: u32) -> Option<(u64, u64, u64, u64, u64)> {
     Some((mach_ns(ri.ri_user_time + ri.ri_system_time), ri.ri_phys_footprint, ri.ri_resident_size, ri.ri_diskio_bytesread, ri.ri_diskio_byteswritten))
 }
 
+/// What a launched process has run so far, for `isolate::held_at_launch`.
+pub struct Ran {
+    /// User-mode CPU ns, with its reaped children's.
+    pub user_ns: u64,
+    /// All its CPU ns, with its reaped children's.
+    pub all_ns: u64,
+    /// Mach system calls it made (dyld and libSystem make dozens before `main`).
+    pub mach_calls: u64,
+}
+
+/// A launched process's `Ran`. None when it is gone or a zombie (an exit at the deadline is no held
+/// launch), or the kernel refuses either read.
+pub fn launch_ran(pid: u32) -> Option<Ran> {
+    if bsd(pid).is_none_or(|b| b.zombie) {
+        return None;
+    }
+    let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    if unsafe { libc::proc_pid_rusage(pid as i32, libc::RUSAGE_INFO_V4, &mut ri as *mut _ as *mut libc::rusage_info_t) } != 0 {
+        return None;
+    }
+    let t = task_info(pid)?;
+    let user_ns = mach_ns(ri.ri_user_time + ri.ri_child_user_time);
+    Some(Ran { user_ns, all_ns: user_ns + mach_ns(ri.ri_system_time + ri.ri_child_system_time), mach_calls: t.pti_syscalls_mach.max(0) as u64 })
+}
+
 /// `struct rusage_info_v6` (macOS 13+): v4's fields, `ri_runnable_time`, v5's `ri_flags`, then v6's.
 /// The libc crate stops at v4. The tail is longer than the kernel's (its reserved words became
 /// fields in later releases): the kernel writes its own size, never past this one.
