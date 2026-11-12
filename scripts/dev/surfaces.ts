@@ -14,7 +14,9 @@
 // command prints).
 //
 //   bun scripts/dev/surfaces.ts exp_2606af exp_a88c60 [--strobe <exe>] [--no-html] [--units us,ms]
-//   bun scripts/dev/surfaces.ts --all [--since 2026-11-01]    every surface of every experiment
+//   bun scripts/dev/surfaces.ts --sample 2                    the newest 2 of every kind (minutes)
+//   bun scripts/dev/surfaces.ts --all [--since 2026-11-01]    every surface of every experiment (hours:
+//                                                             an idle machine's job)
 //   bun scripts/dev/surfaces.ts --scan [--since 2026-11-01]   result.json checks over every experiment
 //
 // Exit 1 when anything CRIT or HIGH was found.
@@ -575,13 +577,39 @@ function checkJson(id: string) {
 
 // ---------- main ----------
 
-const ids = argv.filter((a, i) => !a.startsWith("--") && !["--strobe", "--dir", "--since", "--units"].includes(argv[i - 1]))
+const ids = argv.filter((a, i) => !a.startsWith("--") && !["--strobe", "--dir", "--since", "--units", "--sample"].includes(argv[i - 1]))
 const root = join(HOME, "experiments")
-const list = flag("scan") || flag("all")
-  ? readdirSync(root).filter((d) => existsSync(join(root, d, "result.json")) && (!opt("since") || statSync(join(root, d, "result.json")).mtime >= new Date(opt("since")!)))
-  : ids
+// What kinds of result one holds, for `--sample`: its kind, a comparison of implementations, an A/A, each
+// series' kind and each verdict kind it reached, an absolute (non-ratio) primary.
+function kindsOf(r: J): string[] {
+  const ks = new Set<string>([`kind ${r.kind}`])
+  if (r.comparison === "implementations") ks.add("implementations")
+  if (r.plan?.aa) ks.add("aa")
+  for (const s of seriesOf(r)) {
+    ks.add(`series ${s.kind}`)
+    for (const c of [s.primary, ...(s.secondaries ?? [])].filter(Boolean)) if (c.verdict_kind) ks.add(`verdict ${c.verdict_kind}`)
+    if (s.primary?.relative === false) ks.add("absolute primary")
+  }
+  return [...ks]
+}
+const all = () => readdirSync(root).filter((d) => existsSync(join(root, d, "result.json")) && (!opt("since") || statSync(join(root, d, "result.json")).mtime >= new Date(opt("since")!)))
+// `--sample N`: the newest N experiments of every kind (a few minutes, where `--all` takes hours).
+function sample(n: number): string[] {
+  const got = new Map<string, number>(), pick: string[] = []
+  const newest = all().map((d) => ({ d, t: statSync(join(root, d, "result.json")).mtimeMs })).sort((a, b) => b.t - a.t)
+  for (const { d } of newest) {
+    let ks: string[]
+    try { ks = kindsOf(JSON.parse(readFileSync(join(root, d, "result.json"), "utf8"))) } catch { continue }
+    if (!ks.some((k) => (got.get(k) ?? 0) < n)) continue
+    pick.push(d)
+    for (const k of ks) got.set(k, (got.get(k) ?? 0) + 1)
+  }
+  console.error(`sample: ${pick.length} experiments covering ${[...got].sort().map(([k, c]) => `${k} ×${c}`).join(", ")}`)
+  return pick
+}
+const list = flag("scan") || flag("all") ? all() : flag("sample") ? sample(Number(opt("sample")) || 2) : ids
 if (!list.length) {
-  console.error("usage: bun scripts/dev/surfaces.ts <exp_…> … [--strobe <exe>] [--no-html] [--units us,ms,s] | --all|--scan [--since <date>]")
+  console.error("usage: bun scripts/dev/surfaces.ts <exp_…> … [--strobe <exe>] [--no-html] [--units us,ms,s] | --sample <n> | --all|--scan [--since <date>]")
   process.exit(2)
 }
 if (flag("scan")) {

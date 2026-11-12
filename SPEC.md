@@ -5738,7 +5738,7 @@ not tests). Each plants work whose cost is known by construction and checks that
 | `clocks/` | a heap and DOM growing at a known rate, a full trace buffer, thread churn | `js.heap.growth`, `dom.nodes.growth`, `RunIncomplete`, 64-bit wakes |
 | `chaos/` | load on the target's CPUs during one side's blocks, a CPU quota, Latin-1 output | `Background` and `Throttled` refusals, line decoding |
 | `stats-check.ts`, `stats-sim.ts`, `feed.ts`, `drift-repo.ts` | known statistical answers through the hidden `strobe stats` (§5.11), series through the bench's decision code, a command printing known values, a repository that drifts a little a commit | §9.3's numbers |
-| `surfaces.ts --all` | every experiment on the machine | every output agrees with `result.json` (§11.2) |
+| `surfaces.ts --sample N` (`--all`) | the newest N experiments of every kind (every experiment) | every output agrees with `result.json` in every time unit (§11.2) |
 | `self.bench.ts` | strobe's own commands as a `cli()` target | strobe's own cost |
 
 ### 10.4 A/A
@@ -6012,7 +6012,14 @@ refusals (a refused row shows no number and names its reason, never "sparse"), u
 primary's `primary_pairs` (tallies and plots read the pairs up to the primary's look, not the pairs
 run on for the secondaries). Results written before a field read it from their blocks' lines or
 verdict words. `scripts/dev/surfaces.ts --all` checks every experiment on a machine against its
-`result.json` this way (1,353 on adais, 0 mismatches, 2026-11-08).
+`result.json` this way (1,353 on adais, 0 mismatches, 2026-11-08). It draws every surface once per
+time unit (`--unit us`, `ms`, `s`) and holds each time it shows to §7.1's text of its number, to the
+character: the text, `--format md`, `pr` and `summary`, the card's alt text and the HTML page (opened
+in that unit); a pair that names its unit once (`1,200–2,200 µs`) must read the same times in every
+unit, digits are grouped by threes, nothing reads minus zero, and `--json` keeps its keys and numbers
+in every unit. `--sample N` checks the newest N experiments of every kind (each result kind, series
+kind and verdict kind, implementations, A/A, an absolute primary): N = 3 is a few minutes, where
+`--all` takes hours on a machine with two thousand experiments.
 
 `--format md` of a comparison draws its text again from `result.json` (`bench::render`) with
 today's digits and the rerun ledger as of now, and says so when another strobe measured it
