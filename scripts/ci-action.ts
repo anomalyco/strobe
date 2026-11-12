@@ -7,6 +7,7 @@
 // Every input arrives in the environment as INPUT_<NAME> (action.yml puts it there), never in a shell
 // line: an input is data, not code.
 import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 
 const input = (name: string) => (process.env[`INPUT_${name.toUpperCase().replace(/-/g, "_")}`] ?? "").trim()
@@ -14,8 +15,8 @@ const env = (name: string) => process.env[name] ?? ""
 
 // A workflow command's text: GitHub reads %, CR and LF as escapes.
 const escape = (s: string) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")
-const warn = (s: string) => console.log(`::warning title=strobe::${escape(s)}`)
-const error = (s: string) => console.log(`::error title=strobe::${escape(s)}`)
+const warn = (s: string) => console.log(`::warning title=strobe::${escape(scrubText(s))}`)
+const error = (s: string) => console.log(`::error title=strobe::${escape(scrubText(s))}`)
 function fail(s: string): never {
   error(s)
   process.exit(1)
@@ -209,16 +210,30 @@ async function installNpm(v: string, dir: string): Promise<string> {
   return main
 }
 
-function strobe(args: string[], opts: { cwd?: string; capture?: boolean; env?: Record<string, string> } = {}): { code: number; stdout: string } {
-  const bin = env("STROBE_ACTION_EXE") || "strobe"
-  const p = Bun.spawnSync([bin, ...args], {
-    cwd: opts.cwd,
-    stdin: "ignore",
-    stdout: opts.capture === false ? "inherit" : "pipe",
-    stderr: "inherit",
-    env: { ...process.env, ...opts.env },
-  })
-  return { code: p.exitCode ?? 1, stdout: p.stdout ? p.stdout.toString() : "" }
+async function strobe(args: string[], opts: { cwd?: string; capture?: boolean; env?: Record<string, string> } = {}): Promise<{ code: number; stdout: string }> {
+  return run([env("STROBE_ACTION_EXE") || "strobe", ...args], opts)
+}
+
+// A program, run with an argument list. The job's log is readable by anyone who can read the repository's
+// Actions, so what it prints there goes through `scrubText` line by line (a wait's busiest processes, a
+// covering window's title, home paths); stdout is kept whole, unscrubbed, when captured (JSON to parse).
+async function run(cmd: string[], opts: { cwd?: string; capture?: boolean; env?: Record<string, string> } = {}): Promise<{ code: number; stdout: string }> {
+  const p = Bun.spawn(cmd, { cwd: opts.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...opts.env } })
+  const relay = async (stream: ReadableStream<Uint8Array>, to: NodeJS.WriteStream) => {
+    const decoder = new TextDecoder()
+    let rest = ""
+    for await (const chunk of stream) {
+      const lines = (rest + decoder.decode(chunk, { stream: true })).split(/\r?\n|\r/)
+      rest = lines.pop() ?? ""
+      for (const line of lines) to.write(`${scrubText(line)}\n`)
+    }
+    if (rest) to.write(`${scrubText(rest)}\n`)
+  }
+  const [stdout] = await Promise.all([
+    opts.capture === false ? relay(p.stdout, process.stdout).then(() => "") : new Response(p.stdout).text(),
+    relay(p.stderr, process.stderr),
+  ])
+  return { code: (await p.exited) ?? 1, stdout }
 }
 
 function json(text: string): any {
@@ -239,7 +254,7 @@ async function installStep() {
   if (v.exitCode !== 0) fail(`${main} does not run: ${v.stderr.toString().trim()}`)
   console.log(v.stdout.toString().trim())
   // The engine (trace_processor) has its own version, which the binary names; its folder is cached apart.
-  const status = json(strobe(["status", "--fast", "--json"]).stdout)
+  const status = json((await strobe(["status", "--fast", "--json"])).stdout)
   const engine = status?.engine
   if (engine?.version && engine?.path) {
     output("engine-key", `strobe-engine-${platform()}-${engine.version}`)
@@ -255,26 +270,20 @@ const PLAYWRIGHT = "1.65.0"
 async function setupStep() {
   // Only the engine: nothing installed into the runner user's profile (a self-hosted machine's own strobe,
   // PATH and skill stay as they were), no privilege prompt, daemon, MCP registration or calibration.
-  const up = strobe(["up", "--skip", "self,skill,daemon,mcp,deep,calibrate"], { capture: false })
+  const up = await strobe(["up", "--skip", "self,skill,daemon,mcp,deep,calibrate"], { capture: false })
   if (up.code !== 0) fail(`strobe up failed (exit ${up.code}); its lines above say which step`)
-  const check = json(strobe(["up", "--check", "--json"]).stdout)
+  const check = json((await strobe(["up", "--check", "--json"])).stdout)
   const browser = check?.browser?.ok === true
   const wanted = oneOf("install-browser", ["auto", "false"], "auto") === "auto"
   output("browser-missing", String(!browser && wanted))
   if (!browser && !wanted) warn("no browser found and install-browser is false: page targets will fail (install Chrome, or set STROBE_BROWSER)")
-  if (!browser && wanted) {
-    const path = env("PLAYWRIGHT_BROWSERS_PATH") || join(cacheRoot(), "ms-playwright")
-    output("browser-path", path)
-    output("browser-key", `strobe-chromium-${platform()}-playwright-${PLAYWRIGHT}`)
-  }
 }
 
+// Into Playwright's own folder (PLAYWRIGHT_BROWSERS_PATH, else the user's cache), where strobe looks.
 async function browserStep() {
-  const path = env("STROBE_ACTION_BROWSERS")
-  setEnv("PLAYWRIGHT_BROWSERS_PATH", path)
-  const p = Bun.spawnSync(["bunx", `playwright@${PLAYWRIGHT}`, "install", "chromium"], { stdin: "ignore", stdout: "inherit", stderr: "inherit" })
-  if (p.exitCode !== 0) fail(`bunx playwright@${PLAYWRIGHT} install chromium failed (exit ${p.exitCode})`)
-  const check = json(strobe(["up", "--check", "--json"]).stdout)
+  const p = await run(["bunx", `playwright@${PLAYWRIGHT}`, "install", "chromium"], { capture: false })
+  if (p.code !== 0) fail(`bunx playwright@${PLAYWRIGHT} install chromium failed (exit ${p.code})`)
+  const check = json((await strobe(["up", "--check", "--json"])).stdout)
   if (check?.browser?.ok !== true) fail(`strobe finds no browser after Playwright's install: ${check?.browser?.detail ?? "no detail"}`)
 }
 
@@ -359,6 +368,9 @@ const stateDir = () =>
 // (SPEC §1 rule 9, §26.2); any other error without a `; busiest …` tail.
 const BUSIEST = /;?\s*(the )?(three )?busiest\b[\s\S]*$/i
 function publicError(out: any, stdout: string): string {
+  return scrubText(errorText(out, stdout))
+}
+function errorText(out: any, stdout: string): string {
   const refusal = out?.refusal
   if (refusal?.summary) return `${refusal.validator ?? out.validator ?? "refused"}: ${String(refusal.summary).replace(BUSIEST, "")}`
   if (out?.validator && typeof out.error === "string") {
@@ -370,9 +382,9 @@ function publicError(out: any, stdout: string): string {
   return `${text.replace(BUSIEST, "")}${out?.hint ? ` (fix: ${String(out.hint).replace(BUSIEST, "")})` : ""}`
 }
 
-function bench(file: string, args: string[], cwd: string, leak: boolean): Done | null {
+async function bench(file: string, args: string[], cwd: string, leak: boolean): Promise<Done | null> {
   console.log(`::group::strobe bench ${file} ${args.join(" ")}`)
-  const r = strobe(["bench", file, ...args, "--json"], { cwd })
+  const r = await strobe(["bench", file, ...args, "--json"], { cwd })
   console.log("::endgroup::")
   const out = json(r.stdout)
   if (!out || out.error || !out.id) {
@@ -389,25 +401,25 @@ function bench(file: string, args: string[], cwd: string, leak: boolean): Done |
 
 // The experiment's markdown in a format, read from the file report writes (--json names it). A strobe
 // without that format writes something else (before 0.29: an HTML view named "summary").
-function markdownReport(d: Done, cwd: string, format: string): string {
+async function markdownReport(d: Done, cwd: string, format: string): Promise<string> {
   const labels = input("labels") && !d.leak && d.result?.kind !== "check" ? ["--labels", input("labels")] : []
-  const r = json(strobe(["report", "experiment", d.id, "--format", format, ...labels, "--json"], { cwd }).stdout)
+  const r = json((await strobe(["report", "experiment", d.id, "--format", format, ...labels, "--json"], { cwd })).stdout)
   const path: string = r?.path ?? ""
   if (!path.endsWith(".md")) return ""
   return typeof r.markdown === "string" ? r.markdown : existsSync(path) ? readFileSync(path, "utf8") : ""
 }
 
 // Only `--format summary`, which strobe writes for publishing (no process names, scrubbed paths): never
-// `md`, which is for the machine's own user.
-function summary(d: Done, cwd: string) {
-  const text = markdownReport(d, cwd, "summary")
+// `md`, which is for the machine's own user. `scrubText` over it too, for what strobe's own scrub misses.
+async function summary(d: Done, cwd: string) {
+  const text = scrubText(await markdownReport(d, cwd, "summary"))
   if (!text) warn(`this strobe has no report --format summary (0.29.0 and later): ${d.id} gets no step summary; its result is in the artifacts`)
   summarize(text || `### strobe · ${d.bench}\n\n\`${d.id}\`: this strobe writes no step summary (\`report --format summary\` needs 0.29.0 or later).\n`)
 }
 
-function htmlReport(d: Done, cwd: string): string {
+async function htmlReport(d: Done, cwd: string): Promise<string> {
   const out = d.dir ? join(d.dir, "report-experiment.html") : ""
-  const r = strobe(["report", "experiment", d.id, "--format", "html", ...(out ? ["--out", out] : [])], { cwd })
+  const r = await strobe(["report", "experiment", d.id, "--format", "html", ...(out ? ["--out", out] : [])], { cwd })
   return r.code === 0 && out && existsSync(out) ? out : ""
 }
 
@@ -429,16 +441,137 @@ function pullRequest(ev: any): string {
   return String(pr.number)
 }
 
-function artifacts(done: Done[]): string {
+// The lists of other processes strobe's warnings, notes and refusals carry, as the PR block and the step
+// summary say them (`scrub_public` in src/app/pr/extract.rs): their count and the busiest one's share.
+const LISTS: [string, string][] = [
+  ["(busiest elsewhere: ", ""],
+  ["busiest processes on the machine (% of a core): ", " on the machine"],
+  ["busiest processes on the machine: ", " on the machine"],
+  ["busiest processes (% of a core): ", ""],
+  ["busiest processes: ", ""],
+]
+// A list's items are `<name> <share>%` joined by `, `, and a name may hold anything (`Discord (PTB).exe`,
+// `a).exe`): the list ends after the last item that is followed by no `, ` and another item.
+const ITEM = /^(.*?) (\d+(?:\.\d+)?)%/s
+
+// Text the job publishes or uploads, without what names the machine and its user (SPEC §26.2): the lists of
+// other processes, the titles of other apps' windows (`WindowHidden`: `"<title>" of process <pid>`), home
+// folders (`~`) and the machine's name on `strobe up`'s first line.
+function scrubText(text: string): string {
+  return scrubPaths(scrubLists(scrubWindows(text))).replace(/^strobe up · .*$/m, "strobe up")
+}
+
+// Every quoted string in a clause that names `… of process <pid>`: a window's title or class, an element's
+// name and key (`button "Send" (key "send") of process 4120`).
+function scrubWindows(text: string): string {
+  return text.replace(/"(?:[^"\\]|\\.)*"(?=(?:[^";]|"(?:[^"\\]|\\.)*")*? of process \d)/g, '"…"')
+}
+
+// A home folder as `~` where a path starts (never mid-path: `/tmp/x/home/y` stays): this runner user's own
+// (`/root`, a renamed profile), then any user's `C:\Users\<u>`, `/home/<u>`, `/Users/<u>`.
+function scrubPaths(text: string): string {
+  const start = String.raw`(^|[\s"'\x60(=,[]|file:\/\/)`
+  const own = homedir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\\|\//g, String.raw`[\\/]`)
+  return text
+    .replace(new RegExp(`${start}${own}(?=[\\\\/\\s"'\\x60)]|$)`, process.platform === "win32" ? "gim" : "gm"), "$1~")
+    .replace(new RegExp(String.raw`(^|[\s"'\x60(=,[/\\])[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/][^\\/\s"'\x60<>|)]+`, "gm"), "$1~")
+    .replace(new RegExp(String.raw`${start}\/(?:home|Users)\/[^/\s"'\x60<>|)]+`, "gm"), "$1~")
+}
+
+function scrubLists(text: string): string {
+  // `ReservedCpus`: the processes it moved, in parentheses up to what the note says next, and those it could
+  // not move, up to the share it put back.
+  let rest = text
+    .replace(/moved per block \(.*?\)(?=, \d+ more started|; \d+ could not be moved|; \d+% put back|$)/gm, "moved per block")
+    .replace(/(\d+) could not be moved: .*?(; \d+% put back|$)/gm, "$1 could not be moved$2")
+  let out = ""
+  for (;;) {
+    const found = LISTS.map(([m, w]) => [rest.indexOf(m), m, w] as const)
+      .filter(([at]) => at >= 0)
+      .sort((a, b) => a[0] - b[0])[0]
+    if (!found) return out + rest
+    const [at, marker, where] = found
+    const wrapped = marker.startsWith("(")
+    let end = at + marker.length
+    const shares: number[] = []
+    for (;;) {
+      const m = ITEM.exec(rest.slice(end))
+      if (!m) break
+      shares.push(Number(m[2]))
+      end += m[0].length
+      if (!/^, .*? \d+(?:\.\d+)?%/s.test(rest.slice(end))) break
+      end += 2
+    }
+    // No item read: the list as strobe 0.29 cut it, to `; ` or the parenthesis around it.
+    if (!shares.length) {
+      const stop = rest.slice(at + marker.length).search(wrapped ? /\)/ : /;|\)/)
+      end = stop < 0 ? rest.length : at + marker.length + stop
+    }
+    const list = rest.slice(at + marker.length, end)
+    out += rest.slice(0, at)
+    if (list.startsWith("none named")) out += rest.slice(at, end)
+    else {
+      const peak = Math.max(...shares).toFixed(0)
+      const said =
+        shares.length === 0
+          ? `other processes${where} (not named here)`
+          : shares.length === 1
+            ? `1 other process${where}, ${peak}% of a core`
+            : `${shares.length} other processes${where}, the busiest ${peak}% of a core`
+      out += wrapped ? `(${said}` : said
+    }
+    rest = rest.slice(end)
+  }
+}
+
+// result.json without the bench machine's other processes' names (SPEC §26.4): each block's `background`
+// ([name, % of a core]) and the reserve's `moved` and `failed` ({name: count}) keep their shares and counts
+// under a number, and every text and key goes through `scrubText`.
+function scrub(v: any, key = ""): any {
+  if (typeof v === "string") return scrubText(v)
+  if (Array.isArray(v)) {
+    if (key === "background") return v.map((e, i) => (Array.isArray(e) ? [`other process ${i + 1}`, ...e.slice(1)] : scrub(e)))
+    return v.map((e) => scrub(e))
+  }
+  if (v && typeof v === "object") {
+    const out: any = {}
+    for (const [k, x] of Object.entries(v)) {
+      out[scrubText(k)] =
+        (k === "moved" || k === "failed") && key === "reserve" && x && typeof x === "object" && !Array.isArray(x)
+          ? Object.fromEntries(Object.values(x).map((n, i) => [`other process ${i + 1}`, n]))
+          : scrub(x, k)
+    }
+    return out
+  }
+  return v
+}
+
+// The artifact's result.json, scrubbed, and its HTML report drawn from that copy alone: strobe reads it in a
+// state folder that holds nothing else, so no recording (whose insights name other processes too) reaches it.
+async function scrubbedReport(d: Done, to: string, cwd: string) {
+  const result = join(to, "result.json")
+  writeFileSync(result, JSON.stringify(scrub(JSON.parse(readFileSync(join(d.dir, "result.json"), "utf8"))), null, 2))
+  const state = join(env("RUNNER_TEMP") || cacheRoot(), `strobe-report-state-${d.id}`)
+  mkdirSync(state, { recursive: true })
+  const out = join(to, "report-experiment.html")
+  const r = await strobe(["report", "experiment", result, "--format", "html", "--out", out], { cwd, env: process.platform === "win32" ? { LOCALAPPDATA: state } : { XDG_DATA_HOME: state } })
+  rmSync(state, { recursive: true, force: true })
+  if (r.code !== 0 || !existsSync(out)) warn(`strobe report of ${d.id}'s scrubbed result failed (exit ${r.code}): its artifact holds result.json without the HTML report`)
+}
+
+async function artifacts(done: Done[], cwd: string): Promise<string> {
   const root = join(env("RUNNER_TEMP") || cacheRoot(), `strobe-artifacts-${done.map((d) => d.id).join("-") || Date.now()}`)
   mkdirSync(root, { recursive: true })
   const recordings = flag("upload-recordings")
   for (const d of done) {
-    if (!d.dir || !existsSync(d.dir)) continue
+    if (!d.dir || !existsSync(join(d.dir, "result.json"))) continue
     const to = join(root, d.id)
     mkdirSync(to, { recursive: true })
+    await scrubbedReport(d, to, cwd)
     for (const f of readdirSync(d.dir)) {
-      if (f === "report-experiment.html" || f === "result.json" || f === "runner.log" || (f.startsWith("failed-") && f.endsWith(".png"))) copyFileSync(join(d.dir, f), join(to, f))
+      // The bench file's own console output, its paths' home folders as `~`.
+      if (f === "runner.log") writeFileSync(join(to, f), scrubText(readFileSync(join(d.dir, f), "utf8")))
+      if (f.startsWith("failed-") && f.endsWith(".png")) copyFileSync(join(d.dir, f), join(to, f))
     }
     // Recordings can hold what the target showed and typed (SPEC rule 9): only when asked.
     if (recordings) {
@@ -468,7 +601,7 @@ async function runStep() {
   // A profile this runner cannot resolve (an app the job never builds, a guard's variable unset) is a
   // warning: the bench refuses only the series that use it.
   console.log("::group::strobe config")
-  const config = strobe(["config"], { cwd, capture: false })
+  const config = await strobe(["config"], { cwd, capture: false })
   console.log("::endgroup::")
   if (config.code !== 0) warn(`strobe config: strobe.json has a problem on this runner (exit ${config.code}); its lines in the log say which`)
 
@@ -484,7 +617,7 @@ async function runStep() {
       const args = ["--head", ".", "--check", ...common]
       if (b) args.push("--base", b, "--noworse", noworse)
       if (input("max-time")) args.push("--max-time", input("max-time"))
-      const d = bench(file, args, cwd, false)
+      const d = await bench(file, args, cwd, false)
       if (!d) {
         failed = true
         continue
@@ -501,7 +634,7 @@ async function runStep() {
       const args = ["--base", b, "--head", ".", "--max-time", input("max-time") || "20m", ...common]
       for (const name of ["primary", "pairs", "equivalence", "noworse"]) if (input(name)) args.push(`--${name}`, input(name))
       if (failOn === "unclear") args.push("--require-verdict")
-      const d = bench(file, args, cwd, false)
+      const d = await bench(file, args, cwd, false)
       if (!d) {
         failed = true
         continue
@@ -528,7 +661,7 @@ async function runStep() {
       if (filter) args.push("--filter", filter)
       for (const name of ["target", "params"]) if (input(name)) args.push(`--${name}`, input(name))
       if (headless) args.push("--headless")
-      const d = bench(file, args, cwd, true)
+      const d = await bench(file, args, cwd, true)
       if (!d) {
         failed = true
         continue
@@ -538,10 +671,10 @@ async function runStep() {
     }
   }
 
-  for (const d of [...done, ...leakDone]) summary(d, cwd)
+  for (const d of [...done, ...leakDone]) await summary(d, cwd)
 
   let reportPath = ""
-  for (const d of [...done, ...leakDone]) reportPath ||= htmlReport(d, cwd)
+  for (const d of [...done, ...leakDone]) reportPath ||= await htmlReport(d, cwd)
 
   let prUpdated = false
   const pr = mode === "compare" ? pullRequest(ev) : ""
@@ -549,7 +682,7 @@ async function runStep() {
     for (const d of done) {
       const args = ["report", "experiment", d.id, "--format", "pr", "--update-pr", pr, "-R", env("GITHUB_REPOSITORY")]
       if (input("labels")) args.push("--labels", input("labels"))
-      const r = strobe(args, { cwd, capture: false, env: token ? { GH_TOKEN: token } : {} })
+      const r = await strobe(args, { cwd, capture: false, env: token ? { GH_TOKEN: token } : {} })
       if (r.code === 0) prUpdated = true
       else if (input("update-pr") === "true") {
         error(`strobe report --update-pr ${pr} failed (exit ${r.code}): the job needs permissions: pull-requests: write`)
@@ -580,7 +713,7 @@ async function runStep() {
   const upload = oneOf("upload-artifacts", ["on-failure", "always", "never"], "on-failure")
   const all = [...done, ...leakDone]
   if (all.length && (upload === "always" || (upload === "on-failure" && failed))) {
-    output("artifact-path", artifacts(all))
+    output("artifact-path", await artifacts(all, cwd))
     output("artifact-name", input("artifact-name") || `strobe-${env("GITHUB_JOB") || "job"}-${all.map((d) => d.id).join("-")}`)
   }
   if (failed) {
