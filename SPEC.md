@@ -5315,7 +5315,10 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   side.
 - **macOS.** A page or Electron side's window is brought to the front (as a native block's, after a
   minute without input) and must be the active app and uncovered at the start and end of the runs
-  (`WindowHidden`, which a bench waits out), so both sides run as the key window. Whether a person
+  (`WindowHidden`, which a bench waits out), so both sides run as the key window. A headless page
+  side draws to no display and is not brought forward or checked: its browser still lists a window,
+  which never becomes the active app: 0.29.0 refused two headless page targets compared on air
+  `WindowHidden` after five blocks. Whether a person
   used the Mac reads the HID system's idle clock less strobe's own posted input: a move posted at the
   session tap from a private event source, and a cursor warp, reset that clock as a person's input
   does (air, macOS 27), so strobe notes when it posts and a last event within 250 ms of its own post

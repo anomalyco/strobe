@@ -8071,7 +8071,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let hidden_ok = set == Set::Memory && host::session_locked();
         if !hidden_ok {
             validity::window_visible(&page)?;
-            front_page(s, &browser)?;
+            front_page(s, &browser, headless)?;
         }
         // From outside, every input of the block (setup's and reset's too) comes from the OS, as the
         // native side's does: set up once the window shows and is in front.
@@ -8797,7 +8797,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 if batch {
                     if !hidden_ok {
                         validity::window_visible(&page)?;
-                        front_page(s, &browser)?;
+                        front_page(s, &browser, headless)?;
                     }
                     browser.own()?;
                     if let Some(first) = &first_slow {
@@ -8923,7 +8923,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // The window must have stayed visible for the whole block, and the browser strobe's alone.
             if !hidden_ok && !batch {
                 validity::window_visible(&page)?;
-                front_page(s0, &browser)?;
+                front_page(s0, &browser, headless)?;
             }
             if !batch {
                 browser.own()?;
@@ -9672,10 +9672,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
 /// `WindowHidden` when other apps' windows cover it or it is not the active app, which a bench waits
 /// out as for a native block. A key window can cost several times an inactive one, so both sides run
 /// in that one state (and a `--check` of a file whose pages get OS input, which needs the window in
-/// front). Elsewhere, and for builds of one target, nothing.
-fn front_page(s: &Series, browser: &WebBrowser) -> Result<()> {
+/// front). Elsewhere, for builds of one target, and for a headless page, nothing: it draws to no
+/// display, so no app in front changes it (its browser still lists a window, which never becomes the
+/// active app: every block was refused).
+fn front_page(s: &Series, browser: &WebBrowser, headless: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
-    if s.sides.is_some() || s.cross_engine {
+    if !headless && (s.sides.is_some() || s.cross_engine) {
         use crate::target::native::{COVERED, NOT_ACTIVE};
         let pids = browser.pids();
         host::raise_windows(&pids);
@@ -9692,7 +9694,7 @@ fn front_page(s: &Series, browser: &WebBrowser) -> Result<()> {
         }
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (s, browser);
+    let _ = (s, browser, headless);
     Ok(())
 }
 
