@@ -2,6 +2,7 @@
 
 mod actions;
 mod diff;
+mod exp_insights;
 pub(super) mod http;
 mod inputs;
 mod rec;
@@ -62,7 +63,7 @@ pub fn run(args: &Args) -> Result<Output> {
                 let text = live_ledger(&mut result);
                 Ok(Output::new(text, result))
             }
-            "insights" => experiment_insights(&result),
+            "insights" => exp_insights::run(&result),
             "actions" => actions::experiment(&result, args, top),
             other => {
                 // A check of one case has one recording: its views answer for the experiment.
@@ -588,7 +589,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     // Off-CPU: a block's runs that took their time waiting (on a server, the network, a timer, a lock,
     // I/O) rather than computing; an idle native block waits by design. A recording has no runs: its
     // `run.duration` is the window it was asked to record.
-    let (duration, cpu) = (v["run.duration"].as_f64().unwrap_or(f64::NAN), v["cpu.work"].as_f64().unwrap_or(f64::NAN));
+    // A script host under its profiler spends a core on the sampler (its cpu.work is mostly that): its
+    // main thread's CPU is the script's own.
+    let profiled_script = meta["script"] == true && meta["timing"] == "perturbed";
+    let (cpu_metric, whose) = if profiled_script { ("cpu.main", "the host's main thread ran") } else { ("cpu.work", "the target's processes used") };
+    let (duration, cpu) = (v["run.duration"].as_f64().unwrap_or(f64::NAN), v[cpu_metric].as_f64().unwrap_or(f64::NAN));
     if meta["kind"] == "block" && duration >= 100.0 && cpu.is_finite() && cpu < 0.25 * duration && !idle_block {
         let mut handles = Vec::new();
         if crate::probe::http_probe::read(dir).is_some() {
@@ -603,6 +608,9 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             handles.push(q("waits"));
         } else if handles.is_empty() && dir.join("trace.pftrace").is_file() {
             handles.push(format!("strobe open {id}"));
+        } else if handles.is_empty() && dir.join("timeline.json.gz").is_file() {
+            // A script host: its threads over time (no native capture to say where each waited).
+            handles.push(q("threads --timeline"));
         } else if handles.is_empty() {
             handles.push(q("waits"));
         }
@@ -610,12 +618,13 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             "off-cpu-bound",
             "info",
             format!(
-                "off-CPU: each run took {} while the target's processes used {} of CPU ({:.0}%): most of the run was not on a CPU (waiting on a server, the network, a timer, a lock or I/O)",
+                "off-CPU: each run took {} while {whose} {} of CPU ({:.0}%){}: most of the run was not on a CPU (waiting on a server, the network, a timer, a lock or I/O)",
                 fmt::value(duration, "ms"),
                 fmt::value(cpu, "ms"),
-                100.0 * cpu / duration
+                100.0 * cpu / duration,
+                if profiled_script { ", the profiler's own thread left out" } else { "" }
             ),
-            json!({ "run_duration_ms": duration, "cpu_work_ms": cpu, "cpu_share": cpu / duration }),
+            json!({ "run_duration_ms": duration, "cpu_work_ms": v["cpu.work"], "cpu_ms": cpu, "cpu_metric": cpu_metric, "cpu_share": cpu / duration }),
             handles,
         );
     }
@@ -694,6 +703,36 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             );
         }
     }
+    // Stalled HTTP probes: probes in a row the server held past the stall threshold (`query http`).
+    if let Some(h) = http::recording_json(dir, usize::MAX)
+        && let Some(n) = h["cohorts_total"].as_u64().filter(|n| *n > 0)
+    {
+        // The first in a measured run says what the runs saw; warmup runs hold cohorts too.
+        let all = h["cohorts"].as_array().cloned().unwrap_or_default();
+        let measured = all.iter().filter(|c| c["when"] == "measured").count();
+        let c = all.iter().find(|c| c["when"] == "measured").or(all.first()).cloned().unwrap_or(Value::Null);
+        let at = match (c["run"].as_str(), c["when"].as_str().unwrap_or("")) {
+            (Some(r), "measured") => r.to_string(),
+            (Some(r), when) => format!("{r} ({})", if when == "warmup" { "not measured" } else { when }),
+            (None, when) => when.to_string(),
+        };
+        let timeouts = h["cohorts"].as_array().into_iter().flatten().filter_map(|c| c["timeouts"].as_u64()).sum::<u64>();
+        hit(
+            "http-stalls",
+            if timeouts > 0 { "warn" } else { "info" },
+            format!(
+                "HTTP probe: {n} stalled cohort{} ({measured} in measured runs; probes in a row over {}); the first{}, {at} +{:.2} s, {} probes: {}",
+                if n == 1 { "" } else { "s" },
+                fmt::value(h["stall_threshold_ms"].as_f64().unwrap_or(f64::NAN), "ms"),
+                if measured > 0 { " measured" } else { "" },
+                c["at_s"].as_f64().unwrap_or(0.0),
+                c["probes"],
+                c["says"].as_str().unwrap_or("")
+            ),
+            json!({ "cohorts": n, "measured_cohorts": measured, "first": c, "stall_threshold_ms": h["stall_threshold_ms"], "measured": h["measured"] }),
+            vec![q("http"), format!("strobe open {id}")],
+        );
+    }
     // Background load on the measured CPUs.
     if v["cpu.foreign.max"].as_f64().is_some_and(|f| f >= 25.0) {
         hit(
@@ -729,6 +768,34 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         }
         let rows = h["rows"].as_array().cloned().unwrap_or_default();
         let busy: f64 = rows.iter().filter(|r| r["name"] != "(idle)").map(|r| r["weight"].as_f64().unwrap_or(0.0)).sum();
+        // One function holding a large part of the sampled CPU: where a change pays first. A profile's
+        // pseudo-frames and strobe's page driver name no function to change.
+        let named = rows.iter().find(|r| {
+            let at = r["where"].as_str().unwrap_or("");
+            !r["name"].as_str().unwrap_or("(").starts_with('(') && at != VIA_DRIVER && !at.ends_with(crate::driver::SOURCE_URL)
+        });
+        if let Some(r) = named
+            && busy > 0.0
+        {
+            let (w, samples) = (r["weight"].as_f64().unwrap_or(0.0), r["samples"].as_u64().unwrap_or(0));
+            if w / busy >= 0.25 && samples >= 20 {
+                // Weights are µs; untimed native samples and a recording's window have no runs to divide by.
+                let per_run = (meta["kind"] == "block" && h["untimed"] != true).then(|| rec.runs()).flatten().filter(|n| *n > 0);
+                let amount = match per_run {
+                    Some(n) => format!("{} per run", fmt::value(w / 1e3 / n as f64, "ms")),
+                    None => format!("{} over the recording", fmt::value(w / 1e3, "ms")),
+                };
+                // Its file by name, as the movers say it (the hotspots view keeps the whole location).
+                let at = r["where"].as_str().and_then(|w| w.rsplit(['/', '\\']).next()).filter(|w| !w.is_empty()).map(|w| format!(" ({w})")).unwrap_or_default();
+                hit(
+                    "hot-function",
+                    "info",
+                    format!("hot function: {}{at} holds {:.0}% of the sampled CPU ({amount}, {samples} samples)", r["name"].as_str().unwrap_or("?"), 100.0 * w / busy),
+                    json!({ "function": r["name"], "where": r["where"], "share": w / busy, "weight_us": w, "samples": samples, "runs": per_run }),
+                    vec![q("hotspots"), q("hotspots --by package")],
+                );
+            }
+        }
         let program = rows.iter().find(|r| r["name"] == "(program)").and_then(|r| r["weight"].as_f64()).unwrap_or(0.0);
         if busy > 0.0 && program / busy >= 0.3 {
             // A script host has no browser: its (program) is the runtime's own work, and its threads are
@@ -749,10 +816,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     }
     // Memory recordings and leak runs: what grew and what stayed (facts only).
     if let Some(l) = meta["leak"]["js_heap"].as_object() {
+        let grows = crate::stats::kind_of(&meta["leak"]["js_heap"]) == crate::model::VerdictKind::Worse;
         hit(
             "leak",
-            if crate::stats::kind_of(&meta["leak"]["js_heap"]) == crate::model::VerdictKind::Worse { "warn" } else { "info" },
-            format!("js heap: {}", l["verdict"].as_str().unwrap_or("")),
+            if grows { "warn" } else { "info" },
+            format!("js heap: {}{}", l["verdict"].as_str().unwrap_or(""), if grows { retainer(&meta["leaks"]).map(|r| format!("; {r}")).unwrap_or_default() } else { String::new() }),
             json!(l),
             // Firefox keeps about:memory censuses, no heap snapshots to list leaks from.
             if meta["engine"] == "firefox" { vec![q("memory --at 0"), q("memory")] } else { vec![q("leaks"), q("memory")] },
@@ -761,7 +829,12 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         hit(
             "leak",
             "info",
-            format!("{} objects from the first half are still alive at the end, retaining {}", meta["leaks"]["count"], fmt::bytes(meta["leaks"]["retained_size"].as_f64().unwrap_or(0.0))),
+            format!(
+                "{} objects from the first half are still alive at the end, retaining {}{}",
+                meta["leaks"]["count"],
+                fmt::bytes(meta["leaks"]["retained_size"].as_f64().unwrap_or(0.0)),
+                retainer(&meta["leaks"]).map(|r| format!("; {r}")).unwrap_or_default()
+            ),
             meta["leaks"].clone(),
             vec![q("leaks"), q("memory")],
         );
@@ -772,51 +845,50 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         hit(rule, "warn", c["summary"].as_str().unwrap_or("target process crashed or was jetsam-killed").to_string(), c.clone(), vec![q("log --source crash")]);
     }
     let mut text = format!("insights · {id} · {} hit(s)\n", hits.len());
-    for h in &hits {
-        text += &format!("{} {}\n", if h["level"] == "warn" { "!" } else { "i" }, h["title"].as_str().unwrap_or(""));
-        for c in h["handles"].as_array().into_iter().flatten() {
-            text += &format!("    {}\n", c.as_str().unwrap_or(""));
-        }
-    }
+    text += &hits_text(&hits);
     if hits.is_empty() {
         text += "nothing stood out: no rule crossed its threshold\n";
     }
     Ok(Output::new(text, json!({ "recording": id, "insights": hits })))
 }
 
-/// An experiment's insights: per series, what moved most between the base and head profiled launches
-/// (`series_insights`), then the head recording's own insights.
-pub fn experiment_insights(result: &Value) -> Result<Output> {
-    let mut text = format!("insights · {}\n", result["id"].as_str().unwrap_or(""));
-    let mut series_out = Vec::new();
-    // Two implementations share no code (SPEC §9.10): each side's profiled launch gets its own
-    // insights, under its name, and no movers between them.
-    if result["comparison"] == "implementations" {
-        for s in result["series"].as_array().into_iter().flatten() {
-            let mut sides = json!({});
-            for (i, role) in ["base", "head"].into_iter().enumerate() {
-                let Some(id) = s["attribution"][role].as_str() else { continue };
-                let name = result["variants"][i]["name"].as_str().unwrap_or(role);
-                let o = insights(&Rec::resolve(id)?)?;
-                text += &format!("\n{} · {name}\n{}", s["label"].as_str().unwrap_or(""), o.text);
-                sides[role] = json!({ "name": name, "recording": id, "insights": o.json["insights"] });
-            }
-            if sides.as_object().is_some_and(|o| !o.is_empty()) {
-                series_out.push(json!({ "series": s["label"], "sides": sides }));
-            }
+/// Insight hits as text: `! title` (warn) or `i title`, then the commands that show its evidence. A hit
+/// of a comparison's head says whether base's recording has the same rule's hit (`sides`).
+fn hits_text(hits: &[Value]) -> String {
+    let mut text = String::new();
+    for h in hits {
+        let sides = match h["sides"].as_str() {
+            Some("both") => " (base too)",
+            Some("head only") => " (head only)",
+            _ => "",
+        };
+        text += &format!("{} {}{sides}\n", if h["level"] == "warn" { "!" } else { "i" }, h["title"].as_str().unwrap_or(""));
+        for c in h["handles"].as_array().into_iter().flatten() {
+            text += &format!("    {}\n", c.as_str().unwrap_or(""));
         }
-        return Ok(Output::new(text, json!({ "experiment": result["id"], "comparison": "implementations", "series": series_out })));
     }
-    for s in result["series"].as_array().into_iter().flatten() {
-        let (Some(b), Some(h)) = (s["attribution"]["base"].as_str(), s["attribution"]["head"].as_str()) else { continue };
-        let (base, head) = (Rec::resolve(b)?, Rec::resolve(h)?);
-        let o = series_insights(&base, &head, result["plan"]["runs_per_block"].as_u64())?;
-        text += &format!("\n{}\n{}", s["label"].as_str().unwrap_or(""), o.text);
-        let mut j = o.json;
-        j["series"] = s["label"].clone();
-        series_out.push(j);
+    text
+}
+
+/// Marks each of head's hits by whether base's recording has a hit of the same rule (`sides`: both,
+/// or head only); returns base's hits of rules head has none of.
+fn mark_sides(head: &mut [Value], base: Vec<Value>) -> Vec<Value> {
+    let rule = |h: &Value| h["rule"].as_str().unwrap_or("").to_string();
+    for h in head.iter_mut() {
+        h["sides"] = json!(if base.iter().any(|b| rule(b) == rule(h)) { "both" } else { "head only" });
     }
-    Ok(Output::new(text, json!({ "experiment": result["id"], "series": series_out })))
+    base.into_iter().filter(|b| !head.iter().any(|h| rule(h) == rule(b))).collect()
+}
+
+/// The suspect a leak's census names first: the largest class of objects from the first half still
+/// alive at the end whose constructor the page's script defines (it has a source location), else
+/// the largest of any, with its count, retained size and what holds its largest object.
+fn retainer(leaks: &Value) -> Option<String> {
+    let classes = leaks["classes"].as_array()?;
+    let c = classes.iter().find(|c| c["location"].is_object()).or(classes.first())?;
+    // At the location `query leaks` prints (V8's line and column).
+    let at = c["location"]["url"].as_str().filter(|u| !u.is_empty()).map(|u| format!(" (its constructor at {u}:{}:{})", c["location"]["line"], c["location"]["column"])).unwrap_or_default();
+    Some(format!("most retained: {} ×{}{at}, {}, held by {}", c["class"].as_str().unwrap_or("?"), c["count"], fmt::bytes(c["retained_size"].as_f64().unwrap_or(0.0)), path_tail(&c["largest"]["path"])))
 }
 
 /// The last two steps of a retainer path, as `… › parent › object`.

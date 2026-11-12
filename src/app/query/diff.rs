@@ -290,6 +290,13 @@ fn portable_path(p: &str) -> String {
         Some(i) if parts.len() > i + 4 => &parts[i + 4..],
         _ => &parts,
     };
+    // A git ref strobe checked out (`<state>/builds/<commit>/…`): the commit's folder names the
+    // checkout, so a file at its root keeps its own name alone.
+    let commit = |s: &str| (7..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit());
+    let rest: &[&str] = match rest.windows(2).rposition(|w| w[0] == "builds" && commit(w[1])) {
+        Some(i) if rest.len() > i + 2 => &rest[i + 2..],
+        _ => rest,
+    };
     // A build script's output: `<crate>-<16 hex>/out/…` keeps the crate.
     let hashless = |s: &str| match s.rsplit_once('-') {
         Some((n, h)) if h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()) => n.to_string(),
@@ -548,11 +555,13 @@ impl Weighted {
 
 /// An experiment series' insights: what moved most between the base and head profiled launches (CPU
 /// self time, forced layout and allocations by function, per run, outside sampling noise), then the
-/// head recording's own insights. Each side's sources load once, both sides at once. A view that is
-/// not per run on both sides (untimed native samples, an unknown run count) names no mover.
+/// head recording's own insights, each marked by whether base's recording has the same rule's hit
+/// (`sides`: both, or head only), and the rules that fired on base alone. Each side's sources load
+/// once, both sides at once. A view that is not per run on both sides (untimed native samples, an
+/// unknown run count) names no mover.
 pub fn series_insights(base: &Rec, head: &Rec, plan_runs: Option<u64>) -> Result<Output> {
     std::thread::scope(|s| {
-        s.spawn(|| base.preload(&ATTRIBUTION_PARTS, true, true, false));
+        s.spawn(|| base.preload(&ATTRIBUTION_PARTS, true, true, true));
         head.preload(&ATTRIBUTION_PARTS, true, true, true);
     });
     let mut text = String::new();
@@ -580,10 +589,14 @@ pub fn series_insights(base: &Rec, head: &Rec, plan_runs: Option<u64>) -> Result
         }
     }
     let own = super::insights(head)?;
-    for line in own.text.lines().skip(1) {
-        text += &format!("{line}\n");
+    let theirs = super::insights(base).map(|o| o.json["insights"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
+    let mut hits = own.json["insights"].as_array().cloned().unwrap_or_default();
+    let base_only = super::mark_sides(&mut hits, theirs);
+    text += &super::hits_text(&hits);
+    for b in &base_only {
+        text += &format!("i base only: {}\n", b["title"].as_str().unwrap_or(""));
     }
-    Ok(Output::new(text, json!({ "movers": movers, "head": own.json["insights"] })))
+    Ok(Output::new(text, json!({ "movers": movers, "head": hits, "base_only": base_only })))
 }
 
 /// The diff flame of an experiment series (SPEC §11.2): CPU time and allocations as one call tree of

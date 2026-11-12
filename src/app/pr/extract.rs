@@ -784,11 +784,38 @@ pub(crate) fn scrub_public(s: &str) -> String {
 
 /// Local paths out: a user's home as `~`, other absolute paths by their last part.
 pub(super) fn scrub_paths(s: &str) -> String {
-    // `C:/Users/x/…` too, or the drive letter stayed behind (`C:~/…`).
-    let home = regex_lite::Regex::new(r"([A-Za-z]:)?(/Users|/home)/[^/\s`|)]+").expect("pattern");
-    let s = home.replace_all(s, "~");
+    // This machine's home first, wherever it is (`/root`, a home below another folder), and only as a
+    // whole path at its start: never inside a longer name (`/home/ann` in `/home/anna`) or a deeper path.
+    let mut s = s.to_string();
+    let home = crate::host::home().display().to_string();
+    if home.len() > 3 && home != "/" {
+        for h in [home.clone(), home.replace('\\', "/")] {
+            s = whole_path(&s, &h, "~");
+        }
+    }
+    // Any other user's home at the start of a path: after a delimiter, never mid-path (a folder named
+    // `home` below another). `C:/Users/x/…` too, or the drive letter stayed behind (`C:~/…`).
+    let home = regex_lite::Regex::new(r#"(^|[\s"'`(\[=,:|<>])([A-Za-z]:)?(/Users|/home)/[^/\s`|)]+"#).expect("pattern");
+    let s = home.replace_all(&s, "${1}~");
     let drive = regex_lite::Regex::new(r#"(\\\\\?\\)?\b[A-Za-z]:[\\/](?:[^\s\\/|`)<>"]+[\\/])+"#).expect("pattern");
     drive.replace_all(&s, "…/").to_string()
+}
+
+/// `path` replaced by `with` where it is a whole path or a path's first part: nothing of a name or a
+/// path before it (start, a space, a quote, a parenthesis, `=`), and a separator or the name's end after.
+fn whole_path(s: &str, path: &str, with: &str) -> String {
+    let named = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | '~' | '/' | '\\' | '?');
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(at) = rest.find(path) {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + path.len()..].chars().next();
+        let whole = before.is_none_or(|c| !named(c) && c != ':') && after.is_none_or(|c| c == '/' || c == '\\' || !named(c));
+        out += &rest[..at];
+        out += if whole { with } else { path };
+        rest = &rest[at + path.len()..];
+    }
+    out + rest
 }
 
 /// A prebuilt executable as a report names it in public: `exe:…/base/app`, the last two parts of

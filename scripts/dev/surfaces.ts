@@ -5,7 +5,10 @@
 // strobe given and checks each number, sign, interval, verdict word, tally and refusal against
 // result.json: the text (`query <exp> summary`), `report --format md`, `--format pr`, the HTML report
 // (rendered by a headless Chromium: its text after the page's own script ran), the card's alt text and
-// the badges. A number that differs between surfaces is printed as CRIT.
+// the badges, and `--format summary` (a comparison's is its PR block; a check's states and tally, never a
+// time; a leak run's verdicts; a --blocks run's median and interval; no other process named). A --blocks
+// run's text is checked against its HTML report (median, interval, blocks, declared metrics). A number
+// that differs between surfaces is printed as CRIT.
 //
 //   bun scripts/dev/surfaces.ts exp_2606af exp_a88c60 [--strobe <exe>] [--no-html]
 //   bun scripts/dev/surfaces.ts --all [--since 2026-11-01]    every surface of every experiment
@@ -313,14 +316,22 @@ function checkSurfaces(r: J) {
   const id = r.id
   const dir = mkdtempSync(join(tmpdir(), "strobe-surfaces-"))
   try {
-    // `bench --blocks` measured one build: no report of it, by design (only `query`).
-    const reportable = seriesOf(r).some((s: J) => s.kind !== "blocks")
-    // The HTML is checked only where something was compared (a --check's page says passed or failed).
-    const html = reportable && seriesOf(r).some((s: J) => compared(s)) ? htmlSurface(id, dir) : undefined
+    // Every result has an HTML and md report; `bench --blocks` has no PR block, card or badge (it compares nothing).
+    const reportable = true
+    const blocksRun = seriesOf(r).some((s: J) => s.kind === "blocks")
+    // The HTML is checked where something was compared, and a --blocks run's blocks (a --check's page says passed or failed).
+    const html = seriesOf(r).some((s: J) => compared(s) || s.kind === "blocks") ? htmlSurface(id, dir) : undefined
     const text = run(["query", id, "summary"]).out
     const md = reportable ? run(["report", "experiment", id, "--format", "md"]).out : text
+    // The step summary: a comparison's is its PR block; a check, pixels, leak or --blocks run's is a table of its own.
+    const summary = run(["report", "experiment", id, "--format", "summary"])
+    if (summary.code !== 0) flagIt("HIGH", "summary", `--format summary failed (exit ${summary.code}): ${summary.err.trim().split("\n")[0]}`)
+    else checkSummary(r, summary.out, text)
+    if (blocksRun) for (const s of seriesOf(r).filter((s: J) => s.kind === "blocks")) checkBlocks(s, text, html?.text ?? "")
     const judgedAny = seriesOf(r).some((s: J) => compared(s))
     const pr = judgedAny ? run(["report", "experiment", id, "--format", "pr"]).out : ""
+    // A comparison's step summary is its PR block as `--format pr` writes it (no card or badges either way here).
+    if (judgedAny && r.kind === "experiment" && summary.code === 0 && summary.out.trim() !== pr.trim()) flagIt("MED", "summary", "a comparison's --format summary differs from its --format pr block")
     const card = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "card", "--json", "--out", join(dir, "card.svg")]).out || "{}") : {}
     const badge = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "badge", "--json", "--out", join(dir, "badge.svg")]).out || "{}") : {}
     if (r.text && r.text.trim() !== text.trim()) flagIt("LOW", "text", "the text bench printed and `query summary` now differ (a later strobe renders it otherwise)")
@@ -441,6 +452,115 @@ function checkSurfaces(r: J) {
     }
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// A printed number in its metric's unit with the half-step its digits allow: `12.3 ms` → [12.3, 0.05].
+function readNum(tok: string, unit: string): [number, number] | undefined {
+  const m = /([−+-]?)(\d+(?:\.(\d+))?)\s*([A-Za-z%/]*)/.exec(tok.replace(/,/g, ""))
+  if (!m) return
+  const dec = m[3]?.length ?? 0
+  const scale = { KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[4]] ?? (m[4] === "MB" && unit === "bytes" ? 1024 ** 2 : 1)
+  return [(m[1] === "−" || m[1] === "-" ? -1 : 1) * parseFloat(m[2]) * scale, 0.5 * 10 ** -dec * scale]
+}
+// Two printed numbers that can round from one value.
+function near(a: string | undefined, b: string | undefined, unit: string): boolean {
+  const x = a ? readNum(a, unit) : undefined, y = b ? readNum(b, unit) : undefined
+  return !!x && !!y && Math.abs(x[0] - y[0]) <= (x[1] + y[1]) * (1 + 1e-9) + 1e-12
+}
+const squash = (s: string) => s.replace(/[ \t\u00a0]+/g, " ").trim()
+const NUM = /—|[−+-]?\d[\d.,]*(?: ?(?:[GMk] instr|instr|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g
+
+// `bench --blocks`: the text's median, interval and blocks against the HTML report's hero and the step summary's row,
+// and each declared metric's line against the HTML's row (one build: nothing compared).
+function checkBlocks(s: J, text: string, html: string) {
+  const m = s.primary?.metric ?? ""
+  const u = unitOf(m)
+  const sec = text.split(/^(?=strobe bench )/m).find((x) => x.split("\n")[0].includes(`· ${s.label} ·`)) ?? ""
+  if (!sec) return flagIt("MED", `text ${s.label}`, "no --blocks section in the text")
+  const star = sec.split("\n").find((l) => l.startsWith(`★ ${m} `)) ?? ""
+  const blocksLine = sec.split("\n").find((l) => l.trim().startsWith("blocks "))?.trim().slice(7).trim() ?? ""
+  // The page opens on its first series: only that one's hero is in the HTML's text.
+  if (!html || !html.includes(`${s.label} · Primary:`)) return
+  const lines = html.split("\n").map(squash)
+  const med = /median (\S+(?: (?:ms|MB|KB|GB|B|pp|instr|s))?)\s+\[(.+?) … (.+?)\]/.exec(star)
+  if (med) {
+    const hero = lines.find((l) => / median /.test(l) && l.includes(": median "))
+    const heroMed = hero ? /: median (.+)$/.exec(hero)?.[1] : undefined
+    if (!near(med[1], heroMed, u)) flagIt("CRIT", `html ${s.label} ${m}`, `hero median "${heroMed}", the text's "${med[1]}"`)
+    const prose = lines.find((l) => l.includes(" … ") && /interval|range/.test(l)) ?? ""
+    const pr = / is (.+?) … (.+?)\. Nothing/.exec(prose)
+    if (!pr || !near(med[2], pr[1], u) || !near(med[3], pr[2], u)) flagIt("CRIT", `html ${s.label} ${m}`, `interval "${pr ? `${pr[1]} … ${pr[2]}` : prose}", the text's "${med[2]} … ${med[3]}"`)
+  } else if (/ \(1 block\)| \(1 of \d+ blocks\)/.test(star)) {
+    const v = /★ \S+ {2}(.+?) \(/.exec(star)?.[1]
+    if (!lines.some((l) => l.includes(": ") && l.endsWith("(1 block)") && near(v, /: (.+) \(1 block\)$/.exec(l)?.[1], u))) flagIt("HIGH", `html ${s.label} ${m}`, `no hero "… (1 block)" for the text's ${v}`)
+  }
+  const strip = lines.find((l) => l.startsWith("Blocks: "))?.slice(8) ?? ""
+  const tb = blocksLine.split(" · "), hb = strip.split(" · ")
+  if (tb.length !== hb.length || tb.some((x, i) => x !== hb[i] && !near(x, hb[i], u))) flagIt("CRIT", `html ${s.label} ${m}`, `blocks "${strip}", the text's "${blocksLine}"`)
+  // Declared metrics: the same words and numbers (the text pads columns; the page does not).
+  for (const l of sec.split("\n").filter((l) => /^ {2}[a-z][\w.{}=,-]+ {2,}/.test(l) && !l.trim().startsWith("blocks ") && !l.trim().startsWith("rec "))) {
+    const [name, ...rest] = l.trim().split(/ {2,}/)
+    const want = squash(rest.join(" "))
+    const i = lines.indexOf(name)
+    const got = i >= 0 ? lines[i + 1] ?? "" : lines.find((x) => x.startsWith(`${name} `))?.slice(name.length + 1) ?? ""
+    if (!got) {
+      flagIt("HIGH", `html ${s.label} ${name}`, "no row for a declared metric the text shows")
+      continue
+    }
+    const a = want.match(NUM) ?? [], b = got.match(NUM) ?? []
+    const words = (x: string) => x.replace(NUM, "#")
+    if (a.length !== b.length || a.some((x, k) => x !== b[k] && !near(x, b[k], unitOf(name)))) flagIt("HIGH", `html ${s.label} ${name}`, `"${got}", the text's "${want}"`)
+    else if (words(want) !== words(got)) flagIt("LOW", `html ${s.label} ${name}`, `the same numbers in other words: "${got}", the text's "${want}"`)
+  }
+}
+
+// `report --format summary`: a check's states and tally against result.json, never a time; a leak run's verdicts; a
+// --blocks run's median and interval against the text; and no other process's name anywhere in it.
+function checkSummary(r: J, md: string, text: string) {
+  const rowsOf = (t: string) => t.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| ---")).map((l) => l.split(/(?<!\\)\|/).slice(1, -1).map(strip))
+  const rows = rowsOf(md).slice(1)
+  // Names a published summary must never carry (SPEC §1 rule 9): what the reservation moved or could not move.
+  const names = [...Object.keys(r.plan?.reserve?.moved ?? {}), ...Object.keys(r.plan?.reserve?.failed ?? {})].filter((n) => n.length > 3)
+  for (const n of names) if (md.includes(n)) flagIt("CRIT", "summary", `names another process: ${n}`)
+  const series = seriesOf(r)
+  if (r.kind === "check") {
+    const passed = series.filter((s: J) => (s.state ?? (s.passed ? "pass" : "fail")) === "pass" && s.passed !== false).length
+    if (!md.includes(`**${passed} of ${series.length} case`)) flagIt("CRIT", "summary", `tally lacks "${passed} of ${series.length}"`)
+    for (const s of series) {
+      const row = rows.find((c) => c[0] === (s.case ?? "") && (c[1] === (s.target ?? "") || !s.target))
+      if (!row) {
+        flagIt("HIGH", `summary ${s.label}`, "no row")
+        continue
+      }
+      const want = s.state === "pass" && s.passed === false ? "fail" : s.state ?? (s.kind === "refused" ? "refused" : s.passed ? "pass" : "fail")
+      if (row[2].replace(/\*/g, "") !== want && !(want === "gap" || s.not_run)) flagIt("CRIT", `summary ${s.label}`, `status "${row[2]}", result.json ${want}`)
+      // One cold run measures no time: only exact counters.
+      const timed = (row[3] ?? "").match(/`([a-z][\w.]*)`/g)?.map((x) => x.slice(1, -1)).filter((x) => !/^count\.|^net\.(requests|bytes)$|^tty\.frames$|^dom\.nodes$/.test(x)) ?? []
+      if (timed.length) flagIt("HIGH", `summary ${s.label}`, `a check row shows ${timed.join(", ")}, not an exact counter`)
+    }
+  } else if (series.length && series.every((s: J) => s.kind === "leak" || s.kind === "refused" || s.not_run)) {
+    for (const s of series.filter((s: J) => s.kind === "leak")) {
+      for (const role of ["base", "head"]) {
+        const v = s.leak?.[role]?.js_heap?.verdict ?? s.leak?.[role]?.native_host?.verdict
+        if (v && !md.includes(v.replace(/\|/g, "\\|"))) flagIt("CRIT", `summary ${s.label}`, `${role}'s verdict "${v}" not in the summary`)
+      }
+    }
+  } else if (series.length && series.every((s: J) => s.kind === "blocks" || s.kind === "refused" || s.not_run)) {
+    for (const s of series.filter((s: J) => s.kind === "blocks")) {
+      const m = s.primary?.metric ?? ""
+      const row = rows.find((c) => c[0] === (s.case ?? "") && c[2].replace(/`/g, "") === m)
+      const sec = text.split(/^(?=strobe bench )/m).find((x) => x.split("\n")[0].includes(`· ${s.label} ·`)) ?? ""
+      const star = sec.split("\n").find((l) => l.startsWith(`★ ${m} `)) ?? ""
+      const t = /median (.+?)\s+\[(.+?) … (.+?)\]/.exec(star)
+      const sm = row ? /^(.+?) \[(.+?) … (.+?)\]$/.exec(row[3]) : null
+      // One block: its value, no interval.
+      const one = /★ \S+ {2}(.+?) \(1 (?:block|of)/.exec(star)?.[1]
+      if (!row) flagIt("HIGH", `summary ${s.label}`, "no row")
+      else if (t && (!sm || ![1, 2, 3].every((k) => near(t[k], sm[k], unitOf(m))))) flagIt("CRIT", `summary ${s.label}`, `"${row[3]}", the text's median ${t[1]} [${t[2]} … ${t[3]}]`)
+      else if (one && !near(one, /^(.+?) \(one block/.exec(row[3])?.[1], unitOf(m))) flagIt("CRIT", `summary ${s.label}`, `"${row[3]}", the text's one block ${one}`)
+      else if (row && Number(row[4]) !== (s.blocks ?? []).length) flagIt("HIGH", `summary ${s.label}`, `${row[4]} blocks, result.json ${(s.blocks ?? []).length}`)
+    }
   }
 }
 
