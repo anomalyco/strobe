@@ -43,10 +43,19 @@ pub fn run(args: &Args) -> Result<Output> {
     let handle = args.pos.get(1).ok_or_else(|| Error::usage(format!("report {view} needs a handle: strobe report {view} <exp_…|rec_…|path/to/result.json>")))?;
     // A result.json or meta.json named by its path (an edited copy, a hand-written fixture) is read as it
     // is: nothing is written beside it, and what a report writes goes to strobe's own run folder.
-    let file = std::path::Path::new(handle).is_file().then(|| std::path::PathBuf::from(handle));
+    // A folder holding one names it too (`query` reads the same).
+    let named = std::path::Path::new(handle);
+    let file = if named.is_file() {
+        Some(named.to_path_buf())
+    } else if named.is_dir() && !store::plain_id(handle) {
+        ["result.json", "meta.json"].iter().map(|f| named.join(f)).find(|f| f.is_file())
+    } else {
+        None
+    };
     let (dir, mut data, experiment) = match &file {
         Some(f) => {
-            let data = store::read_json(f)?;
+            // Checked as `query` checks a named file: an object, of a bounded size and depth.
+            let data = store::read_named_json(f)?;
             let experiment = data["series"].is_array();
             (f.parent().map(std::path::Path::to_path_buf).unwrap_or_default(), data, experiment)
         }
@@ -62,7 +71,9 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let scratch = match &file {
         Some(_) => {
-            let d = crate::host::paths::run().join("reports").join(data["id"].as_str().filter(|i| !i.is_empty()).unwrap_or("file"));
+            // Its id only when that is a plain id; else a hash of where it is: never a path the file says.
+            let name = data["id"].as_str().filter(|i| store::plain_id(i)).map_or_else(|| format!("file-{}", super::query::folder_key(&dir)), str::to_string);
+            let d = crate::host::paths::run().join("reports").join(name);
             std::fs::create_dir_all(&d)?;
             d
         }
@@ -248,19 +259,19 @@ const EMBED_BYTES: u64 = 16 << 20;
 /// Each video the report shows (SPEC §11.2): a recording's own, or each series' base and head (their
 /// `video` recordings), as `video_player` beside it: every side's `video.json` and where it plays from.
 pub fn attach_videos(data: &mut Value, recording: Option<&std::path::Path>, src: &Videos) -> Result<()> {
-    let side = |rec: &str| -> Option<Filmed> {
-        let dir = store::resolve(rec).ok()?;
+    // A recording's video, in its own folder: the file its video.json names by a plain name there alone.
+    let filmed = |rec: &str, dir: &std::path::Path| -> Option<Filmed> {
         let j = store::read_json(&dir.join("video.json")).ok()?;
-        let file = dir.join(j["file"].as_str()?);
+        let name = j["file"].as_str().filter(|n| !n.is_empty() && !n.starts_with('.') && n.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c)))?;
+        let file = dir.join(name);
         file.is_file().then(|| (rec.to_string(), file, j))
     };
+    let side = |rec: &str| -> Option<Filmed> { filmed(rec, &store::resolve(rec).ok()?) };
     // (where to put it, its sides by role)
     let mut players: Vec<Player> = Vec::new();
     if let Some(dir) = recording {
-        let id = data["id"].as_str().unwrap_or("").to_string();
-        if dir.join("video.json").is_file()
-            && let Some(s) = side(&id)
-        {
+        let id = data["id"].as_str().filter(|i| store::plain_id(i)).unwrap_or("recording").to_string();
+        if let Some(s) = filmed(&id, dir) {
             players.push((None, vec![("recording", s)]));
         }
     }

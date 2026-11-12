@@ -159,7 +159,7 @@ impl History {
     /// Up to 5 newest earlier runs of this series (same bench file name, series label and primary, and the
     /// same setup, `setup_of`: a reduced-motion series is never estimated from an animated one, nor a
     /// phone's from a desktop's or another phone's).
-    fn same_series(&mut self, file_name: &str, s: &Series, setup: &Value) -> Vec<Past> {
+    fn same_series(&mut self, file_name: &str, s: &Series, setup: &Value, cmds: &Cmds) -> Vec<Past> {
         let label = s.label();
         let ids: Vec<String> = self
             .index
@@ -174,6 +174,9 @@ impl History {
         let sides = s.sides.as_ref().map(|(b, h)| json!({ "base": b, "head": h }));
         for id in ids {
             let Some(r) = self.result(&id) else { continue };
+            if !ran(&r, cmds) {
+                continue;
+            }
             let same = |x: &&Value| x["label"] == label.as_str() && setup_of(x) == *setup && sides.as_ref().is_none_or(|t| x["targets"] == *t);
             if let Some(p) = r["series"].as_array().into_iter().flatten().find(same).and_then(|x| past(&id, x)) {
                 out.push(p);
@@ -218,21 +221,45 @@ fn setup_of(series: &Value) -> Value {
     json!([series["motion"], series["mobile"]])
 }
 
+/// The commands a `strobe run` plan is of (its `cmd:` variants' specs): its history is only of runs of
+/// one of them, since every `strobe run` writes a bench file of the same name and series. None for a
+/// bench file, whose name and series say which.
+type Cmds = Option<std::collections::BTreeSet<String>>;
+
+/// Whether an earlier result ran one of `cmds` (always, for a bench file's plan).
+fn ran(r: &Value, cmds: &Cmds) -> bool {
+    cmds.as_ref().is_none_or(|c| r["variants"].as_array().into_iter().flatten().filter_map(|v| v["spec"].as_str()).any(|spec| c.contains(spec)))
+}
+
 /// A `--check` of this series (with the same setup, `setup_of`): one cold block with one run, plus the
-/// warmup and runs a timed block adds.
-fn check_block(file_name: &str, label: &str, runs: f64, setup: &Value) -> Option<(f64, String)> {
+/// warmup and runs a timed block adds. An implementation comparison's series is its journey on two
+/// targets, which a check runs as one series per target (`<case> · <target>`): the slower of the two.
+fn check_block(file_name: &str, s: &Series, runs: f64, setup: &Value, cmds: &Cmds) -> Option<(f64, String)> {
+    let label = s.label();
+    let mine = |x: &Value| match &s.sides {
+        Some((b, h)) => x["journey"] == s.journey().as_str() && (x["target"] == b.as_str() || x["target"] == h.as_str()),
+        None => x["label"] == label.as_str(),
+    };
     for (id, _) in store::list("exp", 40) {
         let path = host::paths::experiments().join(&id).join("result.json");
         if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > 2 << 20 {
             continue;
         }
         let Ok(r) = store::read_json(&path) else { continue };
-        if r["kind"] != "check" || Path::new(r["file"].as_str().unwrap_or("")).file_name().is_none_or(|f| f.to_string_lossy() != file_name) {
+        if r["kind"] != "check" || Path::new(r["file"].as_str().unwrap_or("")).file_name().is_none_or(|f| f.to_string_lossy() != file_name) || !ran(&r, cmds) {
             continue;
         }
-        let Some(s) = r["series"].as_array().into_iter().flatten().find(|s| s["label"] == label && s["passed"] == true && setup_of(s) == *setup) else { continue };
-        let one = s["values"]["run.duration"].as_f64().unwrap_or(0.0);
-        return Some((s["elapsed_ms"].as_f64()? + (runs + 1.0) * one, id));
+        let block = |x: &Value| Some(x["elapsed_ms"].as_f64()? + (runs + 1.0) * x["values"]["run.duration"].as_f64().unwrap_or(0.0));
+        let ms = r["series"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| mine(x) && x["passed"] == true && setup_of(x) == *setup)
+            .filter_map(block)
+            .fold(None, |m: Option<f64>, b| Some(m.map_or(b, |m| m.max(b))));
+        if let Some(ms) = ms {
+            return Some((ms, id));
+        }
     }
     None
 }
@@ -264,9 +291,15 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
     let mut unknown = 0usize;
     let implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     let journeys = series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()).count();
+    let cmds: Cmds = variants.iter().any(|v| matches!(v.kind, Kind::Cmd(_))).then(|| variants.iter().map(|v| v.spec.clone()).collect());
     for s in series {
         if let Some(r) = &s.refused {
             out.push(json!({ "label": s.label(), "case": s.case, "target": s.target, "primary": s.primary, "refused": r, "pairs": 0, "ms": 0.0 }));
+            continue;
+        }
+        // A parity gap runs nothing: no pairs, no time, never a time unknown.
+        if let Some((role, why, _)) = &s.gap {
+            out.push(json!({ "label": s.label(), "case": s.case, "target": s.target, "primary": s.primary, "gap": { "role": role, "why": why }, "pairs": 0, "ms": 0.0 }));
             continue;
         }
         let target = &describe["targets"][&s.target];
@@ -275,7 +308,7 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         // Its motion (both sides of an implementation comparison ask for the same) and phone.
         let motion = &describe["targets"][s.sides.as_ref().map_or(&s.target, |(b, _)| b)]["motion"];
         let setup = json!([motion, mobile]);
-        let same = history.same_series(&file_name, s, &setup);
+        let same = history.same_series(&file_name, s, &setup, &cmds);
         // The spread from this series when it ran 4 pairs or more here, else from other series of its metric.
         let from_series = same.iter().map(|p| p.d.len()).sum::<usize>() >= 4;
         let spread_from = if from_series { "series" } else { "metric" };
@@ -316,7 +349,7 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         // of a command takes milliseconds, one of a page's scroll half a minute).
         let (block_ms, block_source) = match same.first() {
             Some(_) => (Some(same.iter().map(|p| p.block_ms).sum::<f64>() / same.len() as f64), format!("mean of {} earlier", same.len())),
-            None => match check_block(&file_name, &s.label(), runs, &setup) {
+            None => match check_block(&file_name, s, runs, &setup, &cmds) {
                 Some((ms, id)) => (Some(ms), format!("from the --check {id} plus warmup and {runs} runs; rough: a check's block is a cold launch")),
                 None => (None, UNKNOWN_BLOCK.to_string()),
             },
@@ -486,6 +519,9 @@ fn series_line(s: &Value) -> String {
     if let Some(r) = s["refused"].as_object() {
         return format!("{}: refused ({}), not run", s["label"].as_str().unwrap_or(""), r["validator"].as_str().unwrap_or(""));
     }
+    if s["gap"].is_object() {
+        return format!("{}: a parity gap ({} cannot run it), not run", s["label"].as_str().unwrap_or(""), s["gap"]["role"].as_str().unwrap_or("a side"));
+    }
     let time = match s["ms"].as_f64() {
         Some(ms) => format!("~{}", minutes(ms)),
         None => "time unknown until a block of it ran here".to_string(),
@@ -505,7 +541,7 @@ fn total_line(plan: &Value) -> String {
         Some(ms) => format!("total ~{} of blocks", minutes(ms)),
         None => {
             let n = plan["blocks_unknown"].as_u64().unwrap_or(0);
-            let all = plan["series"].as_array().map_or(0, |a| a.iter().filter(|s| s["refused"].is_null()).count() as u64);
+            let all = plan["series"].as_array().map_or(0, |a| a.iter().filter(|s| s["refused"].is_null() && s["gap"].is_null()).count() as u64);
             format!(
                 "total unknown: no block of {} ran here yet (a --check or --pilot first measures one)",
                 if n >= all { if all == 1 { "this series".to_string() } else { "these series".to_string() } } else { format!("{n} of the {all} series") }
@@ -549,6 +585,15 @@ fn text(file: &Path, variants: &[Variant], plan: &Value, notes: &[String]) -> St
     for s in plan["series"].as_array().into_iter().flatten() {
         if s["refused"].is_object() {
             t += &format!("\n{}\n  refused  {}\n", s["label"].as_str().unwrap_or(""), refused_text(&s["refused"]));
+            continue;
+        }
+        if s["gap"].is_object() {
+            t += &format!(
+                "\n{}\n  gap      {} cannot run it: {} (nothing runs; it takes no time)\n",
+                s["label"].as_str().unwrap_or(""),
+                s["gap"]["role"].as_str().unwrap_or(""),
+                s["gap"]["why"].as_str().unwrap_or("")
+            );
             continue;
         }
         // A difference in the metric's unit: a time as times print (`--unit`), a percentage in points.

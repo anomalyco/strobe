@@ -28,45 +28,68 @@ pub use rec::{Part, Rec, Stacks, Weight};
 /// A result or a recording named by its path rather than its handle, as `report` reads them: read as it
 /// is, from anywhere (a copy, a fixture), and nothing is written beside it.
 pub(super) enum ByPath {
-    /// An experiment's result.json (named, or in the folder named).
-    Experiment(std::path::PathBuf),
+    /// An experiment's result.json (named, or in the folder named), and what it holds (read once).
+    Experiment(std::path::PathBuf, Value),
     /// A recording's folder (named, or its meta.json named).
     Recording(std::path::PathBuf),
 }
 
-/// `handle` as a path: a result.json (any file holding an experiment's `series`), a meta.json, or a
-/// folder holding either. None when it names no such file or folder (a handle, `a..b`).
-pub(super) fn by_path(handle: &str) -> Option<ByPath> {
-    let p = std::path::absolute(handle).ok()?;
+/// `handle` as a path a person named: a result.json (a file holding an experiment's `series`, or a
+/// bisect's), a meta.json, or a folder holding either. None when no file or folder of that name is here
+/// (a handle, `a..b`), or for a plain id (`store::plain_id`) that names a folder holding neither. A file
+/// that is no result or meta.json strobe can read (too large, not JSON, nested past serde_json's limit)
+/// is refused with why (`store::read_named_json`). Nothing read from it is ever joined to a path:
+/// the recordings a result names resolve by plain id in the store alone.
+pub(super) fn by_path(handle: &str) -> Result<Option<ByPath>> {
+    let Ok(p) = std::path::absolute(handle) else { return Ok(None) };
     let p = p.as_path();
     if p.is_dir() {
-        return if p.join("result.json").is_file() {
-            Some(ByPath::Experiment(p.join("result.json")))
+        return Ok(if p.join("result.json").is_file() {
+            let file = p.join("result.json");
+            let v = experiment_json(&file)?;
+            Some(ByPath::Experiment(file, v))
         } else if p.join("meta.json").is_file() {
             Some(ByPath::Recording(p.to_path_buf()))
-        } else {
+        } else if store::plain_id(handle) {
             None
-        };
+        } else {
+            return Err(Error::usage(format!("{handle}: a folder with no result.json or meta.json in it: not an experiment or a recording")));
+        });
     }
     if !p.is_file() {
-        return None;
+        return Ok(None);
     }
-    let dir = p.parent().map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d }).unwrap_or(Path::new(".")).to_path_buf();
+    let dir = p.parent().unwrap_or(Path::new(".")).to_path_buf();
     if p.file_name().is_some_and(|n| n == "meta.json") {
-        return Some(ByPath::Recording(dir));
+        return Ok(Some(ByPath::Recording(dir)));
     }
-    match store::read_json(p) {
-        Ok(v) if v["series"].is_array() => Some(ByPath::Experiment(p.to_path_buf())),
-        Ok(v) if v["kind"].is_string() && dir.join("meta.json").is_file() => Some(ByPath::Recording(dir)),
-        _ => None,
+    match experiment_json(p) {
+        Ok(v) => Ok(Some(ByPath::Experiment(p.to_path_buf(), v))),
+        // A plain id that happens to name a file here is still a handle.
+        Err(_) if store::plain_id(handle) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
-/// A path as a printed command's word: forward slashes (which Windows reads too), quoted for `sh` and
-/// PowerShell alike.
+/// An experiment's result named by its path: a comparison's, a check's (`series` a list) or a bisect's.
+fn experiment_json(file: &Path) -> Result<Value> {
+    let v = store::read_named_json(file)?;
+    if v["series"].is_array() || v["kind"] == "bisect" { Ok(v) } else { Err(Error::usage(format!("{}: not an experiment's result.json (no series) or a recording's meta.json", file.display()))) }
+}
+
+/// A path as a printed command's word: forward slashes (which Windows reads too), a canonical path's
+/// verbatim prefix taken off (`\\?\C:\x` → `C:/x`, `\\?\UNC\srv\share` → `//srv/share`), quoted for the
+/// shells (`exp_insights::quote`).
 pub(super) fn path_word(p: &Path) -> String {
-    let s = p.display().to_string();
-    exp_insights::quote(&s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/"))
+    exp_insights::quote(&plain_path(&p.display().to_string()))
+}
+
+/// A local path as a person types it, in forward slashes (Windows reads them too).
+pub(super) fn plain_path(s: &str) -> String {
+    match s.strip_prefix(r"\\?\UNC\") {
+        Some(unc) => format!("//{}", unc.replace('\\', "/")),
+        None => s.strip_prefix(r"\\?\").unwrap_or(s).replace('\\', "/"),
+    }
 }
 
 pub fn run(args: &Args) -> Result<Output> {
@@ -85,10 +108,10 @@ pub fn run(args: &Args) -> Result<Output> {
     if view == "http" {
         return http::run(args, top);
     }
-    let path = by_path(handle);
-    if let Some(ByPath::Experiment(file)) = &path {
-        return experiment(store::read_json(file)?, Some(file.as_path()), args, view, top);
-    }
+    let path = match by_path(handle)? {
+        Some(ByPath::Experiment(file, result)) => return experiment(result, Some(file.as_path()), args, view, top),
+        other => other,
+    };
     // (`store::resolve` marks what it resolves used: never a folder named by its path.)
     if let Some(dir) = path.is_none().then(|| store::resolve(handle).ok()).flatten().filter(|d| store::is_experiment(d)) {
         if !dir.join("result.json").exists() {
@@ -121,20 +144,25 @@ pub fn run(args: &Args) -> Result<Output> {
 
 /// An experiment's view, from its result (stored, or read from a path).
 fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str, top: usize) -> Result<Output> {
+    // The folder that holds the result: what it keeps beside itself (a check's actions) is read there.
+    let home = match source {
+        Some(f) => f.parent().map(Path::to_path_buf),
+        None => result["id"].as_str().and_then(|id| store::resolve(id).ok()),
+    };
     match view {
         "summary" | "progress" => {
-            let text = live_ledger(&mut result);
+            // A result read from its path keeps the ledger it holds: this machine's index is not its history.
+            let text = live_ledger(&mut result, source.is_none());
             Ok(Output::new(text, result))
         }
         "insights" => exp_insights::run(&result, source),
-        "actions" => actions::experiment(&result, args, top),
+        "actions" => actions::experiment(&result, home.as_deref(), args, top),
         other => {
-            // A check of one case has one recording: its views answer for the experiment.
+            // A check of one case has one recording: its views answer for the experiment. A recording a
+            // result names is one strobe keeps, by its plain id, never a path.
             let mut recs: Vec<String> = result["series"].as_array().into_iter().flatten().filter_map(|s| s["recording"].as_str().map(str::to_string)).collect();
             if result["kind"] == "check" && recs.len() == 1 {
-                let mut a = args.clone();
-                a.pos[0] = recs.remove(0);
-                return run(&a);
+                return recording(&store::resolve(&recs.remove(0))?, view, args, top);
             }
             // `--blocks N` compares nothing: its attribution recordings are head's alone (`--why
             // always`), one per series, and one answers for the experiment.
@@ -145,11 +173,7 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
                 let heads: Vec<String> = series.iter().filter_map(|s| s["attribution"]["head"].as_str().map(str::to_string)).collect();
                 let id = result["id"].as_str().unwrap_or("this experiment");
                 return match heads.as_slice() {
-                    [one] => {
-                        let mut a = args.clone();
-                        a.pos[0] = one.clone();
-                        run(&a)
-                    }
+                    [one] => recording(&store::resolve(one)?, view, args, top),
                     [] => {
                         let timed: Vec<&str> = series.iter().flat_map(|s| s["timing_recordings"].as_array().into_iter().flatten()).filter_map(|t| t["recording"].as_str()).collect();
                         let others = if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): strobe query <rec> {other} with one of {}", timed.join(", ")) };
@@ -179,7 +203,7 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
 
 /// `a..b`: one view of two recordings, side by side and per run.
 fn pair(a: &str, b: &str, view: &str, args: &Args, top: usize) -> Result<Output> {
-    let (a, b) = (Rec::resolve(a)?, Rec::resolve(b)?);
+    let (a, b) = (Rec::named(a)?, Rec::named(b)?);
     let mut out = diff::run(&a, &b, view, args, top)?;
     // A full trace costs the page main-thread time (SPEC §8.1): a lean and a full-trace recording's
     // times differ by that alone. The level is the trace's probes: a bench block's lean set, or the
@@ -209,6 +233,15 @@ fn pair(a: &str, b: &str, view: &str, args: &Args, top: usize) -> Result<Output>
         }
     }
     Ok(out)
+}
+
+/// A scratch folder's name for a folder named by its path: 12 hex of the SHA-256 of its full path and
+/// its meta.json's modification time (two copies never share one; an edited copy gets its own).
+pub(super) fn folder_key(dir: &Path) -> String {
+    use sha2::Digest;
+    let full = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let at = std::fs::metadata(dir.join("meta.json")).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+    sha2::Sha256::digest(format!("{}\u{0}{at}", full.display()).as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// A recording's view.
@@ -246,7 +279,8 @@ fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> 
                 let built = if rec.stored() {
                     dir.join("perfetto.pftrace")
                 } else {
-                    let d = crate::host::paths::run().join("query").join(&rec.id);
+                    // Named by a hash of the folder and its meta.json's time, never by anything the file says.
+                    let d = crate::host::paths::run().join("query").join(folder_key(&dir));
                     std::fs::create_dir_all(&d)?;
                     d.join("perfetto.pftrace")
                 };
@@ -292,6 +326,15 @@ fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> 
                 "threads come from Firefox's profiler, in Firefox attribution recordings (--probes attribution)".to_string()
             }
         ))),
+        // A Chromium page block that traced nothing (`traced: false`: a headless page's lean block traces
+        // only for a metric read from the trace) has no frames to read: said, never a trace engine's error.
+        "frames" if !trace.exists() => Err(match meta["frames_refused"].as_str().and_then(crate::model::Refusal::from_line) {
+            Some(r) => r.fix("bench --trace full, or a headed run (no --headless), keeps a trace with the page's frames").into(),
+            None => Error::usage(format!(
+                "this recording kept no trace{}, so it has no frames: bench --trace full, or a headed run (no --headless), keeps one",
+                if meta["traced"] == false { " (its block traced nothing: a headless page's lean block traces only for a metric read from the trace)" } else { "" }
+            )),
+        }),
         "frames" => frames(&trace, meta, top),
         "threads" if !trace.exists() => Err(Error::usage(format!(
             "this recording kept no thread counters (no trace, no threads.json){}",
@@ -329,7 +372,15 @@ fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> 
         "gc" => gc(&rec),
         "heap" => heap(&rec, top, args.has("reveal")),
         "leaks" => leaks(&rec, top, args.has("reveal")),
-        "insights" => insights(&rec),
+        "insights" => {
+            exp_insights::quoting_reset();
+            let mut out = insights(&rec)?;
+            if let Some((shell, note)) = exp_insights::quoting_note() {
+                out.text = format!("quoting  {note}\n{}", out.text);
+                out.json["quoted_for"] = json!(shell);
+            }
+            Ok(out)
+        }
         "actions" => actions::recording(&dir, args, top, case.as_ref().map(|c| (c.name.as_str(), c.seq == 1))),
         "log" => wir::log(&dir, meta, args, top),
         "network" => wir::network(&dir, meta, args, top),
@@ -360,9 +411,9 @@ fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> 
 /// An experiment's text with its rerun ledger as of now (SPEC §14.2): the text froze the ledger when
 /// the bench ended, and experiments on the same variants since then count too, as the report's do.
 /// A comparison's or a check's text is drawn again from its numbers, in the unit times print in now.
-fn live_ledger(result: &mut Value) -> String {
+fn live_ledger(result: &mut Value, update: bool) -> String {
     let mut text = result["text"].as_str().unwrap_or("").to_string();
-    if !result["identity"].is_object() {
+    if !result["identity"].is_object() || !update {
         if let Some(t) = super::bench::rendered(result) {
             result["text"] = json!(t);
             return t;
@@ -3625,23 +3676,26 @@ fn rank(stacks: &Stacks, by: &str, top: usize, header: &str, show: impl Fn(f64) 
 }
 
 /// The scripts whose frames read minified: a script file (not an HTML document, whose inline scripts
-/// are its own source) with a frame past column 300 (a bundle's long lines) or mostly one- and
-/// two-letter function names. A source map is what they lack; a script written as it runs lacks none.
+/// are its own source, nor a WebAssembly module, whose column is a byte offset) whose unmapped frames
+/// have one past column 300 (a bundle's long lines) or mostly one-letter function names (a minifier
+/// spends every one-letter name of a scope before any two-letter one; a person writes `on`, `el`, `px`).
+/// A source map is what they lack; a script written as it runs lacks none. Mapped frames (which carry
+/// their original names and columns) say nothing of the bundle around them.
 fn minified_scripts(frames: &[Frame]) -> std::collections::BTreeSet<String> {
-    // url → (largest column, named frames, short-named frames)
+    // url → (largest column, named frames, one-letter-named frames)
     let mut seen: BTreeMap<&str, (i64, u64, u64)> = BTreeMap::new();
-    for f in frames.iter().filter(|f| !f.url.is_empty() && f.package.is_none()) {
+    for f in frames.iter().filter(|f| !f.url.is_empty() && f.package.is_none() && !f.mapped) {
         let e = seen.entry(f.url.as_str()).or_default();
         e.0 = e.0.max(f.column);
         if !f.name.is_empty() && !f.name.starts_with('(') {
             e.1 += 1;
-            e.2 += u64::from(f.name.chars().count() <= 2);
+            e.2 += u64::from(f.name.chars().count() == 1);
         }
     }
     let document = |url: &str| {
         let path = url.split(['?', '#']).next().unwrap_or(url);
         let last = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-        last.is_empty() || [".html", ".htm", ".xhtml"].iter().any(|x| last.ends_with(x))
+        url.starts_with("wasm:") || last.is_empty() || [".html", ".htm", ".xhtml", ".wasm"].iter().any(|x| last.ends_with(x))
     };
     seen.into_iter().filter(|(url, (col, named, short))| !document(url) && (*col > 300 || (*named > 0 && 2 * short >= *named))).map(|(url, _)| url.to_string()).collect()
 }

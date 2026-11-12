@@ -111,13 +111,20 @@ pub(super) fn cached<T>(r: &Result<T>) -> Result<&T> {
 
 impl Rec {
     pub fn open(dir: &Path) -> Rec {
-        let meta = store::read_json(&dir.join("meta.json")).unwrap_or(Value::Null);
-        let id = meta["id"].as_str().map(str::to_string).unwrap_or_else(|| dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
+        // A meta.json strobe did not write here (a folder named by its path) is read as any named file is.
+        let meta = if stored { store::read_json(&dir.join("meta.json")) } else { store::read_named_json(&dir.join("meta.json")) }.unwrap_or(Value::Null);
+        // Its id as the file says when that is a plain id, else its folder's: it names caches and shows
+        // in text, so never a path (`store::plain_id`).
+        let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| store::plain_id(n));
+        let id = meta["id"].as_str().filter(|i| store::plain_id(i)).map(str::to_string).or(folder).unwrap_or_else(|| "recording".into());
         Rec {
             dir: dir.to_path_buf(),
             id,
             meta,
-            sym: Mutex::new(Symbolizer::open(dir)),
+            // A recording strobe keeps reads its scripts' original sources from disk; one named by its path
+            // reads only what it holds (its maps' own sources), never a file its maps name.
+            sym: Mutex::new(if stored { Symbolizer::open(dir) } else { Symbolizer::open_held(dir) }),
             cpu: OnceLock::new(),
             host_cpu: OnceLock::new(),
             alloc: OnceLock::new(),
@@ -130,12 +137,19 @@ impl Rec {
         }
     }
 
-    /// A recording by its handle, or by the path of its folder or its meta.json (`query::by_path`).
+    /// A recording strobe keeps, by its id (or the id's first letters). An id read from a file (a result's
+    /// recordings) resolves only here: never as a path.
     pub fn resolve(handle: &str) -> Result<Rec> {
-        match super::by_path(handle) {
+        Ok(Rec::open(&store::resolve(handle)?))
+    }
+
+    /// A recording a person named: by its handle, or by the path of its folder or its meta.json
+    /// (`query::by_path`).
+    pub fn named(handle: &str) -> Result<Rec> {
+        match super::by_path(handle)? {
             Some(super::ByPath::Recording(dir)) => Ok(Rec::open(&dir)),
-            Some(super::ByPath::Experiment(_)) => Err(Error::usage(format!("{handle} is an experiment's result, not a recording"))),
-            None => Ok(Rec::open(&store::resolve(handle)?)),
+            Some(super::ByPath::Experiment(..)) => Err(Error::usage(format!("{handle} is an experiment's result, not a recording"))),
+            None => Rec::resolve(handle),
         }
     }
 
@@ -515,6 +529,7 @@ impl HostTimes {
 
 /// A profile from JSON: profiles nest one level per stack frame, past serde_json's default limit.
 fn parse<'a, T: serde::Deserialize<'a>>(bytes: &'a [u8]) -> Result<T> {
+    store::deep_enough(bytes, Path::new("a profile of this recording"))?;
     let mut de = serde_json::Deserializer::from_slice(bytes);
     de.disable_recursion_limit();
     Ok(T::deserialize(&mut de)?)

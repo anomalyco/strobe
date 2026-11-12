@@ -24,8 +24,10 @@ pub fn recording(dir: &Path, args: &Args, top: usize, case: Option<(&str, bool)>
 }
 
 /// The experiment's actions: each series' kept recordings' (a check's, attribution blocks', kept
-/// timing blocks'), and a check case's without a recording (kept beside the result).
-pub fn experiment(result: &Value, args: &Args, top: usize) -> Result<Output> {
+/// timing blocks'), and a check case's without a recording (kept beside the result, in `home`: the
+/// folder the result is in). A file the result names is read only by its name in `home` (the name a
+/// bench writes, `[failed-]<case>.actions.json.gz`), never as the path it says.
+pub fn experiment(result: &Value, home: Option<&Path>, args: &Args, top: usize) -> Result<Output> {
     let mut found: Vec<(String, ActionLog)> = Vec::new();
     for s in result["series"].as_array().into_iter().flatten() {
         let label = s["label"].as_str().unwrap_or("");
@@ -60,8 +62,8 @@ pub fn experiment(result: &Value, args: &Args, top: usize) -> Result<Output> {
                 found.push((format!("{label}{target} · {rec} ({what})"), log));
             }
         }
-        if let Some(path) = s["actions"]["path"].as_str()
-            && let Some(log) = ActionLog::read(Path::new(path))?
+        if let Some(path) = s["actions"]["path"].as_str().and_then(|p| beside(home?, p))
+            && let Some(log) = ActionLog::read(&path)?
         {
             found.push((format!("{label}{target} · {}", if s["actions"]["failed"] == false { "no recording" } else { "failed" }), log));
         }
@@ -79,6 +81,14 @@ pub fn experiment(result: &Value, args: &Args, top: usize) -> Result<Output> {
     }
     let json = if parts.len() == 1 { parts.remove(0) } else { json!({ "sources": parts }) };
     Ok(Output::new(text, json))
+}
+
+/// The file a result's `actions.path` names, in the folder the result is in: its last part alone, when
+/// that is a name a bench writes (letters, digits, `-`, ending `.actions.json.gz`).
+fn beside(home: &Path, path: &str) -> Option<std::path::PathBuf> {
+    let name = path.rsplit(['/', '\\']).next()?;
+    let stem = name.strip_suffix(".actions.json.gz")?;
+    (!stem.is_empty() && stem.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')).then(|| home.join(name))
 }
 
 /// The rows (`--phase` filters, `--top` bounds the text) and the redacted log as JSON.

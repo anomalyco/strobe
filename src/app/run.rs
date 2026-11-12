@@ -75,8 +75,10 @@ pub fn run(args: &Args) -> Result<Output> {
     Ok(out)
 }
 
-/// What `strobe run --check` shows beside its primary (`cpu.work`) when `--metrics` names none.
-const CHECK_METRICS: [&str; 2] = ["run.duration", "memory.peak"];
+/// What `strobe run --check` declares beside its primary (`cpu.work`) when `--metrics` names none. Not
+/// `memory.peak`: declared, a Linux command smaller than strobe's own resident set is refused it; its
+/// line shows it where the block measured it (`bench::main_thread_shown`'s rule, the bench's side).
+const CHECK_METRICS: [&str; 1] = ["run.duration"];
 
 /// The bench file of a command A/B: one `cli()` target whose variants supply the command, one case
 /// that runs it once per run. Its text depends only on the declared metrics, so the rerun ledger sees
@@ -102,23 +104,38 @@ fn paired(args: &Args) -> Result<Output> {
     if let Some(bad) = metrics.iter().find(|m| crate::model::metric(m).is_none()) {
         return Err(Error::usage(format!("--metrics: {bad} is no metric (a command gives cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.read, io.write and metric.<name>)")));
     }
-    // A check reads each side once: only an exact counter compares that way. Said before anything runs,
-    // in this command's words.
-    if args.has("check")
-        && let Some(timed) = args.get("noworse").and_then(|n| {
-            n.split(',')
-                .map(|p| p.split_once('=').map_or(p, |(k, _)| k).trim())
-                .map(|k| if k.ends_with('%') || k.parse::<f64>().is_ok() { "cpu.work" } else { k })
-                .find(|k| !crate::model::is_ci_counter(k))
+    // `--noworse` names: a bare margin is the primary's (`--primary`, else cpu.work); a name that is no
+    // metric is refused first, as `--metrics` refuses one.
+    let primary = args.get("primary").unwrap_or("cpu.work");
+    let noworse: Vec<&str> = args
+        .get("noworse")
+        .map(|n| {
+            n.split(',').map(|p| p.split_once('=').map_or(p, |(k, _)| k).trim()).filter(|k| !k.is_empty()).map(|k| if k.ends_with('%') || k.parse::<f64>().is_ok() { primary } else { k }).collect()
         })
+        .unwrap_or_default();
+    if let Some(bad) = noworse.iter().find(|m| crate::model::metric(m).is_none()) {
+        return Err(Error::usage(format!("--noworse: {bad} is no metric (a command gives cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.read, io.write and metric.<name>)")));
+    }
+    // A check runs each command once, so only an exact counter would compare, and a command prints none
+    // (its `strobe:metric` lines are numbers, not counts): any `--noworse` needs timed pairs. Said before
+    // anything runs, in this command's words.
+    if args.has("check")
+        && let Some(m) = noworse.first()
     {
+        // An exact counter by its name: one a command never gives.
+        if crate::model::is_ci_counter(m) {
+            return Err(Error::usage(format!(
+                "--check --noworse {m}: a command gives no {m} (it gives cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.read, io.write and metric.<name>), so nothing compares it; timed pairs compare those: strobe run --base \"<command>\" --head \"<command>\" --noworse <metric>=2%"
+            )));
+        }
         return Err(Error::usage(format!(
-            "--check --noworse {timed}: a check runs each command once, and compares only exact counters (count.*, net.*, tty.frames, dom.nodes), which a command gives none of; {timed} needs timed pairs: strobe run --base \"<command>\" --head \"<command>\" --noworse {timed}=2%"
+            "--check --noworse {m}: a check runs each command once, and compares only exact counters (count.*, net.*, tty.frames, dom.nodes), which a command gives none of; {m} needs timed pairs: strobe run --base \"<command>\" --head \"<command>\" --noworse {m}=2%"
         )));
     }
     // A check times nothing against anything: its line shows what a person running a command first
-    // asks, how long it took and how much memory it used, beside its CPU. A comparison declares only
-    // what --metrics asks (each secondary widens the gate's Holm family).
+    // asks, how long it took, beside its CPU (its peak memory too wherever the block measured it, as the
+    // check line shows a measured value it was not asked for). A comparison declares only what
+    // --metrics asks (each secondary widens the gate's Holm family).
     if args.has("check") && args.get("metrics").is_none() {
         metrics = CHECK_METRICS.iter().map(|m| m.to_string()).collect();
     }

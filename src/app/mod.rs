@@ -251,13 +251,18 @@ fn project_of(args: &Args) -> Option<PathBuf> {
         "record" => args.get("bench").and_then(file_dir),
         "query" | "report" => {
             let handle = args.pos.iter().find(|p| !matches!(p.as_str(), "experiment" | "recording" | "history"))?;
-            let result = if Path::new(handle).is_file() {
-                std::path::PathBuf::from(handle)
-            } else {
-                let dir = crate::store::resolve(handle.split("..").next().unwrap_or(handle)).ok().filter(|d| crate::store::is_experiment(d))?;
-                dir.join("result.json")
-            };
-            crate::store::read_json(&result).ok()?["file"].as_str().and_then(file_dir)
+            // A result or recording named by its path: the project is where that file is (what it says
+            // its bench file was is not followed, and nothing beside it is marked used). An id: the bench
+            // file its stored result ran.
+            let p = Path::new(handle);
+            if p.is_file() {
+                return std::path::absolute(p).ok()?.parent().map(Path::to_path_buf);
+            }
+            if p.is_dir() && (p.join("result.json").is_file() || p.join("meta.json").is_file()) {
+                return std::path::absolute(p).ok();
+            }
+            let dir = crate::store::resolve(handle.split("..").next().unwrap_or(handle)).ok().filter(|d| crate::store::is_experiment(d))?;
+            crate::store::read_json(&dir.join("result.json")).ok()?["file"].as_str().and_then(file_dir)
         }
         _ => None,
     }

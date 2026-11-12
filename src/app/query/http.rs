@@ -19,13 +19,13 @@ pub fn run(args: &Args, top: usize) -> Result<Output> {
     let handle = args.pos.first().ok_or_else(|| Error::usage("query needs a handle: strobe query rec_… http"))?;
     let phase = args.get("phase");
     // A result.json, a meta.json or the folder of either, named by its path: read as it is.
-    match super::by_path(handle) {
-        Some(super::ByPath::Experiment(file)) => return experiment(&store::read_json(&file)?, phase, top),
+    match super::by_path(handle)? {
+        Some(super::ByPath::Experiment(_, result)) => return experiment(&result, phase, top),
         Some(super::ByPath::Recording(dir)) => return recording(&dir, phase, top),
         None => {}
     }
     if let Some((a, b)) = handle.split_once("..") {
-        let side = |h: &str| super::Rec::resolve(h).map(|r| r.dir);
+        let side = |h: &str| super::Rec::named(h).map(|r| r.dir);
         return pair(&side(a)?, &side(b)?, phase, top);
     }
     let dir = store::resolve(handle)?;

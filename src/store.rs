@@ -177,9 +177,21 @@ pub fn append_index(line: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Whether `s` can name a recording or experiment folder: letters, digits, `_` and `-`, at most 128.
+/// Nothing else (a path, `.`, `..`, a drive) ever reaches a folder of the store: an id read from a file
+/// (a result's recordings, a meta.json's own) is checked with this before it is joined to anything.
+pub fn plain_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
 /// Resolves a handle or a unique prefix (`rec_3f`, `exp_8c`) to its directory. `bench --id` names an
-/// experiment freely, so a handle without either prefix may be a recording or an experiment.
+/// experiment freely, so a handle without either prefix may be a recording or an experiment. Only a
+/// plain id (`plain_id`): a path never resolves here (`query` and `report` read paths themselves), so
+/// nothing outside the store is ever marked used.
 pub fn resolve(handle: &str) -> Result<PathBuf> {
+    if !plain_id(handle) {
+        return Err(Error::usage(format!("no recording or experiment {handle}: a handle is an id (rec_…, exp_…) or its first letters")));
+    }
     let roots = if handle.starts_with("exp_") {
         vec![paths::experiments()]
     } else if handle.starts_with("rec_") {
@@ -222,10 +234,71 @@ pub fn index() -> Vec<Value> {
 pub fn read_json(path: &std::path::Path) -> Result<Value> {
     use serde::Deserialize;
     let bytes = std::fs::read(path)?;
+    deep_enough(&bytes, path)?;
     // Profiles nest one level per stack frame; serde_json stops at 128 by default.
     let mut de = serde_json::Deserializer::from_slice(&bytes);
     de.disable_recursion_limit();
     Ok(Value::deserialize(&mut de)?)
+}
+
+/// The deepest JSON strobe reads: profiles nest one level per stack frame (the deepest kept here held
+/// 83), and reading or dropping a value recurses once per level, so a file nested far deeper (a
+/// crafted one) would overflow the thread's stack: refused before it is parsed.
+pub const MAX_JSON_DEPTH: usize = 2048;
+
+/// Refuses JSON nested past `MAX_JSON_DEPTH` (strings skipped, one pass over the bytes).
+pub fn deep_enough(bytes: &[u8], path: &Path) -> Result<()> {
+    let (mut depth, mut max, mut string, mut escape) = (0usize, 0usize, false, false);
+    for &c in bytes {
+        if string {
+            match c {
+                _ if escape => escape = false,
+                b'\\' => escape = true,
+                b'"' => string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' => string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                max = max.max(depth);
+                if max > MAX_JSON_DEPTH {
+                    return Err(Error::usage(format!("{}: JSON nested more than {MAX_JSON_DEPTH} levels deep, which no file strobe writes is: not read", path.display())));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The most of a result.json or meta.json strobe reads when a person names it by its path (the largest
+/// result kept here is under 20 MB).
+pub const MAX_NAMED_JSON: u64 = 256 << 20;
+
+/// A result.json or meta.json named by its path, read as it is and checked first: an object (its first
+/// byte past blanks is `{`), at most `MAX_NAMED_JSON`, nested at most serde_json's default 128 levels
+/// (the deepest result kept here nests 11). A file that is none of these is refused with why, never read
+/// whole or parsed past its stack.
+pub fn read_named_json(path: &Path) -> Result<Value> {
+    use std::io::Read;
+    let shown = path.display();
+    let len = std::fs::metadata(path).map_err(|e| Error::usage(format!("{shown}: {e}")))?.len();
+    if len > MAX_NAMED_JSON {
+        return Err(Error::usage(format!("{shown}: {} MB, larger than any result.json or meta.json ({} MB at most): not read", len >> 20, MAX_NAMED_JSON >> 20)));
+    }
+    let mut f = std::fs::File::open(path).map_err(|e| Error::usage(format!("{shown}: {e}")))?;
+    let mut head = [0u8; 512];
+    let n = f.read(&mut head)?;
+    if head[..n].iter().find(|c| !c.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(Error::usage(format!("{shown}: not a result.json or meta.json (no JSON object)")));
+    }
+    let bytes = std::fs::read(path)?;
+    // serde_json's own limit (128 levels) refuses a deeper file with an error, not a stack overflow.
+    serde_json::from_slice(&bytes).map_err(|e| Error::usage(format!("{shown}: not a result.json or meta.json strobe can read: {e}")))
 }
 
 /// The newest recordings or experiments, newest first.

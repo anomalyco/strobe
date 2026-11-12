@@ -199,6 +199,10 @@ pub fn resolve_all(dir: &Path, deep: &Deep) -> Result<HashMap<String, Resolved>>
 
 /// `resolve_all` with its cache in `cache` (beside the recording's other files).
 pub fn resolve_cached(dir: &Path, deep: &Deep, cache: &str) -> Result<HashMap<String, Resolved>> {
+    // A recording strobe keeps is symbolized from the modules it names on this machine and cached beside
+    // it. One a person named by its path (a copy, another machine's) is read as it is: its own cache if
+    // it holds one, else each address by its module's name, and no file it names is opened or written.
+    let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
     let cache = dir.join(cache);
     if let Ok(f) = std::fs::File::open(&cache) {
         let mut text = String::new();
@@ -274,6 +278,9 @@ pub fn resolve_cached(dir: &Path, deep: &Deep, cache: &str) -> Result<HashMap<St
                         .iter()
                         .map(|(path, items)| {
                             let p = Path::new(path);
+                            if !stored {
+                                return (items.clone(), path.clone(), None);
+                            }
                             // PE modules by their PDB; ELF and Mach-O by their DWARF.
                             let located = match pdb::codeview(p) {
                                 Some(cv) => pdb::find(p, &cv, servers).and_then(|pdb| pdb::resolve(&pdb, &items.iter().map(|x| x.1 as u32).collect::<Vec<_>>())),
@@ -322,7 +329,9 @@ pub fn resolve_cached(dir: &Path, deep: &Deep, cache: &str) -> Result<HashMap<St
             out.insert(key, r);
         }
     }
-    let _ = write_gz(&cache, &out);
+    if stored {
+        let _ = write_gz(&cache, &out);
+    }
     Ok(out)
 }
 
