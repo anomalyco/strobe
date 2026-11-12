@@ -330,10 +330,8 @@ fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> 
         // only for a metric read from the trace) has no frames to read: said, never a trace engine's error.
         "frames" if !trace.exists() => Err(match meta["frames_refused"].as_str().and_then(crate::model::Refusal::from_line) {
             Some(r) => r.fix("bench --trace full, or a headed run (no --headless), keeps a trace with the page's frames").into(),
-            None => Error::usage(format!(
-                "this recording kept no trace{}, so it has no frames: bench --trace full, or a headed run (no --headless), keeps one",
-                if meta["traced"] == false { " (its block traced nothing: a headless page's lean block traces only for a metric read from the trace)" } else { "" }
-            )),
+            None if meta["traced"] == false => Error::usage("this block took no trace: nothing it measured needs one; record or bench with --trace full, or headed, to keep one"),
+            None => Error::usage("this recording kept no trace, so it has no frames: bench --trace full, or a headed run (no --headless), keeps one"),
         }),
         "frames" => frames(&trace, meta, top),
         "threads" if !trace.exists() => Err(Error::usage(format!(

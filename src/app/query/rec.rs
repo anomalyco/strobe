@@ -291,6 +291,10 @@ impl Rec {
 
     pub(super) fn part(&self, p: Part) -> Result<Arc<Rows>> {
         if !self.has(p) {
+            // A page block that took no trace (`traced: false`): nothing it measured needed one.
+            if self.meta["traced"] == false && !self.dir.join("trace.pftrace").is_file() {
+                return Err(Error::usage("this block took no trace: nothing it measured needs one; record or bench with --trace full, or headed, to keep one"));
+            }
             return Err(Error::usage("this recording has no trace with strobe's run marks"));
         }
         self.prefetch(&[p]);
