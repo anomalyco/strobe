@@ -33,6 +33,8 @@ struct Ran {
     launch: f64,
     /// The line is the shell's to run (`shell_line`): its commands are the shell's children.
     shell_line: bool,
+    /// Why the shell ran the line and stayed its parent (`shell_why`), or None.
+    shelled: Option<&'static str>,
 }
 
 /// A run's commands summed, or None when one of them has no value.
@@ -50,15 +52,24 @@ fn line_for(asked: &Value, v: &Variant, target: &Value) -> Result<String> {
     line.ok_or_else(|| Error::usage("a cli target needs a command: cli(\"<line>\"), a cmd:<line> variant, or ctx.exec(\"<line>\")"))
 }
 
-/// Whether the shell, not the line's first program, is what `line` asks to run: it has, outside the OS
-/// shell's quotes, an operator that joins commands or redirects them (`&&`, `||`, `&`, `|`, `<`, `>`;
-/// on Unix also `;`, `(`, `)` and a new line) or, on Unix, a substitution (`$(…)`, a backquote: also
-/// inside double quotes). Then the line runs through the shell on every OS (`sh -c`, Windows `cmd /c`),
-/// all of it; a quoted operator is an argument and changes nothing. Quotes are the shell's own: `'…'`
-/// and `"…"` with `\` escapes on Unix; on Windows only `"…"`, and `^` escapes the next character, as cmd
-/// reads a line.
+/// Whether the person wrote `line` for the shell rather than for its first program: then the shell runs
+/// all of it on every OS (Unix `sh -c` without `exec`, Windows `cmd /d /s /c`). The rule, row by row
+/// with the outcome each OS gives (and run on each OS), is the table in
+/// `scripts/dev/shell/rows.ts` (`shell.bench.ts` runs it). In short:
+/// - Unix reads the line as sh does: an operator outside quotes (`&&`, `||`, `&`, `|`, `<`, `>`, `;`,
+///   `(`, `)`, a new line) or a substitution (`$(…)`, a backquote, also inside double quotes). Quotes are
+///   `'…'` and `"…"`, and `\` escapes the next character outside single quotes.
+/// - Windows reads quotes as a program reads its arguments (`"…"`; a `"` after an odd run of `\` is a
+///   literal quote, in quotes or not: a JSON argument), so a quoted operator is an argument. Outside
+///   quotes `&&`, `||`, `|`, `<` and `>` are cmd's, as is a `&` that stands apart from a word (a `&`
+///   inside one, as in an unquoted URL's query, stays the argument it was in 0.32.0), and a caret before
+///   an operator (`^&`, `^|`, `^<`, `^>`) is cmd's escape, written for cmd. A caret anywhere else
+///   (`git show HEAD^`) is the argument's.
 pub(super) fn shell_line(line: &str) -> bool {
-    let unix = !cfg!(windows);
+    if cfg!(windows) { cmd_line(line) } else { sh_line(line) }
+}
+
+fn sh_line(line: &str) -> bool {
     let (mut single, mut double, mut escaped) = (false, false, false);
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
@@ -67,19 +78,102 @@ pub(super) fn shell_line(line: &str) -> bool {
             continue;
         }
         match c {
-            '\\' if unix && !single => escaped = true,
-            '^' if !unix && !double => escaped = true,
-            '\'' if unix && !double => single = !single,
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
             '"' if !single => double = !double,
-            '`' if unix && !single => return true,
-            '$' if unix && !single && chars.peek() == Some(&'(') => return true,
+            '`' if !single => return true,
+            '$' if !single && chars.peek() == Some(&'(') => return true,
             _ if single || double => {}
-            '&' | '|' | '<' | '>' => return true,
-            ';' | '(' | ')' | '\n' if unix => return true,
+            '&' | '|' | '<' | '>' | ';' | '(' | ')' | '\n' => return true,
             _ => {}
         }
     }
     false
+}
+
+fn cmd_line(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let (mut double, mut slashes) = (false, 0usize);
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '\\' {
+            slashes += 1;
+            continue;
+        }
+        let literal_quote = slashes % 2 == 1;
+        slashes = 0;
+        let (prev, next) = (i.checked_sub(1).map(|p| chars[p]), chars.get(i + 1).copied());
+        match c {
+            '"' if literal_quote => {}
+            '"' => double = !double,
+            _ if double => {}
+            '^' if matches!(next, Some('&' | '|' | '<' | '>')) => return true,
+            '|' | '<' | '>' => return true,
+            '&' => {
+                let in_word = prev.is_some_and(|p| !p.is_whitespace() && p != '&') && next.is_some_and(|n| !n.is_whitespace() && n != '&');
+                if !in_word {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Why the shell, not the line's first program, runs `line` (and stays its parent), or None.
+/// `fallback`: Windows started the line under cmd after its first word was no executable it could run.
+fn shell_why(line: &str, fallback: bool) -> Option<&'static str> {
+    if shell_line(line) {
+        return Some("it has a shell operator outside quotes");
+    }
+    #[cfg(windows)]
+    {
+        let first = line.trim().strip_prefix('"').map_or_else(|| line.split_whitespace().next().unwrap_or(""), |q| q.split('"').next().unwrap_or(""));
+        if Path::new(first).extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat")) {
+            return Some("it runs a .cmd or .bat script");
+        }
+        fallback.then_some("its first word is no executable (a shell builtin or a script)")
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = fallback;
+        (!simple(line)).then_some("it starts with a shell keyword, builtin or variable assignment")
+    }
+}
+
+/// `ShellLine`, once per series: an info line when the shell ran a command line of a side (its own
+/// start-up, a few ms, is inside `run.duration` and `cpu.work`), a warning instead once one side of a
+/// comparison ran its lines through the shell and the other did not.
+pub(super) fn shell_note(ctx: &mut Ctx, s: &Series, role: &str, why: Option<&'static str>) {
+    let label = s.label();
+    let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
+    let sides = ctx.shells.entry(label.clone()).or_default();
+    *sides.entry(role.to_string()).or_insert(false) |= why.is_some();
+    let shelled: Vec<String> = sides.iter().filter(|(_, on)| **on).map(|(r, _)| r.clone()).collect();
+    let direct: Vec<String> = sides.iter().filter(|(_, on)| !**on).map(|(r, _)| r.clone()).collect();
+    let prefix = format!("{label}: ");
+    let said = |ctx: &Ctx, level: &str| ctx.warnings.iter().any(|w| w.id == "ShellLine" && w.level == level && w.text.starts_with(&prefix));
+    if !shelled.is_empty() && !direct.is_empty() {
+        if said(ctx, "warn") {
+            return;
+        }
+        ctx.warnings.retain(|w| !(w.id == "ShellLine" && w.text.starts_with(&prefix)));
+        let w = validity::warn(
+            "ShellLine",
+            format!(
+                "{label}: {}'s command line runs through {shell} and {}'s does not, so only {}'s run.duration and cpu.work hold the shell's own start-up (a few ms a command line): the sides are not measured alike",
+                shelled.join(", "),
+                direct.join(", "),
+                shelled.join(", ")
+            ),
+        );
+        progress(format!("  ! ShellLine  {}", w.text));
+        ctx.warnings.push(w);
+    } else if let Some(why) = why.filter(|_| !said(ctx, "info") && !said(ctx, "warn")) {
+        let w = validity::info("ShellLine", format!("{label}: a command line runs through {shell} ({why}), so the shell's own start-up (a few ms) is inside run.duration and cpu.work"));
+        progress(format!("  i ShellLine  {}", w.text));
+        ctx.warnings.push(w);
+    }
 }
 
 /// A line the shell can replace itself with (`exec`): one command, no variable assignment in front,
@@ -197,8 +291,12 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         Ok((child, t0, super::script::cpu_ms((c0, k0), (c1, k1), t1.duration_since(t0).as_secs_f64() * 1e3)))
     };
     // Windows: a word that is no executable (NotFound), or a script `raw_arg` cannot pass (InvalidInput).
+    let mut fallback = false;
     let (mut child, t0, launch) = match start(false) {
-        Err(e) if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) => start(true),
+        Err(e) if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) => {
+            fallback = true;
+            start(true)
+        }
         r => r,
     }
     .map_err(|e| Error::msg(format!("start `{line}`: {e}")))?;
@@ -274,7 +372,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
     }
     let output: String = lines.join("\n");
     let output = if output.len() > 64 * 1024 { output[output.floor_char_boundary(output.len() - 64 * 1024)..].to_string() } else { output };
-    Ok((Ran { wall, usage, metrics, launch, shell_line: shell_line(line) }, output))
+    Ok((Ran { wall, usage, metrics, launch, shell_line: shell_line(line), shelled: shell_why(line, fallback) }, output))
 }
 
 /// Child processes' CPU from Windows' clock ticks needs this many ticks (15.6 ms each) per run before
@@ -449,6 +547,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
             ),
         ));
     }
+    shell_note(ctx, s, v.role, measured.iter().flat_map(|r| r.0.iter()).find_map(|x| x.shelled));
     put("cpu.wakes", per(&|r| sum_of(r, |x| x.usage.switches.map(|n| n as f64)).map(|n| n / (wall(r) / 1e3).max(1e-9))), &|| {
         Refusal::new(ValidatorId::NotOnThisOs, "cpu.wakes: Windows keeps no context-switch count of a process that has ended (its job counts CPU and IO only)")
     });

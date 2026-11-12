@@ -168,7 +168,7 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
     prepare_series(ctx, s, variants, config)?;
     // `--video`: one film of the launch, each case's span marked in it.
     let film = ctx.args.has("video") && {
-        let skip = no_video(ctx, variants[0].target_of(s));
+        let skip = no_video(ctx, s, &variants[0]);
         if let Some(why) = &skip {
             ctx.warnings.push(validity::info("Video", format!("{}: no video: {why}", s.label())));
         }

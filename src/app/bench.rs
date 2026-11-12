@@ -1014,7 +1014,7 @@ fn series_windowless(ctx: &Ctx, s: &Series) -> bool {
         Some((b, h)) => vec![b.as_str(), h.as_str()],
         None => vec![s.target.as_str()],
     };
-    names.iter().all(|n| windowless_target(&ctx.describe["targets"][*n], &ctx.config))
+    names.iter().all(|n| ctx_windowless(ctx, s, n, true))
 }
 
 /// A target that opens no window: a script, a command line, a terminal (its grid is strobe's own), or an
@@ -1023,18 +1023,53 @@ fn windowless_target(t: &Value, config: &Value) -> bool {
     matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) || launch::app_windowless(t, profile_of(t).and_then(|id| isolate::app(id, config).ok()).as_ref())
 }
 
-/// `windowless_target` as one side runs it: an `app:<id>` variant runs that profile, not the target's.
-fn side_windowless(t: &Value, config: &Value, v: &Variant) -> bool {
-    match &v.kind {
-        Kind::App(id) if !matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) => launch::app_windowless(t, isolate::app(id, config).ok().as_ref()),
+/// `windowless_target` as a side runs it with the app profile it names (`app:<id>`), not the target's.
+fn windowless_as(t: &Value, config: &Value, app: Option<&str>) -> bool {
+    match app {
+        Some(id) if !matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) => launch::app_windowless(t, isolate::app(id, config).ok().as_ref()),
         _ => windowless_target(t, config),
     }
 }
 
-/// An app whose page strobe drives over DevTools (`app`, `exe`, `webview`, `command`) declared with
-/// `window: false` (`windowless_target`): it may draw, but to no window anyone sees.
-fn windowless_app(t: &Value, config: &Value) -> bool {
-    matches!(t["kind"].as_str(), Some("app" | "exe" | "webview" | "command")) && windowless_target(t, config)
+/// The app profile a side names on the command line (`app:<id>`).
+fn app_of(v: &Variant) -> Option<&str> {
+    if let Kind::App(id) = &v.kind { Some(id.as_str()) } else { None }
+}
+
+/// `windowless_as` for one side.
+fn side_windowless(t: &Value, config: &Value, v: &Variant) -> bool {
+    windowless_as(t, config, app_of(v))
+}
+
+/// `all` of the sides' readings, or any; `none` with no side.
+fn of_sides(sides: impl Iterator<Item = bool>, all: bool, none: impl FnOnce() -> bool) -> bool {
+    let sides: Vec<bool> = sides.collect();
+    match (sides.is_empty(), all) {
+        (true, _) => none(),
+        (false, true) => sides.iter().all(|w| *w),
+        (false, false) => sides.iter().any(|w| *w),
+    }
+}
+
+/// `sides_windowless` from what the run keeps of its sides (`Ctx::side_profiles`), for a check of a
+/// series that has no side in hand.
+fn ctx_windowless(ctx: &Ctx, s: &Series, name: &str, all: bool) -> bool {
+    let t = &ctx.describe["targets"][name];
+    let config = ctx.projects.get(name).map_or(&ctx.config, |(_, c)| c);
+    let sides = ctx.side_profiles.iter().filter(|(target, _)| target.as_deref().unwrap_or(&s.target) == name).map(|(_, app)| windowless_as(t, config, app.as_deref()));
+    of_sides(sides, all, || windowless_target(t, config))
+}
+
+/// An app whose page strobe drives over DevTools (`app`, `exe`, `webview`, `command`) that shows no
+/// window as this side runs it (`side_windowless`): it may draw, but to no window anyone sees.
+fn side_windowless_app(t: &Value, config: &Value, v: &Variant) -> bool {
+    matches!(t["kind"].as_str(), Some("app" | "exe" | "webview" | "command")) && side_windowless(t, config, v)
+}
+
+/// Whether the sides that run target `name` in `s` show no window (`side_windowless`): `all` of them,
+/// or any. With no side of it known (a series before its variants), the target's own reading.
+fn sides_windowless(s: &Series, name: &str, t: &Value, config: &Value, variants: &[Variant], all: bool) -> bool {
+    of_sides(variants.iter().filter(|v| v.target_of(s) == name).map(|v| side_windowless(t, config, v)), all, || windowless_target(t, config))
 }
 
 /// How a note names a side: an implementation's own name in an implementation comparison, else its
@@ -1057,7 +1092,7 @@ fn admit_window(ctx: &mut Ctx, s: &Series, v: &Variant, b: &Block) -> Result<()>
     let target = &ctx.describe["targets"][v.target_of(s)];
     // A target with no window (its own `window: false` or its app profile's) has no size to hold to a
     // viewport or to the other side's: a hidden window's is no one's.
-    if windowless_target(target, &ctx.config) {
+    if side_windowless(target, &ctx.config, v) {
         return Ok(());
     }
     // A phone's page is its own screen: a target's viewport sizes only an emulated one.
@@ -1321,9 +1356,10 @@ fn has_video(rec: &str) -> bool {
 /// Why the target `name` (one side's, in an implementation comparison) gets no video with `--video`
 /// (it is said, the bench goes on): it opens no window, or it is a headless page in an engine without
 /// a screencast.
-fn no_video(ctx: &Ctx, name: &str) -> Option<String> {
+fn no_video(ctx: &Ctx, s: &Series, v: &Variant) -> Option<String> {
+    let name = v.target_of(s);
     let t = &ctx.describe["targets"][name];
-    if windowless_target(t, &ctx.config) {
+    if side_windowless(t, &ctx.config, v) {
         return Some(format!("{name} opens no window (a script, a command, a terminal program, or window: false)"));
     }
     let engine = engine_of(t);
@@ -1578,6 +1614,11 @@ struct Ctx<'a> {
     inputs: BTreeMap<String, validity::InputClass>,
     /// Per series and side, whether its first page block matched reduced motion (`admit_motion`).
     motions: BTreeMap<String, bool>,
+    /// Per series, each side's cli runs and whether the shell ran a line of them (`cli::shell_note`).
+    shells: BTreeMap<String, BTreeMap<String, bool>>,
+    /// Per side, the target it runs when its own and the app profile it names (`app:<id>`): what a
+    /// check with no side in hand asks whether it shows a window (`ctx_windowless`).
+    side_profiles: Vec<(Option<String>, Option<String>)>,
     /// The sides whose first launch has run: a later launch notes what appears in the user's
     /// Documents or Desktop (`folder_notes`) instead of stopping (SPEC §13.2).
     folders_first: std::collections::BTreeSet<String>,
@@ -2211,6 +2252,8 @@ pub fn run(args: &Args) -> Result<Output> {
         windows: BTreeMap::new(),
         inputs: BTreeMap::new(),
         motions: BTreeMap::new(),
+        shells: BTreeMap::new(),
+        side_profiles: Vec::new(),
         folders_first: Default::default(),
         folder_notes: Default::default(),
         runner_pin,
@@ -2273,6 +2316,7 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     }
     ctx.projects = target_projects(&ctx.describe, &series, &variants)?;
+    ctx.side_profiles = variants.iter().map(|v| (v.target.clone(), app_of(v).map(str::to_string))).collect();
     ctx.implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     check_engines(&mut series, &ctx.describe, args, &variants, &config, &ctx.projects)?;
     // A series the display cannot show refuses before anything counts it (journeys, the Holm family). A
@@ -2283,7 +2327,7 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some((a, b)) = check_pair(&ctx.describe, args, &project)? {
         let sides = [resolve_side("base", a, None, &ctx.describe, &project, &config)?, resolve_side("head", b, None, &ctx.describe, &project, &config)?];
         implementation_preflight(&ctx.describe, &series, &sides, &config, &ctx.projects)?;
-        offscreen_sides(&ctx.describe, &sides, &config, &ctx.projects, ctx.headless)?;
+        offscreen_sides(&ctx.describe, &series, &sides, &config, &ctx.projects, ctx.headless)?;
     }
     if mode == Mode::Compare
         && let Some(why) = &ctx.shared
@@ -2301,13 +2345,17 @@ pub fn run(args: &Args) -> Result<Output> {
             series[i].setup_key = Some(k);
         }
     }
+    // Two builds or profiles of one target, too: --base app:tray --head app:desk.
+    if !ctx.implementations {
+        offscreen_sides(&ctx.describe, &series, &variants, &config, &ctx.projects, ctx.headless)?;
+    }
     if ctx.implementations {
         for v in &variants {
             let t = v.target.as_deref().unwrap_or("");
             progress(format!("{:<5} {}: target {t} ({}) at {}", v.role, v.name, ctx.describe["targets"][t]["kind"].as_str().unwrap_or("?"), v.label));
         }
         implementation_preflight(&ctx.describe, &series, &variants, &config, &ctx.projects)?;
-        offscreen_sides(&ctx.describe, &variants, &config, &ctx.projects, ctx.headless)?;
+        offscreen_sides(&ctx.describe, &series, &variants, &config, &ctx.projects, ctx.headless)?;
         ctx.cross_engine = {
             let kinds: Vec<&str> = variants.iter().filter_map(|v| v.target.as_deref()).map(|t| engine(&ctx.describe["targets"][t])).collect();
             kinds[0] != kinds[1]
@@ -2878,7 +2926,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     let main_counters = split == Counting::Only || (split == Counting::Separate && counted_apart(&s.primary));
     // `--video`: the check block films its run (a counter block films nothing: its times are dropped anyway).
     let film = ctx.args.has("video") && !main_counters && {
-        let skip = no_video(ctx, variants[variants.len() - 1].target_of(s));
+        let skip = no_video(ctx, s, &variants[variants.len() - 1]);
         if let Some(why) = &skip {
             ctx.warnings.push(validity::info("Video", format!("{}: no video: {why}", s.label())));
         }
@@ -3093,6 +3141,11 @@ fn flagged_counts<'a>(s: &Series, blocks: impl IntoIterator<Item = &'a mut Block
     seen
 }
 
+/// What turns a `--noworse` counter that nothing compared into one compared: said by `Uncounted` and by a
+/// check's summary when it compared none (exit 4).
+const NOWORSE_DECLARE: &str =
+    "a counter the case declares in its metrics reads 0 when it never fires, so 0 on both sides compares as no worse; one it does not declare cannot be told from a misspelled name.";
+
 /// `Uncounted`: an exact counter (`count.<name>`, `net.*`, `tty.frames`, `dom.nodes`) only `--noworse`
 /// names that no case declares and no block of the whole experiment counted or refused (`seen`, and the outputs of series done before a resume): nothing compared it,
 /// which is right when what it counts never happened on either side, and hides a regression when the
@@ -3113,7 +3166,9 @@ fn uncounted(series: &[Series], outs: &[Value], seen: &std::collections::BTreeSe
             let known = if declared.is_empty() { "no case declares a counter".to_string() } else { format!("the cases declare {}", declared.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")) };
             validity::warn(
                 "Uncounted",
-                format!("--noworse {m}: no run of any case counted it, so nothing compared it: either what it counts never happened on either side (0 on both, nothing to hold), or no case counts that name (check it: {known})"),
+                format!(
+                    "--noworse {m}: no run of any case counted it, so nothing compared it: {NOWORSE_DECLARE} Declare it in the metrics of the case that counts it (metrics: [\"{m}\"]), or check the name ({known})"
+                ),
             )
         })
         .collect()
@@ -3444,7 +3499,8 @@ fn check_spread(s: &Value, name: &str) -> String {
 
 /// A two-build check's base line (`base_check`): its declared metrics' values, or why it failed (the
 /// whole error, its later lines under the first, and its fix).
-fn base_line(b: &Value, declared: &[&str], case_fix: Option<&str>) -> String {
+/// `extra`: what the case's line shows undeclared (`main_thread_shown`), where base measured it.
+fn base_line(b: &Value, declared: &[&str], extra: &[&str], case_fix: Option<&str>) -> String {
     if b["passed"] != true {
         let error = b["error"].as_str().unwrap_or("").trim_end().lines().map(str::trim_end).collect::<Vec<_>>().join("\n            ");
         // Base's fix, unless the case's line said it already (the case failed on base alone).
@@ -3458,6 +3514,7 @@ fn base_line(b: &Value, declared: &[&str], case_fix: Option<&str>) -> String {
             None if b["refused"][*n].is_string() => format!("{n} refused"),
             None => format!("{n} no value"),
         })
+        .chain(extra.iter().filter_map(|n| b["values"][*n].as_f64().map(|v| format!("{n} {}", fmt::value(v, model::metric(n).map_or("", |d| d.unit))))))
         .collect();
     let rec = b["recording"].as_str().map(|r| format!(" · rec {r}")).unwrap_or_default();
     format!("{}{rec}", values.join(" · "))
@@ -3466,8 +3523,13 @@ fn base_line(b: &Value, declared: &[&str], case_fix: Option<&str>) -> String {
 /// The main thread's CPU (`cpu.main`, `cpu.main.busy`) a case's line shows after its declared metrics
 /// when it declared them not: a script's or a windowless native app's, read in every block, and with
 /// no window the line has little else of the app's own. On the line only: the JSON holds them either way.
+/// A command's (`cli`) line shows its peak memory (`memory.peak`) the same way, where a run measured it.
 pub(super) fn main_thread_shown(s: &Value, declared: &[&str]) -> Vec<&'static str> {
     let kind = s["target_kind"].as_str();
+    if kind == Some("cli") {
+        let measured = s["values"]["memory.peak"].is_f64() || s["blocks"].as_array().into_iter().flatten().any(|b| b["values"]["memory.peak"].is_f64());
+        return if measured && !declared.contains(&"memory.peak") { vec!["memory.peak"] } else { Vec::new() };
+    }
     if kind != Some("script") && !(kind == Some("native") && s["windowless"] == true) {
         return Vec::new();
     }
@@ -3748,7 +3810,7 @@ pub(crate) fn check_text(r: &Value) -> String {
         // A two-build check (`--base <variant>`): the base's line under the head's, and each `--noworse`
         // counter held to it.
         if s["base"].is_object() {
-            text += &format!("      base  {}\n", base_line(&s["base"], &declared, s["hint"].as_str()));
+            text += &format!("      base  {}\n", base_line(&s["base"], &declared, &main_thread_shown(s, &declared), s["hint"].as_str()));
         }
         for n in s["counters"].as_array().into_iter().flatten() {
             text += &format!("      {} noworse  {}\n", if n["passed"] == true { " " } else { "!" }, n["text"].as_str().unwrap_or(""));
@@ -3803,10 +3865,14 @@ pub(crate) fn check_text(r: &Value) -> String {
         n => format!("; {n} cases measured run 2 instead, since a process of the target ended in their run 1"),
     };
     let compared = match noworse_compared(&r["series"]) {
-        Some(0) => "base and head each checked; no --noworse counter was measured on both sides, so nothing was compared (exit 4)",
-        Some(_) => "base and head each checked; only the --noworse counters compared, exactly",
-        None if series.iter().any(|s| s["base"].is_object()) => "base and head each checked; nothing compared: the same command without --check times head against base",
-        None => "nothing compared",
+        // Refused on both sides (said on the case lines), or counted nowhere (`Uncounted`), or both.
+        Some(0) if r["warnings"].as_array().into_iter().flatten().any(|w| w["id"] == "Uncounted") => {
+            format!("base and head each checked; no --noworse counter was measured on both sides, so nothing was compared (exit 4): {}", NOWORSE_DECLARE.trim_end_matches('.'))
+        }
+        Some(0) => "base and head each checked; every --noworse counter was refused on both sides (the refused lines say why), so nothing was compared (exit 4)".into(),
+        Some(_) => "base and head each checked; only the --noworse counters compared, exactly".into(),
+        None if series.iter().any(|s| s["base"].is_object()) => "base and head each checked; nothing compared: the same command without --check times head against base".into(),
+        None => "nothing compared".into(),
     };
     let reset = if series.iter().any(|s| s["reset"] == true) { "; a case with a reset runs once more after it, unmeasured" } else { "" };
     // Cases whose base could not run them: failed, as nothing of head was checked against base.
@@ -3905,7 +3971,7 @@ fn secondary_names(s: &Series, extra: &[&str], rate_context: bool) -> Vec<String
 /// event loop a person waits on with no window to time: a script's host, a windowless native app.
 fn target_defaults(ctx: &Ctx, s: &Series, target: &Value) -> Vec<&'static str> {
     let outside = matches!(target["kind"].as_str(), Some("script" | "cli" | "tty")) || is_native(target) || s.sides.is_some() || engine_of(target) != WebEngine::Chromium;
-    let main = target["kind"] == "script" || (is_native(target) && windowless_target(target, &ctx.config));
+    let main = target["kind"] == "script" || (is_native(target) && ctx_windowless(ctx, s, &s.target, true));
     outside.then_some("cpu.work").into_iter().chain(if main { ["cpu.main", "cpu.main.busy"].as_slice() } else { &[] }.iter().copied()).collect()
 }
 
@@ -4905,7 +4971,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             progress("  video blocks (one warmed run per variant; not timed)");
             for v in variants.iter() {
                 // Each side by its own target: an implementation comparison's may differ.
-                if let Some(why) = no_video(ctx, v.target_of(s)) {
+                if let Some(why) = no_video(ctx, s, v) {
                     warnings.push(validity::info("Video", format!("{}: no video of {}: {why}", s.label(), side_of(ctx, v))));
                     continue;
                 }
@@ -6527,7 +6593,7 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     // are not its screen.
     let own_screen = ctx.phone.is_some() || cases.iter().all(|s| on_headless_compositor(&ctx.describe["targets"][v.target_of(s)], &ctx.config));
     let mut hot = 0;
-    if cases.iter().all(|s| runs_locked(ctx, s, x)) {
+    if cases.iter().all(|s| runs_locked(ctx, s, v, x)) {
         loop {
             let (start, locks, unlocks) = (host::session_locked() && !own_screen, ctx.awake.locks(), ctx.awake.unlocks());
             let mut display = if own_screen { None } else { host::display_state() };
@@ -6619,7 +6685,7 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             ctx.locked_out = false;
         }
         if host::session_locked() {
-            let why = needs_screen(ctx, s, x).unwrap_or_else(|| met.into());
+            let why = needs_screen(ctx, s, v, x).unwrap_or_else(|| met.into());
             // An earlier series' wait ran out (`--unlock-wait`) and the session is still locked: this one
             // is not run either, without waiting again, and the series that need no window run on.
             if ctx.locked_out {
@@ -6940,7 +7006,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 None => r,
             };
             let kind = ctx.describe["targets"][v.target_of(s)]["kind"].as_str().unwrap_or("").to_string();
-            let r = r.map(|b| self_state(ctx, s, v, x, &kind, b)).map(|b| declared_state(ctx, s, v, x, b)).inspect(|b| restate_recording(ctx, s, b));
+            let r = r.map(|b| self_state(ctx, s, v, x, &kind, b)).map(|b| declared_state(ctx, s, v, x, b)).inspect(|b| restate_recording(ctx, s, v, b));
             // A timed or check block that refused its primary refuses the block, as a native one does:
             // pairs of nothing would end `unclear` instead of saying why.
             let r = r.and_then(|b| match b.refused.get(&s.primary).filter(|why| x.set != Set::Attribution && x.set != Set::Memory && why.fix.as_deref() != Some(FILMED_CPU_FIX)) {
@@ -7101,15 +7167,16 @@ fn phase_ms(marks: &[(String, u64)], name: &str, run: &metrics::Timed) -> f64 {
 /// `window: false`; and a native target with `window: false` (a tray app), or any native target under `--check` (no verdict: it validates the
 /// file), whose metrics are all CPU (`ui.*` too), memory (GPU memory too), IO, counters, its run
 /// time, GPU use as a secondary (refused while locked) and launch milestones (not pixels).
-fn runs_locked(ctx: &Ctx, s: &Series, x: &Exec) -> bool {
-    needs_screen(ctx, s, x).is_none()
+fn runs_locked(ctx: &Ctx, s: &Series, v: &Variant, x: &Exec) -> bool {
+    needs_screen(ctx, s, v, x).is_none()
 }
 
 /// What makes a series need a presenting window, said for the wait on a locked session (None: it runs
 /// locked, `runs_locked`). A metric a native app can never have (a browser engine's, frames of a
 /// windowless app) needs nothing: its block refuses it `NotForTarget`.
-fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
-    let t = &ctx.describe["targets"][&s.target];
+/// `v`: the side that runs, whose profile may be its own (`side_windowless`).
+fn needs_screen(ctx: &Ctx, s: &Series, v: &Variant, x: &Exec) -> Option<String> {
+    let t = &ctx.describe["targets"][v.target_of(s)];
     // On the headless compositor strobe runs, the session's lock screen covers nothing of the app: its
     // pixels and input are the compositor's own.
     if on_headless_compositor(t, &ctx.config) {
@@ -7120,7 +7187,7 @@ fn needs_screen(ctx: &Ctx, s: &Series, x: &Exec) -> Option<String> {
             || m == "run.duration"
             || (m.starts_with("launch.") && m != "launch.painted" && m != "launch.settled")
     };
-    let windowless = windowless_target(t, &ctx.config);
+    let windowless = side_windowless(t, &ctx.config, v);
     // A pixels block compares what the window shows; only a headless page (or a phone's) draws it
     // without a screen, a terminal's grid is drawn by strobe itself, and Windows draws a native app's
     // window for its own rendering and its compositor's copy while locked (`host::window_image`).
@@ -7179,7 +7246,7 @@ pub(crate) fn foreground_metric(m: &str) -> bool {
 /// A kept recording's values and refusals as the block ended with them: the block wrote its
 /// `meta.json` before `priority_state` and `headless_state` refused what the screen or the priority
 /// make meaningless, and the recording must not hold those values under its handle.
-fn restate_recording(ctx: &Ctx, s: &Series, b: &Block) {
+fn restate_recording(ctx: &Ctx, s: &Series, v: &Variant, b: &Block) {
     let Some(dir) = b.recording.as_deref().and_then(|id| store::resolve(id).ok()) else { return };
     let Ok(mut meta) = store::read_json(&dir.join("meta.json")) else { return };
     // A batch's recording holds each case's values by its label (`batch::meta`).
@@ -7200,7 +7267,7 @@ fn restate_recording(ctx: &Ctx, s: &Series, b: &Block) {
     // Why the recording's frames are gone, as a `record` says it (`query summary`).
     let why = if headless_of(ctx, s) {
         Some("Headless: the page ran headless, so nothing it drew reached a display".to_string())
-    } else if windowless_app(&ctx.describe["targets"][&s.target], &ctx.config) {
+    } else if side_windowless_app(&ctx.describe["targets"][v.target_of(s)], &ctx.config, v) {
         Some(format!("NotForTarget: {}", launch::WINDOWLESS_DRAWN))
     } else if b.browser.as_ref().is_some_and(|br| br.software) {
         Some("SoftwareGpu: a software adapter drew the page; the browser's CPU includes the rasterization a GPU would do".to_string())
@@ -7216,18 +7283,19 @@ fn restate_recording(ctx: &Ctx, s: &Series, b: &Block) {
 /// A headless page (`--headless`, a target's `headless`): what reached no display is not kept. Frames,
 /// input-to-screen latencies, scrolling, canvas frames and GPU use go, and the declared ones show
 /// refused (`Headless`); CPU, main-thread work, counters, memory, milestones and strobe's own input
-/// pacing stay. So for an app driven over DevTools with `window: false` (`windowless_app`): what its
+/// pacing stay. So for an app driven over DevTools with `window: false` (`side_windowless_app`): what its
 /// hidden or headless window drew reached no display either (`NotForTarget`; a launch block's own
 /// refusal of its pixels, `launch::refusals`, stands as it is).
 fn headless_state(ctx: &Ctx, s: &Series, v: &Variant, mut b: Block) -> Block {
     let t = &ctx.describe["targets"][v.target_of(s)];
-    let windowless = matches!(t["kind"].as_str(), Some("app" | "exe" | "webview" | "command")) && side_windowless(t, &ctx.config, v);
+    let windowless = side_windowless_app(t, &ctx.config, v);
     if !headless_of(ctx, s) && !windowless {
         return b;
     }
     // GPU memory too when this block's headless browser drew in software: no GPU held it.
     let software = b.browser.as_ref().is_some_and(|br| br.software);
-    let drawn = |m: &str| display_metric(m) || gpu_use(m) || (software && matches!(m, "gpu.vram" | "gpu.shared"));
+    // A windowless app's GPU memory on a software adapter is that adapter's to refuse (`software_state`).
+    let drawn = |m: &str| display_metric(m) || gpu_use(m) || (software && !windowless && matches!(m, "gpu.vram" | "gpu.shared"));
     b.values.retain(|k, _| !drawn(k));
     // The frames' own lists too: a report must not read late frames or pacing from them.
     b.frames.clear();
@@ -7303,7 +7371,7 @@ fn declared_state(ctx: &Ctx, s: &Series, v: &Variant, x: &Exec, mut b: Block) ->
         if b.refused.contains_key(m) || b.values.get(m).is_some_and(|v| v.is_finite()) {
             continue;
         }
-        let r = unread_refusal(ctx, s, target, m);
+        let r = unread_refusal(ctx, s, v, target, m);
         // A metric only the flag names is the case's only where the target cannot read it at all.
         if !s.case_declares(m) && (m.starts_with("count.") || !model::is_ci_counter(m) || !cannot_read(r.validator)) {
             continue;
@@ -7316,10 +7384,11 @@ fn declared_state(ctx: &Ctx, s: &Series, v: &Variant, x: &Exec, mut b: Block) ->
 
 /// Why a block of `target` has no value of `m` it declared (`declared_state`): a metric of another kind
 /// of case or run, or of the bench file's setup (`NotForTarget`); one the target never gives, by the
-/// support matrix's `support::measures` (`NotForTarget`, with what to measure instead) or not on this OS
+/// support matrix (`support::runtime_reads`: its capability's row and the metric's exceptions) as the
+/// side runs it (`NotForTarget`, with what this target gives instead, `instead_of`) or not on this OS
 /// (`NotOnThisOs`); an input latency or pacing of runs that sent no input (`NoInput`); a frame metric of
 /// a page measured from outside (`NoPresentSource`). Else `NoMetric`: nothing in the runs gave it.
-fn unread_refusal(ctx: &Ctx, s: &Series, target: &Value, m: &str) -> Refusal {
+fn unread_refusal(ctx: &Ctx, s: &Series, v: &Variant, target: &Value, m: &str) -> Refusal {
     let base = m.split_once('{').map_or(m, |(b, _)| b);
     let not_for = |why: &str, fix: &str| Refusal::new(ValidatorId::NotForTarget, format!("{m}: {why}")).fix(fix);
     if base.starts_with("launch.") && !s.launch.is_object() {
@@ -7335,27 +7404,23 @@ fn unread_refusal(ctx: &Ctx, s: &Series, target: &Value, m: &str) -> Refusal {
         return not_for("other work on the CPUs the target is pinned to, and it is pinned to none", "run on a machine with cores to keep apart, with --pin auto");
     }
     let os = support::Host::this().os();
-    if let Some(rt) = support::Runtime::of_target(target, windowless_target(target, &ctx.config), ctx.phone.is_some()) {
-        // A terminal's grid (`tty.*`) is a tty() target's alone, which `support::measures` does not list.
-        let tty_only = base.starts_with("tty.") && rt != support::Runtime::Tty;
-        if tty_only || !support::Os::ALL.iter().any(|o| support::measures(rt, m, *o)) {
-            // What gives the same or the closest reading on this kind of target.
-            let instead = match base {
-                "memory.app.host" | "memory.peak" => "measure memory.app.private",
-                "js.heap.retained" => "measure js.heap.used (a page's heap after the run)",
-                "cpu.main" | "cpu.main.busy" => "measure main.work (a page's main-thread work)",
-                "cli.launch" => "measure run.duration",
-                _ if base.starts_with("metric.") => "count with ctx.count and measure count.<name> (metric.<name> is a cli() command's printed line)",
-                _ if base.starts_with("tty.") || base.starts_with("app.") || base == "cpu.pty_host" => "measure it on a tty() target (a terminal program's grid)",
-                _ if base.starts_with("ui.") => "measure cpu.work (ui.* is a native app's UI thread)",
-                _ if matches!(rt, support::Runtime::Script) => "measure cpu.main or cpu.work (a script has no page)",
-                _ => "measure cpu.work, run.duration or a memory metric",
-            };
-            return not_for(&format!("a {} target never gives it; instead, {instead}", rt.label()), "measure what this kind of target gives, or drop it from the case");
-        }
-        if !support::measures(rt, m, os) {
-            return Refusal::new(ValidatorId::NotOnThisOs, format!("{m}: a {} target gives it on other OSes, not on {}", rt.label(), os.label()))
-                .fix("measure it on an OS that reads it, or drop it from the case");
+    if let Some(rt) = support::Runtime::of_target(target, side_windowless(target, &ctx.config, v), ctx.phone.is_some()) {
+        let instead = instead_of(ctx, s, target, rt, m, os).map(|i| format!("; instead, measure {i}")).unwrap_or_default();
+        // Where it is read, when no metric of this target stands in for it.
+        let fix = match base {
+            _ if base.starts_with("metric.") => "metric.<name> is a cli() command's printed line: count with ctx.count (count.<name>), or drop it from the case",
+            _ if base.starts_with("tty.") || base.starts_with("app.") || base == "cpu.pty_host" => "it is a tty() target's (a terminal program's grid): drop it from the case",
+            _ if base.starts_with("ui.") => "it is a windowed native() app's UI thread: drop it from the case",
+            _ => "measure what this kind of target gives, or drop it from the case",
+        };
+        match support::runtime_reads(rt, m, os) {
+            support::Reads::Yes => {}
+            support::Reads::Never => return not_for(&format!("a {} target never gives it{instead}", rt.label()), fix),
+            support::Reads::NotHere(why) => {
+                let why = why.map(|w| format!(" ({w})")).unwrap_or_default();
+                return Refusal::new(ValidatorId::NotOnThisOs, format!("{m}: a {} target gives it on other OSes, not on {}{why}{instead}", rt.label(), os.label()))
+                    .fix("measure it on an OS that reads it, or drop it from the case");
+            }
         }
     }
     if matches!(base, "input.rate" | "input.gap.p95") || base.starts_with("interaction.") || base.starts_with("scroll.latency") {
@@ -7366,6 +7431,43 @@ fn unread_refusal(ctx: &Ctx, s: &Series, target: &Value, m: &str) -> Refusal {
             .fix("compare frames.interval.* or frames.dropped.pct, which the presents give");
     }
     Refusal::new(ValidatorId::NoMetric, format!("{m}: no measured run gave a value of it")).fix("check that the run does what the metric measures, or drop it from the case")
+}
+
+/// What to measure instead of `m`, which this target does not give: up to two of the readings closest
+/// to it that this target does give on this OS (`support::runtime_reads`, less what its engine refuses,
+/// a page measured from outside lacks, or a macOS Bun host's footprint misses), or None where it gives none.
+fn instead_of(ctx: &Ctx, s: &Series, target: &Value, rt: support::Runtime, m: &str, os: support::Os) -> Option<String> {
+    use support::Capability as C;
+    let base = m.split_once('{').map_or(m, |(b, _)| b);
+    let closest: &[&str] = match base {
+        "memory.app.host" | "memory.peak" | "memory.app.pss" => &["memory.app.private", "memory.peak", "js.heap.used"],
+        "js.heap.retained" | "js.heap.used" => &["js.heap.used", "js.heap.retained", "memory.app.private", "memory.peak"],
+        "cpu.main" | "cpu.main.busy" => &["main.work", "cpu.main", "cpu.work"],
+        "cli.launch" => &["run.duration"],
+        "ui.cpu" | "ui.wakes" => &["cpu.main", "cpu.work"],
+        _ if base.starts_with("metric.") => &["count.<name>"],
+        _ if base.starts_with("tty.") || base.starts_with("app.") || base == "cpu.pty_host" => &[],
+        _ => match support::Capability::of(m) {
+            Some(C::PageEngine) => &["cpu.main", "cpu.work", "run.duration"],
+            Some(C::Frames | C::Canvas | C::InputLatency | C::Pixels | C::Gpu) => &["main.work", "cpu.main", "cpu.work"],
+            Some(C::ProcessMemory) => &["memory.app.private", "memory.peak", "js.heap.used"],
+            Some(C::ProcessCpu | C::HardwareCounters | C::PackageIdle) => &["cpu.work", "cpu.main"],
+            _ => &["cpu.work", "run.duration", "memory.app.private"],
+        },
+    };
+    let engine = engine_of(target);
+    let bun_mac = cfg!(target_os = "macos") && rt == support::Runtime::Script && target["runtime"].as_str().unwrap_or("bun") == "bun";
+    let gives = |c: &str| {
+        let name = if c == "count.<name>" { "count.x" } else { c };
+        c != m
+            && support::runtime_reads(rt, name, os) == support::Reads::Yes
+            && !(rt.is_page() && validity::engine_refusal(engine, name).is_some())
+            && !(s.cross_engine && c.starts_with("main."))
+            && !(bun_mac && c == "memory.app.private")
+            && !(c == "cpu.fixture" && ctx.fixture.is_none())
+    };
+    let picked: Vec<&str> = closest.iter().copied().filter(|c| gives(c)).take(2).collect();
+    (!picked.is_empty()).then(|| picked.join(" or "))
 }
 
 /// Linux's per-thread perf events (opened for a series that declares `cpu.instructions`) cost the
@@ -8186,21 +8288,15 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     }
                     if run_goto && r.is_ok() {
                         // The document it loaded is the one strobe expects from now on.
-                        let loaded = counters();
+                        counters();
                         doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
-                        // A mark in it: a page that moved to another renderer keeps the run's frames, tasks
-                        // and inputs there too (`metrics::windows_sql`). Its evaluate is strobe's work in the
-                        // new document, which the run's counters hold from the document's start: read
-                        // around it and taken out of the run's totals.
-                        if trace_on || gecko_on {
+                        // A mark in it for a Firefox profile, which has no Performance-domain counters to
+                        // disturb. A Chromium trace needs none: every new top-level document marks itself
+                        // (`metrics::doc_mark_script`), which puts its renderer in the run's windows. A mark
+                        // there would be strobe's work in the page's counters, and reading around it to
+                        // take it out would take out whatever the page ran in that moment too.
+                        if gecko_on {
                             driver.mark(&format!("{}:goto", hooks.run_key()))?;
-                            let marked = counters();
-                            let mut c = carried.borrow_mut();
-                            for ((sum, after), before) in c.iter_mut().zip(marked).zip(loaded) {
-                                if (after - before).is_finite() {
-                                    *sum -= after - before;
-                                }
-                            }
                         }
                     }
                     if let Some(v) = video.borrow().as_ref() {
@@ -10300,7 +10396,7 @@ fn preflight(series: &[Series], describe: &Value, variants: &[Variant], config: 
             let target = &describe["targets"][name];
             let config = projects.get(name).map_or(config, |(_, c)| c);
             // `--headless` runs a file's pages headless and leaves what opens no window as it is.
-            if headless && !matches!(target["kind"].as_str(), Some("web" | "url")) && !windowless_target(target, config) {
+            if headless && !matches!(target["kind"].as_str(), Some("web" | "url")) && !side_windowless(target, config, v) {
                 return Err(headless_window(&s.label(), name, target));
             }
             let apps = profile_of(target).into_iter().chain(if let Kind::App(id) = &v.kind { Some(id.as_str()) } else { None });
@@ -10549,40 +10645,46 @@ fn implementation_preflight(describe: &Value, series: &[Series], variants: &[Var
     Ok(())
 }
 
-/// An implementation comparison of two pages or apps on one engine (measured from inside, not from
-/// outside) whose sides differ in having anything on screen: a headless page or an app with `window:
+/// A comparison of two pages or apps on one engine (measured from inside, not from outside: two
+/// targets, or two builds or profiles of one) whose sides differ, in a series, in having anything on screen: a headless page or an app with `window:
 /// false` against one that shows its window. The side with nothing on screen takes no trace and waits for
 /// no frame after its runs (`run_chunk`'s `offscreen`), the other does both, so their work and times are not
 /// measured alike (`VariantMismatch`). `headless`: `--headless`.
-fn offscreen_sides(describe: &Value, variants: &[Variant], config: &Value, projects: &BTreeMap<String, (PathBuf, Value)>, headless: bool) -> Result<()> {
-    let (Some(b), Some(h)) = (variants[0].target.as_deref(), variants.get(1).and_then(|v| v.target.as_deref())) else { return Ok(()) };
-    let (tb, th) = (&describe["targets"][b], &describe["targets"][h]);
-    let driven = |t: &Value| matches!(t["kind"].as_str(), Some("web" | "url" | "app" | "exe" | "webview" | "command"));
-    if !driven(tb) || !driven(th) || engine(tb) != engine(th) {
-        return Ok(());
-    }
-    let off = |name: &str, t: &Value| {
-        let page = matches!(t["kind"].as_str(), Some("web" | "url"));
-        if page && (headless || t["headless"] == true) {
-            Some("runs headless")
-        } else if windowless_target(t, projects.get(name).map_or(config, |(_, c)| c)) {
-            Some("shows no window (window: false)")
-        } else {
-            None
+fn offscreen_sides(describe: &Value, series: &[Series], variants: &[Variant], config: &Value, projects: &BTreeMap<String, (PathBuf, Value)>, headless: bool) -> Result<()> {
+    let [vb, vh] = variants else { return Ok(()) };
+    for s in series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()) {
+        let (b, h) = (vb.target_of(s), vh.target_of(s));
+        let (tb, th) = (&describe["targets"][b], &describe["targets"][h]);
+        let driven = |t: &Value| matches!(t["kind"].as_str(), Some("web" | "url" | "app" | "exe" | "webview" | "command"));
+        if !driven(tb) || !driven(th) || engine(tb) != engine(th) {
+            continue;
         }
-    };
-    let (ob, oh) = (off(b, tb), off(h, th));
-    if ob.is_some() == oh.is_some() {
-        return Ok(());
+        // Each side as it runs: its own profile (`--head app:<id>`) too, also between two of one target's.
+        let off = |name: &str, t: &Value, v: &Variant| {
+            let page = matches!(t["kind"].as_str(), Some("web" | "url"));
+            if page && (headless || t["headless"] == true) {
+                Some("runs headless")
+            } else if !page && side_windowless(t, projects.get(name).map_or(config, |(_, c)| c), v) {
+                Some("shows no window (window: false)")
+            } else {
+                None
+            }
+        };
+        let (ob, oh) = (off(b, tb, vb), off(h, th, vh));
+        if ob.is_some() == oh.is_some() {
+            continue;
+        }
+        let (off_side, on_side, how) = if let Some(w) = ob { (&vb.name, &vh.name, w) } else { (&vh.name, &vb.name, oh.unwrap_or("")) };
+        let on = if vb.target.is_some() { String::new() } else { format!("{}: ", s.label()) };
+        return Err(Error::refused(
+            "VariantMismatch",
+            format!(
+                "{on}{off_side} {how} and {on_side} shows its window: a side with nothing on screen is measured without a trace or a frame wait after its runs, the other with both, so they are not measured alike"
+            ),
+            "run both sides with nothing on screen (headless pages, apps with window: false) or both on screen",
+        ));
     }
-    let (off_side, on_side, how) = if let Some(w) = ob { (&variants[0].name, &variants[1].name, w) } else { (&variants[1].name, &variants[0].name, oh.unwrap_or("")) };
-    Err(Error::refused(
-        "VariantMismatch",
-        format!(
-            "{off_side} {how} and {on_side} shows its window: a side with nothing on screen is measured without a trace or a frame wait after its runs, the other with both, so they are not measured alike"
-        ),
-        "run both sides with nothing on screen (headless pages, apps with window: false) or both on screen",
-    ))
+    Ok(())
 }
 
 /// A target's `expect` with the case's keys over it.
@@ -10972,7 +11074,7 @@ fn headless_series(ctx: &Ctx, s: &Series) -> bool {
         Some((b, h)) => vec![b.as_str(), h.as_str()],
         None => vec![s.target.as_str()],
     };
-    names.iter().any(|n| headless_target(ctx, n)) && names.iter().all(|n| headless_target(ctx, n) || windowless_target(&ctx.describe["targets"][*n], &ctx.config))
+    names.iter().any(|n| headless_target(ctx, n)) && names.iter().all(|n| headless_target(ctx, n) || ctx_windowless(ctx, s, n, true))
 }
 
 /// What an app's page (Electron, a webview, a command's browser) sees of its input devices: the
@@ -11093,7 +11195,7 @@ fn check_engines(series: &mut [Series], describe: &Value, args: &Args, variants:
         };
         for name in names {
             if s.refused.is_none() {
-                s.refused = target_refusal(s, &name, describe, args, projects.get(&name).map_or(config, |(_, c)| c))?;
+                s.refused = target_refusal(s, &name, describe, args, variants, projects.get(&name).map_or(config, |(_, c)| c))?;
             }
             if s.refused.is_none() {
                 s.refused = motion_contract(s, &name, describe, variants, projects.get(&name).map_or(config, |(_, c)| c));
@@ -11288,13 +11390,15 @@ fn headless_window(label: &str, name: &str, t: &Value) -> Error {
 
 /// `check_engines` for one target of a series: a usage error or whole-run refusal, else the series' own
 /// refusal (its summary without the series' label, which every listing prints beside it).
-fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config: &Value) -> Result<Option<Refusal>> {
+/// `variants`: the sides, whose profile (`--head app:<id>`) may be their own (`sides_windowless`).
+fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variants: &[Variant], config: &Value) -> Result<Option<Refusal>> {
     let t = &describe["targets"][name];
+    let windowless = |all: bool| sides_windowless(s, name, t, config, variants, all);
     let page = matches!(t["kind"].as_str(), Some("web" | "url"));
     if args.get("engine").is_some() && !page {
         return Err(Error::usage(format!("{}: --engine picks a page's browser; {} is a {} target (narrow the run with --target)", s.label(), name, t["kind"].as_str().unwrap_or("?"))));
     }
-    if args.has("headless") && !page && !windowless_target(t, config) {
+    if args.has("headless") && !page && !windowless(true) {
         return Err(headless_window(&s.label(), name, t));
     }
     let reduce = Motion::of(t, name)?;
@@ -11309,13 +11413,15 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
     // An app with no window (`window: false` on the target or its profile) draws to no display: a primary of
     // frames, input latency, the display or GPU use is refused before anything launches, as its blocks would.
     // A launch case: one that ends on a window, or whose primary is its pixels (`launch::windowless_refusal`).
-    if windowless_app(t, config) || (is_native(t) && windowless_target(t, config)) {
+    if (matches!(t["kind"].as_str(), Some("app" | "exe" | "webview" | "command")) || is_native(t)) && windowless(false) {
         let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
         if s.launch.is_object() {
             let window_until = native::window_until(s, &s.launch["until"])?.is_some();
             if let Err(e) = launch::windowless_refusal(s, window_until) {
                 let Some(r) = e.refusal else { return Err(e) };
-                return Ok(Some(Refusal { summary: format!("{on}{}", r.summary), ..*r }));
+                // launch.rs names the case; every listing prints the series' label beside this.
+                let summary = r.summary.strip_prefix(&format!("{}: ", s.case)).unwrap_or(&r.summary).to_string();
+                return Ok(Some(Refusal { summary: format!("{on}{summary}"), ..*r }));
             }
         } else if display_metric(&s.primary) || gpu_use(&s.primary) {
             return Ok(Some(
