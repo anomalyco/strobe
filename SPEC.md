@@ -312,7 +312,9 @@ A flag that takes a list (`--filter`, `--target`, `--params`, `--metrics`, `--no
 be given more than once: the lists add up (`--filter a --filter b` is `--filter a,b`). Any other flag
 given twice with another value is a usage error (exit 2); the last one never wins silently.
 
-Sizes print in binary units: KB, MB and GB are 2^10, 2^20 and 2^30 bytes (§7.1).
+Sizes print in binary units: KB, MB and GB are 2^10, 2^20 and 2^30 bytes (§7.1). Times print in
+microseconds, digits grouped (`1,234 µs`); `--unit ms|s` or `"unit"` in strobe.json picks another
+unit, for the text only (§7.1 "Times").
 
 `strobe config [<dir>]` checks a project's strobe.json without a bench, strictly read-only (it runs before
 the power plan and CPU-set restores every other command does, and makes no state folder): the strict read every command
@@ -546,7 +548,7 @@ strobe up · adais
   ✓ daemon     running · starts at login
   ✓ mcp        registered "strobe" · live in 6 opencode locations
   ✓ skill      ~/.config/opencode/skills/strobe/SKILL.md
-  ✓ calibrate  speed check 4.1 ms · display 144 Hz · 4/4 cases within tolerance
+  ✓ calibrate  speed check 4,100 µs · display 144 Hz · 4/4 cases within tolerance
 ```
 
 The cpu line's shape (`Topology::cpu_shape`, the same in `status`): several L3 groups are named
@@ -832,7 +834,7 @@ secondaries (adais: a spinning script `cpu.main 295 ms · cpu.main.busy 97.6%`, 
 when its launch found the GPU shader caches cold (`gpu_cache` per series; said only of an app that
 did GPU work in the runs, or for a launch case one that opened a window, 13.2). `tty.latency.p50` and `.p95` on a check line say their
 inputs, `(N inputs[, B busy][, S silent])` (busy: written while the program still drew; silent:
-followed by no change; both left out), as `tty.latency.p50 20.7 ms (10 inputs)`.
+followed by no change; both left out), as `tty.latency.p50 20,700 µs (10 inputs)`.
 A failure keeps the fix strobe's driver gave (a missing permission and where to grant it) and
 names the hook once (`setup: …`, not `setup: setup: …`). Under each case, `--check` prints the
 last 10 lines the bench file's hooks wrote to the console during it (`console.log`/`error`; the
@@ -1032,7 +1034,7 @@ out, as 134 of 400 skewed samples of 26–40 values did in `scripts/dev/stats-ch
 block)` / `(1 of N blocks)`; with none (every block refused or stopped before one) `★ <metric>  no
 value`; progress lines say `1 block`. vps exp_e93d96 and adais exp_1d358d
 (`http-probe-example.bench.ts --head . --blocks 1`): `★ http.latency.p95  515 ms (1 block)` / `514 ms
-(1 block)`, where the value sat on a bare `blocks  844 ms` line before. It is what `track` records for a commit
+(1 block)` (adais's now prints `513,762 µs (1 block)`), where the value sat on a bare `blocks  844 ms` line before. It is what `track` records for a commit
 (§25.2); with `--base`, `--aa`, `--check`, `--probes memory`, or anything that compares or decides
 (`--require-verdict`, `--plan`, `--noworse`, `--pairs`, `--pixels`, `--pixels-only`) it is a usage
 error, as is N that is not a whole number from 1. The primary is refused as a comparison would refuse
@@ -1051,9 +1053,9 @@ nothing, so there is no --format <f> of it` (fix: `strobe report experiment <exp
 md` shows its blocks). result.json is unchanged; the report payload adds `series[].blocks_summary` `{
 blocks, primary, secondaries }` (each `{ metric, unit, values[], median, lo, hi, confidence, refused,
 refused_blocks, verdict }`). adais exp_d60e9b (`http-probe-example.bench.ts --blocks 3 --why always
---runs 3`): text and HTML both `median 515 ms [507 ms … 534 ms] (75% over the blocks)` (HTML: `The
-median's range over 3 blocks (75% median coverage; 6 blocks needed for 95%) is 507 ms … 534 ms.`), secondaries
-`cpu.main` 2197 ms [2197 … 2199], `cpu.main.busy` 84.3% [84.3 … 84.4]. Its timed blocks run no profiler (rule 3); `--blocks N --why always`
+--runs 3`): text and HTML both `median 514,863 µs [507,161 µs … 534,237 µs] (75% over the blocks)` (HTML: `The
+median's range over 3 blocks (75% median coverage; 6 blocks needed for 95%) is 507,161 µs … 534,237 µs.`), secondaries
+`cpu.main` 2,197,247 µs [2,197,107 µs … 2,199,186 µs], `cpu.main.busy` 84.3% [84.3% … 84.4%]. Its timed blocks run no profiler (rule 3); `--blocks N --why always`
 then runs one attribution block per series on `--head`, as `--check --why always` does (warmed, then
 `--runs` measured runs), kept as the series' `attribution.head` and printed (`why    attribution
 block: head rec_…`). `--why auto` runs none (nothing compared, so nothing to explain); a `--why` value other than
@@ -1082,19 +1084,19 @@ plan   pinned CCD0 (V-Cache) · power plan High performance (restored) · visibl
 blocks 8 pairs (16 fresh launches) · warmup until steady · 5 runs per block · stopped: primary decided
 probes timing: frames, toplevel threads, os, gpu · overhead 0.6% main thread
 
-metric                         base       head       Δ        95% CI           verdict
-★ frames.presented.p95         10.4 ms    9.6 ms     −7.7%    −11.0 … −4.2     faster
-  frames.dropped               41         33         −8       −14 … −2         fewer
-  main.script                  412 ms     362 ms     −12%     −15 … −9         faster
-  count.rows    exact (A/A)    160        115        −45      exact            fewer
-  memory.app.private           302 MB     301 MB     −0.3%    −1.2 … +0.6      same (±2%)
-  frames.presented.p99         —          —                                    refused (TailTooShort): 310 frames < 1,000
+metric                        base        head      Δ  CI             verdict
+★ frames.presented.p95   10,410 µs    9,610 µs    −8%  −11% … −4%     faster
+  frames.dropped                41          33     −8  −14 … −2       fewer
+  main.script           412,300 µs  362,400 µs   −12%  −15% … −9%     faster
+  count.rows                   160         115    −45  exact          fewer (exact)
+  memory.app.private        302 MB      301 MB  −0.3%  −1.2% … +0.6%  same (±2%)
+  frames.presented.p99           —           —                        refused (TailTooShort): 310 frames < 1,000
 
 ★ primary, declared before the run · secondaries gated on the primary, Holm-corrected
 
 warnings
 ! MultimodalDistribution  main.script: 2 modes (mValue 3.4)
-! Background              block 5: MsMpEng.exe 31% on CPU 28–29 for 320 ms; block kept, flagged
+! Background              other work ran on the measured CPUs during 1 block(s): pair 3 head: up to 31% of a core (busiest elsewhere: scanner.exe 31%); blocks kept, flagged
 i Attribution             separate blocks: hotspots, allocation sites, counters → rec_91c0
 ```
 
@@ -1143,6 +1145,13 @@ An HTML report opens on the view its address names: `#series=<i>`, `#scope=runs|
 bench file's setup alone, where the report has that profile) and `#metric=<name>` (the metric
 pair-by-pair consistency shows), joined with `&` (`report.html#series=1&scope=host`); a headless
 `strobe look <file:///…/report.html#scope=host>` shoots that view.
+Every report prints times in the command's unit (§7.1 "Times"): the PR block, step summary, card and
+badge as written, and an HTML page (an experiment's, a recording's, `history.html`) opens in it
+(`default_unit` in the page's data; `us` for a page without it). The page's sticky header has a
+`µs | ms | s` switch, always shown, that draws every time again in place (headline, tables, charts
+and their axes, verdict bounds) and writes `#unit=<us|ms|s>` into the address; `#unit=` names the
+unit a page opens in, over `default_unit`, and an address without it falls back to `default_unit`.
+Wall-clock durations, configured values and stored text stay as written there too.
 
 Writes a self-contained artifact from a view in the catalog (§11.2) and prints its path (`md` and
 `pr` print the markdown on stdout and the path on stderr). The view follows from the handle when it
@@ -1216,8 +1225,10 @@ shared). `--once` prints one view and exits. Not built: the focused target's fra
 checks of §9.3 without a bench: one JSON request a line on stdin (`{"op": "wilcoxon", "d": […]}`,
 `hl`, `theil_sen`, `compare` with `metric`, `pairs`, `bound` and `noworse`, `repeated_p`,
 `pairs_needed`, `pairs_for`, `family_min_pairs`, `median_interval`, `pct`, `pct_ci`, `pct_vs`,
-`bound`, `value`), one JSON answer a line on stdout, with the same code a bench runs; it reads and
-writes nothing else. `scripts/dev/stats-check.ts` feeds it synthetic pairs and checks the answers
+`bound`, `value`, `signed`, `times` (times printed together, `signed`), `verdict` (a comparison as
+result.json keeps it, its words drawn again); each request may name `time_unit` (`us`, the default,
+`ms` or `s`) and `ascii`), one JSON answer a line on stdout, with the same code a bench runs; it
+reads and writes nothing else. `scripts/dev/stats-check.ts` feeds it synthetic pairs and checks the answers
 against brute force. `simulate` (`trials`, `seed`, `effect` or `effects` with `journeys`, `noise`
 `{kind: normal|t3|spike, sigma, p}` per block, `pairs`, `bound`, `noworse`, `first`, `discard`,
 `order`, `secondaries`, `looks` with `confidence`) runs synthetic series through the bench's own
@@ -1295,7 +1306,7 @@ profile's `window: false`): a tray app, a service or a command, launched as a wi
 is, with its stdout and stderr read through a pipe; nothing is waited for or read of a window
 (`--until`, `--out` and `--keys` are usage errors). It watches the app for `--wait` (2 s): whether it
 kept running (`running  after 2 s · N processes`), else how it ended (`exited   with code 0 after
-10 ms`; a launcher that exits 0 and leaves the app running is no end), and the guards; then
+10,000 µs`; a launcher that exits 0 and leaves the app running is no end), and the guards; then
 `window   none (windowless)` and its last 20 output lines (`output`, with the count). Exit 0, also
 for a command that did its work and exited 0; 124 for a nonzero exit or a guard that stopped it
 (said on a `!` line). JSON `windowless: true`, `running`, `exit_code`, `ended_ms`, `processes`,
@@ -1592,6 +1603,80 @@ Each metric declares:
 **Units.** Sizes are binary: a KB is 2^10 bytes, an MB 2^20 and a GB 2^30, in metric values
 (`memory.*`, `js.heap.*`, `gpu.vram`), views, reports and cards alike (`fmt::bytes`). `net.bytes`
 counts bytes. Counts in millions (`M instr`) are decimal.
+
+**Times.** A measured time prints in microseconds: `18,309,038 µs`, `42.0 µs`. `--unit ms` or
+`--unit s` prints milliseconds or seconds instead, never promoted to a larger unit as a value grows.
+The unit is, first to last: `--unit` (on `record`, `bench`, `plan`, `query`, `report`, `look`, `run`,
+`status`, `top`, `track` and `history`; `us` or `µs`, `ms`, `s`, else exit 2 `--unit is us, ms or s,
+not <x>`), `"unit"` in the nearest strobe.json above the working folder, `"unit"` in the user's own
+`<state>/strobe.json`, else `us`. A `"unit"` strobe does not have is a usage error with its place
+(`<path>:<line>:<col>: unit must be one of "us", "ms", "s", not …`); only `"unit"` is read for it,
+so another key's problem never fails a `query` or a `report`. An MCP call's `unit` is its own (§17).
+
+`fmt::time` prints them, and `report.html` and `history.html` print them alike, to the character:
+
+- Every whole digit, grouped by threes with `,`; then at least three significant digits (2 decimals
+  from 1, 1 from 10, none from 100; below 1, as many as three significant digits need), and never
+  more decimals than the unit's finest step: 0.01 µs, 0.0001 ms, 0.000001 s. The decimals are taken
+  again from the rounded value: 99.96 ms prints `100 ms`, not `100.0 ms`. Rounding is Rust's
+  `{:.d}`: the nearest decimal, an exact tie to even.
+- Exactly 0 is `0 µs`. A nonzero time that rounds to all zeros, or that is 0 only once scaled to
+  the unit (an underflow), is the floor, `<0.01 µs`, `<0.0001 ms` or `<0.000001 s`: a measured time
+  is never printed as nothing (rule 1). A value that is not a finite number, or not one once scaled,
+  prints `—`. Nothing prints as minus zero, of any kind (`0 µs`, `0 B`, `0 instr`, `0.0`).
+- A difference is signed: `+` above 0, `−` (U+2212) below, no sign on exactly 0 (`+<0.01 µs`,
+  `−42.0 µs`, `0 µs`).
+- One ASCII space, then the unit: `µs` is U+00B5 MICRO SIGN (the cards' font has it, not U+03BC);
+  Markdown table cells put U+00A0 there. A terminal whose locale is not UTF-8 (`LC_ALL`, else
+  `LC_CTYPE`, else `LANG`, set and naming no UTF-8: `C`, `POSIX`; on Windows too) gets `us`, and `-`
+  for the minus of times and percentages; nothing else changes. An unset locale is UTF-8 (a Windows
+  console takes UTF-16, a pipe UTF-8), and what `report` writes or prints (Markdown, pages, cards)
+  and MCP answers are always UTF-8.
+- Times printed together (a median and its interval, an estimate and its ends, `base → head`) each
+  print as they would alone: `+3.20 µs [−1.20 µs … +12.4 µs]`. Shared decimals printed 0.05 ms
+  beside 250 ms as `0.1 ms`, or digits a value does not have (`12.40`).
+- A time's absolute bound or margin in a verdict is a time (`same (±40.0 µs)`, `no worse (≤1,200 µs,
+  faster)`); a stored verdict's words are drawn again from its `bound` (§9.3).
+
+| Stored (ms) | µs | ms | s |
+|---|---|---|---|
+| 0 | `0 µs` | `0 ms` | `0 s` |
+| 0.000004 | `<0.01 µs` | `<0.0001 ms` | `<0.000001 s` |
+| 0.0004 | `0.40 µs` | `0.0004 ms` | `<0.000001 s` |
+| 0.042 | `42.0 µs` | `0.0420 ms` | `0.000042 s` |
+| 0.5 | `500 µs` | `0.500 ms` | `0.000500 s` |
+| 0.99996 | `1,000 µs` | `1.00 ms` | `0.00100 s` |
+| 1.234 | `1,234 µs` | `1.23 ms` | `0.00123 s` |
+| 9.996 | `9,996 µs` | `10.0 ms` | `0.0100 s` |
+| 16.6667 | `16,667 µs` | `16.7 ms` | `0.0167 s` |
+| 99.96 | `99,960 µs` | `100 ms` | `0.100 s` |
+| 738.147 | `738,147 µs` | `738 ms` | `0.738 s` |
+| 1234.5678 | `1,234,568 µs` | `1,235 ms` | `1.23 s` |
+| 18309.038 | `18,309,038 µs` | `18,309 ms` | `18.3 s` |
+| −0.042 | `−42.0 µs` | `−0.0420 ms` | `−0.000042 s` |
+
+`scripts/dev/stats-check.ts` (`--only units`) holds `strobe stats` to this table and its edges in
+every unit (§5.11), and `scripts/dev/surfaces.ts` every surface of every experiment to it (§11.2).
+
+What is no measured time prints as before, in every unit: a wall-clock duration (a recording's
+length, a block's `time` line, an ETA, a wait, a run's length in a PR block's `per 77 ms run`:
+`850 ms`, `12.3 s`, `2.5 min`), a configured value (a cadence, a timeout, a threshold such as the
+HTTP probe's `at least 50 ms` or `≥ 1 ms/run`), a duration given to strobe (`--for 10s`), the names
+in `strobe open`'s trace, and text strobe stored when it measured: warnings, refusals and notes, a
+pixels run's text, a `--check --noworse` counter's `text`, calibration's `summary`. Those keep the
+unit of the strobe that wrote them. Outputs this file quotes from runs before the release that
+made microseconds the default (dated, or from a named machine) show times as that strobe printed
+them, in ms.
+
+Only what people read changes. `--json`, MCP `structuredContent`, `result.json`, `meta.json`,
+`history/` and every other stored number keep their metric's unit (a `ms` metric in ms;
+`sampling.*_us` in µs), so `--json` holds the same keys and numbers in every unit; only the words
+it carries for people (`text`, an insight's `title`) print times as the terminal does. A `count.*`
+is a count (`count.main_thread_cpu_us` too): grouped (`1,234,567`), never scaled or labelled µs.
+`--unit` is not part of an experiment's identity (the rerun ledger, §14.2) and stays out of the PR
+block's rerun command; `track` keeps it in a schedule's flags, so its alerts print in it (§25.6).
+Stored results print in the unit asked: `query <exp> summary` and `report --format md` draw a
+comparison's and a check's text again from `result.json`, and a recording's from `meta.json`.
 
 The catalog lives in `src/model.rs` (each metric's unit, direction, kind, minimum n and `across`);
 `result.json` carries each comparison's unit and direction. Families resolve by their base: `count.<name>` (what `ctx.count` or the page counted, §8.4), `net.requests` and
@@ -2218,7 +2303,7 @@ Firefox: its main threads' samples inside the measured runs), gaps over 50 ms le
 not sampled then: a runtime that skips ticks while idle, a paused process). Every attribution
 recording of a page keeps it in `meta.json` (`sampling`: `asked_us`, `median_us`, `gaps`; a Firefox
 one also in `gecko.json`), and every view says it: the block's line, the experiment's text and its
-result (`head JavaScript sampled every 2.0 ms (asked 1 ms: 2.0× coarser)`; `attribution_sampling`:
+result (`head JavaScript sampled every 2,000 µs (asked 1,000 µs: 2.0× coarser)`; `attribution_sampling`:
 the one sampling of a `--check`, else per variant, null when none), `record` and `record --bench` and
 `query <rec> summary` (`samples` line), `query hotspots` and Firefox's `query threads` (header, and
 `sampling` in their JSON; hotspots' `interval_us` is the median kept). A script target's is its
@@ -3166,7 +3251,10 @@ flowchart LR
   exact counter) is floored at half a count, its smallest step. A score has no smallest step: a
   floor of 0.5 once made a layout shift of 0 → 0.30 `jumpier (small)` and 0 → 0.1 in some runs
   `same (±0.5)`. An interval of exactly 0 (every pair the same) is `same (±0)` at any bound. The
-  bound prints as given (`same (±0.3%)`, `no worse (≤1.5%)`), never rounded to whole percent.
+  bound prints as given (`same (±0.3%)`, `no worse (≤1.5%)`), never rounded to whole percent. A
+  time's absolute bound prints as a time in the unit shown (§7.1), drawn again from the comparison's
+  `bound` whenever a stored result is shown: a `same (±0 ms)` stored for a bound of 0.04 ms reads
+  `same (±40.0 µs)`; a bound of exactly 0 (both medians 0) reads `same (±0 µs)`.
 - **Verdicts**: interval entirely on the better side of 0 → `faster` (`less`, `fewer`); tagged
   `small` when it also overlaps the bound. Entirely on the worse side → `slower`. Inside the
   bound → `same`. Otherwise `unclear`.
@@ -3307,7 +3395,7 @@ flowchart LR
   +2.0%]` (one digit alone printed `[+1% … +2%]`), `+7% [−51% … +116%]`. A lone percentage never prints a nonzero change as 0.0% (`fmt::pct`); one
   printed beside a threshold gets the decimals that tell them apart (`fmt::pct_vs`: `+15.2% > 15%`,
   not `+15% > 15%`); a bound or margin prints as given (`fmt::bound`). A value under 0.01 in its unit
-  shows its first significant digit (a layout shift of 0.003, not 0.00).
+  shows its first significant digit (a layout shift of 0.003, not 0.00). Times follow §7.1 "Times".
 
 ### 9.4 Noise control and provenance
 
@@ -3882,7 +3970,7 @@ CPU.
     whose CPU was lost to one (`run`, `measured`, `cpu_lost`, `ended_ms`, `processes` [{ `exe`,
     `count`, `cpu_ms` }], exe names where the OS gives them: Windows' jobs), from page, native and
     script blocks and a native `record`; `query <rec> summary` prints them as `ended` lines (`ended
-    run:1 measured · 140 ms of CPU counted · chrome.exe 140 ms (2 processes)`). Still unknown, and refused: a
+    run:1 measured · 140,000 µs of CPU counted · chrome.exe 140,000 µs (2 processes)`). Still unknown, and refused: a
     process of the set outside the cgroups (one strobe did not launch, one that moved itself out, as
     Chromium's browser process into a systemd scope of its own under a user manager) that ended or
     reaped one, one that left the cgroups still running, a process in them that is none of the set's
@@ -4654,8 +4742,8 @@ targets (a `tty()` target refuses them `NotForTarget`: its grid has text, not pi
   `overhead.pixel_pct` (§19: 0.5%, `OverheadBudget` warns), and its absolute cost per measured run is
   `driver.pixel_cpu_ms` (ms, lower is better, timed and compared; `overhead.pixel_cpu_ms` the mean per
   measured run): two builds whose runs differ in length compare by it, where a share of a longer run
-  reads lower at the same CPU. The `self` line reads `pixels 2.9% (0.85 ms/run)` and `OverheadBudget`
-  `… used 2.9% of a core (0.85 ms CPU/run over 30.0 ms runs; over 2%, the budget is 0.5%)`. Past 2% the block's times and rates over
+  reads lower at the same CPU. The `self` line reads `pixels 2.9% (850 µs/run)` and `OverheadBudget`
+  `… used 2.9% of a core (850 µs CPU/run over 30,000 µs runs; over 2%, the budget is 0.5%)`. Past 2% the block's times and rates over
   the runs' wall time (`run.duration`, `frames.*`, `interaction.*`, `scroll.*`, `phase.*`,
   `cpu.app.total`, wakes per second, `input.*`) leave a timed block's values, and the series' declared
   ones are refused `OverheadBudget`; a `--check` warns `OverheadBudget` instead, naming the declared
@@ -5346,7 +5434,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `EngineUnsupported` | a target, metric, probe set, hook or case kind needs a browser engine strobe does not drive on it: a webview target on Linux (WebKitGTK) or macOS (WKWebView), refused before anything launches with the fix `kind: "native"` (§13.8); and a page's engine that gives strobe no way to measure it (Firefox: `main.*`, `layout.count`, `style.count`, `layout.shift`, `gpu.compile`, `js.heap.*`, `span.*`, `frames.presented.p*`, attribution and memory probes and a launch's attribution block, `ctx.playwright`; `canvas.*` on a page without WebGPU; WebKit also launch cases (no preload script), `net.*`, `input.rate`, `input.gap.p95`, `ctx.mock`, a window `scale`, pointer input where the browser drops it (WPE's headless view), `page.scroll` on a Firefox page that emulates a phone and a `page.drag` there that the browser would pan (headless Firefox does not pan on touch, §9.6), `emulate` (`"mobile"` or `"touch"`) on WebKit (§13.1), and `count.*`, `canvas.*`, `interaction.*`, `scroll.latency.*` of a run that loaded a document, a `page.goto` after `ctx.addInitScript`), or an engine strobe cannot run here (`webkit` on Windows for good, Safari `--headless`, a window `scale` on WebKit, a Firefox before 148 known from its `application.ini`, or one that lists no chrome context at its first chrome read, §13.1; and `look --engine` other than chromium, §5.12): a primary refuses its series before anything builds, with the closest metric the engine has, and the rest of the file runs (§5.6 "Refused series"); a declared secondary is refused per block, and an undeclared one (a default secondary, a descriptive row) is left out of the block's values |
 | `Headless` | a frame, input-latency, scrolling, canvas or GPU-use metric of a page that runs headless (`--headless`, a target's `headless`): a primary refuses its series before anything builds (§5.6 "Refused series"); a secondary is refused per block; a run of a headless page measured from outside that sends input (no window for the OS's input); `page.window` on a headless page. A native app on the headless Wayland compositor strobe runs (§13.7 "Wayland"): `frames.*`, `interaction.*`, `scroll.*`, `display.*`, `launch.painted` and `launch.settled` (a display primary before anything builds, a secondary per block), and a launch that ends on an element's frame or the window's pixels (`until`: a selector, `window: "painted"` or `"settled"`; before anything builds) |
 | `NotForTarget` | a declared metric this kind of target or case has none of, refused alone: `main.script` of a page block whose runs called `page.eval()` (Chromium's `ScriptDuration` leaves it out); `main.tasks.long` of a lean trace, which has no RunTask slices (a primary before anything builds); a `script()` target's `cpu.wakes`, `io.read`, `io.write`; a browser engine's metric or a frame stage split on a native app; frames, latency and `display.*` of an app with no window (`window: false`); `ui.*` without a main window; a run's metric on a launch case and a launch's on a run case; `cpu.fixture` without a `fixture()`; `cpu.foreign` with `--pin none`; a page launch's memory (its browser started before it) and Node's own timing from a launch that gave none (`launch.inspect`); a `tty()` target's metrics outside what it measures, and `tty.frame.*` of a program that drew no synchronized frames. A `cli()` target's metrics outside what it measures from outside its commands. Also: a page launch's `until` on an image or pixels (it is timed in its own document); an image locator or pixel wait on a terminal, a `page.window` action other than a resize or `restore` there, and a `page` call a terminal does not take; `page.window` on a windowless native target or a phone's page; `--video` of a target with no window or one strobe attached to; reduced motion on a native app whose profile declares none, or on a `command()` launch case; `look --until image=` of a `tty:` or `wir:` target; an image or pixel wait in a timed run of a phone's page; `expect.heading` of a native window showing a Chromium web view with no heading in its tree (§13.7); and on a phone (`--mobile`) what strobe reads from this computer's processes and OS (`cpu.*` but `cpu.fixture`, `memory.*`, `gpu.*` but `gpu.compile`, `ui.*`, `energy.*`, `io.*`; `validity::phone_refusal`), a target that is no phone target, a launch case, and `record --mobile --probes memory` (a bench leak run on a phone runs: 8.6) |
-| `Throttled` | a headless Chromium page with the console display off (`DisplayOff`; not a phone's, not an implementation comparison's side): its frames and timers run on a throttled clock of its own, so `run.duration`, `phase.*`, `span.*`, `main.busy`, `main.busy.cdp`, `cpu.app.total`, `cpu.process.total`, `cpu.renderer`, `cpu.gpu` and `cpu.browser` are refused (`input.rate` and `input.gap.p95` stand: a headless page paces drags and paced wheel steps at 60 Hz on strobe's own clock, having no display to follow; a primary among the refused: its series is refused before anything builds when the display is off then, and when it turns off mid-bench, after one try to wake an unlocked session's display, that series is refused and the rest of the file runs; per metric in a `--check`), while `cpu.work`, `main.work` and its parts, counts, `net.*` and memory stay (Firefox unaffected); or the block-start speed check (a fixed JS workload in the page) runs more than 1.5× slower than this device's calibration: emulated throttling, thermal throttling, power saving or battery mode. Native targets have no page: strobe runs a fixed integer workload on the target's CPUs before the launch, once those CPUs are quiet (two 100 ms looks under 5% mean busy and no CPU over 25%, up to 10 s: the last block's app may still be freeing its memory and GPU objects), and compares it with this device's reference for that CPU mask: the median of its last 20 passing checks there (`<state>/native-speed.json`, per mask; the first check sets it). A slow check is tried again: up to 3 slow tries on quiet CPUs, and for up to 2 minutes while other processes keep the target's CPUs over 25% of a core busy during the check (never past `--max-time`: a check it cuts short while still slow is neither `Throttled` nor `Background`, and the bench ends there as in any wait, §9.1 "Stop rule"; `Throttled` says how many tries it had). Slow while other work was busy there is `Background` (naming the busiest processes), not `Throttled`. A `--check` (and `record --bench`, which runs one) compares nothing, so it never waits for a speed check or refuses on one: it runs the check once (native: after at most 2 s for the CPUs to quiet; a page: no second check, and none after the runs), and a slow one is a warning with the text the refusal would have (`! Background` or `! Throttled`, ending "the check ran at once (a timed block would wait that out, or refuse)"); the block runs at once. A loaded machine once held a native `--check` 20 minutes in `Background` waits. A page's slow check runs once more after the CPUs settle (the same quiet wait, up to 10 s, then 2 s): a burst passes (the page's own work just after its load, a neighbour on a VM's host, a process that just ended) while throttling lasts, so a second slow check refuses the block (`Background` or `Throttled`, by the other work during it, saying it was slow twice and quoting the first) and a fast one lets the runs go on. Such a block is accepted only if one more check, right after its measured runs (no wait), is at speed too: then a `Throttled` note (info) quotes the first; slow again refuses the block as above, quoting the first. It never goes on silently. The busiest processes named are every process but the browser's and strobe's own, strobe's tree included and marked `the bench's` (the runner, the servers it started: their work counts as other work on the target's CPUs, and once went unnamed as "system work"). strobe reads the processes before the idle counters at the check's start and after them at its end, so its own reading is outside the span (read inside it, it showed as a quarter of a core of other work on vps). On Linux the other work carries the idle counters' resolution (`±N%`: `/proc/stat` counts idle in 10 ms ticks, so over a check of tens of ms each CPU's reading is off by up to a tick). A Linux guest reads the hypervisor's steal over the check on the target's CPUs (`/proc/stat`'s steal, their mean) and names it as a cause from 0.5% of those CPUs' time (`none named (hypervisor steal 37% of those CPUs during the check)`, and after the named processes when there are some); under that, `none named (system work; 0% hypervisor steal)`; bare metal and other OSes say `none named (system work)`. The native check reads the process lists outside the idle counters' span and takes strobe's own CPU over the span out of the busy time, rather than assuming its check thread used one whole core (with a single target CPU, other work could then never read above 0) A CPU quota (Linux's CPU controller: `cpu.max`, a container's `--cpus`, systemd's `CPUQuota`) throttles without slowing a one-thread check: strobe reads the throttled time of its own cgroup and of every cgroup above it that has a quota (`cpu.stat`'s `throttled_usec`, v1 `throttled_time` under `cpu,cpuacct` or else `cpu`; which files is found once, and with no quota nothing is read) around each `run` call (`Runner::throttled`, `host::cgroup_throttled_ns`), and over the whole block for a launch case. A rise over a timing or check block's measured runs refuses what a quota moves (`load_metric`: times, CPU shares, `metric.*`, `app.*`, wakes per second), not CPU time (`cpu.work`, `ui.cpu`, `cpu.fixture`, `cli.launch`: a quota delays work and adds none); the refusal gives the throttled thread time (`0.42 ms` under a millisecond). On vps, strobe and an A/A of a 114 ms command in a cgroup with `cpu.max 50000 100000` printed `run.duration` 242 ms and 219 ms as values (`unthrottled` on the plan line) before this. `cli()` and `script()` targets run no speed check: their plan line says `speed not checked` |
+| `Throttled` | a headless Chromium page with the console display off (`DisplayOff`; not a phone's, not an implementation comparison's side): its frames and timers run on a throttled clock of its own, so `run.duration`, `phase.*`, `span.*`, `main.busy`, `main.busy.cdp`, `cpu.app.total`, `cpu.process.total`, `cpu.renderer`, `cpu.gpu` and `cpu.browser` are refused (`input.rate` and `input.gap.p95` stand: a headless page paces drags and paced wheel steps at 60 Hz on strobe's own clock, having no display to follow; a primary among the refused: its series is refused before anything builds when the display is off then, and when it turns off mid-bench, after one try to wake an unlocked session's display, that series is refused and the rest of the file runs; per metric in a `--check`), while `cpu.work`, `main.work` and its parts, counts, `net.*` and memory stay (Firefox unaffected); or the block-start speed check (a fixed JS workload in the page) runs more than 1.5× slower than this device's calibration: emulated throttling, thermal throttling, power saving or battery mode. Native targets have no page: strobe runs a fixed integer workload on the target's CPUs before the launch, once those CPUs are quiet (two 100 ms looks under 5% mean busy and no CPU over 25%, up to 10 s: the last block's app may still be freeing its memory and GPU objects), and compares it with this device's reference for that CPU mask: the median of its last 20 passing checks there (`<state>/native-speed.json`, per mask; the first check sets it). A slow check is tried again: up to 3 slow tries on quiet CPUs, and for up to 2 minutes while other processes keep the target's CPUs over 25% of a core busy during the check (never past `--max-time`: a check it cuts short while still slow is neither `Throttled` nor `Background`, and the bench ends there as in any wait, §9.1 "Stop rule"; `Throttled` says how many tries it had). Slow while other work was busy there is `Background` (naming the busiest processes), not `Throttled`. A `--check` (and `record --bench`, which runs one) compares nothing, so it never waits for a speed check or refuses on one: it runs the check once (native: after at most 2 s for the CPUs to quiet; a page: no second check, and none after the runs), and a slow one is a warning with the text the refusal would have (`! Background` or `! Throttled`, ending "the check ran at once (a timed block would wait that out, or refuse)"); the block runs at once. A loaded machine once held a native `--check` 20 minutes in `Background` waits. A page's slow check runs once more after the CPUs settle (the same quiet wait, up to 10 s, then 2 s): a burst passes (the page's own work just after its load, a neighbour on a VM's host, a process that just ended) while throttling lasts, so a second slow check refuses the block (`Background` or `Throttled`, by the other work during it, saying it was slow twice and quoting the first) and a fast one lets the runs go on. Such a block is accepted only if one more check, right after its measured runs (no wait), is at speed too: then a `Throttled` note (info) quotes the first; slow again refuses the block as above, quoting the first. It never goes on silently. The busiest processes named are every process but the browser's and strobe's own, strobe's tree included and marked `the bench's` (the runner, the servers it started: their work counts as other work on the target's CPUs, and once went unnamed as "system work"). strobe reads the processes before the idle counters at the check's start and after them at its end, so its own reading is outside the span (read inside it, it showed as a quarter of a core of other work on vps). On Linux the other work carries the idle counters' resolution (`±N%`: `/proc/stat` counts idle in 10 ms ticks, so over a check of tens of ms each CPU's reading is off by up to a tick). A Linux guest reads the hypervisor's steal over the check on the target's CPUs (`/proc/stat`'s steal, their mean) and names it as a cause from 0.5% of those CPUs' time (`none named (hypervisor steal 37% of those CPUs during the check)`, and after the named processes when there are some); under that, `none named (system work; 0% hypervisor steal)`; bare metal and other OSes say `none named (system work)`. The native check reads the process lists outside the idle counters' span and takes strobe's own CPU over the span out of the busy time, rather than assuming its check thread used one whole core (with a single target CPU, other work could then never read above 0) A CPU quota (Linux's CPU controller: `cpu.max`, a container's `--cpus`, systemd's `CPUQuota`) throttles without slowing a one-thread check: strobe reads the throttled time of its own cgroup and of every cgroup above it that has a quota (`cpu.stat`'s `throttled_usec`, v1 `throttled_time` under `cpu,cpuacct` or else `cpu`; which files is found once, and with no quota nothing is read) around each `run` call (`Runner::throttled`, `host::cgroup_throttled_ns`), and over the whole block for a launch case. A rise over a timing or check block's measured runs refuses what a quota moves (`load_metric`: times, CPU shares, `metric.*`, `app.*`, wakes per second), not CPU time (`cpu.work`, `ui.cpu`, `cpu.fixture`, `cli.launch`: a quota delays work and adds none); the refusal gives the throttled thread time (`420 µs`, a time as §7.1 prints it). On vps, strobe and an A/A of a 114 ms command in a cgroup with `cpu.max 50000 100000` printed `run.duration` 242 ms and 219 ms as values (`unthrottled` on the plan line) before this. `cli()` and `script()` targets run no speed check: their plan line says `speed not checked` |
 | `Background` (refusing) | the native speed check stayed slow for 2 minutes (one `--max-time` cut short refuses nothing: the bench ends there, §9.1) while other processes kept the target's CPUs busy (an antivirus scanning new files, an update, a build): the message names the busiest. A timed bench block waits it out first, holding nothing (a minute, then until the CPUs are quiet, and the check again), up to 15 times, about an hour: on a shared machine another agent's build ends. Blocks that run through a locked session (a headless page, a windowless app) wait the same way: they once ended the bench at the first busy check. Never in a `--check`: there it is a warning and the block runs (`Throttled` above) |
 | `BackgroundPriority` | the target runs at background priority, inherited from strobe or its own: macOS `taskpolicy -b` (`PRIO_DARWIN_PROCESS`), Windows' idle priority class, efficiency mode (EcoQoS) or background mode (very low memory priority), Linux `SCHED_IDLE` or nice 19. The OS keeps it on efficiency cores, at low clocks or behind other work: a drag in an Electron app read 83–91% dropped frames under `taskpolicy -b` against 0.4% at normal priority. Refuses frame and input-latency metrics (`frames.*`, `interaction.*`, `scroll.*`, `canvas.*`, `input.*`, `launch.painted`, `launch.settled`): a primary among them refuses the bench before anything builds (strobe's own priority) or at the block (the target's), a secondary shows refused, and `record` prints `frames refused`. CPU, memory and counters stay, with a warning to compare them only with runs at the same priority. Attribution and memory blocks are untimed and keep running. `record pid:` measures a process as its user runs it and is not checked |
 | `PresentsUnmatched` | over 5% of the inputs strobe sent a native app (those after which its accessibility tree changed, or its pixels did where a pixel proof timed them) showed no frame within a second while the present session lost no events (refuses `interaction.*`, §7.4). Inputs proven by pixels say so: "inputs whose pixels changed showed no frame event within a second: the window draws without flip-model GPU presents (such as GDI)"; with both kinds, each with its count. `NoPresentSource` words its pixel-proven inputs the same way |
@@ -5748,7 +5836,7 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 | `style` | `--top` | what invalidated style in the measured runs, from the trace's invalidation tracking (`disabled-by-default-devtools.timeline.invalidationTracking`, in attribution blocks only: of a series that declares `main.style` or `style.count`, with `--style`, or `record --probes attribution --style`): recalcs per run with the elements they restyled and the largest; invalidations by what changed (a class, an id, an attribute, a pseudo-class such as `:hover`, an inline style or custom property, a sheet) with the nodes they hit, by the selector whose invalidation set matched, and by the script line that made the change (source-mapped) |
 | `frames` | `--phase` `--case` | frame percentiles, dropped vsyncs, budget misses, worst frames with handles; `by process`: a trace's vsyncs presented and reported per process (the page's renderers marked), a native recording's frames on screen per pid; a native recording's footer points at `query <rec> inputs` |
 | `inputs` | `--case` `--top` | from OS presents (`frames.json` + `presents.json.gz`: a native block, a headed page where the OS tells presents): per measured input (a click's release with its press, a key, a scroll's first step), its run, its time in the run, what proved its change (`change ±ms`, the first non-feedback change after it that may have happened before the next input, or `pixels +ms` for a pixel proof), the target's frames around it (the last shown before it and the next three, screen time from it; `^` one shown after it but begun before its first edge), and its outcome: latency (and edge), unchanged, unshown, burst, or busy with why (`BusyWhy`, §7.4) and the needed delay. Footer: busy counts by why and the needed delay's median and max ("a wait of about that before such an input lets the app rest"). Else, a Chromium page's trace: each `EventLatency` in the measured runs' timed stretches (untimed stretches left out) of the types `interaction.*` and `scroll.latency.*` read (keys, mouse buttons, a touch's edges, scroll updates, wheel turns; pointer moves, characters and a gesture's begin and end are counted as `other_events` and left out), with its latency to presentation and the `PipelineReporter` frames presented around it; Chromium decides which counts. Runs in time order. It shows the first 100 inputs (`--top N` sets how many, `--top 3` three; `--json` lists every one) and then `… K more (--top N shows more; --json lists every one)`; `--top` once only raised the cap (`total.min(top.max(100))`: `--top 3` showed 100). The header names the runs it read: `in 5 measured runs (run:4..run:8; warmup before run:4 left out)` when the first is not `run:0`, `non-measured runs left out` when runs between them were not measured (an unfiltered batch), and with `--case` `warmup and other cases' runs left out`; adais `query rec_084edf inputs --top 3`: 3 lines, `… 227 more`. On the hybrid laptop: a canvas `latency · app` check recording (OS presents, 240 Hz) `input (pixels) pixels +33.6 ms frames +25.3 … latency 25.3 ms`; a `latency · page` attribution recording (trace) 10 key events in 5 runs. JSON: `source` (`presents` or `trace`), `quiet_ms`, `refresh_ms`, `inputs[]` (`run`, `t_ns`, `at_ms`, `kind`, `press_ms`, `change_ms`, `proved_by`, `frames[{ screen_ms, begun_before }]`, `outcome`, `latency_ms`, `edge`, `busy{ why, …, prev_input_at_ms }`, `needed_ms`), `outcomes`, `busy`, `needed_ms{ p50, max }`. A Firefox recording without OS presents says: `this Firefox recording has no inputs to show: a Firefox page's inputs are timed against the OS's presents, which only a headed run records (frames.json and presents.json.gz; run it without --headless, on an unlocked session | this one: <os_frames.refused>)`, not the Chromium trace's message (adais rec_340b00, headless Firefox) |
-| `threads` | `--phase` `--case` `--timeline` | busy share by thread and category, long tasks; a native recording's threads with wakes and CPU per run (a `record` without runs: `cpu ms` over the recording) and `by whose threads` (`app`, `driver`, `os`, `unknown (?)`); `--timeline` each thread's CPU per second from the launch (§7.4) |
+| `threads` | `--phase` `--case` `--timeline` | busy share by thread and category, long tasks; a native recording's threads with wakes and CPU per run (a `record` without runs: `cpu` over the recording) and `by whose threads` (`app`, `driver`, `os`, `unknown (?)`); `--timeline` each thread's CPU per second from the launch (§7.4) |
 | `hotspots` | `--by function\|file\|package` `--phase` `--thread` `--pid` `--native` `--sort self\|total` `--source host\|startup\|setup` | a script target's attribution recording: its measured runs' profiles by default (`scope: measured_runs`, §9.6), `--phase` that phase's stretches of them (`scope: phase`), `--source host` the whole host process instead (`scope: whole_host`: startup, setup, warmup, runs, resets, never divided by runs; the header and JSON say which), ending with `by lifecycle`, shares of wall time, not CPU (startup, setup, warmup runs, measured runs as their timed stretches (`Timed::segments`: what the default view and `meta.missed.sampled_ms` read), `untimed (in runs)` (their `ctx.untimed` stretches, when any), unmeasured runs, resets, teardown, any other `lifecycle_spans` name by its prefix: each part's wall ms on strobe's clock against the JavaScript sampled in it, and `other` sampled between the parts: strobe's clock-sync spins, its calls between runs, the exit; JSON `lifecycle[]` `{ part, label, spans, wall_ms, sampled_ms }`; the report's whole-host view shows it too; adais `script-profile.bench.ts`: measured runs 420 ms wall, 307 ms sampled, the default view's total, and `untimed (in runs)` 172 ms, 102 ms, where one row read 592 and 409 before); `--source startup` the whole host profile's samples inside `lifecycle_spans` `startup` (the host's spawn until it said ready: the runtime's boot, strobe's host and the target's static imports) and `--source setup` inside `setup` (the bench file's setup hook, which runs in strobe's runner, so its wall is the whole hook while the samples are the host's: what it called in the target, a server's dynamic imports among them), per recording, the host's frames folded as in the measured runs, ending `<part>: X of JavaScript sampled in Y of wall time (Z% of wall time, not CPU)` (`scope` `startup` or `setup`, `wall_ms`, `sampled_ms`: every weight but `(root)` and `(idle)`, `probe::cpu::weights` as `meta.missed`); refused (usage) with `--phase`, with `--native`, `--thread` or `--pid` (those read native samples), on a recording that is not a script's or has no span of that name (one from before `lifecycle_spans`). `a..b hotspots --source startup|setup` compares that part per recording, as `--source host` does: the header says `per recording: each side's host's startup alone` / `… bench file's setup alone, which no run count divides` (JSON `per_recording`, the words; `whole_host` true only for `--source host`); adais `query rec_6a1fe3..rec_6a1fe3 hotspots --source setup`: 40.7 ms → 40.7 ms per recording (that recording's lifecycle setup), where 0.25.0 refused it. `--source` is refused on every view but `hotspots` and `log` (it was ignored there before). Bun evaluates each imported module as a root stack of its own (`(module)` at its root, 0.5–16 ms each), so a server's 150–200 of them never reached `--top`: `--source host`, `startup` and `setup` add `N modules evaluated, each its own stack: X in all, the most Y (<file>); --by file or --by package sums them` (JSON `modules` `{ count, ms, max_ms, max_file }`). `--source startup` or `setup` with under half of its wall time sampled, and in `by lifecycle` a part over 10 ms with under half sampled, adds an `i` note, never a warning or a claim of missing rows: wall time with no JavaScript sample is mostly the host waiting (idle, I/O, timers) and the runner's own steps between its calls; on Bun, whose `--cpu-prof` samples JavaScript only, its native work (transpiling TypeScript, resolving and loading modules) too; on Node, which samples its native work as `(program)`, its `(idle)` samples are left out of the count (Bun's profiler does start before the host imports anything: vps, Bun 1.4.4, the first sample 27 ms into `startup`). `--by file` and `--by package` (any recording): a frame with no script URL is its file when it has one (the script host's), the profile's own names (`(program)`, `(garbage collector)`, `(module)`, `(anonymous)`) as themselves, else `(native)`; a package is read from the path a `file://` URL names: the folder after `node_modules/`, else the nearest `package.json`'s name, else `(app)` for a file on disk, and a runtime's own scripts (`internal:…`) are `(runtime)` (vps, a Bun server's `--source host --by package`: `(native)`, then its workspace packages, where native functions and the path's first folder read as packages before). vps `agents.bench.ts --check --why always --runs 1` of a server: `startup` 279 ms wall, 48.7 ms sampled (49 modules); `setup` 2225 ms, 799 ms sampled (175 modules, 166 ms, the most 16.1 ms); adais `script-profile.bench.ts`: `startup` 320 ms, 285 ms sampled (101 modules, 269 ms: the harness's 100 planted 2 ms modules); rows with self and total time (total: every stack the row's frame is in, once a stack, CPU views only, not `alloc` or `layout`; `self_ms`, `total_ms`, `share`, `total_share`; a function that only calls is a row by its total, sorted after every row with self time; strobe's driver script is its own row by file or package, never the app's; report.html's self-time tables leave rows of 0 self out), sample counts, intervals, handles; native samples (`deep`) in the same shape (a recording without a JavaScript profile shows them by default). Sorted by self time (the default), the callers whose time is in what they called and that missed the rows (5% of the total or more, up to 8) follow as `callers by total time` (`callers` in JSON); `--sort total` ranks by total. Native samples of several processes say `N samples of P processes` and add a `by process` split (pid, executable, samples, sampled ms = samples × interval, share); `--pid <pid\|exe>` keeps one process (its id or a part of its executable's name). Untimed samples (macOS `sample`'s snapshots) are counts, never ms. The header gives two resolved shares, of leaf frames and of all frames (a leaf in a named system library can resolve while every caller in an unsymbolized binary does not), and `Unresolved` warns when either is under 95%; `cpu_coverage` compares the capture's samples (native, timed, the whole recording) with those the processes' CPU asks for at one per interval (`share`, `samples`, `samples_asked`, `sampled_ms`, `cpu_ms`, `source`), counted over the whole capture by the sampler's own count (a block's rows keep its measured runs only, which read 66% for 93%), and `Coverage` warns under 80%, naming what the sampler counted of the rest: `late_ms` ("ran in threads before strobe opened them"), `unseen_ms` over 1 ms (set cycles above what the sampler saw; `record pid:` only: "ran outside the threads strobe followed (begun and ended between its looks, or around the capture's edges)"), `forgone_ms` ("ran past two intervals between looks at a thread (waking between set refreshes, or a late tick)"), the rate cap, unopened threads, lost events; else "the sampler counted no cause for the rest". On the hybrid laptop `record pid:<spawner 150 50> --probes stacks-unprivileged` read 80.7% (each child 144 of 150 ms; late 712 ms, forgone 369 ms). A script recording's measured runs and `--phase` drop the host's frames from each stack up to its last `host.mjs` frame (the line reader and hook call, the same on every stack); a sample in the host alone is one frame `(strobe script host)`; `--source host` keeps the host's frames, its file named `(strobe script host)` (strobe's install path is under the user's profile). `--thread main` also matches a thread whose id is its process's (Linux) |
 | `waits` | `--by function\|file\|package` `--thread` `--phase` | off-CPU waits of a native capture taken with `--probes waits` (attribution only, rule 3): per row (the innermost frame of the wait's stack outside the OS, the kernel and the language runtime), the time off CPU, waits, the longest, the part waiting and the part runnable (preempted, or woken and queued for a CPU), who woke them (a thread with the frame it woke them from, or an interrupt: a timer or a device) and the heaviest full stack; the header gives the threads, waits, totals and the share with a known waker. `--phase` clips each wait to the phase's spans. A capture without waits refuses (`NoWaits`, saying why) |
 | `http` | `--phase` `--top`; `exp_…` and `a..b` too | the HTTP probe (§8.9) of a bench block's recording: its setup (the URL without query values, whether an authorization was sent, never its value), the idle control (probes, p50, p95, max) against the probes due in the measured runs' timed parts (due, answered, timeouts, errors, missed sends, statuses; p50, p95 and max, a quantile that falls on a timeout said `censored`, never a number), the probe's own CPU, and the stalled cohorts: probes in a row slower than max(5 × the idle p95, 50 ms) or timed out, each with its run, when, every probe's latency in order (`TIMEOUT` for one) and what the server did. A cohort ends at a missed send, an error, a probe under the threshold, and a probe sent after every probe before it in the cohort had its answer (or its timeout's deadline, unless it timed out and none of the cohort was answered after it was sent: a hung server's timeouts, each over before the next is sent when `timeoutMs` ≤ `cadenceMs`, stay one cohort): nothing out bridged the gap, so the server answered in between. Each cohort says one of: `the server answered none for X` (one silence: from the first probe's dispatch to the last answer); `at least X` when a timeout's deadline falls after the last answer and no probe in scope was answered before it; or, when probes still out waited across answers into a later silence, `spanned N stalls over X (longest silence S; K probe(s) waited across a brief drain)` (a silence: first dispatch to an answer, answer to answer, or the last answer to a later deadline, each longer than the stall threshold, every answer in scope counted: a response read, ok or bad, of any probe, not the cohort's alone; K: probes dispatched before a later silence began and still out at it). A cohort whose trailing silence an answer cut short ends at its last answer (with none, the first answer after its first dispatch). Its timeouts are said wherever they fell: `· N timed out at T ms`, with `, still out after every answer` (`all …`, `one of them …`, `K of them …`) only when the cohort had answers and K timeouts ran past them. JSON per cohort: `any_timeout`, `answered`, `timeouts_past_answers`, `waves` (silences), `longest_silence_ms`, `carried`, `says` (the sentence); `held_past_timeout` means a timeout's deadline after the last answer with no answer before it, and `held_ms` runs to that deadline then. The latency quantiles follow the block's refusals: unread (`—`, `  (unread: <why>)`) when no probe counted (none due, none answered or timed out), on any error or bad answer, when strobe missed more than max(1, due / 20) sends, or in a timed block (probe and pass blocks, their kept recordings' views) when the probe used over 2% of a core; `censored` only when not unread and the quantile falls on a timeout. The view's JSON has `cohorts_total` and the measured runs' `judge`, `states` (`p50`, `p95`, `max`: `ok`, `censored` or `unread`), `unread` and `unread_why`; beyond `--top` the text says `… N more (--top N shows more)`. `--phase` keeps the probes due in that phase's spans. `exp_…` lists every probe block (its side, its pair or `block N` for a `--blocks` series, quantiles, counts and the recording that keeps its probes) and the probed check and attribution recordings; `a..b` shows two recordings' side by side |
@@ -5765,7 +5853,7 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 | `network` | `--top` `--reveal` | a `wir:` recording's network waterfall; cookies, authorization headers and secret query parameters scrubbed unless `--reveal` |
 | `cpu` | `--cores` `--residency` | not built: per-core load, frequency, which core each thread ran on |
 | `insights` | (`exp_…` too) | rule hits with their numbers and the commands that show the evidence; for an experiment, the largest base/head movers per series first |
-| `actions` | `--phase` `--top` `--reveal` `--case` (`exp_…` too) | a bench block's actions in order (§9.6, `actions.json.gz`): seq, hook, run, ms from the first, from its input's send to strobe's answer, call, selector, arguments, outcome, its latency sample (`sample sent 32.7 ms`), untimed and phase, and each input's hit (role, name, point, scrolled) on a line of its own; the seed in the header, and the samples counted by edge with what each means. `--phase` keeps one phase's, `--top` bounds the rows (default 15), `--json` gives every record. Typed text, `act` values, `ctx.call` arguments and `ctx.exec` lines show as their length (`«18 chars»`) unless `--reveal` (rule 9). `exp_…`: each series' kept recordings' (a check's, attribution blocks', kept timing blocks'), each named by what it was, and each check case's kept beside the result (`no recording` or `failed`) |
+| `actions` | `--phase` `--top` `--reveal` `--case` (`exp_…` too) | a bench block's actions in order (§9.6, `actions.json.gz`): seq, hook, run, ms from the first, from its input's send to strobe's answer, call, selector, arguments, outcome, its latency sample (`sample sent 32,700 µs`), untimed and phase, and each input's hit (role, name, point, scrolled) on a line of its own; the seed in the header, and the samples counted by edge with what each means. `--phase` keeps one phase's, `--top` bounds the rows (default 15), `--json` gives every record. Typed text, `act` values, `ctx.call` arguments and `ctx.exec` lines show as their length (`«18 chars»`) unless `--reveal` (rule 9). `exp_…`: each series' kept recordings' (a check's, attribution blocks', kept timing blocks'), each named by what it was, and each check case's kept beside the result (`no recording` or `failed`) |
 | `timeline` | `--from --to --thread` | not built: bounded event list for a range (`threads --timeline` and `strobe open` show time) |
 | `progress` | (`exp_…` only) | a running experiment's state and estimate |
 | `runs` | | every run of a block recording, warmup and unmeasured runs too, measured or not: from the block's `meta.run_list` (run, measured, `run.duration`, `cpu.work`, main-thread tasks, main CPU, CPU lost; kept with every block recording, §9.6); else `runs.json` (a native or script block's measured runs only, no warmup run: `run.duration`, `cpu.work`, main CPU; a `record` of a native window: its one span is the whole recording); else a bench block's run marks in its trace (a page: each run's span between its marks, wider than `run.duration`, the driver's time, by the marks' round trips, and the renderer main thread's top-level task time when the trace holds tasks; a lean trace holds none, so none is shown). A `record <url>` marks its window, not runs: usage error (`keeps no runs to list`). JSON `{ recording, from, runs: […] }` |
@@ -5902,10 +5990,12 @@ file in the daemon's memory). The daemon refuses `/report/` and `/video/` to a r
 `Sec-Fetch-Site` is anything but `same-origin` or `none` (another site's page). The PR block and
 markdown are unchanged.
 
-Axis ticks of a millisecond metric read in seconds once the axis reaches a second (`16 s`,
-`15.05 s`), at the decimals the step needs; a chart's left margin is as wide as its widest tick label
-(report.html's pair, per-pair delta, forest, frame-distribution, census and leak charts; history.html),
-where a 16,000 ms axis once read `.6000 ms`.
+Axis ticks of a time read in the page's unit (§7.1 "Times"), digits grouped, at the decimals the
+step needs and never finer than the unit's finest step (`250,000 µs`, `0.25 s`); an axis narrower
+than four of those steps is widened about its middle, so no two ticks print alike. A chart's left
+margin is as wide as its widest tick label (report.html's pair, per-pair delta, forest,
+frame-distribution, census and leak charts; history.html), where a 16,000 ms axis once read
+`.6000 ms`.
 
 A `--check` experiment's HTML shows each case as a check (`renderCheckSeries`): passed or failed,
 its error and fix, the one run's declared values (not a verdict), what was on screen, its recording
@@ -5984,7 +6074,7 @@ pull request body, pasted verbatim. Few words, two drawers:
 - **Proof:** one line per series, every series once and by name, its title in sentence case (the
   target only when the series do not share one): the main metric's paired change, bold when
   decided, the medians labelled as such, the pairs and the likely range (`CPU time per 8 s run
-  **−44%** per pair (medians 7.05 → 3.90 ms), better in 8 of 8 pairs, likely −54% to −32%.`;
+  **−44%** per pair (medians 7,050 → 3,900 µs), better in 8 of 8 pairs, likely −54% to −32%.`;
   `Run time unchanged, within ±2% (…)`; `no clear change in 12 pairs (…); ~50 pairs would settle
   it`), and the hero's second win when it came from this series. An unsteady case says so on its
   line (`; **unsteady case**: its work grew each run.`). When the medians and the paired change
@@ -6025,7 +6115,7 @@ pull request body, pasted verbatim. Few words, two drawers:
   out when there is nothing to show), How it was measured (builds with subjects, machine,
   method, each note in plain words, the strobe that recorded it and the one that formatted it),
   then Also measured, not tested (what moved in a table; what held still in one line, `Unchanged:
-  DOM nodes (108), run time (8.01 s).`, beside what read zero in both builds).
+  DOM nodes (108), run time (8,010,000 µs).`, beside what read zero in both builds).
 - **Rerun** (one drawer): the `strobe bench` command, one flag per line, the full report, the
   Perfetto line, kept recordings.
 
@@ -6043,8 +6133,10 @@ calls one of them "This PR". Sentences use the same words: `before` and `with th
 the tag the line gives).
 
 Rules: "before" and "this PR" (or the side names above), never base and head, and no column header that names only one side;
-metric names in words with one scheme per family (`Frame gap, p95`, `Frame latency, p99`); three
-significant figures and a non-breaking space between number and unit; decided changes bold, no
+metric names in words with one scheme per family (`Frame gap, p95`, `Frame latency, p99`); numbers
+as the text prints them (`fmt::value`: a time in the unit of the command that wrote the block, §7.1;
+`7,050 → 3,900 µs`, the unit once when both share it) and a non-breaking space between number and
+unit; decided changes bold, no
 colour; no charts (GitHub draws Mermaid blank inside a closed drawer and covers it with pan
 controls); no nested drawers, footnotes or emoji; one alert, only for regressions. Frame-gap
 percentiles use one definition everywhere, each launch's percentile and the median
@@ -6801,7 +6893,7 @@ target is resumed), never pairs or writes to the phone, and never prints the pho
     `query summary`, `query insights`, and Perfetto tracks in `strobe open`); the run window derives
     strictly from both page marks on one `WebContent` target (`RunIncomplete` if either mark is missing
     or the target swaps mid-run), excluding strobe's own mark evaluations from `Timeline` and
-    `ScriptProfiler` so an idle tab reads `0 ms` `main.work`.
+    `ScriptProfiler` so an idle tab reads `0 µs` `main.work`.
   - `Heap.snapshot` converts WebKit's version-3 snapshot into V8's `.heapsnapshot.gz` (`0600`
     owner-only, excluding `InjectedScript` / `CommandLineAPI` debugger scaffolding via two-BFS
     dominator filtering) for `query heap` and (`--probes memory` S0/S1/S2) `query leaks`;
@@ -8406,6 +8498,10 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
   look and `build` (which run in the folder strobe runs in) are refused there with a pointer to the
   CLI or the stdio server (`strobe mcp`, which runs in the agent's folder); an `app:<id>` resolves
   from the user's own strobe.json.
+- `unit` (`us`, the default, `ms` or `s`; on `status`, `record`, `bench`, `query`, `report`, `look`)
+  is how the call's `content` prints times (§7.1 "Times"); `structuredContent` keeps each metric's
+  unit whatever it says. Each call has its own; the daemon's other calls are not affected. A call without it takes `"unit"` from the strobe.json above the server's folder, else
+  the user's own: through the daemon, whose folder is strobe's install folder, the user's.
 - The MCP token and `strobe open`'s session tokens come from the OS's secure random source
   (`host::paths::csprng_hex`); the token file and each session file (the key to its trace)
   are 0600, in folders only the user can enter, on Unix.
@@ -8468,9 +8564,9 @@ nothing to the share. Each edge reads strobe's own cycles right beside the clock
 them, so reading the runner is not in strobe's count. `--check` prints it per case (`self  strobe 0.81% · runner 0.40% ·
 sampler 0.16% of a core`), a bench per series (the blocks' mean); in a timed block a part over its
 budget above warns `OverheadBudget`, once per series and part. The strobe-and-runner warning says what
-that share is per run, `(X ms/run over Y ms runs)`, and when the runs average under 250 ms adds `; under
+that share is per run, `(X/run over Y runs)` (times, §7.1), and when the runs average under 250 ms adds `; under
 250 ms a run leaves strobe's fixed cost per run a large share of it: give each run more work` (`121.4%
-of a core in the runs (2.56 ms/run over 2.11 ms runs; …)`). strobe's own process and the runner
+of a core in the runs (2,560 µs/run over 2,110 µs runs; …)`). strobe's own process and the runner
 (in a timed or `--check` block, `self_state`): with the target unpinned (`--pin none`, under 4 cores,
 macOS) they share its CPUs, so `strobe` + `runner` over 5% of a core warns `OverheadBudget` and over
 20% refuses a timed block's wall-time, CPU-share, frame and latency metrics (`OverheadBudget`; the
@@ -8657,6 +8753,18 @@ describe it now. The sections above say what strobe does; this list only dates i
 2026-11-09 this section also held the notes of where and how each change was checked, with their
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
+
+**After 0.29.0**
+
+- 2026-11-12 · cleanup/usa cleanup/usb cleanup/usc · times print in microseconds with grouped digits
+  (`18,309,038 µs`), never promoted to ms or s; `--unit us|ms|s`, `"unit"` in strobe.json (project
+  over user), MCP `unit`; one formatter (`fmt::time`: every whole digit, at least three significant,
+  the unit's finest step, `<0.01 µs` for a nonzero dust value) for the terminal, Markdown, the PR
+  block, the step summary, cards and both HTML pages, whose `µs | ms | s` switch writes `#unit=`;
+  the PR block and card print `fmt::value` (no three significant figures, no seconds past 1,000 ms);
+  counts grouped; a stored check's text and a time's absolute verdict bound drawn again in the unit
+  asked; `--json` and stored numbers unchanged; `strobe stats` `signed`, `times`, `verdict`,
+  `time_unit`, `ascii` (5, 5.8, 5.11, 7.1, 9.3, 11.1, 11.2, 17).
 
 **After 0.28.0**
 

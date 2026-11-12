@@ -68,6 +68,8 @@ In CI, the GitHub Action checks every case on each pull request, and holds exact
 
 A shared runner's timings move with the jobs beside it, so strobe gives no timing verdict there. On a machine of your own (a self-hosted runner), `mode: compare` runs the A/B and puts the card above in the PR. Every input: [action.yml](action.yml); the design: [SPEC.md §26](SPEC.md#26-ci-the-github-action-actionyml).
 
+Times print in microseconds (`18,309,038 µs`); `--unit ms` or `"unit": "ms"` in strobe.json to change it.
+
 Packages for Windows (x64, Arm64), macOS (Apple silicon, Intel) and Linux (x64, arm64).
 
 Design: [SPEC.md](SPEC.md)

@@ -1,8 +1,10 @@
 // Known-answer checks of strobe's statistics (SPEC §9.3) through the hidden `strobe stats` command:
 // synthetic pairs go in, what a bench would decide comes out, and each answer is printed beside the
-// truth computed here independently (brute force, simulation or arithmetic).
+// truth computed here independently (brute force, simulation or arithmetic). The `units` group holds
+// the text of times (SPEC §7.1 "Times") to its table in every unit: any answer that differs fails the
+// run (exit 1).
 //
-//   bun scripts/dev/stats-check.ts <strobe> [<other strobe> …] [--only wilcoxon,theil,…]
+//   bun scripts/dev/stats-check.ts <strobe> [<other strobe> …] [--only wilcoxon,theil,units,…]
 //
 // Give an older build and a newer one to see a fix: every row prints each binary's answer.
 import { spawnSync } from "node:child_process"
@@ -209,6 +211,128 @@ if (group("median")) {
       const out = med(v) < hl.lo || med(v) > hl.hi
       console.log(`    ${short(b)}: printed median ${f(med(v))} with HL interval [${f(hl.lo)} … ${f(hl.hi)}]${out ? "  ← median outside" : ""}; HL point ${f(hl.est)}; median interval ${mi.error ? mi.error : `[${f(mi.lo)} … ${f(mi.hi)}] (${f(mi.achieved, 3)})`}`)
     }
+  }
+}
+
+if (group("units")) {
+  console.log("\n## times in µs, ms and s (truth: SPEC §7.1's table; a miss fails the run)")
+  // [stored ms, op, µs, ms, s]: `value` prints a time unsigned (a negative with −), `signed` adds + above 0.
+  const rows: [number, string, string, string, string][] = [
+    [0, "value", "0 µs", "0 ms", "0 s"],
+    [0, "signed", "0 µs", "0 ms", "0 s"],
+    // The floor: a nonzero time is never 0.
+    [0.000004, "value", "<0.01 µs", "<0.0001 ms", "<0.000001 s"],
+    [0.000004, "signed", "+<0.01 µs", "+<0.0001 ms", "+<0.000001 s"],
+    [-1e-7, "value", "−<0.01 µs", "−<0.0001 ms", "−<0.000001 s"],
+    [-1e-7, "signed", "−<0.01 µs", "−<0.0001 ms", "−<0.000001 s"],
+    [0.0000049, "value", "<0.01 µs", "<0.0001 ms", "<0.000001 s"],
+    [0.0000051, "value", "0.01 µs", "<0.0001 ms", "<0.000001 s"],
+    [0.000051, "value", "0.05 µs", "0.0001 ms", "<0.000001 s"],
+    [0.00051, "value", "0.51 µs", "0.0005 ms", "0.000001 s"],
+    [0.0004, "value", "0.40 µs", "0.0004 ms", "<0.000001 s"],
+    [0.004, "value", "4.00 µs", "0.0040 ms", "0.000004 s"],
+    [0.00999, "value", "9.99 µs", "0.0100 ms", "0.000010 s"],
+    [0.042, "value", "42.0 µs", "0.0420 ms", "0.000042 s"],
+    [0.1, "value", "100 µs", "0.100 ms", "0.000100 s"],
+    [0.5, "value", "500 µs", "0.500 ms", "0.000500 s"],
+    // Tier boundaries crossed by rounding: the decimals are taken again from the rounded value.
+    [0.0099996, "value", "10.0 µs", "0.0100 ms", "0.000010 s"],
+    [0.0999996, "value", "100 µs", "0.100 ms", "0.000100 s"],
+    [0.999996, "value", "1,000 µs", "1.00 ms", "0.00100 s"],
+    [0.99996, "value", "1,000 µs", "1.00 ms", "0.00100 s"],
+    [9.996, "value", "9,996 µs", "10.0 ms", "0.0100 s"],
+    [99.96, "value", "99,960 µs", "100 ms", "0.100 s"],
+    [9999.96, "value", "9,999,960 µs", "10,000 ms", "10.0 s"],
+    [99999.6, "value", "99,999,600 µs", "100,000 ms", "100 s"],
+    [1.234, "value", "1,234 µs", "1.23 ms", "0.00123 s"],
+    [16.6667, "value", "16,667 µs", "16.7 ms", "0.0167 s"],
+    [42, "value", "42,000 µs", "42.0 ms", "0.0420 s"],
+    [738.147, "value", "738,147 µs", "738 ms", "0.738 s"],
+    [1000, "value", "1,000,000 µs", "1,000 ms", "1.00 s"],
+    [1234.5678, "value", "1,234,568 µs", "1,235 ms", "1.23 s"],
+    [18309.038, "value", "18,309,038 µs", "18,309 ms", "18.3 s"],
+    // 1e9 ms and past: every whole digit, grouped.
+    [1e9, "value", "1,000,000,000,000 µs", "1,000,000,000 ms", "1,000,000 s"],
+    [1234567890.123, "value", "1,234,567,890,123 µs", "1,234,567,890 ms", "1,234,568 s"],
+    // Negatives: − (U+2212), never a hyphen.
+    [-0.042, "value", "−42.0 µs", "−0.0420 ms", "−0.000042 s"],
+    [-0.042, "signed", "−42.0 µs", "−0.0420 ms", "−0.000042 s"],
+    [1.234, "signed", "+1,234 µs", "+1.23 ms", "+0.00123 s"],
+    [-18309.038, "signed", "−18,309,038 µs", "−18,309 ms", "−18.3 s"],
+  ]
+  const units = ["us", "ms", "s"]
+  const qs: Q[] = rows.flatMap(([v, op]) => units.map((u) => ({ op, v, unit: "ms", time_unit: u })))
+  // Times printed together: each as it prints alone, however far apart (no shared decimals).
+  const sets: [number[], string[], string[], string[]][] = [
+    [[-0.0032, -0.0012, 0.0124], ["−3.20 µs", "−1.20 µs", "+12.4 µs"], ["−0.0032 ms", "−0.0012 ms", "+0.0124 ms"], ["−0.000003 s", "−0.000001 s", "+0.000012 s"]],
+    [[-3837.429, -4012.11, -3661.804], ["−3,837,429 µs", "−4,012,110 µs", "−3,661,804 µs"], ["−3,837 ms", "−4,012 ms", "−3,662 ms"], ["−3.84 s", "−4.01 s", "−3.66 s"]],
+    [[0.12, 0.05, 2.5], ["+120 µs", "+50.0 µs", "+2,500 µs"], ["+0.120 ms", "+0.0500 ms", "+2.50 ms"], ["+0.000120 s", "+0.000050 s", "+0.00250 s"]],
+    [[0, -1e-7, 2e-7], ["0 µs", "−<0.01 µs", "+<0.01 µs"], ["0 ms", "−<0.0001 ms", "+<0.0001 ms"], ["0 s", "−<0.000001 s", "+<0.000001 s"]],
+    [[-3e-7, -4012.11, 2.5], ["−<0.01 µs", "−4,012,110 µs", "+2,500 µs"], ["−<0.0001 ms", "−4,012 ms", "+2.50 ms"], ["−<0.000001 s", "−4.01 s", "+0.00250 s"]],
+  ]
+  for (const [v] of sets) for (const u of units) qs.push({ op: "times", v, signed: true, time_unit: u })
+  // An absolute bound of a time, and a stored verdict drawn again from its bound.
+  const bounds: [number, string, string, string][] = [
+    [0.00004, "0.04 µs", "<0.0001 ms", "<0.000001 s"],
+    [0.04, "40.0 µs", "0.0400 ms", "0.000040 s"],
+    [0.52, "520 µs", "0.520 ms", "0.000520 s"],
+    [14.76, "14,760 µs", "14.8 ms", "0.0148 s"],
+  ]
+  for (const [abs] of bounds) for (const u of units) qs.push({ op: "bound", fraction: 0, relative: false, abs, unit: "ms", time_unit: u })
+  const verdicts: [Q, string, string, string][] = [
+    [{ metric: "cpu.work", relative: false, bound: 0.04, verdict: "same (±0 ms)" }, "same (±40.0 µs)", "same (±0.0400 ms)", "same (±0.000040 s)"],
+    [{ metric: "cpu.work", relative: false, bound: 0, verdict: "same (±0 ms)" }, "same (±0 µs)", "same (±0 ms)", "same (±0 s)"],
+    [{ metric: "cpu.work", relative: false, bound: 1.2, verdict: "no worse (≤1.20 ms, faster)" }, "no worse (≤1,200 µs, faster)", "no worse (≤1.20 ms, faster)", "no worse (≤0.00120 s, faster)"],
+    [{ metric: "cpu.work", relative: false, bound: 0.5, verdict: "worse (>0.5 ms)" }, "worse (>500 µs)", "worse (>0.500 ms)", "worse (>0.000500 s)"],
+    [{ metric: "cpu.work", relative: true, bound: 0.02, verdict: "same (±2%)" }, "same (±2%)", "same (±2%)", "same (±2%)"],
+  ]
+  for (const [c] of verdicts) for (const u of units) qs.push({ op: "verdict", c, time_unit: u })
+  // Not a time: a count is grouped, never scaled or labelled µs (`count.*_us` is a count); MB as before.
+  const others: [Q, string][] = [
+    [{ op: "value", v: 1234567, unit: "count", time_unit: "s" }, "1,234,567"],
+    [{ op: "value", v: -12345, unit: "count" }, "-12,345"],
+    [{ op: "value", v: 12.5, unit: "count", time_unit: "ms" }, "12.5"],
+    [{ op: "value", v: 0.287, unit: "MB", time_unit: "s" }, "0.29 MB"],
+    // A terminal that is not UTF-8: `us` and a hyphen.
+    [{ op: "value", v: 0.042, unit: "ms", ascii: true }, "42.0 us"],
+    [{ op: "signed", v: -1.234, unit: "ms", ascii: true }, "-1,234 us"],
+    // No time_unit: microseconds.
+    [{ op: "value", v: 738.147, unit: "ms" }, "738,147 µs"],
+    // Nonzero, but 0 once scaled (underflow): the floor, never 0 or −0.
+    [{ op: "value", v: -5e-324, unit: "ms", time_unit: "s" }, "−<0.000001 s"],
+    [{ op: "signed", v: 5e-324, unit: "ms", time_unit: "s" }, "+<0.000001 s"],
+    [{ op: "value", v: 5e-324, unit: "ms", time_unit: "s" }, "<0.000001 s"],
+    // Not finite once scaled, or no number: a dash.
+    [{ op: "value", v: 1e307, unit: "ms", time_unit: "us" }, "—"],
+    [{ op: "signed", v: -1e307, unit: "ms", time_unit: "us" }, "—"],
+    [{ op: "value", unit: "ms" }, "—"],
+    // Never minus zero, for any kind of value.
+    [{ op: "value", v: -0, unit: "ms" }, "0 µs"],
+    [{ op: "signed", v: -0, unit: "ms" }, "0 µs"],
+    [{ op: "value", v: -0.1, unit: "bytes" }, "0 B"],
+    [{ op: "value", v: -0.1, unit: "instructions" }, "0 instr"],
+    [{ op: "value", v: -0.04, unit: "count" }, "0.0"],
+    [{ op: "signed", v: -0.04, unit: "count" }, "0.0"],
+  ]
+  for (const [q] of others) qs.push(q)
+  const want: string[] = [
+    ...rows.flatMap(([, , a, b, c]) => [a, b, c]),
+    ...sets.flatMap(([, a, b, c]) => [a.join(" "), b.join(" "), c.join(" ")]),
+    ...bounds.flatMap(([, a, b, c]) => [a, b, c]),
+    ...verdicts.flatMap(([, a, b, c]) => [a, b, c]),
+    ...others.map(([, t]) => t),
+  ]
+  const res = all(qs)
+  for (const [k, b] of bins.entries()) {
+    let miss = 0
+    for (const [i, q] of qs.entries()) {
+      const a = res[k][i], got = a.texts ? a.texts.join(" ") : a.text ?? `error: ${a.error}`
+      if (got === want[i]) continue
+      miss++
+      console.log(`  ${short(b)} ${JSON.stringify(q)}: "${got}", want "${want[i]}"`)
+    }
+    console.log(`${short(b)}  ${qs.length - miss} of ${qs.length} as the table says`)
+    if (miss) process.exitCode = 1
   }
 }
 

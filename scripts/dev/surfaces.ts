@@ -7,7 +7,13 @@
 // (rendered by a headless Chromium: its text after the page's own script ran), the card's alt text and
 // the badges. A number that differs between surfaces is printed as CRIT.
 //
-//   bun scripts/dev/surfaces.ts exp_2606af exp_a88c60 [--strobe <exe>] [--no-html]
+// Times print in the unit asked (`--unit us|ms|s`, SPEC §7.1 "Times"): every surface is drawn once per
+// unit (`--units`, default all three) and each time it shows must be, character for character, the text
+// this file's `tTime` gives its stored number in that unit (the table in `scripts/dev/stats-check.ts`);
+// the card's alt text too. `--json` must be the same bytes in every unit, but for `text` (the words the
+// command prints).
+//
+//   bun scripts/dev/surfaces.ts exp_2606af exp_a88c60 [--strobe <exe>] [--no-html] [--units us,ms]
 //   bun scripts/dev/surfaces.ts --all [--since 2026-11-01]    every surface of every experiment
 //   bun scripts/dev/surfaces.ts --scan [--since 2026-11-01]   result.json checks over every experiment
 //
@@ -29,6 +35,9 @@ const HOME =
       ? join(homedir(), "Library/Application Support/strobe")
       : join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local/share"), "strobe"))
 const SCHEMA = JSON.parse(readFileSync(new URL("../../schema/result.v1.json", import.meta.url), "utf8"))
+// The units every surface is drawn in, and the one this pass draws (`--unit` on each query and report).
+const UNITS = (opt("units") ?? "us,ms,s").split(",")
+let UNIT = UNITS[0]
 
 type Sev = "CRIT" | "HIGH" | "MED" | "LOW"
 const found: { exp: string; sev: Sev; where: string; what: string }[] = []
@@ -66,18 +75,55 @@ function digitsFor(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, d))
 }
 
+// fmt::time: a time stored in ms, in `unit` (SPEC §7.1 "Times"). Every whole digit grouped by threes,
+// at least three significant ones, at most the unit's finest decimals (taken again from the rounded
+// value: 99.96 ms is `100 ms`); `<0.01 µs` for a nonzero one that rounds to nothing; `0 µs` for 0.
+const TU: Record<string, { label: string; perMs: number; finest: number }> = {
+  us: { label: "µs", perMs: 1000, finest: 2 },
+  ms: { label: "ms", perMs: 1, finest: 4 },
+  s: { label: "s", perMs: 0.001, finest: 6 },
+}
+if (UNITS.some((u) => !TU[u])) {
+  console.error(`--units takes us, ms and s, not ${UNITS.join(",")}`)
+  process.exit(2)
+}
+const group = (s: string) => s.replace(/^(-?)(\d+)/, (_, sign, int) => sign + int.replace(/\B(?=(\d{3})+(?!\d))/g, ","))
+function timeDigits(x: number, finest: number): number {
+  const d = (x: number) => (x >= 100 ? 0 : x >= 10 ? 1 : x >= 1 ? 2 : Math.min(finest, [3, 4, 5, 6].find((k) => k <= Math.max(3, finest) && x * 10 ** k >= 100) ?? finest))
+  const first = d(x)
+  return Math.min(d(parseFloat(rfix(x, first))), first)
+}
+function tTime(ms: number | null, signed = false, unit = UNIT): string {
+  if (ms == null || !Number.isFinite(ms)) return "—"
+  const t = TU[unit], x = Math.abs(ms * t.perMs)
+  const s = x === 0 ? "0" : rfix(x, timeDigits(x, t.finest))
+  const body = x === 0 ? "0" : /[1-9]/.test(s) ? group(s) : `<${rfix(10 ** -t.finest, t.finest)}`
+  return `${ms < 0 ? "−" : ms > 0 && signed ? "+" : ""}${body} ${t.label}`
+}
+// stats::verdict_text: a time's absolute bound or margin drawn again from `bound` in the unit shown.
+function vText(c: J): string {
+  const v = String(c.verdict ?? "")
+  if (c.relative !== false || unitOf(c.metric) !== "ms" || !(Number.isFinite(c.bound) && c.bound >= 0)) return v
+  for (const p of ["same (±", "no worse (≤", "worse (>"]) {
+    if (!v.startsWith(p)) continue
+    const ends = [v.indexOf(")", p.length), v.indexOf(", ", p.length)].filter((i) => i >= 0)
+    if (ends.length) return p + tTime(c.bound) + v.slice(Math.min(...ends))
+  }
+  return v
+}
+
 // app::fmt::value / pct / pct_ci / signed (the text and the markdown report).
 function tValue(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
+  if (unit === "ms") return tTime(v)
   let d = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4)
   if (Math.round(v * 10 ** d) === 0) {
     v = 0
     d = Math.min(d, 2)
   }
   switch (unit) {
-    case "ms": return `${rfix(v, d)} ms`
     case "%": return `${rfix(v, d)}%`
-    case "count": return Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : rfix(v, 1)
+    case "count": return group(Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : rfix(v, 1))
     case "bytes": return tBytes(v)
     case "pp": return `${rfix(v, d)} pp`
     case "MB": return `${rfix(v, d)} MB`
@@ -117,32 +163,15 @@ function pctCI(est: number, lo: number, hi: number): [string, string, string] {
 const relCI = (c: J): [string, string, string] => ([c.estimate, c.lo, c.hi].every(Number.isFinite) ? pctCI(c.estimate, c.lo, c.hi) : [tPct(c.estimate), tPct(c.lo), tPct(c.hi)])
 function tSigned(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
+  if (unit === "ms") return tTime(v, true)
   const body = tValue(Math.abs(v), unit)
   return !/[1-9]/.test(body) ? body : v < 0 ? `−${body}` : v > 0 ? `+${body}` : body
 }
 
-// pr::extract::sig3 / disp / signed_disp (the PR block and the card).
-function sig3(v: number): string {
-  if (!Number.isFinite(v)) return "—"
-  const a = Math.abs(v)
-  if (a === 0) return "0"
-  const d = a >= 100 ? 0 : Math.min(4, Math.max(0, 2 - Math.floor(Math.log10(a))))
-  const s = rfix(v, d)
-  return /^-?[0.]+$/.test(s) ? "0" : s
-}
-function pDisp(v: number | null, unit: string): string {
-  if (v == null || !Number.isFinite(v)) return "—"
-  if (unit === "ms" && Math.abs(v) >= 1000) return `${sig3(v / 1000)} s`
-  if (unit === "bytes") return tBytes(v)
-  if (unit === "count" || unit === "") return tValue(v, "count")
-  if (unit === "value") return sig3(v)
-  if (unit === "instructions") return tValue(v, "instructions")
-  return ["ms", "pp", "MB"].includes(unit) ? `${sig3(v)} ${unit}` : ["%", "/s"].includes(unit) ? `${sig3(v)}${unit}` : `${sig3(v)} ${unit}`
-}
-function pSigned(v: number, unit: string): string {
-  const body = pDisp(Math.abs(v), unit)
-  return body === pDisp(0, unit) ? body : v < 0 ? `−${body}` : v > 0 ? `+${body}` : body
-}
+// pr::extract::disp / signed_disp (the PR block and the card): `fmt::value` and `fmt::signed` since
+// times print in one unit (no 3 significant figures, no second for a time past 1,000 ms).
+const pDisp = (v: number | null, unit: string) => tValue(v, unit || "count")
+const pSigned = (v: number, unit: string) => tSigned(v, unit || "count")
 
 // ---------- reading result.json ----------
 
@@ -268,8 +297,9 @@ function checkResult(r: J) {
 
 // ---------- the surfaces ----------
 
-function run(args: string[]): { out: string; err: string; code: number } {
-  const p = Bun.spawnSync([STROBE, ...args], { stdout: "pipe", stderr: "pipe" })
+// A query or report in this pass's unit.
+function run(args: string[], unit: string | null = UNIT): { out: string; err: string; code: number } {
+  const p = Bun.spawnSync([STROBE, ...args, ...(unit ? ["--unit", unit] : [])], { stdout: "pipe", stderr: "pipe" })
   return { out: p.stdout.toString(), err: p.stderr.toString(), code: p.exitCode ?? 0 }
 }
 
@@ -323,7 +353,7 @@ function checkSurfaces(r: J) {
     const pr = judgedAny ? run(["report", "experiment", id, "--format", "pr"]).out : ""
     const card = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "card", "--json", "--out", join(dir, "card.svg")]).out || "{}") : {}
     const badge = judgedAny ? JSON.parse(run(["report", "experiment", id, "--format", "badge", "--json", "--out", join(dir, "badge.svg")]).out || "{}") : {}
-    if (r.text && r.text.trim() !== text.trim()) flagIt("LOW", "text", "the text bench printed and `query summary` now differ (a later strobe renders it otherwise)")
+    if (UNIT === UNITS[0] && r.text && r.text.trim() !== text.trim()) flagIt("LOW", "text", "the text bench printed and `query summary` now differ (a later strobe renders it otherwise)")
     // `--format md` of a comparison is drawn again from result.json (`bench::render`: today's digits and
     // ledger), so it is checked against result.json as the stored text is, row by row; where it prints the
     // stored text unchanged (a check, a recording, an older strobe) the text's check covers it.
@@ -354,11 +384,11 @@ function checkSurfaces(r: J) {
             if (sec) flagIt("HIGH", `${name} ${where}`, "no row")
           } else {
             // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
-            const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(c.verdict)[0]
-            const toks = body.match(/—|[−+-]?\d[\d.,]*(?: ?(?:[GMk] instr|instr|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
+            const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(vText(c))[0]
+            const toks = body.match(/—|[−+-]?<?\d[\d.,]*(?: ?(?:[GMk] instr|instr|µs|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
             const [tb, th, td] = toks
             const tci = toks.length >= 5 ? `${toks[3]} … ${toks[4]}` : toks[3]
-            if (!row.includes(c.verdict)) flagIt("CRIT", `${name} ${where}`, `verdict "${c.verdict}" not in: ${row.trim()}`)
+            if (!row.includes(vText(c))) flagIt("CRIT", `${name} ${where}`, `verdict "${vText(c)}" not in: ${row.trim()}`)
             if (refused) {
               if ([tb, th, td, tci].some((x) => /\d/.test(x ?? ""))) flagIt(c.verdict_kind ? "CRIT" : "LOW", `${name} ${where}`, `refused, yet the row reads ${row.trim()}`)
             } else {
@@ -367,6 +397,11 @@ function checkSurfaces(r: J) {
               const checks: [string | undefined, number, string][] = [[tb, c.base, u], [th, c.head, u], [td, c.relative ? c.estimate * 100 : c.estimate, scaleU]]
               if (!c.exact) checks.push([lo, c.relative ? c.lo * 100 : c.lo, scaleU], [hi, c.relative ? c.hi * 100 : c.hi, scaleU])
               for (const [tok, v, unit] of checks) if (!agrees(tok, v, unit)) flagIt("CRIT", `${name} ${where}`, `"${tok}" does not round from ${v} (${unit}): ${row.trim()}`)
+              // A time is the unit's text of its number, to the character (the change and its ends signed).
+              for (const [k, [tok, v, unit]] of checks.entries()) {
+                const want = unit !== "ms" ? tok : k < 2 ? tTime(v) : tTime(v, true)
+                if (tok !== want && agrees(tok, v, unit)) flagIt("CRIT", `${name} ${where}`, `"${tok}" where ${UNIT} prints "${want}": ${row.trim()}`)
+              }
             }
           }
         }
@@ -379,11 +414,13 @@ function checkSurfaces(r: J) {
           const sameChange = (x: string) => x === ch || (/×$/.test(x) && Math.abs(parseFloat(x) - (1 + c.estimate)) < 0.06)
           // Every row with these numbers (two metrics can share them): the verdict must be on one of them.
           const hits = prRows.filter((cells) => (cells.includes(ch) && cells.includes(rg)) || (impl && c.relative && !refused && cells.length >= 6 && sameChange(cells[3]) && /×|%/.test(cells[4])))
-          const word = aa && (k === "better" || k === "worse") ? "false positive" : String(c.verdict).replace(/ \(small\)$/, "")
+          const word = aa && (k === "better" || k === "worse") ? "false positive" : vText(c).replace(/ \(small\)$/, "")
           if (!hits.length) flagIt("HIGH", `pr ${where}`, `no Metrics row with change ${ch} and range ${rg}`)
           else if (refused && hits.every((h) => h.slice(1, 3).some((x) => /\d/.test(x)))) flagIt("CRIT", `pr ${where}`, `refused, yet the row shows ${hits[0].join(" | ")}`)
           else if ((k === "better" || k === "worse") && !hits.some((h) => h.some((x) => x.startsWith(word)))) flagIt("CRIT", `pr ${where}`, `verdict ${word} not in its row: ${hits[0].join(" | ")}`)
           else if (k === "untested" && !hits.some((h) => h.some((x) => x.startsWith("not tested")))) flagIt("HIGH", `pr ${where}`, `untested, yet the row reads ${hits[0].join(" | ")}`)
+          // Its medians as the text prints them, in this unit.
+          else if (!impl && !refused && u === "ms" && !hits.some((h) => h[1] === pDisp(c.base, u) && h[2] === pDisp(c.head, u))) flagIt("CRIT", `pr ${where}`, `medians "${hits[0][1]} | ${hits[0][2]}", where ${UNIT} prints "${pDisp(c.base, u)} | ${pDisp(c.head, u)}"`)
         }
         // HTML: the forest row's base, head, paired change, range and outcome, for the series the page
         // opens on (its hero names it: `<label> · Primary: …`).
@@ -406,6 +443,8 @@ function checkSurfaces(r: J) {
             const next = lines[i + 1] ?? ""
             const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested$/ : /Inconclusive|Unconfirmed/
             if (!want.test(next)) flagIt("CRIT", `html ${where}`, `outcome "${next}" for verdict_kind ${k}`)
+            // A time's absolute bound, drawn again in the unit shown (`Same (±40.0 µs)`).
+            else if ((k === "same" || k === "no_worse") && vText(c) !== c.verdict && !next.includes(tTime(c.bound))) flagIt("CRIT", `html ${where}`, `outcome "${next}", where ${UNIT} prints its bound ${tTime(c.bound)}`)
           }
         }
       }
@@ -428,34 +467,88 @@ function checkSurfaces(r: J) {
         if (k === "refused" && /\d/.test(b.value)) flagIt("CRIT", `badge ${s.label}`, `refused, yet the badge reads ${b.value}`)
         if ((k === "better" || k === "worse") && /^[+−-]/.test(b.value) && (b.value.startsWith("+") !== p.estimate > 0)) flagIt("CRIT", `badge ${s.label}`, `sign of ${b.value} against estimate ${p.estimate}`)
       }
-      // Precision: the same median read 25% apart on two surfaces (text `1 MB`, PR `0.785 MB`).
-      for (const { c } of rows(s)) {
-        const u = unitOf(c.metric)
-        for (const side of ["base", "head"]) {
-          // Both in the metric's unit (the PR block writes a second or longer in seconds).
-          const read = (s: string) => parseFloat(s) * (/\d s$/.test(s) && u === "ms" ? 1000 : 1)
-          const v = c[side], a = read(tValue(v, u)), b2 = read(pDisp(v, u))
-          if (Number.isFinite(v) && v !== 0 && Number.isFinite(a) && Number.isFinite(b2) && Math.abs(a - b2) > 0.25 * Math.abs(v)) flagIt("MED", `text/pr ${s.label} ${c.metric}`, `${side} prints ${tValue(v, u)} in the text and ${pDisp(v, u)} in the PR block`)
-        }
+    }
+    // The card's alt text: each time it holds is one of the shown series' primary numbers as this unit
+    // prints it, never another unit's.
+    if (card.alt) {
+      const want = new Set<string>(), nums: number[] = []
+      for (const s of seriesOf(r).filter(compared)) {
+        const p = s.primary ?? {}
+        if (unitOf(p.metric ?? "") !== "ms") continue
+        for (const v of [p.base, p.head, p.bound].filter(Number.isFinite)) want.add(tTime(v)), nums.push(v)
+        for (const v of [p.estimate, p.lo, p.hi].filter(Number.isFinite)) want.add(tTime(v, true)).add(tTime(Math.abs(v))), nums.push(v, Math.abs(v))
+      }
+      // A time that rounds from one of those numbers (others, a wait's `30 s`, are not the card's numbers).
+      for (const m of card.alt.matchAll(/[−+]?<?\d[\d,]*(?:\.\d+)? ?(?:µs|ms|s)\b/g)) {
+        if (nums.some((v) => agrees(m[0], v, "ms")) && !want.has(m[0])) flagIt("CRIT", "card", `alt "${card.alt}": ${m[0]} is not how ${UNIT} prints its number`)
       }
     }
+    // Every surface's times are whole: digits grouped by threes, a shared-unit pair (`1,200–2,200 µs`,
+    // `7,050 → 3,900 µs`, `−24 … −16 µs`) holds both its numbers (once `1–2,200 µs`), and nothing is −0.
+    const summary = judgedAny ? run(["report", "experiment", id, "--format", "summary"]).out : ""
+    checkWhole([["text", text], ["md", mdBody], ["pr", pr], ["summary", summary], ["card", card.alt ?? ""], ["html", html?.text ?? ""]])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 }
 
-// Whether a printed number (`12.3 ms`, `−4.1%`, `1.2 MB` of bytes, `1.00 s`) rounds from v: within half
-// its last digit, in the metric's unit.
+// Times printed whole on each surface: a time's digits grouped by threes, no number printed as minus zero,
+// and every pair that names its unit once (`1,200–2,200 µs`, `7,050 → 3,900 µs`) kept for `checkPairs`,
+// which holds each pair to the same pair in the other units (a first number cut at its comma, once
+// `1–2,200 µs`, reads 1,000 times smaller than its `0.00120–0.00220 s`).
+const PAIRS = new Map<string, { text: string; ends: [number, number][] }[]>()
+function checkWhole(surfaces: [string, string][]) {
+  const N = "[−+-]?<?\\d[\\d,]*(?:\\.\\d+)?"
+  const pair = new RegExp(`(?<![\\d.,])(${N})[ \\u00a0]?(?:→|–|to|…)[ \\u00a0]?(${N})[ \\u00a0](µs|us|ms|s)(?![\\w/])`, "g")
+  for (const [name, t] of surfaces) {
+    for (const m of t.matchAll(/(?<![\d.,])(\d[\d,]*)(?:\.\d+)?[ \u00a0](?:µs|us|ms)(?![\w/])/g)) {
+      const groups = m[1].split(",")
+      if (groups.length > 1 && (groups[0].length > 3 || groups.slice(1).some((g) => g.length !== 3))) flagIt("CRIT", name, `"${m[0]}" is not grouped by threes`)
+    }
+    const list = [...t.matchAll(pair)].map((m) => ({ text: m[0], ends: [m[1], m[2]].map((e) => span(`${e} ${m[3]}`)) as [number, number][] }))
+    PAIRS.set(`${name} ${UNIT}`, list)
+    for (const m of t.matchAll(/(?<![\w.,−-])[−-]0(?:\.0+)?(?=[ \u00a0]|%|$|[),;])/gm)) flagIt("HIGH", name, `minus zero "${m[0]}" in: ${t.slice(Math.max(0, m.index! - 40), m.index! + 20).replace(/\n/g, " ")}`)
+  }
+}
+// A printed time's possible values in ms: [low, high] (its rounding; `<0.01 µs` from 0 up to the step).
+function span(tok: string): [number, number] {
+  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)\s*(µs|us|ms|s)/.exec(tok.replace(/,/g, ""))
+  if (!m) return [NaN, NaN]
+  const scale = m[5] === "s" ? 1000 : m[5] === "ms" ? 1 : 0.001, x = parseFloat(m[3]) * scale, half = 0.5 * 10 ** -(m[4]?.length ?? 0) * scale
+  const [lo, hi] = m[2] ? [0, x] : [x - half, x + half]
+  return m[1] === "−" || m[1] === "-" ? [-hi, -lo] : [lo, hi]
+}
+// The same pair on the same surface in every unit: its ends must overlap.
+function checkPairs() {
+  const names = new Set([...PAIRS.keys()].map((k) => k.slice(0, k.lastIndexOf(" "))))
+  for (const name of names) {
+    const per = UNITS.map((u) => PAIRS.get(`${name} ${u}`) ?? [])
+    if (per.some((l) => l.length !== per[0].length)) continue
+    for (const [i, p] of per[0].entries()) {
+      for (const [k, other] of per.entries()) {
+        const q = other[i]
+        const apart = [0, 1].some((e) => !(p.ends[e][0] <= q.ends[e][1] * (1 + 1e-9) + 1e-12 && q.ends[e][0] <= p.ends[e][1] * (1 + 1e-9) + 1e-12))
+        if (apart) flagIt("CRIT", name, `"${p.text}" (${UNITS[0]}) and "${q.text}" (${UNITS[k]}) are not the same times`)
+      }
+    }
+  }
+  PAIRS.clear()
+}
+
+// Whether a printed number (`12.3 ms`, `−4.1%`, `1.2 MB` of bytes, `1.00 s`, `12,300 µs`) rounds from v:
+// within half its last digit, in the metric's unit; `<0.01 µs` from a nonzero v under that step.
 function agrees(tok: string | undefined, v: number, unit: string): boolean {
   if (tok == null) return false
   if (!Number.isFinite(v)) return /^—/.test(tok.trim())
-  const m = /([−+-]?)(\d+(?:\.(\d+))?)\s*([A-Za-z%/]*)/.exec(tok.replace(/,/g, ""))
+  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)\s*([A-Za-zµ%/]*)/.exec(tok.replace(/,/g, ""))
   if (!m) return false
   const sign = m[1] === "−" || m[1] === "-" ? -1 : 1
-  const dec = m[3]?.length ?? 0
-  const scale = { KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[4]] ?? (m[4] === "MB" && unit === "bytes" ? 1024 ** 2 : 1)
-  const x = sign * parseFloat(m[2]) * scale
-  return Math.abs(x - v) <= 0.5 * 10 ** -dec * scale * (1 + 1e-9) + 1e-12
+  const dec = m[4]?.length ?? 0
+  const scale = { KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, µs: unit === "ms" ? 0.001 : 1, us: unit === "ms" ? 0.001 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[5]] ?? (m[5] === "MB" && unit === "bytes" ? 1024 ** 2 : 1)
+  // In the printed number's own unit, so a big one (`17,105,146 µs`) keeps its last digit's precision.
+  const x = sign * parseFloat(m[3]), w = v / scale
+  if (m[2]) return v !== 0 && Math.sign(v) === sign && Math.abs(w) < 0.5 * Math.abs(x) * (1 + 1e-9)
+  return Math.abs(x - w) <= 0.5 * 10 ** -dec * (1 + 1e-9) + 1e-9 * Math.max(1e-3, Math.abs(w))
 }
 
 // report.html's fmtVal / fmtDelta (Rust's rounding since cleanup/audit-surfaces).
@@ -467,15 +560,28 @@ function hDelta(c: J, u: string): string {
   return c.relative !== false ? relCI(c)[0] : tSigned(c.estimate, absUnit(u))
 }
 
+// `--json` in every unit: the same keys, numbers and values, but for the words it holds for people (`text`,
+// an insight's `title`), which print times as the terminal does (SPEC §7.1: the unit is display only).
+function checkJson(id: string) {
+  const data = (j: J): J => Array.isArray(j) ? j.map(data) : j && typeof j === "object" ? Object.fromEntries(Object.entries(j).filter(([k, v]) => !(["text", "title"].includes(k) && typeof v === "string")).map(([k, v]) => [k, data(v)])) : j
+  for (const view of ["summary", "insights"]) {
+    const outs = UNITS.map((u) => run(["query", id, view, "--json"], u))
+    if (outs.some((o) => o.code !== outs[0].code)) flagIt("HIGH", `json ${view}`, `exit ${outs.map((o) => o.code).join(", ")} in ${UNITS.join(", ")}`)
+    let parsed: string[]
+    try { parsed = outs.map((o) => JSON.stringify(data(JSON.parse(o.out)))) } catch { continue }
+    for (const [k, d] of parsed.entries()) if (d !== parsed[0]) flagIt("CRIT", `json ${view}`, `--unit ${UNITS[k]} gives other --json than --unit ${UNITS[0]} (beyond its words)`)
+  }
+}
+
 // ---------- main ----------
 
-const ids = argv.filter((a, i) => !a.startsWith("--") && !["--strobe", "--dir", "--since"].includes(argv[i - 1]))
+const ids = argv.filter((a, i) => !a.startsWith("--") && !["--strobe", "--dir", "--since", "--units"].includes(argv[i - 1]))
 const root = join(HOME, "experiments")
 const list = flag("scan") || flag("all")
   ? readdirSync(root).filter((d) => existsSync(join(root, d, "result.json")) && (!opt("since") || statSync(join(root, d, "result.json")).mtime >= new Date(opt("since")!)))
   : ids
 if (!list.length) {
-  console.error("usage: bun scripts/dev/surfaces.ts <exp_…> … [--strobe <exe>] [--no-html] | --all|--scan [--since <date>]")
+  console.error("usage: bun scripts/dev/surfaces.ts <exp_…> … [--strobe <exe>] [--no-html] [--units us,ms,s] | --all|--scan [--since <date>]")
   process.exit(2)
 }
 if (flag("scan")) {
@@ -496,7 +602,16 @@ for (const [i, id] of list.entries()) {
   try { r = JSON.parse(readFileSync(file, "utf8")) } catch (e) { flagIt("HIGH", "result.json", `unreadable: ${e}`); continue }
   // One odd result never stops the run: the checker's own failure is reported as one.
   try {
-    if (!flag("scan")) checkSurfaces(r)
+    if (!flag("scan")) {
+      for (const u of UNITS) {
+        UNIT = u
+        current = UNITS.length > 1 ? `${id} ${u}` : id
+        checkSurfaces(r)
+      }
+      current = id
+      checkPairs()
+      checkJson(id)
+    }
     checkResult(r)
   } catch (e) {
     flagIt("HIGH", "checker", `failed on this result: ${e}`)
