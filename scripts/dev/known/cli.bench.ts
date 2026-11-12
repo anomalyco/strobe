@@ -11,6 +11,12 @@
 // RunIncomplete, and strobe ends it: no known process left after); twice 2 commands of 150 ms;
 // timer 100 wakes a second; alloc 200 MiB touched (alloc-small 4 MiB, under strobe's own resident set); io 40 MiB written, 24 MiB read; orphan leaves a process
 // running (refused RunIncomplete).
+// Paired runs (`strobe run --base "<known> …" --head "<known> …"`): a spin is CPU by the thread's CPU clock on Linux
+// and macOS, but wall time on Windows (no thread CPU clock), so on Windows other work on the same CPUs makes it do
+// less CPU than planted, and on Linux and macOS it waits out the CPUs it is denied, so its wall time is no plant:
+// plant wall time with `sleep 150` vs `sleep 300` there. Each process's own launch and exit (sleep's cpu.work and
+// run.duration less its 500 ms) is the fixed cost b0 of a planted ratio; page tables add 100 KiB per 50 MiB of
+// alloc on Windows (4 KiB pages, 8 bytes each), which memory.peak counts.
 import { bench, cli } from "@hona/strobe"
 import { join } from "node:path"
 

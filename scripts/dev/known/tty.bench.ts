@@ -4,6 +4,10 @@
 // Truth on Unix (Windows' tty.bytes is the console host's re-render, not the program's bytes):
 //   keys      per run 10 keys, each answered 20 ms later by one synchronized frame of 62 bytes rewriting 40 cells:
 //             tty.latency.p50 just over 20 ms, tty.updates 10, tty.frames 10, tty.bytes 620, tty.cells 400
+//   spaced    the same keys 200 ms apart, on keys and keys-80 (each key answered 80 ms later): tty.latency.p50
+//             +60 ms (--base keys --head keys-80 --filter spaced). Keys back to back are no plant for an answer
+//             slower than strobe's 50 ms rest before a key: the next key goes in first and strobe takes the late
+//             answer for its own (keys-80 back to back read 24.7 ms on Windows, a 50 ms answer 0.17 ms on Linux)
 //   frames    launch until `done`: 10 frames 50 ms apart (launch.ready just over 500 ms plus the start), tty.frames 10,
 //             tty.bytes 15 + 10 × 62 + 10 = 645
 //   ready-0 / ready-300  launch until READY: the two launch.ready differ by 300 ms
@@ -16,6 +20,7 @@ const io = ["cpu.work", "cpu.app.total", "cpu.wakes", "memory.app.private", "io.
 export default bench({
   targets: {
     keys: tty([bin, "tty", "40", "20"], { cols: 80, rows: 24 }),
+    "keys-80": tty([bin, "tty", "40", "80"], { cols: 80, rows: 24 }),
     frames: tty([bin, "frames", "10", "40", "50"], { cols: 80, rows: 24 }),
     "ready-0": tty([bin, "ready", "0", "READY"], { cols: 80, rows: 24 }),
     "ready-300": tty([bin, "ready", "300", "READY"], { cols: 80, rows: 24 }),
@@ -30,6 +35,18 @@ export default bench({
       resetCheck: false,
       run: async ({ page }: any) => {
         for (let i = 0; i < 10; i++) await page.press("x")
+      },
+    },
+    spaced: {
+      targets: ["keys", "keys-80"],
+      primary: "tty.latency.p50",
+      metrics: ["tty.updates", "tty.frames", "tty.cells"],
+      resetCheck: false,
+      run: async ({ page }: any) => {
+        for (let i = 0; i < 10; i++) {
+          await page.press("x")
+          await page.wait(200)
+        }
       },
     },
     // One key, answered by one 62-byte frame of 40 cells 20 ms later: tty.updates 1, tty.bytes 62, tty.cells 40.
