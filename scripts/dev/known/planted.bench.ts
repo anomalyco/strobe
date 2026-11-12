@@ -39,8 +39,10 @@
 //   frames    the page times the display's vsync V, then every animation frame spins 0.1 V (frame-light) or 1.5 V
 //             (frame-heavy), headed only: frame-light presents every vsync (frames.interval.p50 V,
 //             frames.dropped.pct 0); Chromium starts a late main frame at once rather than at the next vsync, so
-//             frame-heavy presents 2 frames in every 3 vsyncs at any refresh rate: frames.dropped.pct 33.3%,
-//             frames.interval.p95 2 V (its intervals are half V and half 2 V: no answer for their median)
+//             frame-heavy presents 2 frames in every 3 vsyncs at any refresh rate: frames.interval.p95 2 V exactly
+//             (light V: a planted +100%; its intervals are half V and half 2 V, so their median has no answer).
+//             frames.dropped.pct is 1 - V / W for a frame of W, 33.3% at W = 1.5 V; each frame's own style and
+//             paint add a little (33.6% on a 60 Hz Mac: W = 1.508 V), so it is within 1 pp above 33.3%
 //   click     15 clicks a run, each answered in the next animation frame, which spins 0, 50 or 150 ms before the
 //             button changes colour (click-0, click-50, click-150): interaction.p50 moves by the spin rounded up to
 //             whole vsyncs, ceil(ms / V) × V (+50 and +150 ms exactly at 60, 120 and 240 Hz; +55.6 and +152.8 ms
@@ -60,9 +62,11 @@
 //   memory    a windowless program holding 50 MiB (hold-50) or 100 MiB (hold-100) written once: memory.app.private
 //             +50 MiB (b0: the idle program, about 1.2 MiB; the page tables of 50 MiB more add about 30 KiB)
 //   pulse     a windowless program that prints BEGIN, busy-waits 100 ms (pulse-100) or 200 ms (pulse-200) of wall
-//             time, prints END and sleeps 300 ms; a run waits for BEGIN, then times phase.busy until END:
-//             phase.busy 100 and 200 ms (±1.5 ms per edge), +100 ms. A `page.wait` is no wall answer on macOS
-//             (a sleep wakes 1.5-10 ms late there); this busy-wait is
+//             time, prints END and sleeps 300 ms; a run waits for BEGIN and END: count.busy_us, the time between
+//             when strobe read the two lines (`waitForLine`'s `at`, its host clock), 100,000 and 200,000 µs
+//             (±1.5 ms per edge), +100 ms. phase.busy around the END wait is coarser: the runner polls a line wait
+//             every 10 ms (later on macOS), so each phase edge is late by up to a poll. A `page.wait` is no wall
+//             answer on macOS (a sleep wakes 1.5-10 ms late there); this busy-wait is
 import { bench, native, script, url } from "@hona/strobe"
 import { join } from "node:path"
 
@@ -120,9 +124,10 @@ export default bench({
     },
     frames: {
       targets: ["frame-light", "frame-heavy"],
-      primary: "frames.dropped.pct",
-      metrics: ["frames.interval.p50", "frames.interval.p95", "frames.dropped"],
-      run: ({ page }: any) => page.wait(1000),
+      primary: "frames.interval.p95",
+      metrics: ["frames.dropped.pct", "frames.interval.p50", "frames.dropped"],
+      // 2 s: a block of 5 runs has the 200 frame gaps a p95 needs at 40 frames a second.
+      run: ({ page }: any) => page.wait(2000),
     },
     click: {
       targets: ["click-0", "click-50", "click-150"],
@@ -155,11 +160,13 @@ export default bench({
     },
     pulse: {
       targets: ["pulse-100", "pulse-200"],
-      primary: "phase.busy",
-      metrics: ["run.duration"],
-      async run({ waitForLine, phase }: any) {
-        await waitForLine("BEGIN")
-        await phase("busy", () => waitForLine("END"))
+      primary: "count.busy_us",
+      metrics: ["phase.busy", "run.duration"],
+      async run({ waitForLine, phase, count }: any) {
+        const begin = await waitForLine("BEGIN")
+        const end = await phase("busy", () => waitForLine("END"))
+        // When strobe read each line (ns, its host clock): the program's busy-wait between them.
+        count("busy_us", Math.round((end.at - begin.at) / 1000))
       },
     },
   },

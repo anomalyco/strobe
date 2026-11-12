@@ -4515,9 +4515,10 @@ discarded first, so the OS has read the build from disk before any timed launch.
   The observer runs in a page's top document only: an element in a frame never ends a launch.
   Each page has one session: auto-attach also attaches the pages already open, and those sessions
   are the ones armed (observer and, for attribution, the CPU profiler), before strobe navigates; a
-  page it left out is attached once. Chromium's profiler is per session, and until this the first
-  page got a second session that was armed while the auto-attached one was read, so every Chromium
-  page launch's attribution block failed "Profiler.stop: No recording profiles found".
+  page it left out is attached once. Chromium's profiler is per session: from 0.13.0 to 0.31.0 the
+  first page got a second session, which was armed while the auto-attached one was read, so a page
+  launch's attribution block failed "Profiler.stop: No recording profiles found" (every time on air
+  and on vps; adais's Chromium still profiled, so not on every OS).
 - **Pages in each engine:** a `web` or `url` launch is a fresh browser with a fresh profile (no HTTP
   cache, storage, service worker or browser shader cache from an earlier visit; the GPU driver's own
   shader cache is the OS user's and stays), timed from strobe's navigation command on the host's wall
@@ -5512,7 +5513,7 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   (`WindowHidden`, which a bench waits out), so both sides run as the key window. A side with nothing
   on screen (a headless page, an app with `window: false`) is neither raised before its runs nor
   brought forward or checked: its browser still lists a hidden window, which never becomes the active
-  app. 0.11.0 to 0.30.0 refused it `WindowHidden` after five blocks: an implementation comparison with
+  app. 0.11.0 to 0.31.0 refused it `WindowHidden` after five blocks: an implementation comparison with
   a headless page side or a `window: false` app side, and a `--check` whose case spans a page and a
   windowless target that is no page, or two engines (two headless page targets compared on air, and a
   `window: false` app against a windowless native target). Whether a person
