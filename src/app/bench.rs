@@ -2871,6 +2871,10 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         all.extend(br.iter_mut().chain(bl.iter_mut()));
     }
     ctx.noworse_seen.extend(flagged_counts(s, all));
+    // A base side that lacks an adapter entry the case needs is a gap on that side, as head's is.
+    if let Some(e) = base.as_ref().and_then(|(r, _)| r.as_ref().err()).filter(|e| e.validator() == Some(ValidatorId::ParityGap)).cloned() {
+        return Ok(runtime_gap(ctx, s, variants, 0, &e, &launches));
+    }
     let base = base.map(|(mut r, launches)| {
         let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
         if let Ok(b) = &r {
@@ -2903,6 +2907,12 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
             if let Some(d) = out["declared"].as_array_mut().filter(|d| !d.iter().any(|x| x == m.as_str())) {
                 d.push(json!(m));
             }
+        }
+        // A base that could not run the case leaves head checked against nothing: the case fails (exit 1).
+        if b["passed"] != true && out["passed"] == true {
+            out["passed"] = json!(false);
+            out["decided"] = json!(false);
+            out["error"] = json!("base failed, so head was checked against nothing (base's error is on its line)");
         }
         out["base"] = b;
         if let Some(head) = held {
@@ -3080,8 +3090,8 @@ fn distinct(v: &[f64]) -> Vec<f64> {
 }
 
 /// A two-build check's base: what its line shows (`check_output`), and its `--noworse` counters'
-/// values (`side_counters`) when it passed. Its failure fails nothing: a base that cannot run the case
-/// says only that no counter of it is compared.
+/// values (`side_counters`) when it passed. A base that cannot run the case fails it (`check_series`):
+/// head was checked against nothing.
 fn base_check(r: Result<Block>, launches: &[Block]) -> (Value, Option<Vec<Block>>) {
     match r {
         Ok(b) => (
@@ -3094,8 +3104,10 @@ fn base_check(r: Result<Block>, launches: &[Block]) -> (Value, Option<Vec<Block>
 
 /// `--check --base <variant> --noworse <counters>`: each counter must hold one value on each side
 /// (`side_counters`) and head be at most its margin above base (an exact non-inferiority,
-/// `stats::compare_noworse`): either failing fails the case (exit 1). A base that failed compares
-/// nothing; a counter head did not measure fails, as a declared check that read nothing.
+/// `stats::compare_noworse`): either failing fails the case (exit 1). So does a counter not compared:
+/// the base failed or measured none of it, or (one the case declares) neither side measured it; a
+/// counter head did not measure fails, as a declared check that read nothing. Only a counter just the
+/// flag names (`Series::flagged`) that neither side measured is none of this case's.
 fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Block]>, head: &BTreeMap<String, Vec<f64>>, out: &mut Value) {
     if noworse.is_empty() {
         return;
@@ -3105,19 +3117,22 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
     let list = |v: &[f64], m: &str| v.iter().map(|x| fmt::value(*x, unit(m))).collect::<Vec<_>>().join(", ");
     let mut rows = Vec::new();
     let mut failed: Vec<String> = Vec::new();
+    let mut moved = false;
     for (m, &margin) in noworse {
         let h_runs = head.get(m).cloned().unwrap_or_default();
         let b_runs = base.as_ref().map(|b| b.get(m).cloned().unwrap_or_default());
-        // A counter neither side measured is not this case's: nothing to say of it.
-        if h_runs.is_empty() && b_runs.as_ref().is_none_or(Vec::is_empty) {
+        let neither = h_runs.is_empty() && b_runs.as_ref().is_none_or(Vec::is_empty);
+        // A counter only the flag names that neither side measured is not this case's: nothing to say of it.
+        if neither && (!s.case_declares(m) || b_runs.is_none()) {
             continue;
         }
         let (h, b) = (distinct(&h_runs), b_runs.as_deref().map(distinct));
         let (state, text) = match (&b, h.as_slice()) {
-            (None, _) => ("not_compared", format!("{m}: the base failed: nothing to compare")),
+            (None, _) => ("not_compared", format!("{m}: the base failed: nothing compared it")),
+            _ if neither => ("not_compared", format!("{m}: neither side measured it (each refused it), so nothing compared it")),
             (_, []) => ("missing", format!("{m}: head measured no value, where base did")),
             (_, [_, _, ..]) => ("unstable", format!("{m}: head did not hold one value ({}), so no difference of it holds", list(&h_runs, m))),
-            (Some(b), _) if b.is_empty() => ("not_compared", format!("{m}: base measured no value")),
+            (Some(b), _) if b.is_empty() => ("not_compared", format!("{m}: base measured no value, so nothing compared it")),
             (Some(b), _) if b.len() > 1 => ("unstable", format!("{m}: base did not hold one value ({}), so no difference of it holds", list(b_runs.as_deref().unwrap_or_default(), m))),
             (Some(b), [hv]) => {
                 let def = model::metric(m).map_or(&model::METRICS[0], model::as_counter);
@@ -3128,9 +3143,10 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
                 (if worse { "worse" } else { "no_worse" }, format!("{m} {} → {} · {}", fmt::value(b[0], unit(m)), fmt::value(*hv, unit(m)), c.verdict))
             }
         };
-        let passed = matches!(state, "no_worse" | "not_compared");
+        let passed = state == "no_worse";
         if !passed {
             failed.push(text.clone());
+            moved |= matches!(state, "unstable" | "worse");
         }
         let median = |v: &[f64]| (!v.is_empty()).then(|| metrics::median(v));
         rows.push(json!({
@@ -3147,8 +3163,11 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
         out["passed"] = json!(false);
         out["decided"] = json!(false);
         out["error"] = json!(format!("--noworse: {}", failed.join("; ")));
-        out["hint"] =
-            json!(format!("{}: a counter that moves between launches is no exact count (make it count the work, not time-dependent events); one that grew is what this change does", s.label()));
+        out["hint"] = json!(if moved {
+            format!("{}: a counter that moves between launches is no exact count (make it count the work, not time-dependent events); one that grew is what this change does", s.label())
+        } else {
+            format!("{}: a counter is compared only where each side measured it: the refused lines say why one did not", s.label())
+        });
     }
 }
 
@@ -3342,10 +3361,13 @@ fn check_spread(s: &Value, name: &str) -> String {
     out
 }
 
-/// A two-build check's base line (`base_check`): its declared metrics' values, or why it failed.
+/// A two-build check's base line (`base_check`): its declared metrics' values, or why it failed (the
+/// whole error, its later lines under the first, and its fix).
 fn base_line(b: &Value, declared: &[&str]) -> String {
     if b["passed"] != true {
-        return format!("failed, so no counter of it is compared: {}", b["error"].as_str().unwrap_or("").lines().next().unwrap_or(""));
+        let error = b["error"].as_str().unwrap_or("").trim_end().lines().map(str::trim_end).collect::<Vec<_>>().join("\n            ");
+        let fix = b["hint"].as_str().map(|h| format!("\n      base fix: {h}")).unwrap_or_default();
+        return format!("failed: {error}{fix}");
     }
     let values: Vec<String> = declared
         .iter()
@@ -3618,6 +3640,10 @@ pub(crate) fn check_text(r: &Value) -> String {
             }
         } else {
             text += &format!("FAIL  {}  {secs:.1} s{launch}\n      {}\n", s["label"].as_str().unwrap_or(""), s["error"].as_str().unwrap_or("").replace('\n', "\n      "));
+            // Head ran, but the case failed on base or on a `--noworse` counter: what head measured.
+            if s["values"].as_object().is_some_and(|v| !v.is_empty()) {
+                text += &format!("      head  {value}\n");
+            }
             if let Some(h) = s["hint"].as_str() {
                 text += &format!("      fix: {h}\n");
             }
@@ -3686,9 +3712,12 @@ pub(crate) fn check_text(r: &Value) -> String {
     } else {
         "nothing compared"
     };
+    // Cases whose base could not run them: failed, as nothing of head was checked against base.
+    let base_failed = series.iter().filter(|s| s["base"].is_object() && s["base"]["passed"] != true).count();
     text += &format!(
-        "\n{} of {ran} cases passed{}{}{} ({cold}{later}; a case with a reset runs once more after it, unmeasured; {compared})\n",
+        "\n{} of {ran} cases passed{}{}{}{} ({cold}{later}; a case with a reset runs once more after it, unmeasured; {compared})\n",
         ran - failed,
+        if base_failed > 0 { format!(", {base_failed} failed on base") } else { String::new() },
         if refused > 0 { format!(", {refused} where the targets' journeys differ") } else { String::new() },
         if gaps > 0 { format!(", {gaps} parity gap{}", if gaps == 1 { "" } else { "s" }) } else { String::new() },
         if before > 0 { format!(", {before} refused") } else { String::new() }
@@ -4449,9 +4478,15 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         }
         let (blocks, pairs) = source(name);
         if !blocks.iter().all(|b| b.values.get(name).is_some_and(|v| v.is_finite())) {
-            // A metric the series declared that a block refused shows as refused, not as missing.
-            if let Some(why) = blocks.iter().find_map(|b| b.refused.get(name)) {
-                secondaries.push(refused(name, d, why));
+            // A metric the series declared that a block refused shows as refused, not as missing; one no
+            // block refused (its pass of blocks failed or never ran) shows why it has none.
+            let none = || {
+                let why = if apart(name) && pass.is_none() { "the blocks that measure it did not run (see the series' notes)" } else { "a block gave no value of it" };
+                Refusal::new(ValidatorId::NoMetric, format!("{name}: {why}"))
+            };
+            let declared = s.case_declares(name) && declared_metrics(s).contains(&name);
+            if declared || blocks.iter().any(|b| b.refused.contains_key(name)) {
+                secondaries.push(refused(name, d, blocks.iter().find_map(|b| b.refused.get(name)).unwrap_or(&none())));
             }
             continue;
         }
@@ -6797,7 +6832,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 None => r,
             };
             let kind = ctx.describe["targets"][v.target_of(s)]["kind"].as_str().unwrap_or("").to_string();
-            let r = r.map(|b| self_state(ctx, s, v, x, &kind, b)).inspect(|b| restate_recording(ctx, s, b));
+            let r = r.map(|b| self_state(ctx, s, v, x, &kind, b)).map(|b| declared_state(ctx, s, v, x, b)).inspect(|b| restate_recording(ctx, s, b));
             // A timed or check block that refused its primary refuses the block, as a native one does:
             // pairs of nothing would end `unclear` instead of saying why.
             let r = r.and_then(|b| match b.refused.get(&s.primary).filter(|why| x.set != Set::Attribution && x.set != Set::Memory && why.fix.as_deref() != Some(FILMED_CPU_FIX)) {
@@ -7111,6 +7146,49 @@ fn phase_state(ctx: &Ctx, s: &Series, mut b: Block) -> Block {
         };
         b.values.remove(m);
         b.refused.insert(m.clone(), refusal);
+    }
+    b
+}
+
+/// Every metric the case declared ends a block with a finite value or a refusal (rule 1), whatever kind
+/// of target or block made it: one that no reading gave and nothing refused is refused `NoMetric` here,
+/// never left out (a secondary would vanish from the table, a primary pair nothing and end unclear).
+/// Not of a block that measures for no comparison (attribution, memory, pixels), nor what another
+/// kind of block of the series measures (counter blocks, probe blocks: `counted_apart`, `Probing`),
+/// nor a counter only `--noworse` names (`flagged_counts` decides those across the series).
+fn declared_state(ctx: &Ctx, s: &Series, v: &Variant, x: &Exec, mut b: Block) -> Block {
+    if matches!(x.set, Set::Attribution | Set::Memory) || x.pixels.is_some() {
+        return b;
+    }
+    let split = counting(s);
+    let elsewhere = |m: &str| {
+        let apart = match split {
+            Counting::InTiming => false,
+            Counting::Only => !x.counters && counted_apart(m),
+            Counting::Separate => counted_apart(m) != x.counters,
+        };
+        // A check's one block measures every declared metric; a timed series' probe blocks (`x.http`) the
+        // `http.*` ones, its clean timing blocks the rest.
+        let http = http_probe::metric(m);
+        apart || (http && !x.probes_http() && !x.untimed) || (!http && x.http && !x.untimed)
+    };
+    let target = &ctx.describe["targets"][v.target_of(s)];
+    let what = format!(
+        "{} {}{}",
+        target["kind"].as_str().unwrap_or("this"),
+        if s.launch.is_object() { "launch case" } else { "case" },
+        if headless_of(ctx, s) && matches!(target["kind"].as_str(), Some("web" | "url")) { " (headless)" } else { "" }
+    );
+    for m in declared_metrics(s).into_iter().filter(|m| s.case_declares(m) && !elsewhere(m)) {
+        if b.refused.contains_key(m) || b.values.get(m).is_some_and(|v| v.is_finite()) {
+            continue;
+        }
+        b.values.remove(m);
+        b.refused.insert(
+            m.clone(),
+            Refusal::new(ValidatorId::NoMetric, format!("{m}: a {what} gave no value of it: strobe reads it for no such target, or no measured run did what it measures"))
+                .fix("declare a metric this kind of target measures (SPEC §7.1), or drop it from the case"),
+        );
     }
     b
 }
@@ -7487,6 +7565,18 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // No trace to carry runs, phases and frames: measured from outside (against a native
         // implementation), or a page whose engine has none for strobe (Firefox).
         let traceless = outside || page.cdp().is_none();
+        // Whether the block traces at all (`traceless` aside, which measures without one). A lean trace
+        // holds what reached a display (frames, input latency, paint) and what is read from the page's own
+        // marks (phases, spans, layout shifts, GC, GPU compiles). A headless page reaches no display, so
+        // its lean block traces only for a declared metric of the trace: the trace's stream cost strobe
+        // about 3 ms of CPU per page load, and its marks run in the page. Its main-thread work, counts,
+        // CPU and memory come from the Performance domain and the OS. Counter and memory blocks trace nothing.
+        let trace_on = !traceless
+            && set != Set::Memory
+            && !x.counters
+            && (set != Set::Lean
+                || !headless
+                || declared.iter().any(|m| m.starts_with("phase.") || m.starts_with("span.") || matches!(m.as_str(), "layout.shift" | "main.gc" | "gpu.compile" | "main.paint")));
         // Frames from the OS's presents: from outside, or headed in such an engine. Then `interaction.*`
         // too (a default secondary), from the page's own changes (`CHANGES_SCRIPT`, in every document
         // from its start). From outside the input is the OS's (`os::OsInput`), in every engine; a page
@@ -7571,7 +7661,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let token = id.trim_start_matches("rec_").to_string();
         // Every top-level document marks its start in the trace, in its renderer: a run's windows then
         // hold each renderer the page was in, one the page reached by itself too (`metrics::windows_sql`).
-        if !traceless || gecko_on {
+        if trace_on || gecko_on {
             page.add_init_script(&metrics::doc_mark_script(&token))?;
         }
         let mut driver = Driver::new(page.clone(), token.clone());
@@ -7797,7 +7887,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             if !start && paused.take() {
                 profile_start()?;
             }
-            if !traceless {
+            if trace_on {
                 driver.mark(&hooks.untimed_mark(n, start))?;
             }
             if start {
@@ -7892,14 +7982,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         same_renderer()?;
                     }
                     if run_goto && r.is_ok() {
+                        // A mark in the document it loaded: a page that moved to another renderer keeps
+                        // the run's frames, tasks and inputs there too (`metrics::windows_sql`). Before the
+                        // counters' read, which the new document's work counts from: the mark's evaluate
+                        // is strobe's, none of the run's.
+                        if trace_on || gecko_on {
+                            driver.mark(&format!("{}:goto", hooks.run_key()))?;
+                        }
                         // The document it loaded is the one strobe expects from now on.
                         counters();
                         doc_expected.set(Some(nav_at.get()).filter(|n| n.is_finite()));
-                        // A mark in the document it loaded: a page that moved to another renderer keeps
-                        // the run's frames, tasks and inputs there too (`metrics::windows_sql`).
-                        if !traceless || gecko_on {
-                            driver.mark(&format!("{}:goto", hooks.run_key()))?;
-                        }
                     }
                     if let Some(v) = video.borrow().as_ref() {
                         v.note(call, &args, started);
@@ -7937,7 +8029,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 // A page's phases are marks in its own trace, read from there with the run's frames; from
                 // outside, or in an engine without that trace, strobe's own marks on the host clock.
                 "phase" => {
-                    if traceless {
+                    if !trace_on {
                         hooks.phase(a)?;
                     } else if let Some(key) = hooks.phase_key(a)? {
                         driver.mark(&key)?;
@@ -8214,9 +8306,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         .collect();
         // A counter block traces nothing: its times are dropped, and tracing would add the browser's
         // own instructions to what the counters count.
-        // Without a trace (`traceless`) the marks are strobe's own on the host clock, the frames the OS's.
+        // Without a trace (`traceless`) the marks are strobe's own on the host clock, the frames the OS's;
+        // a headless page that declared nothing of the trace takes none (`trace_on`).
         let tracing = match browser.cdp() {
-            Some(b) if set != Set::Memory && !x.counters && !traceless => Some(probe::trace::start_with(&b.cdp, set, &extra_categories)?),
+            Some(b) if trace_on => Some(probe::trace::start_with(&b.cdp, set, &extra_categories)?),
             _ => None,
         };
         // A kept recording is claimed for this block alone and discarded on any error before its meta.json.
@@ -8358,7 +8451,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             if profile {
                 profile_start()?;
             }
-            if !traceless || gecko_on {
+            if trace_on || gecko_on {
                 driver.mark(&format!("{key}:start"))?;
             }
             let c0_at = host::now_ns();
@@ -8409,7 +8502,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let mut c1 = counters();
             let mut c1_at = host::now_ns();
             doc_check();
-            if !traceless || gecko_on {
+            if trace_on || gecko_on {
                 driver.mark(&format!("{key}:end"))?;
             }
             // A run that ended inside an untimed stretch left its profilers stopped already.
@@ -8731,7 +8824,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let evals0 = evals.get();
                 let mark = format!("case:{k}:{}", batch::mark_name(&s.case));
                 if batch {
-                    if !traceless {
+                    if trace_on {
                         driver.mark(&format!("{mark}:start"))?;
                     }
                     case_marks.borrow_mut().push((format!("{mark}:start"), host::now_ns()));
@@ -8862,7 +8955,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let end = if batch {
                     let end = shown::page(ctx, s, v, pair, "end", &page);
                     shown::expect(&s.expect, &end, "after the runs", true, &|sel| shown::page_shows(&page, sel))?;
-                    if !traceless {
+                    if trace_on {
                         driver.mark(&format!("{mark}:end"))?;
                     }
                     case_marks.borrow_mut().push((format!("{mark}:end"), host::now_ns()));
@@ -9095,7 +9188,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 ctx.warnings.push(validity::warn("Teardown", format!("{} block: {}", side, e.message)));
             }
             // The launch's trace, read once: each case takes its own measured runs from it.
-            let traced = if set == Set::Memory || x.counters || traceless { metrics::BlockData::default() } else { metrics::read(&trace, &token)? };
+            let traced = if trace_on { metrics::read(&trace, &token)? } else { metrics::BlockData::default() };
             lap("analyse");
             let run_counts = run_counts.take();
             let run_marks = run_marks.take();
@@ -9186,7 +9279,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 for name in declared_metrics(s).into_iter().filter_map(|m| m.strip_prefix("phase.")) {
                     let per: BTreeMap<String, f64> = (0..measured.len())
                         .filter_map(|j| {
-                            if traceless {
+                            if !trace_on {
                                 return Some((key(j), phase_ms(run_marks.get(first + j)?, name, &measured.get(j)?.timed))).filter(|(_, ms)| ms.is_finite());
                             }
                             let suffix = format!(":run:{}:phase:{name}", first + j);
@@ -9593,7 +9686,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                             c.runs.iter().enumerate().map(move |(i, r)| (format!("run:{}", c.base + i), r.t0, r.t1, local.contains(&i)))
                         })
                         .collect();
-                    let mut marks: Vec<(String, u64)> = if traceless { run_marks.iter().flatten().cloned().collect() } else { video_marks.take() };
+                    let mut marks: Vec<(String, u64)> = if trace_on { video_marks.take() } else { run_marks.iter().flatten().cloned().collect() };
                     marks.extend(case_marks.take());
                     st.keep(&dir, &filmed, &video_sent.take(), &marks)
                         .map_err(|e| ctx.warnings.push(validity::warn("Video", format!("{} · {side} block: the video was not kept: {}", s0.label(), e.message))))
@@ -9622,7 +9715,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     _ if x.video => "perturbed",
                     Set::Lean => "clean",
                     // Only where Chromium traced it: a counter block, a page from outside or another engine traced nothing.
-                    Set::Timing if page.cdp().is_some() && !x.counters && !traceless => "full-trace",
+                    Set::Timing if trace_on => "full-trace",
                     Set::Timing => "clean",
                     _ => "perturbed",
                 },
@@ -10443,11 +10536,19 @@ fn margins(v: &Value, primary: &str) -> std::result::Result<BTreeMap<String, f64
                 out.insert(k.clone(), pct(x)?);
             }
         }
-        // A list (`--noworse` given twice adds to it): `metric=margin`, or a bare margin, the primary's.
+        // A list (`--noworse` given twice adds to it): `metric=margin`, a bare exact counter (`0%`: no
+        // more than base), or a bare margin, the primary's.
         Value::String(s) => {
             let mut given: BTreeMap<&str, &str> = BTreeMap::new();
             for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-                let (k, x) = part.split_once('=').map_or((primary, part), |(k, x)| (k.trim(), x.trim()));
+                let (k, x) = match part.split_once('=') {
+                    Some((k, x)) => (k.trim(), x.trim()),
+                    None if model::is_ci_counter(part) => (part, "0%"),
+                    None if model::metric(part).is_some() => {
+                        return Err(format!("{part} needs a margin (for example {part}=2%); only an exact counter (count.*, net.requests, net.bytes, tty.frames, dom.nodes) defaults to 0%"));
+                    }
+                    None => (primary, part),
+                };
                 let m = pct(&json!(x))?;
                 if let Some(was) = out.insert(k.to_string(), m)
                     && was != m
@@ -11875,16 +11976,38 @@ fn placement(ctx: &mut Ctx, variants: &[Variant]) {
         return;
     }
     ctx.placed = true;
-    if let Some(why) = host::paths::placement_diff(b, h) {
-        ctx.warnings.push(validity::warn(
-            "VariantPlacement",
-            format!(
-                "base runs in {} and head in {}: {why}; a runtime that looks up from its folder (a package.json, node_modules, a config) or reads it at startup does other work on each side, which lands in its numbers; put both in one place (git refs both build under strobe's own folder)",
-                host::paths::plain(b),
-                host::paths::plain(h)
-            ),
-        ));
+    let Some(why) = host::paths::placement_diff(b, h) else { return };
+    // What differs (`placement_diff` says each as one part): the kind of filesystem, or what lies around
+    // the folders. Each has its own effect and its own remedy.
+    let (fs, around): (Vec<&str>, Vec<&str>) = why.split("; ").partition(|p| p.starts_with("they are on different filesystems"));
+    let mut effects: Vec<String> = Vec::new();
+    let mut fixes: Vec<String> = Vec::new();
+    if !fs.is_empty() {
+        effects.push("each file the program opens and reads can cost a different time on each kind (their caching, and the filters such as antivirus that see their IO)".into());
+        // The side that runs from strobe's build folder (a git ref) and the folder of the other.
+        let state = host::paths::plain(&host::paths::state_path());
+        let var = if cfg!(windows) { "LOCALAPPDATA" } else { "XDG_DATA_HOME" };
+        match (&base.kind, &head.kind) {
+            (Kind::Git(r), Kind::Dir) | (Kind::Dir, Kind::Git(r)) => {
+                let (built, dir) = if matches!(base.kind, Kind::Git(_)) { ("base", head) } else { ("head", base) };
+                let mut alts = vec![format!("check {r} out on the checkout's filesystem (git worktree add <folder there> {r}) and pass that folder as --{built}")];
+                if !dir.dirty {
+                    alts.push(format!("pass --{} HEAD, which builds that commit under strobe's folder ({state}) too", dir.role));
+                }
+                alts.push(format!("run strobe with {var} set to a folder on the checkout's filesystem, which moves strobe's folder there"));
+                fixes.push(alts.join(", or "));
+            }
+            _ => fixes.push("put both folders on one filesystem".into()),
+        }
     }
+    if !around.is_empty() {
+        effects.push("a runtime that looks up from its folder (a package.json, node_modules, a config) or lists it at startup does other work on each side".into());
+        fixes.push("put both in folders alike (git refs both build under strobe's own folder)".into());
+    }
+    ctx.warnings.push(validity::warn(
+        "VariantPlacement",
+        format!("base runs in {} and head in {}: {why}: {}, which lands in its numbers; {}", host::paths::plain(b), host::paths::plain(h), effects.join(", and "), fixes.join("; ")),
+    ));
 }
 
 /// Builds and serves a variant for `web` targets (once per experiment).
