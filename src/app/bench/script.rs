@@ -570,13 +570,29 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 warmup.values(&mut values);
                 // Never a reading from after the reset in its place: no value.
                 let (private_mb, pss) = local.end.checked_sub(1).and_then(|i| ends.get(i).copied().flatten()).unwrap_or((0.0, None));
-                if private_mb > 0.0 {
+                // macOS, a Bun host: its allocator gives freed pages back as reusable (out of the footprint, still
+                // resident) and writes them again without saying so, so the footprint misses memory it holds
+                // again (air: 100 MiB held read as 5.1 MiB, and a planted +100 MiB as +0.19 MB). Resident size
+                // cannot tell those pages from free ones, so a Bun host's footprint is never a value. Node's
+                // allocator tells macOS (the same 100 MiB read 114 MiB).
+                let footprint_short = cfg!(target_os = "macos") && ctx.describe["targets"][&s.target]["runtime"].as_str().unwrap_or("bun") == "bun";
+                if private_mb > 0.0 && !footprint_short {
                     values.insert("memory.app.private".into(), private_mb);
                 }
                 if let Some(b) = pss {
                     values.insert("memory.app.pss".into(), b as f64 / (1024.0 * 1024.0));
                 }
                 let mut refused = uncounted;
+                if footprint_short && declared_metrics(s).iter().any(|m| *m == "memory.app.private") {
+                    refused.insert(
+                        "memory.app.private".into(),
+                        Refusal::new(
+                            ValidatorId::NotOnThisOs,
+                            "memory.app.private: macOS leaves out of a Bun host's footprint the memory its allocator freed and then wrote again, so the footprint can miss what the host holds (100 MiB held read as 5.1 MiB)",
+                        )
+                        .fix("declare js.heap.retained (what a run leaves on the heap after a collection, buffers included), or host the module on Node (runtime: \"node\")"),
+                    );
+                }
                 if let Some(lost) = &main_lost {
                     for m in declared_metrics(s).into_iter().filter(|m| *m == "cpu.main" || *m == "cpu.main.busy") {
                         refused.insert(m.clone(), lost.refusal(m));

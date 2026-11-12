@@ -67,11 +67,14 @@ createInterface({ input: socket }).on("line", async (line) => {
     write({ id, ok: { ...edge, mono_us: mono(), runtime: bun ? "bun" : "node", version: bun ? Bun.version : process.versions.node } })
     return
   }
-  // `js.heap.retained`: the heap after a full collection, between runs.
+  // `js.heap.retained`: the heap after a full collection, between runs, with the contents of
+  // ArrayBuffers: Node keeps them off its heap (`arrayBuffers`), Bun counts them in `heapUsed` (and
+  // reports `arrayBuffers` 0). Without them a kept 100 MiB Uint8Array read 0 on Node.
   if (op === "heap") {
     if (globalThis.Bun) Bun.gc(true)
     else globalThis.gc?.()
-    write({ id, ok: process.memoryUsage().heapUsed })
+    const m = process.memoryUsage()
+    write({ id, ok: m.heapUsed + (m.arrayBuffers ?? 0) })
     return
   }
   if (op === "exit") {

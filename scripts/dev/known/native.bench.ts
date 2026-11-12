@@ -4,9 +4,14 @@
 // Truth per 1000 ms run (page.wait):
 //   duty      2 threads each busy 50% of every 100 ms: cpu.work 1000 ms, cpu.app.total 100% (of one core),
 //             cpu.wakes about 20/s (each thread sleeps 10 times a second)
-//   wake      one thread waking 100 times a second: cpu.wakes about 100/s, cpu.work near 0
+//   wake      one thread waking 100 times a second: cpu.wakes about 100/s, cpu.work near 0 (its sleep of 10 ms
+//             wakes late on macOS: about 78/s there, so no answer; `tick` keeps a fixed schedule)
 //   hold      150 MiB private written once: memory.app.private and memory.app.host 150 MiB above the idle program
-//   shm       150 MiB of shared anonymous memory written: not private on Windows (a pagefile section)
+//   shm       150 MiB of shared anonymous memory written: not private on Windows (a pagefile section) or Linux
+//             (shmem); macOS's footprint charges it once to the process that made it: 150 MiB above idle there
+//   (a timed run's wall time is page.wait's sleep, which wakes 1.5-10 ms late on macOS: planted.bench.ts
+//   `pulse` is the wall answer for a windowless app; tick-4 vs tick-8 plants CPU time, not instructions or energy
+//   on Apple silicon: planted.bench.ts `counters` plants those)
 //   map       150 MiB of a file mapped read-only and read: file-backed, not private
 //   idle      the program sleeping: the base the memory cases are above
 //   spawner   a child of 100 ms CPU every 200 ms, each ending inside the run: cpu.work about 500 ms (or refused)

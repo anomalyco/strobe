@@ -566,6 +566,9 @@ pub struct MetricDef {
     /// Whether it compares between two implementations (SPEC 7.1, 9.10).
     #[serde(skip)]
     pub across: Across,
+    /// The instrument it is read with: what its verified or preview path is of (SPEC §21.1).
+    #[serde(skip)]
+    pub capability: crate::support::Capability,
     pub about: &'static str,
 }
 
@@ -602,7 +605,7 @@ impl Across {
 const CARE_CPU: &str = "every process of each app's process set, per run; the fixture not included";
 const CARE_CPU_SHARE: &str = "every process of each app, as a share of one core over the run: compare it only where run.duration is the same";
 const CARE_WAKES: &str = "all threads of all processes of each app: more threads and processes wake more by design";
-const CARE_PRIVATE: &str = "the OS's private memory of every process of each app (Windows commit, macOS footprint, Linux private pages); memory shared between an app's processes is in neither";
+const CARE_PRIVATE: &str = "the OS's private memory of every process of each app (Windows commit, macOS footprint, Linux private pages); memory shared between an app's processes is in neither on Windows and Linux, while macOS counts shared anonymous memory once, in the process that made it";
 const CARE_HOST: &str = "what every process of each app allocated in its own address space, without GPU memory";
 const CARE_GPU_MEMORY: &str = "GPU memory of every process of each app";
 const CARE_FRAMES: &str = "descriptive: more frames can mean smoother or wasteful";
@@ -614,9 +617,12 @@ const COUNT: (&str, &str) = ("fewer", "more");
 const AMOUNT: (&str, &str) = ("less", "more");
 const SMOOTH: (&str, &str) = ("smoother", "choppier");
 
+use crate::support::Capability;
+
 pub const METRICS: &[MetricDef] = &[
     MetricDef {
         name: "frames.presented.p50",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -625,12 +631,53 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "median frame latency (begin of frame to presentation) of presented frames",
     },
-    MetricDef { name: "frames.presented.p90", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 100, across: Across::PerSide, about: "90th percentile frame cost" },
-    MetricDef { name: "frames.presented.p95", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 200, across: Across::PerSide, about: "95th percentile frame cost" },
-    MetricDef { name: "frames.presented.p99", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 1000, across: Across::PerSide, about: "99th percentile frame cost" },
-    MetricDef { name: "frames.presented.max", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 1, across: Across::PerSide, about: "worst presented frame cost" },
+    MetricDef {
+        name: "frames.presented.p90",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 100,
+        across: Across::PerSide,
+        about: "90th percentile frame cost",
+    },
+    MetricDef {
+        name: "frames.presented.p95",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 200,
+        across: Across::PerSide,
+        about: "95th percentile frame cost",
+    },
+    MetricDef {
+        name: "frames.presented.p99",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 1000,
+        across: Across::PerSide,
+        about: "99th percentile frame cost",
+    },
+    MetricDef {
+        name: "frames.presented.max",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 1,
+        across: Across::PerSide,
+        about: "worst presented frame cost",
+    },
     MetricDef {
         name: "frames.presented.count",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -641,6 +688,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.frames",
+        capability: Capability::Canvas,
         unit: "count",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -651,6 +699,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p50",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -661,6 +710,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p95",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -671,6 +721,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p99",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -681,6 +732,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.max",
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -691,6 +743,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.interval.p50",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -701,6 +754,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.interval.p95",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -711,6 +765,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.interval.p99",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -719,9 +774,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::Compared,
         about: "99th percentile gap between presented frames",
     },
-    MetricDef { name: "frames.interval.max", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: SMOOTH, min_n: 1, across: Across::Compared, about: "longest gap between presented frames" },
+    MetricDef {
+        name: "frames.interval.max",
+        capability: Capability::Frames,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: SMOOTH,
+        min_n: 1,
+        across: Across::Compared,
+        about: "longest gap between presented frames",
+    },
     MetricDef {
         name: "frames.dropped.pct",
+        capability: Capability::Frames,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -732,6 +798,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.dropped",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -742,6 +809,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.discarded",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -752,6 +820,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.partial",
+        capability: Capability::Frames,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -760,9 +829,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "frames presented without all updates, per run",
     },
-    MetricDef { name: "main.busy", unit: "%", better: Better::Lower, kind: Kind::Timed, words: AMOUNT, min_n: 0, across: Across::PerSide, about: "renderer main thread busy share during runs" },
+    MetricDef {
+        name: "main.busy",
+        capability: Capability::PageEngine,
+        unit: "%",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "renderer main thread busy share during runs",
+    },
     MetricDef {
         name: "frames.renderer.p95",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -773,6 +853,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "frames.viz.p95",
+        capability: Capability::Frames,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -783,6 +864,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.work",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -793,6 +875,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.script",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -803,6 +886,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.gc",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -811,9 +895,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "garbage collection on the renderer main thread per run (V8's top-level GC slices); traced only for series that declare it",
     },
-    MetricDef { name: "main.layout", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: AMOUNT, min_n: 0, across: Across::PerSide, about: "layout time on the renderer main thread per run" },
+    MetricDef {
+        name: "main.layout",
+        capability: Capability::PageEngine,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "layout time on the renderer main thread per run",
+    },
     MetricDef {
         name: "main.style",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -824,6 +919,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "main.paint",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -832,11 +928,42 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::PerSide,
         about: "prepaint and paint time on the renderer main thread per run",
     },
-    MetricDef { name: "layout.count", unit: "count", better: Better::Lower, kind: Kind::Timed, words: COUNT, min_n: 0, across: Across::PerSide, about: "layouts per run" },
-    MetricDef { name: "style.count", unit: "count", better: Better::Lower, kind: Kind::Timed, words: COUNT, min_n: 0, across: Across::PerSide, about: "style recalculations per run" },
-    MetricDef { name: "main.tasks.long", unit: "count", better: Better::Lower, kind: Kind::Timed, words: COUNT, min_n: 0, across: Across::PerSide, about: "main-thread tasks over 50 ms, per run" },
+    MetricDef {
+        name: "layout.count",
+        capability: Capability::PageEngine,
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "layouts per run",
+    },
+    MetricDef {
+        name: "style.count",
+        capability: Capability::PageEngine,
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "style recalculations per run",
+    },
+    MetricDef {
+        name: "main.tasks.long",
+        capability: Capability::PageEngine,
+        unit: "count",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: COUNT,
+        min_n: 0,
+        across: Across::PerSide,
+        about: "main-thread tasks over 50 ms, per run",
+    },
     MetricDef {
         name: "interaction.p50",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -847,6 +974,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "interaction.p95",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -857,6 +985,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "input.rate",
+        capability: Capability::WallAndCounts,
         unit: "/s",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -867,6 +996,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "input.gap.p95",
+        capability: Capability::WallAndCounts,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -877,6 +1007,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.reads",
+        capability: Capability::WallAndCounts,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -887,6 +1018,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.read_ms",
+        capability: Capability::WallAndCounts,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -897,6 +1029,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.pixel_reads",
+        capability: Capability::Pixels,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -907,6 +1040,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.pixel_ms",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -917,6 +1051,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "driver.pixel_cpu_ms",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -927,6 +1062,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "scroll.latency.p50",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -937,6 +1073,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "scroll.latency.p95",
+        capability: Capability::InputLatency,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -947,6 +1084,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.latency.p50",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -957,6 +1095,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.latency.p95",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -967,6 +1106,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.settle.p50",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -977,6 +1117,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.settle.p95",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -987,6 +1128,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.updates",
+        capability: Capability::TtyGrid,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -997,6 +1139,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.frames",
+        capability: Capability::TtyGrid,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -1007,6 +1150,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.frame.p50",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1017,6 +1161,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.frame.p95",
+        capability: Capability::TtyGrid,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1027,6 +1172,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.bytes",
+        capability: Capability::TtyGrid,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1037,6 +1183,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "tty.cells",
+        capability: Capability::TtyGrid,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1047,6 +1194,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.pty_host",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1055,9 +1203,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::Compared,
         about: "terminal targets on Windows: CPU of the console host ConPTY starts for the terminal, per run: the terminal's work, never in cpu.work",
     },
-    MetricDef { name: "run.duration", unit: "ms", better: Better::Lower, kind: Kind::Timed, words: TIME, min_n: 0, across: Across::Compared, about: "wall time of one run" },
+    MetricDef {
+        name: "run.duration",
+        capability: Capability::WallAndCounts,
+        unit: "ms",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: TIME,
+        min_n: 0,
+        across: Across::Compared,
+        about: "wall time of one run",
+    },
     MetricDef {
         name: "cpu.app.total",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1068,6 +1227,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.foreign",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1076,9 +1236,20 @@ pub const METRICS: &[MetricDef] = &[
         across: Across::Compared,
         about: "other processes' work on the CPUs the target is pinned to during runs, % of one core: a validity signal, not the target's cost",
     },
-    MetricDef { name: "cpu.process.total", unit: "%", better: Better::Lower, kind: Kind::Timed, words: AMOUNT, min_n: 0, across: Across::Care(CARE_CPU_SHARE), about: "alias of cpu.app.total" },
+    MetricDef {
+        name: "cpu.process.total",
+        capability: Capability::ProcessCpu,
+        unit: "%",
+        better: Better::Lower,
+        kind: Kind::Timed,
+        words: AMOUNT,
+        min_n: 0,
+        across: Across::Care(CARE_CPU_SHARE),
+        about: "alias of cpu.app.total",
+    },
     MetricDef {
         name: "cpu.renderer",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1089,6 +1260,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.gpu",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1099,6 +1271,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.browser",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1109,16 +1282,18 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "memory.app.private",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
         words: AMOUNT,
         min_n: 0,
         across: Across::Care(CARE_PRIVATE),
-        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; Linux: anonymous resident and swapped pages; macOS: the physical footprint)",
+        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; Linux: anonymous resident and swapped pages; macOS: the physical footprint, which also holds the dirty pages of shared anonymous memory the process created, and is refused for a Bun script host, whose allocator reuses pages the footprint no longer counts)",
     },
     MetricDef {
         name: "memory.app.host",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1129,6 +1304,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "memory.app.pss",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1139,6 +1315,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.fixture",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1149,6 +1326,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.compile",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1159,6 +1337,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.process.3d",
+        capability: Capability::Gpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1169,6 +1348,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.vram",
+        capability: Capability::Gpu,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1179,6 +1359,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "gpu.shared",
+        capability: Capability::Gpu,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1189,6 +1370,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "js.heap.used",
+        capability: Capability::PageEngine,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1199,6 +1381,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "dom.nodes",
+        capability: Capability::PageEngine,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1209,6 +1392,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "js.heap.growth",
+        capability: Capability::PageEngine,
         unit: "MB/min",
         better: Better::Lower,
         kind: Kind::Sampled,
@@ -1219,6 +1403,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "dom.nodes.growth",
+        capability: Capability::PageEngine,
         unit: "count/min",
         better: Better::Lower,
         kind: Kind::Sampled,
@@ -1229,6 +1414,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "leak.suspects.retained",
+        capability: Capability::PageEngine,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Sampled,
@@ -1239,6 +1425,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.work",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1249,6 +1436,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.main",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1259,6 +1447,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.main.busy",
+        capability: Capability::ProcessCpu,
         unit: "%",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1269,6 +1458,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "ui.cpu",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1279,6 +1469,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "ui.wakes",
+        capability: Capability::ProcessCpu,
         unit: "/s",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1289,6 +1480,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.wakes",
+        capability: Capability::ProcessCpu,
         unit: "/s",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1299,6 +1491,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "energy.cpu",
+        capability: Capability::HardwareCounters,
         unit: "mJ",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1309,6 +1502,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.instructions",
+        capability: Capability::HardwareCounters,
         unit: "instructions",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1319,6 +1513,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cpu.idle_wakes",
+        capability: Capability::PackageIdle,
         unit: "/s",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1329,6 +1524,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "cli.launch",
+        capability: Capability::ProcessCpu,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1339,6 +1535,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "memory.peak",
+        capability: Capability::ProcessMemory,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1349,6 +1546,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "metric",
+        capability: Capability::WallAndCounts,
         unit: "value",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1359,6 +1557,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "io.read",
+        capability: Capability::ProcessCpu,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1369,6 +1568,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "io.write",
+        capability: Capability::ProcessCpu,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1379,16 +1579,18 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "js.heap.retained",
+        capability: Capability::PageEngine,
         unit: "MB",
         better: Better::Lower,
         kind: Kind::Timed,
         words: AMOUNT,
         min_n: 0,
         across: Across::PerSide,
-        about: "script targets: the JS heap a run leaves behind, after a full collection before and after it",
+        about: "script targets: the JS heap a run leaves behind, after a full collection before and after it, ArrayBuffer and Buffer contents included (Node keeps them off its heap; Bun counts them in it)",
     },
     MetricDef {
         name: "http.latency.p50",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1399,6 +1601,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.latency.p95",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1409,6 +1612,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.latency.max",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1419,6 +1623,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.timeouts",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1429,6 +1634,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.errors",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1439,6 +1645,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.missed_sends",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1449,6 +1656,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.probes",
+        capability: Capability::HttpProbe,
         unit: "count",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -1459,6 +1667,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "http.idle.p50",
+        capability: Capability::HttpProbe,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1469,6 +1678,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "layout.shift",
+        capability: Capability::PageEngine,
         unit: "score",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1479,6 +1689,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "net.requests",
+        capability: Capability::PageEngine,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -1489,6 +1700,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "net.bytes",
+        capability: Capability::PageEngine,
         unit: "bytes",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -1499,6 +1711,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "count",
+        capability: Capability::WallAndCounts,
         unit: "count",
         better: Better::Lower,
         kind: Kind::Exact,
@@ -1509,6 +1722,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "app",
+        capability: Capability::WallAndCounts,
         unit: "value",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1519,6 +1733,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "phase",
+        capability: Capability::WallAndCounts,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1529,6 +1744,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "span",
+        capability: Capability::PageEngine,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1539,6 +1755,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.ready",
+        capability: Capability::Launch,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1549,6 +1766,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.painted",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1559,6 +1777,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.settled",
+        capability: Capability::Pixels,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1569,6 +1788,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "launch.milestone",
+        capability: Capability::Launch,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -1583,6 +1803,7 @@ pub const METRICS: &[MetricDef] = &[
 /// the other direction (SPEC §9.6).
 pub const METRIC_HIGHER: MetricDef = MetricDef {
     name: "metric",
+    capability: Capability::WallAndCounts,
     unit: "value",
     better: Better::Higher,
     kind: Kind::Timed,
