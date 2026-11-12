@@ -20,6 +20,9 @@ struct Host {
     /// The runtime's own process, as it says in its ready message: the child strobe started, or the
     /// runtime a launcher it started (a version manager's shim) runs.
     runtime_pid: u32,
+    /// Bun runs the module, as the host says in its ready message (a `node` on PATH may be Bun's shim),
+    /// whatever the target declared.
+    bun: bool,
 }
 
 /// A profiled host's clocks against strobe's (`probe::cpu::Sync`), and its runtime (`name`, `version`).
@@ -152,11 +155,14 @@ impl Host {
             }
         });
         let pid = child.pid();
-        let mut host = Host { child, conn, lines, next: 1, runtime_pid: pid };
+        let mut host = Host { child, conn, lines, next: 1, runtime_pid: pid, bun: runtime == "bun" };
         loop {
             let line = host.lines.recv_timeout(Duration::from_secs(60)).map_err(|_| failed(log))?;
             if let Some(v) = serde_json::from_str::<Value>(&line).ok().filter(|v| v["ready"] == true) {
                 host.runtime_pid = v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 0).unwrap_or(pid);
+                if let Some(r) = v["runtime"].as_str() {
+                    host.bun = r == "bun";
+                }
                 return Ok(host);
             }
         }
@@ -574,8 +580,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // resident) and writes them again without saying so, so the footprint misses memory it holds
                 // again (air: 100 MiB held read as 5.1 MiB, and a planted +100 MiB as +0.19 MB). Resident size
                 // cannot tell those pages from free ones, so a Bun host's footprint is never a value. Node's
-                // allocator tells macOS (the same 100 MiB read 114 MiB).
-                let footprint_short = cfg!(target_os = "macos") && ctx.describe["targets"][&s.target]["runtime"].as_str().unwrap_or("bun") == "bun";
+                // allocator tells macOS (the same 100 MiB read 114 MiB). Bun as the host says it runs (a
+                // `node` on PATH may be Bun's shim), not as the target declares.
+                let footprint_short = cfg!(target_os = "macos") && host.borrow().bun;
                 if private_mb > 0.0 && !footprint_short {
                     values.insert("memory.app.private".into(), private_mb);
                 }
@@ -587,7 +594,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     refused.insert(
                         "memory.app.private".into(),
                         Refusal::new(
-                            ValidatorId::NotOnThisOs,
+                            ValidatorId::EngineUnsupported,
                             "memory.app.private: macOS leaves out of a Bun host's footprint the memory its allocator freed and then wrote again, so the footprint can miss what the host holds (100 MiB held read as 5.1 MiB)",
                         )
                         .fix("declare js.heap.retained (what a run leaves on the heap after a collection, buffers included), or host the module on Node (runtime: \"node\")"),

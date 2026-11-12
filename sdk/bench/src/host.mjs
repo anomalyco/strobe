@@ -67,14 +67,25 @@ createInterface({ input: socket }).on("line", async (line) => {
     write({ id, ok: { ...edge, mono_us: mono(), runtime: bun ? "bun" : "node", version: bun ? Bun.version : process.versions.node } })
     return
   }
-  // `js.heap.retained`: the heap after a full collection, between runs, with the contents of
-  // ArrayBuffers: Node keeps them off its heap (`arrayBuffers`), Bun counts them in `heapUsed` (and
-  // reports `arrayBuffers` 0). Without them a kept 100 MiB Uint8Array read 0 on Node.
+  // `js.heap.retained`: the heap after a full collection, between runs, buffer contents included, once.
+  // Bun's `heapUsed` counts every buffer's bytes already, and its `arrayBuffers` repeats them whenever an
+  // ArrayBuffer object exists (`new ArrayBuffer`, a typed array's `.buffer` read, `arrayBuffer()`): the
+  // sum read 200 MiB for 100 MiB. Node's `heapUsed` counts none of them and `arrayBuffers` all of them,
+  // once a second collection after a turn of the event loop has freed the backing stores the first one
+  // left (Response.arrayBuffer()'s copies read 200-300 MiB for 100 MiB after one collection).
   if (op === "heap") {
-    if (globalThis.Bun) Bun.gc(true)
-    else globalThis.gc?.()
-    const m = process.memoryUsage()
-    write({ id, ok: m.heapUsed + (m.arrayBuffers ?? 0) })
+    let used
+    if (bun) {
+      Bun.gc(true)
+      used = process.memoryUsage().heapUsed
+    } else {
+      globalThis.gc?.()
+      await new Promise((r) => setImmediate(r))
+      globalThis.gc?.()
+      const m = process.memoryUsage()
+      used = m.heapUsed + (m.arrayBuffers ?? 0)
+    }
+    write({ id, ok: used })
     return
   }
   if (op === "exit") {
@@ -95,4 +106,5 @@ createInterface({ input: socket }).on("line", async (line) => {
 // strobe going away ends the host.
 socket.on("close", () => process.exit(0))
 
-write({ ready: true, pid: process.pid })
+// The runtime that actually runs (a `node` on PATH may be Bun's shim): strobe reads it, not the declared one.
+write({ ready: true, pid: process.pid, runtime: bun ? "bun" : "node" })
