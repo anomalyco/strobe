@@ -426,7 +426,7 @@ impl Across {
 const CARE_CPU: &str = "every process of each app's process set, per run; the fixture not included";
 const CARE_CPU_SHARE: &str = "every process of each app, as a share of one core over the run: compare it only where run.duration is the same";
 const CARE_WAKES: &str = "all threads of all processes of each app: more threads and processes wake more by design";
-const CARE_PRIVATE: &str = "the OS's private memory of every process of each app (Windows commit, macOS footprint, Linux private pages); memory shared between an app's processes is in neither";
+const CARE_PRIVATE: &str = "the OS's private memory of every process of each app (Windows commit, macOS footprint, Linux private pages); memory shared between an app's processes is in neither on Windows and Linux, while macOS counts shared anonymous memory once, in the process that made it";
 const CARE_HOST: &str = "what every process of each app allocated in its own address space, without GPU memory";
 const CARE_GPU_MEMORY: &str = "GPU memory of every process of each app";
 const CARE_FRAMES: &str = "descriptive: more frames can mean smoother or wasteful";
@@ -939,7 +939,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::Care(CARE_PRIVATE),
-        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; Linux: anonymous resident and swapped pages; macOS: the physical footprint)",
+        about: "private bytes of every target process at the end of the last measured run, before its reset (Windows: the commit charge, which includes commit held for the processes' GPU allocations; Linux: anonymous resident and swapped pages; macOS: the physical footprint, which also holds the dirty pages of shared anonymous memory the process created, and is refused for a Bun script host, whose allocator reuses pages the footprint no longer counts)",
     },
     MetricDef {
         name: "memory.app.host",
@@ -1209,7 +1209,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::PerSide,
-        about: "script targets: the JS heap a run leaves behind, after a full collection before and after it",
+        about: "script targets: the JS heap a run leaves behind, after a full collection before and after it, ArrayBuffer and Buffer contents included (Node keeps them off its heap; Bun counts them in it)",
     },
     MetricDef {
         name: "http.latency.p50",
