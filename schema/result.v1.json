@@ -159,7 +159,7 @@
       }
     },
     "spans": {
-      "description": "The private parts of this object's text fields (SPEC 1 rule 9), by the field's key (text, summary, detail, fix, why, message, error, hint, reason): what belongs to the machine (another program's name, a covering window's title, a local path, a phone's serial), each with the words a published surface shows in its place. The fields themselves are the local text, unchanged. Absent when nothing is marked.",
+      "description": "The private parts of this object's text fields (SPEC 1 rule 9), by the field's key (text, summary, detail, fix, why, message, error, hint, reason, verdict; in refused_spans, the metric whose refused line it marks): what belongs to the machine (another program's name, a covering window's title, a local path, a phone's serial), each with the words a published surface shows in its place. The fields themselves are the local text, unchanged. Absent when nothing is marked.",
       "type": "object",
       "additionalProperties": { "type": "array", "items": { "$ref": "#/definitions/span" } }
     },
@@ -289,7 +289,8 @@
         "across": { "enum": ["compared", "care", "per_side"], "description": "implementations: the metric's comparability class (SPEC 7.1); per_side never reaches a comparison (refused NotComparable when declared)." },
         "care_note": { "type": "string", "description": "across care: what the number sums on each side, printed wherever it is." },
         "p_repeated": { "type": ["number", "null"], "description": "implementations, primary: the p-value adjusted for the series' sequential looks." },
-        "holm_decided": { "type": ["boolean", "null"], "description": "implementations, primary: still decided after Holm across the journeys." }
+        "holm_decided": { "type": ["boolean", "null"], "description": "implementations, primary: still decided after Holm across the journeys." },
+        "spans": { "$ref": "#/definitions/spans", "description": "The private parts of verdict (a refusal's summary in it)." }
       }
     },
     "perSide": {
@@ -450,6 +451,7 @@
               "pair": { "type": "integer" },
               "values": { "type": "object", "additionalProperties": { "type": ["number", "null"] }, "description": "Each metric's value, and the block's own notes: warmup.unsteady (1 swung, 2 grew), warmup.stepped.first and warmup.stepped.last (the measured runs stepped down: the first measured run's work and the last half's median, NotSteady, SPEC 9.1), untimed.n and untimed.ms." },
               "refused": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Metrics the block refused: \"<validator>: <why>\"." },
+              "refused_spans": { "$ref": "#/definitions/spans", "description": "The private parts of refused's lines, by metric." },
               "gpu_cache": { "enum": ["cold", "warm", null], "description": "A native block: how its launch found the GPU shader caches, said only of an app that did GPU work in the runs, or for a launch case's block one that opened a window (SPEC 13.2). Absent otherwise and in older results." },
               "same": { "type": "object", "description": "implementations: what each expect.same element read, by its name: { setup, run[], reset[] }." },
               "ops": { "type": "object", "additionalProperties": { "type": "number" }, "description": "implementations: the measured runs' input calls, each call's median count per run (a typed character each)." },
@@ -525,6 +527,7 @@
         },
         "measured_run": { "type": ["integer", "null"], "description": "check: the run values came from, from 0: 1 when a process of the target ended in run 0 and the case has a reset with resetCheck on, so the values are a warm run's from the state the reset left (SPEC 9.1); null when the case failed. Absent in older results (then 0)." },
         "refused": { "type": ["object", "null"], "description": "check: metrics the run refused, \"<validator>: <why>\"." },
+        "refused_spans": { "$ref": "#/definitions/spans", "description": "check: the private parts of refused's lines, by metric." },
         "error": { "type": ["string", "null"] },
         "hint": { "type": ["string", "null"] },
         "spans": { "$ref": "#/definitions/spans", "description": "The private parts of error and hint." },

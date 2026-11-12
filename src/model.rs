@@ -43,7 +43,7 @@ impl Error {
             Some(id) => Refusal::new(id, message).fix(hint).into(),
             None => {
                 let message: Text = message.into();
-                Error::msg(crate::msg!("internal: {validator} is not a validator: {}", message))
+                Error::msg(crate::msg!("internal: {} is not a validator: {}", validator, message))
             }
         }
     }
@@ -78,6 +78,27 @@ impl Error {
         t.push(&self.message_text());
         self.message = self.spans.set("message", t);
         self
+    }
+    /// `suffix` after the message (`… (the block was filmed)`), the message's marks kept.
+    pub fn suffixed(mut self, suffix: impl Into<Text>) -> Self {
+        let mut t = self.message_text();
+        t.push(&suffix.into());
+        self.message = self.spans.set("message", t);
+        self
+    }
+    /// `note` after what the error says: a refusal's detail (`<detail>; <note>`, so its validator and fix
+    /// stay, the message said again from it), else the message (`<message>; <note>`).
+    pub fn append_detail(mut self, note: impl Into<Text>) -> Self {
+        let note: Text = note.into();
+        match self.refusal.take() {
+            Some(r) => {
+                let r = r.append_detail(note);
+                self.message = self.spans.set("message", r.message_text());
+                self.refusal = Some(Box::new(r));
+                self
+            }
+            None => self.suffixed(crate::msg!("; {}", note)),
+        }
     }
     /// The validator that refused (an exit-4 error, or a usage error a validator names).
     pub fn validator(&self) -> Option<ValidatorId> {
@@ -347,6 +368,23 @@ impl Refusal {
         self.summary = self.spans.set("summary", t);
         self
     }
+    /// `suffix` after the summary (`… (the block was filmed: …)`), the summary's marks kept.
+    pub fn suffixed(mut self, suffix: impl Into<Text>) -> Self {
+        let mut t = self.summary_text();
+        t.push(&suffix.into());
+        self.summary = self.spans.set("summary", t);
+        self
+    }
+    /// `note` after the detail (`<detail>; <note>`), or as the detail when there is none.
+    pub fn append_detail(mut self, note: impl Into<Text>) -> Self {
+        let note: Text = note.into();
+        let detail = match self.detail_text() {
+            Some(d) => crate::msg!("{}; {}", d, note),
+            None => note,
+        };
+        self.detail = Some(self.spans.set("detail", detail));
+        self
+    }
     pub fn summary_text(&self) -> Text {
         self.spans.text("summary", &self.summary)
     }
@@ -418,6 +456,17 @@ pub mod refusal_lines {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<BTreeMap<String, Refusal>, D::Error> {
         let lines = BTreeMap::<String, String>::deserialize(d)?;
         Ok(lines.into_iter().filter_map(|(k, l)| Some((k, Refusal::from_line(&l)?))).collect())
+    }
+
+    /// The marks of each line `serialize` writes, by metric, for result.json's `refused_spans` beside the
+    /// map; metrics whose line has none are left out.
+    pub fn spans(map: &BTreeMap<String, Refusal>) -> BTreeMap<String, Vec<crate::text::Span>> {
+        map.iter()
+            .filter_map(|(k, r)| {
+                let t = r.message_text();
+                t.is_marked().then(|| (k.clone(), t.spans().to_vec()))
+            })
+            .collect()
     }
 }
 
