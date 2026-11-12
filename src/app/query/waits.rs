@@ -131,7 +131,7 @@ pub fn waits(dir: &Path, by: &str, top: usize, thread: Option<&str>, phase: Opti
         n += 1;
         threads.insert(x.tid);
     }
-    let secs = |ms: f64| if ms >= 1000.0 { format!("{:.2} s", ms / 1000.0) } else { fmt::value(ms, "ms") };
+    let secs = |ms: f64| fmt::value(ms, "ms");
     let mut text = format!(
         "waits · {} thread{} · {n} waits · {} off CPU ({} waiting, {} runnable: preempted or woken and queued) · wakers known for {}{}\n",
         threads.len(),
@@ -154,7 +154,7 @@ pub fn waits(dir: &Path, by: &str, top: usize, thread: Option<&str>, phase: Opti
     let mut json_rows = Vec::new();
     for ((name, at), row) in sorted.into_iter().take(top) {
         let share = if total > 0.0 { row.ms / total } else { 0.0 };
-        text += &format!("  {:>9}  {:>5.1}%  {:>5}×  max {:>9}  {}  {}\n", secs(row.ms), share * 100.0, row.n, secs(row.max), name, at);
+        text += &format!("  {:>13}  {:>5.1}%  {:>5}×  max {:>13}  {}  {}\n", secs(row.ms), share * 100.0, row.n, secs(row.max), name, at);
         let mut wakers: Vec<(&String, &(u64, f64))> = row.wakers.iter().collect();
         wakers.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
         if !wakers.is_empty() {

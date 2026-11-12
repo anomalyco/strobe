@@ -17,7 +17,7 @@ that it works.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/card-dark.png">
-  <img alt="44% less CPU time, 78% less memory, better in 8 of 8 pairs" src="docs/card-light.png">
+  <img alt="44% less CPU time, 78.0% less memory, better in 8 of 8 pairs; before 7,052 µs, this PR 3,904 µs" src="docs/card-light.png">
 </picture>
 
 ## In your project
@@ -63,6 +63,8 @@ bunx strobe record --bench perf/scroll.bench.ts#scroll  # one case under the pro
 bunx strobe query rec_3f9a..rec_7c1d hotspots           # what got slower between two recordings
 bunx strobe open rec_3f9a                               # the whole recording in Perfetto
 ```
+
+Times print in microseconds (`18,309,038 µs`); `--unit ms` or `"unit": "ms"` in strobe.json to change it.
 
 `bunx strobe status` says what this machine can measure, which permission is missing, and how much
 disk strobe's files take; `bunx strobe prune` frees what nothing uses. Web, Electron and native apps,

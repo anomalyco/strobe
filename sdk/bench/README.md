@@ -104,12 +104,13 @@ export default bench({
 ```
 
 ```sh
-bunx strobe bench perf/server.bench.ts --head . --check     # http.latency.p95 ≈ 500 ms: the held cohorts
+bunx strobe bench perf/server.bench.ts --head . --check     # http.latency.p95 ≈ 500,000 µs: the held cohorts
 bunx strobe record --bench "perf/server.bench.ts#slow handler" --head .   # then: strobe query <rec> http
 ```
 
 `http.latency.p95` is what a client waited while the runs held the server; `cpu.main` is the server's main
-thread alone (`cpu.main.busy` near 100%: its event loop never waited).
+thread alone (`cpu.main.busy` near 100%: its event loop never waited). Times print in microseconds; `--unit ms`
+or `"unit": "ms"` in strobe.json prints milliseconds.
 
 A native app (`native(…, { output: true })`) that prints a line when it is ready: wait for it in setup, so the first run does not measure the
 launch's work. `since: "launch"` also takes a line the app wrote before the call (strobe keeps its output's last

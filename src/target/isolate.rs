@@ -647,8 +647,8 @@ pub fn held_at_launch(pid: u32, home: Option<&Path>, exe: &Path, waited: &str) -
         Error::new(
             3,
             format!(
-                "{waited}; it never got past starting ({:.1} ms of CPU in all, almost no system calls), so macOS held it at launch (Gatekeeper asks a person after a download or an update)",
-                ns as f64 / 1e6
+                "{waited}; it never got past starting ({} of CPU in all, almost no system calls), so macOS held it at launch (Gatekeeper asks a person after a download or an update)",
+                crate::fmt::time(ns as f64 / 1e6)
             ),
         )
         .hint(step),

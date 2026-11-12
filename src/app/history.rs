@@ -140,6 +140,21 @@ fn value_of(s: &Series, v: f64) -> String {
     if s.implementations() { port::pct(v) } else { fmt::value(v, s.meta["unit"].as_str().unwrap_or("")) }
 }
 
+/// A point's median and interval as a series shows them, together (`fmt::values`, as the page does).
+fn values_of(s: &Series, v: &[f64]) -> Vec<String> {
+    if s.implementations() { v.iter().map(|x| port::pct(*x)).collect() } else { fmt::values(v, s.meta["unit"].as_str().unwrap_or("")) }
+}
+
+/// A change's estimate and interval, signed: percentages, or differences in `unit` together (`fmt::times`).
+fn changes_of(rel: bool, unit: &str, c: &Value) -> Vec<String> {
+    let v = [c["estimate"].as_f64().unwrap_or(f64::NAN), c["lo"].as_f64().unwrap_or(f64::NAN), c["hi"].as_f64().unwrap_or(f64::NAN)];
+    match (rel, unit) {
+        (true, _) => v.iter().map(|x| fmt::pct(*x)).collect(),
+        (false, "ms") => fmt::times(&v, true),
+        (false, u) => v.iter().map(|x| fmt::signed(*x, u)).collect(),
+    }
+}
+
 /// A port's series names its two sides after its journey: `Idle (Rewrite vs Original)`.
 fn title(s: &Series) -> String {
     let label = s.meta["label"].as_str().unwrap_or("").to_string();
@@ -192,12 +207,8 @@ fn detail(s: &Series, top: Option<usize>) -> String {
         // A port's point: its pairs and the confidence they reach (3 pairs: 75%), never read as 95%.
         let n = if s.implementations() { format!("{} pairs, {}", p["n"], port::confidence_text(p["confidence"].as_f64().unwrap_or(f64::NAN))) } else { format!("n={}", p["n"]) };
         let value = if p["valid"] == true {
-            format!(
-                "{:>10}  [{} … {}]  {n}",
-                value_of(s, p["median"].as_f64().unwrap_or(f64::NAN)),
-                value_of(s, p["lo"].as_f64().unwrap_or(f64::NAN)),
-                value_of(s, p["hi"].as_f64().unwrap_or(f64::NAN)),
-            )
+            let v = values_of(s, &[p["median"].as_f64().unwrap_or(f64::NAN), p["lo"].as_f64().unwrap_or(f64::NAN), p["hi"].as_f64().unwrap_or(f64::NAN)]);
+            format!("{:>13}  [{} … {}]  {n}", v[0], v[1], v[2])
         } else {
             format!("no value: {}", p["why"].as_str().unwrap_or(""))
         };
@@ -224,7 +235,6 @@ fn change_text(s: &Series, c: &Value) -> String {
     // A port's paired confirmation compares the head alone, in its metric's own unit.
     let unit = s.meta[if s.implementations() { "metric_unit" } else { "unit" }].as_str().unwrap_or("");
     let rel = c["relative"] == true;
-    let f = |v: &Value| if rel { fmt::pct(v.as_f64().unwrap_or(f64::NAN)) } else { fmt::signed(v.as_f64().unwrap_or(f64::NAN), unit) };
     let mut t = format!(
         "{} {} {}  {}..{}  history {} (p {:.1e})",
         c["id"].as_str().unwrap_or(""),
@@ -232,7 +242,7 @@ fn change_text(s: &Series, c: &Value) -> String {
         c["direction"].as_str().unwrap_or(""),
         c["good_short"].as_str().unwrap_or(""),
         c["bad_short"].as_str().unwrap_or(""),
-        f(&c["estimate"]),
+        changes_of(rel, unit, c)[0],
         c["p"].as_f64().unwrap_or(f64::NAN)
     );
     if c["epoch"].is_object() {
@@ -240,10 +250,9 @@ fn change_text(s: &Series, c: &Value) -> String {
     }
     let cf = &c["confirm"];
     if cf["verdict"].is_string() {
-        let crel = cf["relative"] == true;
-        let g = |v: &Value| if crel { fmt::pct(v.as_f64().unwrap_or(f64::NAN)) } else { fmt::signed(v.as_f64().unwrap_or(f64::NAN), unit) };
+        let g = changes_of(cf["relative"] == true, unit, cf);
         let alone = s.meta["head_name"].as_str().filter(|_| s.implementations()).map(|h| format!(" A/B of {h} alone")).unwrap_or_default();
-        t += &format!(" · paired{alone} {} [{} … {}] {} {}", g(&cf["estimate"]), g(&cf["lo"]), g(&cf["hi"]), cf["verdict"].as_str().unwrap_or(""), cf["exp"].as_str().unwrap_or(""));
+        t += &format!(" · paired{alone} {} [{} … {}] {} {}", g[0], g[1], g[2], crate::stats::verdict_text(cf), cf["exp"].as_str().unwrap_or(""));
     }
     if let Some(sh) = c["culprit"]["short"].as_str() {
         t += &format!(" · culprit {sh} {}", c["culprit"]["subject"].as_str().unwrap_or(""));
@@ -287,7 +296,9 @@ pub fn report(args: &Args) -> Result<Output> {
         return super::card::history_report(args, p, &default, format);
     }
     let data: Vec<Value> = series.iter().map(full).collect();
-    let payload = serde_json::to_string(&json!({ "series": data, "device": crate::host::device_name(), "created": super::record::now_iso() })).unwrap_or_default().replace("</", "<\\/");
+    let payload = serde_json::to_string(&json!({ "series": data, "device": crate::host::device_name(), "created": super::record::now_iso(), "default_unit": crate::fmt::ctx().unit.as_str() }))
+        .unwrap_or_default()
+        .replace("</", "<\\/");
     let html = TEMPLATE.replace("/*STROBE_DATA*/null", &payload);
     let out = match args.get("out") {
         Some(p) => std::path::PathBuf::from(p),

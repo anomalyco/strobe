@@ -30,6 +30,8 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("help", Switch, "*"),
     ("version", Switch, "*"),
     ("progress", Value, "*"),
+    // The unit times print in: us (default), ms or s.
+    ("unit", Value, "record bench plan query report look run status top track history"),
     // record, bench, plan, run.
     ("id", Value, "record bench run"),
     ("for", Value, "record"),
@@ -641,6 +643,8 @@ Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells th
           <command> --help lists its flags)
 Schema    result.json and --json: schema/result.v1.json (node_modules/@hona/strobe/schema/); strobe.json:
           schema/strobe.v1.json
-Units     KB, MB and GB are binary: 2^10, 2^20 and 2^30 bytes
+Units     times print in microseconds, digits grouped (1,234 µs); --unit ms|s (or \"unit\": \"ms\" in strobe.json)
+          prints them in milliseconds or seconds; stored and --json numbers keep their metric's unit (ms)
+          KB, MB and GB are binary: 2^10, 2^20 and 2^30 bytes
 Exit codes: 0 ok · 1 error · 2 usage · 3 needs a human · 4 refused (invalid) · 5 inconclusive · 124 timeout · 130 stopped · 255 unreachable
 ";

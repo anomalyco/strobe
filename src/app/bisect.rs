@@ -130,7 +130,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
             steps[0]["metric"].as_str().unwrap_or(""),
             short(&moved_from),
             short(&good),
-            not_alone.as_ref().and_then(|s| s["verdict"].as_str()).unwrap_or(""),
+            not_alone.as_ref().map(crate::stats::verdict_text).unwrap_or_default(),
             undecided.len(),
             undecided.iter().map(|c| short(&c.0)).collect::<Vec<_>>().join(", "),
             short(&from),
@@ -143,11 +143,11 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
             steps[0]["metric"].as_str().unwrap_or(""),
             short(&moved_from),
             short(&good),
-            not_alone.as_ref().and_then(|s| s["verdict"].as_str()).unwrap_or(""),
+            not_alone.as_ref().map(crate::stats::verdict_text).unwrap_or_default(),
             short(&moved_from),
             short(&bad)
         ),
-        (None, _) => format!("no change: {} did not move between good and bad ({})", steps[0]["metric"].as_str().unwrap_or(""), steps[0]["verdict"].as_str().unwrap_or("")),
+        (None, _) => format!("no change: {} did not move between good and bad ({})", steps[0]["metric"].as_str().unwrap_or(""), crate::stats::verdict_text(&steps[0])),
         (Some(_), true) => format!("found: {} {}", short(&bad), subject(&root, &bad)),
         (Some(_), false) => format!(
             "unclear: {} {} is the likeliest culprit (it moved, and no step before it did), but {} step(s) had no verdict ({}), so the culprit may be anywhere in {}..{}; more pairs (--pairs auto) settle it",
@@ -232,8 +232,10 @@ fn step_json(out: &Output, root: &Path, k: usize, base: &str, head: &str) -> Res
         "step": k, "good": base, "commit": head, "short": short(head), "subject": subject(root, head),
         "experiment": out.json["id"], "series": series[0]["label"], "metric": p["metric"], "relative": p["relative"],
         "estimate": p["estimate"], "lo": p["lo"], "hi": p["hi"], "verdict": p["verdict"], "verdict_kind": p["verdict_kind"], "decided": p["decided"], "pairs": series[0]["pairs"],
+        // So a reader draws an absolute time bound again in its own unit (`stats::verdict_text`).
+        "bound": p["bound"], "noworse": p["noworse"],
     });
-    progress(format!("  {}  {}", change(&s), s["verdict"].as_str().unwrap_or("")));
+    progress(format!("  {}  {}", change(&s), crate::stats::verdict_text(&s)));
     Ok(s)
 }
 
@@ -256,26 +258,50 @@ fn change(s: &Value) -> String {
         let (e, lo, hi) = fmt::pct_ci(f("estimate"), f("lo"), f("hi"));
         format!("{e} [{lo} … {hi}]")
     } else {
-        format!("{:+.2} [{:+.2} … {:+.2}]", f("estimate"), f("lo"), f("hi"))
+        // In the metric's unit: a time in the unit times print in (it printed bare `+0.42` before).
+        let unit = crate::model::metric(s["metric"].as_str().unwrap_or("")).map_or("count", |d| if d.unit == "%" { "pp" } else { d.unit });
+        let v = [f("estimate"), f("lo"), f("hi")];
+        let v: Vec<String> = if unit == "ms" { fmt::times(&v, true) } else { v.iter().map(|x| fmt::signed(*x, unit)).collect() };
+        format!("{} [{} … {}]", v[0], v[1], v[2])
     }
 }
 
-fn text(r: &Value) -> String {
+/// A bisect's text from its result.json (`query`, `report --format md` draw it again in the unit times
+/// print in now).
+pub(crate) fn text(r: &Value) -> String {
     let mut t = format!("strobe bisect {} · {} · {}\n", r["range"].as_str().unwrap_or(""), r["series"].as_str().unwrap_or(""), r["metric"].as_str().unwrap_or(""));
-    for s in r["steps"].as_array().into_iter().flatten() {
-        t += &format!(
-            "step {:<2} {} vs {}  {:<28} {:<22} {}  {}\n",
-            s["step"],
-            s["short"].as_str().unwrap_or(""),
-            short(s["good"].as_str().unwrap_or("")),
-            change(s),
-            s["verdict"].as_str().unwrap_or(""),
-            s["experiment"].as_str().unwrap_or(""),
-            s["subject"].as_str().unwrap_or("")
-        );
-    }
-    t += &format!("\n{}\n", r["verdict"].as_str().unwrap_or(""));
+    // Columns as wide as their widest cell: a change in µs is 45 characters.
+    let rows: Vec<Vec<String>> = r["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            vec![
+                format!("step {}", s["step"]),
+                format!("{} vs {}", s["short"].as_str().unwrap_or(""), short(s["good"].as_str().unwrap_or(""))),
+                change(s),
+                crate::stats::verdict_text(s),
+                s["experiment"].as_str().unwrap_or("").to_string(),
+                s["subject"].as_str().unwrap_or("").to_string(),
+            ]
+        })
+        .collect();
+    t += &crate::app::fmt::table(&rows, &[], "", 2);
+    t += &format!("\n{}\n", verdict_text(r));
     t
+}
+
+/// A bisect's conclusion (`no change: … (same (±40.0 µs))`) with each step verdict it quotes drawn again
+/// as the step's own line draws it (`stats::verdict_text`), in the unit times print in now.
+pub(crate) fn verdict_text(r: &Value) -> String {
+    let mut v = r["verdict"].as_str().unwrap_or("").to_string();
+    for s in r["steps"].as_array().into_iter().flatten() {
+        let (old, new) = (s["verdict"].as_str().unwrap_or(""), crate::stats::verdict_text(s));
+        if !old.is_empty() && old != new {
+            v = v.replace(&format!("({old})"), &format!("({new})"));
+        }
+    }
+    v
 }
 
 fn rev_parse(root: &Path, rev: &str) -> Result<String> {

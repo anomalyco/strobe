@@ -427,7 +427,7 @@ pub fn text(meta: &Value) -> String {
                 p["events"],
                 p["events_lost"],
                 p["via"].as_str().unwrap_or(""),
-                cpu.map(|c| format!("{c:.1} ms CPU ({:.3}% of a core)", 100.0 * c / dur)).unwrap_or_else(|| "?".into())
+                cpu.map(|c| format!("{} CPU ({:.3}% of a core)", fmt::time(c), 100.0 * c / dur)).unwrap_or_else(|| "?".into())
             );
         }
     }
@@ -455,7 +455,7 @@ pub fn text(meta: &Value) -> String {
         s += &format!(
             "{}{} {}  {}\n",
             if i == 0 { "threads  " } else { "         " },
-            fmt::pad(&fmt::value(t["cpu_ms"].as_f64().unwrap_or(f64::NAN), "ms"), 10),
+            fmt::pad(&fmt::value(t["cpu_ms"].as_f64().unwrap_or(f64::NAN), "ms"), 13),
             t["name"].as_str().map(str::to_string).unwrap_or_else(|| format!("thread {}", t["tid"])),
             if t["pid"] != meta["pid"] { format!("(pid {})", t["pid"]) } else { String::new() }
         );

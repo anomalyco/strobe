@@ -1,8 +1,32 @@
 //! Number formatting with precision that follows the interval width (SPEC §9.3 "Digits").
 
+/// A value in its unit as every surface prints it; one that rounds to nothing never reads as minus
+/// zero (`-0 B`, `-0 instr`, `-0.0` were printed for tiny negatives).
 pub fn value(v: f64, unit: &str) -> String {
+    crate::fmt::no_minus_zero(value_of(v, unit))
+}
+
+fn value_of(v: f64, unit: &str) -> String {
     if !v.is_finite() {
         return "—".into();
+    }
+    // A time in the unit people read it in (`--unit`; µs by default).
+    if unit == "ms" {
+        return crate::fmt::time(v);
+    }
+    // Too large to print exactly (`fmt::EXACT`, 2^53): three significant digits in scientific notation
+    // with the unit as it would have been (`1.00e307`, `1.00e307 instr`, `1.00e307 B`), never the
+    // digits of a cast that saturated.
+    if v.abs() >= crate::fmt::EXACT {
+        let n = crate::fmt::sci(v);
+        return match unit {
+            "count" | "value" | "" => n,
+            "%" => format!("{n}%"),
+            "/s" => format!("{n}/s"),
+            "instructions" => format!("{n} instr"),
+            "bytes" => format!("{n} B"),
+            u => format!("{n} {u}"),
+        };
     }
     // Below 0.01 as many decimals as show the first significant digit (a layout-shift score of 0.003
     // is not 0.00), up to four.
@@ -16,13 +40,13 @@ pub fn value(v: f64, unit: &str) -> String {
     // A value that rounds to zero prints as 0 at two decimals, without a sign (not −0.00%, not 0.0000).
     let (v, digits) = if (v * 10f64.powi(digits as i32)).round() == 0.0 { (0.0, digits.min(2)) } else { (v, digits) };
     match unit {
-        "ms" => format!("{v:.digits$} ms"),
         "%" => format!("{v:.digits$}%"),
+        // Grouped like a time: `1,234,567` (a `count.*_us` counter holds microseconds as a count).
         "count" => {
             if (v - v.round()).abs() < 1e-9 {
-                format!("{}", v.round() as i64)
+                crate::fmt::group(&format!("{}", v.round() as i64))
             } else {
-                format!("{v:.1}")
+                crate::fmt::group(&format!("{v:.1}"))
             }
         }
         "bytes" => bytes(v),
@@ -30,6 +54,8 @@ pub fn value(v: f64, unit: &str) -> String {
         // Like every unit: a native app's 0.287 MB heap once printed `0 MB` beside a ±4% interval.
         "MB" => format!("{v:.digits$} MB"),
         "/s" => format!("{v:.digits$}/s"),
+        // A display's refresh rate in whole Hz, as the report page prints it.
+        "Hz" => format!("{v:.0} Hz"),
         // A number the target reported in a unit of its own (`metric.<name>`).
         "value" => format!("{v:.digits$}"),
         // Counts in the billions: 4.12 G instr.
@@ -52,16 +78,36 @@ pub fn counters(get: impl Fn(&str) -> f64) -> String {
     if shown.is_empty() { String::new() } else { format!("counters {}\n", shown.join(" · ")) }
 }
 
-pub use crate::fmt::{bound, bytes, pct, pct_ci, pct_vs, pct_with};
+pub use crate::fmt::{bound, bytes, minus, pct, pct_ci, pct_vs, pct_with, time, time_label, time_signed, times};
+
+/// Values printed together (a median and its interval's ends): each at its own digits, times through
+/// `fmt::times`, any other unit as `value` prints it.
+pub fn values(vs: &[f64], unit: &str) -> Vec<String> {
+    if unit == "ms" { times(vs, false) } else { vs.iter().map(|v| value(*v, unit)).collect() }
+}
+
+/// Differences printed together (an estimate and its interval's ends), signed: times through
+/// `fmt::times`, any other unit each as `signed` prints it.
+pub fn signed_values(vs: &[f64], unit: &str) -> Vec<String> {
+    if unit == "ms" { times(vs, true) } else { vs.iter().map(|v| signed(*v, unit)).collect() }
+}
 
 pub fn signed(v: f64, unit: &str) -> String {
-    let body = value(v.abs(), unit);
-    // One that shows as zero at the decimals it printed with has no sign (`0.00 MB`, not `−0.0000 MB`
-    // or `−0 Hz`): every digit it shows is 0.
+    // A time is never shown as 0 unless it is (`+<0.01 µs`).
+    if unit == "ms" {
+        return time_signed(v);
+    }
+    signed_by(v, |x| value(x, unit))
+}
+
+/// `v` with its sign, its size as `show` prints it; none when that shows as zero (`0.00 MB`, `0.0`, not
+/// `−0.0000 MB` or `−0 Hz`): every digit it shows is 0. Every signed difference goes through here.
+pub fn signed_by(v: f64, show: impl Fn(f64) -> String) -> String {
+    let body = show(v.abs());
     if body.chars().filter(char::is_ascii_digit).all(|d| d == '0') {
         body
     } else if v < 0.0 {
-        format!("−{body}")
+        format!("{}{body}", minus())
     } else if v > 0.0 {
         format!("+{body}")
     } else {

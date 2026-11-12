@@ -54,7 +54,8 @@
       "additionalProperties": false,
       "description": "This machine's setting, read only from your own <state>/strobe.json (a project's file may not set it) (SPEC 5.14).",
       "properties": { "unused": { "type": "string", "description": "Caches unused this long go on their own, once a day: an age (\"14d\", the default) or \"off\"." } }
-    }
+    },
+    "unit": { "enum": ["us", "ms", "s"], "description": "The unit times print in: us (microseconds, the default), ms or s; --unit overrides it. Stored and --json numbers keep their metric's unit." }
   },
   "definitions": {
     "perOs": {

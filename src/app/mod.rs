@@ -135,6 +135,28 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     }
     // A flag of another command: refused before anything runs, from the CLI and MCP alike.
     args.check_command()?;
+    // This invocation's unit for times: an MCP call's own on its thread (never the process's, which
+    // the daemon's other calls share); a command a command runs (a bisect's step, `record --bench`'s
+    // bench) keeps the one it runs in unless it names one.
+    let unit = match (args.get("unit"), crate::fmt::scoped()) {
+        (None, Some(c)) => c.unit,
+        _ => time_unit(args)?,
+    };
+    // `--json` is for programs: its bytes never depend on a display choice, so its prose fields
+    // (`text`, `says`, insights' titles) print in µs and UTF-8 whatever `--unit`, strobe.json or the
+    // locale say. Not a report's: its `markdown` is the file it wrote, in the unit asked for.
+    let fixed = args.json() && args.command != "report";
+    let unit = if fixed { crate::fmt::TimeUnit::default() } else { unit };
+    // The CLI's own command (the main thread) sets the process's too, so the threads it starts print
+    // alike. A report's files (Markdown, HTML, images) and the MCP servers' answers are UTF-8 whatever
+    // the terminal is.
+    let main = std::thread::current().name() == Some("main");
+    let ascii = main && !fixed && crate::fmt::ascii_locale() && !matches!(args.command.as_str(), "report" | "mcp" | "daemon");
+    let fmt_ctx = crate::fmt::FmtCtx { unit, ascii: crate::fmt::scoped().map_or(ascii, |c| c.ascii) && args.command != "report" };
+    if main && crate::fmt::scoped().is_none() {
+        crate::fmt::set_default(fmt_ctx);
+    }
+    let _fmt = crate::fmt::scope(fmt_ctx);
     // Strictly read-only: it puts nothing back and makes no state folder.
     if args.command == "config" {
         return config::run(args);
@@ -196,6 +218,49 @@ pub fn dispatch(args: &Args) -> Result<Output> {
         progress(line);
     }
     out
+}
+
+/// The unit a command prints times in: `--unit`, else `"unit"` in the nearest strobe.json above the
+/// project the command is about (`project_of`), else above the working folder, else the user's own,
+/// else µs. A command that prints no time takes none.
+fn time_unit(args: &Args) -> Result<crate::fmt::TimeUnit> {
+    if let Some(u) = args.get("unit") {
+        return crate::fmt::TimeUnit::parse(u).ok_or_else(|| Error::usage(format!("--unit is us, ms or s, not {u}")));
+    }
+    if !crate::cli::takes(&args.command, "unit") || args.has("help") {
+        return Ok(crate::fmt::TimeUnit::default());
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let nearest = |d: &Path| d.ancestors().find(|a| a.join("strobe.json").is_file()).map(Path::to_path_buf);
+    // The user's own file is read after the root's (`config::unit`): a root without one falls to it.
+    let root = project_of(args).and_then(|d| nearest(&d)).or_else(|| nearest(&cwd)).unwrap_or(cwd);
+    Ok(crate::config::unit(&root)?.unwrap_or_default())
+}
+
+/// The folder of the project a command is about, when it names one: a bench file (`bench`, `plan`,
+/// `track`, `record --bench`), or the bench file an experiment ran (`query`, `report` of an `exp_…` or
+/// of a result.json's path). Through the daemon, whose working folder is strobe's own, this is how a
+/// project's `"unit"` is found at all.
+fn project_of(args: &Args) -> Option<PathBuf> {
+    let file_dir = |f: &str| {
+        let p = Path::new(f.split('#').next().unwrap_or(f));
+        p.is_file().then(|| std::path::absolute(p).ok()?.parent().map(Path::to_path_buf)).flatten()
+    };
+    match args.command.as_str() {
+        "bench" | "plan" | "track" => args.pos.first().and_then(|f| file_dir(f)),
+        "record" => args.get("bench").and_then(file_dir),
+        "query" | "report" => {
+            let handle = args.pos.iter().find(|p| !matches!(p.as_str(), "experiment" | "recording" | "history"))?;
+            let result = if Path::new(handle).is_file() {
+                std::path::PathBuf::from(handle)
+            } else {
+                let dir = crate::store::resolve(handle.split("..").next().unwrap_or(handle)).ok().filter(|d| crate::store::is_experiment(d))?;
+                dir.join("result.json")
+            };
+            crate::store::read_json(&result).ok()?["file"].as_str().and_then(file_dir)
+        }
+        _ => None,
+    }
 }
 
 fn fail(e: &Error, json: bool) -> i32 {

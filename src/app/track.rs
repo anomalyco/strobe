@@ -448,7 +448,10 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         history::append(&id, &p)?;
         let unit = def.map_or("", |d| d.unit);
         text += &match &why {
-            None => format!("  {}  {id}  {label} · {metric} {} [{} … {}] ({} blocks)\n", short(commit), fmt::value(median, unit), fmt::value(lo, unit), fmt::value(hi, unit), values.len()),
+            None => {
+                let v = fmt::values(&[median, lo, hi], unit);
+                format!("  {}  {id}  {label} · {metric} {} [{} … {}] ({} blocks)\n", short(commit), v[0], v[1], v[2], values.len())
+            }
             Some(w) => format!("  {}  {id}  {label} · no value: {w}\n", short(commit)),
         };
         points.push(json!({ "series": id, "commit": commit, "median": finite(median), "lo": finite(lo), "hi": finite(hi), "valid": why.is_none(), "why": why }));
@@ -683,14 +686,18 @@ fn confirm(args: &Args, s: &history::Series, c: &Value) -> Result<(String, Value
         0.0
     };
     let detected = c["estimate"].as_f64().unwrap_or(0.0).signum();
-    let verdict = p["verdict"].as_str().unwrap_or("").to_string();
+    let verdict = crate::stats::verdict_text(p);
     let (state, why) = match (decided, moved) {
         (true, m) if m == detected => ("confirmed", format!("the paired A/B moved the same way: {verdict}")),
         (true, 0.0) => ("rejected", format!("the paired A/B says {verdict}")),
         (true, _) => ("rejected", format!("the paired A/B moved the other way: {verdict}")),
         (false, _) => ("unclear", format!("the paired A/B gave no verdict ({verdict}); nothing alerts (strobe track --confirm {cid} runs it again)")),
     };
-    let confirm = json!({ "exp": exp, "verdict": verdict, "estimate": p["estimate"], "lo": p["lo"], "hi": p["hi"], "relative": p["relative"], "pairs": out.json["series"][0]["pairs"] });
+    // `metric` and `bound`: a reader draws an absolute time bound again in its own unit (`stats::verdict_text`).
+    let confirm = json!({
+        "exp": exp, "verdict": verdict, "estimate": p["estimate"], "lo": p["lo"], "hi": p["hi"], "relative": p["relative"], "pairs": out.json["series"][0]["pairs"],
+        "metric": p["metric"], "bound": p["bound"],
+    });
     history::append(&s.id, &json!({ "t": "change", "id": cid, "state": state, "why": why, "confirm": confirm }))?;
     let mut text = format!("  {cid}  {state}: {why} · {exp}\n");
     let mut result = json!({ "id": cid, "series": s.id, "state": state, "confirm": confirm });
@@ -764,12 +771,9 @@ fn alert(args: &Args, s: &history::Series, c: &Value) -> Result<Value> {
         let (e, lo, hi) = fmt::pct_ci(cf["estimate"].as_f64().unwrap_or(f64::NAN), cf["lo"].as_f64().unwrap_or(f64::NAN), cf["hi"].as_f64().unwrap_or(f64::NAN));
         format!("{e} [{lo} … {hi}]")
     } else {
-        format!(
-            "{} [{} … {}]",
-            fmt::signed(cf["estimate"].as_f64().unwrap_or(f64::NAN), unit),
-            fmt::signed(cf["lo"].as_f64().unwrap_or(f64::NAN), unit),
-            fmt::signed(cf["hi"].as_f64().unwrap_or(f64::NAN), unit)
-        )
+        let v = [cf["estimate"].as_f64().unwrap_or(f64::NAN), cf["lo"].as_f64().unwrap_or(f64::NAN), cf["hi"].as_f64().unwrap_or(f64::NAN)];
+        let v: Vec<String> = if unit == "ms" { fmt::times(&v, true) } else { v.iter().map(|x| fmt::signed(*x, unit)).collect() };
+        format!("{} [{} … {}]", v[0], v[1], v[2])
     };
     let culprit = c["culprit"]["short"]
         .as_str()

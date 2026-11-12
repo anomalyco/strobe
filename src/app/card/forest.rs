@@ -470,7 +470,10 @@ fn forest_svg(svg: &mut Svg, card: &Forest, top: f32, bottom: f32) {
     let rh = (avail / rows.len().max(1) as f32).clamp(24.0, 112.0);
     let g = ((rh - 42.0) / 70.0).clamp(0.0, 1.0);
     let name_w = 196.0 + 40.0 * g;
-    let value_w = 76.0 + 24.0 * g;
+    let name_size = if rh >= 34.0 { 17.0 + 7.0 * g } else { 15.0 };
+    // As wide as the widest value (`−3,837,429 µs`), up to 300 px; past that the value shrinks to fit.
+    let widest = rows.iter().map(|r| measure(&r.value, name_size, true)).fold(0.0f32, f32::max);
+    let value_w = (76.0 + 24.0 * g).max(widest + 12.0).min(300.0);
     let (ax0, ax1) = (x0 + name_w + 12.0, x1 - value_w);
     // One axis for every row, wide enough for every interval (a regression is never cut off), with
     // room on both sides of no change.
@@ -498,7 +501,6 @@ fn forest_svg(svg: &mut Svg, card: &Forest, top: f32, bottom: f32) {
     let (b0, b1) = (px(band.0), px(band.1));
     svg.rect(b0, rows_top, (b1 - b0).max(1.0), rows_bottom - rows_top, Ink::Band);
     svg.line(zero, rows_top, zero, rows_bottom, Ink::Muted);
-    let name_size = if rh >= 34.0 { 17.0 + 7.0 * g } else { 15.0 };
     let (sub_size, note_size, tick_size) = (12.0 + 4.0 * g, 14.0 + 3.0 * g, 13.0 + 2.0 * g);
     let (dot, whisker, bar) = (5.5 + 2.5 * g, 6.0 + 3.0 * g, 2.0 + g);
     for (i, row) in rows.iter().enumerate() {
@@ -534,7 +536,8 @@ fn forest_svg(svg: &mut Svg, card: &Forest, top: f32, bottom: f32) {
             Tone::Plain => Ink::Muted,
             t => tone_ink(t),
         };
-        svg.text(x1, cy + name_size * 0.35, (name_size, true), vink, "end", &row.value);
+        let vs = fit(&row.value, value_w - 12.0, name_size, true);
+        svg.text(x1, cy + vs * 0.35, (vs, true), vink, "end", &row.value);
     }
     // Ticks: no change, and up to two round changes either side that the axis reaches.
     let mut y = rows_bottom + 18.0 + 2.0 * g;

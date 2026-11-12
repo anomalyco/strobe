@@ -347,7 +347,8 @@ strobe report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--fo
                   (a --blocks run: HTML and md, its median and interval, no verdict; pr/card/badge refused;
                   --blocks 1 prints ★ <metric> <value> (1 block))
                   (HTML: report.html#series=1&scope=runs|host|startup|setup&metric=<name> opens that view;
-                  strobe look file:///…/report.html#scope=host shoots it headless)
+                  strobe look file:///…/report.html#scope=host shoots it headless; #unit=ms, or the
+                  page's µs | ms | s switch, shows its times in ms)
 strobe open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
 strobe look <url|file|wir:…|app:<id>|exe:<path>|tty:<command>> [--until <selector>] [--out shot.png]
 strobe look app:<id>|exe:<path> [--windowless] [--wait 2s] [--timeout 30s] [-- <args…>]
@@ -371,6 +372,14 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - `record --bench` prints the bench's warnings (`Attribution`, `ProbeOverhead`, `ObserverCost`,
   `TimerCoalescing`); `--json` marks each recording `kind: "attribution"`.
 - Every duration needs its unit (`500ms`, `10s`, `2m`, `2h`, `1d`): `--for 2000` exits 2.
+- Times print in microseconds, digits grouped: `18,309,038 µs`, `42.0 µs`, `<0.01 µs` (nonzero, under
+  the finest step), `0 µs` (exactly 0). `--unit ms` or `--unit s` (or `"unit": "ms"` in strobe.json)
+  prints milliseconds or seconds; never promoted as a value grows. Text only: `--json` is the same in
+  every unit (numbers in the metric's unit, ms; its prose in µs), as are result.json and MCP
+  `structuredContent`'s numbers. Read numbers from `--json`, not the text.
+- Unchanged in every unit: wall-clock durations (`time  19.5 min`, ETA, waits, `per 77 ms run`),
+  configured values (`at least 50 ms`), and stored warning text, written in the unit of the strobe
+  that measured it (`base pair 6 (15985 ms)`).
 - `--filter`, `--target`, `--params`, `--metrics` and `--noworse` given twice add up; any other flag
   given twice with another value exits 2. `--params n=1,n=3` runs both values.
 - `-q`: stdout holds only the handles (`rec_…`, `exp_…`), or `report --format md|pr|summary`'s markdown;
@@ -403,6 +412,7 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - MCP tools `status`, `record`, `bench`, `query`, `report`, `look`, `config`, `init`: the CLI's names,
   arguments and JSON. Through the daemon, `bench` needs an absolute file and `head`; `config` and `init`
   an absolute `dir`; `look` absolute paths, and no `tty:` or `build` (use the CLI or `strobe mcp`).
+  `unit: "ms"` on `status`, `record`, `bench`, `query`, `report`, `look` prints that call's times in ms.
 - Exit codes: `0` · `1` error · `2` usage · `3` needs a human · `4` refused · `5` inconclusive
   (with `--require-verdict`) · `124` timeout or an unlock wait that ran out · `130` stopped ·
   `255` unreachable.
@@ -631,4 +641,6 @@ export default bench({
   from the checkout's root. `//` comments and trailing commas are fine; an unknown key exits 2.
 - `"$schema": "./node_modules/@hona/strobe/schema/strobe.v1.json"`. `strobe config` checks it;
   `strobe init` writes a first one.
+- `"unit": "us" | "ms" | "s"`: the unit times print in (default `us`); the project's beats the user's
+  own `<state>/strobe.json`, and `--unit` beats both.
 - If an isolated launch disturbs your own state, strobe stops: add what leaked to the profile.

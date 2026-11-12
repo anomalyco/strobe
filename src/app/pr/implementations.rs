@@ -675,7 +675,7 @@ impl<'a> Doc<'a> {
             }
         };
         let mut line = format!("strobe bench {} --base {} --head {}", self.file(), side(&b, "base"), side(&h, "head"));
-        const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "update-pr", "repo", "force", "format", "out"];
+        const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "update-pr", "repo", "force", "format", "out", "unit"];
         let mut rest: Vec<(&String, &Value)> =
             r["args"]["flags"].as_object().into_iter().flatten().filter(|(k, _)| !SKIP.contains(&k.as_str()) && (*k != "seed" || r["plan"]["used_random"] == true)).collect();
         rest.sort_by(|a, b| a.0.cmp(b.0));

@@ -332,12 +332,20 @@ fn attach_series(data: &mut Value) -> Option<Value> {
             s["blocks_summary"] = blocks_summary(s);
         }
         let recs: Vec<(&str, Rec)> = ["base", "head"].into_iter().filter_map(|role| Some((role, Rec::resolve(s["attribution"][role].as_str()?).ok()?))).collect();
+        // The threads print times as this invocation does (an MCP call's own unit).
+        let fmt_ctx = crate::fmt::ctx();
         let sides: Vec<(&str, Option<Value>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = recs
                 .iter()
                 .map(|(role, rec)| {
                     let engine = engines[usize::from(*role == "head")].as_str();
-                    (*role, scope.spawn(move || if implementations { side_attribution(rec, plan_runs, engine) } else { attribution(rec, plan_runs) }))
+                    (
+                        *role,
+                        scope.spawn(move || {
+                            let _fmt = crate::fmt::scope(fmt_ctx);
+                            if implementations { side_attribution(rec, plan_runs, engine) } else { attribution(rec, plan_runs) }
+                        }),
+                    )
                 })
                 .collect();
             handles.into_iter().map(|(role, h)| (role, h.join().ok().flatten())).collect()
@@ -697,23 +705,25 @@ pub fn html(view: &str, data: &Value) -> String {
         .iter()
         .map(|m| json!({ "name": m.name, "unit": m.unit, "better": m.better, "kind": m.kind, "words": [m.words.0, m.words.1], "min_n": m.min_n, "about": m.about }))
         .collect();
-    let payload = serde_json::to_string(&json!({ "view": view, "data": data, "metrics": catalog })).unwrap_or_default().replace("</", "<\\/");
+    // The unit the page prints times in first (`--unit`, strobe.json); its switch picks another.
+    let payload = serde_json::to_string(&json!({ "view": view, "data": data, "metrics": catalog, "default_unit": crate::fmt::ctx().unit.as_str() })).unwrap_or_default().replace("</", "<\\/");
     TEMPLATE.replace("/*STROBE_DATA*/null", &payload)
 }
 
 pub fn markdown(data: &Value) -> String {
-    // A comparison's text is drawn again from its result, as its PR block and HTML are: today's digits
-    // and rendering, and the rerun ledger as of now (`run` refreshed it). Other results keep the text
-    // they printed (a check, a recording).
-    let text = if data["kind"] == "experiment" && data["series"].is_array() {
-        let mut t = super::bench::render(data);
+    // A comparison's or a check's text is drawn again from its result, as its PR block and HTML are:
+    // today's digits, rendering and unit, and the rerun ledger as of now (`run` refreshed it). A
+    // recording's from its meta.json; other results keep the text they printed (a pixels run).
+    let text = if let Some(mut t) = super::bench::rendered(data) {
         // Another strobe measured it: its numbers are that strobe's, the words this one's.
-        if let Some(v) = data["env"]["strobe"].as_str().filter(|v| *v != env!("CARGO_PKG_VERSION")) {
+        if let Some(v) = data["env"]["strobe"].as_str().filter(|v| *v != env!("CARGO_PKG_VERSION") && data["kind"] == "experiment") {
             t += &format!("\nmeasured by strobe {v}; this text drawn again by strobe {}\n", env!("CARGO_PKG_VERSION"));
         }
         t
+    } else if data["series"].is_array() {
+        data["text"].as_str().unwrap_or("").to_string()
     } else {
-        data["text"].as_str().map(str::to_string).unwrap_or_else(|| super::record::summary_text(data))
+        super::record::summary_text(data)
     };
     format!("```\n{}\n```\n", text.trim_end())
 }
