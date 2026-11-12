@@ -133,7 +133,8 @@ pub fn launch_with(app: &App, seed: Option<&Path>, window: &Window, cpus: Option
                 .hint("exe: and app: targets are Chromium or Electron apps; for any other program use exe:<path> --native, or record a running process with pid:<pid>"));
         }
         if Instant::now() > deadline {
-            return Err(Error::unreachable(format!("{} did not open a debugging port in 60 s", app.exe.display())));
+            let waited = format!("{} did not open a debugging port in 60 s", app.exe.display());
+            return Err(isolate::held_at_launch(pid, Some(&home), &app.exe, &waited).unwrap_or_else(|| Error::unreachable(waited)));
         }
         std::thread::sleep(Duration::from_millis(100));
     };

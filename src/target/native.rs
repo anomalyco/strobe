@@ -144,7 +144,8 @@ impl Native {
             }
             guard.check("while the app started")?;
             if Instant::now() > deadline {
-                return Err(Error::unreachable(format!("{} opened no visible window in {} s{}", self.exe.display(), timeout.as_secs(), self.wayland_note())));
+                let waited = format!("{} opened no visible window in {} s{}", self.exe.display(), timeout.as_secs(), self.wayland_note());
+                return Err(isolate::held_at_launch(self.pid, Some(&self.home), &self.exe, &waited).unwrap_or_else(|| Error::unreachable(waited)));
             }
             std::thread::sleep(Duration::from_millis(50));
         }

@@ -164,9 +164,8 @@ pub(super) fn series(ctx: &mut Ctx, b: &mut Batching, all: &[Series], i: usize, 
     }
     let cases: Vec<Series> = chunk.iter().map(|j| all[*j].clone()).collect();
     let s = &cases[0];
-    release_machine(ctx);
-    ctx.reg.set("preparing", format!("{}: builds and servers", s.label()));
-    prepare_all(ctx, s, variants, config)?;
+    // The machine is given back only to build or serve, or for another bench in line (`prepare_series`).
+    prepare_series(ctx, s, variants, config)?;
     // `--video`: one film of the launch, each case's span marked in it.
     let film = ctx.args.has("video") && {
         let skip = no_video(ctx, variants[0].target_of(s));

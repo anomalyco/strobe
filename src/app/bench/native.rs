@@ -807,6 +807,10 @@ fn runs(
                 }
             }
             let first = warmup.first().unwrap_or(0);
+            // A check that measured its second run (`Warmup::after`): run 1 is not what it measured.
+            if first > 0 && base == 0 {
+                first_run = None;
+            }
             let warm_ms: f64 = runs[..first].iter().map(|r| r.total).sum::<f64>() + 0.0;
             let steps = vec![("warmup".to_string(), warm_ms), ("runs".to_string(), (began.elapsed().as_secs_f64() * 1e3 - warm_ms).max(0.0))];
             // In a batch the app must outlive the case: one it ended fails the case that did it.
@@ -1237,7 +1241,8 @@ fn runs(
                 }
             }
             for m in declared_metrics(s).into_iter() {
-                if values.contains_key(m) || refused.contains_key(m) {
+                // A counter only `--noworse` names that no run counted is the series' to decide (`flagged_counts`).
+                if values.contains_key(m) || refused.contains_key(m) || (!s.case_declares(m) && m.starts_with("count.")) {
                     continue;
                 }
                 refused.insert(m.clone(), missing(m, &have));
@@ -1838,11 +1843,10 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 }
                 guard.check("while the app started")?;
                 if Instant::now() > deadline {
-                    return Err(Error::refused(
-                        "RunIncomplete",
-                        format!("{} launch: milestone {name} never matched in {} s", s.case, timeout.as_secs()),
-                        "check the milestone's match and where it looks",
-                    ));
+                    let waited = format!("{} launch: milestone {name} never matched in {} s", s.case, timeout.as_secs());
+                    return Err(
+                        isolate::held_at_launch(n.pid, Some(&n.home), &n.exe, &waited).unwrap_or_else(|| Error::refused("RunIncomplete", waited, "check the milestone's match and where it looks"))
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -1859,7 +1863,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 }
                 guard.check("while the app started")?;
                 if Instant::now() > deadline {
-                    return Err(Error::refused("RunIncomplete", format!("{} launch: no window in {} s", s.case, timeout.as_secs()), "check that the app opens a window"));
+                    let waited = format!("{} launch: no window in {} s", s.case, timeout.as_secs());
+                    return Err(isolate::held_at_launch(n.pid, Some(&n.home), &n.exe, &waited).unwrap_or_else(|| Error::refused("RunIncomplete", waited, "check that the app opens a window")));
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
@@ -1984,7 +1989,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 }
                 guard.check("while the app started")?;
                 if Instant::now() > deadline {
-                    return Err(Error::refused("RunIncomplete", format!("{} launch: its window never {} in {} s", s.case, until_text(&until), timeout.as_secs()), "check that the app opens a window"));
+                    let waited = format!("{} launch: its window never {} in {} s", s.case, until_text(&until), timeout.as_secs());
+                    return Err(isolate::held_at_launch(n.pid, Some(&n.home), &n.exe, &waited).unwrap_or_else(|| Error::refused("RunIncomplete", waited, "check that the app opens a window")));
                 }
             };
             (sample.at, sample.cycles, sample.root, sample.ended)

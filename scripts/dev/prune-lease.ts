@@ -118,8 +118,12 @@ const store = P.join(data, "strobe", "gpu-cache", `${exp}-head`)
 const log2 = fs.openSync(P.join(scratch, "bench2.log"), "w")
 const bench2 = spawn(bin, ["bench", P.join(repo2, "warm.bench.ts"), "--head", ".", "--check", "--id", exp, "--progress", "stdout"], { env: { ...env, STROBE_PROGRESS: "stdout" }, cwd: repo2, stdio: ["ignore", log2, log2] })
 const ended2 = new Promise<number>((r) => bench2.on("exit", (c) => r(c ?? -1)))
-// The first launch has given its caches back to the store: a prune now lands between launches.
-for (let i = 0; i < 240 && !fs.existsSync(P.join(store, "paths")); i++) await Bun.sleep(250)
+// The first launch has given its caches back to the store: a prune now lands between launches. macOS
+// moves no driver cache (Metal's stays in the user's per-app cache folder), so there it waits for the
+// first case's line.
+const mac = process.platform === "darwin"
+const firstDone = () => (mac ? /(pass|FAIL) +one · app/.test(fs.readFileSync(P.join(scratch, "bench2.log"), "utf8")) : fs.existsSync(P.join(store, "paths")))
+for (let i = 0; i < 240 && !firstDone(); i++) await Bun.sleep(250)
 const seedDir = fs.readdirSync(P.join(data, "strobe", "seeds")).map((n) => P.join(data, "strobe", "seeds", n)).find((p) => fs.statSync(p).isDirectory()) ?? ""
 const seedTime = seedDir ? fs.statSync(P.join(seedDir, "big.bin")).mtimeMs : 0
 const mid = strobe("prune", "--force", "--json").json
@@ -127,8 +131,8 @@ const midAt = Date.now()
 const keptMid = Object.fromEntries((mid?.kept ?? []).map((e: any) => [e.name, e.why]))
 const removedMid = (mid?.removed ?? []).map((e: any) => e.name)
 check(
-  fs.existsSync(P.join(store, "paths")) && !removedMid.some((n: string) => n.startsWith("gpu-cache/") || n.startsWith("seeds/")),
-  "a prune between the launches keeps the experiment's GPU cache store and seed copy",
+  (mac ? Object.keys(keptMid).some((n) => n.startsWith("seeds/")) : fs.existsSync(P.join(store, "paths"))) && !removedMid.some((n: string) => n.startsWith("gpu-cache/") || n.startsWith("seeds/")),
+  mac ? "a prune between the launches keeps the experiment's seed copy" : "a prune between the launches keeps the experiment's GPU cache store and seed copy",
   `kept ${Object.entries(keptMid).filter(([n]) => /^(gpu-cache|seeds|builds)\//.test(n)).map(([n, w]) => `${n}: ${w}`).join("; ")}`,
 )
 const code2 = await ended2
@@ -137,12 +141,13 @@ const result = JSON.parse(fs.readFileSync(P.join(data, "strobe", "experiments", 
 const metas = (result.series ?? []).map((s: any) => JSON.parse(fs.readFileSync(P.join(data, "strobe", "recordings", s.recording, "meta.json"), "utf8")))
 const later = metas.filter((m: any) => Date.parse(m.created) > midAt)
 check(
-  code2 === 0 && metas.length === 3 && metas[0].gpu_cache === "cold" && later.length > 0 && later.every((m: any) => m.gpu_cache === "warm"),
-  "the launches made after the prune were warm",
+  code2 === 0 && metas.length === 3 && later.length > 0 && (mac ? metas.every((m: any) => m.gpu_cache == null) : metas[0].gpu_cache === "cold" && later.every((m: any) => m.gpu_cache === "warm")),
+  mac ? "the bench passed across the prune; no launch claims a GPU cache state (macOS moves none)" : "the launches made after the prune were warm",
   `exit ${code2}, ${metas.map((m: any) => `${m.gpu_cache}${Date.parse(m.created) > midAt ? " (after the prune)" : ""}`).join(", ")}; ${P.join(scratch, "bench2.log")}`,
 )
 check(seedDir !== "" && fs.statSync(P.join(seedDir, "big.bin")).mtimeMs === seedTime, "the seed copy was not made again", seedDir)
-const leftInGpu = fs.readdirSync(P.join(data, "strobe", "gpu-cache")).filter((n) => n.startsWith(exp))
+const gpuDir = P.join(data, "strobe", "gpu-cache")
+const leftInGpu = fs.existsSync(gpuDir) ? fs.readdirSync(gpuDir).filter((n) => n.startsWith(exp)) : []
 check(leftInGpu.length === 0, "once the experiment ended, its store and the store's stamp are gone", leftInGpu.join(", ") || "nothing left")
 const failed = results.filter((r) => r.startsWith("FAIL")).length
 console.log(`\n${results.length - failed} passed, ${failed} failed · scratch left in ${scratch}`)

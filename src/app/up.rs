@@ -116,7 +116,11 @@ pub fn run(args: &Args) -> Result<Output> {
         s.line(mark, &if i == 0 { "android".to_string() } else { format!("android {}", i + 1) }, line);
     }
     match runner::find_bun() {
-        Some(p) => s.line("✓", "bun", p.display().to_string()),
+        Some(p) => match runner::bun_version(&p) {
+            Some((v, true)) => s.line("!", "bun", format!("{} · {v} (ctx.playwright needs Bun 1.4.0 or later: update this Bun)", p.display())),
+            Some((v, false)) => s.line("✓", "bun", format!("{} · {v}", p.display())),
+            None => s.line("✓", "bun", p.display().to_string()),
+        },
         None => s.line("!", "bun", "missing: bench files need Bun (https://bun.sh)"),
     }
     if check {
@@ -129,9 +133,9 @@ pub fn run(args: &Args) -> Result<Output> {
     } else {
         install_self(&mut s)?
     };
-    // Engine.
+    // Engine: `ensure` hashed the file there (extracted again when it was not the pinned build).
     match engine::ensure() {
-        Ok(p) => s.line("✓", "engine", format!("trace_processor {} · sha256 ok · {}", engine::VERSION, p.display())),
+        Ok(p) => s.line("✓", "engine", format!("trace_processor {} · sha256 {}… ok · {}", engine::VERSION, engine::digest().map_or("", |d| &d[..12]), p.display())),
         Err(e) => s.line("✗", "engine", e.message),
     }
     // Deep mode: present events and native stacks (one UAC prompt when something is missing).

@@ -504,7 +504,7 @@ export default bench({
 - Waits that are not the journey: `await ctx.untimed(() => page.idle())`. Its time, CPU, frames and
   inputs leave the run; `gpu.process.3d`, `energy.*`, `net.*`, `canvas.*` refuse (`Untimed`).
 - `ctx.addInitScript(fn, arg)` and `ctx.mock(pattern, handler)` in `prepare` work in every engine;
-  Playwright (`ctx.playwright`) only on Chromium.
+  Playwright (`ctx.playwright`) only on Chromium, and only under Bun 1.4.0 or later (`bun upgrade`).
 - Random workloads: draw from `ctx.random()` (each hook call replays the same stream), never
   `Math.random()`; `--seed N` replays; `ctx.seed` seeds the app only if you pass it in.
 - `expect: { title, heading, url, visible }` on a case or target: a block on another screen is

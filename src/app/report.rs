@@ -35,6 +35,11 @@ pub fn run(args: &Args) -> Result<Output> {
     if view == "history" {
         return super::history::report(args);
     }
+    // A format no report writes is refused before anything is read or written (an HTML once took its place).
+    const FORMATS: [&str; 6] = ["html", "md", "pr", "summary", "card", "badge"];
+    if let Some(f) = args.get("format").filter(|f| !FORMATS.contains(f)) {
+        return Err(Error::usage(format!("--format {f}: an experiment's report writes html (default), md, pr, summary, card or badge; a recording's html or md")));
+    }
     let handle = args.pos.get(1).ok_or_else(|| Error::usage(format!("report {view} needs a handle: strobe report {view} <exp_…|rec_…|path/to/result.json>")))?;
     // A result.json or meta.json named by its path (an edited copy, a hand-written fixture) is read as it
     // is: nothing is written beside it, and what a report writes goes to strobe's own run folder.
@@ -52,6 +57,9 @@ pub fn run(args: &Args) -> Result<Output> {
             (dir, data, experiment)
         }
     };
+    if let Some(f) = args.get("format").filter(|f| !experiment && !matches!(*f, "html" | "md")) {
+        return Err(Error::usage(format!("--format {f} writes an experiment's result: give an exp_… handle (a recording's report is html or md)")));
+    }
     let scratch = match &file {
         Some(_) => {
             let d = crate::host::paths::run().join("reports").join(data["id"].as_str().filter(|i| !i.is_empty()).unwrap_or("file"));
@@ -86,11 +94,10 @@ pub fn run(args: &Args) -> Result<Output> {
     } else if let (Some(n), Some("pr")) = (args.get("update-pr"), args.get("format")) {
         data["pr_head_commit"] = json!(super::pr::head_commit(n, args.get("repo"))?);
     }
-    // A card or badge needs only the result: no views, no insights.
+    // A card or badge needs only the result: no views, no insights. Published: every string of it
+    // through `pr::public` first.
     if let Some(format @ ("card" | "badge")) = args.get("format") {
-        if !experiment {
-            return Err(Error::usage(format!("--format {format} draws an experiment's result: give an exp_… handle")));
-        }
+        super::pr::public_value(&mut data);
         return super::card::report(args, &scratch, &data, format);
     }
     if experiment {
@@ -144,11 +151,10 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     }
     let format = args.get("format").unwrap_or("html");
-    if format == "pr" && !experiment {
-        return Err(Error::usage("--format pr writes an experiment's results for a pull request: give an exp_… handle"));
-    }
-    if format == "summary" && !experiment {
-        return Err(Error::usage("--format summary writes an experiment's result for a CI job's summary page: give an exp_… handle"));
+    // A PR block and a step summary are published: every string they read through `pr::public` first,
+    // the views and insights just attached too.
+    if matches!(format, "pr" | "summary") {
+        super::pr::public_value(&mut data);
     }
     let markdown_out = matches!(format, "md" | "pr" | "summary");
     let out = match args.get("out") {
@@ -418,7 +424,16 @@ fn blocks_summary(s: &Value) -> Value {
             }
         }
     }
-    let secondaries: Vec<Value> = s["declared"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| *m != metric).map(one).collect();
+    let declared: Vec<&str> = s["declared"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| *m != metric).collect();
+    let mut secondaries: Vec<Value> = declared.iter().copied().map(one).collect();
+    // Then the main thread's CPU of a target with no window, as the text shows it (`main_thread_shown`):
+    // only where a block measured or refused it.
+    for m in super::bench::main_thread_shown(s, &declared).into_iter().filter(|m| *m != metric) {
+        let j = one(m);
+        if j["values"].as_array().is_some_and(|v| v.iter().any(Value::is_number)) || j["refused_blocks"].as_u64().unwrap_or(0) > 0 {
+            secondaries.push(j);
+        }
+    }
     json!({ "blocks": blocks.len(), "primary": primary, "secondaries": secondaries })
 }
 

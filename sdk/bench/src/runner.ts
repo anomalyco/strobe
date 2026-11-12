@@ -275,6 +275,8 @@ const state: {
   env: Record<string, string> | null
   exe: string | null
   playwright: any
+  /** Why Playwright did not connect for this block (thrown when a hook reads ctx.playwright). */
+  playwrightError: unknown
   prepared: unknown
   mocks: { pattern: string; test: RegExp; handler: Function }[]
   session: any
@@ -290,7 +292,7 @@ const state: {
   usedRandom: boolean
   /** What the file's `setupKey` gave for the block's case (`ctx.setupKey`); undefined without one. */
   setupKey: unknown
-} = { case: "", params: {}, target: "", variant: "base", url: "", root: "", home: null, env: null, exe: null, playwright: null, prepared: undefined, mocks: [], session: null, fixture: null, engine: "chromium", relay: null, devtools: null, seed: 0, caseSeed: 0, stream: () => 0, usedRandom: false, setupKey: undefined }
+} = { case: "", params: {}, target: "", variant: "base", url: "", root: "", home: null, env: null, exe: null, playwright: null, playwrightError: null, prepared: undefined, mocks: [], session: null, fixture: null, engine: "chromium", relay: null, devtools: null, seed: 0, caseSeed: 0, stream: () => 0, usedRandom: false, setupKey: undefined }
 
 // Seeds (SPEC §9.6): a case's seed is mix(experiment seed, case + "\n" + its params as canonical JSON), so
 // base and head, and every target of a journey, get the same one. Each hook call starts its own stream
@@ -513,6 +515,7 @@ const prepareContext = () => seeded({
   root: state.root,
   get playwright() {
     if (state.engine === "chromium") {
+      if (state.playwrightError !== null) throw state.playwrightError
       if (!state.playwright) throw new Error(`ctx.playwright needs Playwright: install playwright or @playwright/test next to ${file}`)
       return state.playwright
     }
@@ -598,11 +601,52 @@ async function playwright(endpoint: string, target: string) {
   const names = ["playwright", "@playwright/test", "playwright-core"]
   const resolved = names.map((n) => { try { return Bun.resolveSync(n, from) } catch { return undefined } }).find(Boolean)
   if (!resolved) return null
+  // Under Bun 1.3 Playwright's DevTools WebSocket never opens: connectOverCDP waits out its 30 s and
+  // times out (macOS and Windows, Playwright 1.56 and 1.65; Bun 1.4.0 connects in about 0.1 s).
+  if (beforeBun14(Bun.version))
+    throw Object.assign(new Error(`ctx.playwright needs Bun 1.4.0 or later: under Bun ${Bun.version} (${process.execPath}) Playwright's connectOverCDP never connects to the browser (it times out after 30 s)`), {
+      hint: `update the Bun strobe runs bench files with, ${process.execPath} (strobe takes the first bun on PATH, else ~/.bun/bin's): \`${process.execPath} upgrade\` for Bun's own install, else its package manager; a prepare that uses only ctx.addInitScript and ctx.mock works under this Bun`,
+    })
   // A bench path canonicalized on Windows starts with \\?\, which Bun's import() cannot load.
   const { chromium } = await import(resolved.replace(/^\\\\\?\\/, ""))
   const browser = await chromium.connectOverCDP(endpoint)
-  const context = browser.contexts()[0]
-  return { browser, context, page: await strobePage(context, target) }
+  try {
+    const context = browser.contexts()[0]
+    if (!context) throw new Error("Playwright saw no browser context to attach to")
+    return { browser, context, page: await strobePage(context, target) }
+  } catch (e) {
+    await browser.close().catch(() => {})
+    throw e
+  }
+}
+
+// The block the runner serves: `dropBlockConnections` moves it on, so a `prepare` still in flight from an
+// earlier block (strobe gave up on it) writes nothing into this one's state.
+let blockEpoch = 0
+
+// Ends the block's own connections to its browser (the Fetch session, Playwright, another engine's
+// relay) and forgets them, so no later block's hook sees them: the state is cleared before anything is
+// awaited, and one close that throws does not keep the others.
+async function dropBlockConnections() {
+  blockEpoch++
+  const { session, playwright: pw, relay } = state
+  Object.assign(state, { playwright: null, playwrightError: null, session: null, mocks: [], relay: null, devtools: null })
+  try { relay?.end() } catch {}
+  await Promise.all([session?.detach().catch(() => {}), pw?.browser.close().catch(() => {})])
+}
+
+// Whether a Bun version is before 1.4.0 by SemVer's order (a pre-release of 1.4.0 is before it), by the
+// same rule as `runner::before_bun_14` in strobe: the version before any `+`, then before any `-`, must
+// be exactly three dot-separated runs of ASCII digits, else it is not called old (a custom build).
+function beforeBun14(version: string) {
+  const full = version.trim()
+  const corePre = full.split("+")[0]
+  const dash = corePre.indexOf("-")
+  const [core, pre] = dash < 0 ? [corePre, false] : [corePre.slice(0, dash), true]
+  const parts = core.split(".")
+  if (parts.length !== 3 || parts.some((p) => !/^[0-9]+$/.test(p))) return false
+  const [a, b, c] = parts.map(Number)
+  return a < 1 || (a === 1 && b < 4) || (a === 1 && b === 4 && c === 0 && pre)
 }
 
 // The page strobe drives, by CDP target id: Playwright may attach to pages late, and a page of
@@ -769,6 +813,8 @@ async function handle(op: string, args: any) {
         }
       })
     case "block":
+      // A block that ended before its `close` (a refusal, a retry, a hook that threw) left its connections.
+      await dropBlockConnections()
       Object.assign(state, {
         caseSeed: mix(state.seed, `${args.case ?? ""}\n${canonical(args.params ?? {})}`),
         case: args.case ?? "",
@@ -811,10 +857,26 @@ async function handle(op: string, args: any) {
       try {
         if (target?.prepare) {
           state.devtools = args.endpoint ? { endpoint: args.endpoint, target: args.target } : null
-          if (args.endpoint) state.playwright = await playwright(args.endpoint, args.target)
+          // A Playwright that cannot connect fails only a prepare that reads ctx.playwright.
+          state.playwrightError = null
+          // A prepare strobe gave up on (its call timed out, the next block began) writes nothing into
+          // the next block's state, and its late Playwright closes.
+          const epoch = blockEpoch
+          if (args.endpoint) {
+            let error: unknown = null
+            const pw = await playwright(args.endpoint, args.target).catch((e) => ((error = e), null))
+            if (epoch !== blockEpoch) {
+              await pw?.browser.close().catch(() => {})
+              throw new Error("prepare: a later block began while this one's Playwright connected")
+            }
+            state.playwright = pw
+            state.playwrightError = error
+          }
           stream("prepare")
           launchHook = "the target's prepare"
-          state.prepared = await target.prepare(prepareContext())
+          const prepared = await target.prepare(prepareContext())
+          if (epoch !== blockEpoch) throw new Error("prepare: a later block began while this one's prepare ran")
+          state.prepared = prepared
         }
         // A `url` function names the first page from what `prepare` returned, so the block loads one page.
         if (typeof target?.url === "function") stream("url")
@@ -862,10 +924,7 @@ async function handle(op: string, args: any) {
       await Promise.resolve(spec.teardown?.(context())).catch((e) => errors.push(e))
       stream("target-teardown")
       await Promise.resolve(spec.targets[state.target]?.teardown?.(prepareContext())).catch((e) => errors.push(e))
-      if (state.session) await state.session.detach().catch(() => {})
-      if (state.playwright) await state.playwright.browser.close().catch(() => {})
-      if (state.relay) state.relay.end()
-      Object.assign(state, { playwright: null, session: null, mocks: [], relay: null, devtools: null })
+      await dropBlockConnections()
       if (errors.length) throw new AggregateError(errors, `teardown failed: ${errors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`)
       return true
     }
