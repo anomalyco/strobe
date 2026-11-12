@@ -231,7 +231,7 @@ fn scrub_params(s: &str) -> String {
 fn secret_key(k: &str) -> bool {
     const EXACT: &[&str] = &["code", "sid", "sig", "jwt", "bearer", "cookie", "auth", "pass", "pwd", "otp", "nonce", "state"];
     const ENDS: &[&str] = &["token", "secret", "key", "password", "passwd", "signature", "session", "sessionid", "session_id", "credential", "credentials", "authorization"];
-    let k = k.split(['[', ']', '.']).filter(|p| !p.is_empty()).last().unwrap_or("").to_ascii_lowercase();
+    let k = k.split(['[', ']', '.']).rfind(|p| !p.is_empty()).unwrap_or("").to_ascii_lowercase();
     EXACT.contains(&k.as_str()) || ENDS.iter().any(|e| k.ends_with(e))
 }
 
@@ -406,8 +406,7 @@ fn url_at(t: &str) -> Option<usize> {
 /// does not open (`(https://x/a)` → `https://x/a`, but `http://[::1]/a` and `?filter[token]=x` whole).
 fn trim_url(u: &str) -> (&str, &str) {
     let mut end = u.len();
-    loop {
-        let Some(c) = u[..end].chars().next_back() else { break };
+    while let Some(c) = u[..end].chars().next_back() {
         let open = match c {
             ')' => Some('('),
             ']' => Some('['),
