@@ -48,6 +48,11 @@ fn bench_case(args: &Args, file: &str, case: &str) -> Result<Output> {
     match args.get("probes") {
         None | Some("attribution" | "deep") => {}
         Some("waits") => b.set("probes", "waits"),
+        Some("memory") => {
+            return Err(Error::usage(format!(
+                "record --bench records the case's attribution block, which ends with a heap snapshot: strobe record --bench {file}#{case}; a leak run of the case (snapshots between runs) is strobe bench {file} --filter {case} --probes memory"
+            )));
+        }
         Some(p) => return Err(Error::usage(format!("record --bench records the case's attribution block; --probes {p} does not apply (waits adds off-CPU waits to a native case)"))),
     }
     let out = super::bench::run(&b)?;
@@ -370,7 +375,8 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     // page moves to in the recording stays the run's.
     crate::target::web::WebPage::from(page.clone()).add_init_script(&metrics::doc_mark_script(&token))?;
     if set == Set::Memory {
-        let meta = memory(&page, &browser, &dir, &id, &target, for_ms, json!({ "input": input, "headless": !on_screen, "emulate": meta_emulate(&emulation) }))?;
+        let phone_meta = browser.phone.as_ref().map(|p| p.meta(crate::target::android_chrome::screen(&page)));
+        let meta = memory(&page, &browser, &dir, &id, &target, for_ms, json!({ "input": input, "headless": !on_screen, "emulate": meta_emulate(&emulation), "phone": phone_meta }))?;
         if host_screen && (awake.locks() > 0 || host::session_locked()) {
             return Err(validity::locked());
         }
@@ -538,13 +544,6 @@ fn mobile_usage(args: &Args, target: &str) -> Result<()> {
     ];
     if let Some((f, why)) = why.iter().find(|(f, _)| args.has(f)) {
         return Err(Error::usage(format!("--{f} with --mobile: {why}")));
-    }
-    if args.get("probes") == Some("memory") {
-        return Err(Error::refused(
-            "NotForTarget",
-            "--probes memory on a phone: its census reads the browser's processes on this computer, and the page's are on the phone",
-            "record --probes attribution on the phone (it ends with a heap snapshot), or the memory recording on a desktop browser",
-        ));
     }
     match args.get("engine").map(WebEngine::parse).transpose()? {
         Some(WebEngine::Firefox | WebEngine::Webkit) => Err(Error::usage("--mobile drives Chrome on Android (Chromium): drop --engine")),
@@ -1456,8 +1455,9 @@ fn memory(page: &chromium::Page, browser: &chromium::Browser, dir: &std::path::P
         }
         c["at_ms"] = json!(started.elapsed().as_millis() as u64);
         c["dom_nodes"] = c["dom"]["nodes"].clone();
-        // OS memory of the snapshotted process is inflated after its first snapshot (CensusContaminated).
-        c["private_bytes"] = if i == 0 { json!(browser.processes().iter().map(|p| p.private_bytes).sum::<u64>()) } else { Value::Null };
+        // OS memory of the snapshotted process is inflated after its first snapshot (CensusContaminated). A
+        // phone's Chrome has no process on this computer: none, never 0.
+        c["private_bytes"] = if i == 0 && browser.phone.is_none() { json!(browser.processes().iter().map(|p| p.private_bytes).sum::<u64>()) } else { Value::Null };
         c["os_after_snapshot"] = json!(i > 0);
         probe::census::add_allocators(&mut c, browser, page, &dir.join(format!("memdump-{i}.pftrace")));
         census.push(c);
@@ -1497,6 +1497,11 @@ fn memory(page: &chromium::Page, browser: &chromium::Browser, dir: &std::path::P
         }
     }
     values.insert("memory.app.private", at(0, "private_bytes") / (1024.0 * 1024.0));
+    if browser.phone.is_some() {
+        let r = crate::model::Refusal::new(crate::model::ValidatorId::NotForTarget, "memory.app.private: the page's processes are on the phone, and strobe reads private memory from this computer's")
+            .fix("read the page's own memory here (js.heap.used, its growth, the leak suspects), or the processes' memory in a desktop browser's memory recording");
+        refused.insert("memory.app.private".into(), json!(r.message()));
+    }
     values.insert("leak.suspects.retained", leaks["retained_size"].as_f64().unwrap_or(0.0) / (1024.0 * 1024.0));
     let values: BTreeMap<&str, f64> = values.into_iter().filter(|(_, v)| v.is_finite()).collect();
     let mut meta = json!({

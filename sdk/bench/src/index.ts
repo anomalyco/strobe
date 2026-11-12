@@ -784,9 +784,13 @@ export interface CommandOptions {
 
 export interface ScriptOptions {
   /**
-   * The harness module whose exports cases call (`ctx.call`), relative to the bench file. strobe
-   * runs the same file for both variants, placed at the same path in a git ref's worktree, so its
-   * relative imports reach that variant's code. Keep the harness in one file.
+   * The harness module whose exports cases call (`ctx.call`), relative to the bench file, at the same
+   * path in each variant's folder, so its relative imports reach that variant's code. In the harness
+   * (the bench file's folder, strobe.json's `harness` paths) both variants run the bench's own copy:
+   * it is copied into a git ref's worktree, over the ref's own (`HarnessOverlay` says so). Outside it
+   * (`"../src/x.ts"`) the entry is code under test and each variant runs its own; a git ref that lacks
+   * it gets the bench's copy (`HarnessOverlay` info). A folder variant is never written to: the entry
+   * must be there. Keep the harness in one file.
    */
   entry: string
   /** Default `"bun"`. */
