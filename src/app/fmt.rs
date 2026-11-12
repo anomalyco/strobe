@@ -86,6 +86,12 @@ pub fn values(vs: &[f64], unit: &str) -> Vec<String> {
     if unit == "ms" { times(vs, false) } else { vs.iter().map(|v| value(*v, unit)).collect() }
 }
 
+/// Differences printed together (an estimate and its interval's ends), signed: times through
+/// `fmt::times`, any other unit each as `signed` prints it.
+pub fn signed_values(vs: &[f64], unit: &str) -> Vec<String> {
+    if unit == "ms" { times(vs, true) } else { vs.iter().map(|v| signed(*v, unit)).collect() }
+}
+
 pub fn signed(v: f64, unit: &str) -> String {
     // A time is never shown as 0 unless it is (`+<0.01 µs`).
     if unit == "ms" {
