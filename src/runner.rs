@@ -39,16 +39,19 @@ pub fn sdk_dir() -> Result<PathBuf> {
 }
 
 /// Whether a Bun version is before 1.4.0 by SemVer's order (a pre-release of 1.4.0 is before it), under
-/// which Playwright's `connectOverCDP` never connects (the runner's `beforeBun14`, the same rule). A
-/// version with no three numbers (a custom build) is not called old.
+/// which Playwright's `connectOverCDP` never connects (the runner's `beforeBun14`, the same rule): the
+/// version before any `+`, then before any `-`, must be exactly three dot-separated runs of ASCII
+/// digits, else (a custom build) it is not called old.
 pub fn before_bun_14(version: &str) -> bool {
     let full = version.trim();
     let core_pre = full.split('+').next().unwrap_or(full);
     let (core, pre) = core_pre.split_once('-').map_or((core_pre, false), |(c, _)| (c, true));
-    let n: Vec<u64> = core.split('.').take(3).map_while(|p| p.parse().ok()).collect();
-    if n.len() < 3 {
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
         return false;
     }
+    // A run of digits too long for a u64 compares as the largest (as the runner's Number does).
+    let n: Vec<u64> = parts.iter().map(|p| p.parse().unwrap_or(u64::MAX)).collect();
     (n[0], n[1]) < (1, 4) || ((n[0], n[1], n[2]) == (1, 4, 0) && pre)
 }
 

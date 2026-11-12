@@ -620,23 +620,33 @@ async function playwright(endpoint: string, target: string) {
   }
 }
 
+// The block the runner serves: `dropBlockConnections` moves it on, so a `prepare` still in flight from an
+// earlier block (strobe gave up on it) writes nothing into this one's state.
+let blockEpoch = 0
+
 // Ends the block's own connections to its browser (the Fetch session, Playwright, another engine's
-// relay) and forgets them, so no later block's hook sees them.
+// relay) and forgets them, so no later block's hook sees them: the state is cleared before anything is
+// awaited, and one close that throws does not keep the others.
 async function dropBlockConnections() {
-  if (state.session) await state.session.detach().catch(() => {})
-  if (state.playwright) await state.playwright.browser.close().catch(() => {})
-  if (state.relay) state.relay.end()
+  blockEpoch++
+  const { session, playwright: pw, relay } = state
   Object.assign(state, { playwright: null, playwrightError: null, session: null, mocks: [], relay: null, devtools: null })
+  try { relay?.end() } catch {}
+  await Promise.all([session?.detach().catch(() => {}), pw?.browser.close().catch(() => {})])
 }
 
-// Whether a Bun version is before 1.4.0 by SemVer's order (a pre-release of 1.4.0 is before it), read
-// from its numbers as `strobe status` reads them: no Bun.semver (Bun 1.0.15+, and it throws on a custom
-// build's version). A version with no three numbers is not called old.
+// Whether a Bun version is before 1.4.0 by SemVer's order (a pre-release of 1.4.0 is before it), by the
+// same rule as `runner::before_bun_14` in strobe: the version before any `+`, then before any `-`, must
+// be exactly three dot-separated runs of ASCII digits, else it is not called old (a custom build).
 function beforeBun14(version: string) {
-  const [core, ...pre] = version.split("+")[0].split("-")
-  const n = core.split(".").map(Number)
-  if (n.length < 3 || n.slice(0, 3).some((x) => !Number.isInteger(x))) return false
-  return n[0] < 1 || (n[0] === 1 && n[1] < 4) || (n[0] === 1 && n[1] === 4 && n[2] === 0 && pre.length > 0)
+  const full = version.trim()
+  const corePre = full.split("+")[0]
+  const dash = corePre.indexOf("-")
+  const [core, pre] = dash < 0 ? [corePre, false] : [corePre.slice(0, dash), true]
+  const parts = core.split(".")
+  if (parts.length !== 3 || parts.some((p) => !/^[0-9]+$/.test(p))) return false
+  const [a, b, c] = parts.map(Number)
+  return a < 1 || (a === 1 && b < 4) || (a === 1 && b === 4 && c === 0 && pre)
 }
 
 // The page strobe drives, by CDP target id: Playwright may attach to pages late, and a page of
@@ -849,10 +859,24 @@ async function handle(op: string, args: any) {
           state.devtools = args.endpoint ? { endpoint: args.endpoint, target: args.target } : null
           // A Playwright that cannot connect fails only a prepare that reads ctx.playwright.
           state.playwrightError = null
-          if (args.endpoint) state.playwright = await playwright(args.endpoint, args.target).catch((e) => ((state.playwrightError = e), null))
+          // A prepare strobe gave up on (its call timed out, the next block began) writes nothing into
+          // the next block's state, and its late Playwright closes.
+          const epoch = blockEpoch
+          if (args.endpoint) {
+            let error: unknown = null
+            const pw = await playwright(args.endpoint, args.target).catch((e) => ((error = e), null))
+            if (epoch !== blockEpoch) {
+              await pw?.browser.close().catch(() => {})
+              throw new Error("prepare: a later block began while this one's Playwright connected")
+            }
+            state.playwright = pw
+            state.playwrightError = error
+          }
           stream("prepare")
           launchHook = "the target's prepare"
-          state.prepared = await target.prepare(prepareContext())
+          const prepared = await target.prepare(prepareContext())
+          if (epoch !== blockEpoch) throw new Error("prepare: a later block began while this one's prepare ran")
+          state.prepared = prepared
         }
         // A `url` function names the first page from what `prepare` returned, so the block loads one page.
         if (typeof target?.url === "function") stream("url")

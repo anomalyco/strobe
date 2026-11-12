@@ -630,28 +630,66 @@ impl Guard {
 const UNREADABLE: &str = "\u{0}strobe: unreadable";
 
 /// A launch that never showed what it waited for (`waited`: a debugging port, a window): on macOS, when
-/// nothing launched for it ran (the root `pid` and every process of its set by `home`, under 1 ms of
-/// CPU in all), macOS held it before its first instruction, as Gatekeeper does with an app not yet
-/// opened since it was downloaded or updated (the kernel logs 'Security policy would not allow
-/// process'). On air a held Firefox had used 0.32 ms (its exec, in the kernel) after 5 s, and the
-/// smallest program that ran and then slept (`sleep`) 1.55 ms. That needs a person: exit 3 with the
-/// step, never retried. Else `None`: a slow launch, which a bench retries. A wrapper script that
-/// started the app is not held: the app's CPU counts.
+/// nothing launched for it ran past the kernel's exec (the root `pid` and every process of its set by
+/// `home`, each with its reaped children: `held_cpu`), macOS held it before its first instruction, as Gatekeeper does with an app not yet opened since it
+/// was downloaded or updated (the kernel logs 'Security policy would not allow process'): it waits in
+/// the kernel's exec, before dyld runs. That needs a person: exit 3 with the step, never retried. Else
+/// `None`: a slow launch, which a bench retries. Not held: a process gone or a zombie at the deadline,
+/// one whose CPU cannot be read, a wrapper whose child ran, a tiny program that ran and then waits.
 pub fn held_at_launch(pid: u32, home: Option<&Path>, exe: &Path, waited: &str) -> Option<Error> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    let set = host::process_set(pid, home);
-    let ns: u64 = set.iter().map(|p| p.cpu_ns).sum();
-    if set.is_empty() || ns >= 1_000_000 {
-        return None;
-    }
+    let ns = held_cpu(pid, home)?;
     let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
     let step = match bundle {
         Some(app) => format!("open {} once from the Finder and allow it (if macOS still refuses, allow it in System Settings > Privacy & Security > Open Anyway), then run again", app.display()),
         None => format!("allow {} in System Settings > Privacy & Security > Open Anyway, then run again", exe.display()),
     };
-    Some(Error::new(3, format!("{waited}; it used {:.1} ms of CPU in all, so macOS held it at launch (Gatekeeper asks a person after a download or an update)", ns as f64 / 1e6)).hint(step))
+    Some(
+        Error::new(
+            3,
+            format!(
+                "{waited}; it never got past starting ({:.1} ms of CPU in all, almost no system calls), so macOS held it at launch (Gatekeeper asks a person after a download or an update)",
+                ns as f64 / 1e6
+            ),
+        )
+        .hint(step),
+    )
+}
+
+/// `held_at_launch`'s bounds, measured on air (macOS 27, M4) 3–4 s after each start: a held Firefox 159
+/// made 16–17 Mach system calls (55 Unix ones) with 0.04–0.16 ms of user-mode CPU (0.3–1.4 ms in all);
+/// programs that ran and then waited (a C `pause()`, a Rust sleep, `/bin/sleep`, a shell running a
+/// paused child) made 83–313 Mach calls with 0.38–2.5 ms of user-mode CPU. Both must hold.
+#[cfg(target_os = "macos")]
+const HELD_MACH_CALLS: u64 = 40;
+#[cfg(target_os = "macos")]
+const HELD_USER_NS: u64 = 300_000;
+
+/// The CPU ns a launch used in all when nothing of it ran past the kernel's exec (`held_at_launch`):
+/// every process of its set made few Mach calls (dyld and libSystem make dozens), and their user-mode
+/// CPU with reaped children's (a wrapper's child that worked and exited counts) stays under
+/// `HELD_USER_NS`. Else None.
+#[cfg(target_os = "macos")]
+fn held_cpu(pid: u32, home: Option<&Path>) -> Option<u64> {
+    let pids = host::process_set_pids(pid, home);
+    if pids.is_empty() {
+        return None;
+    }
+    let (mut user, mut all) = (0u64, 0u64);
+    for p in pids {
+        // A process gone, a zombie, or one the kernel will not read: nothing says it was held.
+        let r = host::macos::launch_ran(p)?;
+        if r.mach_calls >= HELD_MACH_CALLS {
+            return None;
+        }
+        user += r.user_ns;
+        all += r.all_ns;
+    }
+    (user < HELD_USER_NS).then_some(all)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn held_cpu(_pid: u32, _home: Option<&Path>) -> Option<u64> {
+    None
 }
 
 pub fn alive(pid: u32) -> bool {

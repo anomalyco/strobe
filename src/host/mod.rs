@@ -1857,10 +1857,29 @@ pub fn display_of(hwnd: isize) -> Option<DisplayPath> {
 }
 
 /// Finds an executable: on PATH, as the user's shell would, then in the given candidate paths (known
-/// install places, for a desktop-app shell or a launchd job whose PATH lacks them, §2).
+/// install places, for a desktop-app shell or a launchd job whose PATH lacks them, §2). Only absolute
+/// PATH folders count: an empty entry (a leading or trailing `:` or `;`) or `.` would find a program in
+/// the current folder, an untrusted checkout's. On Unix the file must be executable: a `0644` file named
+/// like the tool would shadow the real one and fail to spawn.
 pub fn find_exe(name: &str, candidates: &[PathBuf]) -> Option<PathBuf> {
     let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|p| p.join(&exe)).find(|p| p.is_file())).or_else(|| candidates.iter().find(|p| p.is_file()).cloned())
+    std::env::var_os("PATH")
+        .and_then(|paths| std::env::split_paths(&paths).filter(|d| d.is_absolute()).map(|d| d.join(&exe)).find(|p| runnable(p)))
+        .or_else(|| candidates.iter().find(|p| runnable(p)).cloned())
+}
+
+/// A regular file (through links) this OS would run: on Unix, with an execute bit.
+fn runnable(p: &Path) -> bool {
+    let Ok(m) = std::fs::metadata(p) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        m.is_file() && m.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        m.is_file()
+    }
 }
 
 /// Runs a command and returns stdout when it succeeds.

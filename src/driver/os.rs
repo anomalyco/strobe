@@ -472,35 +472,38 @@ impl OsInput {
     /// `MOVE_QUIET`: a move posted before (the one from beside the point) may reach the page only with
     /// the next, in one frame's dispatch (macOS Chromium: probe 1 then read the move from beside it, 3
     /// units off, and every case of a page measured from outside was refused InputMismatch). Moves are
-    /// counted by the page's uncapped trusted-move count (`SCRIPT`'s `n`), and the wait ends by
-    /// `t + MOVE_QUIET` whatever comes: moves that keep arriving past it are someone else's (a person,
-    /// a trackpad's inertia, another program), and the map cannot tell which landing was strobe's.
+    /// counted by the page's uncapped trusted-move count (`SCRIPT`'s `n`) from the wait's first read.
+    /// Past `t` + 100 ms, three or more moves since that read are someone else's (a person, a trackpad's
+    /// inertia, another program: strobe posts at most two, from beside the point and onto it), and the
+    /// map cannot tell which landing was strobe's: refused. Fewer (strobe's own move arriving late, one
+    /// bump of the mouse) settle as usual, and by 50 ms after that the last landing stands.
     fn wait_move(&self, page: &Page, t: Duration) -> Result<Option<[f64; 2]>> {
         const MOVE_QUIET: Duration = Duration::from_millis(50);
         let start = Instant::now();
-        let (until, hard) = (start + t, start + t + MOVE_QUIET);
-        // (moves counted, the last landing) as last read, and when that changed.
+        let (until, hard) = (start + t, start + t + Duration::from_millis(100));
+        // (moves counted, the last landing) as last read, and when that changed; the count at the first read.
         type Read = (u64, Option<[f64; 2]>);
         let mut seen: Option<(Read, Instant)> = None;
-        let mut changes = 0u32;
+        let mut first: Option<u64> = None;
         loop {
             let v = page.eval(&format!("JSON.stringify([__strobeOs.n[{MOVE}], __strobeOs.moves.at(-1) ?? null])"))?;
             let now = Instant::now();
             let read = v.as_str().and_then(|s| serde_json::from_str::<Read>(s).ok()).unwrap_or((0, None));
             if seen.as_ref().is_none_or(|(was, _)| *was != read) {
-                changes += u32::from(seen.is_some());
                 seen = Some((read, now));
             }
+            let moves = read.0.saturating_sub(*first.get_or_insert(read.0));
             let since = seen.as_ref().map_or(now, |(_, at)| *at);
             match read.1 {
                 Some(p) if now.duration_since(since) >= MOVE_QUIET => return Ok(Some(p)),
-                Some(_) if now >= hard => {
+                Some(_) if now >= hard && moves >= 3 => {
                     return Err(refused(format!(
-                        "pointer moves kept reaching the page while strobe mapped it ({changes} changes in {} ms, the last {} ms ago): something else moves the pointer (a person, a trackpad's inertia, another program), so strobe cannot tell where its own move landed",
+                        "pointer moves kept reaching the page while strobe mapped it ({moves} pointer moves in {} ms, the last {} ms ago): something else moves the pointer (a person, a trackpad's inertia, another program), so strobe cannot tell where its own move landed",
                         now.duration_since(start).as_millis(),
                         now.duration_since(since).as_millis()
                     )));
                 }
+                Some(p) if now >= hard + MOVE_QUIET => return Ok(Some(p)),
                 None if now >= until => return Ok(None),
                 _ => {}
             }

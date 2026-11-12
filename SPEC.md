@@ -83,7 +83,9 @@ When a design change is agreed, update this file in the same change.
 - Deep mode (§13.4): one UAC (Windows) or one sudo (Linux) during `up`.
 
 Tools may be installed but not on PATH (desktop-app shells). strobe looks on PATH first, as the
-user's shell would, then in known install locations (`host::find_exe`).
+user's shell would, then in known install locations (`host::find_exe`). Only absolute PATH folders count
+(an empty entry or `.` would run a program in the current folder, an untrusted checkout's), and on
+Unix only a file with an execute bit.
 
 ## 3. Glossary
 
@@ -803,14 +805,15 @@ to 3 times per block; a run that failed, or a validator, still ends it. Two such
 (load average 35–70 on a shared Mac) once lost a 40-minute experiment with its finished pairs. A
 navigation the browser refuses for its address (a blocked port, a bad scheme or URL, a host that does
 not resolve: `net::ERR_UNSAFE_PORT` and its kin) fails the case at once: running the launch again
-cannot pass. Nor is an evaluation in the page that never ended (`Runtime.evaluate`,
+cannot pass. An evaluation in the page that never ended (`Runtime.evaluate`,
 `Runtime.callFunctionOn`, `Runtime.awaitPromise`, BiDi's `script.evaluate` and `script.callFunction`
-with no reply): the browser answered, the page did not, and a new launch meets the same page (macOS:
-a frame wait on a popup's hidden opener took 6 minutes a case in 4 tries); a frame wait after a run
-that times out is the run's (`RunIncomplete`). A launch whose browser macOS held before it ran
-(nothing launched for it used 1 ms of CPU: Gatekeeper waiting for a person after a download or an
-update) is not retried either: it exits 3 with the step (open the app once from the Finder, or allow
-it in System Settings > Privacy & Security), for browsers, `app:`/`exe:` and native targets alike
+with no reply) once the block's own page work began (its `prepare` ran) is the page's, refused
+`RunIncomplete` ("the page stopped answering"), never retried: the browser answered, the page did
+not, and a new launch meets the same page (macOS: a frame wait on a popup's hidden opener took 6
+minutes a case in 4 tries). One while the browser attaches (its first blank page, Firefox's chrome
+reads, fitting the viewport) is a launch that may pass, retried as before. A launch macOS held
+before it ran (Gatekeeper waiting for a person after a download or an update, §13.1) is not retried
+either: it exits 3 with the step, for browsers, `app:`/`exe:` and native targets, launch cases too
 (`isolate::held_at_launch`). A page's address in such errors, and on a failed step's `page:` line, is cut to 80
 characters with its length (a 4 KB `data:` page).
 
@@ -5246,9 +5249,11 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   A probe's landing is the page's last trusted move once 50 ms passed with no other (its uncapped
   move count unchanged): macOS Chromium delivered the move from beside the point with the one onto
   it, so the first move read was 3 units off and every page measured from outside was refused (the
-  third point off the map). The wait ends by its limit plus those 50 ms whatever arrives: moves that
-  keep coming are someone else's (a person, a trackpad's inertia, another program), refused
-  `InputMismatch` naming how many came, never waited out. None within a second, points that do not map by one
+  third point off the map). Past the wait's limit plus 100 ms, three or more moves since its first
+  read are someone else's (a person, a trackpad's inertia, another program: strobe posts at most two
+  a probe), refused `InputMismatch` naming how many pointer moves came, never waited out; one or two
+  (strobe's own arriving late, one bump of the mouse) settle as usual, and 50 ms later the last
+  landing stands. None within a second, points that do not map by one
   scale, a third point that lands over 2 page pixels from where the map puts it, or a viewport the
   map puts outside the window's frame (within 3 units), refuse the block `InputMismatch`, whose text
   names the window class and process the moves were posted to and says when the cursor could not be
@@ -5361,7 +5366,7 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
 | `SoftwareGpu` | the target renders on a software adapter (SwiftShader, WARP and the Microsoft Basic Render Driver, llvmpipe, lavapipe, softpipe: `validity::is_software_gpu`) and a frame or GPU metric is requested; a native app: its GPU work ran on such an adapter. Per metric for a headed page (a virtual display such as Xvfb, a machine without a GPU): what reached a display and every `gpu.*` metric (`validity::software_drawn`) leave its values and show refused, a primary among them refuses the block, and CPU, main-thread work, memory and milestones stay, with a warning that the browser's CPU metrics include the rasterization a GPU would do (compare them only with runs on the same setup). Headless, `Headless` refuses what reached no display instead (`software_refusals`, in `record` and in every page block of a bench: `browser_seen` refuses a drawn primary when the block's browser starts, `software_state` takes the rest out of the block with its frame lists). A native app on strobe's Wayland compositor on a machine with no GPU render node (`/dev/dri/renderD*`): the compositor composites with pixman and the app draws in software, so `gpu.*` is refused (a `gpu.*` primary before anything builds) and a warning says `cpu.work` holds the app's own rasterization |
 | `DevBuild` | a dev or unminified build is measured for timing (Vite client, a framework's dev build, `NODE_ENV` not `production`; a native app whose executable imports a debug C runtime, such as `ucrtbased.dll`: strobe reads only the executable's header slices and needs an import entry, where it once read a 115 MB executable whole per block) |
 | `DebuggerAttached` | an iPhone tab (`wir:`) that another debugger (Safari's Web Inspector) already holds, refused before strobe attaches (`target/wir.rs`). Not built: the desktop check that a debugger, DevTools or a non-timing probe is attached during a timing block |
-| `WindowHidden` | the window is minimized, hidden, occluded or `visibilityState` is not `visible`; a native app's main window hidden, minimized or cloaked at the start or end of the runs, or another window over the point strobe would click (the OS hit-tests elsewhere). On macOS the app must also be the active app (strobe makes it so in every block); while someone uses the Mac the block does not refuse but waits, holding nothing, until a minute passes without input, then activates the app and runs it again; a block whose app lost the front while nobody used the Mac (another app opened a window or took focus by itself) is discarded and runs again, up to 5 times. A frame wait (the frame after a headed run, `until: "frame"`, the frame after scrolling an element into view, the display's frame period, the frames after a commanded resize) on a page hidden for 200 ms (`document.hidden`) ends at once, refused here when the series needs frames (a display metric), never a 60 s wait and never a retried launch (§10.2 `PageHidden`) |
+| `WindowHidden` | the window is minimized, hidden, occluded or `visibilityState` is not `visible`; a native app's main window hidden, minimized or cloaked at the start or end of the runs, or another window over the point strobe would click (the OS hit-tests elsewhere). On macOS the app must also be the active app (strobe makes it so in every block); while someone uses the Mac the block does not refuse but waits, holding nothing, until a minute passes without input, then activates the app and runs it again; a block whose app lost the front while nobody used the Mac (another app opened a window or took focus by itself) is discarded and runs again, up to 5 times. A frame wait (the frame after a run, headed or headless, `until: "frame"`, the frame after scrolling an element into view, the display's frame period, the frames after a commanded resize) on a page hidden for 200 ms without a break (`document.hidden`: on macOS Chromium a `window.open` popup hides its opener) refuses here, whatever the series measures: a hidden page's timers clamp, its frames stop and its renderer is backgrounded, so its run is no valid run. Never a 60 s wait, never a retried launch; the fix names a popup the case opened. The wait arms no timer on a visible page: a `visibilitychange` listener arms one 200 ms timer while the page is hidden, with the browser's own timer and listener calls kept before the page's scripts |
 | `WrongScreen` | a block's window or page is not on the screen its case's (or target's) `expect` names (§9.6): a title, a dialog or heading, an address, or selectors that must be visible, read before the runs and after them (never inside one). A first-run dialog over the pane the case meant fails the block instead of timing it. Before a native app's runs, only titles are checked unless setup already drove the app: reading its tree there would connect strobe to it for the runs. Not an `expect.heading` on a native window that shows a Chromium web view whose tree was read and held no heading: that is `NotForTarget` (UI Automation gives such a client the content's form controls only; fix: a webview() or app() target, or `expect.title` / `expect.visible`, §13.7) |
 | `UnpacedSpin` | a native app presented more frames in a run than the display refreshed, plus ten: its frame metrics are refused |
 | `NoPresentSource` | a presented-frame or input-latency metric of a native app with no presentation times, or no input that reacted (refuses that metric); every frame and latency metric of a block when the OS's present events lost the way to the screen of any present of the target's processes in its measured runs (Windows: a DirectComposition surface's, as Firefox's WebRender presents; counted with none, its frames would read short or 0); a headed page on Linux with neither `DISPLAY` nor `WAYLAND_DISPLAY`, refused before anything builds (`web::refusal`: a bench's series, a record) and again at the launch |
@@ -5486,7 +5491,6 @@ emits:
 | `TickSampledCpu` | warn | a `cli()` run's `cpu.work` holds child processes' CPU from Windows' clock ticks (where strobe did not hold them): their share of `cpu.work` (§9.6) |
 | **What a run counted** | | |
 | `EndedCpu` | info | once per series: processes ended inside measured runs (or before a launch was ready), and `cpu.work` holds the CPU they used, from Linux's launch cgroups or the handles Windows strobe held from each process's start: how many runs, the median ms, and on Windows the executables that used the most (§9.6) |
-| `PageHidden` | warn | a headed page run left the page hidden (`document.hidden` for 200 ms: on macOS Chromium a `window.open` popup hides its opener), so no frame came to end the run with: the run ended at its last step, and the series declares no display metric (one that does is refused `WindowHidden`); names how many runs, and the fix: keep the page visible (close the popup in the run) |
 | `HeadlessFrame` | warn | a headless run's last step left at least 1.0 ms and 5% of `main.work` of style and layout (or layouts the run read 0 of) to the frame after the run, and the series declares a metric read before that frame (`run.duration`, `cpu.*` but `cpu.wakes`, the trace's metrics over the run): names those metrics and the time; pass `{ until: [selector, "frame"] }` (§7.3) |
 | `Counters` | info | a series' counter blocks ran apart from its timing blocks (Linux, §7.5): how many pairs each kind got |
 | `HttpProbe` | info, warn | info: a series' HTTP probe blocks ran apart from its clean timing blocks, and how many pairs each kind got (or that the other kind failed); warn: a block's probes could not be kept in a recording (§8.9) |
@@ -6505,14 +6509,18 @@ resolve to native symbols; the residue stays visible as `unresolved`.
   their stderr into the profile (`stderr.log`): a browser that exits before its debugging port opens,
   with nothing else of its launch running, fails at once with its exit code and last lines, never after
   the 30 s wait for the port (Edge's launcher exits 0 once it hands the window to a process it started,
-  which carries on). On macOS a browser (or an `app:`/`exe:` app, or a native app's window) that
-  showed nothing in its wait and whose launch used under 1 ms of CPU in all (the root and its set by
-  home: a wrapper script's app counts) was held by macOS before it ran, as Gatekeeper holds an app not
-  yet opened since a download or an update (the kernel logs 'Security policy would not allow
-  process'; on air a held Firefox 159 had used 0.32 ms, the smallest program that ran and slept
-  1.55 ms): exit 3 with the step (an app bundle: open it once from the Finder and allow it, or System
-  Settings > Privacy & Security > Open Anyway; a bare binary: Open Anyway), never retried (§5.6
-  "Launches that fail and pass"; `isolate::held_at_launch`).
+  which carries on). On macOS a browser (or an `app:`/`exe:` app, a native app's window, a native
+  launch case's window or milestone) that showed nothing in its wait and of whose launch nothing ran
+  past the kernel's exec was held by macOS, as Gatekeeper holds an app not yet opened since a download
+  or an update (the kernel logs 'Security policy would not allow process'): every live process of its
+  set by home (none gone or a zombie: an exit at the deadline is no held launch) made under 40 Mach
+  system calls, and their user-mode CPU with reaped children's (a wrapper's child that worked counts)
+  is under 0.3 ms. On air, 3–4 s after the start, a held Firefox 159 made 16–17 Mach calls with
+  0.04–0.16 ms of user-mode CPU (0.3–1.4 ms in all, so CPU in all cannot tell); programs that ran and
+  then waited (a C `pause()`, a Rust sleep, `/bin/sleep`, a shell running a paused child) made 83–313
+  Mach calls with 0.38–2.5 ms of user-mode CPU. Then: exit 3 with the step (an app bundle: open it
+  once from the Finder and allow it, or System Settings > Privacy & Security > Open Anyway; a bare
+  binary: Open Anyway), never retried (§5.6 "Launches that fail and pass"; `isolate::held_at_launch`).
 - `SoftwareGpu` checks `SystemInfo.getInfo` before measuring, per metric (10.1). Its device list puts
   first the adapter Chromium's GL renderer names (`auxAttributes.glRenderer`, ANGLE's `NVIDIA … (0x00002C05)
   Direct3D11`): by device id, else by name (a Linux OpenGL adapter named from pci.ids by the marketing
@@ -8654,8 +8662,7 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   `ri_child_*_time` in ns, `interaction.*` from a pixel proof under the 2% budget, a visible Dock's
   work area, Safari Technology Preview, an app bundle that needs a permission its parent had, the
   HTTP probe (§8.9), Firefox on macOS (on air 159.0.1 is held by Gatekeeper until a person opens it
-  once) and the focus case whose popup leaves the opener page `hidden` on macOS Chromium (its frame
-  waits hang 60 s). Checked on air (macOS 27, M4, 60 Hz) on 2026-11-12: plain `bun` under the
+  once). Checked on air (macOS 27, M4, 60 Hz) on 2026-11-12: plain `bun` under the
   terminal bench leaves its Library cache as it was, OS input to headed Chromium (9 of 9), a native
   app's pixel anchors, waits and input latency, a page measured from outside, startup still running
   into run 1 (`NotSteady` naming the thread), `query inputs`, `look exe:`, the prune checks.
@@ -8724,17 +8731,21 @@ what was built but not yet run on a device is in §21.
   was refused `InputMismatch`, 3 units off); `AnchorNotFound` for a shape found in other colours says
   so and offers no lower threshold (9.6, 10.1). The prune checks run on macOS (`du -k`, perl's
   `flock`, no driver cache store there): air 34 of 34, 11 of 11, 11 of 11. After review: the map's
-  wait ends by its limit plus 50 ms whatever arrives (moves that keep coming refuse `InputMismatch`;
-  they held it for as long as they came, 33 s on air); tools come from PATH first, then their known
-  places (`find_exe`; Bun's: `~/.bun/bin`, then Homebrew's), and the Bun error names the binary;
-  one SemVer rule for an old Bun in `status`, `up` and the runner; the runner closes a block's
-  connections at the next `block` too; a launch held by macOS is exit 3, judged on its whole set
-  (a wrapper's app counts) under 1 ms of CPU, for `app:`/`exe:` and native targets too; a launch
-  case's prepare that throws refuses its series; `look proc:`/`ws://`/`node:`/`bun:` are usage
-  errors. A frame wait on a page hidden for 200 ms ends at once (refused `WindowHidden` where frames
-  matter, else `PageHidden`), and an in-page evaluation with no reply is no failed launch: the macOS
-  popup cases took 11 and 21 s, refused `WindowHidden`, where each took about 6 minutes in 4 launches
-  (2, 5.6, 9.10, 10.1, 10.2, 13.1).
+  wait ends by its limit plus 100 ms when three or more moves keep coming (`InputMismatch`; they held
+  it for as long as they came, 33 s on air), and strobe's own late move or one bump still settles;
+  tools come from absolute PATH folders first (executable files only on Unix), then their known
+  places (`find_exe`; Bun's: `~/.bun/bin`, then Homebrew's), and the Bun error names the binary; one
+  SemVer rule for an old Bun in `status`, `up` and the runner (exactly three runs of digits); the
+  runner clears a block's connections before it awaits their close, at the next `block` too, and a
+  prepare strobe gave up on writes nothing into the next block; a launch held by macOS is exit 3,
+  judged on user-mode CPU over its live set with reaped children, for `app:`/`exe:` and native
+  targets and launch cases too; a launch case's prepare that throws refuses its series; `look
+  proc:`/`ws://`/`node:`/`bun:` are usage errors. A frame wait on a page hidden for 200 ms without a
+  break refuses `WindowHidden` for every series, headed or headless (a hidden page's run is no valid
+  run), and arms no timer on a visible page; an in-page evaluation with no reply after the block's page
+  work began is `RunIncomplete`, never a failed launch, while one during the browser's attach is still
+  retried: the macOS popup cases took 11 and 21 s, refused `WindowHidden`, where each took about 6
+  minutes in 4 launches (2, 5.6, 9.10, 10.1, 13.1).
 
 **0.29.0** (1c9e9b3, 2026-11-12)
 

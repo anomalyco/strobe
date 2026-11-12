@@ -490,14 +490,45 @@ const LAUNCH_RETRIES: u32 = 3;
 /// as opposed to a run that failed or a validator that refused.
 fn transient(e: &Error) -> bool {
     // Unreachable (255): no debugging port, a connection that closed. A timeout (124) only from CDP or
-    // BiDi: a call with no reply; a hook or a wait that timed out is the bench's own. Not an evaluation
-    // in the page that never ended: the browser answered, the page's own work (a promise it never
-    // settled: a frame wait on a page that stopped drawing, mac-4) did not, and a new launch meets the
-    // same page (macOS: a popup's opener hidden, 6 minutes a case in 4 tries).
+    // BiDi: a call with no reply; a hook or a wait that timed out is the bench's own. An evaluation in
+    // the page with no reply once the block's page work began is the page's (`page_hang`), refused
+    // before it gets here; one while the browser attaches (its first blank page, Firefox's chrome
+    // reads) is a launch that may pass.
+    e.validator().is_none() && !bad_address(e) && (e.code == 255 || (e.code == 124 && (e.message.starts_with("cdp ") || e.message.starts_with("bidi "))))
+}
+
+/// A page block's errors once its page work began (`run_chunk`'s `page_work`): an evaluation in the
+/// page that never answered (no reply in 60 s: a promise the page never settled, a main thread that
+/// stopped) is `RunIncomplete`, never a failed launch run again: the browser answered, the page did not,
+/// and a new launch meets the same page (macOS: a frame wait on a popup's hidden opener took 6 minutes a
+/// case in 4 launches).
+fn page_hang(r: Result<Launch>) -> Result<Launch> {
     const IN_PAGE: [&str; 5] = ["cdp Runtime.evaluate:", "cdp Runtime.callFunctionOn:", "cdp Runtime.awaitPromise:", "bidi script.evaluate:", "bidi script.callFunction:"];
-    e.validator().is_none()
-        && !bad_address(e)
-        && (e.code == 255 || (e.code == 124 && (e.message.starts_with("cdp ") || e.message.starts_with("bidi ")) && !IN_PAGE.iter().any(|p| e.message.starts_with(p))))
+    let settle = |e: Error| {
+        if e.code == 124 && e.validator().is_none() && IN_PAGE.iter().any(|p| e.message.starts_with(p)) {
+            crate::runner::incomplete(
+                "the page stopped answering",
+                "page",
+                e,
+                "",
+                "something kept the page's main thread busy or paused for a minute (a hang, a modal dialog, a debugger): see what it ran; a new launch would meet the same page",
+            )
+        } else {
+            e
+        }
+    };
+    match r {
+        Err(e) => Err(settle(e)),
+        Ok(mut l) => {
+            l.abort = l.abort.take().map(settle);
+            for c in &mut l.cases {
+                if let Err(e) = c {
+                    *e = settle(e.clone());
+                }
+            }
+            Ok(l)
+        }
+    }
 }
 
 /// A navigation the browser refused for its address (a port it blocks, a scheme or URL it cannot
@@ -7250,6 +7281,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         steps.borrow_mut().push((name.to_string(), lapped.get().elapsed().as_secs_f64() * 1e3));
         lapped.set(Instant::now());
     };
+    // Set once the block's own page work begins (its `prepare` ran): an evaluation in the page that never
+    // answers after that is the page's (`page_hang`), never a failed launch to run again.
+    let page_work = Cell::new(false);
     let result = (|| -> Result<Launch> {
         let seen = browser_seen(ctx, s, v, headless, !matches!(set, Set::Attribution | Set::Memory), &browser)?;
         let software = seen.software;
@@ -7366,8 +7400,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let nav_at = Cell::new(f64::NAN);
         let doc_expected: Cell<Option<f64>> = Cell::new(None);
         let doc_lost = Cell::new(false);
-        // Per series: runs that ended on a page left hidden, with no frame waited for (`PageHidden`).
-        let hidden_ends: RefCell<BTreeMap<String, u32>> = RefCell::new(BTreeMap::new());
         let counters = || -> [f64; 6] {
             // Chromium's Performance domain; an engine without it has no such counters (NaN, never 0).
             let m = page.cdp().map_or(Value::Null, |p| p.send("Performance.getMetrics", json!({})).unwrap_or(Value::Null));
@@ -7755,6 +7787,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         lap("prepare");
         prepared.set(true);
+        page_work.set(true);
         // A phone's screen as its first page saw it, kept with the block.
         let mut phone_screen = Value::Null;
         if !app {
@@ -8144,19 +8177,17 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // step: its frames come from a clock of the browser's own, which with the display off took
             // 60 to 165 ms for two (SPEC 7.2); the frame is waited for after the run, untimed.
             let frame_after = !outside && !hooks.ended_untimed();
-            // A page the run left hidden (macOS hides a popup's opener) draws no frame: a series that
-            // reads frames refuses, and one that does not ends the run at its last step, said once
-            // (`PageHidden`). A frame wait that times out is the run's, never a failed launch.
+            // A page the run left hidden (macOS hides a popup's opener) refuses the run `WindowHidden`,
+            // headed or headless, whatever the series measures: a hidden page's timers clamp, its frames
+            // stop and its renderer is backgrounded. A frame wait that times out is the run's, never a
+            // failed launch.
             let frame_wait = |what: &str| {
                 driver
                     .dispatch("frame", &[])
                     .map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), what, e, "", "the page drew no frame after the run; see what keeps its main thread busy"))
             };
-            if frame_after && !headless && crate::driver::hidden(&frame_wait("frame")?) {
-                if let Some(m) = declared_metrics(s).into_iter().find(|m| validity::display_metric(m)) {
-                    return Err(crate::driver::page_hidden(&format!("{} run, which declares {m}", s.case)));
-                }
-                *hidden_ends.borrow_mut().entry(s.label()).or_insert(0) += 1;
+            if frame_after && !headless {
+                frame_wait("frame")?;
             }
             let t1 = host::now_ns();
             let (fast1, tsc1) = fast_read(true);
@@ -9044,16 +9075,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                         ),
                     ));
                 }
-                let hidden_runs = hidden_ends.borrow().get(&s.label()).copied().unwrap_or(0);
-                if hidden_runs > 0 && !ctx.warnings.iter().any(|w| w.id == "PageHidden" && w.text.starts_with(&s.label())) {
-                    ctx.warnings.push(validity::warn(
-                        "PageHidden",
-                        format!(
-                            "{}: {hidden_runs} run(s) left the page hidden (document.visibilityState \"hidden\": on macOS a popup hides its opener), and a hidden page draws no frame, so those runs ended at their last step without the frame a visible page's run ends with; keep the page visible (close the popup in the run) to time that frame",
-                            s.label()
-                        ),
-                    ));
-                }
                 // canvas.*: frames per run, and gaps between consecutive frames pooled over the measured runs, as
                 // frames.interval pools presented frames. A gap never spans two documents.
                 let case_canvas = declared.iter().any(|m| m.starts_with("canvas."));
@@ -9435,6 +9456,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         out.extend(failed.map(Err));
         Ok(Launch { cases: out, abort, notes, actions: None, log_at, case_ms, first_run: None })
     })();
+    let result = if page_work.get() { page_hang(result) } else { result };
     lapped.set(Instant::now());
     // A timed block whose phone got hot during it describes a throttling phone (`Thermal`): it runs again.
     let cooled = on_phone.filter(|_| x.measures_time()).map_or(Ok(()), |p| p.still_cool());
