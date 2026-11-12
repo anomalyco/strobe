@@ -614,7 +614,7 @@ pub fn calibrate(full: bool) -> Result<Value> {
             Some(why) => format!("{why}: frame, display and GPU checks skipped"),
             None => hz.map_or("display rate unread".to_string(), |h| format!("display {h:.0} Hz")),
         };
-        let summary = format!("speed check {speed:.1} ms · {shown} · {passed}/{} cases within tolerance", checks.len());
+        let summary = format!("speed check {} · {shown} · {passed}/{} cases within tolerance", super::fmt::time(speed), checks.len());
         Ok(json!({
             "at": super::record::now_iso(), "speed_ms": speed, "display_hz": hz, "checks": checks, "ok": ok, "summary": summary,
             "headless": headless.is_some(), "software_gpu": gpu.software, "gpu": gpu.devices.first(), "frames_skipped": no_frames,

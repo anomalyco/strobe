@@ -427,7 +427,7 @@ pub fn text(meta: &Value) -> String {
                 p["events"],
                 p["events_lost"],
                 p["via"].as_str().unwrap_or(""),
-                cpu.map(|c| format!("{c:.1} ms CPU ({:.3}% of a core)", 100.0 * c / dur)).unwrap_or_else(|| "?".into())
+                cpu.map(|c| format!("{} CPU ({:.3}% of a core)", fmt::time(c), 100.0 * c / dur)).unwrap_or_else(|| "?".into())
             );
         }
     }

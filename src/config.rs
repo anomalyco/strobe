@@ -228,7 +228,26 @@ const TOP: Shape = Keys(&[
     // The user's own file only (`load` refuses it in a project's): caches unused this long go on
     // their own, or "off" (SPEC 5.14).
     ("prune", Keys(&[("unused", Str)])),
+    // The unit times print in (µs by default; `--unit` over it): the project's over the user's.
+    ("unit", Enum(crate::fmt::TimeUnit::NAMES)),
 ]);
+
+/// The unit times print in that strobe.json picks (`"unit"`): the project's at `root`, else the
+/// user's own, else none. Read on its own, so a command that reads no other setting (`query`,
+/// `report`) is not failed by another key's problem; a `"unit"` strobe does not have is a usage error
+/// with where it is.
+pub fn unit(root: &Path) -> Result<Option<crate::fmt::TimeUnit>> {
+    for path in [root.join("strobe.json"), host::paths::state_path().join("strobe.json")] {
+        let Ok((map, problems)) = read(&path) else { continue };
+        if let Some(p) = problems.into_iter().find(|p| matches!(p.path.first(), Some(Seg::Key(k)) if k == "unit")) {
+            return Err(p.error(""));
+        }
+        if let Some(u) = map.get("unit").and_then(Value::as_str) {
+            return Ok(crate::fmt::TimeUnit::parse(u));
+        }
+    }
+    Ok(None)
+}
 
 /// Why `prune.unused` is not one strobe reads ("off" or an age), if it is not.
 fn bad_unused(v: &Value) -> Option<String> {

@@ -478,13 +478,13 @@ impl Weighted {
         if k.sampled() {
             text += &format!(" · {} and {} samples", self.samples[0], self.samples[1]);
         }
-        text += &format!(" · {per}\n  {:>10}  {:>10}  {:>11}  {:>9}  {}\n", "base", "head", "Δ", if k.sampled() { "±95%" } else { "" }, self.by);
+        text += &format!(" · {per}\n  {:>13}  {:>13}  {:>14}  {:>9}  {}\n", "base", "head", "Δ", if k.sampled() { "±95%" } else { "" }, self.by);
         let mut rows_json = Vec::new();
         for row in self.rows.iter().take(top) {
             let ci = self.ci(row);
             let noise = self.noise(row);
             text += &format!(
-                "{} {:>10}  {:>10}  {:>11}  {:>9}  {}{}\n",
+                "{} {:>13}  {:>13}  {:>14}  {:>9}  {}{}\n",
                 if noise { "~" } else { " " },
                 k.show(row.v[0]),
                 k.show(row.v[1]),
@@ -714,7 +714,7 @@ fn rows_text(rows: &[(String, f64, f64)], top: usize, show: impl Fn(f64) -> Stri
     let mut text = String::new();
     let mut json_rows = Vec::new();
     for (k, x, y) in rows.iter().take(top) {
-        text += &format!("  {:>10}  {:>10}  {:>11}  {k}\n", show(*x), show(*y), signed(y - x, &show));
+        text += &format!("  {:>13}  {:>13}  {:>14}  {k}\n", show(*x), show(*y), signed(y - x, &show));
         json_rows.push(json!({ "name": k, "base": x, "head": y, "delta": y - x }));
     }
     (text, json_rows)
@@ -726,7 +726,7 @@ fn signed(v: f64, show: &impl Fn(f64) -> String) -> String {
     match v {
         _ if body == show(0.0) => body,
         v if v > 0.0 => format!("+{body}"),
-        v if v < 0.0 => format!("−{body}"),
+        v if v < 0.0 => format!("{}{body}", fmt::minus()),
         _ => body,
     }
 }
@@ -736,16 +736,21 @@ fn style(a: &Rec, b: &Rec, top: usize) -> Result<Output> {
     let (x, y) = (super::invalidation(a)?, super::invalidation(b)?);
     let (rx, ry) = (x.runs.max(1) as f64, y.runs.max(1) as f64);
     let count = |v: f64| fmt::value(v, "count");
-    let scalars = vec![
+    let scalars = [
         ("recalcs per run".to_string(), x.recalcs as f64 / rx, y.recalcs as f64 / ry),
-        ("recalc ms per run".to_string(), x.recalc_ms / rx, y.recalc_ms / ry),
+        ("recalc time per run".to_string(), x.recalc_ms / rx, y.recalc_ms / ry),
         ("elements restyled per run".to_string(), x.elements / rx, y.elements / ry),
         ("invalidations per run".to_string(), x.tracked as f64 / rx, y.tracked as f64 / ry),
     ];
     let mut text = format!("style invalidation · base {} → head {} · per run ({} and {} measured runs)\n", a.id, b.id, x.runs, y.runs);
-    text += &format!("  {:>10}  {:>10}  {:>11}\n", "base", "head", "Δ");
-    let (t, scalars_json) = rows_text(&scalars, scalars.len(), count);
-    text += &t;
+    text += &format!("  {:>13}  {:>13}  {:>14}\n", "base", "head", "Δ");
+    // The recalc time is a time; the rest are counts.
+    let mut scalars_json = Vec::new();
+    for (i, row) in scalars.iter().enumerate() {
+        let (t, j) = if i == 1 { rows_text(std::slice::from_ref(row), 1, |v| fmt::value(v, "ms")) } else { rows_text(std::slice::from_ref(row), 1, count) };
+        text += &t;
+        scalars_json.extend(j);
+    }
     let per = |m: &BTreeMap<String, u64>, r: f64| -> BTreeMap<String, f64> { m.iter().map(|(k, n)| (k.clone(), *n as f64 / r)).collect() };
     let what = |v: &super::Invalidation, r: f64| -> BTreeMap<String, f64> { v.what.iter().map(|(k, (n, _))| (k.clone(), *n as f64 / r)).collect() };
     let sources = |v: &super::Invalidation, r: f64| -> BTreeMap<String, f64> {
@@ -794,11 +799,11 @@ fn threads(a: &Rec, b: &Rec, top: usize) -> Result<Output> {
         };
         let (ca, cb) = (read(a)?, read(b)?);
         text = format!("threads · base {} → head {} · CPU per measured run of the threads Firefox's profiler sampled, processes of one kind summed\n", a.id, b.id);
-        text += &format!("  {:>10}  {:>10}  {:>11}  process · thread\n", "base", "head", "Δ");
+        text += &format!("  {:>13}  {:>13}  {:>14}  process · thread\n", "base", "head", "Δ");
         let mut rows_json = Vec::new();
         for (k, x, y) in keyed(&ca, &cb).iter().take(top) {
             let ms = |v: f64| fmt::value(v, "ms");
-            text += &format!("  {:>10}  {:>10}  {:>11}  {k}\n", ms(*x), ms(*y), signed(y - x, &ms));
+            text += &format!("  {:>13}  {:>13}  {:>14}  {k}\n", ms(*x), ms(*y), signed(y - x, &ms));
             rows_json.push(json!({ "thread": k, "base_cpu_ms_per_run": x, "head_cpu_ms_per_run": y, "delta_cpu_ms": y - x }));
         }
         json = json!({ "firefox": true, "rows": rows_json });
@@ -824,14 +829,14 @@ fn threads(a: &Rec, b: &Rec, top: usize) -> Result<Output> {
         let ((ca, wa), (cb, wb)) = (read(a)?, read(b)?);
         let rows = keyed(&ca, &cb);
         text = format!("threads by name · base {} → head {} · CPU per measured run; wakes per second\n", a.id, b.id);
-        text += &format!("  {:>10}  {:>10}  {:>11}  {:>17}  thread (started in) [whose]\n", "base", "head", "Δ", "wakes/s");
+        text += &format!("  {:>13}  {:>13}  {:>14}  {:>17}  thread (started in) [whose]\n", "base", "head", "Δ", "wakes/s");
         let mut rows_json = Vec::new();
         for (k, x, y) in rows.iter().take(top) {
             let (u, v) = (wa.get(k).copied(), wb.get(k).copied());
             let ms = |v: f64| fmt::value(v, "ms");
             let w = |x: Option<f64>| x.map_or("—".to_string(), |x| fmt::value(x, "count"));
             let wakes = if k == EXITED { String::new() } else { format!("{} → {}", w(u), w(v)) };
-            text += &format!("  {:>10}  {:>10}  {:>11}  {:>17}  {k}\n", ms(*x), ms(*y), signed(y - x, &ms), wakes);
+            text += &format!("  {:>13}  {:>13}  {:>14}  {:>17}  {k}\n", ms(*x), ms(*y), signed(y - x, &ms), wakes);
             rows_json.push(json!({ "thread": k, "base_cpu_ms_per_run": x, "head_cpu_ms_per_run": y, "delta_cpu_ms": y - x, "base_wakes_per_s": u, "head_wakes_per_s": v }));
         }
         json = json!({ "native": true, "rows": rows_json });
@@ -855,12 +860,12 @@ fn threads(a: &Rec, b: &Rec, top: usize) -> Result<Output> {
         let ((ba, ta, ra), (bb, tb, rb)) = (read(a)?, read(b)?);
         let rows = keyed(&ba, &bb);
         text = format!("threads · base {} → head {} · task-loop time per measured run ({ra} and {rb}): the tasks (RunTask) that started in a run, processes of one type summed\n", a.id, b.id);
-        text += &format!("  {:>10}  {:>10}  {:>11}  {:>15}  process · thread\n", "base", "head", "Δ", "tasks/run");
+        text += &format!("  {:>13}  {:>13}  {:>14}  {:>15}  process · thread\n", "base", "head", "Δ", "tasks/run");
         let mut rows_json = Vec::new();
         for (k, x, y) in rows.iter().take(top) {
             let (u, v) = (ta.get(k).copied().unwrap_or(0.0), tb.get(k).copied().unwrap_or(0.0));
             let ms = |v: f64| fmt::value(v, "ms");
-            text += &format!("  {:>10}  {:>10}  {:>11}  {:>15}  {k}\n", ms(*x), ms(*y), signed(y - x, &ms), format!("{:.0} → {:.0}", u, v));
+            text += &format!("  {:>13}  {:>13}  {:>14}  {:>15}  {k}\n", ms(*x), ms(*y), signed(y - x, &ms), format!("{:.0} → {:.0}", u, v));
             rows_json.push(json!({ "thread": k, "base_busy_ms_per_run": x, "head_busy_ms_per_run": y, "delta_ms": y - x, "base_tasks_per_run": u, "head_tasks_per_run": v }));
         }
         json = json!({ "native": false, "runs": [ra, rb], "rows": rows_json });

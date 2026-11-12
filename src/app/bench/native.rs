@@ -1896,10 +1896,10 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                     return Err(Error::refused(
                         "NoPresentSource",
                         format!(
-                            "{} launch: no frame of the app reached the screen between strobe's last capture without it ({:.0} ms after the spawn) and its first with it ({:.0} ms)",
+                            "{} launch: no frame of the app reached the screen between strobe's last capture without it ({} after the spawn) and its first with it ({})",
                             s.case,
-                            at(lacked),
-                            at(had)
+                            crate::fmt::time(at(lacked)),
+                            crate::fmt::time(at(had))
                         ),
                         "a window that draws without the OS's present path cannot be timed to its pixels; time it to { window: \"settled\" } or a milestone",
                     ));
@@ -1908,10 +1908,10 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                     return Err(Error::refused(
                         "AmbiguousInteraction",
                         format!(
-                            "{} launch: two or more frames reached the screen between strobe's last capture without the until image or pixels and its first with them ({:.0} to {:.0} ms after the spawn), so which one showed them is unknown",
+                            "{} launch: two or more frames reached the screen between strobe's last capture without the until image or pixels and its first with them ({} to {} after the spawn), so which one showed them is unknown",
                             s.case,
-                            at(lacked),
-                            at(had)
+                            crate::fmt::time(at(lacked)),
+                            crate::fmt::time(at(had))
                         ),
                         "time the launch to an image that appears once the app stops animating, or to { window: \"settled\" }",
                     ));
@@ -1942,19 +1942,24 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                     (n.epoch_ms + (early.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles, root, ended)
                 } else if late.next_screen_ns == 0 {
                     let at = |ns: u64| (ns as f64 - n.at_ns as f64) / 1e6;
-                    let last = if late.last_start_ns == 0 { "it never presented".to_string() } else { format!("its last present started at {:.0} ms", at(late.last_start_ns)) };
+                    let last = if late.last_start_ns == 0 { "it never presented".to_string() } else { format!("its last present started at {}", crate::fmt::time(at(late.last_start_ns))) };
                     return Err(Error::refused(
                         "RunIncomplete",
-                        format!("{} launch: no frame reached the screen after the element showed (between {:.0} and {:.0} ms after the spawn; {last})", s.case, at(lo), at(hi)),
+                        format!(
+                            "{} launch: no frame reached the screen after the element showed (between {} and {} after the spawn; {last})",
+                            s.case,
+                            crate::fmt::time(at(lo)),
+                            crate::fmt::time(at(hi))
+                        ),
                         "a window that never presents cannot be timed to an element; use a milestone",
                     ));
                 } else if early.next_start_ns != late.next_start_ns && late.next_screen_ns.saturating_sub(early.next_screen_ns) > refresh_ns {
                     return Err(Error::refused(
                         "RunIncomplete",
                         format!(
-                            "{} launch: the app showed {:.1} ms of frames while strobe read its tree, so which frame showed the element is unknown",
+                            "{} launch: the app showed {} of frames while strobe read its tree, so which frame showed the element is unknown",
                             s.case,
-                            (late.next_screen_ns - early.next_screen_ns) as f64 / 1e6
+                            crate::fmt::time((late.next_screen_ns - early.next_screen_ns) as f64 / 1e6)
                         ),
                         "time the launch to an element that appears after the app stops animating, or to { window: \"settled\" }",
                     ));

@@ -64,6 +64,13 @@ pub fn main() -> i32 {
         print!("{HELP}");
         return 0;
     }
+    // The whole process prints times so, its threads too. A report's files (Markdown, HTML, images) and
+    // the MCP servers' answers are UTF-8 whatever the terminal is.
+    let ascii = crate::fmt::ascii_locale() && !matches!(args.command.as_str(), "report" | "mcp" | "daemon");
+    match time_unit(&args) {
+        Ok(unit) => crate::fmt::set_default(crate::fmt::FmtCtx { unit, ascii }),
+        Err(e) => return fail(&e, args.json()),
+    }
     let result = dispatch(&args);
     match result {
         Ok(out) => {
@@ -135,6 +142,9 @@ pub fn dispatch(args: &Args) -> Result<Output> {
     }
     // A flag of another command: refused before anything runs, from the CLI and MCP alike.
     args.check_command()?;
+    // This invocation's unit for times (an MCP call's own, beside the daemon's other calls).
+    let unit = time_unit(args)?;
+    let _fmt = crate::fmt::scope(crate::fmt::FmtCtx { unit, ascii: crate::fmt::ctx().ascii && args.command != "report" });
     // Strictly read-only: it puts nothing back and makes no state folder.
     if args.command == "config" {
         return config::run(args);
@@ -196,6 +206,20 @@ pub fn dispatch(args: &Args) -> Result<Output> {
         progress(line);
     }
     out
+}
+
+/// The unit a command prints times in: `--unit`, else `"unit"` in the nearest strobe.json above the
+/// working folder, else the user's own, else µs. A command that prints no time takes none.
+fn time_unit(args: &Args) -> Result<crate::fmt::TimeUnit> {
+    if let Some(u) = args.get("unit") {
+        return crate::fmt::TimeUnit::parse(u).ok_or_else(|| Error::usage(format!("--unit is us, ms or s, not {u}")));
+    }
+    if !crate::cli::takes(&args.command, "unit") || args.has("help") {
+        return Ok(crate::fmt::TimeUnit::default());
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let root = cwd.ancestors().find(|d| d.join("strobe.json").is_file()).unwrap_or(&cwd).to_path_buf();
+    Ok(crate::config::unit(&root)?.unwrap_or_default())
 }
 
 fn fail(e: &Error, json: bool) -> i32 {

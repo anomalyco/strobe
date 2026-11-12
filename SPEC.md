@@ -295,6 +295,7 @@ Use        status · record · bench · plan · run (§5.13) · config · query 
            · look (§5.12) · top · track · history (§25)
 Internal   daemon · mcp · helper · stats (hidden, §5.11)
 Global     --json  -q/--quiet  -v/--verbose  -h/--help  -V/--version  --progress stderr|stdout|off
+Times      --unit us|ms|s (commands that print times; "unit" in strobe.json; default us)
 ```
 
 `strobe <command> --help` prints that command's lines of the help and every flag it reads, from the
@@ -8378,12 +8379,12 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
 
 | Tool | Input (beyond the CLI flags of the same name) | Output |
 |---|---|---|
-| `status` | `calibrate?`, `fast?`, `disk?` | §5.4 JSON |
-| `record` | `target` (not with `bench`), `for?`, `probes?`, `native?`, `app?`, `windowless?`, `headless?`, `wayland?`, `emulate?`, `engine?`, `mobile?`, `served?`, `style?`, `os-frames?`, `until-line?`, `stop-line?`, `bench?`, `head?`, `gpu-cache?`, `params?`, `runs?`, `seed?`, `pin?`, `power?`, `video?`, `max-time?`, `timeout?` | `{ handle, valid, summary, warnings }` (with `bench`: `{ recordings, warnings }`) |
-| `bench` | `file` (not with `stop`/`resume`), `head?`, `base?`, `aa?`, `check?`, `batch?`, `headless?`, `engine?`, `wayland?`, `mobile?`, `blocks?`, `filter?`, `target?`, `params?`, `primary?`, `equivalence?`, `noworse?`, `plan?`, `effect?`, `pilot?`, `pairs?`, `runs?`, `probes?`, `repeat?`, `seed?`, `bisect?`, `pin?`, `power?`, `reserve-cpus?`, `why?`, `trace?`, `keep?`, `pixels?`, `pixels-only?`, `video?`, `style?`, `max-time?`, `unlock-wait?`, `require-verdict?`, `require-parity?`, `stop?`, `resume?`, `timeout?` | result (§5.6) or `{ id, state: "running", progress }` |
-| `query` | `handle`, `view?`, `sql?`, `by?`, `source?`, `top?`, `reveal?`, `at?`, `native?`, `thread?`, `pid?`, `sort?`, `case?`, `phase?`, `timeline?`; `history`, `changes` or `ser_…` for tracked history (§25.5) | view JSON |
-| `report` | `handle` (or a `result.json`/`meta.json` path), `view?`, `format?`, `out?`, `theme?`, `update-pr?`, `repo?`, `force?`, `no-card?`, `labels?`, `badge-url?`, `scoreboard?` | `{ path, bytes }` |
-| `look` | `target`, `until?`, `wait?`, `timeout?`, `out?`, `size?`, `scale?`, `chars?`, `full?`, `element?`, `headed?`, `mobile?`, `app?`, `build?`, `keys?`, `windowless?`, `wayland?`, `home?`, `type?`, `press?`; no arguments after `--` (a native app's own) | §5.12 JSON (exit 124: problems, still a result) |
+| `status` | `calibrate?`, `fast?`, `disk?`, `unit?` | §5.4 JSON |
+| `record` | `target` (not with `bench`), `for?`, `probes?`, `native?`, `app?`, `windowless?`, `headless?`, `wayland?`, `emulate?`, `engine?`, `mobile?`, `served?`, `style?`, `os-frames?`, `until-line?`, `stop-line?`, `bench?`, `head?`, `gpu-cache?`, `params?`, `runs?`, `seed?`, `pin?`, `power?`, `video?`, `max-time?`, `unit?`, `timeout?` | `{ handle, valid, summary, warnings }` (with `bench`: `{ recordings, warnings }`) |
+| `bench` | `file` (not with `stop`/`resume`), `head?`, `base?`, `aa?`, `check?`, `batch?`, `headless?`, `engine?`, `wayland?`, `mobile?`, `blocks?`, `filter?`, `target?`, `params?`, `primary?`, `equivalence?`, `noworse?`, `plan?`, `effect?`, `pilot?`, `pairs?`, `runs?`, `probes?`, `repeat?`, `seed?`, `bisect?`, `pin?`, `power?`, `reserve-cpus?`, `why?`, `trace?`, `keep?`, `pixels?`, `pixels-only?`, `video?`, `style?`, `max-time?`, `unlock-wait?`, `require-verdict?`, `require-parity?`, `stop?`, `resume?`, `unit?`, `timeout?` | result (§5.6) or `{ id, state: "running", progress }` |
+| `query` | `handle`, `view?`, `sql?`, `by?`, `source?`, `top?`, `reveal?`, `at?`, `native?`, `thread?`, `pid?`, `sort?`, `case?`, `phase?`, `timeline?`, `unit?`; `history`, `changes` or `ser_…` for tracked history (§25.5) | view JSON |
+| `report` | `handle` (or a `result.json`/`meta.json` path), `view?`, `format?`, `out?`, `theme?`, `update-pr?`, `repo?`, `force?`, `no-card?`, `labels?`, `badge-url?`, `scoreboard?`, `unit?` | `{ path, bytes }` |
+| `look` | `target`, `until?`, `wait?`, `timeout?`, `out?`, `size?`, `scale?`, `chars?`, `full?`, `element?`, `headed?`, `mobile?`, `app?`, `build?`, `keys?`, `windowless?`, `wayland?`, `home?`, `type?`, `press?`, `unit?`; no arguments after `--` (a native app's own) | §5.12 JSON (exit 124: problems, still a result) |
 | `config` | `dir?` | §5 JSON (a problem: `isError`) |
 | `init` | `dir?`, `target?`, `force?` | §5 JSON: `wrote`, `kept`, `next` |
 

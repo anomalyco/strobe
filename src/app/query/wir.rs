@@ -141,7 +141,7 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
             };
             let rep = c["repeat"].as_u64().filter(|&r| r > 1).map(|r| format!(" ×{r}")).unwrap_or_default();
             let line1 = c["text"].as_str().unwrap_or("").lines().next().unwrap_or("");
-            text += &format!("  {:>7.1} ms  {:<8} {line1}{rep}{loc}\n", c["at_ms"].as_f64().unwrap_or(0.0), c["level"].as_str().unwrap_or("log"));
+            text += &format!("  {:>13}  {:<8} {line1}{rep}{loc}\n", fmt::time(c["at_ms"].as_f64().unwrap_or(0.0)), c["level"].as_str().unwrap_or("log"));
         }
         if console.len() > top {
             text += &format!("  … {} more (--top N or --source console)\n", console.len() - top);
@@ -161,7 +161,7 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
                 _ => String::new(),
             };
             let line1 = e["message"].as_str().unwrap_or("").lines().next().unwrap_or("");
-            text += &format!("  {:>7.1} ms  {:<7} {}{pid}  {label}{line1}\n", e["at_ms"].as_f64().unwrap_or(0.0), e["level"].as_str().unwrap_or("notice"), e["process"].as_str().unwrap_or(""));
+            text += &format!("  {:>13}  {:<7} {}{pid}  {label}{line1}\n", fmt::time(e["at_ms"].as_f64().unwrap_or(0.0)), e["level"].as_str().unwrap_or("notice"), e["process"].as_str().unwrap_or(""));
         }
         if dev_entries.len() > top {
             text += &format!("  … {} more (--top N or --source device)\n", dev_entries.len() - top);
@@ -269,11 +269,11 @@ pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Outp
         .collect();
 
     if !rows.is_empty() {
-        text += "      start        dur       ttfb  status  proto     type         wire  url\n";
+        text += &format!("  {:>13}  {:>13}  {:>13}  status  proto     type         wire  url\n", "start", "dur", "ttfb");
         for r in rows.iter().take(top) {
-            let start = r["start_ms"].as_f64().unwrap_or(0.0);
-            let dur = r["duration_ms"].as_f64().map_or_else(|| "—".into(), |d| format!("{d:>6.1} ms"));
-            let ttfb = r["ttfb_ms"].as_f64().map_or_else(|| "—".into(), |d| format!("{d:>6.1} ms"));
+            let start = fmt::time(r["start_ms"].as_f64().unwrap_or(0.0));
+            let dur = r["duration_ms"].as_f64().map_or_else(|| "—".into(), fmt::time);
+            let ttfb = r["ttfb_ms"].as_f64().map_or_else(|| "—".into(), fmt::time);
             let status = match (r["status"].as_i64(), r["error"].as_str()) {
                 (Some(code), _) => format!("{code:>6}"),
                 (None, Some(_)) => "   ERR".into(),
@@ -284,7 +284,7 @@ pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Outp
             let wire = fmt::bytes(r["encoded_bytes"].as_f64().unwrap_or(0.0));
             let url = r["url"].as_str().unwrap_or("");
             let short_url: String = if url.chars().count() > 80 { format!("{}…", url.chars().take(79).collect::<String>()) } else { url.to_string() };
-            text += &format!("  {start:>6.1} ms  {dur:>9}  {ttfb:>9}  {status}  {proto:<8}  {rtype:<10}  {wire:>7}  {short_url}\n");
+            text += &format!("  {start:>13}  {dur:>13}  {ttfb:>13}  {status}  {proto:<8}  {rtype:<10}  {wire:>7}  {short_url}\n");
         }
         if rows.len() > top {
             text += &format!("  … {} more requests (--top N)\n", rows.len() - top);
@@ -293,17 +293,17 @@ pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Outp
         let pre_wire: f64 = pre_resources.iter().filter_map(|r| r["transfer_bytes"].as_f64()).sum();
         let pre_dec: f64 = pre_resources.iter().filter_map(|r| r["decoded_bytes"].as_f64()).sum();
         text += &format!("loaded before attach · {} Resource Timing entries · {} transfer ({} decoded)\n", pre_resources.len(), fmt::bytes(pre_wire), fmt::bytes(pre_dec));
-        text += "      start        dur       ttfb  proto     type         wire  url\n";
+        text += &format!("  {:>13}  {:>13}  {:>13}  proto     type         wire  url\n", "start", "dur", "ttfb");
         for r in pre_resources.iter().take(top) {
-            let start = r["start_ms"].as_f64().unwrap_or(0.0);
-            let dur = r["duration_ms"].as_f64().map_or_else(|| "—".into(), |d| format!("{d:>6.1} ms"));
-            let ttfb = r["ttfb_ms"].as_f64().map_or_else(|| "—".into(), |d| format!("{d:>6.1} ms"));
+            let start = fmt::time(r["start_ms"].as_f64().unwrap_or(0.0));
+            let dur = r["duration_ms"].as_f64().map_or_else(|| "—".into(), fmt::time);
+            let ttfb = r["ttfb_ms"].as_f64().map_or_else(|| "—".into(), fmt::time);
             let proto = r["protocol"].as_str().filter(|p| !p.is_empty()).unwrap_or("—");
             let rtype = r["type"].as_str().unwrap_or("other");
             let wire = fmt::bytes(r["transfer_bytes"].as_f64().unwrap_or(0.0));
             let url = r["url"].as_str().unwrap_or("");
             let short_url: String = if url.chars().count() > 80 { format!("{}…", url.chars().take(79).collect::<String>()) } else { url.to_string() };
-            text += &format!("  {start:>6.1} ms  {dur:>9}  {ttfb:>9}  {proto:<8}  {rtype:<10}  {wire:>7}  {short_url}\n");
+            text += &format!("  {start:>13}  {dur:>13}  {ttfb:>13}  {proto:<8}  {rtype:<10}  {wire:>7}  {short_url}\n");
         }
         if pre_resources.len() > top {
             text += &format!("  … {} more pre-attach resources (--top N)\n", pre_resources.len() - top);

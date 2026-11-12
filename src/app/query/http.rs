@@ -284,14 +284,14 @@ impl View {
         }
         let mut t = format!("stalled   probes in a row over {} ({STALL_IDLE}× the idle p95, at least {STALL_MS} ms):\n", fmt::value(self.threshold, "ms"));
         for c in &cohorts {
-            let lat: Vec<String> = c["latencies_ms"].as_array().into_iter().flatten().map(|l| l.as_f64().map_or("TIMEOUT".to_string(), |x| format!("{x:.0}"))).collect();
+            let lat: Vec<String> = c["latencies_ms"].as_array().into_iter().flatten().map(|l| l.as_f64().map_or("TIMEOUT".to_string(), crate::fmt::time_number)).collect();
             // Where it began: a measured run, or a run that is not (warmup, the check's run after its reset).
             let at = match (c["run"].as_str(), c["when"].as_str().unwrap_or("")) {
                 (Some(r), "measured") => r.to_string(),
                 (Some(r), when) => format!("{r} ({})", if when == "warmup" { "not measured" } else { when }),
                 (None, when) => when.to_string(),
             };
-            t += &format!("  {at} +{:.2} s  {} probes: {} ms  · {}\n", c["at_s"].as_f64().unwrap_or(0.0), c["probes"], lat.join(" "), c["says"].as_str().unwrap_or(""));
+            t += &format!("  {at} +{:.2} s  {} probes: {} {}  · {}\n", c["at_s"].as_f64().unwrap_or(0.0), c["probes"], lat.join(" "), fmt::time_label(), c["says"].as_str().unwrap_or(""));
         }
         if let Some(more) = j["cohorts_total"].as_u64().map(|n| n.saturating_sub(cohorts.len() as u64)).filter(|m| *m > 0) {
             t += &format!("  … {more} more (--top N shows more)\n");

@@ -4,6 +4,10 @@ pub fn value(v: f64, unit: &str) -> String {
     if !v.is_finite() {
         return "—".into();
     }
+    // A time in the unit people read it in (`--unit`; µs by default).
+    if unit == "ms" {
+        return crate::fmt::time(v);
+    }
     // Below 0.01 as many decimals as show the first significant digit (a layout-shift score of 0.003
     // is not 0.00), up to four.
     let digits = if v.abs() >= 100.0 {
@@ -16,13 +20,13 @@ pub fn value(v: f64, unit: &str) -> String {
     // A value that rounds to zero prints as 0 at two decimals, without a sign (not −0.00%, not 0.0000).
     let (v, digits) = if (v * 10f64.powi(digits as i32)).round() == 0.0 { (0.0, digits.min(2)) } else { (v, digits) };
     match unit {
-        "ms" => format!("{v:.digits$} ms"),
         "%" => format!("{v:.digits$}%"),
+        // Grouped like a time: `1,234,567` (a `count.*_us` counter holds microseconds as a count).
         "count" => {
             if (v - v.round()).abs() < 1e-9 {
-                format!("{}", v.round() as i64)
+                crate::fmt::group(&format!("{}", v.round() as i64))
             } else {
-                format!("{v:.1}")
+                crate::fmt::group(&format!("{v:.1}"))
             }
         }
         "bytes" => bytes(v),
@@ -52,16 +56,26 @@ pub fn counters(get: impl Fn(&str) -> f64) -> String {
     if shown.is_empty() { String::new() } else { format!("counters {}\n", shown.join(" · ")) }
 }
 
-pub use crate::fmt::{bound, bytes, pct, pct_ci, pct_vs, pct_with};
+pub use crate::fmt::{bound, bytes, minus, pct, pct_ci, pct_vs, pct_with, time, time_label, time_signed, times};
+
+/// Values printed together (a median and its interval's ends): times at one set of digits
+/// (`fmt::times`), any other unit each as `value` prints it.
+pub fn values(vs: &[f64], unit: &str) -> Vec<String> {
+    if unit == "ms" { times(vs, false) } else { vs.iter().map(|v| value(*v, unit)).collect() }
+}
 
 pub fn signed(v: f64, unit: &str) -> String {
+    // A time is never shown as 0 unless it is (`+<0.01 µs`).
+    if unit == "ms" {
+        return time_signed(v);
+    }
     let body = value(v.abs(), unit);
     // One that shows as zero at the decimals it printed with has no sign (`0.00 MB`, not `−0.0000 MB`
     // or `−0 Hz`): every digit it shows is 0.
     if body.chars().filter(char::is_ascii_digit).all(|d| d == '0') {
         body
     } else if v < 0.0 {
-        format!("−{body}")
+        format!("{}{body}", minus())
     } else if v > 0.0 {
         format!("+{body}")
     } else {

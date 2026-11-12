@@ -392,10 +392,12 @@ impl BusyWhy {
     pub fn text(&self) -> String {
         match *self {
             BusyWhy::MidDrawing { prev_frame_ago_ms, quiet_ms } if prev_frame_ago_ms < 0.0 => {
-                format!("mid-drawing: a frame begun before it showed {:.1} ms after it (the app must rest {quiet_ms:.1} ms)", -prev_frame_ago_ms)
+                format!("mid-drawing: a frame begun before it showed {} after it (the app must rest {})", crate::fmt::time(-prev_frame_ago_ms), crate::fmt::time(quiet_ms))
             }
-            BusyWhy::MidDrawing { prev_frame_ago_ms, quiet_ms } => format!("mid-drawing: its last frame ended {prev_frame_ago_ms:.1} ms before it (the app must rest {quiet_ms:.1} ms)"),
-            BusyWhy::Behind { showed_after_ms, .. } => format!("behind: an earlier input's reaction showed {showed_after_ms:.1} ms after it"),
+            BusyWhy::MidDrawing { prev_frame_ago_ms, quiet_ms } => {
+                format!("mid-drawing: its last frame ended {} before it (the app must rest {})", crate::fmt::time(prev_frame_ago_ms), crate::fmt::time(quiet_ms))
+            }
+            BusyWhy::Behind { showed_after_ms, .. } => format!("behind: an earlier input's reaction showed {} after it", crate::fmt::time(showed_after_ms)),
             BusyWhy::AmbiguousPress => "ambiguous press: its change may be an earlier input's, announced late".into(),
             BusyWhy::MultiFramePixel { frames } => format!("{frames} frames between the captures that proved its pixels: which showed it is unknown"),
         }

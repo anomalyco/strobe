@@ -21,8 +21,9 @@ pub(super) enum Out {
     NotRun,
 }
 
-pub(super) fn verdict(c: &Value) -> &str {
-    c["verdict"].as_str().unwrap_or("")
+/// What `c` decided in words, a time's bound in the unit times print in (`stats::verdict_text`).
+pub(super) fn verdict(c: &Value) -> String {
+    stats::verdict_text(c)
 }
 
 /// The direction comparison `c` counted as better (a `metric.<name>` may be better higher), from the
@@ -125,6 +126,15 @@ pub(super) fn delta(c: &Value, x: f64) -> String {
     if c["relative"] == true && x.to_bits() == f(&c["estimate"]).to_bits() && f(&c["lo"]).is_finite() && f(&c["hi"]).is_finite() {
         return fmt::pct_ci(x, f(&c["lo"]), f(&c["hi"])).0;
     }
+    // A time's estimate and ends at one set of digits, as the text prints them (`fmt::times`).
+    let all = [f(&c["estimate"]), f(&c["lo"]), f(&c["hi"])];
+    if c["relative"] != true
+        && unit == "ms"
+        && all.iter().all(|v| v.is_finite())
+        && let Some(i) = all.iter().position(|v| v.to_bits() == x.to_bits())
+    {
+        return fmt::times(&all, true).swap_remove(i);
+    }
     if c["relative"] == true { fmt::pct(x) } else { signed_disp(x, abs_unit(unit)) }
 }
 
@@ -156,19 +166,25 @@ pub(super) fn value(c: &Value, side: &str) -> String {
     disp(f(&c[side]), unit_of(c["metric"].as_str().unwrap_or("")))
 }
 
-/// `7.05 → 3.90 ms`: both medians, the unit once when they share it.
+/// Whether `s` is a number as `fmt` prints one (`1,234`, `−0.40`, `<0.01`), so a unit after it can
+/// be shared.
+fn number(s: &str) -> bool {
+    s.chars().any(|c| c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_digit() || ",.+-<\u{2212}".contains(c))
+}
+
+/// `7,050 → 3,900 µs`: both medians, the unit once when they share it.
 pub(super) fn before_after(c: &Value) -> String {
     let (b, h) = (value(c, "base"), value(c, "head"));
     match (b.rsplit_once(' '), h.rsplit_once(' ')) {
-        (Some((bn, bu)), Some((_, hu))) if bu == hu && bn.parse::<f64>().is_ok() => nb(&format!("{bn} → {h}")),
+        (Some((bn, bu)), Some((_, hu))) if bu == hu && number(bn) => nb(&format!("{bn} → {h}")),
         _ => nb(&format!("{b} → {h}")),
     }
 }
 
-/// `7.10 → 3.89 ms`: before → this PR, the unit once when they share it; it may break after the arrow.
+/// `7,100 → 3,890 µs`: before → this PR, the unit once when they share it; it may break after the arrow.
 pub(super) fn arrow(b: &str, h: &str) -> String {
     match (b.rsplit_once(' '), h.rsplit_once(' ')) {
-        (Some((bn, bu)), Some((_, hu))) if bu == hu && bn.parse::<f64>().is_ok() => format!("{bn}\u{a0}→ {}", nb(h)),
+        (Some((bn, bu)), Some((_, hu))) if bu == hu && number(bn) => format!("{bn}\u{a0}→ {}", nb(h)),
         _ => format!("{}\u{a0}→ {}", nb(b), nb(h)),
     }
 }
@@ -192,7 +208,8 @@ pub(super) fn refusal(c: &Value) -> (String, String) {
     if let (Some(id), Some(why)) = (c["refusal"]["validator"].as_str(), c["refusal"]["summary"].as_str()) {
         return (id.to_string(), why.to_string());
     }
-    let rest = verdict(c).trim_start_matches("refused").trim();
+    let v = verdict(c);
+    let rest = v.trim_start_matches("refused").trim();
     let (id, why) = rest.split_once("): ").map(|(a, b)| (a.trim_start_matches('('), b)).unwrap_or((rest.trim_matches(['(', ')']), ""));
     (id.to_string(), why.to_string())
 }
@@ -660,7 +677,7 @@ pub(super) fn verdict_text(c: &Value, o: Out, s: &Value, aa: bool) -> String {
         Out::AaFalse => "**false positive**".into(),
         Out::Same if aa => "same <sub>A/A passed</sub>".into(),
         Out::Same => "same".into(),
-        Out::NoWorse | Out::NoWorseSlower => format!("**no worse**{}", sub(v.trim_start_matches("no worse").trim().trim_matches(['(', ')']).split(',').next().unwrap_or(""))),
+        Out::NoWorse | Out::NoWorseSlower => format!("**no worse**{}", sub(v.trim_start_matches("no worse").trim().trim_matches(['(', ')']).split(", ").next().unwrap_or(""))),
         Out::Worse | Out::Better => format!("**worse**{}", sub(v.trim_start_matches("worse").trim().trim_matches(['(', ')']))),
         Out::Refused => {
             let (id, why) = refusal(c);
@@ -843,40 +860,15 @@ pub(super) fn sig3(v: f64) -> String {
     if s.trim_start_matches('-').chars().all(|c| c == '0' || c == '.') { "0".into() } else { s }
 }
 
-/// A value with three significant figures and its unit; a second or longer in seconds.
+/// A value with its unit as the text prints it (`fmt::value`: a time in the unit times print in,
+/// `14,200 µs`); one without a unit as a count.
 pub(super) fn disp(v: f64, unit: &str) -> String {
-    if !v.is_finite() {
-        return "—".into();
-    }
-    match unit {
-        "ms" if v.abs() >= 1000.0 => format!("{} s", sig3(v / 1000.0)),
-        "ms" => format!("{} ms", sig3(v)),
-        "%" => format!("{}%", sig3(v)),
-        "pp" => format!("{} pp", sig3(v)),
-        "MB" => format!("{} MB", sig3(v)),
-        "/s" => format!("{}/s", sig3(v)),
-        "bytes" => fmt::bytes(v),
-        "count" | "" => fmt::value(v, "count"),
-        // A number the target printed in a unit of its own.
-        "value" => sig3(v),
-        // `480.2 M instr` as the text has it, not `480226998 instructions`.
-        "instructions" => fmt::value(v, "instructions"),
-        u => format!("{} {u}", sig3(v)),
-    }
+    fmt::value(v, if unit.is_empty() { "count" } else { unit })
 }
 
+/// A difference with its sign, as the text prints it (`fmt::signed`).
 pub(super) fn signed_disp(v: f64, unit: &str) -> String {
-    let body = disp(v.abs(), unit);
-    // One that shows as zero has no sign.
-    if body == disp(0.0, unit) {
-        body
-    } else if v < 0.0 {
-        format!("−{body}")
-    } else if v > 0.0 {
-        format!("+{body}")
-    } else {
-        body
-    }
+    fmt::signed(v, if unit.is_empty() { "count" } else { unit })
 }
 
 /// A share as a percentage with two decimals: 10.28%.
@@ -1131,7 +1123,7 @@ pub(super) fn bisect(r: &Value) -> String {
             s["pairs"],
             if marked(s, o) { format!("**{}**", nb(&delta(s, f(&s["estimate"])))) } else { nb(&delta(s, f(&s["estimate"]))) },
             range(s),
-            cell(verdict(s))
+            cell(&verdict(s))
         );
     }
     t + &format!("\nEach step is an experiment of its own (`strobe report experiment <step> --format pr`); the whole search: `strobe report experiment {id} --open`.\n\n</details>\n")

@@ -303,7 +303,8 @@ pub fn throttled(ms: f64, baseline: Option<f64>) -> Result<Option<f64>> {
     let Some(base) = baseline.filter(|b| *b > 0.0) else { return Ok(None) };
     let ratio = ms / base;
     if ratio > 1.5 {
-        return Err(Refusal::new(ValidatorId::Throttled, format!("the speed check ran {ratio:.2}× slower than this device's calibration ({ms:.1} ms vs {base:.1} ms)"))
+        let vs = crate::fmt::times(&[ms, base], false).join(" vs ");
+        return Err(Refusal::new(ValidatorId::Throttled, format!("the speed check ran {ratio:.2}× slower than this device's calibration ({vs})"))
             .fix("remove CPU throttling, plug in power, leave power saving, let the machine cool down")
             .into());
     }
@@ -617,11 +618,12 @@ pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option
     if let (Some(ratio), Some(r)) = (ratio, reference)
         && ratio > 1.5
     {
+        let vs = crate::fmt::times(&[ms, r], false).join(" vs ");
         // `--max-time` cut the waits short while the check was still slow: neither refusal is shown to
         // hold (the bench ends there, `bench::out_of_time`).
         if slow < 3 && until.is_some_and(|u| std::time::Instant::now() >= u) {
             return Err(Error::timeout(format!(
-                "the native speed check waited {:.0} s for the target's CPUs, still {ratio:.2}× slower than this device's reference ({ms:.1} ms vs {r:.1} ms)",
+                "the native speed check waited {:.0} s for the target's CPUs, still {ratio:.2}× slower than this device's reference ({vs})",
                 started.elapsed().as_secs_f64()
             )));
         }
@@ -631,7 +633,7 @@ pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option
             return Err(Refusal::new(
                 ValidatorId::Background,
                 format!(
-                    "the native speed check on the target's CPUs ran {ratio:.2}× slower than this device's reference ({ms:.1} ms vs {r:.1} ms) while other work kept those CPUs {:.0}% of a core busy {how_long}",
+                    "the native speed check on the target's CPUs ran {ratio:.2}× slower than this device's reference ({vs}) while other work kept those CPUs {:.0}% of a core busy {how_long}",
                     last.foreign_pct
                 ),
             )
@@ -644,7 +646,7 @@ pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option
             (false, 0 | 1) => "one try on quiet CPUs".to_string(),
             (false, n) => format!("best of {n} tries on quiet CPUs"),
         };
-        return Err(Refusal::new(ValidatorId::Throttled, format!("the native speed check ran {ratio:.2}× slower than this device's reference on these CPUs ({ms:.1} ms vs {r:.1} ms, {tries})"))
+        return Err(Refusal::new(ValidatorId::Throttled, format!("the native speed check ran {ratio:.2}× slower than this device's reference on these CPUs ({vs}, {tries})"))
             .detail(format!("other work during the last: {:.0}% of a core there; busiest processes: {}", last.foreign_pct, who(&last)))
             .fix("plug in power, leave power saving, let the machine cool down")
             .into());
@@ -696,7 +698,8 @@ fn reference_throttled(key: &str, what: &str, ms: f64, keep: bool) -> Result<Opt
     if let (Some(ratio), Some(r)) = (ratio, reference)
         && ratio > 1.5
     {
-        return Err(Refusal::new(ValidatorId::Throttled, format!("the page's speed check ran {ratio:.2}× slower than {what} ({ms:.1} ms vs {r:.1} ms)"))
+        let vs = crate::fmt::times(&[ms, r], false).join(" vs ");
+        return Err(Refusal::new(ValidatorId::Throttled, format!("the page's speed check ran {ratio:.2}× slower than {what} ({vs})"))
             .fix(format!(
                 "remove CPU throttling, plug in power, leave power saving, let the device cool down; a reference set by an unusually fast check goes with its entry {key:?} in {}",
                 path.display()

@@ -370,7 +370,10 @@ fn blocks(r: &Value, series: &[&Value]) -> String {
         let u = unit_of(m);
         let got: Vec<f64> = p["values"].as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
         let value = match (p["median"].as_f64(), p["lo"].as_f64(), p["hi"].as_f64()) {
-            (Some(x), Some(lo), Some(hi)) => format!("{} {}", nb(&disp(x, u)), nb(&format!("[{} … {}]", disp(lo, u), disp(hi, u)))),
+            (Some(x), Some(lo), Some(hi)) => {
+                let v = fmt::values(&[x, lo, hi], if u.is_empty() { "count" } else { u });
+                format!("{} {}", nb(&v[0]), nb(&format!("[{} … {}]", v[1], v[2])))
+            }
             _ if p["verdict"].is_string() => cell(p["verdict"].as_str().unwrap_or("")),
             _ if p["refused"].is_string() => format!("refused: {}", cell(&first_clause(p["refused"].as_str().unwrap_or(""), 120))),
             // One block: its value, with no interval.

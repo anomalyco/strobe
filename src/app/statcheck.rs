@@ -34,6 +34,12 @@ fn nums(v: &Value) -> Vec<f64> {
 }
 
 fn answer(q: &Value) -> Result<Value> {
+    // The unit times print in (`time_unit`: us, the default, ms or s) and ASCII output (`ascii`), per request.
+    let unit = match q["time_unit"].as_str() {
+        None => crate::fmt::TimeUnit::default(),
+        Some(u) => crate::fmt::TimeUnit::parse(u).ok_or_else(|| Error::usage(format!("stats: time_unit is us, ms or s, not {u}")))?,
+    };
+    let _fmt = crate::fmt::scope(crate::fmt::FmtCtx { unit, ascii: q["ascii"] == true });
     let conf = q["confidence"].as_f64().unwrap_or(0.95);
     let looks: Vec<usize> = q["looks"].as_array().into_iter().flatten().filter_map(|x| x.as_u64().map(|n| n as usize)).collect();
     Ok(match q["op"].as_str().unwrap_or("") {
@@ -74,6 +80,11 @@ fn answer(q: &Value) -> Result<Value> {
         "simulate" => simulate::run(q)?,
         "pct" => json!({ "text": fmt::pct(q["r"].as_f64().unwrap_or(f64::NAN)) }),
         "value" => json!({ "text": fmt::value(q["v"].as_f64().unwrap_or(f64::NAN), q["unit"].as_str().unwrap_or("value")) }),
+        "signed" => json!({ "text": fmt::signed(q["v"].as_f64().unwrap_or(f64::NAN), q["unit"].as_str().unwrap_or("value")) }),
+        // Times printed together (an estimate and its interval's ends), in milliseconds.
+        "times" => json!({ "texts": fmt::times(&nums(&q["v"]), q["signed"] == true) }),
+        // A comparison's verdict as result.json keeps it, drawn again (`stats::verdict_text`).
+        "verdict" => json!({ "text": stats::verdict_text(&q["c"]) }),
         other => return Err(Error::usage(format!("stats: no op {other}"))),
     })
 }

@@ -195,7 +195,7 @@ impl<'a> Doc<'a> {
         let margin = c["noworse"].as_f64().map(|x| if c["relative"] == true { super::pct_bound(x) } else { disp(x, abs_unit(unit_of(m))) }).unwrap_or_else(|| bound.clone());
         match o {
             Out::NotRun => format!("not run ({}).", cell(s["halt"]["message"].as_str().unwrap_or("the bench stopped first")).trim_end_matches('.')),
-            _ if s["kind"] == "leak" => format!("{}.", cell(&capitalize(verdict(c))).trim_end_matches('.')),
+            _ if s["kind"] == "leak" => format!("{}.", cell(&capitalize(&verdict(c))).trim_end_matches('.')),
             Out::Better | Out::Worse if !beyond_margin(c) => {
                 let (k, word) = if o == Out::Better { (w, "better") } else { (worse, "worse") };
                 let small = if small(c) { format!(", perhaps by under {}", bound.trim_start_matches('±')) } else { String::new() };
@@ -511,7 +511,7 @@ impl<'a> Doc<'a> {
         let mut odd: Vec<(&Value, &Value)> = Vec::new();
         for s in &self.series {
             if s["not_run"] == true || s["kind"] == "leak" {
-                t += &format!("{}| {} | | | | | {} |\n", self.series_cell(s, 0), if s["kind"] == "leak" { "Memory growth per run" } else { "Not run" }, cell(verdict(&s["primary"])));
+                t += &format!("{}| {} | | | | | {} |\n", self.series_cell(s, 0), if s["kind"] == "leak" { "Memory growth per run" } else { "Not run" }, cell(&verdict(&s["primary"])));
                 continue;
             }
             // Refused before it ran (an engine without its primary): the validator, why, and the primary to use.
@@ -1313,7 +1313,7 @@ impl<'a> Doc<'a> {
         } else {
             line += &format!(" --base {} --head {}", quote(&spec(&base, "<base>")), quote(&spec(&head, ".")));
         }
-        const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "update-pr", "repo", "force", "format", "out"];
+        const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "update-pr", "repo", "force", "format", "out", "unit"];
         // The seed only when a hook used it: then it is the workload (`plan.used_random`).
         let mut rest: Vec<(&String, &Value)> = flags.into_iter().flatten().filter(|(k, _)| !SKIP.contains(&k.as_str()) && (*k != "seed" || r["plan"]["used_random"] == true)).collect();
         rest.sort_by(|a, b| a.0.cmp(b.0));

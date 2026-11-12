@@ -107,10 +107,10 @@ pub fn headline(shifts: &Value) -> Option<String> {
     let dx = to[0].as_f64().unwrap_or(0.0) - from[0].as_f64().unwrap_or(0.0);
     let way = if dy.abs() >= dx.abs() { format!("{} {:.0} px", if dy > 0.0 { "down" } else { "up" }, dy.abs()) } else { format!("{} {:.0} px", if dx > 0.0 { "right" } else { "left" }, dx.abs()) };
     Some(format!(
-        "largest layout shift {:.3} ({}, {:.0} ms in): {} moved {way}{}",
+        "largest layout shift {:.3} ({}, {} in): {} moved {way}{}",
         s["score"].as_f64().unwrap_or(0.0),
         s["run"].as_str().unwrap_or(""),
-        s["at_ms"].as_f64().unwrap_or(0.0),
+        crate::fmt::time(s["at_ms"].as_f64().unwrap_or(0.0)),
         node["node"].as_str().unwrap_or("?"),
         match s["nodes"].as_array().map_or(0, Vec::len) {
             0 | 1 => String::new(),
@@ -122,14 +122,17 @@ pub fn headline(shifts: &Value) -> Option<String> {
 /// The `shifts` view of `query`.
 pub fn text(shifts: &Value) -> String {
     let Some(list) = shifts.as_array().filter(|l| !l.is_empty()) else { return "no layout shifts in the measured runs\n".into() };
-    let mut out = String::from("score   run      at        moved\n");
-    for s in list {
-        out += &format!("{:<7.4} {:<8} {:>6.0} ms", s["score"].as_f64().unwrap_or(0.0), s["run"].as_str().unwrap_or(""), s["at_ms"].as_f64().unwrap_or(0.0));
+    // `at` as wide as its widest time (`18,309,038 µs`).
+    let at: Vec<String> = list.iter().map(|s| crate::fmt::time(s["at_ms"].as_f64().unwrap_or(0.0))).collect();
+    let w = at.iter().map(|a| a.chars().count()).max().unwrap_or(2).max(2);
+    let mut out = format!("score   run      {:<w$}  moved\n", "at");
+    for (s, at) in list.iter().zip(&at) {
+        out += &format!("{:<7.4} {:<8} {at:>w$}", s["score"].as_f64().unwrap_or(0.0), s["run"].as_str().unwrap_or(""));
         for (i, n) in s["nodes"].as_array().into_iter().flatten().take(5).enumerate() {
             let r = |v: &Value| format!("{:.0},{:.0} {:.0}×{:.0}", v[0].as_f64().unwrap_or(0.0), v[1].as_f64().unwrap_or(0.0), v[2].as_f64().unwrap_or(0.0), v[3].as_f64().unwrap_or(0.0));
             out += &format!(
                 "{}{} {:.0} px  ({} → {})\n",
-                if i == 0 { "  " } else { "                            " },
+                if i == 0 { "  ".to_string() } else { " ".repeat(19 + w) },
                 n["node"].as_str().unwrap_or("?"),
                 n["moved"].as_f64().unwrap_or(0.0),
                 r(&n["from"]),

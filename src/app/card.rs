@@ -143,8 +143,9 @@ fn f(v: &Value) -> f64 {
     v.as_f64().unwrap_or(f64::NAN)
 }
 
-fn verdict(c: &Value) -> &str {
-    c["verdict"].as_str().unwrap_or("")
+/// What `c` decided in words, a time's bound in the unit times print in (`stats::verdict_text`).
+fn verdict(c: &Value) -> String {
+    stats::verdict_text(c)
 }
 
 fn metric(c: &Value) -> &str {
@@ -297,50 +298,15 @@ fn short(m: &str) -> (String, Option<(&'static str, &'static str)>) {
     (if first.is_empty() { m.to_string() } else { first.to_string() }, None)
 }
 
-/// Three significant figures, no exponent: 229, 50.4, 7.05, 0.0881.
-fn sig3(v: f64) -> String {
-    if !v.is_finite() {
-        return "—".into();
-    }
-    let a = v.abs();
-    if a == 0.0 {
-        return "0".into();
-    }
-    let d = if a >= 100.0 { 0 } else { (2 - a.log10().floor() as i32).clamp(0, 4) as usize };
-    let s = format!("{v:.d$}");
-    if s.trim_start_matches('-').chars().all(|c| c == '0' || c == '.') { "0".into() } else { s }
-}
-
-/// A value with three significant figures and its unit; a second or longer in seconds.
+/// A value with its unit as the text prints it (`fmt::value`: a time in the unit times print in,
+/// `14,200 µs`); one without a unit as a count.
 fn disp(v: f64, unit: &str) -> String {
-    if !v.is_finite() {
-        return "—".into();
-    }
-    match unit {
-        "ms" if v.abs() >= 1000.0 => format!("{} s", sig3(v / 1000.0)),
-        "ms" => format!("{} ms", sig3(v)),
-        "%" => format!("{}%", sig3(v)),
-        "/s" => format!("{}/s", sig3(v)),
-        "bytes" => super::fmt::bytes(v),
-        "count" | "" => super::fmt::value(v, "count"),
-        // A number the target printed in a unit of its own.
-        "value" => sig3(v),
-        // `480.2 M instr` as the text has it, not `480226998 instructions`.
-        "instructions" => super::fmt::value(v, "instructions"),
-        u => format!("{} {u}", sig3(v)),
-    }
+    super::fmt::value(v, if unit.is_empty() { "count" } else { unit })
 }
 
-/// `+60`, `−1.5 ms`: a difference with its sign; one that shows as zero has none.
+/// `+60`, `−1,500 µs`: a difference with its sign; one that shows as zero has none (`fmt::signed`).
 fn signed_disp(v: f64, unit: &str) -> String {
-    let body = disp(v.abs(), unit);
-    if body == disp(0.0, unit) {
-        body
-    } else if v < 0.0 {
-        format!("−{body}")
-    } else {
-        format!("+{body}")
-    }
+    super::fmt::signed(v, if unit.is_empty() { "count" } else { unit })
 }
 
 fn abs_unit(unit: &str) -> &str {
@@ -387,7 +353,7 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let delta = match relative {
         true if lo.is_finite() && hi.is_finite() => super::fmt::pct_ci(est, lo, hi).0,
         true => super::fmt::pct(est),
-        false => format!("{}{}", if est < 0.0 { "−" } else { "+" }, disp(est.abs(), abs_unit(unit_of(m)))),
+        false => signed_disp(est, abs_unit(unit_of(m))),
     };
     let amount = delta.trim_start_matches(['+', '−']).to_string();
     let unit = unit_of(m);

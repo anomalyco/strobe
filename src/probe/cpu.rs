@@ -86,11 +86,10 @@ impl Sampling {
         self.median_us > 1.5 * self.asked_us
     }
 
-    /// `sampled every 0.52 ms (asked 0.5 ms)`, `sampled every 2.0 ms (asked 1 ms: 2.0× coarser)`.
+    /// `sampled every 520 µs (asked 500 µs)`, `sampled every 2,000 µs (asked 1,000 µs: 2.0× coarser)`.
     pub fn text(&self) -> String {
-        let got = if self.median_us >= 1000.0 { format!("{:.1} ms", self.median_us / 1000.0) } else { format!("{:.2} ms", self.median_us / 1000.0) };
         let coarser = if self.coarse() { format!(": {:.1}× coarser", self.median_us / self.asked_us) } else { String::new() };
-        format!("sampled every {got} (asked {} ms{coarser})", self.asked_us / 1000.0)
+        format!("sampled every {} (asked {}{coarser})", crate::fmt::time(self.median_us / 1000.0), crate::fmt::time(self.asked_us / 1000.0))
     }
 }
 
@@ -154,14 +153,18 @@ pub fn missed_texts(missed: &Value, runtime: Option<&str>) -> Vec<String> {
             _ => "the runtime's sampler took no sample of it, or its gaps were cut to the cap",
         };
         out.push(format!(
-            "Missed: the main thread ran {main:.0} ms on a CPU in the measured runs (cpu.main) and the profile holds samples of {sampled:.0} ms of it: {:.0} ms ({:.0}%) has no sample, so rows undercount. {why}",
-            missed["ms"].as_f64().unwrap_or(0.0),
+            "Missed: the main thread ran {} on a CPU in the measured runs (cpu.main) and the profile holds samples of {} of it: {} ({:.0}%) has no sample, so rows undercount. {why}",
+            crate::fmt::time(main),
+            crate::fmt::time(sampled),
+            crate::fmt::time(missed["ms"].as_f64().unwrap_or(0.0)),
             100.0 * share
         ));
     }
     if main > 0.0 && sampled > WAITED_RATIO * main && sampled - main > WAITED_MS {
         out.push(format!(
-            "Waited: hotspot rows include time the main thread waited for a CPU (sampled {sampled:.0} ms vs cpu.main {main:.0} ms in the measured runs): a sample weighs the wall time to the next; record where the target's CPUs are not shared"
+            "Waited: hotspot rows include time the main thread waited for a CPU (sampled {} vs cpu.main {} in the measured runs): a sample weighs the wall time to the next; record where the target's CPUs are not shared",
+            crate::fmt::time(sampled),
+            crate::fmt::time(main)
         ));
     }
     out
