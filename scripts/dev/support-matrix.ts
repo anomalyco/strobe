@@ -36,7 +36,7 @@ export function parseSupport(text: string): Support {
     return s
   }
   const cell = (src: string, where: string): Cell => {
-    const m = src.match(/^(Verified|Preview|Refused)\((.*)\)$/s)
+    const m = src.match(/^(?:Cell::)?(Verified|Preview|Refused)\((.*)\)$/s)
     if (!m) throw new Error(`${where}: not a cell: ${src}`)
     if (m[1] === "Verified") {
       const ev = evidence.get(m[2].replace(/^&/, ""))
@@ -45,7 +45,7 @@ export function parseSupport(text: string): Support {
     }
     return { kind: m[1] === "Preview" ? "preview" : "refused", why: text_of(m[2].trim(), where) }
   }
-  const CELL = `((?:Verified\\(&\\w+\\))|(?:(?:Preview|Refused)\\((?:\\w+|${STR})\\)))`
+  const CELL = `((?:Cell::)?(?:Verified\\(&\\w+\\)|(?:Preview|Refused)\\((?:\\w+|${STR})\\)))`
   const all = (ty: string) =>
     [...(text.match(new RegExp(`pub const ALL: \\[${ty}; \\d+\\] = \\[([\\s\\S]*?)\\];`))?.[1] ?? "").matchAll(new RegExp(`${ty}::(\\w+)`, "g"))].map((m) => snake(m[1]))
   const matrix = text.match(/pub const SUPPORT_MATRIX: &\[Row\] = &\[([\s\S]*?)\n\];/)?.[1]
