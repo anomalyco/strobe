@@ -80,17 +80,46 @@ fn seed_fingerprint(r: &Value, fingerprint: &mut Value) {
     }
 }
 
-/// A metric whose reading on this OS changed meaning carries its revision in the fingerprint, so its
-/// points from before are another series: Linux `memory.app.private` became anonymous + swapped pages
-/// (it was private clean + dirty, which counted a file's page cache). Only such a metric, so every
-/// other series keeps its history.
-fn metric_fingerprint(metric: &str, fingerprint: &mut Value) {
+/// A metric whose reading on this OS or runtime changed meaning carries its revision in the fingerprint,
+/// so its points from before are another series: Linux `memory.app.private` became anonymous + swapped
+/// pages (it was private clean + dirty, which counted a file's page cache); a Node host's
+/// `js.heap.retained` became the heap plus ArrayBuffer contents (it was the heap alone, which leaves
+/// them out: a kept 100 MiB buffer read 0, now 100 MiB; Bun's heap always held them). Only such a
+/// metric, so every other series keeps its history.
+fn metric_fingerprint(metric: &str, s: &Value, fingerprint: &mut Value) {
     let revision = match metric {
         "memory.app.private" if cfg!(target_os = "linux") => Some(2),
+        "js.heap.retained" if script_runtimes(s).contains(&"node") => Some(2),
         _ => None,
     };
     if let Some(r) = revision {
         fingerprint["metric_revision"] = json!(r);
+    }
+}
+
+/// The script runtimes a series' blocks ran, read from the executables of their process sets (what ran,
+/// whatever the target declared): `bun`, `node`, or both across two sides.
+fn script_runtimes(s: &Value) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for b in s["blocks"].as_array().into_iter().flatten() {
+        for name in b["process_set"].as_object().into_iter().flatten().map(|(k, _)| k.to_lowercase()) {
+            for r in ["bun", "node"] {
+                if name.trim_end_matches(".exe") == r && !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A script series' runtime in its fingerprint: Bun and Node read some metrics differently (the heap,
+/// the footprint on macOS), so a module hosted on each is two histories.
+fn runtime_fingerprint(s: &Value, fingerprint: &mut Value) {
+    let runtimes = script_runtimes(s);
+    if !runtimes.is_empty() {
+        fingerprint["runtime"] = json!(runtimes.join("+"));
     }
 }
 
@@ -413,9 +442,12 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         if !s["display"].is_null() {
             fingerprint["native_display"] = s["display"].clone();
         }
+        if s["target_kind"] == "script" {
+            runtime_fingerprint(s, &mut fingerprint);
+        }
         motion_fingerprint(r, s, &mut fingerprint);
         seed_fingerprint(r, &mut fingerprint);
-        metric_fingerprint(&metric, &mut fingerprint);
+        metric_fingerprint(&metric, s, &mut fingerprint);
         let family = json!({ "device": statics["device"], "repo": repo, "file": file_rel, "label": label, "metric": metric });
         let id = history::series_id(&family, &fingerprint);
         if !history::exists(&id) {
