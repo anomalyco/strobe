@@ -1545,6 +1545,9 @@ struct Ctx<'a> {
     placed: bool,
     /// `check_series` prints the case's line itself, once `--noworse` judged it (`check_case` does not).
     case_line_later: bool,
+    /// The counters only `--noworse` names that a block of some series counted or refused (`flagged_counts`):
+    /// one none did is said once (`Uncounted`).
+    noworse_seen: std::collections::BTreeSet<String>,
 }
 
 /// Every block's reservation, merged for the experiment's context.
@@ -2150,6 +2153,7 @@ pub fn run(args: &Args) -> Result<Output> {
         shared: env.shared_runner.clone(),
         placed: false,
         case_line_later: false,
+        noworse_seen: Default::default(),
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
     // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check`, a
@@ -2610,6 +2614,7 @@ pub fn run(args: &Args) -> Result<Output> {
     for text in variants.iter().flat_map(|v| v.changed.iter()) {
         ctx.warnings.push(validity::warn("VariantChanged", text.clone()));
     }
+    ctx.warnings.extend(uncounted(&series, &series_out, &ctx.noworse_seen));
     // Now it is known whether a hook used the seed: only then is another `--seed` another workload.
     // A resumed bench keeps what the runs before the resume found (`checkpoint`).
     let used_random = ctx.runner.used_random() || ctx.saved["used_random"] == true;
@@ -2813,7 +2818,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     if let Some((br, bl)) = base.as_mut() {
         all.extend(br.iter_mut().chain(bl.iter_mut()));
     }
-    flagged_counts(s, all);
+    ctx.noworse_seen.extend(flagged_counts(s, all));
     let base = base.map(|(mut r, launches)| {
         let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
         if let Ok(b) = &r {
@@ -2841,6 +2846,12 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     if let Some((b, counters)) = base {
         // `base_values` beside head's `values`, as reports read them (`report --format summary`).
         out["base_values"] = b["values"].clone();
+        // A counter only `--noworse` names that base counted is listed when head has none of it (head failed).
+        for m in s.flagged.iter().filter(|m| m.starts_with("count.") && b["values"].get(m.as_str()).is_some()) {
+            if let Some(d) = out["declared"].as_array_mut().filter(|d| !d.iter().any(|x| x == m.as_str())) {
+                d.push(json!(m));
+            }
+        }
         out["base"] = b;
         if let Some(head) = held {
             noworse_state(s, &noworse, counters.as_deref(), &head, &mut out);
@@ -2928,19 +2939,65 @@ fn check_noworse(args: &Args, s: &Series) -> Result<BTreeMap<String, f64>> {
 /// Once any block of them counted it, it is the series' counter, and a block that counted none of it
 /// (refusing nothing of it) read 0, with a 0 spread where the block keeps one: a code path that never ran
 /// on one side is a count of 0 there, not a counter that side lacks. None counted it: none has it.
-fn flagged_counts<'a>(s: &Series, blocks: impl IntoIterator<Item = &'a mut Block>) {
+/// Returns those a block counted or refused (`Ctx::noworse_seen`).
+fn flagged_counts<'a>(s: &Series, blocks: impl IntoIterator<Item = &'a mut Block>) -> Vec<String> {
     let mut blocks: Vec<&mut Block> = blocks.into_iter().collect();
+    let mut seen = Vec::new();
     for m in s.flagged.iter().filter(|m| m.starts_with("count.")) {
+        if blocks.iter().any(|b| b.refused.contains_key(m)) {
+            seen.push(m.clone());
+        }
         if !blocks.iter().any(|b| b.values.contains_key(m)) {
             continue;
+        }
+        if !seen.contains(m) {
+            seen.push(m.clone());
         }
         for b in blocks.iter_mut().filter(|b| !b.values.contains_key(m) && !b.refused.contains_key(m)) {
             b.values.insert(m.clone(), 0.0);
             if !b.spread.is_empty() {
                 b.spread.insert(m.clone(), [0.0, 0.0]);
             }
+            // The block's recording, written when it ended, says the same (`query <rec> summary`).
+            if let Some(dir) = b.recording.as_deref().and_then(|id| store::resolve(id).ok()) {
+                let path = dir.join("meta.json");
+                if let Ok(mut meta) = store::read_json(&path)
+                    && meta["values"].is_object()
+                    && meta["values"].get(m.as_str()).is_none()
+                {
+                    meta["values"][m.as_str()] = json!(0.0);
+                    let _ = store::write_json(&path, &meta);
+                }
+            }
         }
     }
+    seen
+}
+
+/// `Uncounted`: a `count.<name>` only `--noworse` names that no case declares and no block of the whole
+/// experiment counted (`seen`, and the outputs of series done before a resume): nothing compared it,
+/// which is right when what it counts never happened on either side, and hides a regression when the
+/// name is not the one the cases count. Said once per name, with the counters the cases declare.
+fn uncounted(series: &[Series], outs: &[Value], seen: &std::collections::BTreeSet<String>) -> Vec<Warning> {
+    let flagged: std::collections::BTreeSet<&String> = series.iter().flat_map(|s| s.flagged.iter()).filter(|m| m.starts_with("count.")).collect();
+    let declared: std::collections::BTreeSet<&String> = series.iter().flat_map(|s| declared_metrics(s).into_iter().filter(|m| m.starts_with("count.") && s.case_declares(m))).collect();
+    let measured = |m: &str| {
+        outs.iter().any(|o| {
+            [&o["values"], &o["base_values"], &o["refused"]].iter().any(|v| v.get(m).is_some())
+                || o["blocks"].as_array().into_iter().flatten().any(|b| b["values"].get(m).is_some() || b["refused"].get(m).is_some())
+        })
+    };
+    flagged
+        .into_iter()
+        .filter(|m| series.iter().all(|s| s.flagged.contains(*m)) && !seen.contains(*m) && !measured(m))
+        .map(|m| {
+            let known = if declared.is_empty() { "no case declares a counter".to_string() } else { format!("the cases declare {}", declared.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")) };
+            validity::warn(
+                "Uncounted",
+                format!("--noworse {m}: no run of any case counted it, so nothing compared it: either what it counts never happened on either side (0 on both, nothing to hold), or no case counts that name (check it: {known})"),
+            )
+        })
+        .collect()
 }
 
 /// Each `--noworse` counter's values on one side of a check: every launch's (with `--runs N` its lowest
@@ -4005,6 +4062,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // A resumed experiment (`--resume`) starts from the pairs it had finished.
     let saved = &ctx.saved["series"][s.label()];
     let mut blocks: Vec<Block> = serde_json::from_value(saved["blocks"].clone()).unwrap_or_default();
+    // What the blocks before a resume counted.
+    ctx.noworse_seen.extend(blocks.iter().flat_map(|b| s.flagged.iter().filter(|m| b.values.contains_key(*m) || b.refused.contains_key(*m)).cloned()).collect::<Vec<_>>());
     let mut pairs: Vec<(usize, usize)> = serde_json::from_value(saved["pairs"].clone()).unwrap_or_default();
     pairs.retain(|&(a, b)| a < blocks.len() && b < blocks.len());
     // The look a resumed series' primary was decided at (it then ran on for its secondaries): the
@@ -4080,7 +4139,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 }
                 idx[v] = blocks.len();
                 blocks.push(b);
-                flagged_counts(s, blocks.iter_mut());
+                let seen = flagged_counts(s, blocks.iter_mut());
+                ctx.noworse_seen.extend(seen);
             }
             // Base and head of a pair share one lock state and one display state, or the pair runs again.
             if blocks[start].locked == blocks[start + 1].locked && blocks[start].display == blocks[start + 1].display {
@@ -4288,7 +4348,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         }
     }
     if let Some((pb, _)) = pass.as_mut() {
-        flagged_counts(s, pb.iter_mut());
+        ctx.noworse_seen.extend(flagged_counts(s, pb.iter_mut()));
     }
     // Which blocks measure a metric: the pass's for what the paired loop's kind does not.
     let apart = |name: &str| (split == Counting::Separate && counted_apart(name) != main_counters) || (probe == Probing::Separate && http_probe::metric(name) != main_http);
@@ -8229,6 +8289,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let t1 = host::now_ns();
             let (fast1, tsc1) = fast_read(true);
             cost.end();
+            // The run's end takes a tick of the timeline before anything after it (its reads, the reset)
+            // runs: none of that is the run's (`block::startup_spill`).
+            if let Some(t) = &timeline {
+                t.mark_edge();
+            }
             let (fast1, ended1) = joined(fast1);
             let mut c1 = counters();
             let mut c1_at = host::now_ns();
@@ -8576,16 +8641,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     // view of the recording counts it.
                     let unmeasured = warmup.first().is_some() && i >= warmup.measured().end;
                     let key = if unmeasured { format!("warm:{g}") } else { format!("run:{g}") };
-                    // The run's edges take ticks of the timeline, so none holds both the run's CPU and what
-                    // came before it (`block::startup_spill`).
+                    // The run's start takes a tick of the timeline (its end does in `run_once`), so none holds
+                    // both the run's CPU and what came before it (`block::startup_spill`).
                     if let Some(t) = &timeline {
                         t.mark_edge();
                     }
-                    let ran = run_once(&mut ctx.runner, s, &same, &key, profile, profile && i + 1 == warmup.measured().end, set != Set::Memory && warmup.may_end(i));
-                    if let Some(t) = &timeline {
-                        t.mark_edge();
-                    }
-                    runs.push(ran?);
+                    runs.push(run_once(&mut ctx.runner, s, &same, &key, profile, profile && i + 1 == warmup.measured().end, set != Set::Memory && warmup.may_end(i))?);
                     // The work that must hold steady is the renderer's main-thread time. `--check` measures the
                     // first run: it asks whether a case works, not what it costs. From outside or in an engine
                     // without that counter, the work is the processes' CPU, as a native app's; where this machine
