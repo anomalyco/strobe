@@ -1862,8 +1862,8 @@ function niceTicks(lo, hi, count) {
 }
 /* ---------- end of the shared time units ---------- */
 
-// Values printed together, a median and its interval's ends (fmt::values): times at one set of digits,
-// any other unit each as fmtVal prints it.
+// Values printed together, a median and its interval's ends (fmt::values): each at its own digits,
+// times through fmtTimes, any other unit as fmtVal prints it.
 const fmtValues = (vs, u) => (u === "ms" ? fmtTimes(vs) : vs.map((v) => fmtVal(v, u)));
 
 // A number column's width for the longest of `texts` (mono at `px`; a character is at most 0.62em):

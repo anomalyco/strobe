@@ -97,12 +97,21 @@ function timeDigits(x: number, finest: number): number {
   const first = d(x)
   return Math.min(d(parseFloat(rfix(x, first))), first)
 }
+// fmt::EXACT and fmt::sci: from 2^53 a number prints in scientific notation with three significant digits
+// (`1.00e16`, Rust's `{:.2e}`: no `+` in the exponent).
+const EXACT = 2 ** 53
+const sci = (v: number) => v.toExponential(2).replace("e+", "e")
 function tTime(ms: number | null, signed = false, unit = UNIT): string {
   if (ms == null || !Number.isFinite(ms)) return "—"
-  const t = TU[unit], x = Math.abs(ms * t.perMs)
-  const s = x === 0 ? "0" : rfix(x, timeDigits(x, t.finest))
-  const body = x === 0 ? "0" : /[1-9]/.test(s) ? group(s) : `<${rfix(10 ** -t.finest, t.finest)}`
-  return `${ms < 0 ? "−" : ms > 0 && signed ? "+" : ""}${body} ${t.label}`
+  const t = TU[unit]
+  // Exactly 0 is the only time that prints as 0; one scaling took under the smallest double still takes the
+  // floor, and one it took past the largest prints `—`.
+  if (ms === 0) return `0 ${t.label}`
+  const x = Math.abs(ms * t.perMs)
+  if (!Number.isFinite(x)) return "—"
+  const s = x >= EXACT ? sci(x) : rfix(x, timeDigits(x, t.finest))
+  const body = x >= EXACT ? s : /[1-9]/.test(s) ? group(s) : `<${rfix(10 ** -t.finest, t.finest)}`
+  return `${ms < 0 ? "−" : signed ? "+" : ""}${body} ${t.label}`
 }
 // stats::verdict_text: a time's absolute bound or margin drawn again from `bound` in the unit shown.
 function vText(c: J): string {
@@ -120,12 +129,22 @@ function vText(c: J): string {
 function tValue(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
   if (unit === "ms") return tTime(v)
+  // Nothing prints as minus zero (`-0 B`, `-0.0`): fmt::no_minus_zero.
+  const t = tValueOf(v, unit)
+  return /[1-9]/.test(t) ? t : t.replace(/^[-−]/, "")
+}
+function tValueOf(v: number, unit: string): string {
+  if (Math.abs(v) >= EXACT) {
+    const n = sci(v)
+    return ["count", "value", ""].includes(unit) ? n : unit === "%" ? `${n}%` : unit === "/s" ? `${n}/s` : unit === "instructions" ? `${n} instr` : unit === "bytes" ? `${n} B` : `${n} ${unit}`
+  }
   let d = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4)
   if (Math.round(v * 10 ** d) === 0) {
     v = 0
     d = Math.min(d, 2)
   }
   switch (unit) {
+    case "Hz": return `${rfix(v, 0)} Hz`
     case "%": return `${rfix(v, d)}%`
     case "count": return group(Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : rfix(v, 1))
     case "bytes": return tBytes(v)
@@ -398,7 +417,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
           } else {
             // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
             const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(vText(c))[0]
-            const toks = body.match(/—|[−+-]?<?\d[\d.,]*(?: ?(?:[GMk] instr|instr|µs|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
+            const toks = body.match(/—|[−+-]?<?\d[\d.,]*(?:e\d+)?(?: ?(?:[GMk] instr|instr|µs|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
             const [tb, th, td] = toks
             const tci = toks.length >= 5 ? `${toks[3]} … ${toks[4]}` : toks[3]
             if (!row.includes(vText(c))) flagIt("CRIT", `${name} ${where}`, `verdict "${vText(c)}" not in: ${row.trim()}`)
@@ -492,7 +511,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
         for (const v of [p.estimate, p.lo, p.hi].filter(Number.isFinite)) want.add(tTime(v, true)).add(tTime(Math.abs(v))), nums.push(v, Math.abs(v))
       }
       // A time that rounds from one of those numbers (others, a wait's `30 s`, are not the card's numbers).
-      for (const m of card.alt.matchAll(/[−+]?<?\d[\d,]*(?:\.\d+)? ?(?:µs|ms|s)\b/g)) {
+      for (const m of card.alt.matchAll(/[−+]?<?\d[\d,]*(?:\.\d+)?(?:e\d+)? ?(?:µs|ms|s)\b/g)) {
         if (nums.some((v) => agrees(m[0], v, "ms")) && !want.has(m[0])) flagIt("CRIT", "card", `alt "${card.alt}": ${m[0]} is not how ${UNIT} prints its number`)
       }
     }
@@ -510,23 +529,25 @@ function checkSurfaces(r: J, handle: string = r.id) {
 // `1–2,200 µs`, reads 1,000 times smaller than its `0.00120–0.00220 s`).
 const PAIRS = new Map<string, { text: string; ends: [number, number][] }[]>()
 function checkWhole(surfaces: [string, string][]) {
-  const N = "[−+-]?<?\\d[\\d,]*(?:\\.\\d+)?"
-  const pair = new RegExp(`(?<![\\d.,])(${N})[ \\u00a0]?(?:→|–|to|…)[ \\u00a0]?(${N})[ \\u00a0](µs|us|ms|s)(?![\\w/])`, "g")
+  const N = "[−+-]?<?\\d[\\d,]*(?:\\.\\d+)?(?:e\\d+)?"
+  // Its first end with a unit of its own or none (`8.33e16 µs → 7.33e16 µs` beside `83,333 → 73,333 ms`).
+  const pair = new RegExp(`(?<![\\d.,])(${N})(?:[ \\u00a0](µs|us|ms|s))?[ \\u00a0]?(?:→|–|to|…)[ \\u00a0]?(${N})[ \\u00a0](µs|us|ms|s)(?![\\w/])`, "g")
   for (const [name, t] of surfaces) {
     for (const m of t.matchAll(/(?<![\d.,])(\d[\d,]*)(?:\.\d+)?[ \u00a0](?:µs|us|ms)(?![\w/])/g)) {
       const groups = m[1].split(",")
       if (groups.length > 1 && (groups[0].length > 3 || groups.slice(1).some((g) => g.length !== 3))) flagIt("CRIT", name, `"${m[0]}" is not grouped by threes`)
     }
-    const list = [...t.matchAll(pair)].map((m) => ({ text: m[0], ends: [m[1], m[2]].map((e) => span(`${e} ${m[3]}`)) as [number, number][] }))
+    const list = [...t.matchAll(pair)].map((m) => ({ text: m[0], ends: [span(`${m[1]} ${m[2] ?? m[4]}`), span(`${m[3]} ${m[4]}`)] as [number, number][] }))
     PAIRS.set(`${name} ${UNIT}`, list)
     for (const m of t.matchAll(/(?<![\w.,−-])[−-]0(?:\.0+)?(?=[ \u00a0]|%|$|[),;])/gm)) flagIt("HIGH", name, `minus zero "${m[0]}" in: ${t.slice(Math.max(0, m.index! - 40), m.index! + 20).replace(/\n/g, " ")}`)
   }
 }
 // A printed time's possible values in ms: [low, high] (its rounding; `<0.01 µs` from 0 up to the step).
 function span(tok: string): [number, number] {
-  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)\s*(µs|us|ms|s)/.exec(tok.replace(/,/g, ""))
+  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)(?:e(\d+))?\s*(µs|us|ms|s)/.exec(tok.replace(/,/g, ""))
   if (!m) return [NaN, NaN]
-  const scale = m[5] === "s" ? 1000 : m[5] === "ms" ? 1 : 0.001, x = parseFloat(m[3]) * scale, half = 0.5 * 10 ** -(m[4]?.length ?? 0) * scale
+  const p = 10 ** Number(m[5] ?? 0)
+  const scale = (m[6] === "s" ? 1000 : m[6] === "ms" ? 1 : 0.001) * p, x = parseFloat(m[3]) * scale, half = 0.5 * 10 ** -(m[4]?.length ?? 0) * scale
   const [lo, hi] = m[2] ? [0, x] : [x - half, x + half]
   return m[1] === "−" || m[1] === "-" ? [-hi, -lo] : [lo, hi]
 }
@@ -539,7 +560,9 @@ function checkPairs() {
     for (const [i, p] of per[0].entries()) {
       for (const [k, other] of per.entries()) {
         const q = other[i]
-        const apart = [0, 1].some((e) => !(p.ends[e][0] <= q.ends[e][1] * (1 + 1e-9) + 1e-12 && q.ends[e][0] <= p.ends[e][1] * (1 + 1e-9) + 1e-12))
+        // Overlapping, give or take a double's rounding (of either sign).
+        const tol = (a: number, b: number) => 1e-9 * Math.max(Math.abs(a), Math.abs(b)) + 1e-12
+        const apart = [0, 1].some((e) => !(p.ends[e][0] <= q.ends[e][1] + tol(p.ends[e][0], q.ends[e][1]) && q.ends[e][0] <= p.ends[e][1] + tol(q.ends[e][0], p.ends[e][1])))
         if (apart) flagIt("CRIT", name, `"${p.text}" (${UNITS[0]}) and "${q.text}" (${UNITS[k]}) are not the same times`)
       }
     }
@@ -550,10 +573,10 @@ function checkPairs() {
 // A printed number in its metric's unit with the half-step its digits allow: `12.3 ms` → [12.3, 0.05],
 // `12,300 µs` → [12.3, 0.0005]; a `<0.01 µs` floor → [0.000005, 0.000005] (anything from 0 to the step).
 function readNum(tok: string, unit: string): [number, number] | undefined {
-  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)\s*([A-Za-zµ%/]*)/.exec(tok.replace(/,/g, ""))
+  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)(?:e(\d+))?\s*([A-Za-zµ%/]*)/.exec(tok.replace(/,/g, ""))
   if (!m) return
   const dec = m[4]?.length ?? 0
-  const scale = { KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, µs: unit === "ms" ? 0.001 : 1, us: unit === "ms" ? 0.001 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[5]] ?? (m[5] === "MB" && unit === "bytes" ? 1024 ** 2 : 1)
+  const scale = 10 ** Number(m[5] ?? 0) * ({ KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, µs: unit === "ms" ? 0.001 : 1, us: unit === "ms" ? 0.001 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[6]] ?? (m[6] === "MB" && unit === "bytes" ? 1024 ** 2 : 1))
   const sign = m[1] === "−" || m[1] === "-" ? -1 : 1, x = parseFloat(m[3]) * scale
   return m[2] ? [(sign * x) / 2, x / 2] : [sign * x, 0.5 * 10 ** -dec * scale]
 }
@@ -563,7 +586,7 @@ function near(a: string | undefined, b: string | undefined, unit: string): boole
   return !!x && !!y && Math.abs(x[0] - y[0]) <= (x[1] + y[1]) * (1 + 1e-9) + 1e-12
 }
 const squash = (s: string) => s.replace(/[ \t\u00a0]+/g, " ").trim()
-const NUM = /—|[−+-]?<?\d[\d.,]*(?: ?(?:[GMk] instr|instr|µs|us|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g
+const NUM = /—|[−+-]?<?\d[\d.,]*(?:e\d+)?(?: ?(?:[GMk] instr|instr|µs|us|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g
 
 // `bench --blocks`: the text's median, interval and blocks against the HTML report's hero and the step summary's row,
 // and each declared metric's line against the HTML's row (one build: nothing compared).
@@ -618,11 +641,20 @@ function checkSummary(r: J, md: string, text: string) {
   const rows = rowsOf(md).slice(1)
   // Names a published summary must never carry (SPEC §1 rule 9): what the reservation moved or could not move.
   // and the busiest other processes each block saw (`blocks[].background`), where no case or target has the name.
-  // The target's own: its cases and targets, and each side's executable (`exe:…/app.exe` names the target, not another).
-  const own = new Set([...seriesOf(r).flatMap((s: J) => [s.case, s.target, s.label]), r.args?.flags?.base, r.args?.flags?.head].filter(Boolean))
+  const own = new Set(seriesOf(r).flatMap((s: J) => [s.case, s.target, s.label]).filter(Boolean))
   const busy = seriesOf(r).flatMap((s: J) => [...(s.blocks ?? []), ...(s.pass?.blocks ?? [])].flatMap((b: J) => (Array.isArray(b.background) ? b.background.map((x: J) => x?.[0]) : [])))
   const names = [...new Set([...Object.keys(r.plan?.reserve?.moved ?? {}), ...Object.keys(r.plan?.reserve?.failed ?? {}), ...busy])].filter((n) => typeof n === "string" && n.length > 3 && ![...own].some((o: any) => String(o).includes(n)))
-  for (const n of names) if (md.includes(n)) flagIt("CRIT", "summary", `names another process: ${n}`)
+  // A side named by its executable (`exe:…/<hash>/app.exe`, `app:<id>`) is the target itself, not another process:
+  // those side names alone are taken out first, so a foreign name anywhere else in the text still fails.
+  // "Where it came from" lists the target's own threads and the module each started in (its own executable,
+  // which another copy of the same program on the machine shares). Markup (`<code>`) is not text, and a name
+  // is a whole word there (`code` the process, not `<code>`).
+  const cleanMd = md
+    .replace(/\b(?:exe|app):[^\s|`*,;)]+/g, "")
+    .replace(/^#### Where it came from[\s\S]*?(?=^#### |^<\/details>|(?![\s\S]))/m, "")
+    .replace(/<\/?[a-z]+>/g, " ")
+  const word = (n: string) => new RegExp(`(?<![\\w.-])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`)
+  for (const n of names) if (word(n).test(cleanMd)) flagIt("CRIT", "summary", `names another process: ${n}`)
   const series = seriesOf(r)
   if (r.kind === "check") {
     const passed = series.filter((s: J) => (s.state ?? (s.passed ? "pass" : "fail")) === "pass" && s.passed !== false).length
@@ -669,11 +701,12 @@ function checkSummary(r: J, md: string, text: string) {
 function agrees(tok: string | undefined, v: number, unit: string): boolean {
   if (tok == null) return false
   if (!Number.isFinite(v)) return /^—/.test(tok.trim())
-  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)\s*([A-Za-zµ%/]*)/.exec(tok.replace(/,/g, ""))
+  const m = /([−+-]?)(<?)(\d+(?:\.(\d+))?)(?:e(\d+))?\s*([A-Za-zµ%/]*)/.exec(tok.replace(/,/g, ""))
   if (!m) return false
   const sign = m[1] === "−" || m[1] === "-" ? -1 : 1
   const dec = m[4]?.length ?? 0
-  const scale = { KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, µs: unit === "ms" ? 0.001 : 1, us: unit === "ms" ? 0.001 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[5]] ?? (m[5] === "MB" && unit === "bytes" ? 1024 ** 2 : 1)
+  // `1.00e16 µs`: the exponent scales the number, its decimals still say its step.
+  const scale = 10 ** Number(m[5] ?? 0) * ({ KB: 1024, GB: 1024 ** 3, s: unit === "ms" ? 1000 : 1, µs: unit === "ms" ? 0.001 : 1, us: unit === "ms" ? 0.001 : 1, k: 1e3, M: 1e6, G: 1e9 }[m[6]] ?? (m[6] === "MB" && unit === "bytes" ? 1024 ** 2 : 1))
   // In the printed number's own unit, so a big one (`17,105,146 µs`) keeps its last digit's precision.
   const x = sign * parseFloat(m[3]), w = v / scale
   if (m[2]) return v !== 0 && Math.sign(v) === sign && Math.abs(w) < 0.5 * Math.abs(x) * (1 + 1e-9)

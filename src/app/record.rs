@@ -1621,7 +1621,7 @@ fn batch_lines(meta: &Value) -> String {
     s
 }
 
-/// `ended    run:2 measured · 222 ms of CPU counted · chrome.exe 180 ms (2 processes) …`: the runs in
+/// `ended    run:2 measured · 222,000 µs of CPU counted · chrome.exe 180,000 µs (2 processes) …`: the runs in
 /// which processes of the target ended inside the timed parts (`ended_runs` in meta.json), what they
 /// used there and which executables they were (where the OS names them); a run whose CPU was lost
 /// anyway (a process ended unread) says so.

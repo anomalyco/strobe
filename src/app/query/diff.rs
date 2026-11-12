@@ -893,15 +893,9 @@ fn rows_text(rows: &[(String, f64, f64)], top: usize, show: impl Fn(f64) -> Stri
     (text, json_rows)
 }
 
-/// A change with its sign, none when it shows as zero (`0 MB`, not `−0 MB`).
+/// A change with its sign, none when it shows as zero (`0 MB`, `0.0`, never `−0.0`): `fmt::signed_by`.
 fn signed(v: f64, show: &impl Fn(f64) -> String) -> String {
-    let body = show(v.abs());
-    match v {
-        _ if body == show(0.0) => body,
-        v if v > 0.0 => format!("+{body}"),
-        v if v < 0.0 => format!("{}{body}", fmt::minus()),
-        _ => body,
-    }
+    fmt::signed_by(v, show)
 }
 
 /// Style invalidation of two recordings per run: recalcs, what changed, selectors, sources.
@@ -920,7 +914,11 @@ fn style(a: &Rec, b: &Rec, top: usize) -> Result<Output> {
     // The recalc time is a time; the rest are counts.
     let mut scalars_json = Vec::new();
     for (i, row) in scalars.iter().enumerate() {
-        let (t, j) = if i == 1 { rows_text(std::slice::from_ref(row), 1, |v| fmt::value(v, "ms")) } else { rows_text(std::slice::from_ref(row), 1, count) };
+        let (t, mut j) = if i == 1 { rows_text(std::slice::from_ref(row), 1, |v| fmt::value(v, "ms")) } else { rows_text(std::slice::from_ref(row), 1, count) };
+        // The JSON keeps the row's name as it always was (its numbers are milliseconds); the text says time.
+        if i == 1 {
+            j[0]["name"] = json!("recalc ms per run");
+        }
         text += &t;
         scalars_json.extend(j);
     }

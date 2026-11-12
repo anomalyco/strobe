@@ -600,7 +600,7 @@ impl<'a> Doc<'a> {
                 i += 1;
             }
         }
-        // `run time (8.01 s, 20.0 s)`: a name once, with each series' value.
+        // `run time (8,010,000 µs, 20,000,000 µs)`: a name once, with each series' value.
         let mut by: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (name, v) in held {
             let e = by.entry(name).or_default();
@@ -906,14 +906,14 @@ impl<'a> Doc<'a> {
                 any_mem = true;
                 let mb = |v: f64| nb(&format!("{} MB", sig3(v / (1024.0 * 1024.0))));
                 let d = f(&r["delta_bytes"]);
+                // A change that shows as `0 MB` has no sign (never `-0 MB`).
                 mem += &format!(
-                    "{}| {} | {} | {} | {}{} |\n",
+                    "{}| {} | {} | {} | {} |\n",
                     self.series_cell(s, i),
                     layer_name(r["layer"].as_str().unwrap_or("")),
                     mb(f(&r["base_bytes"])),
                     mb(f(&r["head_bytes"])),
-                    if d < 0.0 { "−" } else { "+" },
-                    mb(d.abs())
+                    fmt::signed_by(d, &mb)
                 );
             }
             let rows = all_rows(s);

@@ -128,7 +128,7 @@ pub(super) fn delta(c: &Value, x: f64) -> String {
     if c["relative"] == true && x.to_bits() == f(&c["estimate"]).to_bits() && f(&c["lo"]).is_finite() && f(&c["hi"]).is_finite() {
         return fmt::pct_ci(x, f(&c["lo"]), f(&c["hi"])).0;
     }
-    // A time's estimate and ends at one set of digits, as the text prints them (`fmt::times`).
+    // A time's estimate and ends each at its own digits, as the text prints them (`fmt::times`).
     let all = [f(&c["estimate"]), f(&c["lo"]), f(&c["hi"])];
     if c["relative"] != true
         && unit == "ms"
@@ -168,10 +168,22 @@ pub(super) fn value(c: &Value, side: &str) -> String {
     disp(f(&c[side]), unit_of(c["metric"].as_str().unwrap_or("")))
 }
 
-/// Whether `s` is a number as `fmt` prints one (`1,234`, `−0.40`, `<0.01`), so a unit after it can
-/// be shared.
+/// Whether `s` is a number as `fmt` prints one (`1,234`, `−0.40`, `<0.01`, `1.00e16`), so a unit after
+/// it can be shared.
 fn number(s: &str) -> bool {
-    s.chars().any(|c| c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_digit() || ",.+-<\u{2212}".contains(c))
+    s.chars().any(|c| c.is_ascii_digit()) && number_len(s) == s.len()
+}
+
+/// The length of the number `s` starts with: digits, grouping commas, a point, a sign, a `<` floor, and
+/// an exponent's `e` between digits (`1.00e16 µs` is one number, `12 elements` stops at the space).
+fn number_len(s: &str) -> usize {
+    let b = s.as_bytes();
+    s.char_indices()
+        .find(|&(i, ch)| {
+            let exp = ch == 'e' && i > 0 && b[i - 1].is_ascii_digit() && b.get(i + 1).is_some_and(u8::is_ascii_digit);
+            !(ch.is_ascii_digit() || ",.+-<\u{2212}".contains(ch) || exp)
+        })
+        .map_or(s.len(), |(i, _)| i)
 }
 
 /// `7,050 → 3,900 µs`: both medians, the unit once when they share it.
@@ -437,7 +449,7 @@ pub(super) fn span(lo: &str, hi: &str) -> String {
         {
             return (s[..i].to_string(), s[i..].to_string());
         }
-        let i = s.find(|ch: char| !(ch.is_ascii_digit() || ",.+-<\u{2212}".contains(ch))).unwrap_or(s.len());
+        let i = number_len(s);
         (s[..i].to_string(), s[i..].to_string())
     };
     let ((ln, lu), (hn, hu)) = (split(lo), split(hi));

@@ -5295,7 +5295,7 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     b
 }
 
-/// ` (6.0 ms/run over 50 ms runs; …)`: a share of a core over a block's measured runs as CPU per run, and
+/// ` (6,000 µs/run over 50,000 µs runs; …)`: a share of a core over a block's measured runs as CPU per run, and
 /// their mean length. Most of strobe's cost is fixed per run (its marks, reads and relay), so a short
 /// run (under 250 ms) shows it as a large share: said so. Nothing without runs.
 fn per_run(pct: f64, b: &Block) -> String {
@@ -5706,7 +5706,7 @@ fn change_ci(relative: bool, est: f64, lo: f64, hi: f64, unit: &str) -> (String,
     if relative {
         return fmt::pct_ci(est, lo, hi);
     }
-    // Times at the digits of the largest of the three (`fmt::times`).
+    // Times each at its own digits (`fmt::times`).
     if unit == "ms" {
         let [e, l, h]: [String; 3] = fmt::times(&[est, lo, hi], true).try_into().unwrap_or_default();
         return (e, l, h);

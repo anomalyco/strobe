@@ -986,8 +986,8 @@ fn path_text(p: &Value) -> String {
 
 fn signed_bytes(v: f64) -> String {
     let body = bytes(v.abs());
-    // One that shows as zero has no sign.
-    if body == bytes(0.0) || v.is_nan() {
+    // One that shows as zero has no sign (every digit it shows is 0: `0 B`, never `-0 B`).
+    if body.chars().filter(char::is_ascii_digit).all(|d| d == '0') || v.is_nan() {
         body
     } else if v > 0.0 {
         format!("+{body}")

@@ -1373,8 +1373,8 @@ exits before it opened one, is said with how to look at an app that shows none: 
 profile's `window: false`): a tray app, a service or a command, launched as a windowless bench target
 is, with its stdout and stderr read through a pipe; nothing is waited for or read of a window
 (`--until`, `--out` and `--keys` are usage errors). It watches the app for `--wait` (2 s): whether it
-kept running (`running  after 2 s · N processes`), else how it ended (`exited   with code 0 after
-10,000 µs`; a launcher that exits 0 and leaves the app running is no end), and the guards; then
+kept running (`running  after 2.0 s · N processes`), else how it ended (`exited   with code 0 after
+25 ms`, wall-clock durations of the watch, polled every 100 ms, in every unit; a launcher that exits 0 and leaves the app running is no end), and the guards; then
 `window   none (windowless)` and its last 20 output lines (`output`, with the count). Exit 0, also
 for a command that did its work and exited 0; 124 for a nonzero exit or a guard that stopped it
 (said on a `!` line). JSON `windowless: true`, `running`, `exit_code`, `ended_ms`, `processes`,
@@ -9087,8 +9087,10 @@ what was built but not yet run on a device is in §21.
   seconds past 1,000 ms); counts grouped, values past 2^53 in scientific notation; a stored check's
   and bisect's text and a time's absolute verdict bound drawn again in the unit asked; `--json` the
   same bytes in every unit and locale; `LC_ALL=C` prints `us` and `-`, on Windows too; `strobe stats`
-  `signed`, `times`, `verdict`, `time_unit`, `ascii`; `surfaces.ts` per unit with `--sample N` (5,
-  5.8, 5.11, 7.1, 9.3, 10.3, 11.1, 11.2, 17).
+  `signed`, `times`, `verdict`, `time_unit`, `ascii`; `surfaces.ts` per unit with `--sample N`; `look
+  --windowless`'s watch prints wall-clock durations (`2.0 s`); `--json` keeps its row names
+  (`recalc ms per run`); a bisect step keeps `bound` and `noworse` (5, 5.8, 5.11, 5.12, 7.1, 9.3, 10.3,
+  11.1, 11.2, 17).
 
 **0.30.0** (71eae8e, 2026-11-12)
 

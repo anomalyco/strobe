@@ -358,6 +358,8 @@
         "estimate": { "type": ["number", "null"] },
         "lo": { "type": ["number", "null"] },
         "hi": { "type": ["number", "null"] },
+        "bound": { "type": ["number", "null"], "description": "The step's equivalence bound (or no-worse margin), in its comparison's scale: a reader draws an absolute time bound in the verdict again in its own unit. Absent before this was written." },
+        "noworse": { "type": ["number", "null"], "description": "The step's no-worse margin, when it had one." },
         "verdict": { "type": "string" },
         "verdict_kind": { "$ref": "#/definitions/verdictKind" },
         "decided": { "type": "boolean" },

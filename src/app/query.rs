@@ -2599,9 +2599,9 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sor
                     why.push(format!("the OS lost {lost} events"));
                 }
                 out.text += &format!(
-                    "! Coverage: {taken} samples of the {:.0} the processes' {:.2} s CPU asks for at one per {} ({:.0}%; {source}){}\n",
+                    "! Coverage: {taken} samples of the {:.0} the processes' {} of CPU asks for at one per {} ({:.0}%; {source}){}\n",
                     cpu / every_ms,
-                    cpu / 1e3,
+                    fmt::value(cpu, "ms"),
                     fmt::value(every_ms, "ms"),
                     100.0 * share,
                     if why.is_empty() { "; the sampler counted no cause for the rest".to_string() } else { format!("; {}", why.join("; ")) }

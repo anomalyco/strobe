@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// The unit a measured time shows in (SPEC §11.3 "Units"): microseconds unless the user picks
+/// The unit a measured time shows in (SPEC §7.1 "Times"): microseconds unless the user picks
 /// milliseconds or seconds (`--unit`, `"unit"` in strobe.json, MCP's `unit`). Only what people read
 /// changes: every stored and `--json` number stays in its metric's unit (a `ms` metric in ms).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

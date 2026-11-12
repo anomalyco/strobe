@@ -303,7 +303,7 @@ function val(v, unit) {
   if (unit === "ln_ratio") return pct(Math.exp(v) - 1);
   return fmtVal(v, unit || "");
 }
-// Values printed together, a median and its interval's ends (fmt::values): times at one set of digits.
+// Values printed together, a median and its interval's ends (fmt::values): each at its own digits.
 const vals = (vs, unit) => unit === "ms" ? fmtTimes(vs) : vs.map(v => val(v, unit));
 // fmt::pct: none from 10%, one decimal from 0.1%, below that the first significant digit (up to three),
 // so a nonzero change never prints as 0.0%; no sign on what rounds to zero.
