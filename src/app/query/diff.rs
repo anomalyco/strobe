@@ -478,13 +478,13 @@ impl Weighted {
         if k.sampled() {
             text += &format!(" · {} and {} samples", self.samples[0], self.samples[1]);
         }
-        text += &format!(" · {per}\n  {:>13}  {:>13}  {:>14}  {:>9}  {}\n", "base", "head", "Δ", if k.sampled() { "±95%" } else { "" }, self.by);
+        text += &format!(" · {per}\n  {:>13}  {:>13}  {:>14}  {:>13}  {}\n", "base", "head", "Δ", if k.sampled() { "±95%" } else { "" }, self.by);
         let mut rows_json = Vec::new();
         for row in self.rows.iter().take(top) {
             let ci = self.ci(row);
             let noise = self.noise(row);
             text += &format!(
-                "{} {:>13}  {:>13}  {:>14}  {:>9}  {}{}\n",
+                "{} {:>13}  {:>13}  {:>14}  {:>13}  {}{}\n",
                 if noise { "~" } else { " " },
                 k.show(row.v[0]),
                 k.show(row.v[1]),
@@ -947,7 +947,7 @@ fn summary(a: &Rec, b: &Rec) -> Result<Output> {
     let mut table: Vec<Vec<String>> = vec![["base", "head", "Δ", "Δ%", ""].map(String::from).to_vec()];
     let mut rows = Vec::new();
     for k in keys {
-        let unit = crate::model::metric(k).map(|m| m.unit).unwrap_or("");
+        let unit = crate::model::metric(k).map(|m| m.unit).unwrap_or_else(|| recording_unit(k));
         let (u, v) = (x.get(k).copied().unwrap_or(f64::NAN), y.get(k).copied().unwrap_or(f64::NAN));
         let show = |x: f64| fmt::value(x, if unit.is_empty() { "count" } else { unit });
         // A percentage changes by percentage points.
@@ -972,6 +972,19 @@ fn summary(a: &Rec, b: &Rec) -> Result<Output> {
     text += &perturbed_note(a, b);
     text += "one recording per side, no interval: a verdict needs strobe bench\n";
     Ok(Output::new(text, json!({ "base": a.id, "head": b.id, "rows": rows })))
+}
+
+/// The unit of a value a block's recording keeps that no catalog metric is (as the report page reads
+/// them): its untimed stretches and stepped warmup runs and strobe's own reads are times, the display's
+/// rate Hz, the CDP main-thread share a percentage; anything else a count.
+fn recording_unit(k: &str) -> &'static str {
+    match k {
+        "untimed.ms" => "ms",
+        _ if k.starts_with("warmup.stepped.") || (k.starts_with("driver.") && k.ends_with("_ms")) => "ms",
+        "display.hz" => "Hz",
+        "main.busy.cdp" => "%",
+        _ => "",
+    }
 }
 
 /// Timing read from a recording whose profilers ran is perturbed (SPEC §1 rule 3): said beside it.

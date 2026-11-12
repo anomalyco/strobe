@@ -188,7 +188,7 @@ pub fn run(args: &Args) -> Result<Output> {
                 }
                 built
             };
-            sql_view(&file, sql, top.max(50))
+            sql_view(&file, sql, top.max(50), false)
         }
         "frames" if meta["wir"] == true => Err(Error::refused(
             "EngineUnsupported",
@@ -1151,7 +1151,7 @@ pub fn memory_diff(a: &Path, b: &Path, top: usize) -> Result<Output> {
     rows.sort_by(|x, y| (y.2 - y.1).abs().total_cmp(&(x.2 - x.1).abs()));
     let mut text = String::from("memory diff · last census of each · by layer and process type\n        base        head        Δ  layer · process\n");
     for (k, x, y) in rows.iter().take(top) {
-        text += &format!("  {:>10}  {:>10}  {:>9}  {k}\n", fmt::bytes(*x), fmt::bytes(*y), format!("{}{}", if y < x { "−" } else { "+" }, fmt::bytes((y - x).abs())));
+        text += &format!("  {:>10}  {:>10}  {:>9}  {k}\n", fmt::bytes(*x), fmt::bytes(*y), fmt::signed(y - x, "bytes"));
     }
     if phone.get() {
         text += "a phone's page: its processes are on the phone, from Chromium's memory dump, with no OS private bytes (strobe reads no process memory of the phone's)\n";
@@ -1215,7 +1215,7 @@ fn sql_number(cell: &str) -> &str {
     }
 }
 
-fn sql_view(trace: &Path, sql: &str, limit: usize) -> Result<Output> {
+fn sql_view(trace: &Path, sql: &str, limit: usize, times: bool) -> Result<Output> {
     let mut t = engine::query(trace, sql)?;
     for c in t.rows.iter_mut().flatten().flatten() {
         let short = sql_number(c);
@@ -1225,9 +1225,31 @@ fn sql_view(trace: &Path, sql: &str, limit: usize) -> Result<Output> {
     }
     let shown = t.rows.len().min(limit);
     let mut text = t.columns.join(" | ") + "\n";
-    for r in &t.rows[..shown] {
-        text += &r.iter().map(|c| c.clone().unwrap_or_else(|| "NULL".into())).collect::<Vec<_>>().join(" | ");
-        text.push('\n');
+    // A view's own query (`gpu`, `threads`): its `*_ms` columns are times, printed as times are
+    // (`--unit`), in columns as wide as their widest cell. The JSON keeps the query's cells.
+    if times {
+        fn ms(c: &str) -> Option<&str> {
+            c.strip_suffix("_ms")
+        }
+        let mut table = vec![t.columns.iter().map(|c| ms(c).unwrap_or(c).to_string()).collect::<Vec<_>>()];
+        for r in &t.rows[..shown] {
+            table.push(
+                r.iter()
+                    .zip(&t.columns)
+                    .map(|(c, col)| match (ms(col), c.as_deref().and_then(|x| x.parse::<f64>().ok())) {
+                        (Some(_), Some(v)) => fmt::time(v),
+                        _ => c.clone().unwrap_or_else(|| "NULL".into()),
+                    })
+                    .collect(),
+            );
+        }
+        let right: Vec<bool> = t.columns.iter().map(|c| ms(c).is_some() || ["n", "pid", "tid", "tasks"].contains(&c.as_str())).collect();
+        text = fmt::table(&table, &right, "", 2);
+    } else {
+        for r in &t.rows[..shown] {
+            text += &r.iter().map(|c| c.clone().unwrap_or_else(|| "NULL".into())).collect::<Vec<_>>().join(" | ");
+            text.push('\n');
+        }
     }
     if t.rows.len() > shown {
         text += &format!("… {} more rows (narrow the query or raise --top)\n", t.rows.len() - shown);
@@ -1322,8 +1344,8 @@ fn frames(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
             let parts: Vec<String> = mine
                 .iter()
                 .map(|(name, dur, kids)| {
-                    let inner = if kids.is_empty() { String::new() } else { format!(" ({})", kids.iter().map(|(n, d)| format!("{n} {:.1}", ms(*d))).collect::<Vec<_>>().join(", ")) };
-                    format!("{name} {:.1}{inner}", ms(*dur))
+                    let inner = if kids.is_empty() { String::new() } else { format!(" ({})", kids.iter().map(|(n, d)| format!("{n} {}", fmt::time(ms(*d)))).collect::<Vec<_>>().join(", ")) };
+                    format!("{name} {}{inner}", fmt::time(ms(*dur)))
                 })
                 .collect();
             text += &format!("             {}\n", parts.join(" · "));
@@ -1401,13 +1423,13 @@ fn frame_stages(trace: &Path, meta: &Value, frames: &[&metrics::Vsync]) -> Resul
 fn gpu(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
     let (pre, runs, said) = in_measured_runs(meta);
     let sql = format!(
-        "{pre}select t.name as thread, s.name, count(*) as n, round(sum(s.dur) / 1e6, 1) as total_ms, round(max(s.dur) / 1e6, 1) as max_ms
+        "{pre}select t.name as thread, s.name, count(*) as n, sum(s.dur) / 1e6 as total_ms, max(s.dur) / 1e6 as max_ms
          from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid) join process p using(upid)
          where p.name glob 'GPU*' and s.dur > 0 and s.depth between 1 and 4
            and s.name not in ('RunTask', 'ThreadControllerImpl::RunTask', 'ThreadPool_RunTask', 'SequenceManager::DoIdleWork'){runs}
          group by 1, 2 order by total_ms desc limit {top}"
     );
-    let mut out = sql_view(trace, &sql, top)?;
+    let mut out = sql_view(trace, &sql, top, true)?;
     out.text += &said;
     // The adapter the page drew on (the OS's per-process GPU statistics), where the recording read it.
     if let Some(line) = super::bench::gpu_line(&meta["screen"]["gpu"]) {
@@ -1669,7 +1691,7 @@ fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
         let peak = wakes[i].iter().copied().fold(0.0, f64::max) / bin_s;
         let is_main = main == Some((u64::from(th.pid), u64::from(th.tid)));
         text += &format!(
-            "{strip}{:>9}  {:>6} wakes/s peak  {:.1}-{:.1} s{}  {:<6} {}{} {}{}\n",
+            "{strip}{:>13}  {:>6} wakes/s peak  {:.1}-{:.1} s{}  {:<6} {}{} {}{}\n",
             if unknown(i) { "?".to_string() } else { fmt::value(total[i], "ms") },
             // macOS counts wakes per process, not per thread.
             if cfg!(target_os = "macos") { "—".to_string() } else { fmt::value(peak, "count") },
@@ -1807,15 +1829,15 @@ fn threads(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
         format!(
             "{pre}with x as (select tt.utid, s.ts, s.ts + s.dur as e, s.dur from slice s join thread_track tt on s.track_id = tt.id where s.depth = 0 and s.dur > 0{filter}{runs}),
              o as (select utid, ts, e, dur, max(e) over (partition by utid order by ts, e rows between unbounded preceding and 1 preceding) as before from x)
-             select p.name as process, p.pid, t.tid, t.name as thread, count(*) as tasks, round(sum(max(0, e - max(ts, coalesce(before, ts)))) / 1e6, 1) as busy_ms, round(max(dur) / 1e6, 1) as max_ms
+             select p.name as process, p.pid, t.tid, t.name as thread, count(*) as tasks, sum(max(0, e - max(ts, coalesce(before, ts)))) / 1e6 as busy_ms, max(dur) / 1e6 as max_ms
              from o join thread t using(utid) left join process p using(upid) group by o.utid order by busy_ms desc limit {top}"
         )
     };
-    let mut out = sql_view(trace, &sql(tasks), top)?;
+    let mut out = sql_view(trace, &sql(tasks), top, true)?;
     if out.json["total"].as_u64().unwrap_or(0) == 0 {
         if meta["probes"] == "import" {
             // An imported trace without a task loop's slices: every top-level slice, said so.
-            out = sql_view(trace, &sql(""), top)?;
+            out = sql_view(trace, &sql(""), top, true)?;
             out.text += "no task-loop slices (RunTask) in this trace: every top-level slice of a thread counted, overlaps once\n";
         } else {
             out.text += "no task-loop slices (RunTask) in this trace's measured runs\n";
@@ -2314,9 +2336,9 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sor
     } else {
         (
             format!(
-                "native hotspots by {by} · {} · {{samples}} samples{of_procs} at {} µs (sampled: samples × interval) · resolved: {share:.1}% of leaf frames, {frame_share:.1}% of all frames{{mapped}}",
+                "native hotspots by {by} · {} · {{samples}} samples{of_procs} at {} (sampled: samples × interval) · resolved: {share:.1}% of leaf frames, {frame_share:.1}% of all frames{{mapped}}",
                 columns(sort),
-                n.interval_us
+                fmt::time(n.interval_us / 1e3)
             ),
             n.interval_us,
         )
@@ -2901,15 +2923,18 @@ fn run_phases(rec: &Rec) -> Result<Option<(String, Value)>> {
     if !any {
         return Ok(None);
     }
-    let mut text = format!("per run  {} · renderer main thread\n         style ms (elements restyled)   layout ms   paint ms\n", runs_text(meta, measured.len(), &rows));
+    let mut text = format!("per run  {} · renderer main thread\n", runs_text(meta, measured.len(), &rows));
     let mut out = Vec::new();
     // In run order: `run:10` after `run:9`.
     let mut ordered: Vec<(&String, &([f64; 3], f64))> = per.iter().collect();
     ordered.sort_by_key(|(k, _)| k.rsplit(':').next().and_then(|i| i.parse::<u64>().ok()));
+    let mut table = vec![vec![String::new(), "style".into(), "(elements restyled)".into(), "layout".into(), "paint".into()]];
     for (k, (ms, el)) in ordered {
-        text += &format!("  {:<6} {:>8.1} ({:>8})          {:>9.1}   {:>8.1}\n", k.rsplit(':').next().map(|i| format!("run {i}")).unwrap_or_default(), ms[0], fmt::value(*el, "count"), ms[1], ms[2]);
+        let run = k.rsplit(':').next().map(|i| format!("run {i}")).unwrap_or_default();
+        table.push(vec![run, fmt::time(ms[0]), format!("({})", fmt::value(*el, "count")), fmt::time(ms[1]), fmt::time(ms[2])]);
         out.push(json!({ "run": k, "style_ms": ms[0], "elements_restyled": el, "layout_ms": ms[1], "paint_ms": ms[2] }));
     }
+    text += &fmt::table(&table, &[false, true, true, true, true], "  ", 2);
     Ok(Some((text, json!(out))))
 }
 

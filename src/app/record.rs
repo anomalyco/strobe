@@ -1816,7 +1816,7 @@ fn summary_body(meta: &Value) -> String {
         let l = &meta["leaks"];
         // A refused rate (`refused` says why) shows nothing per minute, never `+NaN B`.
         let per_minute = |s: String, m: &str| if get(m).is_finite() { format!(" · {s} per minute") } else { String::new() };
-        let heap = per_minute(format!("{}{}", if get("js.heap.growth") < 0.0 { "−" } else { "+" }, fmt::bytes(get("js.heap.growth").abs() * 1048576.0)), "js.heap.growth");
+        let heap = per_minute(fmt::signed(get("js.heap.growth") * 1048576.0, "bytes"), "js.heap.growth");
         let dom = per_minute(fmt::signed(get("dom.nodes.growth"), "count"), "dom.nodes.growth");
         return format!(
             "{id} · {} · {} · memory\njs heap  {} after GC{heap}\ndom      {} nodes{dom}\nsuspects {} objects allocated in the first half and alive at the end · {} retained\n{}next     strobe query {id} leaks · strobe query {id} heap\n",

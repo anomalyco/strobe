@@ -944,15 +944,14 @@ impl<'a> Doc<'a> {
                 let func = m["function"].as_str().unwrap_or("");
                 let (name, file) = func.rsplit_once(' ').unwrap_or((func, ""));
                 fns += &format!(
-                    "{}| {} | {} | {} | {} | {} | {}{} |\n",
+                    "{}| {} | {} | {} | {} | {} | {} |\n",
                     self.series_cell(s, i),
                     code(name),
                     if file.is_empty() { "—".into() } else { code(file) },
                     if ms { "CPU time" } else { "Allocated" },
                     show(x),
                     show(y),
-                    if y < x { "−" } else { "+" },
-                    show((y - x).abs())
+                    nb(&signed_disp(y - x, if ms { "ms" } else { "bytes" }))
                 );
             }
             let d = &s["heap_diff"];

@@ -107,6 +107,11 @@ pub fn ctx() -> FmtCtx {
     LOCAL.with(Cell::get).unwrap_or_else(|| FmtCtx::unpack(DEFAULT.load(Ordering::Relaxed)))
 }
 
+/// The context an invocation on this thread entered (`scope`), if one did.
+pub fn scoped() -> Option<FmtCtx> {
+    LOCAL.with(Cell::get)
+}
+
 pub fn set_default(c: FmtCtx) {
     DEFAULT.store(c.pack(), Ordering::Relaxed);
 }
@@ -129,11 +134,9 @@ pub fn scope(c: FmtCtx) -> CtxScope {
 /// Whether a locale (`LC_ALL`, else `LC_CTYPE`, else `LANG`, as POSIX picks it) asks for something
 /// other than UTF-8: `C`, `POSIX`, `en_US.ISO-8859-1`. Unset is taken as UTF-8 (a program started
 /// from a GUI or an IDE has none, and its output is UTF-8). Windows writes to its console in UTF-16
-/// whatever the code page, and UTF-8 to a pipe or file: never plain ASCII there.
+/// whatever the code page and UTF-8 to a pipe or file, so there only an explicit `LC_ALL=C` (or
+/// `LANG=C`) asks for ASCII, as on POSIX (Windows PowerShell 5.1 reads a pipe as its OEM code page).
 pub fn ascii_locale() -> bool {
-    if cfg!(windows) {
-        return false;
-    }
     let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     match get("LC_ALL").or_else(|| get("LC_CTYPE")).or_else(|| get("LANG")) {
         None => false,
@@ -196,9 +199,6 @@ fn time_digits(x: f64, finest: usize) -> usize {
 /// step) for a nonzero one that would print as 0 (SPEC §1 rule 1: a time that was measured is never
 /// shown as nothing).
 fn time_body(x: f64, d: usize, finest: usize) -> String {
-    if x == 0.0 {
-        return "0".into();
-    }
     let s = format!("{x:.d$}");
     if s.chars().all(|c| c == '0' || c == '.') {
         let step = format!("{:.finest$}", 10f64.powi(-(finest as i32)));
@@ -212,9 +212,17 @@ fn time_parts(ms: f64, d: Option<usize>, signed: bool) -> String {
         return "—".into();
     }
     let c = ctx();
+    // Exactly 0 is the only time that prints as 0: one that scaling took under the smallest double
+    // (5e-324 ms in s) is still nonzero (`<0.000001 s`), and one it took past the largest prints `—`.
+    if ms == 0.0 {
+        return format!("0 {}", c.unit.label(c.ascii));
+    }
     let x = (ms * c.unit.per_ms()).abs();
+    if !x.is_finite() {
+        return "—".into();
+    }
     let d = d.unwrap_or_else(|| time_digits(x, c.unit.finest()));
-    let body = time_body(x, d, c.unit.finest());
+    let body = if x >= EXACT { sci(x) } else { time_body(x, d, c.unit.finest()) };
     let sign = if ms < 0.0 {
         minus()
     } else if ms > 0.0 && signed {
@@ -252,12 +260,57 @@ pub fn time_number(ms: f64) -> String {
     t.rsplit_once(' ').map_or(t.clone(), |(n, _)| n.to_string())
 }
 
+/// 2^53: from here a double no longer holds every integer, so whole digits past it would be the
+/// binary number's, not the value's (a count of 1e307 once printed `9,223,372,036,854,775,807`, a cast
+/// that saturated).
+pub const EXACT: f64 = 9_007_199_254_740_992.0;
+
+/// A number too large to print exactly (`|v| ≥ 2^53`) in scientific notation with three significant
+/// digits: `1.00e307`, `-4.50e16` (Rust's `{:.2e}`: the exact decimal rounded, ties to even; no `+`).
+pub fn sci(v: f64) -> String {
+    format!("{v:.2e}")
+}
+
+/// `text` without a minus sign when every digit it shows is 0 (`-0 B`, `-0.0`, `−0 instr` → `0 B`,
+/// `0.0`, `0 instr`): a value that rounds to nothing has no direction, and nothing strobe prints
+/// reads as minus zero.
+pub fn no_minus_zero(text: String) -> String {
+    let zero = !text.chars().any(|c| c.is_ascii_digit() && c != '0');
+    match text.strip_prefix('-').or_else(|| text.strip_prefix('\u{2212}')) {
+        Some(rest) if zero => rest.to_string(),
+        _ => text,
+    }
+}
+
+/// `v` at `d` decimals with its sign, none on what prints as 0: `+1.5`, `−0.3`, `0.0` (never `+0.0` or
+/// `−0.0`).
+pub fn signed_fixed(v: f64, d: usize) -> String {
+    if !v.is_finite() {
+        return "—".into();
+    }
+    let body = format!("{:.d$}", v.abs());
+    if !body.chars().any(|c| c.is_ascii_digit() && c != '0') {
+        body
+    } else if v < 0.0 {
+        format!("{}{body}", minus())
+    } else {
+        format!("+{body}")
+    }
+}
+
 /// Bytes in binary units with three significant digits at most and at least the unit's whole number:
 /// `512 B`, `1.4 KB`, `12 KB`, `3.40 MB`, `34.5 MB`, `1.25 GB` (`—` when non-finite). Whole KB once
 /// printed 1.4 KB as `1 KB`.
 pub fn bytes(v: f64) -> String {
+    no_minus_zero(bytes_of(v))
+}
+
+fn bytes_of(v: f64) -> String {
     if !v.is_finite() {
         return "—".into();
+    }
+    if v.abs() >= EXACT {
+        return format!("{} B", sci(v));
     }
     let a = v.abs();
     let scaled = |div: f64, unit: &str| {
@@ -324,7 +377,11 @@ pub fn pct_with(r: f64, digits: usize) -> String {
         return "—".into();
     }
     let p = r * 100.0;
-    let body = format!("{:.digits$}", p.abs());
+    // A fraction past f64's range once it is a percentage (1e307 → inf) is no number to print.
+    if !p.is_finite() {
+        return "—".into();
+    }
+    let body = if p.abs() >= EXACT { sci(p.abs()) } else { format!("{:.digits$}", p.abs()) };
     let zero = (p.abs() * 10f64.powi(digits as i32)).round() == 0.0;
     let sign = if zero {
         ""

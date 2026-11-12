@@ -1,12 +1,32 @@
 //! Number formatting with precision that follows the interval width (SPEC §9.3 "Digits").
 
+/// A value in its unit as every surface prints it; one that rounds to nothing never reads as minus
+/// zero (`-0 B`, `-0 instr`, `-0.0` were printed for tiny negatives).
 pub fn value(v: f64, unit: &str) -> String {
+    crate::fmt::no_minus_zero(value_of(v, unit))
+}
+
+fn value_of(v: f64, unit: &str) -> String {
     if !v.is_finite() {
         return "—".into();
     }
     // A time in the unit people read it in (`--unit`; µs by default).
     if unit == "ms" {
         return crate::fmt::time(v);
+    }
+    // Too large to print exactly (`fmt::EXACT`, 2^53): three significant digits in scientific notation
+    // with the unit as it would have been (`1.00e307`, `1.00e307 instr`, `1.00e307 B`), never the
+    // digits of a cast that saturated.
+    if v.abs() >= crate::fmt::EXACT {
+        let n = crate::fmt::sci(v);
+        return match unit {
+            "count" | "value" | "" => n,
+            "%" => format!("{n}%"),
+            "/s" => format!("{n}/s"),
+            "instructions" => format!("{n} instr"),
+            "bytes" => format!("{n} B"),
+            u => format!("{n} {u}"),
+        };
     }
     // Below 0.01 as many decimals as show the first significant digit (a layout-shift score of 0.003
     // is not 0.00), up to four.
@@ -34,6 +54,8 @@ pub fn value(v: f64, unit: &str) -> String {
         // Like every unit: a native app's 0.287 MB heap once printed `0 MB` beside a ±4% interval.
         "MB" => format!("{v:.digits$} MB"),
         "/s" => format!("{v:.digits$}/s"),
+        // A display's refresh rate in whole Hz, as the report page prints it.
+        "Hz" => format!("{v:.0} Hz"),
         // A number the target reported in a unit of its own (`metric.<name>`).
         "value" => format!("{v:.digits$}"),
         // Counts in the billions: 4.12 G instr.
