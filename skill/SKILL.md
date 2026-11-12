@@ -353,8 +353,9 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - Every duration needs its unit (`500ms`, `10s`, `2m`, `2h`, `1d`): `--for 2000` exits 2.
 - Times print in microseconds, digits grouped: `18,309,038 µs`, `42.0 µs`, `<0.01 µs` (nonzero, under
   the finest step), `0 µs` (exactly 0). `--unit ms` or `--unit s` (or `"unit": "ms"` in strobe.json)
-  prints milliseconds or seconds; never promoted as a value grows. Text only: `--json`, result.json
-  and MCP `structuredContent` keep each metric's unit (ms). Read numbers from `--json`, not the text.
+  prints milliseconds or seconds; never promoted as a value grows. Text only: `--json` is the same in
+  every unit (numbers in the metric's unit, ms; its prose in µs), as are result.json and MCP
+  `structuredContent`'s numbers. Read numbers from `--json`, not the text.
 - Unchanged in every unit: wall-clock durations (`time  19.5 min`, ETA, waits, `per 77 ms run`),
   configured values (`at least 50 ms`), and stored warning text, written in the unit of the strobe
   that measured it (`base pair 6 (15985 ms)`).

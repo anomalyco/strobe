@@ -334,6 +334,27 @@ if (group("units")) {
     [{ op: "value", v: -0.1, unit: "instructions" }, "0 instr"],
     [{ op: "value", v: -0.04, unit: "count" }, "0.0"],
     [{ op: "signed", v: -0.04, unit: "count" }, "0.0"],
+    [{ op: "signed", v: -0.1, unit: "bytes" }, "0 B"],
+    [{ op: "value", v: -1e307, unit: "ms", time_unit: "us" }, "—"],
+    // A stored zero bound redraws in the unit shown.
+    [{ op: "verdict", c: { metric: "cpu.main", relative: false, bound: 0, verdict: "same (±0.00 ms)" } }, "same (±0 µs)"],
+    [{ op: "verdict", c: { metric: "cpu.main", relative: false, bound: 0, verdict: "same (±0.00 ms)" }, time_unit: "s" }, "same (±0 s)"],
+    // Hz: a whole number.
+    [{ op: "value", v: 59.94, unit: "Hz" }, "60 Hz"],
+    // Too large to print exactly (|v| ≥ 2^53): three significant digits, scientific, the usual unit.
+    [{ op: "value", v: 1e307, unit: "count" }, "1.00e307"],
+    [{ op: "value", v: -1e307, unit: "count" }, "-1.00e307"],
+    [{ op: "value", v: 9007199254740991, unit: "count" }, "9,007,199,254,740,991"],
+    [{ op: "value", v: 9007199254740992, unit: "count" }, "9.01e15"],
+    [{ op: "value", v: 1e307, unit: "bytes" }, "1.00e307 B"],
+    [{ op: "value", v: 1e307, unit: "instructions" }, "1.00e307 instr"],
+    [{ op: "value", v: 1e307, unit: "MB" }, "1.00e307 MB"],
+    [{ op: "value", v: 1e307, unit: "/s" }, "1.00e307/s"],
+    [{ op: "signed", v: 1e307, unit: "count" }, "+1.00e307"],
+    [{ op: "pct", r: 1e307 }, "—"],
+    [{ op: "value", v: 1e13, unit: "ms" }, "1.00e16 µs"],
+    [{ op: "signed", v: -1e13, unit: "ms" }, "−1.00e16 µs"],
+    [{ op: "value", v: 1e300, unit: "ms", time_unit: "s" }, "1.00e297 s"],
   ]
   for (const [q] of others) qs.push(q)
   const want: string[] = [

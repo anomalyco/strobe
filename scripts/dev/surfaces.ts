@@ -10,8 +10,7 @@
 // Times print in the unit asked (`--unit us|ms|s`, SPEC §7.1 "Times"): every surface is drawn once per
 // unit (`--units`, default all three) and each time it shows must be, character for character, the text
 // this file's `tTime` gives its stored number in that unit (the table in `scripts/dev/stats-check.ts`);
-// the card's alt text too. `--json` must be the same bytes in every unit, but for `text` (the words the
-// command prints).
+// the card's alt text too. `--json` must be the same bytes in every unit and under `LC_ALL=C`.
 //
 //   bun scripts/dev/surfaces.ts exp_2606af exp_a88c60 [--strobe <exe>] [--no-html] [--units us,ms]
 //   bun scripts/dev/surfaces.ts --sample 2                    the newest 2 of every kind (minutes)
@@ -300,8 +299,8 @@ function checkResult(r: J) {
 // ---------- the surfaces ----------
 
 // A query or report in this pass's unit.
-function run(args: string[], unit: string | null = UNIT): { out: string; err: string; code: number } {
-  const p = Bun.spawnSync([STROBE, ...args, ...(unit ? ["--unit", unit] : [])], { stdout: "pipe", stderr: "pipe" })
+function run(args: string[], unit: string | null = UNIT, env: Record<string, string> = {}): { out: string; err: string; code: number } {
+  const p = Bun.spawnSync([STROBE, ...args, ...(unit ? ["--unit", unit] : [])], { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } })
   return { out: p.stdout.toString(), err: p.stderr.toString(), code: p.exitCode ?? 0 }
 }
 
@@ -341,8 +340,9 @@ function htmlSurface(id: string, dir: string): { text: string; labels: Record<st
 
 const strip = (s: string) => s.replace(/\*\*/g, "").replace(/<sub>.*?<\/sub>/g, "").replace(/\u00a0/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim()
 
-function checkSurfaces(r: J) {
-  const id = r.id
+// `handle`: the experiment's id, or the path of a result.json given on the command line (a fixture).
+function checkSurfaces(r: J, handle: string = r.id) {
+  const id = handle
   const dir = mkdtempSync(join(tmpdir(), "strobe-surfaces-"))
   try {
     // `bench --blocks` measured one build: no report of it, by design (only `query`).
@@ -562,16 +562,13 @@ function hDelta(c: J, u: string): string {
   return c.relative !== false ? relCI(c)[0] : tSigned(c.estimate, absUnit(u))
 }
 
-// `--json` in every unit: the same keys, numbers and values, but for the words it holds for people (`text`,
-// an insight's `title`), which print times as the terminal does (SPEC §7.1: the unit is display only).
+// `--json` is the same bytes in every unit and locale: numbers in their metric's unit, prose in µs (SPEC §7.1:
+// the unit is display only).
 function checkJson(id: string) {
-  const data = (j: J): J => Array.isArray(j) ? j.map(data) : j && typeof j === "object" ? Object.fromEntries(Object.entries(j).filter(([k, v]) => !(["text", "title"].includes(k) && typeof v === "string")).map(([k, v]) => [k, data(v)])) : j
   for (const view of ["summary", "insights"]) {
-    const outs = UNITS.map((u) => run(["query", id, view, "--json"], u))
-    if (outs.some((o) => o.code !== outs[0].code)) flagIt("HIGH", `json ${view}`, `exit ${outs.map((o) => o.code).join(", ")} in ${UNITS.join(", ")}`)
-    let parsed: string[]
-    try { parsed = outs.map((o) => JSON.stringify(data(JSON.parse(o.out)))) } catch { continue }
-    for (const [k, d] of parsed.entries()) if (d !== parsed[0]) flagIt("CRIT", `json ${view}`, `--unit ${UNITS[k]} gives other --json than --unit ${UNITS[0]} (beyond its words)`)
+    const outs = [...UNITS.map((u) => ({ how: `--unit ${u}`, ...run(["query", id, view, "--json"], u) })), { how: "LC_ALL=C", ...run(["query", id, view, "--json"], null, { LC_ALL: "C" }) }]
+    if (outs.some((o) => o.code !== outs[0].code)) flagIt("HIGH", `json ${view}`, `exit ${outs.map((o) => `${o.code} (${o.how})`).join(", ")}`)
+    for (const o of outs.slice(1)) if (o.out !== outs[0].out) flagIt("CRIT", `json ${view}`, `${o.how} gives other --json bytes than ${outs[0].how}`)
   }
 }
 
@@ -634,7 +631,7 @@ for (const [i, id] of list.entries()) {
       for (const u of UNITS) {
         UNIT = u
         current = UNITS.length > 1 ? `${id} ${u}` : id
-        checkSurfaces(r)
+        checkSurfaces(r, existsSync(id) ? id : r.id)
       }
       current = id
       checkPairs()

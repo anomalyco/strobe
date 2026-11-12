@@ -1608,10 +1608,17 @@ counts bytes. Counts in millions (`M instr`) are decimal.
 `--unit s` prints milliseconds or seconds instead, never promoted to a larger unit as a value grows.
 The unit is, first to last: `--unit` (on `record`, `bench`, `plan`, `query`, `report`, `look`, `run`,
 `status`, `top`, `track` and `history`; `us` or `µs`, `ms`, `s`, else exit 2 `--unit is us, ms or s,
-not <x>`), `"unit"` in the nearest strobe.json above the working folder, `"unit"` in the user's own
-`<state>/strobe.json`, else `us`. A `"unit"` strobe does not have is a usage error with its place
-(`<path>:<line>:<col>: unit must be one of "us", "ms", "s", not …`); only `"unit"` is read for it,
-so another key's problem never fails a `query` or a `report`. An MCP call's `unit` is its own (§17).
+not <x>`), `"unit"` in the project's strobe.json, `"unit"` in the user's own
+`<state>/strobe.json`, else `us`. The project is the one the command is about: the nearest
+strobe.json above the bench file it names (`bench`, `plan`, `track`, `record --bench`) or the bench
+file a queried or reported experiment ran (`result.json`'s `file`), else above the working folder;
+so the daemon and a command run from another folder take the project's unit. A command strobe runs
+for another (a bisect's steps, `record --bench`'s bench) keeps the unit it was given. A `"unit"`
+strobe does not have is a usage error with its place (`<path>:<line>:<col>: unit must be one of
+"us", "ms", "s", not …`); only `"unit"` is read for it, so another key's problem never fails a
+`query` or a `report`. `--unit` on a command that takes none is refused as any such flag is
+(`config has no flag --unit`), and `--help` prints the help whatever `--unit` says. An MCP call's
+`unit` is its own (§17).
 
 `fmt::time` prints them, and `report.html` and `history.html` print them alike, to the character:
 
@@ -1622,8 +1629,12 @@ so another key's problem never fails a `query` or a `report`. An MCP call's `uni
   `{:.d}`: the nearest decimal, an exact tie to even.
 - Exactly 0 is `0 µs`. A nonzero time that rounds to all zeros, or that is 0 only once scaled to
   the unit (an underflow), is the floor, `<0.01 µs`, `<0.0001 ms` or `<0.000001 s`: a measured time
-  is never printed as nothing (rule 1). A value that is not a finite number, or not one once scaled,
-  prints `—`. Nothing prints as minus zero, of any kind (`0 µs`, `0 B`, `0 instr`, `0.0`).
+  is never printed as nothing (rule 1); it keeps its sign (`−<0.000001 s`). Exactly 0 is the only
+  time that prints as 0. A value that is not a finite number, or not one once scaled, prints `—`.
+  Nothing prints as minus zero, of any kind (`0 µs`, `0 B`, `0 instr`, `0.0`).
+- A value too large to print exactly (|v| ≥ 2^53 in the shown unit) prints three significant digits
+  in scientific notation with its usual unit (`1.00e16 µs`, `1.00e307 B`, `9.01e15` for a count);
+  a percentage that overflows prints `—`. A frequency (`Hz`) prints whole (`60 Hz`).
 - A difference is signed: `+` above 0, `−` (U+2212) below, no sign on exactly 0 (`+<0.01 µs`,
   `−42.0 µs`, `0 µs`).
 - One ASCII space, then the unit: `µs` is U+00B5 MICRO SIGN (the cards' font has it, not U+03BC);
@@ -1670,13 +1681,17 @@ them, in ms.
 
 Only what people read changes. `--json`, MCP `structuredContent`, `result.json`, `meta.json`,
 `history/` and every other stored number keep their metric's unit (a `ms` metric in ms;
-`sampling.*_us` in µs), so `--json` holds the same keys and numbers in every unit; only the words
-it carries for people (`text`, an insight's `title`) print times as the terminal does. A `count.*`
+`sampling.*_us` in µs). `--json` output is the same bytes for every `--unit` and locale: numbers in
+their metric's unit, prose fields (`text`, a cohort's `says`, an insight's `title`, every other
+string) in µs and UTF-8; `report --json`'s `markdown` is the exception, the report as written, in
+the unit asked for. MCP answers follow the call's `unit` in their text only: `content` and the
+strings in `structuredContent`, never its numbers (§17). A `count.*`
 is a count (`count.main_thread_cpu_us` too): grouped (`1,234,567`), never scaled or labelled µs.
 `--unit` is not part of an experiment's identity (the rerun ledger, §14.2) and stays out of the PR
 block's rerun command; `track` keeps it in a schedule's flags, so its alerts print in it (§25.6).
 Stored results print in the unit asked: `query <exp> summary` and `report --format md` draw a
-comparison's and a check's text again from `result.json`, and a recording's from `meta.json`.
+comparison's, a check's and a bisect's text again from `result.json` (a bisect's steps with their
+verdicts redrawn), and a recording's from `meta.json`.
 
 The catalog lives in `src/model.rs` (each metric's unit, direction, kind, minimum n and `across`);
 `result.json` carries each comparison's unit and direction. Families resolve by their base: `count.<name>` (what `ctx.count` or the page counted, §8.4), `net.requests` and
@@ -5832,7 +5847,7 @@ windows; an imported trace without strobe's marks is read whole, and `threads` a
 
 | View | Arguments | Returns |
 |---|---|---|
-| `summary` | `--case` | validity, environment, headline metrics per phase; a recording whose trace has them (attribution, `--trace full`): per measured run the renderer main thread's style ms with the elements its recalcs restyled, layout ms and paint ms, and how many runs the trace holds (warmup included). That per-run table is cached in the recording's `phases-cache.json` (keyed by the build id, the trace's size and time, the run marks' token, `runs` and the measured runs; another build's rows are dropped; a trace that fails to load is not kept): a 950 MB recording's summary took 12–17 s, then 21 ms. A deep capture adds its `capture_cost` and both resolved shares. `query exp_… summary` replaces the stored rerun ledger with the ledger as of now, marked `(as of now)`, as `report` does |
+| `summary` | `--case` | validity, environment, headline metrics per phase; a recording whose trace has them (attribution, `--trace full`): per measured run the renderer main thread's style time with the elements its recalcs restyled, layout and paint time (times, §7.1), and how many runs the trace holds (warmup included). That per-run table is cached in the recording's `phases-cache.json` (keyed by the build id, the trace's size and time, the run marks' token, `runs` and the measured runs; another build's rows are dropped; a trace that fails to load is not kept): a 950 MB recording's summary took 12–17 s, then 21 ms. A deep capture adds its `capture_cost` and both resolved shares. `query exp_… summary` replaces the stored rerun ledger with the ledger as of now, marked `(as of now)`, as `report` does |
 | `style` | `--top` | what invalidated style in the measured runs, from the trace's invalidation tracking (`disabled-by-default-devtools.timeline.invalidationTracking`, in attribution blocks only: of a series that declares `main.style` or `style.count`, with `--style`, or `record --probes attribution --style`): recalcs per run with the elements they restyled and the largest; invalidations by what changed (a class, an id, an attribute, a pseudo-class such as `:hover`, an inline style or custom property, a sheet) with the nodes they hit, by the selector whose invalidation set matched, and by the script line that made the change (source-mapped) |
 | `frames` | `--phase` `--case` | frame percentiles, dropped vsyncs, budget misses, worst frames with handles; `by process`: a trace's vsyncs presented and reported per process (the page's renderers marked), a native recording's frames on screen per pid; a native recording's footer points at `query <rec> inputs` |
 | `inputs` | `--case` `--top` | from OS presents (`frames.json` + `presents.json.gz`: a native block, a headed page where the OS tells presents): per measured input (a click's release with its press, a key, a scroll's first step), its run, its time in the run, what proved its change (`change ±ms`, the first non-feedback change after it that may have happened before the next input, or `pixels +ms` for a pixel proof), the target's frames around it (the last shown before it and the next three, screen time from it; `^` one shown after it but begun before its first edge), and its outcome: latency (and edge), unchanged, unshown, burst, or busy with why (`BusyWhy`, §7.4) and the needed delay. Footer: busy counts by why and the needed delay's median and max ("a wait of about that before such an input lets the app rest"). Else, a Chromium page's trace: each `EventLatency` in the measured runs' timed stretches (untimed stretches left out) of the types `interaction.*` and `scroll.latency.*` read (keys, mouse buttons, a touch's edges, scroll updates, wheel turns; pointer moves, characters and a gesture's begin and end are counted as `other_events` and left out), with its latency to presentation and the `PipelineReporter` frames presented around it; Chromium decides which counts. Runs in time order. It shows the first 100 inputs (`--top N` sets how many, `--top 3` three; `--json` lists every one) and then `… K more (--top N shows more; --json lists every one)`; `--top` once only raised the cap (`total.min(top.max(100))`: `--top 3` showed 100). The header names the runs it read: `in 5 measured runs (run:4..run:8; warmup before run:4 left out)` when the first is not `run:0`, `non-measured runs left out` when runs between them were not measured (an unfiltered batch), and with `--case` `warmup and other cases' runs left out`; adais `query rec_084edf inputs --top 3`: 3 lines, `… 227 more`. On the hybrid laptop: a canvas `latency · app` check recording (OS presents, 240 Hz) `input (pixels) pixels +33.6 ms frames +25.3 … latency 25.3 ms`; a `latency · page` attribution recording (trace) 10 key events in 5 runs. JSON: `source` (`presents` or `trace`), `quiet_ms`, `refresh_ms`, `inputs[]` (`run`, `t_ns`, `at_ms`, `kind`, `press_ms`, `change_ms`, `proved_by`, `frames[{ screen_ms, begun_before }]`, `outcome`, `latency_ms`, `edge`, `busy{ why, …, prev_input_at_ms }`, `needed_ms`), `outcomes`, `busy`, `needed_ms{ p50, max }`. A Firefox recording without OS presents says: `this Firefox recording has no inputs to show: a Firefox page's inputs are timed against the OS's presents, which only a headed run records (frames.json and presents.json.gz; run it without --headless, on an unlocked session | this one: <os_frames.refused>)`, not the Chromium trace's message (adais rec_340b00, headless Firefox) |
@@ -6016,8 +6031,8 @@ verdict words. `scripts/dev/surfaces.ts --all` checks every experiment on a mach
 time unit (`--unit us`, `ms`, `s`) and holds each time it shows to §7.1's text of its number, to the
 character: the text, `--format md`, `pr` and `summary`, the card's alt text and the HTML page (opened
 in that unit); a pair that names its unit once (`1,200–2,200 µs`) must read the same times in every
-unit, digits are grouped by threes, nothing reads minus zero, and `--json` keeps its keys and numbers
-in every unit. `--sample N` checks the newest N experiments of every kind (each result kind, series
+unit, digits are grouped by threes, nothing reads minus zero, and `--json` is the same bytes in
+every unit and under `LC_ALL=C`. `--sample N` checks the newest N experiments of every kind (each result kind, series
 kind and verdict kind, implementations, A/A, an absolute primary): N = 3 is a few minutes, where
 `--all` takes hours on a machine with two thousand experiments.
 
@@ -8506,9 +8521,11 @@ headers, 16 MiB body. Results: `content` (text for the model) + `structuredConte
   CLI or the stdio server (`strobe mcp`, which runs in the agent's folder); an `app:<id>` resolves
   from the user's own strobe.json.
 - `unit` (`us`, the default, `ms` or `s`; on `status`, `record`, `bench`, `query`, `report`, `look`)
-  is how the call's `content` prints times (§7.1 "Times"); `structuredContent` keeps each metric's
-  unit whatever it says. Each call has its own; the daemon's other calls are not affected. A call without it takes `"unit"` from the strobe.json above the server's folder, else
-  the user's own: through the daemon, whose folder is strobe's install folder, the user's.
+  is how the call prints times (§7.1 "Times"): its `content` and the strings in its
+  `structuredContent`; the numbers there keep each metric's unit whatever it says (a `--json`
+  printed by the CLI is the same bytes in every unit, §7.1). Each call has its own; the daemon's
+  other calls are not affected. A call without it takes the project's `"unit"` (from the bench file
+  it names, or the experiment's), else the user's own.
 - The MCP token and `strobe open`'s session tokens come from the OS's secure random source
   (`host::paths::csprng_hex`); the token file and each session file (the key to its trace)
   are 0600, in folders only the user can enter, on Unix.
