@@ -5527,6 +5527,8 @@ emits:
 | `CursorNotParked` | warn | a native block's OS cursor could not be moved onto the pointer's points, so hover tracking saw it elsewhere |
 | `GpuCacheGrowing` | warn | a variant's GPU shader caches still grew in its third warm-up block (§13.2) |
 | `VariantChanged` | warn | a folder variant's commit or uncommitted changes differ, when a series builds it, from when the bench started: later series measure what it holds then |
+| `HarnessOverlay` | warn, info | the harness copied into a variant's folder replaced a file its commit tracks (warn) or placed one it lacked (info), and its script, cli or tty target runs that file (a script's entry, a word of `run` or `build`, or of a `cli()` case's own `ctx.exec("<line>")`): that side runs the bench's own copy, so what differs in it is gone from the comparison |
+| `Uncounted` | warn | a `count.<name>` only `--noworse` names, which no case declares and no run of any case counted: nothing compared it; either what it counts never happened on either side, or no case counts that name (the warning lists the counters the cases declare) |
 | `Unattributed` | warn | macOS: a launched app bundle did not become its own responsible process, so its XPC services are missing from its CPU, memory, wakes and GPU (§13.2); in a native block's experiment and a native `record` |
 | `PixelsDiffer` | warn | `--pixels`: base and head drew different pixels at a snapshot |
 | `Video` | info, warn | `--video`: why a block has no film |

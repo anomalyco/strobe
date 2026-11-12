@@ -328,6 +328,12 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
     // `BackgroundPriority`: a program at background priority keeps no latency values (`priority_state`).
     ctx.target_qos = host::background_qos(Some(tty.pid));
     let pid = tty.pid;
+    // An untimed block's threads of the program from its start: what a check's run 1 is judged against
+    // (`block::startup_spill`).
+    let timeline = x.untimed.then(|| {
+        let home = home.dir.clone();
+        probe::wakes::Timeline::start(move || host::process_set_pids(pid, Some(&home)))
+    });
     // The program's process set: its tree, and what left it stamped with its home (a daemon).
     let set_home = home.dir.clone();
     let set_pids = |home: &Path| host::process_set_pids(pid, Some(home));
@@ -443,6 +449,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
                     let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
+                    if let Some(tl) = &timeline {
+                        tl.mark_edge();
+                    }
                     // The listed processes read again right at the run's start, and at its end before the set is
                     // listed for new ones, each by itself and with the clocks: a listing takes milliseconds, which
                     // would be on one side of the run (`record::read_known`, `record::Clock`).
@@ -480,6 +489,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         end = read_end();
                     }
                     cost.end();
+                    if let Some(tl) = &timeline {
+                        tl.mark_edge();
+                    }
                     // An answer already in (until: "frame"): an untimed wait for it to hold still, so its
                     // settle can be judged (latencies read to here, inputs are still the run's).
                     let settled = match last {
@@ -496,6 +508,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     tty_gone(&tty, pid, &set_home, &format!("{} {}'s run {n}", if running { "during" } else { "before" }, s.case), !driver.inputs().is_empty())?;
                     ran.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, &screen_note(&tty), "the run threw or timed out"))?;
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
+                    if base + runs.len() == 0 {
+                        launch.first_run = Some((t0, t1));
+                    }
                     // Switches and IO over the timed parts: the snapshots at the run's ends and its untimed
                     // edges in pairs (a stretch the run never ended ends with it), each part its own span.
                     let mut se = snap_edges.take();
@@ -591,6 +606,10 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     return Err(super::super::record::exited(tty.exited().unwrap_or(-1), &format!("after {}'s runs", s.case), Some(&last_rows(&tty))));
                 }
                 let first = warmup.first().unwrap_or(0);
+                // A check that measured its second run (`Warmup::after`): run 1 is not what it measured.
+                if base == 0 && first > 0 {
+                    launch.first_run = None;
+                }
                 let local = first..warmup.measured().end.clamp(first, runs.len());
                 let (strobe_pct, runner_pct) = cost.share(base + local.start..base + local.end);
                 // Over the measured runs' timed parts only: what the reader did in warmup or an untimed
@@ -811,12 +830,18 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
         }
         Ok(launch)
     })();
+    // Its last tick while the program still runs: its close is no part of the block.
+    let timeline = timeline.map(probe::wakes::Timeline::stop);
     drop(stop);
     drop(driver);
     tty.close();
     drop(events);
     isolate::end_launch(None, Some(&home.dir), true);
     let mut launch = result?;
+    // A check's one cold run that measured the program's startup still running says so.
+    if let Some(why) = timeline.as_ref().zip(launch.first_run).and_then(|(t, (t0, t1))| super::block::startup_spill(t, t0, t1, "the program started")) {
+        ctx.warnings.push(validity::warn("NotSteady", format!("{} · {} block: {why}", s.label(), side_of(ctx, v))));
+    }
     if let Err(e) = guard.check("after the terminal program closed") {
         launch.disturbed(e);
     }

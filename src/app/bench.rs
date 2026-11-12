@@ -153,6 +153,9 @@ struct Series {
     /// Non-inferiority margins by metric (`--noworse`, the case's `noworse`): these metrics answer "is
     /// head at most this much worse?" instead of "did it change?" (SPEC §9.3).
     noworse: BTreeMap<String, f64>,
+    /// The `--noworse` metrics the case itself does not declare (as its primary, in its metrics or its
+    /// own `noworse`): the flag adds them to every series, and a case that never counted one reads none.
+    flagged: std::collections::BTreeSet<String>,
     /// What the block must show (`expect`: the target's, with the case's keys over it): a block on
     /// another screen is refused `WrongScreen`.
     expect: Value,
@@ -185,6 +188,12 @@ impl Series {
     /// A metric this series keeps per side instead of comparing (SPEC §9.10).
     fn per_side(&self, metric: &str) -> bool {
         self.cross_engine && model::metric(metric).is_some_and(|d| d.across == model::Across::PerSide)
+    }
+
+    /// Whether the case itself declares `metric` (`flagged`): only then is a run that counted none of a
+    /// `count.<name>` a 0. One that only `--noworse` names is the case's once a measured run counted it.
+    fn case_declares(&self, metric: &str) -> bool {
+        !self.flagged.contains(metric)
     }
 }
 
@@ -274,6 +283,9 @@ struct Variant {
     /// strobe's build folders this variant uses (its worktree, its executable's copy), held until the
     /// experiment ends so `strobe prune` leaves them alone (`host::cache`).
     leases: Vec<host::cache::Lease>,
+    /// The harness files `overlay_harness` wrote into the variant's folder (relative to it): over a file
+    /// of its own, or where it had none (`HarnessOverlay`).
+    overlaid: Vec<PathBuf>,
 }
 
 impl Variant {
@@ -706,6 +718,7 @@ pub(crate) fn ended_runs<'a>(runs: impl IntoIterator<Item = EndedRun<'a>>) -> Va
 /// (warmup runs are not), wall time (ms, untimed stretches out), the target's CPU in it (`cpu.work`'s
 /// per-run reading, ms), a page renderer's main-thread task time (ms), the main thread's CPU (ms) where
 /// strobe reads it, and whether a process that ended in it took CPU strobe could not count.
+#[derive(Clone)]
 pub(crate) struct RunRow {
     pub run: String,
     pub measured: bool,
@@ -1532,6 +1545,9 @@ struct Ctx<'a> {
     placed: bool,
     /// `check_series` prints the case's line itself, once `--noworse` judged it (`check_case` does not).
     case_line_later: bool,
+    /// The counters only `--noworse` names that a block of some series counted or refused (`flagged_counts`):
+    /// one none did is said once (`Uncounted`).
+    noworse_seen: std::collections::BTreeSet<String>,
 }
 
 /// Every block's reservation, merged for the experiment's context.
@@ -1878,6 +1894,13 @@ pub fn run(args: &Args) -> Result<Output> {
         RESUMED.with(|r| r.borrow_mut().take());
         return out;
     }
+    // `--check --probes memory`: a check takes no heap snapshot; say which run does.
+    if args.has("check") && args.get("probes") == Some("memory") {
+        let file = args.pos.first().map_or("<file>", String::as_str);
+        return Err(Error::usage(format!(
+            "--check --probes memory: a check runs each case once and takes no heap snapshot; a leak run is strobe bench {file} --probes memory (snapshots between runs), and one case's heap and retainers are strobe record --bench {file}#<case> (its attribution block ends with a heap snapshot)"
+        )));
+    }
     // A shared CI runner (SPEC §10.1 `SharedRunner`): timed blocks of one build and a bisection are
     // timings alone. A comparison waits for its series (`shared_series`): exact counters may compare.
     if !args.has("check") && !args.has("plan") {
@@ -2130,6 +2153,7 @@ pub fn run(args: &Args) -> Result<Output> {
         shared: env.shared_runner.clone(),
         placed: false,
         case_line_later: false,
+        noworse_seen: Default::default(),
     };
     // `--mobile`: the phone, picked once. What refuses timing on it does so before anything builds: an
     // emulator, adb over Wi-Fi, Battery Saver, a low battery (`validity::phone_timed`); a `--check`, a
@@ -2590,6 +2614,7 @@ pub fn run(args: &Args) -> Result<Output> {
     for text in variants.iter().flat_map(|v| v.changed.iter()) {
         ctx.warnings.push(validity::warn("VariantChanged", text.clone()));
     }
+    ctx.warnings.extend(uncounted(&series, &series_out, &ctx.noworse_seen));
     // Now it is known whether a hook used the seed: only then is another `--seed` another workload.
     // A resumed bench keeps what the runs before the resume found (`checkpoint`).
     let used_random = ctx.runner.used_random() || ctx.saved["used_random"] == true;
@@ -2779,22 +2804,33 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     }
     // Two builds (`--check --base <variant>`): the base once as the head is, before it.
     let head = variants.len() - 1;
-    let base = if head > 0 {
+    let mut base = if head > 0 {
         progress(format!("  {} base", s.label()));
-        let (mut r, launches, _) = check_launches(ctx, s, &variants[0], repeat, false, (split, main_counters));
+        let (r, launches, _) = check_launches(ctx, s, &variants[0], repeat, false, (split, main_counters));
+        Some((check_halt(ctx, r)?, launches))
+    } else {
+        None
+    };
+    let (r, mut launches, sent) = check_launches(ctx, s, &variants[head], repeat, film, (split, main_counters));
+    let mut r = check_halt(ctx, r)?;
+    // A counter only `--noworse` names, decided across both sides' launches.
+    let mut all: Vec<&mut Block> = r.iter_mut().chain(launches.iter_mut()).collect();
+    if let Some((br, bl)) = base.as_mut() {
+        all.extend(br.iter_mut().chain(bl.iter_mut()));
+    }
+    ctx.noworse_seen.extend(flagged_counts(s, all));
+    let base = base.map(|(mut r, launches)| {
         let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
-        let r = check_halt(ctx, r)?;
+        if let Ok(b) = &r {
+            ctx.warnings.extend(check_stepped(&format!("{} · base", s.label()), &b.values));
+        }
         let (mut b, counters) = base_check(r, &launches);
         if let Some(rep) = repeated {
             b["repeat"] = rep;
         }
-        Some((b, counters))
-    } else {
-        None
-    };
-    let (mut r, launches, sent) = check_launches(ctx, s, &variants[head], repeat, film, (split, main_counters));
+        (b, counters)
+    });
     let repeated = (repeat > 1 && r.is_ok()).then(|| repeated_launches(&mut r, &launches));
-    let r = check_halt(ctx, r)?;
     let held = r.as_ref().ok().map(|_| side_counters(&launches, &noworse));
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     let log = runner_log(ctx, log_from, None);
@@ -2810,6 +2846,12 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     if let Some((b, counters)) = base {
         // `base_values` beside head's `values`, as reports read them (`report --format summary`).
         out["base_values"] = b["values"].clone();
+        // A counter only `--noworse` names that base counted is listed when head has none of it (head failed).
+        for m in s.flagged.iter().filter(|m| m.starts_with("count.") && b["values"].get(m.as_str()).is_some()) {
+            if let Some(d) = out["declared"].as_array_mut().filter(|d| !d.iter().any(|x| x == m.as_str())) {
+                d.push(json!(m));
+            }
+        }
         out["base"] = b;
         if let Some(head) = held {
             noworse_state(s, &noworse, counters.as_deref(), &head, &mut out);
@@ -2890,6 +2932,72 @@ fn check_noworse(args: &Args, s: &Series) -> Result<BTreeMap<String, f64>> {
         )));
     }
     Ok(m)
+}
+
+/// A `count.<name>` only `--noworse` names (`Series::flagged`), across one series' blocks of one kind
+/// (both sides, every launch): a block none of whose runs counted the name has none (`per_run_hooks`).
+/// Once any block of them counted it, it is the series' counter, and a block that counted none of it
+/// (refusing nothing of it) read 0, with a 0 spread where the block keeps one: a code path that never ran
+/// on one side is a count of 0 there, not a counter that side lacks. None counted it: none has it.
+/// Returns those a block counted or refused (`Ctx::noworse_seen`).
+fn flagged_counts<'a>(s: &Series, blocks: impl IntoIterator<Item = &'a mut Block>) -> Vec<String> {
+    let mut blocks: Vec<&mut Block> = blocks.into_iter().collect();
+    let mut seen = Vec::new();
+    for m in s.flagged.iter().filter(|m| m.starts_with("count.")) {
+        if blocks.iter().any(|b| b.refused.contains_key(m)) {
+            seen.push(m.clone());
+        }
+        if !blocks.iter().any(|b| b.values.contains_key(m)) {
+            continue;
+        }
+        if !seen.contains(m) {
+            seen.push(m.clone());
+        }
+        for b in blocks.iter_mut().filter(|b| !b.values.contains_key(m) && !b.refused.contains_key(m)) {
+            b.values.insert(m.clone(), 0.0);
+            if !b.spread.is_empty() {
+                b.spread.insert(m.clone(), [0.0, 0.0]);
+            }
+            // The block's recording, written when it ended, says the same (`query <rec> summary`).
+            if let Some(dir) = b.recording.as_deref().and_then(|id| store::resolve(id).ok()) {
+                let path = dir.join("meta.json");
+                if let Ok(mut meta) = store::read_json(&path)
+                    && meta["values"].is_object()
+                    && meta["values"].get(m.as_str()).is_none()
+                {
+                    meta["values"][m.as_str()] = json!(0.0);
+                    let _ = store::write_json(&path, &meta);
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// `Uncounted`: a `count.<name>` only `--noworse` names that no case declares and no block of the whole
+/// experiment counted (`seen`, and the outputs of series done before a resume): nothing compared it,
+/// which is right when what it counts never happened on either side, and hides a regression when the
+/// name is not the one the cases count. Said once per name, with the counters the cases declare.
+fn uncounted(series: &[Series], outs: &[Value], seen: &std::collections::BTreeSet<String>) -> Vec<Warning> {
+    let flagged: std::collections::BTreeSet<&String> = series.iter().flat_map(|s| s.flagged.iter()).filter(|m| m.starts_with("count.")).collect();
+    let declared: std::collections::BTreeSet<&String> = series.iter().flat_map(|s| declared_metrics(s).into_iter().filter(|m| m.starts_with("count.") && s.case_declares(m))).collect();
+    let measured = |m: &str| {
+        outs.iter().any(|o| {
+            [&o["values"], &o["base_values"], &o["refused"]].iter().any(|v| v.get(m).is_some())
+                || o["blocks"].as_array().into_iter().flatten().any(|b| b["values"].get(m).is_some() || b["refused"].get(m).is_some())
+        })
+    };
+    flagged
+        .into_iter()
+        .filter(|m| series.iter().all(|s| s.flagged.contains(*m)) && !seen.contains(*m) && !measured(m))
+        .map(|m| {
+            let known = if declared.is_empty() { "no case declares a counter".to_string() } else { format!("the cases declare {}", declared.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")) };
+            validity::warn(
+                "Uncounted",
+                format!("--noworse {m}: no run of any case counted it, so nothing compared it: either what it counts never happened on either side (0 on both, nothing to hold), or no case counts that name (check it: {known})"),
+            )
+        })
+        .collect()
 }
 
 /// Each `--noworse` counter's values on one side of a check: every launch's (with `--runs N` its lowest
@@ -3037,6 +3145,20 @@ fn runner_log(ctx: &Ctx, from: u64, to: Option<u64>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `NotSteady` for a check block (`--check --runs N`) whose measured runs stepped down (`Warmup::after`):
+/// `who` names the case, and the side in a two-build check.
+fn check_stepped(who: &str, values: &BTreeMap<String, f64>) -> Option<Warning> {
+    let (first, last) = (values.get("warmup.stepped.first")?, values.get("warmup.stepped.last")?);
+    Some(validity::warn(
+        "NotSteady",
+        format!(
+            "{who}: its measured runs stepped down (the first one's work {}, the last half's median {}): the first runs did work the later ones did not (a cold start's compiles and caches, or launch work still running), and each value is the runs' median; a timed bench measures after warmup",
+            fmt::value(*first, "ms"),
+            fmt::value(*last, "ms")
+        ),
+    ))
+}
+
 /// A check case's progress line: `  pass <label>`, or `  FAIL <label>  <why>`.
 fn case_line(s: &Series, passed: bool, error: &Value) -> String {
     format!("  {} {}{}", if passed { "pass" } else { "FAIL" }, s.label(), error.as_str().map(|e| format!("  {e}")).unwrap_or_default())
@@ -3070,6 +3192,7 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     let (passed, error, hint, values, refused, locked, recording, screen, shown) = match r {
         Ok(b) => {
             let shown = shown::summarize(std::slice::from_ref(&b), false).0;
+            ctx.warnings.extend(check_stepped(&s.label(), &b.values));
             (true, Value::Null, Value::Null, json!(b.values), refusal_map(&b.refused), b.locked, json!(b.recording), b.screen.unwrap_or(Value::Null), shown)
         }
         Err(e) => (false, json!(e.message), json!(e.hint), Value::Null, Value::Null, false, Value::Null, Value::Null, Value::Null),
@@ -3100,7 +3223,9 @@ fn check_case(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], r: Result<Blo
     } else {
         (Value::Null, Value::Null)
     };
-    let declared = declared_metrics(s);
+    // A counter only `--noworse` names that no block of the series counted is none of this case's.
+    let declared: Vec<&String> =
+        declared_metrics(s).into_iter().filter(|m| s.case_declares(m) || !m.starts_with("count.") || values.get(m.as_str()).is_some() || refused.get(m.as_str()).is_some()).collect();
     let mut out = json!({
         "label": s.label(), "case": s.case, "target": s.target, "params": s.params, "kind": "check", "until": launch::until_of(&s.launch), "primary": { "metric": s.primary }, "declared": declared,
         "passed": passed, "decided": passed, "error": error, "hint": hint, "refusal": failed_by, "values": values, "refused": refused, "measured_run": measured_run, "session_locked": locked, "headless": headless_series(ctx, s), "input": input, "elapsed_ms": elapsed_ms, "attribution": attribution, "attribution_sampling": sampling, "target_kind": target["kind"], "engine": target["engine"],
@@ -3937,6 +4062,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // A resumed experiment (`--resume`) starts from the pairs it had finished.
     let saved = &ctx.saved["series"][s.label()];
     let mut blocks: Vec<Block> = serde_json::from_value(saved["blocks"].clone()).unwrap_or_default();
+    // What the blocks before a resume counted.
+    ctx.noworse_seen.extend(blocks.iter().flat_map(|b| s.flagged.iter().filter(|m| b.values.contains_key(*m) || b.refused.contains_key(*m)).cloned()).collect::<Vec<_>>());
     let mut pairs: Vec<(usize, usize)> = serde_json::from_value(saved["pairs"].clone()).unwrap_or_default();
     pairs.retain(|&(a, b)| a < blocks.len() && b < blocks.len());
     // The look a resumed series' primary was decided at (it then ran on for its secondaries): the
@@ -4012,6 +4139,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 }
                 idx[v] = blocks.len();
                 blocks.push(b);
+                let seen = flagged_counts(s, blocks.iter_mut());
+                ctx.noworse_seen.extend(seen);
             }
             // Base and head of a pair share one lock state and one display state, or the pair runs again.
             if blocks[start].locked == blocks[start + 1].locked && blocks[start].display == blocks[start + 1].display {
@@ -4217,6 +4346,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             Err(e) if e.code == 130 || e.code == 124 || stop_requested() => halted = Some(if e.code == 124 { e } else { stop_error() }),
             Err(e) => http_note = Some(format!("the {} blocks failed: {}", if main_http { "timing" } else { "probe" }, e.message)),
         }
+    }
+    if let Some((pb, _)) = pass.as_mut() {
+        ctx.noworse_seen.extend(flagged_counts(s, pb.iter_mut()));
     }
     // Which blocks measure a metric: the pass's for what the paired loop's kind does not.
     let apart = |name: &str| (split == Counting::Separate && counted_apart(name) != main_counters) || (probe == Probing::Separate && http_probe::metric(name) != main_http);
@@ -7720,6 +7852,13 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 other => Err(Error::msg(format!("unknown runner request {other}"))),
             }
         };
+        // An untimed block's browser threads from before its prepare and first page (about 1% of a core):
+        // what they did then, less strobe's speed check, is what a check's run 1 is judged against
+        // (`block::startup_spill`).
+        let timeline = (x.untimed && on_phone.is_none()).then(|| {
+            let (pid, profile) = (browser.pid(), browser.profile());
+            probe::wakes::Timeline::start(move || host::process_set_pids(pid, profile.as_deref()))
+        });
         let t = cases.iter().map(Series::hook_timeout).max().unwrap_or_default();
         let mut block = json!({ "case": s.case, "params": s.params, "target": s.target, "variant": v.role, "url": url, "root": v.root.as_deref().map(host::paths::plain), "engine": engine });
         if let (Some(b), Some(a)) = (block.as_object_mut(), hook_app.as_object()) {
@@ -7822,7 +7961,21 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 (None, _) => slow_check(e, other, again),
             }
         };
-        let (mut checked, mut other) = check()?;
+        // The speed check's stretch, its edges ticks of the timeline: strobe's work in the page, not the target's.
+        let mut checked_spans: Vec<(u64, u64)> = Vec::new();
+        let mut timed_check = || {
+            let from = host::now_ns();
+            if let Some(t) = &timeline {
+                t.mark_edge();
+            }
+            let r = check();
+            if let Some(t) = &timeline {
+                t.mark_edge();
+            }
+            checked_spans.push((from, host::now_ns()));
+            r
+        };
+        let (mut checked, mut other) = timed_check()?;
         // A slow check runs once more after the CPUs settle: a burst passes (the page's own work just
         // after its load, a neighbour on a VM's host, a process that just ended), while throttling
         // (power, heat, a power plan) lasts. A second slow check refuses the block (`Background`, which
@@ -7842,7 +7995,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 validity::wait_quiet(pin, Duration::from_secs(10).min(time_left(ctx)));
             }
             nap_within(ctx, Duration::from_secs(2), "a slow page speed check waited to run again")?;
-            (checked, other) = check()?;
+            (checked, other) = timed_check()?;
             first_slow = Some(first);
         }
         let ratio = match checked {
@@ -7879,12 +8032,6 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // computer's is a phone's page's.
         let sampler = on_phone.is_none().then(|| probe::os::Sampler::start(browser.pid(), browser.profile()));
         let sampled = Instant::now();
-        // An untimed block's browser threads from before setup (about 1% of a core): what they did then is
-        // what a check's run 1 is judged against (`block::startup_spill`).
-        let timeline = (x.untimed && on_phone.is_none()).then(|| {
-            let (pid, profile) = (browser.pid(), browser.profile());
-            probe::wakes::Timeline::start(move || host::process_set_pids(pid, profile.as_deref()))
-        });
         // `page.window` in setup sizes the browser's window: the driver follows its processes from now.
         driver.set_pids(browser.pids());
         // The page's viewport in CSS pixels (device-independent at zoom 1) and its scale, before any
@@ -8142,6 +8289,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let t1 = host::now_ns();
             let (fast1, tsc1) = fast_read(true);
             cost.end();
+            // The run's end takes a tick of the timeline before anything after it (its reads, the reset)
+            // runs: none of that is the run's (`block::startup_spill`).
+            if let Some(t) = &timeline {
+                t.mark_edge();
+            }
             let (fast1, ended1) = joined(fast1);
             let mut c1 = counters();
             let mut c1_at = host::now_ns();
@@ -8489,6 +8641,11 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     // view of the recording counts it.
                     let unmeasured = warmup.first().is_some() && i >= warmup.measured().end;
                     let key = if unmeasured { format!("warm:{g}") } else { format!("run:{g}") };
+                    // The run's start takes a tick of the timeline (its end does in `run_once`), so none holds
+                    // both the run's CPU and what came before it (`block::startup_spill`).
+                    if let Some(t) = &timeline {
+                        t.mark_edge();
+                    }
                     runs.push(run_once(&mut ctx.runner, s, &same, &key, profile, profile && i + 1 == warmup.measured().end, set != Set::Memory && warmup.may_end(i))?);
                     // The work that must hold steady is the renderer's main-thread time. `--check` measures the
                     // first run: it asks whether a case works, not what it costs. From outside or in an engine
@@ -8674,8 +8831,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let sampler_pct = samples.cpu_ms.map(|c| 100.0 * c / (sampled.elapsed().as_secs_f64() * 1e3).max(1.0));
             // A check's one cold run that measured the browser's or page's startup still running says so.
             if let (Some(t), Some((0, c))) = (timeline.map(probe::wakes::Timeline::stop), page_cases.first())
-                && let Some(r) = c.runs.first().filter(|_| c.base == 0)
-                && let Some(why) = block::startup_spill(&t, r.t0, r.t1, "setup began")
+                // Run 1 measured: a check that measured its second run (`Warmup::after`) says nothing of run 1.
+                && let Some(r) = c.runs.first().filter(|_| c.base == 0 && c.warmup.first() == Some(0))
+                && let Some(why) =
+                    block::startup_spill_skipping(&t, r.t0, r.t1, if app { "the block began (before its prepare)" } else { "the block began (before its first page loaded)" }, &checked_spans)
             {
                 ctx.warnings.push(validity::warn("NotSteady", format!("{} · {side} block: {why}", s0.label())));
             }
@@ -8901,6 +9060,10 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 data.measured_only(range.clone());
                 let mut extra = BTreeMap::new();
                 for name in declared.iter().filter_map(|m| m.strip_prefix("count.")) {
+                    // A name only `--noworse` gave, which no measured run counted, is not 0 (`per_run_hooks`).
+                    if !s.case_declares(&format!("count.{name}")) && !(0..measured.len()).any(|j| run_counts.get(first + j).is_some_and(|c| c.contains_key(name))) {
+                        continue;
+                    }
                     extra.insert(format!("count.{name}"), (0..measured.len()).map(|j| (key(j), run_counts.get(first + j).and_then(|c| c.get(name)).copied().unwrap_or(0.0))).collect());
                 }
                 let fixture_cpu: BTreeMap<String, f64> = (0..measured.len()).filter_map(|j| Some((key(j), *run_counts.get(first + j)?.get(block::FIXTURE_CPU)?))).collect();
@@ -10070,8 +10233,12 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
             let primary = args.get("primary").map(str::to_string).unwrap_or_else(|| c["primary"].as_str().unwrap_or("frames.presented.p95").to_string());
             // The case's margins, then `--noworse` over them (a bare margin is the primary's).
             let mut noworse = margins(&c["noworse"], &primary).map_err(|e| Error::usage(format!("{case}: noworse: {e}")))?;
+            let metrics = case_metrics(&c["metrics"], &primary);
+            let mut flagged = std::collections::BTreeSet::new();
             if let Some(flag) = args.get("noworse") {
-                noworse.extend(margins(&json!(flag), &primary).map_err(|e| Error::usage(format!("--noworse: {e}")))?);
+                let given = margins(&json!(flag), &primary).map_err(|e| Error::usage(format!("--noworse: {e}")))?;
+                flagged = given.keys().filter(|m| **m != primary && !metrics.contains(m) && !noworse.contains_key(*m)).cloned().collect();
+                noworse.extend(given);
             }
             // A gap's own selectors may name what its target lacks: nothing of it runs.
             let (expect, launch) = match &gap {
@@ -10093,7 +10260,8 @@ fn expand(describe: &Value, args: &Args, sides: Option<(&str, &str)>, only: Opti
                     params: p.clone(),
                     primary: primary.clone(),
                     noworse: noworse.clone(),
-                    metrics: case_metrics(&c["metrics"], &primary),
+                    flagged: flagged.clone(),
+                    metrics: metrics.clone(),
                     reset: c["reset"].as_bool().unwrap_or(false),
                     reset_check: c["resetCheck"] != false,
                     reset_pixels: if c["resetPixels"].is_null() { targets[target.as_str()]["resetPixels"].clone() } else { c["resetPixels"].clone() },
@@ -11222,6 +11390,7 @@ fn resolve_variant(role: &'static str, spec: &str, project: &Path, config: &Valu
                 name: String::new(),
                 prepared: Default::default(),
                 leases: Vec::new(),
+                overlaid: Vec::new(),
             };
             v.commit = (!sha.is_empty()).then_some(sha);
             v.name = v.label.clone();
@@ -11247,6 +11416,7 @@ fn resolve_variant(role: &'static str, spec: &str, project: &Path, config: &Valu
         name: String::new(),
         prepared: Default::default(),
         leases: Vec::new(),
+        overlaid: Vec::new(),
     };
     if let Kind::Git(r) = &v.kind {
         let sha = git::out(project, &["rev-parse", "--short=10", r]).ok_or_else(|| Error::usage(format!("{spec} is neither a directory nor a git ref in {}", project.display())))?;
@@ -11351,7 +11521,7 @@ fn harness(file: &Path, project: &Path, config: &Value) -> Harness {
 /// Copies the harness into a variant's folder, so a base from before the bench existed (its serve script, its
 /// strobe.json) builds and serves the way head does. A worktree strobe made is strobe's own: head's harness
 /// replaces whatever the ref had. A folder of the user's only gets the files it lacks.
-fn overlay_harness(v: &Variant, root: &Path, h: &Harness) -> Result<()> {
+fn overlay_harness(v: &mut Variant, root: &Path, h: &Harness) -> Result<()> {
     let root = std::fs::canonicalize(root)?;
     if root == h.from {
         return Ok(());
@@ -11359,6 +11529,7 @@ fn overlay_harness(v: &Variant, root: &Path, h: &Harness) -> Result<()> {
     let owned = std::fs::canonicalize(host::paths::sub("builds")).is_ok_and(|b| root.starts_with(b));
     let mut copied = 0;
     let mut kept = Vec::new();
+    let mut wrote: Vec<PathBuf> = Vec::new();
     let mut copy = |src: &Path, dst: &Path| -> Result<()> {
         let same = std::fs::read(dst).ok().is_some_and(|d| std::fs::read(src).is_ok_and(|s| s == d));
         if same {
@@ -11373,6 +11544,7 @@ fn overlay_harness(v: &Variant, root: &Path, h: &Harness) -> Result<()> {
         }
         std::fs::copy(src, dst)?;
         copied += 1;
+        wrote.push(dst.strip_prefix(&root).unwrap_or(dst).to_path_buf());
         Ok(())
     };
     for p in &h.paths {
@@ -11390,6 +11562,7 @@ fn overlay_harness(v: &Variant, root: &Path, h: &Harness) -> Result<()> {
             copy(&src, &root.join(p))?;
         }
     }
+    v.overlaid.extend(wrote);
     if copied > 0 {
         progress(format!("  harness {}: {copied} file(s) from {}", v.role, host::paths::plain(&h.from)));
     }
@@ -11397,6 +11570,98 @@ fn overlay_harness(v: &Variant, root: &Path, h: &Harness) -> Result<()> {
         progress(format!("  harness {}: kept its own {}", v.role, kept.join(", ")));
     }
     Ok(())
+}
+
+/// `HarnessOverlay`: a harness file `overlay_harness` wrote into a variant's folder that its script, cli
+/// or tty target runs (`ran`: `executed`, and a cli case's `ctx.exec` lines). Over a file the variant's
+/// commit holds (git tracks it there), the variant runs the bench file's checkout's copy, not its own:
+/// what differs in that file is gone from the comparison (warn). Where the variant had none, both sides
+/// run that one copy (info).
+fn harness_overlay(v: &Variant, ran: &[PathBuf], name: &str, from: &Path) -> Vec<validity::Warning> {
+    let Some(root) = v.root.as_deref().filter(|_| !v.overlaid.is_empty()) else { return Vec::new() };
+    let mut out = Vec::new();
+    for rel in v.overlaid.iter().map(|p| lexical(Path::new(""), p)).filter(|p| ran.contains(p)) {
+        let file = rel.to_string_lossy().replace('\\', "/");
+        let label = format!("{} ({})", v.role, v.label);
+        if git::ok(root, &["ls-files", "--error-unmatch", "--", &file]) {
+            out.push(validity::warn(
+                "HarnessOverlay",
+                format!(
+                    "{label} runs the bench's own copy of {file}, not its own: the harness (the bench file's folder and strobe.json's harness paths, from {}) is copied over {}'s folder, and {name} runs {file}, which {}'s commit holds with other contents; a change in that file is the same on both sides; keep the code under test out of the harness folder, or name it from there (an import of the variant's own file)",
+                    host::paths::plain(from),
+                    v.role,
+                    v.role
+                ),
+            ));
+        } else {
+            out.push(validity::info("HarnessOverlay", format!("{label} had no {file}, which {name} runs: strobe placed the bench's own copy there, so both sides run that one file")));
+        }
+    }
+    out
+}
+
+/// The files (relative to the variant's folder) a script, cli or tty target runs: a script's entry
+/// (beside the bench file, at the same place in each variant), and the words of a command line (`run`,
+/// a tty's from its `cwd`, and `build`) that name a file in the variant's folder.
+fn executed(target: &Value, bench_file: &Path, from: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    match target["kind"].as_str() {
+        Some("script") => {
+            let entry = bench_file.parent().unwrap_or(Path::new(".")).join(target["entry"].as_str().unwrap_or(""));
+            if let Some(rel) = std::fs::canonicalize(entry).ok().and_then(|e| e.strip_prefix(from).ok().map(Path::to_path_buf)) {
+                out.push(lexical(Path::new(""), &rel));
+            }
+        }
+        Some(kind @ ("cli" | "tty")) => {
+            let cwd = if kind == "tty" { PathBuf::from(target["cwd"].as_str().unwrap_or("")) } else { PathBuf::new() };
+            out.extend(line_files(&cwd, &target["run"]));
+            out.extend(line_files(Path::new(""), &target["build"]));
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The words of a command line (a string, or its words) that could name a file of the variant's folder,
+/// relative to it from `base` (flags and absolute paths are none).
+fn line_files(base: &Path, line: &Value) -> Vec<PathBuf> {
+    let words: Vec<&str> = match line {
+        Value::String(s) => s.split_whitespace().collect(),
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    words
+        .into_iter()
+        .filter_map(|w| {
+            let w = w.trim_matches(|c| c == '"' || c == '\'').replace('\\', "/");
+            (!w.is_empty() && !w.starts_with('-') && !Path::new(&w).is_absolute()).then(|| lexical(base, Path::new(&w)))
+        })
+        .collect()
+}
+
+/// The `HarnessOverlay` notes not yet said, said: in the progress (`!` a warning, `i` a note) and the result.
+fn say_overlay(ctx: &mut Ctx, notes: Vec<validity::Warning>) {
+    for w in notes {
+        if !ctx.warnings.iter().any(|x| x.id == w.id && x.text == w.text) {
+            progress(format!("  {} {}  {}", if w.level == "warn" { "!" } else { "i" }, w.id, w.text));
+            ctx.warnings.push(w);
+        }
+    }
+}
+
+/// `base` joined with `p`, `.` and `..` taken out without touching the disk.
+fn lexical(base: &Path, p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in base.components().chain(p.components()) {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Every file under `dir`, skipping dependency and output folders a harness never needs.
@@ -11441,6 +11706,9 @@ fn prepare_all(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Val
             Some((project, own)) => prepare_variant(v, &target, own, &Harness { from: project.clone(), paths: Vec::new() }, project)?,
             None => prepare_variant(v, &target, config, &ctx.harness, &ctx.project)?,
         }
+        let ran = executed(&target, Path::new(ctx.describe["file"].as_str().unwrap_or(".")), &ctx.harness.from);
+        let notes = harness_overlay(v, &ran, &name, &ctx.harness.from);
+        say_overlay(ctx, notes);
     }
     // Builds of one target, or each side on its own target.
     match &s.sides {
