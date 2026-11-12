@@ -8669,7 +8669,11 @@ what was built but not yet run on a device is in §21.
 - 2026-11-12 · cleanup/mac · under a Bun before 1.4.0 the runner does not connect Playwright (its
   `connectOverCDP` hangs 30 s there: an outside bench read 0 of 4 cases); reading `ctx.playwright`
   throws with the fix `bun upgrade`, and any failed connection fails only a `prepare` that reads
-  `ctx.playwright`; `status` prints the Bun version (5.4, 9.6).
+  `ctx.playwright`; `status` prints the Bun version (5.4, 9.6). A browser that opened no port in 30 s
+  and used no CPU on macOS was held at launch (Gatekeeper after a download or update: the kernel logs
+  'Security policy would not allow process'): the error says so with the fix 'open <app> once from the
+  Finder', and the block is not launched 3 more times (it was 2 minutes a case). `look pid:` and `look
+  cdp:` are usage errors naming `record` (they navigated to the text: `net::ERR_ABORTED`) (5.12, 13.1).
 - 2026-11-11 · cleanup/prune · `strobe prune` (caches unused now, data when named and older than 30
   days, never a recording a kept experiment names; the plan first, `--force` without a terminal,
   `--dry-run`, measured `Total reclaimed space`); cache leases and stamps (`host::cache`); removal

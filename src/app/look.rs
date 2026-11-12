@@ -564,6 +564,12 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         return terminal(args, line);
     }
+    // A running process or browser is record's to attach to: never a page address to navigate to.
+    if let Some(kind) = ["pid:", "cdp:"].into_iter().find(|k| target.starts_with(k)) {
+        return Err(Error::usage(format!(
+            "look opens a page or launches an app, so it takes no {kind} target: strobe look <url | file | wir:[sel] | app:<id> | exe:<path> | tty:<command>>; strobe record {target} attaches to what runs"
+        )));
+    }
     for tty_only in ["type", "press"] {
         if args.has(tty_only) {
             return Err(Error::usage(format!("--{tty_only} is for a terminal program (look tty:<command>)")));
