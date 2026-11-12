@@ -833,9 +833,9 @@ impl Builder {
             let wakes = wakes_per_thread.then(|| make(format!("{name} · wakes/s"), "/s"));
             let last = last.min(t.ticks.len() - 1);
             // Each tick over the span it covers (a run's edge takes a short one, a late one covers more).
-            for k in first..=last {
+            for (k, &tick) in t.ticks.iter().enumerate().take(last + 1).skip(first) {
                 let (ms, w) = c.get(&k).copied().unwrap_or((0.0, 0));
-                let span = t.ticks[k].saturating_sub(start(k)).max(1) as f64;
+                let span = tick.saturating_sub(start(k)).max(1) as f64;
                 if let Some(cpu) = cpu {
                     self.counter(cpu, MONOTONIC, start(k), 100.0 * f64::from(ms) * 1e6 / span);
                 }
