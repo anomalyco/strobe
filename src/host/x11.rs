@@ -397,6 +397,154 @@ pub fn window_region(win: isize, [x, y, w, h]: [i32; 4]) -> Result<crate::png::I
     .ok_or_else(|| "the window is not viewable (unmapped or minimized), or the X server gave no image of it".to_string())
 }
 
+/// A launch announced for X11 startup notification (the freedesktop Startup Notification protocol, the
+/// launch feedback of GNOME's spinner and KDE's bouncing cursor): its id goes into the app's environment
+/// (`env`), and `feedback` is when the app said `remove:` for it, which a toolkit says once it maps its
+/// first window (GTK, Qt).
+pub struct StartupNotice {
+    pub id: String,
+    pub feedback: super::Feedback,
+}
+
+impl StartupNotice {
+    /// The variable the app reads its id from.
+    pub fn env(&self) -> (String, String) {
+        ("DESKTOP_STARTUP_ID".into(), self.id.clone())
+    }
+}
+
+/// Announces a launch on `$DISPLAY` before it starts: a new id, sent as `new:` with `SILENT=1`, so a
+/// desktop that shows launch feedback shows none for it (rule 10: nothing changes on the person's
+/// screen), and a watch on a connection of its own, already listening when this returns, for the app's
+/// `remove:` of that id. The time is when strobe read the message, on `now_ns`'s clock. At `deadline`,
+/// or when the watch is dropped, strobe says `remove:` itself, as a launcher whose app never did must.
+/// `NoDisplay` without a display to connect to.
+pub fn announce_startup(deadline: std::time::Instant) -> Result<StartupNotice, super::NoFeedback> {
+    use super::NoFeedback;
+    use x11rb::protocol::xproto::{ChangeWindowAttributesAux, CreateWindowAux, WindowClass};
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+        return Err(NoFeedback::NoDisplay);
+    }
+    let (conn, screen) = x11rb::connect(None).map_err(|_| NoFeedback::NoDisplay)?;
+    fn unreadable<E>(_: E) -> NoFeedback {
+        NoFeedback::Unreadable
+    }
+    let root = conn.setup().roots.get(screen).ok_or(NoFeedback::Unreadable)?.root;
+    let intern = |name: &str| conn.intern_atom(false, name.as_bytes()).ok().and_then(|c| c.reply().ok()).map(|r| r.atom).ok_or(NoFeedback::Unreadable);
+    let atoms = Startup { begin: intern("_NET_STARTUP_INFO_BEGIN")?, more: intern("_NET_STARTUP_INFO")?, root, from: conn.generate_id().map_err(unreadable)? };
+    // The window the messages come from (the spec groups a message's pieces by it): never mapped.
+    conn.create_window(0, atoms.from, root, -100, -100, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new().override_redirect(1)).map_err(unreadable)?;
+    // Messages go to the root window to whoever selected PropertyChangeMask on it: this connection's
+    // own selection, which no other client's changes.
+    conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE)).map_err(unreadable)?;
+    let id = format!("strobe-{}-{}-{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed), super::now_ns());
+    // Its round trip also puts the selection in place before the app can start.
+    atoms.say(&conn, &format!("new: ID={} NAME={} SCREEN={screen} SILENT=1", quote(&id), quote("launch")))?;
+    let want = id.clone();
+    let feedback = super::Feedback::start(move |stop| atoms.wait_remove(&conn, &want, deadline, stop));
+    Ok(StartupNotice { id, feedback })
+}
+
+/// One announcing connection's atoms and windows.
+struct Startup {
+    begin: u32,
+    more: u32,
+    root: Window,
+    from: Window,
+}
+
+impl Startup {
+    /// Sends one message: its bytes and a NUL in 20-byte pieces, the first as `_NET_STARTUP_INFO_BEGIN`,
+    /// then waits for a round trip: an X server drops the requests of a connection that closes before
+    /// it read them (Xvfb dropped the `remove:` a watch said as it ended).
+    fn say(&self, conn: &RustConnection, text: &str) -> Result<(), super::NoFeedback> {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0);
+        for (i, piece) in bytes.chunks(20).enumerate() {
+            let mut data = [0u8; 20];
+            data[..piece.len()].copy_from_slice(piece);
+            let ev = ClientMessageEvent::new(8, self.from, if i == 0 { self.begin } else { self.more }, data);
+            conn.send_event(false, self.root, EventMask::PROPERTY_CHANGE, ev).map_err(|_| super::NoFeedback::Unreadable)?;
+        }
+        conn.get_input_focus().map_err(|_| super::NoFeedback::Unreadable)?.reply().map(drop).map_err(|_| super::NoFeedback::Unreadable)
+    }
+
+    /// Reads messages until a `remove:` of `id`, `deadline`, or `stop`; strobe's own `remove:` ends a
+    /// launch whose app gave none.
+    fn wait_remove(&self, conn: &RustConnection, id: &str, deadline: std::time::Instant, stop: &std::sync::atomic::AtomicBool) -> Result<u64, super::NoFeedback> {
+        use std::os::fd::AsRawFd;
+        use x11rb::protocol::Event;
+        let fd = conn.stream().as_raw_fd();
+        let mut pieces: std::collections::HashMap<Window, Vec<u8>> = std::collections::HashMap::new();
+        loop {
+            while let Ok(Some(ev)) = conn.poll_for_event() {
+                let at = super::now_ns();
+                let Event::ClientMessage(m) = ev else { continue };
+                // A message's first piece starts it again; a later one goes on with its sender's.
+                if m.type_ == self.begin {
+                    pieces.insert(m.window, Vec::new());
+                } else if m.type_ != self.more || !pieces.contains_key(&m.window) {
+                    continue;
+                }
+                let buf = pieces.entry(m.window).or_default();
+                buf.extend_from_slice(&m.data.as_data8());
+                let Some(end) = buf.iter().position(|b| *b == 0) else { continue };
+                let message = String::from_utf8_lossy(&buf[..end]).to_string();
+                pieces.remove(&m.window);
+                if startup_message(&message).is_some_and(|(kind, keys)| kind == "remove" && keys.iter().any(|(k, v)| k == "ID" && v == id)) {
+                    return Ok(at);
+                }
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = self.say(conn, &format!("remove: ID={}", quote(id)));
+                return Err(super::NoFeedback::Deadline);
+            }
+            let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let ms = left.as_millis().clamp(1, 50) as i32;
+            if unsafe { libc::poll(&mut p, 1, ms) } < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return Err(super::NoFeedback::Unreadable);
+            }
+            if p.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                return Err(super::NoFeedback::Unreadable);
+            }
+        }
+    }
+}
+
+/// A value quoted as the startup-notification spec quotes one.
+fn quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// A startup-notification message as its kind (`new`, `change`, `remove`) and its `KEY=value` pairs
+/// (values quoted or bare, backslash escapes); None when it has no `kind:`.
+pub fn startup_message(text: &str) -> Option<(String, Vec<(String, String)>)> {
+    let (kind, rest) = text.split_once(':')?;
+    let mut keys = Vec::new();
+    let mut chars = rest.chars().peekable();
+    loop {
+        while chars.next_if(|c| *c == ' ').is_some() {}
+        let key: String = std::iter::from_fn(|| chars.next_if(|c| *c != '=' && *c != ' ')).collect();
+        if key.is_empty() || chars.next() != Some('=') {
+            break;
+        }
+        let mut value = String::new();
+        let mut quoted = false;
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => quoted = !quoted,
+                '\\' => value.extend(chars.next()),
+                ' ' if !quoted => break,
+                c => value.push(c),
+            }
+        }
+        keys.push((key, value));
+    }
+    Some((kind.trim().to_string(), keys))
+}
+
 /// The largest window of `pids` as 16×16 averaged BGRA cells, from its own pixels (`GetImage` of the
 /// one-pixel row through each cell row's middle, so a sample moves a few kilobytes, not the window).
 pub fn window_pixels(pids: &[u32]) -> Option<Vec<u8>> {

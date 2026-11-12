@@ -16,6 +16,9 @@ pub struct Error {
     pub hint: Option<String>,
     pub refusal: Option<Box<Refusal>>,
     pub spans: Marks,
+    /// What strobe left alone in the invocation that failed (`host::spawn::LeftAlone`, as `--json` and
+    /// MCP give it): set by `app::dispatch`, null when nothing was.
+    pub left_alone: Option<serde_json::Value>,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -24,7 +27,7 @@ impl Error {
     pub fn new(code: i32, message: impl Into<Text>) -> Self {
         let mut spans = Marks::default();
         let message = spans.set("message", message.into());
-        Error { code, message, hint: None, refusal: None, spans }
+        Error { code, message, hint: None, refusal: None, spans, left_alone: None }
     }
     pub fn msg(message: impl Into<Text>) -> Self {
         Error::new(1, message)
@@ -420,7 +423,7 @@ impl From<Refusal> for Error {
         let mut spans = Marks::default();
         let message = spans.set("message", r.message_text());
         let hint = r.fix_text().map(|f| spans.set("hint", f));
-        Error { code: 4, message, hint, refusal: Some(Box::new(r)), spans }
+        Error { code: 4, message, hint, refusal: Some(Box::new(r)), spans, left_alone: None }
     }
 }
 

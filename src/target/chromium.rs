@@ -306,7 +306,7 @@ pub fn launch_as(window: &Window, headless: bool, cpus: Option<u64>, extra: &[St
         return Err(e);
     }
     let profile = host::paths::run().join(format!("profile-{}-{}", std::process::id(), host::now_ns()));
-    std::fs::create_dir_all(&profile)?;
+    super::isolate::claim(&profile)?;
     let mut args: Vec<String> = vec![
         "--remote-debugging-port=0".into(),
         format!("--user-data-dir={}", profile.display()),

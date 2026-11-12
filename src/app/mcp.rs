@@ -533,6 +533,15 @@ fn result(out: Output) -> Value {
     json!({ "content": [{ "type": "text", "text": out.text }], "structuredContent": out.json, "isError": false })
 }
 
+/// An error's structured content with what strobe left alone in the call (`left_alone`), absent when
+/// there was nothing (never null: `schema/result.v1.json`).
+fn with_left(mut v: Value, e: &Error) -> Value {
+    if let Some(l) = &e.left_alone {
+        v["left_alone"] = l.clone();
+    }
+    v
+}
+
 fn call_tool(name: &str, input: &Value) -> Value {
     let (argv, timeout, pending) = match to_args(name, input) {
         Ok(x) => x,
@@ -547,11 +556,11 @@ fn call_tool(name: &str, input: &Value) -> Value {
         Ok(Ok(out)) => result(out),
         Ok(Err(e)) if e.code == 4 => {
             let text = format!("refused: {}\nfix: {}", e.message, e.hint.clone().unwrap_or_default());
-            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "refused": true, "error": e.message, "hint": e.hint, "code": 4, "validator": e.validator() }, "isError": false })
+            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": with_left(json!({ "refused": true, "error": e.message, "hint": e.hint, "code": 4, "validator": e.validator() }), &e), "isError": false })
         }
         Ok(Err(e)) => {
             let text = format!("{}{}", e.message, e.hint.as_ref().map(|h| format!("\nfix: {h}")).unwrap_or_default());
-            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "error": e.message, "code": e.code, "validator": e.validator() }, "isError": true })
+            json!({ "content": [{ "type": "text", "text": text }], "structuredContent": with_left(json!({ "error": e.message, "code": e.code, "validator": e.validator() }), &e), "isError": true })
         }
         Err(_) => {
             let id = pending.unwrap_or_default();
@@ -604,6 +613,7 @@ pub fn handle(msg: &Value) -> Option<Value> {
 
 pub fn stdio() -> Result<()> {
     super::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::host::spawn::shared_process();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines().map_while(std::result::Result::ok) {
@@ -659,6 +669,7 @@ pub fn daemon(_args: &Args) -> Result<()> {
     let _ = std::fs::create_dir_all(&log);
     super::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
     super::DAEMON.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::host::spawn::shared_process();
     // Tracked branches (`strobe track --schedule`): checked once a minute.
     std::thread::spawn(super::track::daemon_loop);
     std::thread::spawn(follow_installed);
@@ -666,7 +677,12 @@ pub fn daemon(_args: &Args) -> Result<()> {
     // buses): ended now and once a minute, so none outlives them for long.
     std::thread::spawn(|| {
         loop {
+            // Its own invocation: what it left alone is in the log, never in an MCP call's result.
+            let left = crate::host::spawn::left_scope();
             let _ = crate::target::isolate::reap_dead_owners();
+            // Already in the log (`spawn::leave`): taken here so no MCP call reports them.
+            let _ = left.take();
+            drop(left);
             // And caches unused for long, once a day while no bench runs (`prune.json` says what went).
             let _ = super::prune::auto();
             std::thread::sleep(Duration::from_secs(60));

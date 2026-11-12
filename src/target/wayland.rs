@@ -105,6 +105,7 @@ impl Session {
         let program = |p: &str| program(p).ok_or_else(|| Error::msg(format!("{p} is not installed")));
         let dir = crate::host::paths::run().join(format!("wl-{}-{}", std::process::id(), crate::host::paths::csprng_hex(3)?));
         crate::host::paths::owner_only_dir(&dir);
+        isolate::claim(&dir)?;
         // Stamps for everything the session starts: its folder, and this strobe.
         let stamps = isolate::launch_env(&dir);
         let bus = format!("unix:path={}", dir.join("bus").display());

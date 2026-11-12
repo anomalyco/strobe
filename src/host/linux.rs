@@ -235,7 +235,16 @@ pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {
         .into_iter()
         .map(|i| {
             let s = &all[i];
-            ProcTimes { pid: s.pid, parent: s.ppid, name: name(s), cpu_ns: s.cpu_ns, cycles: process_cpu_ns(s.pid).unwrap_or(0), private_bytes: private_bytes(s.pid), working_set: s.rss }
+            ProcTimes {
+                pid: s.pid,
+                parent: s.ppid,
+                start: s.start,
+                name: name(s),
+                cpu_ns: s.cpu_ns,
+                cycles: process_cpu_ns(s.pid).unwrap_or(0),
+                private_bytes: private_bytes(s.pid),
+                working_set: s.rss,
+            }
         })
         .collect()
 }
@@ -250,6 +259,19 @@ pub fn tree_pids_of(roots: &super::PickRoots) -> Vec<u32> {
 pub fn tree_pids(root: u32) -> Vec<u32> {
     let all = all_stats();
     tree_of(&all, &[root]).into_iter().map(|i| all[i].pid).collect()
+}
+
+/// `tree_pids` with each process's start time, from one snapshot (`host::kill`): none when `root` is
+/// gone, or, given its `start`, when it names a process started at another time.
+pub fn tree_starts(root: u32, start: Option<u64>) -> Vec<(u32, u64)> {
+    let all = all_stats();
+    // The list is read process by process: a root that exited during the read may have left its pid to
+    // another process whose children the read found later. Checked again after it: an exited root has
+    // no children of its own (they go to init or a subreaper as it exits).
+    if start.is_some_and(|s| !all.iter().any(|p| p.pid == root && p.start == s) || start_time(root) != Some(s)) {
+        return Vec::new();
+    }
+    tree_of(&all, &[root]).into_iter().map(|i| (all[i].pid, all[i].start)).collect()
 }
 
 /// Children of `parents` that exited and are not reaped yet (zombies), by pid and start time, with

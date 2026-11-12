@@ -13,6 +13,19 @@
     "file_repo": { "type": ["string", "null"], "description": "The bench file's path in its repository." },
     "created": { "type": "string", "description": "ISO 8601 time, UTC." },
     "text": { "type": "string", "description": "The text output." },
+    "left_alone": {
+      "type": "array",
+      "description": "--json, any command, and MCP results: what strobe left alone during the invocation because it could not prove it its own (SPEC 13.2): a process it did not end, a Launch Services record it kept. Absent when there is none.",
+      "items": {
+        "type": "object",
+        "required": ["what", "why"],
+        "properties": {
+          "pid": { "type": ["integer", "null"], "description": "The process, when there is one." },
+          "what": { "type": "string" },
+          "why": { "type": "string", "description": "Why strobe did not end it." }
+        }
+      }
+    },
     "result": { "type": "string", "description": "--json only: the path of result.json." },
     "decided": { "type": "boolean", "description": "experiment: every series' primary got a verdict and nothing stopped the bench." },
     "support": { "oneOf": [{ "$ref": "#/definitions/support" }, { "type": "null" }], "description": "The least support of the series that ran (SPEC 21.1); null when none ran. Absent in older results." },

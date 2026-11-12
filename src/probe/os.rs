@@ -375,9 +375,16 @@ impl Sampler {
     /// devices and strobe itself). Returns after the baseline collection, so ticks cover everything
     /// from the return on.
     pub fn start(root_pid: u32, home: Option<std::path::PathBuf>) -> Sampler {
+        Sampler::start_of(root_pid, None, home)
+    }
+
+    /// `start` from a root strobe does not hold pinned (a browser its WebDriver server started): with
+    /// `start` its start time proven at the launch, the root's tree is sampled only while the root has
+    /// it (`host::process_set_pids_of`); once it does not, only what carries `home`'s stamp.
+    pub fn start_of(root_pid: u32, start: Option<u64>, home: Option<std::path::PathBuf>) -> Sampler {
         let (stop, stop_rx) = mpsc::channel();
         let (ready, ready_rx) = mpsc::channel();
-        let thread = std::thread::Builder::new().name("strobe-sampler".into()).spawn(move || run(root_pid, home, INTERVAL, stop_rx, ready)).expect("spawn the sampler thread");
+        let thread = std::thread::Builder::new().name("strobe-sampler".into()).spawn(move || run(root_pid, start, home, INTERVAL, stop_rx, ready)).expect("spawn the sampler thread");
         let _ = ready_rx.recv();
         Sampler { stop, thread }
     }
@@ -390,10 +397,10 @@ impl Sampler {
     }
 }
 
-fn run(root: u32, home: Option<std::path::PathBuf>, interval: Duration, stop: mpsc::Receiver<()>, ready: mpsc::Sender<()>) -> Samples {
+fn run(root: u32, start: Option<u64>, home: Option<std::path::PathBuf>, interval: Duration, stop: mpsc::Receiver<()>, ready: mpsc::Sender<()>) -> Samples {
     let (k0, tsc0, ns0) = (host::thread_cycles(), host::tsc(), host::now_ns());
     // Sorted, without strobe itself (`host::process_set`).
-    let set = || -> Vec<u32> { if root == 0 { Vec::new() } else { host::process_set_pids(root, home.as_deref()) } };
+    let set = || -> Vec<u32> { if root == 0 { Vec::new() } else { host::process_set_pids_of(root, start, home.as_deref()) } };
     // The first read of the set reads every process's stamp once (cached by pid and start time), so
     // it does not set the refresh; later reads do.
     let mut pids = set();

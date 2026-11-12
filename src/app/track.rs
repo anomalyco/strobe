@@ -877,6 +877,8 @@ fn shell(cmd: &str, file: &Path, stdin: &str) -> Option<i32> {
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
+    // Reaped here, not left a zombie for the life of a long-running strobe (the daemon).
+    let _ = child.wait();
     None
 }
 

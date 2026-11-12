@@ -157,10 +157,12 @@ pub struct Browser {
     session: Arc<Session>,
     driver: Option<Owned>,
     driver_pid: u32,
-    /// The browser process (Safari, MiniBrowser) and its start time. Safari is started by LaunchServices
-    /// at the driver's request, outside the driver's tree: strobe ends it itself.
+    /// The browser process (Safari, MiniBrowser) and its start time, proven at the launch
+    /// (`browser_proof`). Safari is started by LaunchServices at the driver's request, outside the
+    /// driver's tree: strobe ends it itself. Every read of the browser's processes starts from this pid
+    /// only while it has this start time (`host::process_set_of`).
     pub pid: u32,
-    start: Option<u64>,
+    start: u64,
     /// Linux: the private home (HOME and XDG folders) the driver and browser run in.
     home: Option<PathBuf>,
     pub exe: PathBuf,
@@ -199,11 +201,16 @@ struct Started {
     exe: PathBuf,
     before: Vec<u32>,
     armed: bool,
+    /// When the session request went (`host::start_now`): the browser it started began no earlier.
+    since: Option<u64>,
+    /// The browser once proven (`browser_proof`): ended by that proof even when it has exited before
+    /// the guard drops, so what it left (its XPC services, by its pid and start time) goes too.
+    proven: Option<(u32, u64)>,
 }
 
 impl Started {
     fn new(exe: &Path) -> Started {
-        Started { exe: exe.to_path_buf(), before: host::running(exe), armed: cfg!(target_os = "macos") }
+        Started { exe: exe.to_path_buf(), before: host::running(exe), armed: cfg!(target_os = "macos"), since: None, proven: None }
     }
 
     /// Only a Safari in automation mode (`--automation`, as safaridriver starts it) is strobe's: one a
@@ -244,28 +251,84 @@ fn automation(pid: u32) -> bool {
 impl Drop for Started {
     fn drop(&mut self) {
         if self.armed {
-            for pid in self.pids() {
-                end_browser(pid, host::start_time(pid));
+            // Only one proven what the session request started (`browser_proof`): read here, at the
+            // clean-up, by the same proof the launch uses, never by a start time read alone.
+            if let Some((pid, start)) = self.proven {
+                end_browser(pid, Some(start));
+            }
+            for pid in self.pids().into_iter().filter(|p| self.proven.is_none_or(|(q, _)| q != *p)) {
+                if let Ok(start) = browser_proof(pid, &self.exe, self.since, None) {
+                    end_browser(pid, Some(start));
+                }
             }
         }
     }
 }
 
-/// Ends a browser process strobe started and what it left: SIGTERM and up to 5 s to go, then its tree
-/// and (macOS) every XPC service responsible to it (`host::kill_launch`).
+/// Ends a browser process strobe started and what it left: SIGTERM and up to 5 s to go while `pid`
+/// still has the start time `start` strobe proved at the launch (`browser_proof`), then its tree and
+/// (macOS) every XPC service responsible to it (`host::kill_opened`, which ends what an exited browser
+/// left, responsible to its pid and that start time, and nothing of a later process given its pid;
+/// Safari is launchd's child, so no process group of it is signalled). With no start time, nothing.
 fn end_browser(pid: u32, start: Option<u64>) {
-    if pid == 0 || host::start_time(pid) != start {
-        return;
+    let Some(start) = start.filter(|_| pid != 0) else { return };
+    if host::start_time(pid) == Some(start) {
+        #[cfg(unix)]
+        host::kill::sigterm_opened(pid, start);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && host::start_time(pid) == Some(start) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+    host::kill_opened(pid, start);
+}
+
+/// A browser's processes with their start times (`Browser::snapshot`): walked from `pid` only while it
+/// has the start time `start` proven at the launch, checked before and after the walk (none once that
+/// pid names another process), each member with the start time of the walk's own snapshot; never the
+/// WebDriver server (`driver`).
+pub fn browser_set(pid: u32, start: u64, home: Option<&Path>, driver: u32) -> Vec<(u32, u64)> {
+    let proven = || pid != 0 && host::start_time(pid) == Some(start);
+    if !proven() {
+        return Vec::new();
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && host::start_time(pid) == start {
-        std::thread::sleep(Duration::from_millis(50));
+    let set: Vec<(u32, u64)> = host::process_set_of(pid, start, home).iter().filter(|p| p.pid != driver).map(|p| (p.pid, p.start)).collect();
+    if proven() { set } else { Vec::new() }
+}
+
+/// Ends a browser strobe launched (`end_browser`, by the start time proven at the launch) and every
+/// process of `set` (`browser_set`) by its own start time.
+pub fn end_browser_set(pid: u32, start: u64, set: Vec<(u32, u64)>) {
+    end_browser(pid, Some(start));
+    for (p, s) in set {
+        host::kill_opened(p, s);
     }
-    host::kill_launch(pid, start);
+}
+
+/// Proves that `pid` is the browser strobe's session request started (`host::kill`'s standard): it
+/// started no earlier than the request (`since`, `host::start_now`), runs the browser's executable, is
+/// in automation mode (macOS: Safari's `--automation`, as safaridriver starts it) or in the driver's
+/// tree (`driver`, elsewhere), and has the same start time before and after those reads. Its start
+/// time, or why not. Safari's environment carries no stamp of strobe's (Launch Services starts it for
+/// safaridriver), so these are the proof.
+pub fn browser_proof(pid: u32, exe: &Path, since: Option<u64>, driver: Option<u32>) -> std::result::Result<u64, &'static str> {
+    let start = host::start_time(pid).ok_or("it exited before strobe read its start time")?;
+    if since.is_none_or(|s| start < s) {
+        return Err("it started before strobe's session request");
+    }
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if host::exe_of(pid).map(|e| canon(&e)) != Some(canon(exe)) {
+        return Err("it runs another executable than the browser's");
+    }
+    match driver {
+        Some(d) if !host::process_tree(d).iter().any(|p| p.pid == pid) => return Err("it is not in the WebDriver server's tree"),
+        None if !automation(pid) => return Err("it is not in automation mode"),
+        _ => {}
+    }
+    if host::start_time(pid) != Some(start) {
+        return Err("it exited while strobe read it");
+    }
+    Ok(start)
 }
 
 /// A loopback port nothing listens on now.
@@ -336,6 +399,7 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let home = (cfg!(target_os = "linux")).then(super::isolate::new_home);
     if let Some(h) = &home {
+        super::isolate::claim(h)?;
         for d in ["config", "data", "cache", "state", "run"] {
             std::fs::create_dir_all(h.join(d))?;
         }
@@ -400,6 +464,9 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
             return Err(live(&running));
         }
     }
+    // The session request starts the browser: a process of it started no earlier than this.
+    let since = host::start_now();
+    started.since = since;
     let session = match server.new_session(caps, Duration::from_secs(60))? {
         Ok(s) => s,
         Err(f) if f.message.to_lowercase().contains("remote automation") => {
@@ -428,7 +495,20 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let start = host::start_time(pid);
+    // Proven strobe's before anything else touches it: a process the session request started, or
+    // nothing of it is ever touched (no window call, sample or signal).
+    let start = match browser_proof(pid, &install.browser, since, (!cfg!(target_os = "macos")).then_some(driver_pid)) {
+        Ok(s) => s,
+        Err(why) => {
+            let _ = session.delete(Duration::from_secs(5));
+            return Err(Error::refused(
+                "LiveChannel",
+                format!("{} opened a session, but strobe could not prove process {pid} is the browser it asked for ({why}): strobe touched nothing of it", install.flavor.name()),
+                format!("quit any {} that runs, and run again", install.flavor.name()),
+            ));
+        }
+    };
+    started.proven = Some((pid, start));
     // strobe keeps its own deadlines: a script runs as long as the call that waits for it allows (a day;
     // safaridriver takes no null, "no limit", for it).
     session.send("POST", "/timeouts", Some(&json!({ "script": 86_400_000, "pageLoad": 3_600_000 })), Duration::from_secs(10))?;
@@ -442,7 +522,7 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
     // answer them: the block waits, as for any window that is not the active one.
     session.send("POST", "/url", Some(&json!({ "url": "about:blank" })), Duration::from_secs(30))?;
     if windowed {
-        let set: Vec<u32> = host::process_set(pid, home.as_deref()).iter().map(|p| p.pid).filter(|&p| p != driver_pid).collect();
+        let set: Vec<u32> = host::process_set_of(pid, start, home.as_deref()).iter().map(|p| p.pid).filter(|&p| p != driver_pid).collect();
         host::raise_windows(&set);
     }
     let checked = pointer_reaches(&session).and_then(|p| Ok((p, shift_takes_base_key(&session)?)));
@@ -456,7 +536,7 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
         _ => Error { message: format!("{}'s input check on a blank page: {}", install.flavor.name(), e.message), ..e },
     })?;
     // macOS: the session's own windows, so a window a person opens in this Safari later shows (`own`).
-    let own_windows = windows_of(pid);
+    let own_windows = if host::start_time(pid) == Some(start) { windows_of(pid) } else { Vec::new() };
     let (driver, home) = launching.done();
     started.armed = false;
     Ok(Browser {
@@ -592,12 +672,18 @@ impl Browser {
     /// content, GPU, networking); on Linux also what carries its home's stamp. Never the WebDriver
     /// server: that is strobe's tool, not the page's.
     pub fn processes(&self) -> Vec<host::ProcTimes> {
-        host::process_set(self.pid, self.home.as_deref()).into_iter().filter(|p| p.pid != self.driver_pid).collect()
+        host::process_set_of(self.pid, self.start, self.home.as_deref()).into_iter().filter(|p| p.pid != self.driver_pid).collect()
     }
 
-    /// The pids of `processes`, without reading each one's memory.
+    /// The pids of `processes`, without reading each one's memory: from the browser's pid only while it
+    /// has the start time proven at the launch, checked before and after the read.
     pub fn live_pids(&self) -> Vec<u32> {
-        host::process_set_pids(self.pid, self.home.as_deref()).into_iter().filter(|&p| p != self.driver_pid).collect()
+        host::process_set_pids_of(self.pid, Some(self.start), self.home.as_deref()).into_iter().filter(|&p| p != self.driver_pid).collect()
+    }
+
+    /// The browser process's start time, proven at the launch (`browser_proof`).
+    pub fn start(&self) -> u64 {
+        self.start
     }
 
     pub fn pids(&self) -> Vec<u32> {
@@ -631,10 +717,16 @@ impl Browser {
     /// macOS: the windows of strobe's Safari that are not its session's: a person opened them (a link from
     /// another app lands in the running Safari), so that Safari holds their tabs now.
     fn foreign_windows(&self) -> usize {
-        if !cfg!(target_os = "macos") || self.pid == 0 {
+        if !cfg!(target_os = "macos") || !self.proven() {
             return 0;
         }
         windows_of(self.pid).into_iter().filter(|w| !self.own_windows.contains(w)).count()
+    }
+
+    /// Whether the browser's pid still names the browser strobe launched (its start time proven at the
+    /// launch): every window lookup by its pid is guarded by it.
+    fn proven(&self) -> bool {
+        self.pid != 0 && host::start_time(self.pid) == Some(self.start)
     }
 
     /// `LiveChannel` once a person has opened a window in strobe's Safari: what the block measured ran
@@ -651,9 +743,11 @@ impl Browser {
     }
 
     /// The processes now with their start times, read while the browser still runs: macOS answers which
-    /// app an XPC service is responsible to only while that app runs.
-    fn snapshot(&self) -> Vec<(u32, Option<u64>)> {
-        self.processes().iter().map(|p| (p.pid, host::start_time(p.pid))).collect()
+    /// app an XPC service is responsible to only while that app runs. Walked from the browser's pid only
+    /// while it has the start time proven at the launch, before and after the walk (none once that pid
+    /// names another process), each member with the start time of the walk's own snapshot.
+    fn snapshot(&self) -> Vec<(u32, u64)> {
+        browser_set(self.pid, self.start, self.home.as_deref(), self.driver_pid)
     }
 
     /// Ends the session (the driver closes its window), stops the driver, ends the browser strobe started
@@ -664,10 +758,10 @@ impl Browser {
         let deleted = self.session.delete(Duration::from_secs(10)).is_ok();
         // The session's windows close with it: one still there is a person's.
         let deadline = Instant::now() + Duration::from_secs(1);
-        let mut theirs = deleted && cfg!(target_os = "macos") && !windows_of(self.pid).is_empty();
+        let mut theirs = deleted && cfg!(target_os = "macos") && self.proven() && !windows_of(self.pid).is_empty();
         while theirs && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
-            theirs = !windows_of(self.pid).is_empty();
+            theirs = self.proven() && !windows_of(self.pid).is_empty();
         }
         if theirs || self.foreign_windows() > 0 {
             self.pid = 0;
@@ -685,16 +779,11 @@ impl Browser {
 
     /// Stops the driver and ends the browser (`pid`, none when it is a person's now) and every process of
     /// `set` still running, by start time: an XPC service of a Safari that already quit too.
-    fn end_with(&mut self, set: Vec<(u32, Option<u64>)>) {
+    fn end_with(&mut self, set: Vec<(u32, u64)>) {
         drop(self.driver.take());
         let pid = std::mem::take(&mut self.pid);
         if pid != 0 {
-            end_browser(pid, self.start);
-            for (p, start) in set.into_iter().filter(|(_, s)| s.is_some()) {
-                if host::start_time(p) == start {
-                    host::kill_launch(p, start);
-                }
-            }
+            end_browser_set(pid, self.start, set);
         }
         if let Some(h) = self.home.take() {
             super::isolate::end_launch(None, Some(&h), true);

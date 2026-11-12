@@ -69,7 +69,7 @@ pub fn launch(spec: &Spec, home: &Path, fresh: bool, window: &Window, cpus: Opti
     if spec.run.trim().is_empty() {
         return Err(Error::usage("a command target needs `run`, the command line to start"));
     }
-    std::fs::create_dir_all(home)?;
+    super::isolate::claim(home)?;
     let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let fill = |s: &str| s.replace("{home}", &home.display().to_string()).replace("{port}", &port.to_string());
     let mut cmd = shell(&fill(&spec.run));

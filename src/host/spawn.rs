@@ -42,28 +42,47 @@ pub fn parse_owner(s: &str) -> Option<(u32, u64)> {
     Some((p.parse().ok()?, t.parse().ok()?))
 }
 
-/// A process's stamp, read from its environment now.
+/// A process's stamp, read from its environment now. None both when the environment cannot be read
+/// and when it carries no stamp: a caller that must tell the two apart (the second proves the process
+/// is not strobe's) reads `env_of` and `stamp_in`.
 pub fn stamp_of(pid: u32) -> Option<Stamp> {
-    let env = super::env_of(pid)?;
+    stamp_in(&super::env_of(pid)?)
+}
+
+/// The stamp an environment (`NAME=value` strings) carries, if it carries one.
+pub fn stamp_in(env: &[String]) -> Option<Stamp> {
     // Windows reads variable names in any case.
     let var = |name: &str| env.iter().find_map(|e| e.split_once('=').filter(|(k, _)| if cfg!(windows) { k.eq_ignore_ascii_case(name) } else { *k == name }).map(|(_, v)| v.to_string()));
     let (owner, start) = parse_owner(&var(OWNER_VAR)?)?;
     Some(Stamp { home: home_key(Path::new(&var(HOME_VAR)?)), pid: owner, start })
 }
 
-/// Every running process strobe stamped, but this strobe: (pid, parent, stamp). A process's
-/// environment is read once (a process is its pid and start time), so a scan reads only the
-/// processes that started since the last one. A process that shows no stamp is read again while it
-/// is under 2 s old (by its own start time): one that has just started may not have its environment
-/// yet (a Windows process before its parameters are written, a Unix one between fork and exec). The
-/// processes that ran before strobe first looked are read once: re-reading every one of them for 2 s
-/// after the first scan had made the OS sampler 1% of a core in a 5 s block on adais.
-pub fn stamped() -> Vec<(u32, u32, Stamp)> {
+/// A process strobe stamped, as a scan found it: its pid, parent and start time (`start_time`'s units)
+/// from one process list, and the stamp read from that same process (its start time read again after
+/// the stamp). With its pid and start time, what `host::kill_opened` needs to end it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stamped {
+    pub pid: u32,
+    pub parent: u32,
+    pub start: u64,
+    pub stamp: Stamp,
+}
+
+/// Every running process strobe stamped, but this strobe. A process's environment is read once (a
+/// process is its pid and start time), so a scan reads only the processes that started since the last
+/// one. A process that shows no stamp is read again while it is under 2 s old (by its own start time):
+/// one that has just started may not have its environment yet (a Windows process before its
+/// parameters are written, a Unix one between fork and exec). The processes that ran before strobe
+/// first looked are read once: re-reading every one of them for 2 s after the first scan had made the
+/// OS sampler 1% of a core in a 5 s block on adais.
+pub fn stamped() -> Vec<Stamped> {
     stamped_in(&super::process_list())
 }
 
-/// `stamped` over a process list (pid, parent, start time) already taken.
-pub(super) fn stamped_in(list: &[(u32, u32, u64)]) -> Vec<(u32, u32, Stamp)> {
+/// `stamped` over a process list (pid, parent, start time) already taken. A stamp is kept only when the
+/// process still has the list's start time after it was read: one that exited and whose pid went to
+/// another process meanwhile is read again in the next scan, never given the other's stamp.
+pub(super) fn stamped_in(list: &[(u32, u32, u64)]) -> Vec<Stamped> {
     use std::collections::HashMap;
     /// Each process's stamp (or none), by its pid and start time.
     type Seen = HashMap<(u32, u64), Option<Stamp>>;
@@ -77,13 +96,18 @@ pub(super) fn stamped_in(list: &[(u32, u32, u64)]) -> Vec<(u32, u32, Stamp)> {
         if pid == 0 || pid == me {
             continue;
         }
-        let entry = match old.get(&(pid, start)) {
-            Some(None) if age(start).is_some_and(|a| a < std::time::Duration::from_secs(2)) => stamp_of(pid),
-            Some(e) => e.clone(),
-            None => stamp_of(pid),
+        let read = || {
+            let s = stamp_of(pid);
+            (super::start_time(pid) == Some(start)).then_some(s)
         };
+        let entry = match old.get(&(pid, start)) {
+            Some(None) if age(start).is_some_and(|a| a < std::time::Duration::from_secs(2)) => read(),
+            Some(e) => Some(e.clone()),
+            None => read(),
+        };
+        let Some(entry) = entry else { continue };
         if let Some(s) = &entry {
-            out.push((pid, parent, s.clone()));
+            out.push(Stamped { pid, parent, start, stamp: s.clone() });
         }
         now.insert((pid, start), entry);
     }
@@ -127,7 +151,18 @@ pub fn pids_in_home(dir: &Path) -> Vec<u32> {
 /// `pids_in_home` over a process list already taken.
 pub(super) fn pids_in(list: &[(u32, u32, u64)], dir: &Path) -> Vec<u32> {
     let k = home_key(dir);
-    stamped_in(list).into_iter().filter(|(_, _, s)| s.home == k).map(|(p, _, _)| p).collect()
+    stamped_in(list).into_iter().filter(|s| s.stamp.home == k).map(|s| s.pid).collect()
+}
+
+/// The processes stamped with `dir` now, but this strobe and `except`: pid, start time and name.
+fn stamped_with(dir: &Path, except: u32) -> Vec<(u32, u64, String)> {
+    let k = home_key(dir);
+    stamped().into_iter().filter(|s| s.stamp.home == k && s.pid != except).map(|s| (s.pid, s.start, name_of(s.pid))).collect()
+}
+
+/// A process's executable's file name, or nothing.
+fn name_of(pid: u32) -> String {
+    super::exe_of(pid).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default()
 }
 
 /// A child strobe launched, with everything it starts as one group: on Windows a job object that
@@ -138,8 +173,12 @@ pub(super) fn pids_in(list: &[(u32, u32, u64)], dir: &Path) -> Vec<u32> {
 /// The child is never reaped before its group is ended (`exited` reads its status without reaping
 /// it), so on Unix the group's id, the child's pid, cannot name another process when strobe ends the
 /// group. Dropping it ends it all (`end`).
+///
+/// macOS: an app Launch Services started for strobe (`open_owned`) is owned the same way though it is
+/// launchd's child: its tree with the processes responsible to it, and everything stamped with its
+/// home, by its pid and start time (as `target::webkit` owns the Safari it gets started).
 pub struct Owned {
-    child: Child,
+    process: Proc,
     /// Taken by `end`.
     group: Option<Group>,
     /// macOS: why an app bundle's launch is not its own responsible process, so its XPC services
@@ -165,6 +204,15 @@ pub struct Owned {
     cgroup: Option<super::cgroup::Launch>,
 }
 
+/// The process an `Owned` launch started.
+enum Proc {
+    /// strobe's own child.
+    Child(Child),
+    /// macOS: an app Launch Services started (`open_owned`), launchd's child.
+    #[cfg(target_os = "macos")]
+    Opened { pid: u32 },
+}
+
 /// How an `Owned` child ended (`Owned::ended`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Ended {
@@ -173,6 +221,32 @@ pub enum Ended {
     /// Unix: a signal ended it (its number).
     #[cfg(unix)]
     Signal(i32),
+    /// It ended, and no status reached strobe: an app Launch Services started is launchd's child, and
+    /// only launchd reads how it ended (macOS).
+    Unreported,
+}
+
+impl Ended {
+    /// Its exit code, when it exited with one strobe read: None for a signal or an unreported end
+    /// (never a made-up -1).
+    pub fn code(self) -> Option<i32> {
+        match self {
+            Ended::Code(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Ended {
+    /// `exited (code 3)`, `ended by signal 9`, or `exited (its status went to launchd, not strobe)`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ended::Code(c) => write!(f, "exited (code {c})"),
+            #[cfg(unix)]
+            Ended::Signal(s) => write!(f, "ended by signal {s}"),
+            Ended::Unreported => f.write_str("exited (its status went to launchd, not strobe)"),
+        }
+    }
 }
 
 /// Linux: what a child's `ru_maxrss` starts from. The kernel folds the resident high-water mark of the
@@ -229,23 +303,219 @@ struct Group {
     pgid: u32,
 }
 
-/// Every `Owned` launch not yet ended, by its child's pid and start time: what `end_launches` ends on a
-/// stop. A launch registers while this is held from its spawn on, and `end` takes it out under it, so
-/// a stop and a close never race over one launch.
-static LIVE: std::sync::Mutex<Vec<(u32, Option<u64>)>> = std::sync::Mutex::new(Vec::new());
+/// One launch `end_launches` would end: its root's pid and start time, and whether the root is
+/// strobe's own child (never reaped before its end, so its pid and its process group stay its own) or
+/// an app launchd started for strobe (`open_owned`), reaped by launchd as it exits.
+#[derive(Clone, Copy, Debug)]
+struct Live {
+    pid: u32,
+    start: Option<u64>,
+    child: bool,
+}
 
-/// Ends every launch this strobe still owns (each one's tree, then its group; Windows ends the jobs
-/// itself when strobe exits): for a stop of a command that then exits (`isolate::end_on_stop`). The
-/// launches stay ended: their `end` only reaps them.
-pub fn end_launches() {
-    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    for (pid, start) in live.drain(..) {
-        super::kill_launch(pid, start);
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+/// Every `Owned` launch not yet ended: what `end_launches` ends on a stop. A child launch registers
+/// while this is held from its spawn on, and `end` takes it out under it, so a stop and a close never
+/// race over one launch.
+static LIVE: std::sync::Mutex<Vec<Live>> = std::sync::Mutex::new(Vec::new());
+
+/// A process strobe did not end, or a record it did not remove, because it could not prove it its own
+/// (`host::kill`'s standard): reported at the end of the invocation (`left_alone`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LeftAlone {
+    /// The process, when there is one (a request Launch Services had not answered has none).
+    pub pid: Option<u32>,
+    /// What it is, in a few words (never a local path or another app's name).
+    pub what: String,
+    /// Why strobe did not end it.
+    pub why: String,
+}
+
+impl std::fmt::Display for LeftAlone {
+    /// `pid 7000, what: why`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.pid {
+            Some(p) => write!(f, "pid {p}, {}: {}", self.what, self.why),
+            None => write!(f, "{}: {}", self.what, self.why),
         }
     }
+}
+
+/// What strobe left alone, by the invocation it happened in (`left_scope`; 0: a thread outside every
+/// invocation, such as a stop's or the daemon's own clean-up).
+static LEFT: std::sync::Mutex<Vec<(u64, LeftAlone)>> = std::sync::Mutex::new(Vec::new());
+
+thread_local! {
+    /// The invocation this thread runs (`left_scope`), 0 outside one.
+    static LEFT_SCOPE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// An invocation's scope for `left_alone` on this thread, from `left_scope` until dropped. Nested
+/// invocations (a bisect's steps, a track's benches) share the outermost one's, which reports them.
+pub struct LeftScope {
+    id: u64,
+    outermost: bool,
+}
+
+impl LeftScope {
+    /// Whether this is the outermost invocation on its thread: the one that reports (`left_alone`).
+    pub fn outermost(&self) -> bool {
+        self.outermost
+    }
+
+    /// What strobe left alone in this invocation, taken: each reported once. In a process that runs one
+    /// invocation (the CLI) also what was left outside any (a stop's clean-up thread); in one that runs
+    /// many (the daemon, `strobe mcp`: `shared_process`) never: such a note belongs to no call, and is
+    /// in the log (`left_alone_log`).
+    pub fn take(&self) -> Vec<LeftAlone> {
+        let shared = SHARED.load(std::sync::atomic::Ordering::Relaxed);
+        let mut left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *left).into_iter().partition(|(s, _)| *s == self.id || (*s == 0 && !shared));
+        *left = rest;
+        mine.into_iter().map(|(_, l)| l).collect()
+    }
+}
+
+impl Drop for LeftScope {
+    fn drop(&mut self) {
+        if self.outermost {
+            LEFT_SCOPE.with(|s| s.set(0));
+            SEEN.lock().unwrap_or_else(|e| e.into_inner()).retain(|(s, _)| *s != self.id);
+            // Not reported (an invocation that unwound before its report): said on stderr where strobe
+            // runs one invocation, and in the log either way; not kept for another one.
+            let mut left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
+            let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *left).into_iter().partition(|(s, _)| *s == self.id);
+            *left = rest;
+            let mine: Vec<LeftAlone> = mine.into_iter().map(|(_, l)| l).collect();
+            if !mine.is_empty() && !SHARED.load(std::sync::atomic::Ordering::Relaxed) {
+                eprint!("{}", left_alone_text(&mine));
+            }
+        }
+    }
+}
+
+/// Whether this process runs many invocations at once (the daemon, `strobe mcp`): `shared_process`.
+static SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This process serves many invocations (the daemon, `strobe mcp`): a note left outside every
+/// invocation goes to the log only, never to an unrelated call's result (`LeftScope::take`).
+pub fn shared_process() {
+    SHARED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The log every note goes to the moment it is made (`leave`), so none is lost to a panic, an abort, a
+/// second Ctrl-C or an MCP run that outlived its call: `<state>/log/left-alone.log`, a line each:
+/// seconds since 1970, then the note as a run prints it (a pid and fixed words, nothing else).
+pub fn left_alone_log() -> std::path::PathBuf {
+    super::paths::state_dir().join("log").join("left-alone.log")
+}
+
+/// How many notes the log holds from the last `within` (`strobe status`), in it and in the file it was
+/// last rotated to.
+pub fn left_alone_recent(within: std::time::Duration) -> usize {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let since = now.saturating_sub(within.as_secs());
+    let log = left_alone_log();
+    [log.with_extension("log.old"), log]
+        .iter()
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default().lines().filter(|l| l.split(' ').next().and_then(|s| s.parse::<u64>().ok()).is_some_and(|t| t >= since)).count())
+        .sum()
+}
+
+/// Enters an invocation's scope on this thread (`app::dispatch`), or the enclosing one's.
+pub fn left_scope() -> LeftScope {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    LEFT_SCOPE.with(|s| match s.get() {
+        0 => {
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            s.set(id);
+            LeftScope { id, outermost: true }
+        }
+        id => LeftScope { id, outermost: false },
+    })
+}
+
+/// Notes what strobe left alone, in this thread's invocation (`left_scope`).
+/// A note made again in the same invocation (a clean-up that retries every few ms) is recorded once.
+pub fn leave(pid: Option<u32>, what: impl Into<String>, why: impl Into<String>) {
+    let scope = LEFT_SCOPE.with(|s| s.get());
+    let note = LeftAlone { pid, what: what.into(), why: why.into() };
+    {
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.iter().any(|(s, n)| *s == scope && *n == note) {
+            return;
+        }
+        seen.push((scope, note.clone()));
+    }
+    let log = left_alone_log();
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Rotated at 1 MB, as the helper's log is.
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(&log, log.with_extension("log.old"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        use std::io::Write as _;
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        // One write per line: strobes writing at once append whole lines.
+        let _ = f.write_all(format!("{secs} {note}\n").as_bytes());
+    }
+    // A note outside every invocation in a process that serves many is in the log only (`take`).
+    if scope != 0 || !SHARED.load(std::sync::atomic::Ordering::Relaxed) {
+        LEFT.lock().unwrap_or_else(|e| e.into_inner()).push((scope, note));
+    }
+}
+
+/// The notes made in each live invocation (`leave`), so none is made twice in one.
+static SEEN: std::sync::Mutex<Vec<(u64, LeftAlone)>> = std::sync::Mutex::new(Vec::new());
+
+/// The first line of `left_alone_text`, by which a quiet run finds it in a command's text.
+pub const LEFT_ALONE_HEADER: &str = "strobe left alone what it could not prove its own:";
+
+/// Everything strobe left alone and has not reported, taken: for a stop that exits the process
+/// (`isolate::end_on_stop`), which reports it all.
+pub fn left_alone() -> Vec<LeftAlone> {
+    std::mem::take(&mut *LEFT.lock().unwrap_or_else(|e| e.into_inner())).into_iter().map(|(_, l)| l).collect()
+}
+
+/// The text a run ends with when strobe left something alone: one line per process.
+pub fn left_alone_text(left: &[LeftAlone]) -> String {
+    let mut s = format!("{LEFT_ALONE_HEADER}\n");
+    for l in left {
+        s.push_str(&format!("  {l}\n"));
+    }
+    s
+}
+
+/// Ends every launch this strobe still owns (each one's tree, then a child's group; Windows ends the
+/// jobs itself when strobe exits): for a stop of a command that then exits (`isolate::end_on_stop`).
+/// An app launchd started for strobe is ended only as far as `kill_opened` proves it the launch's,
+/// and never by a process group: strobe made none. The launches stay ended: their `end` only reaps them.
+pub fn end_launches() {
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    for l in live.drain(..) {
+        if !l.child {
+            if let Some(start) = l.start {
+                super::kill_opened(l.pid, start);
+            }
+            continue;
+        }
+        if reused(l.pid, l.start) {
+            continue;
+        }
+        super::kill_launch(l.pid, l.start);
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(l.pid as i32), libc::SIGKILL);
+        }
+    }
+}
+
+/// Whether a launch's pid names another process now: one started at another time than the launch
+/// read. A child strobe has not reaped keeps its pid; an app Launch Services started (macOS) is reaped
+/// by launchd as it exits, and its pid may then be reused.
+fn reused(pid: u32, start: Option<u64>) -> bool {
+    start.is_some() && super::start_time(pid).is_some_and(|s| Some(s) != start)
 }
 
 /// Jobs by their launch's root pid and the folder it was for, when it was for one (Windows): for
@@ -315,7 +585,7 @@ pub fn close_job(job: isize) {
 /// found by `group_pids` for `home`. Taken back by `unlist_launch` before it is ended.
 #[cfg(windows)]
 pub fn list_launch(pid: u32, job: Option<isize>, home: Option<&Path>) {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push((pid, None));
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: None, child: true });
     if let Some(j) = job {
         JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((pid, home.map(home_key), j));
     }
@@ -324,7 +594,7 @@ pub fn list_launch(pid: u32, job: Option<isize>, home: Option<&Path>) {
 /// Takes a `list_launch` back off the lists (before its owner ends it and closes its job).
 #[cfg(windows)]
 pub fn unlist_launch(pid: u32, job: Option<isize>) {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != pid);
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|l| l.pid != pid);
     if let Some(j) = job {
         JOBS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, _, x)| *x != j);
     }
@@ -332,7 +602,70 @@ pub fn unlist_launch(pid: u32, job: Option<isize>) {
 
 impl Owned {
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        match &self.process {
+            Proc::Child(c) => c.id(),
+            #[cfg(target_os = "macos")]
+            Proc::Opened { pid, .. } => *pid,
+        }
+    }
+
+    /// The child, when the launch is strobe's own child.
+    fn child(&mut self) -> Option<&mut Child> {
+        match &mut self.process {
+            Proc::Child(c) => Some(c),
+            #[cfg(target_os = "macos")]
+            Proc::Opened { .. } => None,
+        }
+    }
+
+    /// Whether an opened app still runs: its pid with the start time read at its launch, never its pid
+    /// alone (launchd reaps it as it exits, and the pid may then be another process's). One whose
+    /// start time strobe never read (it exited first) is gone.
+    #[cfg(target_os = "macos")]
+    fn opened_alive(&self) -> bool {
+        self.start.is_some_and(|s| super::start_time(self.pid()) == Some(s))
+    }
+
+    /// The pid a launch's process set is walked from, proven now (`host::kill`'s standard; every window
+    /// call, sample, input and signal starts from it): strobe's own child, whose pid cannot name another
+    /// process while strobe holds it unreaped (Unix) or by its handle (Windows); an opened app only while
+    /// it has the start time proven at the launch; else 0, which roots nothing (the set is then only
+    /// what carries the launch's stamp).
+    pub fn root(&self) -> u32 {
+        match &self.process {
+            Proc::Child(c) => c.id(),
+            #[cfg(target_os = "macos")]
+            Proc::Opened { .. } => {
+                if self.opened_alive() {
+                    self.pid()
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
+    /// The root's start time, read at the launch (`start_time`'s units): with its pid, what names it.
+    /// None where it was not read (Windows), or an opened app that had exited first.
+    pub fn start(&self) -> Option<u64> {
+        self.start
+    }
+
+    /// Windows: when the child first goes input idle (`win::input_idle`): the moment the shell's "app
+    /// starting" pointer would clear for a launch of it. Call it right after the launch: its watch
+    /// starts then, on a thread of its own. `NotOnThisOs` elsewhere.
+    pub fn input_idle(&self, deadline: std::time::Instant) -> super::Feedback {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let Proc::Child(c) = &self.process;
+            super::win::input_idle(c.as_raw_handle() as isize, deadline)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = deadline;
+            super::Feedback::none(super::NoFeedback::NotOnThisOs)
+        }
     }
 
     /// Windows: the command's spawn as a person's launch of it would take it, without strobe's job,
@@ -358,31 +691,41 @@ impl Owned {
         self.main.clone()
     }
 
-    /// The child's output pipes, when it was started with them.
+    /// The child's output pipes, when it was started with them (an opened app has none).
     pub fn output(&mut self) -> (Option<std::process::ChildStdout>, Option<std::process::ChildStderr>) {
-        (self.child.stdout.take(), self.child.stderr.take())
+        match self.child() {
+            Some(c) => (c.stdout.take(), c.stderr.take()),
+            None => (None, None),
+        }
     }
 
-    /// The child's exit code once it has exited (-1: ended by a signal). On Unix the child stays a
-    /// zombie (`waitid` with `WNOWAIT`): its pid stays its own until `end` reaps it.
+    /// The child's exit code once it has exited (-1: ended by a signal, or by no status strobe could
+    /// read, `Ended::Unreported`: a caller that says how it ended uses `ended` and `Ended::code`, which
+    /// never makes up a code). On Unix the child stays a zombie (`waitid` with `WNOWAIT`): its pid stays
+    /// its own until `end` reaps it.
     pub fn exited(&mut self) -> Option<i32> {
         self.ended().map(|e| match e {
             Ended::Code(c) => c,
             #[cfg(unix)]
             Ended::Signal(_) => -1,
+            Ended::Unreported => -1,
         })
     }
 
     /// How the child ended, once it has (`exited`, with the signal that ended it on Unix).
     pub fn ended(&mut self) -> Option<Ended> {
+        #[cfg(target_os = "macos")]
+        if matches!(self.process, Proc::Opened { .. }) {
+            return (!self.opened_alive()).then_some(Ended::Unreported);
+        }
         #[cfg(windows)]
         {
-            self.child.try_wait().ok().flatten().map(|s| Ended::Code(s.code().unwrap_or(-1)))
+            self.child().and_then(|c| c.try_wait().ok().flatten()).map(|s| Ended::Code(s.code().unwrap_or(-1)))
         }
         #[cfg(unix)]
         unsafe {
             let mut info: libc::siginfo_t = std::mem::zeroed();
-            let r = libc::waitid(libc::P_PID, self.child.id() as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
+            let r = libc::waitid(libc::P_PID, self.pid() as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
             if r != 0 || info.si_pid() == 0 {
                 return None;
             }
@@ -393,26 +736,32 @@ impl Owned {
 
     /// The child's own CPU so far in `super::process_cycles` units, read through what strobe still holds
     /// of it after it exited: Windows its process handle (`QueryProcessCycleTime` answers for an exited
-    /// process), Unix its unreaped zombie (`exited` keeps it). None when it cannot be read.
+    /// process), Unix its unreaped zombie (`exited` keeps it). An opened app (macOS) is read only while
+    /// it runs: launchd reaps it. None when it cannot be read.
     pub fn own_cycles(&self) -> Option<u64> {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
+            let Proc::Child(c) = &self.process;
             let mut cycles = 0u64;
-            let ok = unsafe { windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime(self.child.as_raw_handle() as _, &mut cycles) } != 0;
+            let ok = unsafe { windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime(c.as_raw_handle() as _, &mut cycles) } != 0;
             ok.then_some(cycles)
         }
         #[cfg(unix)]
         {
-            super::process_cycles(self.child.id())
+            #[cfg(target_os = "macos")]
+            if matches!(self.process, Proc::Opened { .. }) && !self.opened_alive() {
+                return None;
+            }
+            super::process_cycles(self.pid())
         }
     }
 
     /// Takes the launch off the list a stop ends (`end_launches`), so neither a stop nor `end` ends
     /// its tree: for a child that exited and whose leftovers were already read and ended.
     fn unlist(&self) {
-        let pid = self.child.id();
-        LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != pid);
+        let pid = self.pid();
+        LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|l| l.pid != pid);
     }
 
     /// Ends the child's tree (read first: ending the group orphans it), its group, then the child,
@@ -428,10 +777,20 @@ impl Owned {
         let Some(group) = self.group.take() else { return };
         // Held while ending: a stop's `end_launches` either ended this launch already or waits.
         let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let pid = self.child.id();
-        if let Some(i) = live.iter().position(|(p, _)| *p == pid) {
+        let pid = self.pid();
+        let child = self.child().is_some();
+        if let Some(i) = live.iter().position(|l| l.pid == pid) {
             live.remove(i);
-            super::kill_launch(pid, self.start);
+            if child && !reused(pid, self.start) {
+                super::kill_launch(pid, self.start);
+            } else if let (false, Some(start)) = (child, self.start) {
+                // An opened app: what `kill_opened` proves its; a pid that names another process now is
+                // left alone, and said.
+                if reused(pid, self.start) {
+                    leave(Some(pid), "a process given the id of an app strobe launched through Launch Services", "that app had exited, and this process started at another time: it is not strobe's");
+                }
+                super::kill_opened(pid, start);
+            }
         }
         #[cfg(windows)]
         if let Some(job) = group.job {
@@ -441,13 +800,17 @@ impl Owned {
             unsafe { TerminateJobObject(job as _, 1) };
             close_job(job);
         }
+        // An opened app's group is not strobe's: never signalled.
         #[cfg(unix)]
-        unsafe {
-            libc::kill(-(group.pgid as i32), libc::SIGKILL);
+        if self.child().is_some() {
+            unsafe { libc::kill(-(group.pgid as i32), libc::SIGKILL) };
         }
         drop(live);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // An opened app is no child to reap: launchd reaps it as it exits.
+        if let Some(c) = self.child() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 }
 
@@ -529,8 +892,9 @@ pub struct Usage {
 /// How long processes of the command may take to end after it exited before they count as left.
 const GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// `left` with a grace: processes that end within it (a child finishing its exit) do not count.
-fn still_left(read: impl Fn() -> Vec<(u32, String)>) -> Vec<(u32, String)> {
+/// `left` with a grace: processes that end within it (a child finishing its exit) do not count. Each
+/// with its start time (pid, start, name), by which it is ended (`host::kill_opened`).
+fn still_left(read: impl Fn() -> Vec<(u32, u64, String)>) -> Vec<(u32, u64, String)> {
     let until = std::time::Instant::now() + GRACE;
     loop {
         let mut left = read();
@@ -541,6 +905,17 @@ fn still_left(read: impl Fn() -> Vec<(u32, String)>) -> Vec<(u32, String)> {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+/// Ends what a command left (`still_left`), each by its pid and the start time read with what proved it
+/// the command's (its group membership or its stamp, in the same read), never by a group of its own
+/// (`host::kill_opened`), and lists it in `Usage::left`. A start time of 0 marks a process of the
+/// launch's Windows job, which the job's end ends (`TerminateJobObject`), never by its pid.
+fn end_left(left: Vec<(u32, u64, String)>) -> Vec<(u32, String)> {
+    for &(p, s, _) in left.iter().filter(|l| l.1 != 0) {
+        super::kill_opened(p, s);
+    }
+    left.into_iter().map(|(p, _, n)| (p, n)).collect()
 }
 
 impl Owned {
@@ -554,13 +929,7 @@ impl Owned {
     /// command's) is not its own responsible process on macOS, so an XPC service launchd starts for it
     /// is neither in its group nor stamped: in no count, and not ended.
     pub fn run_to_exit(mut self, deadline: std::time::Duration, stamp: Option<&Path>, on_exit: impl FnOnce()) -> std::io::Result<Usage> {
-        let stamped = |me: u32| -> Vec<(u32, String)> {
-            stamp
-                .map(|h| {
-                    pids_in_home(h).into_iter().filter(|p| *p != me).map(|p| (p, super::exe_of(p).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default())).collect()
-                })
-                .unwrap_or_default()
-        };
+        let stamped = |me: u32| -> Vec<(u32, u64, String)> { stamp.map(|h| stamped_with(h, me)).unwrap_or_default() };
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
@@ -571,7 +940,8 @@ impl Owned {
             use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, WaitForSingleObject};
             use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
             let (t0, w0) = self.started;
-            let h = self.child.as_raw_handle();
+            let Proc::Child(child) = &self.process;
+            let h = child.as_raw_handle();
             let ms = deadline.as_millis().min(u32::MAX as u128 - 1) as u32;
             let waited = unsafe { WaitForSingleObject(h as _, ms) };
             // Both clocks together, before anything else runs: the rate below divides one by the other.
@@ -605,7 +975,7 @@ impl Owned {
             if child_ns.is_none() {
                 usage.cpu_refused = Some(super::cycles_refused().unwrap_or_else(|| "the command's process gave no cycles over the cycle clock".into()));
             }
-            match job {
+            let left = match job {
                 Some(j) => {
                     let mut acct: JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
                     let ok = unsafe {
@@ -636,19 +1006,18 @@ impl Owned {
                     {
                         usage.peak_bytes = Some(limits.PeakProcessMemoryUsed as u64);
                     }
-                    let pids = || job_pids(j).into_iter().map(|p| (p, super::exe_of(p).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default())).collect::<Vec<_>>();
-                    usage.left = still_left(|| pids().into_iter().chain(stamped(self.child.id())).collect());
+                    // Ended with the job (self.end), not by pid: a start time of 0 (nd_left).
+                    let pids = || job_pids(j).into_iter().map(|p| (p, 0, name_of(p))).collect::<Vec<_>>();
+                    still_left(|| pids().into_iter().chain(stamped(self.pid())).collect())
                 }
                 None => {
                     // No job (strobe's own job refused a nested one): nothing counts what the command started.
                     usage.cpu_refused = Some("Windows: the job strobe runs in refused a job for the command, so what it started is in no count".into());
                     usage.io_refused = usage.cpu_refused.clone();
-                    usage.left = still_left(|| stamped(self.child.id()));
+                    still_left(|| stamped(self.pid()))
                 }
-            }
-            for (p, _) in &usage.left {
-                super::kill_tree(*p);
-            }
+            };
+            usage.left = end_left(left);
             // What it left was read and ended above, and an exited process is in no snapshot, so
             // ending its tree again (a snapshot of every process, 5 ms on adais) finds nothing.
             self.unlist();
@@ -657,7 +1026,10 @@ impl Owned {
         }
         #[cfg(unix)]
         unsafe {
-            let pid = self.child.id();
+            if self.child().is_none() {
+                return Err(std::io::Error::other("an app Launch Services started is not strobe's child: strobe cannot wait for its exit"));
+            }
+            let pid = self.pid();
             // The deadline: a watchdog ends the group (the child is not reaped, so the id is still its).
             let (stop, stopped) = std::sync::mpsc::channel::<()>();
             let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -673,7 +1045,13 @@ impl Owned {
             while libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) != 0 {
                 let e = std::io::Error::last_os_error();
                 if e.raw_os_error() != Some(libc::EINTR) {
+                    // Not waitable (ECHILD: reaped already): its pid and group id may name another
+                    // process now, so the watchdog is joined before anything else and the group is
+                    // forgotten, and nothing signals it after this.
                     let _ = stop.send(());
+                    let _ = watchdog.join();
+                    self.unlist();
+                    self.group = None;
                     return Err(e);
                 }
             }
@@ -682,9 +1060,7 @@ impl Owned {
             let _ = stop.send(());
             let _ = watchdog.join();
             if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-                for (p, _) in stamped(pid) {
-                    super::kill_tree(p);
-                }
+                end_left(stamped(pid));
                 self.end();
                 return Ok(Usage { timed_out: true, ..Usage::default() });
             }
@@ -715,13 +1091,12 @@ impl Owned {
                     usage.write_bytes = Some(ri.ri_diskio_byteswritten);
                 }
             }
-            usage.left = still_left(|| group_members(pid).into_iter().filter(|(p, _)| *p != pid).chain(stamped(pid)).collect());
-            if !usage.left.is_empty() {
+            let left = still_left(|| group_members(pid).into_iter().filter(|(p, _, _)| *p != pid).chain(stamped(pid)).collect());
+            if !left.is_empty() {
+                // The child's own group: it is not reaped, so the group's id is still its.
                 libc::kill(-(pid as i32), libc::SIGKILL);
-                for (p, _) in &usage.left {
-                    super::kill_tree(*p);
-                }
             }
+            usage.left = end_left(left);
             // Off the list a stop ends before the reap: its pid may name another process after it.
             self.unlist();
             let mut status = 0;
@@ -757,20 +1132,22 @@ impl Owned {
 /// The live processes in process group `pgid` now (pid, name): zombies and dead tasks, which have
 /// ended and only wait to be reaped, are not.
 #[cfg(unix)]
-fn group_members(pgid: u32) -> Vec<(u32, String)> {
+fn group_members(pgid: u32) -> Vec<(u32, u64, String)> {
     #[cfg(target_os = "linux")]
     {
         let mut out = Vec::new();
         for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
             let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
-            // `pid (comm) state ppid pgrp …`: the name may hold spaces and parentheses.
+            // `pid (comm) state ppid pgrp … starttime`: the name may hold spaces and parentheses. The
+            // group and the start time come from this one read: of one process.
             let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else { continue };
-            let mut rest = stat[close + 1..].split_whitespace();
-            let state = rest.next().unwrap_or("");
-            let pgrp = rest.nth(1).and_then(|s| s.parse::<u32>().ok());
-            if pgrp == Some(pgid) && !matches!(state, "Z" | "X" | "x") {
-                out.push((pid, stat[open + 1..close].to_string()));
+            let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+            let state = rest.first().copied().unwrap_or("");
+            let pgrp = rest.get(2).and_then(|s| s.parse::<u32>().ok());
+            let start = rest.get(19).and_then(|s| s.parse::<u64>().ok());
+            if let (Some(start), true) = (start, pgrp == Some(pgid) && !matches!(state, "Z" | "X" | "x")) {
+                out.push((pid, start, stat[open + 1..close].to_string()));
             }
         }
         out
@@ -781,17 +1158,20 @@ fn group_members(pgid: u32) -> Vec<(u32, String)> {
         // PROC_PGRP_ONLY (2), which the libc crate does not name.
         let n = unsafe { libc::proc_listpids(2, pgid, buf.as_mut_ptr() as *mut libc::c_void, (buf.len() * 4) as i32) };
         buf.truncate((n.max(0) as usize / 4).min(buf.len()));
-        let zombie = |pid: i32| {
+        // Its group, state and start time from one read (a pid listed and reused since is in another
+        // group, or started later): SZOMB (5) ended, not reaped.
+        let member = |pid: i32| -> Option<u64> {
             let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
             let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
-            // SZOMB (5): ended, not reaped.
             let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
-            got == size && info.pbi_status == 5
+            (got == size && info.pbi_pgid == pgid && info.pbi_status != 5).then_some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
         };
-        buf.into_iter().filter(|&p| p > 0 && !zombie(p)).map(|p| (p as u32, super::exe_of(p as u32).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default())).collect()
+        buf.into_iter()
+            .filter(|&p| p > 0)
+            .filter_map(|p| Some((p as u32, member(p)?, super::exe_of(p as u32).and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default())))
+            .collect()
     }
 }
-
 /// The processes of the groups launched for `dir` and still owned (Windows' jobs; none on Unix: the
 /// tree and the stamp find them there).
 pub fn group_pids(dir: &Path) -> Vec<u32> {
@@ -870,7 +1250,7 @@ pub fn spawn_owned(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Optio
     // Held from before the spawn until the launch is listed: a stop in between ends it too.
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     let owned = spawn_group(cmd, cpus, flags, home)?;
-    live.push((owned.child.id(), owned.start));
+    live.push(Live { pid: owned.pid(), start: owned.start, child: true });
     Ok(owned)
 }
 
@@ -902,7 +1282,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
             Some(t) => Ok(super::MainThread::of_handle(child.id(), t)),
             None => super::MainThread::attach(child.id()),
         };
-        Ok(Owned { child, group: Some(Group { job }), unattributed: None, start: None, main, started, spawned })
+        Ok(Owned { process: Proc::Child(child), group: Some(Group { job }), unattributed: None, start: None, main, started, spawned })
     }
     #[cfg(not(windows))]
     {
@@ -928,7 +1308,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         #[cfg(not(target_os = "macos"))]
         let unattributed = None;
         Ok(Owned {
-            child,
+            process: Proc::Child(child),
             group: Some(Group { pgid }),
             unattributed,
             start: super::start_time(pgid),
@@ -990,9 +1370,9 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
     let child = cmd.spawn()?;
     let pgid = child.id();
     let start = super::start_time(pgid);
-    live.push((pgid, start));
+    live.push(Live { pid: pgid, start, child: true });
     Ok(Owned {
-        child,
+        process: Proc::Child(child),
         group: Some(Group { pgid }),
         unattributed: None,
         start,
@@ -1004,6 +1384,46 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
     })
 }
 
+/// Starts the app `bundle` through Launch Services (`macos::open_app`), as a person's launch from the
+/// Dock or Finder starts it, and owns it as an `Owned` launch: by its pid and the start time read once
+/// the pid was known (`Opened::start`), with its tree, the processes responsible to it and everything
+/// stamped with `home` (which `env` must stamp: `isolate::launch_env`); never by a process group, which
+/// strobe did not make. The wait for the launch holds no lock (a stop ends it at once, `Stopped`, and
+/// `isolate::end_on_stop`'s sweep of `home` ends what started late); the launch is listed for a stop's
+/// `end_launches` once its pid is known. A process Launch Services names that strobe cannot prove its
+/// launch's (`macos::launched`) fails the launch (`OpenFailed::Foreign`) and is never touched; one that
+/// had exited before it was proven is not adopted: the launch's pid is 0, so its process set is only
+/// what carries `home`'s stamp, and nothing is ever done by the pid Launch Services gave. A stop during
+/// the wait ends the launch once it surfaces (`open_app`, 2 s at most). It has no output pipes, no exit
+/// status (`Ended::Unreported`) and, once gone, no CPU of its own to read. Returns the launch clock read
+/// just before the request (`Opened::at_ns`, `epoch_ms`).
+#[cfg(target_os = "macos")]
+pub fn open_owned(bundle: &super::macos::Bundle, args: &[String], env: &[(String, String)], home: &Path, activate: bool) -> Result<(Owned, super::macos::Opened), super::macos::OpenFailed> {
+    let opened = super::macos::open_app(bundle, args, env, activate, Some(home), std::time::Duration::from_secs(30))?;
+    let start = opened.start;
+    let pid = if start.is_some() { opened.pid } else { 0 };
+    match start {
+        Some(start) => LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: Some(start), child: false }),
+        None => leave(
+            Some(opened.pid),
+            "the process Launch Services answered strobe's launch with",
+            format!("not adopted ({}): strobe tracks only what carries the launch's stamp", opened.unproven.unwrap_or("no start time")),
+        ),
+    }
+    let owned = Owned {
+        process: Proc::Opened { pid },
+        // A group of no process of strobe's: never signalled (`end_group`); with no start time, nothing
+        // of it is ended at all.
+        group: start.map(|_| Group { pgid: pid }),
+        unattributed: start.and_then(|_| super::macos::unattributed(pid)),
+        start,
+        main: match start {
+            Some(_) => super::MainThread::attach(pid),
+            None => Err(super::MainLost::Gone("the app exited at once".into())),
+        },
+    };
+    Ok((owned, opened))
+}
 /// Linux: the CPU mask set between fork and exec. macOS has no CPU affinity. Whether it added a
 /// `pre_exec` closure (Rust then forks rather than `posix_spawn`s).
 #[cfg(not(windows))]

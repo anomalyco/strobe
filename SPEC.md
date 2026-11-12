@@ -172,7 +172,7 @@ sdk/<build>/        the bench SDK the runner imports, one folder per strobe buil
                     each use touches its `.used`; other builds' folders are caches (§5.14)
 symbols/            source maps by debug ID, PDB cache
 engine/<version>/   trace_processor (§15), sha256-checked
-run/  log/          temp files; daemon.log, helper.log (rotated at 1 MB)
+run/  log/          temp files; daemon.log; helper.log, left-alone.log (rotated at 1 MB)
 <entry>.used        a cache entry's stamp: when strobe last used it, locked while a process does (§5.14)
 disk-cache.json     the last walk of each recording, experiment and large build (§5.14)
 prune.json          what the last automatic prune removed, and when (§5.14)
@@ -1366,6 +1366,15 @@ SIGTERM), of a page or an app, ends every launch it owns (each one's tree, then 
 never race), what still runs stamped with the app's home, and removes a home strobe made, before it
 exits 130 (`isolate::end_on_stop`; the watcher ends before the look closes what it launched). A
 browser profile left by a stop goes with the next strobe's `reap_dead_owners`.
+
+strobe signals a process only while it holds proof the process is one it launched: its pid with the
+start time read when strobe identified it, and strobe's stamp wherever its environment is readable
+(`src/host/kill.rs` lists every path and its proof). What it cannot prove it leaves alone and says so:
+every command (a stop's exit 130 too) ends with a line per such process (its pid, what it is, why it
+was not ended), `left_alone` in `--json` and MCP results (`schema/result.v1.json`), on stderr under
+`-q`. Every strobe process (CLI, daemon, `strobe mcp`) also writes each note, the moment it is made,
+to `log/left-alone.log` in the state folder (a time, the pid and fixed words; rotated at 1 MB), and
+`strobe status` says when it holds notes from the last day.
 
 The window (and `--until`) is waited for 30 s (`--timeout`). One that never shows, or an app that
 exits before it opened one, is said with how to look at an app that shows none: `--windowless`, or
