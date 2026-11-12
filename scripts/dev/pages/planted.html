@@ -49,7 +49,7 @@ if (q.has("vsyncs")) {
       if (gaps.length === 30) {
         work = num("vsyncs") * gaps.sort((a, b) => a - b)[15]
         // The bench's setup waits for this, so no run sees the unspun frames that timed V.
-        document.body.append(Object.assign(document.createElement("div"), { id: "calibrated" }))
+        document.body.append(Object.assign(document.createElement("div"), { id: "calibrated", textContent: "calibrated" }))
       }
     } else {
       spin(work)
