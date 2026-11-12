@@ -465,8 +465,9 @@ const WHERE: Record<string, Where> = {
   "launch.milestone": {},
   // Wall time and strobe's own looks.
   "run.duration": {},
-  "input.rate": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
-  "input.gap.p95": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
+  // WebKit (WebDriver Classic) batches an input list inside the browser: no input times (engine_refusal).
+  "input.rate": { only: [...PAGES_APPS.filter((r) => r !== "webkit_page"), "android_chrome", ...WINDOWED] },
+  "input.gap.p95": { only: [...PAGES_APPS.filter((r) => r !== "webkit_page"), "android_chrome", ...WINDOWED] },
   "driver.reads": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
   "driver.read_ms": { only: [...PAGES_APPS, "android_chrome", ...WINDOWED] },
   // The OS's accounting.

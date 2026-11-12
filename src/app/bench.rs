@@ -3026,7 +3026,11 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
         }
         out["base"] = b;
         if let Some(head) = held {
-            noworse_state(s, &noworse, counters.as_deref(), (&head, &launches), &counted_names(&ctx.describe), &mut out);
+            let notes = noworse_state(s, &noworse, counters.as_deref(), (&head, &launches), &counted_names(&ctx.describe), &mut out);
+            for w in notes {
+                progress(format!("  ! {}  {}", w.id, w.text));
+                ctx.warnings.push(w);
+            }
         }
     }
     if out["kind"] == "check" {
@@ -3146,16 +3150,20 @@ fn flagged_counts<'a>(s: &Series, blocks: impl IntoIterator<Item = &'a mut Block
     seen
 }
 
-/// The names the bench file passes to `ctx.count` as a string literal (`count("fallbacks")`, any quote):
-/// what a `--noworse count.<name>` is checked against for its spelling, whether a run counted it or not.
-/// A name built at run time, or counted in a module the file imports, is not among them.
+/// The names the bench file passes as a string literal to a counter call: `ctx.count("fallbacks")`, a bare
+/// `count(…)`, or the page's `__strobeCount("…")` (also `?.(`), any quote, outside comments, the call's name a
+/// whole word. A hint for a `--noworse count.<name>`'s spelling, never a verdict: a name built at run time,
+/// counted in a module the file imports, or by the app itself is not among them.
 fn counted_names(describe: &Value) -> std::collections::BTreeSet<String> {
-    let text = describe["file"].as_str().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+    let text = strip_comments(&describe["file"].as_str().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default());
     let mut names = std::collections::BTreeSet::new();
-    let mut rest = text.as_str();
-    while let Some(i) = rest.find("count(") {
-        rest = &rest[i + "count(".len()..];
-        let after = rest.trim_start();
+    for (i, _) in text.match_indices('(') {
+        let head = text[..i].strip_suffix("?.").unwrap_or(&text[..i]);
+        let word_start = head.char_indices().rev().find(|(_, c)| !(c.is_alphanumeric() || *c == '_' || *c == '$')).map_or(0, |(p, c)| p + c.len_utf8());
+        if !matches!(&head[word_start..], "count" | "__strobeCount") {
+            continue;
+        }
+        let after = text[i + 1..].trim_start();
         let Some(q) = after.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) else { continue };
         if let Some(end) = after[1..].find(q) {
             let name = &after[1..1 + end];
@@ -3167,8 +3175,46 @@ fn counted_names(describe: &Value) -> std::collections::BTreeSet<String> {
     names
 }
 
-/// Two names one typo apart: equal but for case, or within two edits (a letter left out, added,
-/// changed or two swapped) of each other, neither under three letters.
+/// JavaScript text without its `//` and `/* */` comments (strings and template literals kept as they are).
+fn strip_comments(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let (mut out, mut i, mut quote) = (String::with_capacity(text.len()), 0, None::<char>);
+    while i < c.len() {
+        match (quote, c[i], c.get(i + 1)) {
+            (Some(_), '\\', _) => {
+                out.push(c[i]);
+                if let Some(n) = c.get(i + 1) {
+                    out.push(*n);
+                }
+                i += 2;
+                continue;
+            }
+            (Some(q), ch, _) if ch == q => quote = None,
+            (Some(_), _, _) => {}
+            (None, '"' | '\'' | '`', _) => quote = Some(c[i]),
+            (None, '/', Some('/')) => {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            (None, '/', Some('*')) => {
+                i += 2;
+                while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
+}
+/// Two names one typo apart: equal but for case, or one edit (a letter left out, added or changed) apart,
+/// two for names of six letters or more; neither under three letters (`miss` and `hits` are two names).
 fn near_name(a: &str, b: &str) -> bool {
     if a == b || a.len() < 3 || b.len() < 3 {
         return false;
@@ -3188,7 +3234,7 @@ fn near_name(a: &str, b: &str) -> bool {
         }
         prev = row;
     }
-    prev[b.len()] <= 2
+    prev[b.len()] <= if a.len().min(b.len()) >= 6 { 2 } else { 1 }
 }
 
 /// `count.<name>` names a case counts or declares that are one typo from `m`'s (`near_name`): the bench
@@ -3244,7 +3290,7 @@ fn uncounted(series: &[Series], outs: &[Value], seen: &std::collections::BTreeSe
                 )
             } else if !similar.is_empty() && !names.contains(name) {
                 format!(
-                    "--noworse {m}: no run of any case counted it, so nothing compared it. Did you mean {}? The cases count or declare that name, not {m}: name the counter as the run's ctx.count(\"…\") spells it. Only when a run case's ctx.count(\"{name}\") call fires on some path alone, declare metrics: [\"{m}\"] on that case, spelled as that call spells it, so 0 on both sides compares as no worse (a declared name the file does not count fails its check)",
+                    "--noworse {m}: no run of any case counted it, so nothing compared it. Did you mean {}? The cases count or declare that name, not {m}: name the counter as the run's ctx.count(\"…\") spells it. Only when a run case's ctx.count(\"{name}\") call fires on some path alone, declare metrics: [\"{m}\"] on that case, spelled as that call spells it, so 0 on both sides compares as no worse (a declared name the file never counts is warned of, at 0 → 0)",
                     similar.join(" or ")
                 )
             } else if m.starts_with("count.") && names.contains(name) {
@@ -3321,14 +3367,27 @@ fn first_error(error: &str) -> String {
 /// refused it for what they are (`cannot_read`: another engine, target or OS): those rows are left out,
 /// and a check whose cases compared no counter at all exits 4 (`check_output`). `out["counters"]` holds the
 /// rows, an empty list when none was compared.
-/// `names`: the bench file's literal `ctx.count` names (`counted_names`).
-fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Block]>, head: (&BTreeMap<String, Vec<f64>>, &[Block]), names: &std::collections::BTreeSet<String>, out: &mut Value) {
+/// `names`: the bench file's literal counter names (`counted_names`). Returns the notes of the rows it
+/// compared: a declared counter at 0 on both sides whose name the file never counts, while it counts one a
+/// typo away that this case does not also declare, is warned of (`Uncounted`, `did you mean`), never failed:
+/// a source scan misses helper modules, the app's own counters and computed names.
+fn noworse_state(
+    s: &Series,
+    noworse: &BTreeMap<String, f64>,
+    base: Option<&[Block]>,
+    head: (&BTreeMap<String, Vec<f64>>, &[Block]),
+    names: &std::collections::BTreeSet<String>,
+    out: &mut Value,
+) -> Vec<Warning> {
+    let mut notes = Vec::new();
     if noworse.is_empty() {
-        return;
+        return notes;
     }
+    let declared: Vec<&str> = declared_metrics(s).into_iter().filter(|m| s.case_declares(m)).filter_map(|m| m.strip_prefix("count.")).collect();
     let typo_of = |m: &str| -> Option<String> {
         let x = m.strip_prefix("count.")?;
-        (!names.is_empty() && !names.contains(x)).then(|| similar_counters(m, names.iter().map(String::as_str)).into_iter().next()).flatten()
+        let others = names.iter().map(String::as_str).filter(|n| !declared.contains(n));
+        (!names.contains(x)).then(|| similar_counters(m, others).into_iter().next()).flatten()
     };
     let (head, head_blocks) = head;
     let cannot = |blocks: &[Block], m: &str| blocks.iter().any(|b| b.refused.get(m).is_some_and(|r| cannot_read(r.validator)));
@@ -3356,18 +3415,21 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
             (_, [_, _, ..]) => ("unstable", format!("{m}: head did not hold one value ({}), so no difference of it holds", list(&h_runs, m))),
             (Some(b), _) if b.is_empty() => ("not_compared", format!("{m}: base measured no value, so nothing compared it")),
             (Some(b), _) if b.len() > 1 => ("unstable", format!("{m}: base did not hold one value ({}), so no difference of it holds", list(b_runs.as_deref().unwrap_or_default(), m))),
-            // A declared counter 0 on both sides that the bench file never counts, while it counts a name one
-            // typo away: the declaration is that typo, and 0 against 0 would hold nothing.
-            (Some(b), [hv]) if b[0] == 0.0 && *hv == 0.0 && typo_of(m).is_some() => {
-                let near = typo_of(m).unwrap_or_default();
-                ("not_compared", format!("{m}: 0 on both sides, and the bench file counts {near}, never {m}: did you mean {near}? A declared name no run counts compares nothing"))
-            }
             (Some(b), [hv]) => {
                 let def = model::metric(m).map_or(&model::METRICS[0], model::as_counter);
                 // Each side held one value: the exact comparison a bench makes of a counter that held through
                 // `EXACT_MIN_PAIRS` pairs, its difference the answer.
                 let c = stats::compare_noworse(m, def, &[(b[0], *hv); stats::EXACT_MIN_PAIRS], margin, 0.95);
                 let worse = c.kind == VerdictKind::Worse;
+                if b[0] == 0.0
+                    && *hv == 0.0
+                    && let Some(near) = typo_of(m)
+                {
+                    notes.push(validity::warn(
+                        "Uncounted",
+                        format!("--noworse {m}: {}: compared 0 → 0, but the bench file counts {near}, never {m}: did you mean {near}? A misspelled name reads 0 on both sides and holds nothing; if {m} is counted elsewhere (a helper module, the app's __strobeCount, a computed name), this is right", s.label()),
+                    ));
+                }
                 (if worse { "worse" } else { "no_worse" }, format!("{m} {} → {} · {}", fmt::value(b[0], unit(m)), fmt::value(*hv, unit(m)), c.verdict))
             }
         };
@@ -3389,15 +3451,13 @@ fn noworse_state(s: &Series, noworse: &BTreeMap<String, f64>, base: Option<&[Blo
         out["passed"] = json!(false);
         out["decided"] = json!(false);
         out["error"] = json!(format!("--noworse: {}", failed.join("; ")));
-        let typo = noworse.keys().filter(|m| failed.iter().any(|t| t.starts_with(&format!("{m}: 0 on both sides")))).find_map(|m| typo_of(m).map(|near| (m.clone(), near)));
-        out["hint"] = json!(if let Some((m, near)) = typo {
-            format!("{}: name the counter as the run's ctx.count call spells it: {near}, not {m}, in --noworse and in the case's metrics", s.label())
-        } else if moved {
+        out["hint"] = json!(if moved {
             format!("{}: a counter that moves between launches is no exact count (make it count the work, not time-dependent events); one that grew is what this change does", s.label())
         } else {
             format!("{}: a counter is compared only where each side measured it: the refused lines say why one did not", s.label())
         });
     }
+    notes
 }
 
 /// A refusal of what the side is, not of what its run did: another engine, a target or OS that has no
