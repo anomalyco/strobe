@@ -1586,7 +1586,7 @@ pub const METRICS: &[MetricDef] = &[
         words: AMOUNT,
         min_n: 0,
         across: Across::PerSide,
-        about: "script targets: the JS heap a run leaves behind, after a full collection before and after it, ArrayBuffer and Buffer contents counted once (Bun's heap holds them; Node keeps them beside its heap, so a Node host's reading adds them, which strobe 0.31.0 did not)",
+        about: "script targets: the bytes of live JavaScript objects, strings, ArrayBuffer, SharedArrayBuffer, Buffer and typed-array contents and Blob payloads a run leaves behind, after a full collection before and after it, each counted once (a Node host's reading adds what Node keeps beside its heap, which strobe 0.31.0 did not); not seen: native allocations of add-ons, mapped files and, on Node, WebAssembly memory and strings held outside the heap (Buffer.toString's): memory.app.private sees them",
     },
     MetricDef {
         name: "http.latency.p50",

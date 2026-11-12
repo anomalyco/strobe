@@ -65,7 +65,8 @@ export function keep(mb: number) {
 
 export function clear() {
   kept = []
-  if (globalThis.Bun) Bun.gc(true)
+  // The runtime's own version record, not `globalThis.Bun` (shim.ts defines one on Node).
+  if (typeof process.versions.bun === "string") Bun.gc(true)
   else (globalThis as any).gc?.()
   return true
 }
