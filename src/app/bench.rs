@@ -7370,6 +7370,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
     let app = matches!(kind, "app" | "exe" | "webview" | "command");
     let engine = engine_of(&target);
     let headless = headless_of(ctx, s);
+    // Nothing of it on screen to bring forward: a headless page, or an app with `window: false` (a tray
+    // app whose hidden window macOS still lists, and which never becomes the active app).
+    let offscreen = headless || windowless_target(&target, &ctx.config);
     // What the cases declared beyond the default probes: counters, network counts, layout shift. One
     // browser runs every case of a launch, so it is set up for what any of them declared.
     let declared: Vec<&String> = cases.iter().flat_map(declared_metrics).collect();
@@ -7463,8 +7466,17 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         // too (a default secondary), from the page's own changes (`CHANGES_SCRIPT`, in every document
         // from its start). From outside the input is the OS's (`os::OsInput`), in every engine; a page
         // the OS's input cannot reach (`os::unreachable`) takes none in its runs there.
-        let os_frames_on = !headless && (outside || (traceless && !x.counters && set != Set::Memory));
-        let no_os_input = if outside { crate::driver::os::unreachable(engine, headless) } else { None };
+        let os_frames_on = !offscreen && (outside || (traceless && !x.counters && set != Set::Memory));
+        let no_os_input = if !outside {
+            None
+        } else if offscreen && !headless {
+            Some(
+                Refusal::new(ValidatorId::NotForTarget, "an app with window: false shows no window, so the OS has nowhere to send input")
+                    .fix("keep input out of its runs (setup and reset may use it), or give the app a window"),
+            )
+        } else {
+            crate::driver::os::unreachable(engine, headless)
+        };
         let os_input = outside && no_os_input.is_none();
         let changes = os_frames_on;
         if changes {
@@ -8087,7 +8099,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         let hidden_ok = set == Set::Memory && host::session_locked();
         if !hidden_ok {
             validity::window_visible(&page)?;
-            front_page(s, &browser, headless)?;
+            front_page(s, &browser, offscreen)?;
         }
         // From outside, every input of the block (setup's and reset's too) comes from the OS, as the
         // native side's does: set up once the window shows and is in front.
@@ -8253,7 +8265,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let read_same = |when| same.read(when, &|sel| crate::driver::text(&page, sel, Duration::from_secs(2)));
             let began = Instant::now();
             // As a native app is before each run (`front_page`).
-            if cfg!(target_os = "macos") && (s.sides.is_some() || s.cross_engine) {
+            if cfg!(target_os = "macos") && !offscreen && (s.sides.is_some() || s.cross_engine) {
                 host::raise_windows(&browser.pids());
             }
             hooks.begin(key);
@@ -8813,7 +8825,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 if batch {
                     if !hidden_ok {
                         validity::window_visible(&page)?;
-                        front_page(s, &browser, headless)?;
+                        front_page(s, &browser, offscreen)?;
                     }
                     browser.own()?;
                     if let Some(first) = &first_slow {
@@ -8939,7 +8951,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // The window must have stayed visible for the whole block, and the browser strobe's alone.
             if !hidden_ok && !batch {
                 validity::window_visible(&page)?;
-                front_page(s0, &browser, headless)?;
+                front_page(s0, &browser, offscreen)?;
             }
             if !batch {
                 browser.own()?;
@@ -9688,12 +9700,12 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
 /// `WindowHidden` when other apps' windows cover it or it is not the active app, which a bench waits
 /// out as for a native block. A key window can cost several times an inactive one, so both sides run
 /// in that one state (and a `--check` of a file whose pages get OS input, which needs the window in
-/// front). Elsewhere, for builds of one target, and for a headless page, nothing: it draws to no
-/// display, so no app in front changes it (its browser still lists a window, which never becomes the
-/// active app: every block was refused).
-fn front_page(s: &Series, browser: &WebBrowser, headless: bool) -> Result<()> {
+/// front). Elsewhere, for builds of one target, and for a target with nothing on screen (`offscreen`: a
+/// headless page, an app with `window: false`), nothing: no app in front changes it, and its browser
+/// may still list a hidden window, which never becomes the active app (every block was refused).
+fn front_page(s: &Series, browser: &WebBrowser, offscreen: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
-    if !headless && (s.sides.is_some() || s.cross_engine) {
+    if !offscreen && (s.sides.is_some() || s.cross_engine) {
         use crate::target::native::{COVERED, NOT_ACTIVE};
         let pids = browser.pids();
         host::raise_windows(&pids);
@@ -9710,7 +9722,7 @@ fn front_page(s: &Series, browser: &WebBrowser, headless: bool) -> Result<()> {
         }
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (s, browser, headless);
+    let _ = (s, browser, offscreen);
     Ok(())
 }
 
