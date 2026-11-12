@@ -1,0 +1,53 @@
+<!doctype html>
+<!-- Planted differences for paired known-answer runs (scripts/dev/known/planted.bench.ts). The query string plants
+them, so two targets that differ only in it differ by exactly that:
+  ?delay=<ms>  #ready appears after a task that busy-waits <ms>: launch.ready differs by it (a busy-wait, not a
+               timer of <ms>: a browser's timer fires late by its own slack)
+  ?frame=<ms>  every animation frame spins <ms> on the main thread and moves #box: frames over a vsync drop
+  ?click=<ms>  a click on #btn asks for an animation frame, which spins <ms> and then changes #btn's colour: with
+               <ms> a whole number of vsyncs, interaction latency differs by exactly it (a spin in the click
+               handler itself read about 7 ms less on a 60 Hz Mac)
+  known.spin(ms) busy-waits <ms> on the main thread (page.eval) -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>planted</title>
+<style>
+  html, body { margin: 0; font: 13px/18px system-ui, sans-serif }
+  #box { width: 80px; height: 80px; background: #009fff }
+  #btn { width: 160px; height: 40px; background: #eee }
+</style>
+</head>
+<body>
+<div id="box"></div>
+<button id="btn">click</button>
+<script>
+const q = new URLSearchParams(location.search)
+const num = (k) => Number(q.get(k) ?? 0)
+function spin(ms) { const end = performance.now() + ms; while (performance.now() < end) {} }
+window.known = { spin }
+setTimeout(() => {
+  spin(num("delay"))
+  const main = document.createElement("main")
+  main.id = "ready"
+  main.textContent = "ready"
+  document.body.append(main)
+}, 0)
+if (q.has("frame")) {
+  const box = document.getElementById("box")
+  const ms = num("frame")
+  let i = 0
+  const tick = () => { spin(ms); box.style.transform = `translateX(${++i % 40}px)`; requestAnimationFrame(tick) }
+  requestAnimationFrame(tick)
+}
+const btn = document.getElementById("btn")
+let flip = 0
+btn.addEventListener("click", () => {
+  requestAnimationFrame(() => {
+    spin(num("click"))
+    btn.style.background = ++flip % 2 ? "#009fff" : "#eee"
+  })
+})
+</script>
+</body>
+</html>

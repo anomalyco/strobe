@@ -20,7 +20,8 @@
 //                               hops > 1 the child is `breakaway <ms> <hops - 1>` (each hop breaks away again);
 //                               with `leave` the last spin is not waited for and outlives its parent by 300 ms.
 //                               A hop that cannot start fails (exit code nonzero)
-//   io <write_mb> <read_mb>     writes <write_mb> MiB to a file in 64 KiB writes, reads <read_mb> MiB of it
+//   io <write_mb> <read_mb>     writes <write_mb> MiB to a file in 64 KiB writes, reads <read_mb> MiB of it (macOS,
+//                               which counts disk bytes: uncached and without read-ahead, so both reach the disk)
 //   ready <ms> <text>           prints <text> after <ms>, then idles for 60 s
 //   duty <pct> <threads> [s]    long-running: each thread busy <pct>% of every 100 ms (wall), for [s] (60) s
 //   spawner <ms> <gap_ms> [s]   long-running: runs a child that spins <ms> and exits, then sleeps <gap_ms>,
@@ -32,6 +33,12 @@
 //                               allocation, I/O or request), for [s] (60) s. CPU a second: <hz> x <work_ms> ms
 //                               plus the wakes' own cost, which `tick <hz> 0` runs alone; so the true ratio of
 //                               two works at one <hz> is known once that is read
+//   burst <hz> <kiters> [s]     long-running planted work by count, not time: one thread wakes <hz> times a second
+//                               on a fixed schedule and runs <kiters> thousand iterations of one loop on each
+//                               wake, for [s] (60) s. Its instructions do not move with the clock speed or the
+//                               core it lands on (a spin by time does: a short burst runs at a lower clock), so
+//                               two counts at one <hz> retire instructions in the known ratio once `burst <hz> 0`
+//                               reads the wakes' own cost; two rates with one count do the same bursts 1x and 2x
 //   hold <mb> [s]               long-running: <mb> MiB private written once, then idle, for [s] (60) s
 //   startup <ms> [s] [text]     long-running: a thread named `loader` spins <ms> of its CPU from the launch (a
 //                               slow startup), then prints [text] (READY); the process idles for [s] (60) s
@@ -115,6 +122,25 @@ mod os {
     pub fn map_file(f: &std::fs::File, len: usize) -> *mut u8 {
         use std::os::fd::AsRawFd;
         unsafe { mmap(std::ptr::null_mut(), len, 1, 0x01, f.as_raw_fd(), 0) }
+    }
+    #[cfg(target_os = "macos")]
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    /// macOS counts IO in disk bytes, so `io` keeps its file out of the cache (`F_NOCACHE`) and reads it
+    /// without read-ahead (`F_RDAHEAD` 0): what it writes goes to disk and what it reads comes from it,
+    /// byte for byte (a just-written file read from the cache counted 0). Linux counts read and write calls.
+    pub fn uncached(f: &std::fs::File) {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            unsafe {
+                fcntl(f.as_raw_fd(), 48, 1);
+                fcntl(f.as_raw_fd(), 45, 0);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = f;
     }
     /// Raw input: no line editing, echo or signals, one byte a read.
     pub fn raw_input() {
@@ -203,6 +229,8 @@ mod os {
             MapViewOfFile(m, 4, 0, 0, len)
         }
     }
+    /// Windows counts read and write calls, cached or not.
+    pub fn uncached(_: &std::fs::File) {}
     pub fn raw_input() {
         unsafe {
             let h = GetStdHandle(-10i32 as u32);
@@ -324,7 +352,15 @@ fn main() {
         "mapfile" => {
             let mb = arg(&args, 2, 100.0) as usize;
             let path = std::env::temp_dir().join(format!("known-map-{}", std::process::id()));
-            std::fs::write(&path, vec![7u8; mb * MIB]).unwrap();
+            // Written a MiB at a time: one buffer of the whole file, freed, stays this process's dirty memory
+            // on macOS (its allocator keeps large freed blocks), which would read as private.
+            {
+                let mut f = std::fs::File::create(&path).unwrap();
+                let chunk = vec![7u8; MIB];
+                for _ in 0..mb {
+                    f.write_all(&chunk).unwrap();
+                }
+            }
             let f = std::fs::File::open(&path).unwrap();
             let p = os::map_file(&f, mb * MIB);
             let sum = read_pages(p, mb * MIB);
@@ -392,12 +428,14 @@ fn main() {
             let chunk = vec![5u8; 64 * 1024];
             {
                 let mut f = std::fs::File::create(&path).unwrap();
+                os::uncached(&f);
                 for _ in 0..(w * MIB / chunk.len()) {
                     f.write_all(&chunk).unwrap();
                 }
             }
             let mut buf = vec![0u8; 64 * 1024];
             let mut f = std::fs::File::open(&path).unwrap();
+            os::uncached(&f);
             let mut got = 0;
             while got < r * MIB {
                 let n = f.read(&mut buf).unwrap();
@@ -470,6 +508,23 @@ fn main() {
                 }
             }
         }
+        "burst" => {
+            let (hz, kiters, secs) = (arg(&args, 2, 50.0), arg(&args, 3, 1000.0) as u64, arg(&args, 4, 60.0));
+            let period = ms(1e3 / hz);
+            let start = Instant::now();
+            let mut next = start;
+            let mut x = 0u64;
+            while start.elapsed().as_secs_f64() < secs {
+                for i in 0..kiters * 1000 {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(i);
+                }
+                std::hint::black_box(x);
+                next += period;
+                if let Some(d) = next.checked_duration_since(Instant::now()) {
+                    thread::sleep(d);
+                }
+            }
+        }
         "startup" => {
             let (busy, secs) = (arg(&args, 2, 4000.0), arg(&args, 3, 60.0));
             let text = args.get(4).cloned().unwrap_or_else(|| "READY".into());
@@ -522,7 +577,7 @@ fn main() {
             return;
         }
         _ => {
-            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|hold|startup|tty|frames> …");
+            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|burst|hold|startup|tty|frames> …");
             std::process::exit(2);
         }
     }
