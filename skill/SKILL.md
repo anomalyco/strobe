@@ -152,7 +152,8 @@ The design and every rule behind this file: SPEC.md.
 - The step summary, the job's log and the artifacts never name the machine's other processes, other
   apps' windows or its user: the uploaded result.json is a scrubbed copy and its HTML report is drawn
   from that copy alone (no recordings, so no hotspots; the runner keeps them, `report-path`). A PR
-  block strobe posts can still carry a covering window's title (SPEC §21).
+  block strobe posts names a covering window by its process, though some macOS and accessibility
+  forms still carry a name (SPEC §21).
 
 ### No display, a locked session, a server
 
@@ -241,7 +242,8 @@ export default bench({
   - An emulator runs `--check`, `look`, attribution and leak runs (`--probes memory`) only (`Emulator`);
     timed runs refuse Wi-Fi adb, Battery Saver, under 20% battery, and wait up to 3 min for a hot phone.
   - Leak runs and `record --mobile --probes memory` work on a phone (the phone's heap and snapshots;
-    no `memory.app.private`). Loopback addresses `prepare` returns
+    no `memory.app.private`: read `js.heap.used`, its growth and the leak suspects, or a desktop
+    browser's memory recording). Loopback addresses `prepare` returns
     (an API, a WebSocket) are reversed to the phone, like `serve`.
   - `cpu.*`, `memory.*`, `gpu.*` refuse `NotForTarget` (this computer's processes): measure
     `main.work`, `frames.*`, `interaction.*`, `run.duration`. A lost phone ends the bench (exit 255).
@@ -526,14 +528,16 @@ export default bench({
 - Several untimed known-answer runs without a verdict: `--check --runs 5` (5 runs in the one launch,
   the median and `[lowest … highest run]`) or `--check --repeat 3` (3 fresh cold launches per case,
   each launch's value listed). Still a check: nothing is decided. With `--runs N` a first run that
-  did work the later ones did not warns `NotSteady … stepped down`; one cold run under 2 s cannot tell
-  startup from the case's own first-run work. `--check --probes memory` exits 2: a case's heap is
-  `record --bench <file>#<case>`, a leak run `bench <file> --probes memory`.
+  did work the later ones did not warns `NotSteady … stepped down` (base's too, with `--base`); one
+  cold run under 2 s cannot tell startup from the case's own first-run work. `--check --probes memory`
+  exits 2: a case's heap is `record --bench <file>#<case>`, a leak run `bench <file> --probes memory`.
 - `! HarnessOverlay`: the bench's folder (and strobe.json's `harness` paths) is copied onto base, so a
-  file there that a `script()`, `cli()` or `tty()` target runs is the same on both sides. Keep the code
-  under test out of `perf/`, or import the variant's own file from there.
-- A `count.*` only `--noworse` names is judged only in cases that count it: one that never does shows
-  `no value`, not `0 → 0`.
+  file there that a `script()`, `cli()` or `tty()` target (or a `cli()` case's `ctx.exec` line) runs
+  is the same on both sides. Keep the code under test out of `perf/`, or import the variant's own file
+  from there. `script("../src/x.mjs")` outside the harness runs each side's own copy; `i
+  HarnessOverlay` means strobe placed a file base lacked, so both run that one.
+- A `count.*` only `--noworse` names is decided per series over both sides: once any block counted it,
+  a block that counted none reads 0 (`0 → 5 · worse`); a case that never counts it prints nothing of it.
 
 ### Native apps, webviews, terminals
 

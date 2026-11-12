@@ -464,7 +464,9 @@ Use
                                         --noworse's exact counters)
         [--check --noworse count.x=0%,…]  (with --base: exact counters only (count.*, net.requests, net.bytes, tty.frames,
                                         dom.nodes); each must hold one value per side (2 runs with a reset, else 2 launches)
-                                        and head stay within its margin of base, or the case fails)
+                                        and head stay within its margin of base, or the case fails; a count.* only
+                                        --noworse names reads 0 in a block that counted none once any block of
+                                        either side counted it, and nothing at all when none did)
         [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a comparison keeps
                                         the pairs it has, anything else stops, exit 124)
         [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over adb instead

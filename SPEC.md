@@ -867,10 +867,13 @@ untimed and verdict-free. With `--runs N` (from 2) a check judges measured runs 
 timed block does (the first over twice the last half's median, by 20 ms or more) and warns `NotSteady`
 `<case · target>: its measured runs stepped down (the first one's work X, the last half's median Y): the
 first runs did work the later ones did not (a cold start's compiles and caches, or launch work still
-running), and each value is the runs' median; a timed bench measures after warmup`; an untimed block
-never restarts warmup for it. A single cold run is never judged for startup when it is under 2 s:
-strobe cannot tell launch work still running from the case's own first-run work inside it; `--runs N`
-(stepped) or a timed bench (warmup) separates them. `--check --probes memory` exits 2: a check runs
+running), and each value is the runs' median; a timed bench measures after warmup`; in a check
+against base the base side's say so too (`<case · target> · base: its measured runs stepped down …`).
+An untimed block never restarts warmup for it. A single cold run is never judged for startup when it is
+under 2 s: strobe cannot tell launch work still running from the case's own first-run work inside it;
+`--runs N` (stepped) or a timed bench (warmup) separates them. Nor is run 1 judged in a check that
+measured its second run instead (a process of run 1 ended, in a case with a reset; page, native,
+script and terminal blocks). `--check --probes memory` exits 2: a check runs
 each case once and takes no heap snapshot; a leak run is `strobe bench <file> --probes memory`
 (snapshots between runs), and one case's heap and retainers are `strobe record --bench
 <file>#<case>` (its attribution block ends with a heap snapshot). Before, the flag was ignored and a
@@ -892,12 +895,16 @@ highest run): one that moved (`unstable`), head without a value where base had o
 head over base by more than its margin (an exact non-inferiority: a count's margin is at least 0.5, so
 `0%` means no more) fails the case (exit 1), its progress line printed once judged. Lines `  noworse
 count.items 3 → 5 · worse (>0.5) (exact)` (`!` when it fails); the summary ends `base and head each
-checked; only the --noworse counters compared, exactly`. `--noworse` adds its margins to every series,
-but a `count.<name>` only the flag names is the case's only once a measured run counted it: a run that
-counted none reads 0 only when the case declares the counter (its primary, `metrics` or own `noworse`)
-or another measured run counted it. A case that never counts it shows `count.x no value (nothing in
-this block measured it)` and gets no `noworse` line (before: `count.x 0 → 0 · no worse (exact)`). In
-result.json the series keeps `base` (base's
+checked; only the --noworse counters compared, exactly`. `--noworse` adds its margins to every series
+(in every mode). A `count.<name>` only the flag names (not the case's primary, `metrics` or own
+`noworse`: `Series::flagged`) is decided per series, across both sides and every block or launch
+(`flagged_counts`): once any of them counted it, one that counted none of it (and refused nothing of
+it) reads 0, with a 0 spread where it keeps one (`--runs N`), since a code path that never ran on one
+side is a count of 0 there; when none counted it, the series has none of it and prints nothing about
+it (it is not in `declared`), and a launch case does not refuse it. Through 0.29.0 such a counter read
+0 in a case that never counted it (`count.x 0 → 0 · no worse (exact)`). Now (adais and vps): base 0
+→ head 5 reads `count.fallbacks 0 → 5 · worse (exact)`, exit 1; 5 → 0 `no worse`; launches of 1 and 0
+`did not hold one value (1, 0)`; a timed comparison lists it as a secondary. In result.json the series keeps `base` (base's
 side, as head's fields), `base_values` and `counters` (`metric`, `margin` as a fraction, `state`
 `no_worse`, `worse`, `unstable`, `missing` or `not_compared`, `passed`, `stable`, `base` and `head`
 medians, `base_runs`, `head_runs`, `why`, `text`). This is the comparison a shared CI runner allows
@@ -3041,8 +3048,9 @@ flowchart LR
   (script: hosts run that timeline in untimed blocks too, about 1% of a core, in the check's self line)
   or `after the block began (before its first page loaded)` (an untimed page block not on a phone runs
   the browser's thread timeline from before the target's prepare and first page load, `before its
-  prepare` for an app; strobe's own speed check is left out of the stretch before run 1, its ticks
-  counted neither busy nor watched; the OS sampler starts there too, its other readers taking a run's
+  prepare` for an app; strobe's own speed checks, the one run again after a slow one too, are left out
+  of the stretch before run 1, their ticks counted neither busy nor watched, and each run's edges take
+  a tick, so no tick holds both a run's CPU and what came before it; the OS sampler starts there too, its other readers taking a run's
   window as before). A `tty()` check keeps a thread timeline of the program too and says `busy from
   0.0 s to 2.0 s after the program started, while run 1 ran from 0.6 s to 3.1 s`. The
   timeline sees no other process, so other work on the target's CPUs cannot hold up the second half (in
@@ -3582,11 +3590,13 @@ reserved for tools that list a project's bench files; strobe does not read it ye
   benches of several repositories, each with its harness). Code under test kept in the harness folder
   is then the same on both sides: when the copy replaced a file the variant's commit tracks, or placed
   one it lacked, and a `script()`, `cli()` or `tty()` target runs that file (a script's entry, a word
-  of `run` or `build`, a tty's `run` from its `cwd`), strobe says so (`HarnessOverlay`, §10.2: warn
-  for a replaced file, `base (…) runs the bench's own copy of perf/fixture.ts, not its own: …; a change
-  in that file is the same on both sides; keep the code under test out of the harness folder, or name
-  it from there (an import of the variant's own file)`; info for a placed one, `both sides run that
-  one file`), also as a `!` progress line when it happens.
+  of the target's `run` or `build`, a tty's `run` from its `cwd`, or a word of a line a `cli()` case
+  passes to `ctx.exec(…)`), strobe says so (`HarnessOverlay`, §10.2: warn for a replaced file, `base
+  (…) runs the bench's own copy of perf/fixture.ts, not its own: …; a change in that file is the same
+  on both sides; keep the code under test out of the harness folder, or name it from there (an import
+  of the variant's own file)`; info for a placed one, `both sides run that one file`), once each, also
+  as a progress line when it happens (`!` for the warning, `i` for the info). A `script()` entry
+  outside the harness is never replaced (§9.6 "Script targets"). Only the warning reaches a PR block.
 - **Source maps:** every build strobe runs has `STROBE_SOURCEMAP=hidden` in its environment. A
   bundler config that reads it (Vite: `build: { sourcemap: process.env.STROBE_SOURCEMAP }`) writes
   each map beside its script without the `sourceMappingURL` comment, so the scripts served are
@@ -4455,10 +4465,16 @@ its exports with `ctx.call(name, ...args)` (JSON in and out); its console output
 experiment's `script.log`.
 
 - **One harness, two variants:** `entry` resolves from the bench file, like the rest of it. In a
-  worktree strobe made for a git ref, strobe writes the same file at the same path, so its
-  relative imports reach that variant's code and a base that predates the harness still runs.
-  Those untracked files do not change the worktree's build key. A directory variant is the user's
-  own checkout: strobe never writes there, and the harness must exist.
+  worktree strobe made for a git ref, an entry the ref already holds is never replaced: one in the
+  harness (the bench file's folder, strobe.json's `harness` paths) is the bench's own copy there
+  already, as every harness file is (§9.5, `HarnessOverlay` when it replaced a tracked file), and one
+  outside it (`script("../src/x.mjs")`) is code under test, run as each side has it. An entry the ref
+  lacks is written at the same path, so its relative imports reach that variant's code and a base
+  that predates the harness still runs; strobe says so (`HarnessOverlay` info, `base (…) had no
+  <file>, which <target> runs: strobe placed the bench's own copy there, so both sides run that one
+  file`). Through 0.29.0 strobe wrote the bench's copy over the ref's own entry wherever it lay, so
+  base ran head's code under test. Those untracked files do not change the worktree's build key. A
+  directory variant is the user's own checkout: strobe never writes there, and the entry must exist.
 - **Timing:** the host tree's CPU in cycles (`cpu.work`, the primary for compute) and wall clock
   (`run.duration`, the primary for work that waits on children or I/O: CPU of a child that exited
   during the run is not in the tree any more). A run in which a process of the tree ended in a timed
@@ -5390,7 +5406,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `NotOnThisOs` | a declared metric this OS gives strobe no way to read for another process (refuses that metric, with the OS's reason): the §13.6 matrix |
 | `EngineUnsupported` | a target, metric, probe set, hook or case kind needs a browser engine strobe does not drive on it: a webview target on Linux (WebKitGTK) or macOS (WKWebView), refused before anything launches with the fix `kind: "native"` (§13.8); and a page's engine that gives strobe no way to measure it (Firefox: `main.*`, `layout.count`, `style.count`, `layout.shift`, `gpu.compile`, `js.heap.*`, `span.*`, `frames.presented.p*`, attribution and memory probes and a launch's attribution block, `ctx.playwright`; `canvas.*` on a page without WebGPU; WebKit also launch cases (no preload script), `net.*`, `input.rate`, `input.gap.p95`, `ctx.mock`, a window `scale`, pointer input where the browser drops it (WPE's headless view), `page.scroll` on a Firefox page that emulates a phone and a `page.drag` there that the browser would pan (headless Firefox does not pan on touch, §9.6), `emulate` (`"mobile"` or `"touch"`) on WebKit (§13.1), and `count.*`, `canvas.*`, `interaction.*`, `scroll.latency.*` of a run that loaded a document, a `page.goto` after `ctx.addInitScript`), or an engine strobe cannot run here (`webkit` on Windows for good, Safari `--headless`, a window `scale` on WebKit, a Firefox before 148 known from its `application.ini`, or one that lists no chrome context at its first chrome read, §13.1; and `look --engine` other than chromium, §5.12): a primary refuses its series before anything builds, with the closest metric the engine has, and the rest of the file runs (§5.6 "Refused series"); a declared secondary is refused per block, and an undeclared one (a default secondary, a descriptive row) is left out of the block's values |
 | `Headless` | a frame, input-latency, scrolling, canvas or GPU-use metric of a page that runs headless (`--headless`, a target's `headless`): a primary refuses its series before anything builds (§5.6 "Refused series"); a secondary is refused per block; a run of a headless page measured from outside that sends input (no window for the OS's input); `page.window` on a headless page. A native app on the headless Wayland compositor strobe runs (§13.7 "Wayland"): `frames.*`, `interaction.*`, `scroll.*`, `display.*`, `launch.painted` and `launch.settled` (a display primary before anything builds, a secondary per block), and a launch that ends on an element's frame or the window's pixels (`until`: a selector, `window: "painted"` or `"settled"`; before anything builds) |
-| `NotForTarget` | a declared metric this kind of target or case has none of, refused alone: `main.script` of a page block whose runs called `page.eval()` (Chromium's `ScriptDuration` leaves it out); `main.tasks.long` of a lean trace, which has no RunTask slices (a primary before anything builds); a `script()` target's `cpu.wakes`, `io.read`, `io.write`; a browser engine's metric or a frame stage split on a native app; frames, latency and `display.*` of an app with no window (`window: false`); `ui.*` without a main window; a run's metric on a launch case and a launch's on a run case; `cpu.fixture` without a `fixture()`; `cpu.foreign` with `--pin none`; a page launch's memory (its browser started before it) and Node's own timing from a launch that gave none (`launch.inspect`); a `tty()` target's metrics outside what it measures, and `tty.frame.*` of a program that drew no synchronized frames. A `cli()` target's metrics outside what it measures from outside its commands. Also: a page launch's `until` on an image or pixels (it is timed in its own document); an image locator or pixel wait on a terminal, a `page.window` action other than a resize or `restore` there, and a `page` call a terminal does not take; `page.window` on a windowless native target or a phone's page; `--video` of a target with no window or one strobe attached to; reduced motion on a native app whose profile declares none, or on a `command()` launch case; `look --until image=` of a `tty:` or `wir:` target; an image or pixel wait in a timed run of a phone's page; `expect.heading` of a native window showing a Chromium web view with no heading in its tree (§13.7); and on a phone (`--mobile`) what strobe reads from this computer's processes and OS (`cpu.*` but `cpu.fixture`, `memory.*`, `gpu.*` but `gpu.compile`, `ui.*`, `energy.*`, `io.*`; `validity::phone_refusal`), a target that is no phone target, and a launch case. `record --mobile --probes memory` runs (it was refused here): its census has no processes or private bytes of the phone's Chrome (null, never 0), and `memory.app.private` is refused, `the page's processes are on the phone, and strobe reads private memory from this computer's` (8.6) |
+| `NotForTarget` | a declared metric this kind of target or case has none of, refused alone: `main.script` of a page block whose runs called `page.eval()` (Chromium's `ScriptDuration` leaves it out); `main.tasks.long` of a lean trace, which has no RunTask slices (a primary before anything builds); a `script()` target's `cpu.wakes`, `io.read`, `io.write`; a browser engine's metric or a frame stage split on a native app; frames, latency and `display.*` of an app with no window (`window: false`); `ui.*` without a main window; a run's metric on a launch case and a launch's on a run case; `cpu.fixture` without a `fixture()`; `cpu.foreign` with `--pin none`; a page launch's memory (its browser started before it) and Node's own timing from a launch that gave none (`launch.inspect`); a `tty()` target's metrics outside what it measures, and `tty.frame.*` of a program that drew no synchronized frames. A `cli()` target's metrics outside what it measures from outside its commands. Also: a page launch's `until` on an image or pixels (it is timed in its own document); an image locator or pixel wait on a terminal, a `page.window` action other than a resize or `restore` there, and a `page` call a terminal does not take; `page.window` on a windowless native target or a phone's page; `--video` of a target with no window or one strobe attached to; reduced motion on a native app whose profile declares none, or on a `command()` launch case; `look --until image=` of a `tty:` or `wir:` target; an image or pixel wait in a timed run of a phone's page; `expect.heading` of a native window showing a Chromium web view with no heading in its tree (§13.7); and on a phone (`--mobile`) what strobe reads from this computer's processes and OS (`cpu.*` but `cpu.fixture`, `memory.*`, `gpu.*` but `gpu.compile`, `ui.*`, `energy.*`, `io.*`; `validity::phone_refusal`), a target that is no phone target, and a launch case. `record --mobile --probes memory` runs (it was refused here): its census has no processes or private bytes of the phone's Chrome (null, never 0), and `memory.app.private` is refused, `the page's processes are on the phone, and strobe reads private memory from this computer's`, fix `read the page's own memory here (js.heap.used, its growth, the leak suspects), or the processes' memory in a desktop browser's memory recording` (8.6) |
 | `Throttled` | a headless Chromium page with the console display off (`DisplayOff`; not a phone's, not an implementation comparison's side): its frames and timers run on a throttled clock of its own, so `run.duration`, `phase.*`, `span.*`, `main.busy`, `main.busy.cdp`, `cpu.app.total`, `cpu.process.total`, `cpu.renderer`, `cpu.gpu` and `cpu.browser` are refused (`input.rate` and `input.gap.p95` stand: a headless page paces drags and paced wheel steps at 60 Hz on strobe's own clock, having no display to follow; a primary among the refused: its series is refused before anything builds when the display is off then, and when it turns off mid-bench, after one try to wake an unlocked session's display, that series is refused and the rest of the file runs; per metric in a `--check`), while `cpu.work`, `main.work` and its parts, counts, `net.*` and memory stay (Firefox unaffected); or the block-start speed check (a fixed JS workload in the page) runs more than 1.5× slower than this device's calibration: emulated throttling, thermal throttling, power saving or battery mode. Native targets have no page: strobe runs a fixed integer workload on the target's CPUs before the launch, once those CPUs are quiet (two 100 ms looks under 5% mean busy and no CPU over 25%, up to 10 s: the last block's app may still be freeing its memory and GPU objects), and compares it with this device's reference for that CPU mask: the median of its last 20 passing checks there (`<state>/native-speed.json`, per mask; the first check sets it). A slow check is tried again: up to 3 slow tries on quiet CPUs, and for up to 2 minutes while other processes keep the target's CPUs over 25% of a core busy during the check (never past `--max-time`: a check it cuts short while still slow is neither `Throttled` nor `Background`, and the bench ends there as in any wait, §9.1 "Stop rule"; `Throttled` says how many tries it had). Slow while other work was busy there is `Background` (naming the busiest processes), not `Throttled`. A `--check` (and `record --bench`, which runs one) compares nothing, so it never waits for a speed check or refuses on one: it runs the check once (native: after at most 2 s for the CPUs to quiet; a page: no second check, and none after the runs), and a slow one is a warning with the text the refusal would have (`! Background` or `! Throttled`, ending "the check ran at once (a timed block would wait that out, or refuse)"); the block runs at once. A loaded machine once held a native `--check` 20 minutes in `Background` waits. A page's slow check runs once more after the CPUs settle (the same quiet wait, up to 10 s, then 2 s): a burst passes (the page's own work just after its load, a neighbour on a VM's host, a process that just ended) while throttling lasts, so a second slow check refuses the block (`Background` or `Throttled`, by the other work during it, saying it was slow twice and quoting the first) and a fast one lets the runs go on. Such a block is accepted only if one more check, right after its measured runs (no wait), is at speed too: then a `Throttled` note (info) quotes the first; slow again refuses the block as above, quoting the first. It never goes on silently. The busiest processes named are every process but the browser's and strobe's own, strobe's tree included and marked `the bench's` (the runner, the servers it started: their work counts as other work on the target's CPUs, and once went unnamed as "system work"). strobe reads the processes before the idle counters at the check's start and after them at its end, so its own reading is outside the span (read inside it, it showed as a quarter of a core of other work on vps). On Linux the other work carries the idle counters' resolution (`±N%`: `/proc/stat` counts idle in 10 ms ticks, so over a check of tens of ms each CPU's reading is off by up to a tick). A Linux guest reads the hypervisor's steal over the check on the target's CPUs (`/proc/stat`'s steal, their mean) and names it as a cause from 0.5% of those CPUs' time (`none named (hypervisor steal 37% of those CPUs during the check)`, and after the named processes when there are some); under that, `none named (system work; 0% hypervisor steal)`; bare metal and other OSes say `none named (system work)`. The native check reads the process lists outside the idle counters' span and takes strobe's own CPU over the span out of the busy time, rather than assuming its check thread used one whole core (with a single target CPU, other work could then never read above 0) A CPU quota (Linux's CPU controller: `cpu.max`, a container's `--cpus`, systemd's `CPUQuota`) throttles without slowing a one-thread check: strobe reads the throttled time of its own cgroup and of every cgroup above it that has a quota (`cpu.stat`'s `throttled_usec`, v1 `throttled_time` under `cpu,cpuacct` or else `cpu`; which files is found once, and with no quota nothing is read) around each `run` call (`Runner::throttled`, `host::cgroup_throttled_ns`), and over the whole block for a launch case. A rise over a timing or check block's measured runs refuses what a quota moves (`load_metric`: times, CPU shares, `metric.*`, `app.*`, wakes per second), not CPU time (`cpu.work`, `ui.cpu`, `cpu.fixture`, `cli.launch`: a quota delays work and adds none); the refusal gives the throttled thread time (`0.42 ms` under a millisecond). On vps, strobe and an A/A of a 114 ms command in a cgroup with `cpu.max 50000 100000` printed `run.duration` 242 ms and 219 ms as values (`unthrottled` on the plan line) before this. `cli()` and `script()` targets run no speed check: their plan line says `speed not checked` |
 | `Background` (refusing) | the native speed check stayed slow for 2 minutes (one `--max-time` cut short refuses nothing: the bench ends there, §9.1) while other processes kept the target's CPUs busy (an antivirus scanning new files, an update, a build): the message names the busiest. A timed bench block waits it out first, holding nothing (a minute, then until the CPUs are quiet, and the check again), up to 15 times, about an hour: on a shared machine another agent's build ends. Blocks that run through a locked session (a headless page, a windowless app) wait the same way: they once ended the bench at the first busy check. Never in a `--check`: there it is a warning and the block runs (`Throttled` above) |
 | `BackgroundPriority` | the target runs at background priority, inherited from strobe or its own: macOS `taskpolicy -b` (`PRIO_DARWIN_PROCESS`), Windows' idle priority class, efficiency mode (EcoQoS) or background mode (very low memory priority), Linux `SCHED_IDLE` or nice 19. The OS keeps it on efficiency cores, at low clocks or behind other work: a drag in an Electron app read 83–91% dropped frames under `taskpolicy -b` against 0.4% at normal priority. Refuses frame and input-latency metrics (`frames.*`, `interaction.*`, `scroll.*`, `canvas.*`, `input.*`, `launch.painted`, `launch.settled`): a primary among them refuses the bench before anything builds (strobe's own priority) or at the block (the target's), a secondary shows refused, and `record` prints `frames refused`. CPU, memory and counters stay, with a warning to compare them only with runs at the same priority. Attribution and memory blocks are untimed and keep running. `record pid:` measures a process as its user runs it and is not checked |
@@ -6187,8 +6203,13 @@ a PR block. `-q` keeps the Markdown on stdout (md, pr, summary); only the `wrote
 other processes (`(busiest elsewhere: …)`, `busiest processes on the machine (% of a core): …`,
 `busiest processes on the machine: …`, `busiest processes (% of a core): …`, `busiest processes: …`)
 becomes its count and the busiest one's share (`2 other processes, the busiest 101% of a core`;
-`none named (…)` stays), and `ReservedCpus`' lists of the processes it moved or could not move go
-(their counts stay). The PR block's Pairs footnote says `<n> other processes ≥ 5%, busiest <x>% of a
+`none named (…)` stays; a list of shares ends after its last `<name> N%`, so a name holding a
+parenthesis, `app).exe`, ends nothing early), `ReservedCpus`' lists of the processes it moved or could
+not move go (their counts stay; the moved list ends at the parenthesis before `, ` or `; `), and a
+covering window's title goes, its process stays (`another window of process <pid> covers the point
+(x, y)`, `another window of process <pid> covers the region`; other forms: §21). The PR block lists
+`HarnessOverlay` only at warn level (a file base lacked, placed, changed nothing base ran). The PR
+block's Pairs footnote says `<n> other processes ≥ 5%, busiest <x>% of a
 core` (each pair's `cpu.foreign.max` stays). Cards and badges draw only a refusal's validator and
 summary, which name no process. Not foreign, so kept: `EndedCpu` (the target's own ended processes)
 and an implementation comparison's sides' processes. On a shared runner (`env.shared_runner` in the
@@ -6371,13 +6392,16 @@ without attribution printed a header and nothing else.
   lists base's own. `suspects none: <why>` when none can be read: a `cli()` or `tty()` target,
   `--why never` or `--probes timing`, `--max-time`, `nothing to explain: --why auto profiles a series
   only when its primary moved`, or the `Attribution` or `MaxTime` warning's text.
-- **Warnings** that bear on it: the series' warn-level ones and `Attribution`.
+- **Warnings** that bear on it, each once: the series' warn-level ones, and `Attribution` where it
+  says why an attribution block is missing or failed (not its sampling notes).
 - **Next**, as commands: `--pairs <needed_pairs>` when underpowered or unclear, `--pairs
   <holm_pairs>` when Holm leaves secondaries untested, `strobe record --bench <file>#<case> --head
   <base>` and `--head <head>` when a decided difference has no attribution, `strobe query <a>..<b>
   hotspots|layout|alloc` and `strobe report experiment <id> --open` with attribution, `--why always`
   for `--blocks`, `--repeat 2n` for an unclear growth, `bench --resume` for a stopped series, a
-  refusal's fix, and a failed case's hint with its rerun (`--seed` when seeded).
+  refusal's fix, and a failed case's hint with its rerun (`--seed` when seeded). A rerun of one series
+  is the bench's own command without what that run chose for itself (`--id`, `--seed`, `--pairs`,
+  `--filter`, `--why`, `--max-time`, `--resume`, `--json`, `--quiet`, `--plan`).
 
 Facts and pointers only: nothing it says goes past what the experiment holds. Known answers:
 `scripts/dev/insights-repo.ts` (its cases and commands in its header). An experiment's movers come
@@ -8393,9 +8417,14 @@ experiments/
   counts as installed only when it is the pinned build: each platform's unpacked
   `trace_processor_shell` has its own pinned sha256 (v59.1: windows `3acc5aca…`, linux-x64
   `2434129a…`, linux-arm64 `a08e4836…`, mac-x64 `df380398…`, mac-arm64 `8488edbe…`), which
-  `installed()` and `ensure()` check once per process; any other file there (damaged, replaced) is
-  extracted again from the zip, downloaded again when it is gone, before any query runs it. `up`'s
-  line hashes the file it names: `trace_processor v59.1 · sha256 3acc5aca1c76… ok · <path>`.
+  `installed()` and `ensure()` hash once per process and again whenever the file's size or
+  modification time changed since (a daemon or `strobe mcp` lives for days); any other file there
+  (damaged, replaced) is extracted again from the zip, downloaded again when it is gone, before any
+  query runs it. `up`'s line hashes the file it names: `trace_processor v59.1 · sha256 3acc5aca1c76…
+  ok · <path>`. Two strobes installing it at once: an archive the other removed between a look and a
+  read is downloaded again, a rename that fails removes its `.part` (and takes the other's archive
+  when that is the pinned one), and a step that fails while the other wrote a pinned engine takes that
+  engine.
 - Ingest: Chrome's proto trace (`Tracing.start` with `streamFormat: "proto"`) with strobe's own
   packets (OS and GPU counters, census, phases when not in the trace) appended as counter and
   slice tracks with a `ClockSnapshot`. JSON for sources that only give JSON.
@@ -8694,10 +8723,14 @@ Questions for spikes:
   on, the indicator.
 
 **Known gaps in strobe's own published text** (`pr::scrub_public`, the PR block and `--format
-summary`, §11.2): a covering window's title (`WindowHidden`: `"<title>" of process <pid>`) goes
-through as written, and a process name holding `)` ends `ReservedCpus`' `moved per block (…)` list
-and a busiest list early, so the names after it go through. The action scrubs its own copies again
-(§26.4); the fixes are the action's `scrubText` rules.
+summary`, §11.2): it names a covering window by its process for Windows' and X11's and Wayland's
+titles (`another window of process <pid> covers the point (x, y)`, `… covers the region`), but the
+other forms `WindowHidden` gives still carry a name: macOS's `a window of <app> of process <pid>`
+and `<role> "<title>" of process <pid>`, an accessibility element's `<kind> "<name>" of process
+<pid>` (UI Automation) and `<role> "<title>" (key "<id>") of process <pid>` (AX), and Windows'
+`a "<class>" window of process <pid>`. The action scrubs its own copies again (§26.4); the fix is
+its `scrubText` rule (every quoted string in a clause that names `of process <pid>`, and `a window
+of <app>`).
 
 **Not built** (beyond what each section marks): a Firefox launch's attribution block
 (`MOZ_PROFILER_STARTUP`), Firefox's sampled allocations (`jsallocations`), WebKit attribution on
@@ -8792,7 +8825,7 @@ what was built but not yet run on a device is in §21.
   mention), chores left out without an empty heading, Latest only for the highest version (20); the
   action's text scrub also takes covering window titles, names holding `)`, home paths (result.json,
   the HTML, `runner.log`) and everything it relays to the job's log (26.2, 26.4); the strobe Markdown
-  scrub's same holes listed (21). The docs of cleanup/w7a (check steadiness, `--probes memory`
+  scrub's remaining holes listed (21; cleanup/w7b closed its `)` and the plain-title ones). The docs of cleanup/w7a (check steadiness, `--probes memory`
   exits, counters only where counted, `HarnessOverlay`, the pinned engine digests: 5.6, 8.6, 9.1,
   9.5, 10.2, 14, 15) and cleanup/w7b (`query <exp> insights` per series, `hot-function`,
   `http-stalls`, `report --format` checked first, home paths at path boundaries: 5.8, 11.1, 11.2,
@@ -9563,7 +9596,8 @@ user:
   `<name> <share>%` items so a name holding `)` (`Discord (PTB).exe`, `a).exe`) ends nothing early;
   `ReservedCpus`' moved list is cut up to what the note says next; every quoted string in a clause
   that names `… of process <pid>` (a covering window's title or class, an element's name and key:
-  `WindowHidden`) reads `"…"`; and a home folder where a path starts (this user's own, then any
+  `WindowHidden`) reads `"…"`, and macOS's `a window of <app> of process <pid>` reads `a window of
+  process <pid>`; and a home folder where a path starts (this user's own, then any
   `C:\Users\<u>`, `/home/<u>`, `/Users/<u>`; never mid-path) reads `~`. The state folder's own copy
   is untouched.
 - `runner.log` (the bench file's console output) goes through `scrubText` too.
@@ -9580,8 +9614,8 @@ reserve, busiest and `busiest elsewhere` lists, `strobe up · <name>` and those 
 stdout and stderr, home paths in every form in `result.json`, the HTML and `runner.log`) left none
 in the files or the relayed log. What the action publishes itself (the step summary, its
 annotations, the PR block) never names one: `--format summary` and `--format pr` leave them out
-(§11.2; strobe's own Markdown scrub still lets a covering window's title and names holding `)`
-through, §21, so the action scrubs the summary again), and a bench that did not run shows its
+(§11.2; strobe's own Markdown scrub still lets some forms of a covering window's name through, §21,
+so the action scrubs the summary again), and a bench that did not run shows its
 refusal's validator and summary only, never its detail.
 
 ### 26.5 Versions

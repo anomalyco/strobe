@@ -132,7 +132,7 @@ const TOOLS: &[Tool] = &[
             ("equivalence", "equivalence bound in % (default 2)"),
             (
                 "noworse",
-                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear); \"metric=2%,metric2=5%\" per metric; with check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's",
+                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear); \"metric=2%,metric2=5%\" per metric; with check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's. A count.* only this names is the series' once any block of either side counted it (a block that counted none then reads 0); never counted: nothing of it",
             ),
             ("plan", "do not run: estimate pairs and minutes per series from earlier experiments here, builds and the bench slot's queue"),
             ("effect", "with plan: the expected change of the primary in % (default: what the last run of the series measured, else 0)"),
