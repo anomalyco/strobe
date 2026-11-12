@@ -56,7 +56,7 @@ const FINEST: Record<Unit, number> = { us: 2, ms: 4, s: 6 }
 // The expected text of each formatter for a value in ms, as the Rust seam prints it (fmt::time,
 // time_signed, bound, times; the table us-A left at cleanup/usa, then more): `val` fmtVal(v, "ms"),
 // `signed` fmtSigned, `bound` fmtBound of an absolute bound, `times` values printed together.
-const VECTORS: { fn: string; v: number | number[]; unit?: string; want: Record<Unit, string> }[] = [
+const VECTORS: { fn: string; v: number | number[]; unit?: string; want: Partial<Record<Unit, string>> }[] = [
   { fn: "val", v: 0.004, want: { us: "4.00 µs", ms: "0.0040 ms", s: "0.000004 s" } },
   { fn: "val", v: 0.00999, want: { us: "9.99 µs", ms: "0.0100 ms", s: "0.000010 s" } },
   { fn: "val", v: 0.1, want: { us: "100 µs", ms: "0.100 ms", s: "0.000100 s" } },
@@ -81,6 +81,19 @@ const VECTORS: { fn: string; v: number | number[]; unit?: string; want: Record<U
   { fn: "bound", v: 14.76, want: { us: "±14,760 µs", ms: "±14.8 ms", s: "±0.0148 s" } },
   { fn: "verdict", v: 1.2, want: { us: "no worse (≤1,200 µs, faster)", ms: "no worse (≤1.20 ms, faster)", s: "no worse (≤0.00120 s, faster)" } },
   { fn: "verdict", v: 0.04, want: { us: "same (±40.0 µs)", ms: "same (±0.0400 ms)", s: "same (±0.000040 s)" } },
+  // A stored bound of exactly 0 (both medians 0) is the truth: drawn again in the shown unit.
+  { fn: "verdict", v: 0, want: { us: "same (±0 µs)", ms: "same (±0 ms)", s: "same (±0 s)" } },
+  { fn: "bound", v: 0, want: { us: "±0 µs", ms: "±0 ms", s: "±0 s" } },
+  // A nonzero time that scaling underflows to 0 takes the floor, never a signed 0; one that scaling
+  // overflows prints `—` (us-review-usa must-fix 2).
+  { fn: "val", v: -5e-324, want: { us: "−<0.01 µs", ms: "−<0.0001 ms", s: "−<0.000001 s" } },
+  { fn: "val", v: 5e-324, want: { us: "<0.01 µs", ms: "<0.0001 ms", s: "<0.000001 s" } },
+  { fn: "signed", v: 5e-324, want: { us: "+<0.01 µs", ms: "+<0.0001 ms", s: "+<0.000001 s" } },
+  { fn: "signed", v: -5e-324, want: { us: "−<0.01 µs", ms: "−<0.0001 ms", s: "−<0.000001 s" } },
+  // (In ms and s these print every digit, as Rust's `{:.0}` does: the Rust sweep compares them.)
+  { fn: "val", v: 1e307, want: { us: "—" } },
+  { fn: "signed", v: -1e307, want: { us: "—" } },
+  { fn: "times", v: [1e307, -5e-324], want: { us: "— … −<0.01 µs" } },
   { fn: "count", v: 1234567, want: { us: "1,234,567", ms: "1,234,567", s: "1,234,567" } },
   { fn: "count", v: -12345, want: { us: "-12,345", ms: "-12,345", s: "-12,345" } },
   { fn: "count", v: 12.5, want: { us: "12.5", ms: "12.5", s: "12.5" } },
@@ -481,12 +494,16 @@ async function parity(c: { cdp: Cdp; sid: string }, kind: "report" | "history") 
   // Each the double nearest a short decimal (`9.995e-2`), which both sides read alike: serde_json
   // (without float_roundtrip) can read a 17-digit one a unit in the last place off.
   for (let e = -8; e <= 6; e++) for (const m of [1, 1.5, 2.5, 4.9996, 9.9996, 9.995, 12.345, 99.95, 99.996, 314.159]) sweep.push(parseFloat(`${m}e${e}`), -parseFloat(`${m}e${e}`))
-  const groups: number[][] = [[-0.0032, -0.0012, 0.0124], [0.12, 0.05, 2.5], [0, -1e-7, 2e-7], [0.00003, 0.052], [-3837.429, -4012.11, -3661.804], [5.9, 0.004, 120.5], [0.3, 0.30005, 0.9999]]
-  const bounds = [0.00004, 0.04, 0.52, 1.2, 14.76, 0.0000001]
+  // The ends of a double: underflow to 0 when scaled (the floor, unsigned 0 never), overflow (`—`),
+  // and large whole numbers printed digit for digit.
+  // (Times only: a count past i64 has no agreed text yet, Rust clamping it to i64::MAX.)
+  const ends = [5e-324, -5e-324, 2.2e-308, -2.2e-308, 1e-310, 1e307, -1e307, 1.7976931348623157e308, -1.7976931348623157e308, 1e21, 1e22, 9007199254740993, 4.5e15]
+  const groups: number[][] = [[-0.0032, -0.0012, 0.0124], [0.12, 0.05, 2.5], [0, -1e-7, 2e-7], [0.00003, 0.052], [-3837.429, -4012.11, -3661.804], [5.9, 0.004, 120.5], [0.3, 0.30005, 0.9999], [1e307, -5e-324, 0]]
+  const bounds = [0.00004, 0.04, 0.52, 1.2, 14.76, 0.0000001, 0]
   for (const u of UNITS) {
     const reqs = [
-      ...sweep.map((v) => ({ op: "value", v, unit: "ms", time_unit: u })),
-      ...sweep.map((v) => ({ op: "signed", v, unit: "ms", time_unit: u })),
+      ...[...sweep, ...ends].map((v) => ({ op: "value", v, unit: "ms", time_unit: u })),
+      ...[...sweep, ...ends].map((v) => ({ op: "signed", v, unit: "ms", time_unit: u })),
       ...sweep.filter((v) => Math.abs(v) >= 1 || v === 0).map((v) => ({ op: "value", v: Math.round(v), unit: "count", time_unit: u })),
       // Other units (fmt::value), the history page's values included: never `-0.00`, Rust's digits.
       ...(u === "us" ? ["%", "MB", "value", "bytes", "instructions", "score", "pp", "/s", "count"].flatMap((unit) => sweep.map((v) => ({ op: "value", v, unit, time_unit: u }))) : []),
@@ -766,7 +783,7 @@ async function main() {
           : ${kind === "report"
           ? `x.fn === "plain" ? fmtVal(x.v, x.unit) : x.fn === "val" ? fmtVal(x.v, "ms") : x.fn === "signed" ? fmtSigned(x.v, "ms") : x.fn === "count" ? fmtVal(x.v, "count") : fmtBound({ relative: false, bound: x.v }, "ms")`
           : `x.fn === "plain" ? val(x.v, x.unit) : x.fn === "val" ? val(x.v, "ms") : x.fn === "signed" ? fmtTimeSigned(x.v) : x.fn === "count" ? val(x.v, "count") : "±" + val(x.v, "ms")`}); })()`)
-        VECTORS.forEach((x, i) => add(`${kind}.html`, `${x.fn}(${x.v} ${x.unit || "ms"})`, u, got[i] === x.want[u], got[i] === x.want[u] ? got[i] : `got ${got[i]}, want ${x.want[u]}`))
+        VECTORS.forEach((x, i) => x.want[u] !== undefined && add(`${kind}.html`, `${x.fn}(${x.v} ${x.unit || "ms"})`, u, got[i] === x.want[u], got[i] === x.want[u] ? got[i] : `got ${got[i]}, want ${x.want[u]}`))
       }
       if (rust) await parity(c, kind)
     }

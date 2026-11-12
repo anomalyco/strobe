@@ -1648,7 +1648,9 @@ function rfix(v, d) {
   const e = exp === 0 ? -1074 : exp - 1075;
   if (exp !== 0) mant |= 1n << 52n;
   const fixed = () => { const s = v.toFixed(d); return Number.isFinite(v) && !/[1-9]/.test(s) ? s.replace(/^-/, "") : s; };
-  if (!Number.isFinite(v) || e >= 0) return fixed();
+  if (!Number.isFinite(v)) return fixed();
+  // A whole number of 2^52 or more: its exact digits, as Rust prints them (toFixed writes `1e+307`).
+  if (e >= 0) return (v < 0 ? "-" : "") + (mant << BigInt(e)).toString() + (d ? "." + "0".repeat(d) : "");
   const num = mant * 10n ** BigInt(d), den = 1n << BigInt(-e);
   if ((num % den) * 2n !== den) return fixed();
   let q = num / den;
@@ -1696,15 +1698,17 @@ function timeDigits(x, finest) {
 }
 
 // A time in ms in `unit` (fmt::time_parts): its digits grouped at `d` decimals (its own when null),
-// `<0.01` for a nonzero one that would print as 0, the minus sign on a negative one and `+` on a
-// positive one when `signed`. `num`: without the unit.
+// `<0.01` for a nonzero one that would print as 0 (one that scaling underflows to 0 too), the minus
+// sign on a negative one and `+` on a positive one when `signed`; `—` for one that scaling overflows.
+// `num`: without the unit.
 function timeText(ms, { d = null, signed = false, num = false, unit = TIME_UNIT } = {}) {
   if (!Number.isFinite(ms)) return "—";
   const t = TIME_UNITS[unit];
   const x = Math.abs(ms * t.perMs);
+  if (!Number.isFinite(x)) return "—";
   const dd = d ?? timeDigits(x, t.finest);
   let body = "0";
-  if (x !== 0) {
+  if (ms !== 0) {
     const s = rfix(x, dd);
     body = /[1-9]/.test(s) ? groupDigits(s) : `<${rfix(10 ** -t.finest, t.finest)}`;
   }
@@ -1729,7 +1733,7 @@ const fmtTimes = (list, signed = false, unit = TIME_UNIT) => list.map((v) => tim
 function verdictText(c, unit) {
   const v = String(c?.verdict ?? "");
   const b = c?.bound;
-  if (c?.relative !== false || unit !== "ms" || !(Number.isFinite(b) && b > 0)) return v;
+  if (c?.relative !== false || unit !== "ms" || !(Number.isFinite(b) && b >= 0)) return v;
   for (const p of ["same (±", "no worse (≤", "worse (>"]) {
     if (!v.startsWith(p)) continue;
     const rest = v.slice(p.length);
