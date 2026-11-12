@@ -576,10 +576,10 @@ pub fn convert(raw: &Path, token: &str, runs: &[(String, u64, u64)], untimed: &[
         };
         if a > t0 + SLACK_NS || b < t1 - SLACK_NS {
             let summary = format!(
-                "Firefox's profile puts strobe's marks of {} at {:+.2} and {:+.2} ms from the run's start and end, outside it: its clock does not match strobe's",
+                "Firefox's profile puts strobe's marks of {} at {} and {} from the run's start and end, outside it: its clock does not match strobe's",
                 k.trim_start_matches(&prefix),
-                (a - t0) as f64 / 1e6,
-                (b - t1) as f64 / 1e6
+                crate::fmt::time_signed((a - t0) as f64 / 1e6),
+                crate::fmt::time_signed((b - t1) as f64 / 1e6)
             );
             return Err(Refusal::new(ValidatorId::ClockUnsynced, summary).into());
         }

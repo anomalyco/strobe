@@ -1368,9 +1368,10 @@ pub fn reading(d: &Data, measured: usize) -> Reading {
             Refusal::new(
                 ValidatorId::OverheadBudget,
                 format!(
-                    "strobe missed {} of {} probes due in the measured runs (its scheduler ran up to {lag:.0} ms late): a stall then would go unseen; the server is not to blame",
+                    "strobe missed {} of {} probes due in the measured runs (its scheduler ran up to {} late): a stall then would go unseen; the server is not to blame",
                     missed.len(),
-                    counted.len()
+                    counted.len(),
+                    crate::fmt::time(lag)
                 ),
             )
             .fix("keep other work off strobe's CPUs (--pin), or probe less often (cadenceMs)"),

@@ -1906,7 +1906,10 @@ pub fn timer_coalescing() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         os::timer_coalescing().map(|(ms, job)| {
-            format!("timers that wake about {ms:.0} ms late: it runs in a launchd job (its oldest ancestor: {job}) whose ProcessType lets macOS coalesce the timers of everything it starts")
+            format!(
+                "timers that wake about {} late: it runs in a launchd job (its oldest ancestor: {job}) whose ProcessType lets macOS coalesce the timers of everything it starts",
+                crate::fmt::time(ms)
+            )
         })
     }
     #[cfg(not(target_os = "macos"))]

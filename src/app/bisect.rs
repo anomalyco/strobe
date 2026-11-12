@@ -270,20 +270,38 @@ fn change(s: &Value) -> String {
 /// print in now).
 pub(crate) fn text(r: &Value) -> String {
     let mut t = format!("strobe bisect {} · {} · {}\n", r["range"].as_str().unwrap_or(""), r["series"].as_str().unwrap_or(""), r["metric"].as_str().unwrap_or(""));
-    for s in r["steps"].as_array().into_iter().flatten() {
-        t += &format!(
-            "step {:<2} {} vs {}  {:<28} {:<22} {}  {}\n",
-            s["step"],
-            s["short"].as_str().unwrap_or(""),
-            short(s["good"].as_str().unwrap_or("")),
-            change(s),
-            crate::stats::verdict_text(s),
-            s["experiment"].as_str().unwrap_or(""),
-            s["subject"].as_str().unwrap_or("")
-        );
-    }
-    t += &format!("\n{}\n", r["verdict"].as_str().unwrap_or(""));
+    // Columns as wide as their widest cell: a change in µs is 45 characters.
+    let rows: Vec<Vec<String>> = r["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            vec![
+                format!("step {}", s["step"]),
+                format!("{} vs {}", s["short"].as_str().unwrap_or(""), short(s["good"].as_str().unwrap_or(""))),
+                change(s),
+                crate::stats::verdict_text(s),
+                s["experiment"].as_str().unwrap_or("").to_string(),
+                s["subject"].as_str().unwrap_or("").to_string(),
+            ]
+        })
+        .collect();
+    t += &crate::app::fmt::table(&rows, &[], "", 2);
+    t += &format!("\n{}\n", verdict_text(r));
     t
+}
+
+/// A bisect's conclusion (`no change: … (same (±40.0 µs))`) with each step verdict it quotes drawn again
+/// as the step's own line draws it (`stats::verdict_text`), in the unit times print in now.
+pub(crate) fn verdict_text(r: &Value) -> String {
+    let mut v = r["verdict"].as_str().unwrap_or("").to_string();
+    for s in r["steps"].as_array().into_iter().flatten() {
+        let (old, new) = (s["verdict"].as_str().unwrap_or(""), crate::stats::verdict_text(s));
+        if !old.is_empty() && old != new {
+            v = v.replace(&format!("({old})"), &format!("({new})"));
+        }
+    }
+    v
 }
 
 fn rev_parse(root: &Path, rev: &str) -> Result<String> {

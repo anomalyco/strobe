@@ -425,10 +425,17 @@ pub(super) fn phrase(amount: &str, word: &str, thing: &str) -> String {
     if matches!(word, "faster" | "slower" | "smoother" | "choppier") { format!("{}: {amount} {word}", capitalize(thing)) } else { format!("{amount} {word} {thing}") }
 }
 
-/// `19–23%`, `120–219 MB`: two amounts of one unit as a span.
+/// `19–23%`, `120–219 MB`, `1,200–2,200 µs`: two amounts of one unit as a span. A number is whole
+/// with its grouping commas, its `<` floor and its sign (splitting at the first comma once printed
+/// `1–2,200 µs` for 1,200 and 2,200 µs).
 pub(super) fn span(lo: &str, hi: &str) -> String {
     let split = |s: &str| -> (String, String) {
-        let i = s.find(|ch: char| !(ch.is_ascii_digit() || ch == '.')).unwrap_or(s.len());
+        if let Some(i) = s.rfind([' ', '\u{a0}'])
+            && number(&s[..i])
+        {
+            return (s[..i].to_string(), s[i..].to_string());
+        }
+        let i = s.find(|ch: char| !(ch.is_ascii_digit() || ",.+-<\u{2212}".contains(ch))).unwrap_or(s.len());
         (s[..i].to_string(), s[i..].to_string())
     };
     let ((ln, lu), (hn, hu)) = (split(lo), split(hi));
@@ -1106,10 +1113,10 @@ pub(super) fn bisect(r: &Value) -> String {
     let file = repo_relative(r["file"].as_str().unwrap_or(""));
     let span = r["range"].as_str().unwrap_or("").split("..").map(|c| c.chars().take(10).collect::<String>()).collect::<Vec<_>>().join("..");
     let m = r["metric"].as_str().unwrap_or("");
-    let verdict_line = r["verdict"].as_str().unwrap_or("");
+    let verdict_line = crate::app::bisect::verdict_text(r);
     let head = match verdict_line.strip_prefix("found: ") {
         Some(rest) => format!("**Bisect:** {} changed at {}.", noun(m), cell(rest)),
-        None => format!("**Bisect:** {}.", cell(verdict_line)),
+        None => format!("**Bisect:** {}.", cell(&verdict_line)),
     };
     let mut t = format!("{head}\nSearched {} in {}, one full comparison per step.\n\n", code(&span), code(&file));
     t += "<details>\n<summary><b>Which commit?</b> Each step of the search</summary>\n\n| Step | Commit, against the last good one | Pairs | Change | Likely range | Verdict |\n|---:|:---|---:|---:|---:|:---|\n";

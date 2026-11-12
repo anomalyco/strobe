@@ -687,10 +687,12 @@ fn measure(text: &str, size: f32, bold: bool) -> f32 {
     usvg::Tree::from_str(&svg, &options()).map(|t| t.root().abs_bounding_box().width()).unwrap_or(text.chars().count() as f32 * size * 0.55)
 }
 
-/// The largest size up to `size` (and down to 60% of it) at which `text` fits `width`.
+/// The largest size up to `size` (and down to 16 px) at which `text` fits `width`. A floor of 60% of
+/// `size` once let a 13-character time (`18,309,038 µs`) on a three-tile card run 137 px into the next
+/// tile.
 fn fit(text: &str, width: f32, size: f32, bold: bool) -> f32 {
     let w = measure(text, size, bold);
-    if w <= width { size } else { (size * width / w).max(size * 0.6).floor() }
+    if w <= width { size } else { (size * width / w).max(16.0).floor() }
 }
 
 /// `text` in at most two lines of `width`, at the largest size that fits.

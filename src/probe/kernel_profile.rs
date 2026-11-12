@@ -120,9 +120,9 @@ impl Capture {
         let (mut deep, stats) = result?;
         if now != Some(set) {
             return Err(Error::msg(format!(
-                "the system's sampled-profile interval changed during the capture ({} µs set, {} at its end): another profiler set it, so the samples' weight is unknown",
-                set as f64 / 10.0,
-                now.map_or("unreadable".to_string(), |v| format!("{} µs", v as f64 / 10.0))
+                "the system's sampled-profile interval changed during the capture ({} set, {} at its end): another profiler set it, so the samples' weight is unknown",
+                crate::fmt::time(set as f64 / 1e4),
+                now.map_or("unreadable".to_string(), |v| crate::fmt::time(v as f64 / 1e4))
             )));
         }
         deep.interval_us = set as f64 / 10.0;

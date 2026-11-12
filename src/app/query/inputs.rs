@@ -157,7 +157,8 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     let mut shown: Vec<&crate::probe::present::Present> = p.presents.iter().filter(|x| pids.contains(&x.pid) && x.state == "displayed").collect();
     shown.sort_by_key(|x| x.screen_ns);
     let mut rows: Vec<Value> = Vec::new();
-    let mut lines: Vec<String> = Vec::new();
+    // (the line up to its frames, its frames, its outcome): the frames column is as wide as its widest.
+    let mut parts: Vec<(String, String, String)> = Vec::new();
     let (mut counts, mut whys): (BTreeMap<&str, usize>, BTreeMap<&str, usize>) = (BTreeMap::new(), BTreeMap::new());
     let mut needed: Vec<f64> = Vec::new();
     // Runs in time order (their keys sort as text: run:10 before run:2).
@@ -249,15 +250,21 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
             } else {
                 around.iter().map(|(ms, before)| format!("{}{}", fmt::time_signed(*ms), if *before { "^" } else { "" })).collect::<Vec<_>>().join(" ")
             };
-            lines.push(format!(
-                "  {run:<8} {:>13}  {:<14} {:<15} frames {frames_text:<28} {said}\n",
-                fmt::time_signed(at_ms),
-                kind(s),
-                change.map(|(by, ms)| format!("{by} {}", fmt::time_signed(ms))).unwrap_or_else(|| "no change".into()),
+            parts.push((
+                format!(
+                    "  {run:<8} {:>13}  {:<14} {:<15} frames ",
+                    fmt::time_signed(at_ms),
+                    kind(s),
+                    change.map(|(by, ms)| format!("{by} {}", fmt::time_signed(ms))).unwrap_or_else(|| "no change".into()),
+                ),
+                frames_text,
+                said,
             ));
             rows.push(row);
         }
     }
+    let fw = parts.iter().map(|p| p.1.chars().count()).max().unwrap_or(0).max(28);
+    let lines: Vec<String> = parts.iter().map(|(head, frames, said)| format!("{head}{frames:<fw$} {said}\n")).collect();
     if runs == 0 {
         return Err(Error::usage("no measured run of this recording matched (--case picks one case's runs)"));
     }

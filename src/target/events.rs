@@ -243,7 +243,7 @@ impl Events {
     pub fn sync(events: &[Event]) -> Result<()> {
         let worst = events.iter().filter_map(|e| Some((e, e.arrived_ns.abs_diff(e.t_ns?)))).max_by_key(|x| x.1);
         match worst {
-            Some((e, d)) if d > SYNC_NS => Err(Refusal::new(ValidatorId::ClockUnsynced, format!("app event {:?} arrived {:.2} ms from the t_ns it carries (more than {} ms, this OS's delivery)", e.name, d as f64 / 1e6, SYNC_NS / 1_000_000))
+            Some((e, d)) if d > SYNC_NS => Err(Refusal::new(ValidatorId::ClockUnsynced, format!("app event {:?} arrived {} from the t_ns it carries (more than {} ms, this OS's delivery)", e.name, crate::fmt::time(d as f64 / 1e6), SYNC_NS / 1_000_000))
                 .fix("give t_ns from the host's monotonic clock (Linux CLOCK_MONOTONIC, macOS mach_absolute_time in ns, Windows QueryPerformanceCounter in ns), or leave it out; write each line in one append")
                 .into()),
             _ => Ok(()),

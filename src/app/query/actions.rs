@@ -94,7 +94,7 @@ fn view(title: &str, log: &ActionLog, args: &Args, top: usize) -> (String, Value
         phase.map(|p| format!(" · phase {p}")).unwrap_or_default(),
         if log.truncated { " · cut at 100,000 (the rest were not kept)" } else { "" }
     );
-    text += &format!("  {:>5} {:<8} {:>4} {:>13} {:>13}  {:<8} {:<28} {:<30} outcome\n", "seq", "hook", "run", "at", "took", "call", "selector", "args");
+    text += &format!("  {:>5} {:<8} {:>4} {:>13} {:>13}  {:<8} {:<24} {:<25} outcome\n", "seq", "hook", "run", "at", "took", "call", "selector", "args");
     for a in rows.iter().take(top) {
         let run = a.run.map(|r| r.to_string()).unwrap_or_else(|| "-".into());
         let at = (a.t_ns.saturating_sub(t0)) as f64 / 1e6;
@@ -130,15 +130,15 @@ fn view(title: &str, log: &ActionLog, args: &Args, top: usize) -> (String, Value
             marks += " args cut";
         }
         text += &format!(
-            "  {:>5} {:<8} {:>4} {:>13} {:>13}  {:<8} {:<28} {:<30} {outcome}{marks}\n",
+            "  {:>5} {:<8} {:>4} {:>13} {:>13}  {:<8} {:<24} {:<25} {outcome}{marks}\n",
             a.seq,
             a.hook.name(),
             run,
             crate::fmt::time(at),
             crate::fmt::time(ms),
             a.call,
-            clip(&selector, 28),
-            clip(&args_text, 30)
+            clip(&selector, 24),
+            clip(&args_text, 25)
         );
         // What the aim landed on, whole: the selector column cuts it.
         if let Some(h) = &a.hit {
