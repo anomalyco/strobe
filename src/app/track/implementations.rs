@@ -341,9 +341,11 @@ pub(super) fn point(args: &Args, sides: &Sides, file: &Path, root: &Path, commit
         if !s["input"].is_null() {
             fingerprint["input"] = s["input"].clone();
         }
+        let runtimes = super::script_runtimes(r, s, &[(sides.base_target.as_str(), Some("base")), (sides.head_target.as_str(), Some("head"))]);
+        super::runtime_fingerprint(&runtimes, &mut fingerprint);
         super::motion_fingerprint(r, s, &mut fingerprint);
         super::seed_fingerprint(r, &mut fingerprint);
-        super::metric_fingerprint(&metric, &mut fingerprint);
+        super::metric_fingerprint(&metric, &runtimes, &mut fingerprint);
         let fam = json!({ "device": statics["device"], "repo": repo, "file": file_rel, "label": label, "metric": metric, "base_target": sides.base_target, "head_target": sides.head_target });
         let id = history::series_id(&fam, &fingerprint);
         if !history::exists(&id) {

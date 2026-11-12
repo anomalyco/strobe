@@ -1041,7 +1041,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
                 return Err(Error::refused("RunIncomplete", format!("{} launch: milestone {} never matched in {}", s.case, m.name, m.source), "check the milestone's match and where it looks"));
             }
         }
-        let mut refused = super::launch::refusals(s, &values, "a terminal has no window of its own", false);
+        let mut refused = super::launch::refusals(s, &values, "a terminal has no window of its own", false, true);
         if launch_lost && refused.contains_key("cpu.work") {
             refused.insert("cpu.work".into(), super::super::record::cpu_lost("cpu.work", 1, 1, "the program (a launcher that handed over, a helper)"));
         }

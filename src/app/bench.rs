@@ -891,6 +891,10 @@ struct Block {
     /// earlier launch: its runs may compile shaders) or `warm`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gpu_cache: Option<String>,
+    /// The runtime a script block's host reported running (`bun`, `node`): what ran, whatever the
+    /// target declared or the `node` on PATH is (a shim of Bun's). `track` keys a series by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
 }
 
 /// Each per-run metric's lowest and highest measured run (`Block::spread`), for an untimed block of
@@ -2802,6 +2806,8 @@ pub fn run(args: &Args) -> Result<Output> {
         // `--mobile`: the phone the pages ran on, whose CPUs no host pin, reservation or power plan touches.
         "phone": ctx.phone.as_ref().and_then(|p| serde_json::to_value(&p.facts).ok()),
         "comparison": if ctx.implementations { "implementations" } else { "builds" },
+        // Each script target's declared runtime: what `track` keys a series by when no block ran.
+        "script_runtimes": ctx.describe["targets"].as_object().into_iter().flatten().filter(|(_, t)| t["kind"] == "script").map(|(n, t)| (n.clone(), json!(t["runtime"].as_str().unwrap_or("bun")))).collect::<serde_json::Map<_, _>>(),
         "variants": variants.iter().map(|v| {
             let kind = v.target.as_deref().map(|t| ctx.describe["targets"][t]["kind"].clone()).unwrap_or(Value::Null);
             json!({
@@ -9873,6 +9879,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     http: None,
                     spread: run_spread(x, &extra),
                     gpu_cache: None,
+                    runtime: None,
                 });
             }
             // From outside there is no trace to keep: the block's numbers are in result.json. A Firefox block

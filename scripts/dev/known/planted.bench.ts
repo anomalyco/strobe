@@ -11,6 +11,9 @@
 //
 // Commands, from the repo root. Every OS:
 //   strobe bench scripts/dev/known/planted.bench.ts --head . --check --headless --filter spin,page,launch,wakes,memory,pulse
+//   strobe bench scripts/dev/known/planted.bench.ts --head . --check --runs 3 --filter cli-spin,cli-alloc,cli-io
+//   strobe bench scripts/dev/known/planted.bench.ts --base cli-a --head cli-b --filter cli-spin [--primary run.duration]
+//   strobe bench scripts/dev/known/planted.bench.ts --base cli-a --head cli-b --filter cli-alloc   (or cli-io)
 //   strobe bench scripts/dev/known/planted.bench.ts --base script-a --head script-b --filter spin
 //   strobe bench scripts/dev/known/planted.bench.ts --base page-a --head page-b --filter page --headless
 //   strobe bench scripts/dev/known/planted.bench.ts --head . --aa --filter launch --target launch-200 --headless
@@ -28,6 +31,13 @@
 //   strobe bench scripts/dev/known/planted.bench.ts --base burst-1x --head burst-rate --filter counters --primary energy.cpu
 //
 // The truth, per run (or launch):
+//   cli-spin  known.rs spins 150 ms (cli-a) or 300 ms (cli-b) of CPU: cpu.work and run.duration +150 ms (b0: the
+//             process's own launch and exit, about 3 ms of CPU and 5 ms of wall on a Mac; metric.truth_cpu_ms
+//             prints the spin)
+//   cli-alloc 50 MiB (cli-a) or 100 MiB (cli-b) written and held 300 ms: memory.peak +50 MiB (b0: the program's
+//             own peak, about 1.9 MiB on a Mac)
+//   cli-io    20 MiB written and 12 MiB read (cli-a), 40 and 24 (cli-b): io.write and io.read 2x, byte for byte
+//             (macOS counts disk bytes: `io` writes and reads uncached there)
 //   spin      script-a spins 150 ms of the host's main thread, script-b 300 ms: cpu.work and cpu.main +150 ms (b0:
 //             the `ctx.call`, about 0.7 ms of run.duration)
 //   page      page-a spins 100 ms of the page's main thread, page-b 200 ms: main.work and cpu.work +100 ms (b0:
@@ -67,7 +77,7 @@
 //             (±1.5 ms per edge), +100 ms. phase.busy around the END wait is coarser: the runner polls a line wait
 //             every 10 ms (later on macOS), so each phase edge is late by up to a poll. A `page.wait` is no wall
 //             answer on macOS (a sleep wakes 1.5-10 ms late there); this busy-wait is
-import { bench, native, script, url } from "@hona/strobe"
+import { bench, cli, native, script, url } from "@hona/strobe"
 import { join } from "node:path"
 
 const bin = process.env.KNOWN_BIN ?? join(import.meta.dir, process.platform === "win32" ? "known.exe" : "known")
@@ -79,9 +89,17 @@ const burst = (hz: number, kiters: number) => native(bin, { args: ["burst", Stri
 const hold = (mb: number) => native(bin, { args: ["hold", String(mb), "600"], window: false })
 const pulse = (ms: number) => native(bin, { args: ["pulse", String(ms), "300", "600"], window: false, output: true })
 const click = (ms: number) => shown(`click=${ms}`)
+// A command line of known.rs on cli-a, the planted larger one on cli-b.
+const command = (a: string, b: string) => ({
+  targets: ["cli-a", "cli-b"],
+  resetCheck: false,
+  run: ({ exec, target }: any) => exec(`"${bin}" ${target === "cli-b" ? b : a}`),
+})
 
 export default bench({
   targets: {
+    "cli-a": cli(),
+    "cli-b": cli(),
     "script-a": script("./harness.ts"),
     "script-b": script("./harness.ts"),
     "page-a": page("p=a"),
@@ -104,7 +122,14 @@ export default bench({
     "pulse-100": pulse(100),
     "pulse-200": pulse(200),
   },
+  // The frames page times its vsync over its first 30 frames: no run starts before that.
+  setup: async ({ page, case: c }: any) => {
+    if (c === "frames") await page.waitFor("#calibrated")
+  },
   cases: {
+    "cli-spin": { ...command("spin 150", "spin 300"), primary: "cpu.work", metrics: ["run.duration", "metric.truth_cpu_ms"] },
+    "cli-alloc": { ...command("alloc 50 300", "alloc 100 300"), primary: "memory.peak", metrics: ["metric.truth_mib"] },
+    "cli-io": { ...command("io 20 12", "io 40 24"), primary: "io.write", metrics: ["io.read", "metric.truth_write_bytes", "metric.truth_read_bytes"] },
     spin: {
       targets: ["script-a", "script-b"],
       primary: "cpu.work",

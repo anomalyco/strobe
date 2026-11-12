@@ -92,6 +92,17 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     if web && window_until.is_some() {
         return Err(Error::usage(format!("{}: a web target's launch is timed in the page, which has no window of its own: time it to a selector", s.case)));
     }
+    // An app's home is ready before the hook (folders, seed, profile files, a `{port}` a warm home
+    // keeps), and the hook gets the environment and executable the app launches with, so it can start
+    // what the app expects to find (a background service) the way the app would.
+    let app = if matches!(kind.as_str(), "app" | "exe" | "webview") { Some(with_gpu_cache(ctx, s, v, &target, variant_app(v, &target, &ctx.config)?)?) } else { None };
+    // An app with `window: false` (a tray app), on the target or the profile this side runs: nothing to
+    // wait for on screen, fit or film, as for a windowless native app (`native::launch_once`). Refused
+    // for this series alone, so the file's other targets and cases still run.
+    let windowless = !web && app_windowless(&target, app.as_ref());
+    if windowless {
+        windowless_refusal(s, window_until.is_some())?;
+    }
     if matches!(window_until, Some(super::native::Until::Painted | super::native::Until::Settled)) {
         if spec["screen"] == false {
             return Err(Error::usage(format!("{}: launch.until.window painted or settled reads the window's pixels; drop screen: false", s.case)));
@@ -105,10 +116,6 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             ));
         }
     }
-    // An app's home is ready before the hook (folders, seed, profile files, a `{port}` a warm home
-    // keeps), and the hook gets the environment and executable the app launches with, so it can start
-    // what the app expects to find (a background service) the way the app would.
-    let app = if matches!(kind.as_str(), "app" | "exe" | "webview") { Some(with_gpu_cache(ctx, s, v, &target, variant_app(v, &target, &ctx.config)?)?) } else { None };
     // An app on the OS's webview has no Node main process to profile or inspect.
     let electron = app.as_ref().is_some_and(|a| a.kind == isolate::AppKind::Electron);
     if spec["inspect"] == true && !electron {
@@ -169,9 +176,12 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     let emulation = if web { emulation_of(&target, &s.target)? } else { chromium::Emulation::default() };
     let reduce = Motion::of(&target, &s.target)?;
     phone_window(&mut window, &target, &emulation, headless_of(ctx, s));
-    ctx.used = Some(window.clone());
+    // A windowless app's hidden window is no one's size: none is recorded or held to the other side's.
+    if !windowless {
+        ctx.used = Some(window.clone());
+    }
     // An attribution launch reads no pixels, unless they are what ends it.
-    let screen = !web && spec["screen"] != false && (!profile || window_until.is_some());
+    let screen = !web && !windowless && spec["screen"] != false && (!profile || window_until.is_some());
     let inspect_port = if spec["inspect"] == true && !profile { Some(free_port()?) } else { None };
     let mut guard = None;
     // The time stamp counter's rate, from two readings around the launch: cycles to ms.
@@ -212,7 +222,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // An app's windows stay on top without focus (an occluded window never paints); `screen` also
         // captures their pixels. Timed to the window, each look goes to the wait below too, with the
         // process set's cycles, as a native launch's does. An app with `window: false` has none to keep up.
-        let sampler = (!web && (window_until.is_some() || !super::windowless_target(&target, &ctx.config))).then(|| {
+        let sampler = (!web && !windowless).then(|| {
             let stop = stop.clone();
             let timed = window_until.is_some();
             std::thread::spawn(
@@ -405,10 +415,17 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             ));
         }
         let shown_page: Page = page.clone();
-        validity::window_visible(&shown_page)?;
+        // A windowless app's window is hidden (`visibilityState` hidden is what one looks like), and
+        // must stay so: one on screen had none of a windowed app's guards (in front, uncovered).
+        if windowless {
+            windowless_shown(v.target_of(s), &browser.pids())?;
+        } else {
+            validity::window_visible(&shown_page)?;
+        }
         // A webview app's launch is not moved or sized: the block records the window it opened.
         if let (WebBrowser::Chromium(b), Page::Chromium(p)) = (&browser, &page)
             && b.embedded
+            && !windowless
         {
             ctx.used = Some(crate::target::webview::fit(b, p, None, false)?);
         }
@@ -453,7 +470,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         lap("milestones", &mut steps);
         // The page's own size in the window the app opened (a launch is never resized), which
         // `admit_window` holds to the other side's and to a viewport the targets ask for.
-        let client = page.eval("[innerWidth, innerHeight, devicePixelRatio]").ok().and_then(|v| Some([v[0].as_f64()?, v[1].as_f64()?, v[2].as_f64()?]));
+        let client = if windowless { None } else { page.eval("[innerWidth, innerHeight, devicePixelRatio]").ok().and_then(|v| Some([v[0].as_f64()?, v[1].as_f64()?, v[2].as_f64()?])) };
         // What the result says the launch drew in: the page's own size, not the window asked for.
         if let Some(c) = client.filter(|_| !matches!(&browser, WebBrowser::Chromium(b) if b.embedded)) {
             ctx.used = Some(Window { width: c[0].round() as u32, height: c[1].round() as u32, scale: Some(c[2]), ..window.clone() });
@@ -519,8 +536,14 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         if !web && declares(s, "memory.app.") {
             memory(&browser.processes(), &mut values);
         }
-        let why_no_pixels = if web { "a page's launch is timed in the page; window pixels are an app, exe or command target's".to_string() } else { no_pixels(screen) };
-        let mut refused = refusals(s, &values, &why_no_pixels, web);
+        let why_no_pixels = if web {
+            "a page's launch is timed in the page; window pixels are an app, exe or command target's".to_string()
+        } else if windowless {
+            WINDOWLESS_DRAWN.to_string()
+        } else {
+            no_pixels(screen)
+        };
+        let mut refused = refusals(s, &values, &why_no_pixels, web, web || windowless);
         if launch_lost && refused.contains_key("cpu.work") {
             refused.insert("cpu.work".into(), super::super::record::cpu_lost("cpu.work", 1, 1, if web { "the browser" } else { "the app (a launcher that handed over, a helper)" }));
         }
@@ -601,8 +624,9 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
 /// What a launch case measures is the launch: from the spawn until ready, its milestones, the CPU it
 /// took and, for a launched app, its memory once ready. Every other declared metric is refused with
 /// why (a run's, or one this OS cannot read), never left without a value. `pixels`: why the window's
-/// pixels were not read, when they were not.
-pub(super) fn refusals(s: &Series, values: &BTreeMap<String, f64>, pixels: &str, web: bool) -> BTreeMap<String, Refusal> {
+/// pixels were not read, when they were not. `no_window`: the target has none to read (a page, a
+/// terminal, a windowless app), so they are no metric of it (`NotForTarget`), not a source that failed.
+pub(super) fn refusals(s: &Series, values: &BTreeMap<String, f64>, pixels: &str, web: bool, no_window: bool) -> BTreeMap<String, Refusal> {
     let mut out = BTreeMap::new();
     for m in declared_metrics(s) {
         // A counter only `--noworse` names is no launch's to measure, nor to refuse.
@@ -610,6 +634,7 @@ pub(super) fn refusals(s: &Series, values: &BTreeMap<String, f64>, pixels: &str,
             continue;
         }
         let r = super::super::outside::not_on_this_os(m).unwrap_or_else(|| match m.as_str() {
+            "launch.painted" | "launch.settled" if no_window => Refusal::new(ValidatorId::NotForTarget, format!("{m}: {pixels}")),
             "launch.painted" | "launch.settled" => Refusal::new(ValidatorId::NoPresentSource, format!("{m} reads the window's pixels: {pixels}")),
             _ if m.starts_with("launch.node.") => {
                 Refusal::new(ValidatorId::NotForTarget, format!("{m} is Node's own timing, read over --inspect from an app or exe target's main process (launch.inspect: true); this launch gave none"))
@@ -652,6 +677,51 @@ pub(super) fn no_pixels(asked: bool) -> String {
         return format!("macOS gives strobe a window's pixels only with Screen Recording ({}, for {})", host::macos::screen_recording_pane(), host::macos::screen_recording_grantee());
     }
     "no frame of the window was read while the app launched (it showed none in time, or the OS gave strobe none of its pixels: a native Wayland window)".into()
+}
+
+/// Why a windowless app (`app_windowless`) has no pixels, frames or input latency: the same words as
+/// the bench's own refusal of them (`bench.rs`).
+pub(super) const WINDOWLESS_DRAWN: &str = "the app shows no window (window: false), so nothing it draws reaches a display";
+
+/// Whether an app side shows no window: the target's own `window` when it sets one (an explicit
+/// `window: true` holds over its profile's `window: false`), else the profile this side runs (`app`:
+/// the target's, or the one an `app:<id>` variant names).
+pub(super) fn app_windowless(target: &Value, app: Option<&isolate::App>) -> bool {
+    match target["window"].as_bool() {
+        Some(window) => !window,
+        None => app.is_some_and(|a| a.windowless),
+    }
+}
+
+/// What a windowless app's launch cannot be, refused for its series before anything launches: timed to
+/// a window (`window_until`), or with a primary of its pixels. A secondary of them is refused per
+/// block (`refusals`), and the primary still measured.
+pub(super) fn windowless_refusal(s: &Series, window_until: bool) -> Result<()> {
+    if window_until {
+        return Err(Refusal::new(ValidatorId::NotForTarget, format!("{}: the app shows no window (window: false), so its launch cannot end on one", s.case))
+            .fix("time it to a selector in its page or to a milestone")
+            .into());
+    }
+    if matches!(s.primary.as_str(), "launch.painted" | "launch.settled") {
+        return Err(Refusal::new(ValidatorId::NotForTarget, format!("the primary {}: {WINDOWLESS_DRAWN}", s.primary))
+            .fix("choose a primary a windowless app's launch has: launch.ready, a milestone, cpu.work or memory.app.private; or give the app a window")
+            .into());
+    }
+    Ok(())
+}
+
+/// `window: false` on a target whose processes (`pids`) put a normal window on screen anyway: none of a
+/// windowed target's guards held it (in front, uncovered, active), so its numbers may be a covered or
+/// inactive window's. A hidden window, a headless browser's and a tray icon are not on screen; a covered
+/// one is (macOS calls a window under others `cloaked`; Windows only one the compositor hides).
+pub(super) fn windowless_shown(name: &str, pids: &[u32]) -> Result<()> {
+    let on_screen = |w: &host::TopWindow| w.visible && !w.iconic && (cfg!(target_os = "macos") || !w.cloaked);
+    match host::main_window(pids).filter(on_screen) {
+        Some(w) => Err(Refusal::new(ValidatorId::VariantMismatch, format!("the target {name} declares window: false, yet it showed a window on screen ({}×{} pixels)", w.client.0, w.client.1))
+            .fix("drop `window: false`, or keep the window hidden")
+            .into()),
+        None => Ok(()),
+    }
 }
 
 /// A launch's memory once ready (`memory.app.private`, and `memory.app.host` where the OS gives
@@ -1046,24 +1116,24 @@ impl Watch {
             }
             cdp.send("Target.setAutoAttach", p, None)
         };
-        let running = cdp.send("Target.getTargets", json!({}), None)?;
+        // Auto-attach first, then the list: a page that opens between the two is paused for its observer
+        // either way, and is either in the list or arrives as an attach event later.
         attach(true).or_else(|_| attach(false))?;
+        let running = cdp.send("Target.getTargets", json!({}), None)?;
         let a = Arc::new(Attacher { cdp: cdp.clone(), observer, profile, tx, stop: stop.clone(), late: late.clone(), pages: pages.clone(), seen: Mutex::new(Default::default()) });
         // Pages that already ran when strobe connected (a browser opens its first page at startup): armed
-        // here, before strobe navigates one. Auto-attach attaches them too; their sessions are the ones
-        // armed, so each page has one session. A browser whose auto-attach left one out gets it attached.
-        let mut open: std::collections::BTreeMap<String, Value> =
-            running["targetInfos"].as_array().into_iter().flatten().filter(|t| is_page(t)).map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t.clone())).collect();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !open.is_empty() {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
-            let Ok(ev) = events.recv_timeout(left) else { break };
-            if ev["method"] == "Target.attachedToTarget" {
-                open.remove(ev["params"]["targetInfo"]["targetId"].as_str().unwrap_or(""));
-            }
+        // here, before strobe navigates one. Auto-attach attaches them too, and Chromium sends those
+        // attach events before its answer to `setAutoAttach`, on the one connection, so they are queued
+        // now: taken without waiting (this runs inside a timed app launch). Their sessions are the ones
+        // armed, so each page has one session; a page auto-attach left out is attached here.
+        while let Ok(ev) = events.try_recv() {
             a.event(&ev);
         }
-        for (id, info) in &open {
+        for info in running["targetInfos"].as_array().into_iter().flatten().filter(|t| is_page(t)) {
+            let id = info["targetId"].as_str().unwrap_or("");
+            if a.seen.lock().unwrap().contains(id) {
+                continue;
+            }
             let attached = cdp.send("Target.attachToTarget", json!({ "targetId": id, "flatten": true }), None);
             if let Some(session) = attached.ok().as_ref().and_then(|r| r["sessionId"].as_str()) {
                 a.page(session, info);
