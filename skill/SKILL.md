@@ -38,8 +38,10 @@ The design and every rule behind this file: SPEC.md.
    - Secondaries get words only after the primary decided (Holm-corrected); `·` is descriptive.
    - `ledger  3rd experiment on these variants; earlier: …`: reruns count. Paste it as it is.
    - `strobe query <exp> insights`: per series the verdict (or a check's status), ranked suspects
-     with their source, the warnings that bear on it, and the exact commands to run next (`--pairs N`,
-     `record --bench <file>#<case>` when nothing was profiled). Any kind: check, `--blocks`, leak run.
+     with their source, the warnings that bear on it, and commands to run next as printed (`--pairs
+     N`, `record --bench <file>#<case>` for a side nothing profiled). Any kind: check, `--blocks`, leak
+     run. Head's hits read `(over its threshold on head only)`, `(… on base too)` or `(base not read
+     for it)`; beside `same`, `unclear` or an A/A no mover is a suspect (two launches differ anyway).
 4. Put the evidence in the PR (below).
 
 - Refactor or dependency bump? `--noworse 2%` (or `noworse: "2%"` on the case;
@@ -98,7 +100,8 @@ The design and every rule behind this file: SPEC.md.
   `record pid:<n>` or `proc:<name>` for a process strobe did not start.
 - `query <rec> threads`: wakes/s and CPU per thread, the module each started in, whose (app, driver,
   os, `unknown (?)`); `--timeline` per second. `query <rec> insights` rules include dominant-thread,
-  off-cpu-bound, style-layout-dominant, wakes-while-idle (idle blocks too), hot-function, http-stalls.
+  off-cpu-bound, style-layout-dominant, wakes-while-idle (idle blocks too), hot-function (a named
+  function of the target's over 25% of busy samples, one hit each), http-stalls (measured runs only).
 - Native hotspots of a tree pool every process: read `by process`, then `--pid <pid|exe>`.
   A native attribution recording (`record --bench`, `--why`) keeps frames too: `query <rec> inputs`.
   `! Coverage`: samples cover under 80% of the CPU (read shares, not totals); it names what the
@@ -151,9 +154,9 @@ The design and every rule behind this file: SPEC.md.
   it runs `up --skip self,skill,daemon,mcp,deep,calibrate`, which only fetches the engine.
 - The step summary, the job's log and the artifacts never name the machine's other processes, other
   apps' windows or its user: the uploaded result.json is a scrubbed copy and its HTML report is drawn
-  from that copy alone (no recordings, so no hotspots; the runner keeps them, `report-path`). A PR
-  block strobe posts names a covering window by its process, though some macOS and accessibility
-  forms still carry a name (SPEC §21).
+  from that copy alone (no recordings, so no hotspots; the runner keeps them, `report-path`). The PR
+  block, summary and card name no other process, window title or person's folder either (a covering
+  window by its process id; `pr::public`, SPEC §11.2).
 
 ### No display, a locked session, a server
 

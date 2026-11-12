@@ -5862,12 +5862,16 @@ naming each recording's own view; its `insights` are each side's own. Every row 
 know their runs; otherwise neither side is divided and the header says per recording. Native samples
 without times (macOS `sample`) cover the whole capture, launch, warmups and resets included: never
 divided by runs, and they name no insight movers. Two recordings are two launches, often two builds
-in two checkouts: rows match by name and a portable location, never by line. The location starts at
-a step no checkout names: a monorepo's `packages/`, `crates/` or `apps/`, a toolchain's `library/`,
-else the last `src/` or `lib/`; a dependency from its package (`node_modules/…`, a cargo crate
-without its version or a build script's hash); a script URL without origin, query and bundler hash.
-A git ref's checkout strobe made (`builds/<commit>/`) takes no part in it, so a file at the
-checkout's root matches across two refs too (before, its function was two rows: +32 ms and −20 ms).
+in two checkouts: rows match by name and a portable location, never by line. A dependency is named
+from its package (`node_modules/…`, a cargo crate without its version or a build script's hash). A
+file of the side's own checkout is named whole from that checkout's root: the folder with the `.git`
+above it on disk (a repository, or strobe's worktree of a ref), else, for a recording read where its
+files are not (pruned builds, another machine), the folder the side's own script files share, or the
+path from a `builds/<commit>/` folder. Backslashes and `\\?\` are normalized first. So `--base <ref>
+--head .` and two plain folders match a file at the checkout's root (before: two rows, +32 ms and
+−20 ms), and `server/auth/util.ts` and `client/auth/util.ts` stay apart. Else the location starts at a
+step no checkout names (a monorepo's `packages/`, `crates/` or `apps/`, a toolchain's `library/`, else
+the last `src/` or `lib/`); a script URL loses its origin, query and bundler hash.
 The weighted views (`hotspots`, native samples too with `--thread` and `--phase`, `alloc`, `layout`,
 by `--by function|file|package`) rank rows by the size of their change and give, per function, the
 stacks where the change concentrated (each ≥ 5% of the row's change). Sampled views carry each
@@ -6139,10 +6143,8 @@ machine line) from the series that measured, never from refused, gap, check or n
 `(#123)` references, which would link to the PR's repository. Variants are named by commit
 (`1982f5313f`, `origin/x@7bf4e2d566`, `(dirty)`), a prebuilt executable by the last two parts of
 its path (`exe:…/base/app`), the bench file by its path in its repository, never a local folder;
-whatever a note quotes, a home folder reads `~` and another absolute path its last part (this
-machine's home only as a whole path: at the start, after a space or a quote; another user's
-`/home/<u>` or `/Users/<u>` only where a path starts, never mid-path: `…/vps1/home/.local/…` once
-read `…/vps1~/share/…`). The
+whatever a note quotes, a home folder reads `~` and another absolute Windows path its last part
+(where a path starts, never mid-path: "Publishable surfaces" below). The
 block's first line names the bench file (`strobe · exp_c3c66b · perf/launch.bench.ts ·
 generated`), so a body with several blocks says which file each covers. Metric names drop the
 catalog's target prefix (`ui.cpu` is `UI-thread CPU time per run`). The output is deterministic for a strobe build and at most 24,000 characters (UTF-16,
@@ -6211,18 +6213,36 @@ when there are several), and a line naming the strobe and `strobe report <id>`. 
 `--format pr` block without card or badges (a step summary attaches no images). Paths scrubbed as in
 a PR block. `-q` keeps the Markdown on stdout (md, pr, summary); only the `wrote <path>` line goes.
 
-**Publishable surfaces** (rule 9): the PR block and the step summary pass every text strobe wrote
-(notes, refusals, errors) through one scrub (`pr::scrub_public`, beside the path scrub): each list of
-other processes (`(busiest elsewhere: …)`, `busiest processes on the machine (% of a core): …`,
-`busiest processes on the machine: …`, `busiest processes (% of a core): …`, `busiest processes: …`)
-becomes its count and the busiest one's share (`2 other processes, the busiest 101% of a core`;
-`none named (…)` stays; a list of shares ends after its last `<name> N%`, so a name holding a
-parenthesis, `app).exe`, ends nothing early), `ReservedCpus`' lists of the processes it moved or could
-not move go (their counts stay; the moved list ends at the parenthesis before `, ` or `; `), and a
-covering window's title goes, its process stays (`another window of process <pid> covers the point
-(x, y)`, `another window of process <pid> covers the region`; other forms: §21). The PR block lists
-`HarnessOverlay` only at warn level (a file base lacked, placed, changed nothing base ran). The PR
-block's Pairs footnote says `<n> other processes ≥ 5%, busiest <x>% of a
+**Publishable surfaces** (rule 9): every text strobe publishes passes one choke point, `pr::public`
+(the path scrub, then `pr::scrub_public`), before anything cuts it short: the PR block, the step
+summary, the card's calm refusal line (so its alt and aria text too), and inside `first_clause`,
+every cut of public text. It removes:
+
+- each list of other processes (`(busiest elsewhere: …)`, `busiest processes on the machine (% of a
+  core): …`, `busiest processes on the machine: …`, `busiest processes (% of a core): …`, `busiest
+  processes: …`), which becomes its count and the busiest one's share (`2 other processes, the busiest
+  101% of a core`; `none named (…)` stays); a list ends after its last `<name> N%`, whatever a name
+  holds (`app).exe`, a `;`);
+- `ReservedCpus`' lists of the processes it moved or could not move (their counts stay); the moved
+  list ends where the note goes on (`, N more started`, `; N could not be moved`, `; N% put back`);
+- what another program shows: every Debug-quoted string (`"…"`) in a clause (up to the next `; `
+  outside quotes) that names a process (` of process <pid>`, `(pid <pid>)`) becomes `"…"`, the pid
+  staying: a covering window's title, an element's name and key, a window class (`another window
+  covers the point (x, y): "<title>" of process <pid>`, `window "<title>" of process <pid>`, `pane
+  "<name>" (key "<id>") of process <pid>`, `a "<class>" window of process <pid>`, `"<title>" (pid
+  <pid>) is …`, `"<title>" of process <pid> covers the region`); and `a window of <app> of process
+  <pid>` (macOS) reads `a window of process <pid>`;
+- a person's folders: a path starts at the text's start, a delimiter, `file://` or `file:///`, or
+  `\\?\` (never inside a longer path: `…/vps1/home/.local/…` once read `…/vps1~/share/…`). This
+  machine's home (its trailing separator trimmed, either separator, any case, ending at a separator
+  or the name's end: `/home/ann` never matches in `/home/anna`) reads `~`, then any `[X:]\Users\<name>`
+  or `/home/<name>` (either separator, any case) reads `~`, then other absolute Windows paths read
+  `…/` and their last part.
+
+Known answers: `scripts/dev/public-text.ts` (every form above through `--format pr`, `summary`, the
+card's alt text and its SVG). The PR block lists `HarnessOverlay` only at warn level (a file base
+lacked, placed, changed nothing base ran), and names `Uncounted` `Counter not counted` (warn: it
+reaches the PR block and the summary). The PR block's Pairs footnote says `<n> other processes ≥ 5%, busiest <x>% of a
 core` (each pair's `cpu.foreign.max` stays). Cards and badges draw only a refusal's validator and
 summary, which name no process. Not foreign, so kept: `EndedCpu` (the target's own ended processes)
 and an implementation comparison's sides' processes. On a shared runner (`env.shared_runner` in the
@@ -6375,13 +6395,19 @@ As built (`query <rec> insights`, `query <exp> insights`):
 | `style-layout-dominant` | a page's `main.style` + `main.layout` ≥ 20 ms per run (over the recording for a `record`) and over `main.script` (warn from 50 ms and twice script) | style, layout and script ms; `query style`, `query layout` |
 | `background` | `cpu.foreign.max` ≥ 25% | the busiest processes outside strobe's tree |
 | `unresolved` / `native-time` | < 95% of script samples mapped / `(program)` ≥ 30% of busy samples | shares |
-| `hot-function` | info: the top named function (no pseudo-frame, not strobe's driver) holds ≥ 25% of the busy samples and ≥ 20 samples | `hot function: <name> (<file>) holds X% of the sampled CPU (Y per run, n samples)`; `query hotspots`, `query hotspots --by package` |
-| `http-stalls` | the recording's HTTP probe (§8.9) has stalled cohorts: warn when a cohort timed out, else info | `HTTP probe: N stalled cohorts (M in measured runs; probes in a row over T); the first measured, <run> +s, k probes: <says>`; `query http`, `strobe open` |
-| `leak` | a memory recording or leak run | its facts and verdict, and the largest retained class: `most retained: <class> ×N (its constructor at url:line:col), size, held by … > …` |
+| `hot-function` | info, one hit per function (at most four can be): a named function of the target's holds ≥ 25% of the busy samples, with ≥ 20 samples and, in a block, ≥ 1 ms per run. Never a pseudo-frame (`(program)`, …), strobe's driver (`strobe-driver.js:<line>:<col>` or a via-driver row, also left out of the busy total), an unsymbolized native frame (a module's name, `module+0x…`, where `(native)`), nor untimed native snapshots (macOS `sample`: no CPU time) | `hot function: <name> (<file>) holds X% of the sampled CPU (Y per run, n samples)` (`over the whole host process` for a whole-host script profile, `over the recording` for a `record`), the file named from its checkout's root (§11.1) with no line; `query hotspots`, `query hotspots --by package` |
+| `http-stalls` | the recording's HTTP probe (§8.9) has stalled cohorts with a probe due in a measured run's timed part (a cohort opened just before a run is that run's): warn when a measured probe timed out, else info; stalls in warmup, untimed parts or between runs are no suspect | `HTTP probe: N stalled cohorts in the measured runs (probes in a row over T; M more outside them); the first, <run> +s, k probes: <says>`; `query http`, `strobe open`. `query http`'s cohorts carry `in_measured`, `measured_run` and `measured_timeouts` |
+| `leak` | a memory recording or leak run | its facts and verdict, and while the heap grows the class most retained, the page's own (constructor located) first: `most retained: <class> ×N (its constructor at url:line:col), size, held by … > …` (a `record --probes memory` reads its classes from `leaks.json`); handles `leaks` and `memory`, or for Firefox (no heap snapshots) `memory --at 0` and `memory` |
 
 `off-cpu-bound` on a profiled script recording (its timing perturbed) reads `cpu.main` (`the host's
 main thread ran …, the profiler's own thread left out`: Bun's sampler takes a core while the script
-sleeps), and its handle there is `threads --timeline`.
+sleeps), and says nothing when `cpu.work` exceeds `run.duration` by 25% or more (other threads were on
+a CPU, which the main thread alone cannot show). Its handle is `waits` only with a native capture
+(`deep.json.gz`); else `threads` for a native block, `strobe open` for a trace, `threads --timeline`
+for a script host. Every recording's insights JSON lists the rules whose source it held (`checked`),
+and a hit says what it is about (`evidence.subject`: hot-function's function and file,
+dominant-thread's thread and module, unresolved's `native` or `script`), so two recordings' hits pair
+by rule and subject.
 
 **An experiment** (`query <exp> insights`) answers for every kind, per series, in four parts (JSON
 `{ experiment, kind, comparison, warnings, series: [{ series, kind, result[], suspects[{ source, hits
@@ -6395,32 +6421,56 @@ without attribution printed a header and nothing else.
   the median and its interval over the blocks; a leak run: each side's JS heap, DOM and host growth
   verdict, the interval beside a leak. A bisect gives its verdict and `strobe query <culprit step's
   exp> insights`; a pixels run the frames that differ and `report --open`.
-- **Suspects**, ranked, each naming its source: the attribution blocks' movers along the primary's
-  change first, then hits on head only, movers against the change, hits base has too (`(base too)`),
-  then hits on base only; a check's attribution block and its own recording; `--blocks`: head's
-  attribution block, else the first timed block's recording; a leak run: the three largest classes
-  still alive from the first half while memory grows (or may), the page's own (constructor located)
-  as warn; a comparison without attribution blocks: head's timed block recording, its hits marked
-  against base's. In a comparison each head hit carries `sides: both | head only`, and `base_only`
-  lists base's own. `suspects none: <why>` when none can be read: a `cli()` or `tty()` target,
-  `--why never` or `--probes timing`, `--max-time`, `nothing to explain: --why auto profiles a series
-  only when its primary moved`, or the `Attribution` or `MaxTime` warning's text.
+- **Suspects**, ranked, each naming its source. A comparison's attribution blocks (`(untimed, under
+  the profilers; one launch per side, so an interval covers sampling alone, not launch to launch)`):
+  beside a decided change that is no A/A, the movers along it first (the way the cost went: a worse
+  primary is more of it, a better one less, whichever way the metric counts, so `frames.fps` ranks
+  right), then head's hits over their threshold there alone, the movers against the change, the hits
+  base has too, and base's alone; beside `same`, `unclear` or an A/A no mover is a suspect (`no
+  movers: the timed pairs decided no change, so what the two launches differ by is no suspect`, and
+  the JSON's `movers` is empty). Head's hits are tagged against base's by rule and subject: `(over its
+  threshold on base too)`, `(over its threshold on head only)` (base's recording was read for that
+  rule), `(base not read for it)`; base's own are always info, said `base only: …`; a base recording
+  that cannot be read tags nothing. One side's attribution block alone is read as that side's, and
+  `record --bench` is suggested for the missing side only; two implementations' are read each on its
+  own. A check's attribution block and its own recording; `--blocks`: head's attribution block, else
+  the first timed block's recording; a leak run: the three largest classes still alive from the
+  first half while memory grows (or may), the page's own (constructor located) as warn, and with no
+  growth `no memory growth to explain`; a comparison without attribution blocks: head's timed block
+  recording, its hits tagged against base's. `suspects none: <why>` when none can be read: a `cli()`
+  or `tty()` target, a WebKit page or a Firefox page's launch (no profiler in strobe for them), `--why
+  never` or `--probes timing`, `--max-time`, `nothing to explain: --why auto profiles a series only
+  when its primary moved`, the `Attribution` or `MaxTime` warning's text (a failed or skipped `--why
+  always` block), a recording `not on this machine (pruned, or the result came from another)` (the
+  result, warnings and next still print), or a `--check --batch` launch's shared recording, which
+  `holds the runs of N cases of one --batch launch, so its rules would pool them (record --bench
+  profiles one case alone)`.
 - **Warnings** that bear on it, each once: the series' warn-level ones, and `Attribution` where it
   says why an attribution block is missing or failed (not its sampling notes).
 - **Next**, as commands: `--pairs <needed_pairs>` when underpowered or unclear, `--pairs
   <holm_pairs>` when Holm leaves secondaries untested, `strobe record --bench <file>#<case> --head
-  <base>` and `--head <head>` when a decided difference has no attribution, `strobe query <a>..<b>
-  hotspots|layout|alloc` and `strobe report experiment <id> --open` with attribution, `--why always`
-  for `--blocks`, `--repeat 2n` for an unclear growth, `bench --resume` for a stopped series, a
-  refusal's fix, and a failed case's hint with its rerun (`--seed` when seeded). A rerun of one series
-  is the bench's own command without what that run chose for itself (`--id`, `--seed`, `--pairs`,
-  `--filter`, `--why`, `--max-time`, `--resume`, `--json`, `--quiet`, `--plan`).
+  <side>` for each side a decided difference has no attribution for (never for a target strobe cannot
+  profile), `strobe query <a>..<b> hotspots|layout|alloc` and `strobe report experiment <id> --open`
+  with attribution, `--why always` for `--blocks`, `--repeat 2n` for an unclear growth, `leaks` and
+  `heap` for a growth with heap snapshots, else `memory --at 0` and `memory` (a native app's host
+  memory, Firefox), `a..b heap|memory` for two sides (not implementations), `bench --resume` for a
+  stopped series, a refusal's fix, a failed case's hint with its rerun (`--seed` when seeded), and
+  for a check of base and head the same two timed as a comparison. A command is the experiment's own:
+  its bench file and flags (a result that kept none: its variants), or for `strobe run` its two
+  commands (`strobe run --base … --head …`); narrowed to the series (`--filter <case>`, its
+  `--target` and `--params`); without what that run chose for itself (`--id`, `--seed`, `--pairs`,
+  `--why`, `--max-time`, `--resume`, `--json`, `--quiet`, `--plan`, `--verbose`, `--progress`,
+  `--stop`); with only the flags that command reads (`cli::FLAGS`), a switch bare, `--mobile` bare or
+  `--mobile=<serial>`; and every word quoted alike for `sh` and PowerShell (bare when it holds only
+  letters, digits and `_-./:=+%^`, else in single quotes). No placeholder: every command runs as
+  printed (`scripts/dev/next-commands.ts` parses them under both shells).
 
 Facts and pointers only: nothing it says goes past what the experiment holds. Known answers:
 `scripts/dev/insights-repo.ts` (its cases and commands in its header). An experiment's movers come
 from the `a..b` views: CPU self time (≥ 1 ms/run, a CPU profile's pseudo-frames left out), forced
-layout (≥ 1 ms/run) and allocations (≥ 64 KB/run) by function, matched by name and portable location;
-a sampled change inside its 95% sampling interval is not a mover. Core migration needs the deep
+layout (≥ 1 ms/run) and allocations (≥ 64 KB/run) by function, matched by name and portable location
+(§11.1); a sampled change inside its 95% sampling interval is not a mover, nor is anything of a view
+that is not per run on both sides (untimed native samples, an unknown run count). Core migration needs the deep
 helper and is not built.
 
 ### 11.4 Perfetto (`strobe open`)
@@ -8735,16 +8785,6 @@ Questions for spikes:
 - Each embedding app's product decisions for the bridge: where the toggle lives, who can turn it
   on, the indicator.
 
-**Known gaps in strobe's own published text** (`pr::scrub_public`, the PR block and `--format
-summary`, §11.2): it names a covering window by its process for Windows' and X11's and Wayland's
-titles (`another window of process <pid> covers the point (x, y)`, `… covers the region`), but the
-other forms `WindowHidden` gives still carry a name: macOS's `a window of <app> of process <pid>`
-and `<role> "<title>" of process <pid>`, an accessibility element's `<kind> "<name>" of process
-<pid>` (UI Automation) and `<role> "<title>" (key "<id>") of process <pid>` (AX), and Windows'
-`a "<class>" window of process <pid>`. The action scrubs its own copies again (§26.4); the fix is
-its `scrubText` rule (every quoted string in a clause that names `of process <pid>`, and `a window
-of <app>`).
-
 **Not built** (beyond what each section marks): a Firefox launch's attribution block
 (`MOZ_PROFILER_STARTUP`), Firefox's sampled allocations (`jsallocations`), WebKit attribution on
 desktop Linux and macOS, times on macOS native samples, per-thread wakes on macOS (root only, kdebug),
@@ -8837,12 +8877,13 @@ what was built but not yet run on a device is in §21.
   longer cached (26.2, 26.3, 26.4). After review: release notes escaped (no HTML, emphasis, math or
   mention), chores left out without an empty heading, Latest only for the highest version (20); the
   action's text scrub also takes covering window titles, names holding `)`, home paths (result.json,
-  the HTML, `runner.log`) and everything it relays to the job's log (26.2, 26.4); the strobe Markdown
-  scrub's remaining holes listed (21; cleanup/w7b closed its `)` and the plain-title ones). The docs of cleanup/w7a (check steadiness, `--probes memory`
+  the HTML, `runner.log`) and everything it relays to the job's log (26.2, 26.4). The docs of
+  cleanup/w7a (check steadiness, `--probes memory`
   exits, counters only where counted, `HarnessOverlay`, the pinned engine digests: 5.6, 8.6, 9.1,
   9.5, 10.2, 14, 15) and cleanup/w7b (`query <exp> insights` per series, `hot-function`,
-  `http-stalls`, `report --format` checked first, home paths at path boundaries: 5.8, 11.1, 11.2,
-  11.3).
+  `http-stalls`, side tags and no movers beside no decided change, runnable next commands, files
+  named from each side's checkout root, `report --format` checked first, one public-text choke
+  point: 5.8, 11.1, 11.2, 11.3).
 
 **After 0.28.0**
 
@@ -9627,8 +9668,8 @@ reserve, busiest and `busiest elsewhere` lists, `strobe up · <name>` and those 
 stdout and stderr, home paths in every form in `result.json`, the HTML and `runner.log`) left none
 in the files or the relayed log. What the action publishes itself (the step summary, its
 annotations, the PR block) never names one: `--format summary` and `--format pr` leave them out
-(§11.2; strobe's own Markdown scrub still lets some forms of a covering window's name through, §21,
-so the action scrubs the summary again), and a bench that did not run shows its
+(§11.2, `pr::public`; the action scrubs the summary again, the same rules in its own words), and a
+bench that did not run shows its
 refusal's validator and summary only, never its detail.
 
 ### 26.5 Versions
