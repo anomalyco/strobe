@@ -20,6 +20,7 @@ pub mod probe;
 pub mod runner;
 pub mod stats;
 pub mod store;
+pub mod support;
 pub mod symbol;
 pub mod target;
 pub mod text;
