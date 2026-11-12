@@ -134,7 +134,8 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     };
     let home = (!web).then(|| if warm { ctx.homes.entry(key.to_string()).or_insert_with(isolate::new_home).clone() } else { isolate::new_home() });
     if let Some(h) = &home {
-        std::fs::create_dir_all(h)?;
+        // Claimed at once: its owner file before any seed or command (`isolate::claim`).
+        isolate::claim(h)?;
     }
     let seed = target["home"].as_str().map(|h| {
         let h = s.params.iter().fold(h.to_string(), |h, (k, val)| h.replace(&format!("{{{k}}}"), &value_text(val)));

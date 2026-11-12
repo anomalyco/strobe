@@ -63,7 +63,7 @@ impl Spec {
     /// daemon moves only its bench's thread there), and waits until it answers.
     pub(super) fn start(&self, params: &BTreeMap<String, Value>, log: &Path, cpus: Option<u64>) -> Result<Rc<Running>> {
         let home = isolate::new_home();
-        std::fs::create_dir_all(&home)?;
+        isolate::claim(&home)?;
         if let Some(seed) = self.seed_dir(params) {
             if !seed.is_dir() {
                 let _ = std::fs::remove_dir_all(&home);

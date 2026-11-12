@@ -206,13 +206,22 @@ fn end(dir: &Path) {
     let until = Instant::now() + Duration::from_secs(2);
     while populated(dir) && Instant::now() < until {
         if !killed {
+            // Each only while it is still in this cgroup (`host::kill`): a pid that exited since the list
+            // and went to a new process names one in its parent's cgroup, not strobe's.
             for pid in pids(dir).unwrap_or_default() {
-                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                super::kill::signal_if(pid, libc::SIGKILL, || in_cgroup(pid, dir));
             }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
     remove(dir);
+}
+
+/// Whether process `pid` is in cgroup `dir` or one below it now (`/proc/<pid>/cgroup`'s v2 line).
+fn in_cgroup(pid: u32, dir: &Path) -> bool {
+    let Ok(rel) = dir.strip_prefix(ROOT) else { return false };
+    let want = Path::new("/").join(rel);
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix("0::").map(|p| Path::new(p.trim()).starts_with(&want)))).unwrap_or(false)
 }
 
 /// The processes in a cgroup and the ones below it.

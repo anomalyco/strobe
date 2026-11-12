@@ -81,8 +81,11 @@ impl Native {
         p
     }
 
+    /// Walked from the launch's root only while it is proven (`Owned::root`): strobe's own child, or an
+    /// app Launch Services started while it has the start time proven at the launch; else only what
+    /// carries the home's stamp. Every window call, sample and input of the app goes through here.
     pub fn processes(&self) -> Vec<host::ProcTimes> {
-        host::process_set(self.pid, Some(&self.home))
+        host::process_set(self.child.as_ref().map_or(0, |c| c.root()), Some(&self.home))
     }
 
     /// macOS: why this app bundle's XPC services are not in its process set, when its launch did not

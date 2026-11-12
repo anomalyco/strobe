@@ -56,7 +56,7 @@ pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {
         .map(|i| {
             let p = &all[i].info;
             let (cpu_ns, cycles, private_bytes, working_set) = proc_times(p.pid);
-            ProcTimes { pid: p.pid, parent: p.parent, name: p.name.clone(), cpu_ns, cycles, private_bytes, working_set }
+            ProcTimes { pid: p.pid, parent: p.parent, start: all[i].create as u64, name: p.name.clone(), cpu_ns, cycles, private_bytes, working_set }
         })
         .collect()
 }
@@ -133,10 +133,14 @@ pub fn process_list() -> Vec<(u32, u32, u64)> {
 }
 
 /// Terminates a process and every process of its tree, children first: each only when the process
-/// the handle opens was created when the snapshot said (a pid reused since is another process).
-pub fn kill_tree(pid: u32) {
+/// the handle opens was created when the snapshot said (a pid reused since is another process). With
+/// `start` (`start_time`'s units), nothing unless the snapshot's `pid` was created then (`host::kill`).
+pub fn kill_tree(pid: u32, start: Option<u64>) {
     use windows_sys::Win32::System::Threading::{PROCESS_TERMINATE, TerminateProcess};
     let all = system_processes(false);
+    if start.is_some_and(|s| !all.iter().any(|p| p.info.pid == pid && p.create as u64 == s)) {
+        return;
+    }
     for i in tree_of(&all, &[pid]).into_iter().rev() {
         unsafe {
             let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, all[i].info.pid);
@@ -758,6 +762,83 @@ pub fn broadcast_env_change() {
     unsafe {
         SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, env.as_ptr() as isize, SMTO_ABORTIFHUNG, 2000, std::ptr::null_mut());
     }
+}
+
+/// When the process `process` (a handle strobe holds) first goes input idle: a thread of it waits for
+/// input with an empty message queue (`GetMessage`, `MsgWaitForMultipleObjects`), the moment the shell
+/// clears its "app starting" pointer for a launch of it (`STARTF_FORCEONFEEDBACK` ends at
+/// `WaitForInputIdle`). A thread of its own blocks in `WaitForInputIdle` (50 ms at a time, so a drop or
+/// `deadline` ends it); the time is when that wait returned, on `now_ns`'s clock (QPC): 17 to 182 µs
+/// after a fixture's own reading just before its first `GetMessage` or `MsgWaitForMultipleObjects`
+/// (scripts/dev/bounce, 50 launches planted at 0, 120 and 450 ms on a Ryzen desktop, Windows 11).
+/// Windows gives every GUI-subsystem process this state from its creation, so the watch blocks from
+/// the start. `NoMessageQueue` for a console program (`ERROR_NOT_GUI_PROCESS`, for 100 ms or until it
+/// exits: Windows keeps no input idle for one), `Deadline` for a GUI program that never waited for a
+/// message, `Ended` when it exited first.
+///
+/// What it is, and is not: when `WaitForInputIdle` clears the shell's "app starting" pointer, not when
+/// the app's UI is usable (`launch.ready` is that). A multi-threaded app (Chromium, Electron, WPF) can
+/// satisfy it in 15 to 40 ms on a helper thread's queue before any window exists; a loop that only
+/// polls `PeekMessage` without blocking is called idle by Windows' spinning heuristic about 530 ms
+/// after it began, late as the shell's pointer is.
+pub fn input_idle(process: isize, deadline: std::time::Instant) -> super::Feedback {
+    use super::NoFeedback;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_NOT_GUI_PROCESS, GetLastError, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{WaitForInputIdle, WaitForSingleObject};
+    let mut held: HANDLE = std::ptr::null_mut();
+    let me = unsafe { GetCurrentProcess() };
+    if unsafe { DuplicateHandle(me, process as HANDLE, me, &mut held, 0, 0, DUPLICATE_SAME_ACCESS) } == 0 {
+        return super::Feedback::none(NoFeedback::Unreadable);
+    }
+    /// The duplicated handle, closed however the watch ends (its thread never started included).
+    struct Held(isize);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0 as HANDLE) };
+        }
+    }
+    let held = Held(held as isize);
+    super::Feedback::start(move |stop| {
+        // The whole guard moves into the watch (a closure that named only `held.0` would capture the
+        // number, and the guard would close the handle as this function returned).
+        let held = held;
+        let h = held.0 as HANDLE;
+        let exited = || unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0;
+        // When Windows first said the process is a console program: whatever ends the watch after that
+        // (its exit, a stop, the deadline) says so.
+        let mut console: Option<Instant> = None;
+        let ended = |console: Option<Instant>, otherwise: NoFeedback| Err(if console.is_some() { NoFeedback::NoMessageQueue } else { otherwise });
+        loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return ended(console, NoFeedback::Deadline);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return ended(console, NoFeedback::Deadline);
+            }
+            let slice = left.min(Duration::from_millis(50)).as_millis().max(1) as u32;
+            let r = unsafe { WaitForInputIdle(h, slice) };
+            let error = if r == WAIT_FAILED { unsafe { GetLastError() } } else { 0 };
+            match r {
+                0 => return Ok(super::now_ns()),
+                WAIT_TIMEOUT => console = None,
+                _ if error == ERROR_NOT_GUI_PROCESS => {
+                    if console.get_or_insert_with(Instant::now).elapsed() >= Duration::from_millis(100) {
+                        return Err(NoFeedback::NoMessageQueue);
+                    }
+                    if !exited() {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                _ if !exited() => std::thread::sleep(Duration::from_millis(1)),
+                _ => {}
+            }
+            if exited() {
+                return ended(console, NoFeedback::Ended);
+            }
+        }
+    })
 }
 
 /// Puts every visible top-level window of these processes on top without activating it, so the

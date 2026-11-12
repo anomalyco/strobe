@@ -149,7 +149,10 @@ pub fn run(args: &Args) -> Result<Output> {
         problems.push("no calibration yet (strobe up)".into());
     }
     let (disk_text, disk_json) = disk.status(args.has("disk"));
+    // What strobe left alone lately (`host::spawn::left_alone_log`): one line when there is any.
+    let left_recent = host::spawn::left_alone_recent(std::time::Duration::from_secs(86_400));
     let json = json!({
+        "left_alone_last_day": left_recent,
         "env": env, "topology": { "groups": groups, "vcache": vcache }, "busy": busy,
         "browser": browser, "firefox": firefox, "webkit": if webkit { Value::String(webkit_text.clone()) } else { Value::Null }, "bun": bun, "bun_version": bun_version, "engine": { "installed": engine_ok, "damaged": engine_damaged, "version": engine::VERSION, "path": engine::path() },
         "calibration": calibration, "recordings": recordings.iter().map(|r| &r.0).collect::<Vec<_>>(),
@@ -287,6 +290,9 @@ pub fn run(args: &Args) -> Result<Output> {
             _ => "not installed: strobe up installs it",
         }
     );
+    if left_recent > 0 {
+        t += &format!("  i left       {left_recent} process(es) strobe could not prove its own were left alone in the last day: {}\n", host::spawn::left_alone_log().display());
+    }
     if benches.is_empty() {
         t += "    benches    none running\n";
     }
