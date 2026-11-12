@@ -44,6 +44,7 @@ const fails: Record<string, [string, string, string]> = {
   // A capture would format an Error or a Text through Display or Debug and drop its marks.
   msg_capture_error: [`fn f(e: &Error) -> Text { strobe::msg!("stopped: {e}") }`, "E0080", "positional"],
   msg_capture_debug: [`fn f(t: &Text) -> Text { strobe::msg!("{t:?}") }`, "E0080", "positional"],
+  msg_capture_unicode: [`fn f(α: &Error) -> Text { strobe::msg!("stopped: {α}") }`, "E0080", "positional"],
   msg_capture_number: [`fn f(n: u32) -> Text { strobe::msg!("{n} blocks") }`, "E0080", "positional"],
   msg_capture_width: [`fn f(w: usize) -> Text { strobe::msg!("{:w$}", "a") }`, "E0080", "positional"],
   msg_brackets: [`fn f(p: &std::path::Path) -> Text { strobe::msg!["in {}", p.display()] }`, "E0277", "cannot go into a message"],
@@ -131,6 +132,319 @@ impl Check {
 
 fn private(s: &str, kind: PrivKind) -> Private<String> { Private::new(s.to_string(), kind) }
 
+/// Each helper in the sentence it is for, its format string copied from the code on main (file:line at
+/// 0.31.0): local exactly what that code writes today, public a sentence that reads right aloud.
+fn sentences(c: &mut Check) {
+    use std::collections::BTreeMap;
+    let fp = PrivKind::ForeignProc;
+    // The phone's short UDID (host/ios.rs, target/wir.rs): "the phone ({})" keeps "the phone", drops the id.
+    let raw = "00008110-001A2B3C4D5E6F70";
+    let short = private(raw, PrivKind::DeviceId).tail_chars(8);
+    let id = strobe::host::ios::short_udid(raw);
+    let tail = "plug it in and tap Trust, then enter its passcode; strobe never pairs by itself";
+    // src/host/ios.rs:351  "unlock the phone ({}), plug it in and tap Trust, then enter its passcode; strobe never pairs by itself"
+    c.text("ios.rs:351", &msg!("unlock the phone{}, {}", Text::phone_id(&short), tail), &format!("unlock the phone ({id}), {tail}"), &format!("unlock the phone, {tail}"), &[id.as_str()]);
+    // src/host/ios.rs:858  "the phone ({}) is locked"
+    c.text("ios.rs:858", &msg!("the phone{} is locked", Text::phone_id(&short)), &format!("the phone ({id}) is locked"), "the phone is locked", &[id.as_str()]);
+    // src/host/ios.rs:915  "the phone ({}) is locked, so Safari and Web Inspector will not expose tabs"
+    c.text(
+        "ios.rs:915",
+        &msg!("the phone{} is locked, so Safari and Web Inspector will not expose tabs", Text::phone_id(&short)),
+        &format!("the phone ({id}) is locked, so Safari and Web Inspector will not expose tabs"),
+        "the phone is locked, so Safari and Web Inspector will not expose tabs",
+        &[id.as_str()],
+    );
+    // src/target/wir.rs:989  "lost connection to the phone ({short_udid}): {why}"
+    let why = "the inspector socket closed";
+    c.text("wir.rs:989", &msg!("lost connection to the phone{}: {}", Text::phone_id(&short), why), &format!("lost connection to the phone ({id}): {why}"), &format!("lost connection to the phone: {why}"), &[id.as_str()]);
+    // An adb serial named alone (validity.rs).
+    let serial = private("R5CT20ABCDE", PrivKind::DeviceId);
+    let s = "R5CT20ABCDE";
+    // src/validity.rs:787  "{serial} is hot {when}: {why}"
+    let (when, why) = ("before block 3", "its battery is at 44 °C");
+    c.text("validity.rs:787", &msg!("{} is hot {}: {}", Text::device(&serial, false), when, why), &format!("{s} is hot {when}: {why}"), &format!("the phone is hot {when}: {why}"), &[s]);
+    // src/validity.rs:798  "{} is an emulator ({why}): it runs on this computer's CPU and GPU, not a phone's, so its timing describes no phone"
+    let (emu, e) = (private("emulator-5554", PrivKind::DeviceId), "emulator-5554");
+    let rest = "it runs on this computer's CPU and GPU, not a phone's, so its timing describes no phone";
+    c.text("validity.rs:798", &msg!("{} is an emulator ({}): {}", emu.redacted("the device"), "ro.kernel.qemu is 1", rest), &format!("{e} is an emulator (ro.kernel.qemu is 1): {rest}"), &format!("the device is an emulator (ro.kernel.qemu is 1): {rest}"), &[e]);
+    // src/validity.rs:805  "{} is reached over the network (adb over Wi-Fi): the radio's work and the link's latency would be in the numbers"
+    let wifi = private("192.168.1.23:5555", PrivKind::DeviceId);
+    let rest = "is reached over the network (adb over Wi-Fi): the radio's work and the link's latency would be in the numbers";
+    c.text("validity.rs:805", &msg!("{} {}", Text::device(&wifi, false), rest), &format!("192.168.1.23:5555 {rest}"), &format!("the phone {rest}"), &["192.168"]);
+    // src/validity.rs:811  "{} has Battery Saver on: it slows the CPU and GPU and defers work"
+    let rest = "has Battery Saver on: it slows the CPU and GPU and defers work";
+    c.text("validity.rs:811", &msg!("{} {}", Text::device(&serial, false), rest), &format!("{s} {rest}"), &format!("the phone {rest}"), &[s]);
+    // src/validity.rs:814  "{}'s battery is at {}%: phones slow down under {LOW_BATTERY_PCT}% to make it last" (20)
+    c.text(
+        "validity.rs:814",
+        &msg!("{}'s battery is at {}%: phones slow down under {}% to make it last", Text::device(&serial, false), 12, 20),
+        &format!("{s}'s battery is at 12%: phones slow down under 20% to make it last"),
+        "the phone's battery is at 12%: phones slow down under 20% to make it last",
+        &[s],
+    );
+
+    // Other processes (validity.rs, bench.rs): named_work with its lead-in.
+    let who = [(private("tracker (beta).exe (4120, other user)", fp), 421.4), (private("renderfarm.exe (88)", fp), 273.0)];
+    let plain: Vec<(String, f64)> = vec![("tracker (beta).exe (4120, other user)".into(), 421.4), ("renderfarm.exe (88)".into(), 273.0)];
+    let named = strobe::validity::named_work(&plain, None);
+    let names = ["tracker", "renderfarm"];
+    // src/validity.rs:640  "busiest processes (% of a core): {}"
+    c.text(
+        "validity.rs:640",
+        &Text::busiest_processes("busiest processes (% of a core): ", false, &who, None),
+        &format!("busiest processes (% of a core): {named}"),
+        "2 other processes, the busiest 421% of a core",
+        &names,
+    );
+    // src/app/bench.rs:6039  "busiest processes on the machine (% of a core): {named}{again}" (again: bench.rs:8109)
+    let again = "; slow twice, the second time after the CPUs settled (the first: Throttled: the speed check ran 1.42x slower)";
+    c.text(
+        "bench.rs:6039",
+        &msg!("{}{}", Text::busiest_processes("busiest processes on the machine (% of a core): ", true, &who, None), again),
+        &format!("busiest processes on the machine (% of a core): {named}{again}"),
+        &format!("2 other processes on the machine, the busiest 421% of a core{again}"),
+        &names,
+    );
+    // src/app/bench.rs:6043  "other work on the target's CPUs meanwhile: {}; busiest processes on the machine (% of a core): {named}{again}"
+    let on = "88% of a core";
+    c.text(
+        "bench.rs:6043",
+        &msg!("other work on the target's CPUs meanwhile: {}; {}{}", on, Text::busiest_processes("busiest processes on the machine (% of a core): ", true, &who, None), again),
+        &format!("other work on the target's CPUs meanwhile: {on}; busiest processes on the machine (% of a core): {named}{again}"),
+        &format!("other work on the target's CPUs meanwhile: {on}; 2 other processes on the machine, the busiest 421% of a core{again}"),
+        &names,
+    );
+    // src/app/bench.rs:8093  "{}; other work on the target's CPUs {}; busiest processes on the machine: {}"
+    let err = Error::refused("Throttled", "the speed check ran 1.42x slower than this device's reference", "x");
+    c.text(
+        "bench.rs:8093",
+        &msg!("{}; other work on the target's CPUs {}; {}", err, on, Text::busiest_processes("busiest processes on the machine: ", true, &who, None)),
+        &format!("{}; other work on the target's CPUs {on}; busiest processes on the machine: {named}", err.message),
+        &format!("{}; other work on the target's CPUs {on}; 2 other processes on the machine, the busiest 421% of a core", err.message),
+        &names,
+    );
+    // src/app/bench.rs:1637 and 1656  "other processes of this user kept off CPUs {cpus} during {} timed block{}: {:.0} moved per block ({names}{})" … "; {} could not be moved: {failed}"
+    let mut moved = BTreeMap::new();
+    for (n, k) in [("indexer", 3u32), ("chat-helper", 2), ("backup", 1)] {
+        moved.insert(private(n, fp), k);
+    }
+    let mut failed = BTreeMap::new();
+    failed.insert(private("guard.exe", fp), "elevated".to_string());
+    let mut t = msg!("other processes of this user kept off CPUs {} during {} timed block{}: {:.0} moved per block{}", "16-31", 2, "s", 2.0, Text::reserve_moved(&moved));
+    t.push(&msg!("; {}", Text::reserve_failed(&failed)));
+    c.text(
+        "bench.rs:1637+1656",
+        &t,
+        "other processes of this user kept off CPUs 16-31 during 2 timed blocks: 2 moved per block (indexer ×3, chat-helper ×2, backup); 1 could not be moved: guard.exe (elevated)",
+        "other processes of this user kept off CPUs 16-31 during 2 timed blocks: 2 moved per block; 1 could not be moved (elevated)",
+        &["indexer", "chat-helper", "backup", "guard"],
+    );
+    let t = msg!("other processes of this user kept off CPUs {} during {} timed block{}: {:.0} moved per block{}", "16-31", 1, "", 0.0, Text::reserve_moved(&BTreeMap::new()));
+    c.text("bench.rs:1637, none moved", &t, "other processes of this user kept off CPUs 16-31 during 1 timed block: 0 moved per block ()", "other processes of this user kept off CPUs 16-31 during 1 timed block: 0 moved per block ()", &[]);
+
+    // Windows in front of the target's.
+    let covered = "window is covered by other apps' windows (strobe brings it to the front only after a minute without keyboard or mouse input, and with the Accessibility permission)";
+    let apps = [private("Mail Pro", fp), private("Notes+", fp)];
+    // src/target/native.rs:211 and 222  "; in front of it: {}" in "the app's {why}{by}"
+    c.text(
+        "native.rs:211+222",
+        &msg!("the app's {}{}", covered, msg!("; in front of it: {}", Text::covering_apps(&apps))),
+        &format!("the app's {covered}; in front of it: Mail Pro, Notes+"),
+        &format!("the app's {covered}; in front of it: 2 other apps"),
+        &["Mail Pro", "Notes+"],
+    );
+    let title = private("Plan — Q3", PrivKind::WindowTitle);
+    // src/target/a11y/input.rs:579 (and wl_input.rs:233, xtest.rs:140)  "another window covers the point ({x}, {y}): {:?} of process {pid}"
+    c.text(
+        "input.rs:579",
+        &msg!("another window covers the point ({}, {}): {} of process {}", 10, 20, title.quoted_or("a window"), 4120),
+        "another window covers the point (10, 20): \\"Plan — Q3\\" of process 4120",
+        "another window covers the point (10, 20): a window of process 4120",
+        &["Plan"],
+    );
+    // src/target/a11y/input.rs:595  "a {:?} window of process {pid}"
+    let class = private("NorthwindFrame", PrivKind::WindowTitle);
+    c.text(
+        "input.rs:595",
+        &msg!("{} of process {}", Text::marked(msg!("a {} window", class.quoted_or("")), PrivKind::WindowTitle, "a window"), 4120),
+        "a \\"NorthwindFrame\\" window of process 4120",
+        "a window of process 4120",
+        &["Northwind"],
+    );
+    // src/target/a11y/cg_input.rs:291 and 297  "another app's window covers the point ({x:.0}, {y:.0}): {what} of process {pid}", what = "a window of {owner}"
+    let owner = private("Mail Pro", fp);
+    c.text(
+        "cg_input.rs:291+297",
+        &msg!("another app's window covers the point ({:.0}, {:.0}): {} of process {}", 10.4, 20.6, Text::marked(msg!("a window of {}", owner.redacted("")), fp, "a window"), 4120),
+        "another app's window covers the point (10, 21): a window of Mail Pro of process 4120",
+        "another app's window covers the point (10, 21): a window of process 4120",
+        &["Mail Pro"],
+    );
+    // src/host/x11.rs:378 and 379  "{:?} (pid {})" in "the window is not on top at ({cx}, {cy}): {over} is, and the X server copies what covers a window"
+    c.text(
+        "x11.rs:378+379",
+        &msg!("the window is not on top at ({}, {}): {} (pid {}) is, and the X server copies what covers a window", 640, 360, Text::window(&title), 4120),
+        "the window is not on top at (640, 360): \\"Plan — Q3\\" (pid 4120) is, and the X server copies what covers a window",
+        "the window is not on top at (640, 360): another window (pid 4120) is, and the X server copies what covers a window",
+        &["Plan"],
+    );
+    // src/host/wayland.rs:442  "{:?} of process {} covers the region"
+    c.text("wayland.rs:442", &msg!("{} of process {} covers the region", title.quoted_or("a window"), 4120), "\\"Plan — Q3\\" of process 4120 covers the region", "a window of process 4120 covers the region", &["Plan"]);
+}
+
+/// The second review's inputs (cleanup/priv1 f23e91d): each must hide what it names.
+fn review2(c: &mut Check) {
+    let home = host::home().display().to_string();
+    // 1. Tool output.
+    for (raw, private) in [
+        ("GET https://example.test/app;jsessionid=s3cr3t?v=1;token=t0k3n failed", &["s3cr3t", "t0k3n"][..]),
+        ("fetch https://example.test/api?fields=a,b&token=s3cr3t failed", &["s3cr3t"][..]),
+        ("connect http://[::1]:8080/api?token=s3cr3t failed", &["s3cr3t"][..]),
+        ("GET https://example.test/api?filter[token]=s3cr3t", &["s3cr3t"][..]),
+        ("at /Users/ann/a.ts https://ann:hunter2@example.test?token=s3cr3t", &["hunter2", "s3cr3t", "/ann"][..]),
+        ("\\x1b[36m\\x1b(B/Users/ann/northwind/a.ts\\x1b[0m:3:1", &["ann", "northwind"][..]),
+        ("\\u{9b}36m/Users/ann/northwind/a.ts\\u{9b}0m:3:1", &["ann", "northwind"][..]),
+    ] {
+        c.hides(&format!("output2: {raw:?}"), &Text::external_output(raw, None), None, private);
+    }
+    c.hides("output2: a drive's C://", &Text::external_output("open C://Users/ann/northwind/a.txt", None), Some("open ~/…/a.txt"), &["ann", "northwind"]);
+    c.hides("output2: a :// no URL rule reads", &Text::external_output("see x@https://ann:pw7@example.test/", None), Some("see [redacted]"), &["pw7"]);
+    c.hides("output2: a newline after a one-part path", &Text::external_output("120 /s\\nsrc/a.ts:3:1: error TS2322", None), Some("120 /s\\nsrc/a.ts:3:1: error TS2322"), &[]);
+    let user = Path::new(&home).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    c.hides("output2: the home folder before a colon", &Text::external_output(&format!("cannot open {home}: Permission denied"), None), Some("cannot open ~: Permission denied"), &[&user]);
+    c.hides("output2: the home folder in PATH", &Text::external_output(&format!("PATH=/usr/bin:{home}"), None), Some("PATH=…/bin:~"), &[&user]);
+    c.hides("output2: the home folder before a full stop", &Text::external_output(&format!("cannot find {home}."), None), Some("cannot find ~."), &[&user]);
+    // 2. Another user's home folder.
+    use strobe::text::public_path_in as at;
+    for (path, home, public) in [
+        ("/Users/SECRET28", "/Users/ann", "~"),
+        ("/Users/SECRET28/a.ts", "/Users/ann", "~/a.ts"),
+        ("/home/SECRET21/src/x/a.ts", "/home/ann", "~/…/a.ts"),
+        ("/mnt/c/Users/Alice", "/home/ubuntu", "~"),
+        ("/var/home/SECRET22/x", "/home/ann", "~/x"),
+        (r"C:\\Users\\SECRET19\\x\\a.ts", r"C:\\Users\\ann", "~/…/a.ts"),
+        (r"\\\\srv\\Users\\SECRET23\\a.ts", r"C:\\Users\\ann", "~/a.ts"),
+    ] {
+        let got = at(path, None, "/nowhere/strobe", home);
+        let ok = got == public;
+        c.failed += !ok as usize;
+        println!("{} path2 {path:?}: {got:?}{}", if ok { "ok  " } else { "FAIL" }, if ok { String::new() } else { format!(", expected {public:?}") });
+    }
+    c.hides("output2: other users' homes", &Text::external_output(r"in C:\\Users\\SECRET19; /home/SECRET21", None), None, &["SECRET19", "SECRET21"]);
+    // 3. URLs.
+    for (url, private) in [
+        ("file:///Users/ann/northwind/index.html?token=s3cr3t", &["s3cr3t", "northwind"][..]),
+        ("file:///Users/ann/northwind/index.html#/login#token=s3cr3t", &["s3cr3t", "northwind"][..]),
+        ("https://example.test/api?filter[token]=s3cr3t&auth[key]=k3y", &["s3cr3t", "k3y"][..]),
+        ("mailto:ann@northwind-secret.com?subject=hi&token=t0k", &["ann", "northwind", "t0k"][..]),
+    ] {
+        c.hides(&format!("url2: {url}"), &Text::url(url), None, private);
+    }
+    c.hides("url2: an @ in a slashless query stays", &Text::url("https://example.test?user=a@b.com&v=1"), Some("https://example.test?user=a@b.com&v=1"), &[]);
+    let long = format!("https://example.test/?x={}", "=".repeat(200_000));
+    let t0 = std::time::Instant::now();
+    let _ = Text::url(&long);
+    let ms = t0.elapsed().as_millis();
+    c.failed += (ms > 2000) as usize;
+    println!("{} url2: 200 000 '=' scrubbed in {ms} ms", if ms > 2000 { "FAIL" } else { "ok  " });
+    // 5. The bridge: two marked fields swapped or combined; equality.
+    let dev = private("R5CT20ABCDE", PrivKind::DeviceId);
+    let other = private("SecretApp.exe", PrivKind::ForeignProc);
+    let r = Refusal::new(ValidatorId::Thermal, msg!("{} is hot", dev.redacted("the phone"))).detail(msg!("{} is hot; {}", dev.redacted("the phone"), other.redacted("1 other process")));
+    let swapped = Refusal { summary: r.detail.clone().unwrap_or_default(), detail: Some(r.summary.clone()), ..r.clone() };
+    c.hides("bridge: fields swapped", &swapped.summary_text(), None, &["SecretApp", "R5CT20ABCDE"]);
+    c.hides("bridge: fields swapped (the other)", &swapped.detail_text().unwrap_or_default(), None, &["SecretApp", "R5CT20ABCDE"]);
+    let joined = Refusal { summary: format!("{} ({})", r.summary, r.detail.clone().unwrap_or_default()), ..r.clone() };
+    c.hides("bridge: fields combined", &joined.summary_text(), None, &["SecretApp", "R5CT20ABCDE"]);
+    let plain = Refusal::new(ValidatorId::Thermal, "plain").detail(other.redacted("1 other process"));
+    let copied = Refusal { summary: format!("plain: {}", plain.detail.clone().unwrap_or_default()), ..plain.clone() };
+    c.hides("bridge: an unmarked field given another's private part", &copied.summary_text(), None, &["SecretApp"]);
+    let a = Refusal::new(ValidatorId::Thermal, "s").detail(dev.redacted("the phone")).fix(other.redacted("x"));
+    let b = Refusal::new(ValidatorId::Thermal, "s").fix(other.redacted("x")).detail(dev.redacted("the phone"));
+    let ok = a == b;
+    c.failed += !ok as usize;
+    println!("{} bridge: equal whatever order detail and fix were set", if ok { "ok  " } else { "FAIL" });
+    let r2 = Refusal { summary: format!("on head: {}", r.summary), ..r.clone() };
+    let back: Refusal = serde_json::from_str(&serde_json::to_string(&r2).expect("json")).expect("read back");
+    let ok = back == r2;
+    c.failed += !ok as usize;
+    println!("{} bridge: a ..r copy equals itself read back", if ok { "ok  " } else { "FAIL" });
+    // 6. The reserve list as bench writes it (× and an empty list unmarked).
+    let mut moved = std::collections::BTreeMap::new();
+    moved.insert(private("indexer", PrivKind::ForeignProc), 3u32);
+    c.text("reserve: × as bench writes it", &Text::reserve_moved(&moved), " (indexer ×3)", "", &["indexer"]);
+    let none = Text::reserve_moved(&std::collections::BTreeMap::new());
+    if none.is_marked() || none.local() != " ()" { c.failed += 1; println!("FAIL reserve: an empty list is marked or changed: {:?}", none.local()); } else { println!("ok   reserve: an empty list is unmarked"); }
+}
+
+/// Planted secrets combined with the separators, brackets, escapes and wrappers both reviews listed: none may
+/// survive any scrubber; a fixed list of harmless strings passes through unchanged.
+fn fuzz(c: &mut Check) {
+    let (u, f, t, p) = ("zqxuser", "zqxfolder", "zqxtoken", "zqxpass");
+    let home = host::home().display().to_string();
+    let paths: Vec<String> = [
+        "/Users/{U}", "/Users/{U}/a.ts", "/home/{U}/src/a.ts", "/var/home/{U}/x", "/mnt/c/Users/{U}/x/a.ts", r"C:\\Users\\{U}\\a.ts", "C:/Users/{U}/a.ts",
+        "C://Users/{U}/{F}/a.txt", r"\\\\srv\\Users\\{U}\\a.ts", "//srv/Users/{U}/a.ts", "/opt/{F}/bin/tool", "/Volumes/{F}/src/a.ts", r"D:\\{F}\\x\\a.ts", "/srv/{F}/app/a.ts",
+        "/mnt/{F}/x/a.ts", "~/{F}/a.ts", "/tmp/{F}/../{F}/a.ts", "/root/{F}/a.ts", "{H}/{F}/a.ts", "{H}", "/private/var/{F}/x/a.ts", r"\\\\?\\C:\\{F}\\x\\a.ts",
+    ]
+    .iter()
+    .map(|s| s.replace("{U}", u).replace("{F}", f).replace("{H}", &home))
+    .collect();
+    let urls: Vec<String> = [
+        "https://example.test/a?token={T}", "https://example.test/a;jsessionid={T}?v=1", "https://example.test/#/login#token={T}", "https://example.test/api?fields=a,b&token={T}",
+        "https://example.test/api?filter[token]={T}", "http://[::1]:8080/api?token={T}", "https://u:{P}@example.test/x", "https://u:{P}#x@example.test/x", "https://u:{P}?x@example.test/x",
+        "ws://u:{P}@localhost:9222/x", "https://example.test/a?accessToken={T}&v=1", "https://example.test/a?X-Amz-Signature={T}", "file:///Users/{U}/x/index.html?token={T}",
+        "file:///C:/Users/{U}/x/a.html#token={T}", "mailto:{U}@example.test", "data:text/html,{F}", "HTTPS://U:{P}@EXAMPLE.TEST/?TOKEN={T}",
+    ]
+    .iter()
+    .map(|s| s.replace("{U}", u).replace("{F}", f).replace("{T}", t).replace("{P}", p))
+    .collect();
+    let wraps: &[(&str, &str)] = &[
+        ("", ""), ("\\"", "\\""), ("'", "'"), ("(", ")"), ("[", "]"), ("<", ">"), ("\`", "\`"), ("{", "}"), ("=", ""), ("--out=", ""), ("PATH=/usr/bin:", ":/bin"), ("", ":3:1"),
+        ("", ":3:1: error TS2322"), ("", "(3,1)"), ("", "."), ("", ","), ("", ";"), ("", ":"), ("\\x1b[36m", "\\x1b[0m"), ("\\x1b(B", ""), ("\\u{9b}31m", "\\u{9b}0m"), ("\\x1b]8;;", "\\x07"),
+        ("\\u{9d}0;t\\u{9c}", ""), ("", " https://example.test/?q=1"), ("x ", " y"), ("\\x1b[1m\\x1b(B", "\\x1b[m"),
+    ];
+    let lines: &[(&str, &str)] = &[("", ""), ("error: ", ""), ("at ", "\\nnext line"), ("\\t", "\\r\\n"), ("120 /s\\n", ""), ("open ", " failed")];
+    let secrets = [u, f, t, p];
+    let (mut n, mut bad) = (0, Vec::new());
+    for x in paths.iter().chain(urls.iter()) {
+        for (a, b) in wraps {
+            for (l, r) in lines {
+                let raw = format!("{l}{a}{x}{b}{r}");
+                let public = Text::external_output(&raw, None).public().to_lowercase();
+                n += 1;
+                if secrets.iter().any(|s| public.contains(s)) { bad.push((raw, public)); }
+            }
+        }
+    }
+    for x in &paths {
+        let public = Text::path(Path::new(x), None).public().to_lowercase();
+        n += 1;
+        if secrets.iter().any(|s| public.contains(s)) { bad.push((x.clone(), public)); }
+    }
+    for x in &urls {
+        for (a, b) in [("", ""), ("", "&v=1"), ("", "#top")] {
+            let raw = format!("{a}{x}{b}");
+            let public = Text::url(&raw).public().to_lowercase();
+            n += 1;
+            if secrets.iter().any(|s| public.contains(s)) { bad.push((raw, public)); }
+        }
+    }
+    c.failed += !bad.is_empty() as usize;
+    println!("{} fuzz: {n} inputs, {} kept a planted secret", if bad.is_empty() { "ok  " } else { "FAIL" }, bad.len());
+    for (raw, public) in bad.iter().take(12) { println!("  {raw:?}\\n    -> {public:?}"); }
+    let harmless = [
+        "/s", "3/4", "n/a", "and/or", "2026-11-12", "2026/11/12", "v1.2.3", "0.31.0", "src/a.ts:3:1", "?v=1&page=2", "120 /s, 3/4 done, 10 ms/run", "a/b/c",
+        "src/a.ts:3:1: error TS2322: Type 'x' is not assignable", "see https://example.test/docs?v=1&page=2", "1/2\\n3/4\\r\\n", "C:", "x = y; z: w", "(see a/b)",
+    ];
+    let changed: Vec<_> = harmless.iter().filter(|h| Text::external_output(h, None).public() != **h).collect();
+    c.failed += !changed.is_empty() as usize;
+    println!("{} fuzz: {} harmless strings unchanged{}", if changed.is_empty() { "ok  " } else { "FAIL" }, harmless.len(), if changed.is_empty() { String::new() } else { format!(", changed: {changed:?}") });
+    for (url, what) in [("https://example.test/app?v=1&page=2", "a plain query"), ("https://example.test/a?tokenize=1&keyboard=us&author=x", "lookalike keys")] {
+        c.hides(&format!("fuzz: {what} stays"), &Text::url(url), Some(url), &[]);
+    }
+}
+
 /// What the next packages build on (the review's Item 11), each on real strings.
 fn api(c: &mut Check) {
     use std::collections::BTreeMap;
@@ -171,17 +485,13 @@ fn api(c: &mut Check) {
     c.text(
         "a CPU reservation",
         &t,
-        "other processes of this user kept off CPUs 16-31 during 2 timed blocks: 3 moved per block (indexer x3, chat-helper x2, backup, sync-agent, …); 3 could not be moved: sys-mon (access denied); guard.exe, vault.exe (elevated)",
+        "other processes of this user kept off CPUs 16-31 during 2 timed blocks: 3 moved per block (indexer ×3, chat-helper ×2, backup, sync-agent, …); 3 could not be moved: sys-mon (access denied); guard.exe, vault.exe (elevated)",
         "other processes of this user kept off CPUs 16-31 during 2 timed blocks: 3 moved per block; 3 could not be moved (access denied; elevated)",
         &["indexer", "chat-helper", "backup", "sync-agent", "guard", "vault", "sys-mon"],
     );
 
-    // A phone: its id, a short id derived without exposing it, an emulator.
-    let udid = private("00008110-001A2B3C4D5E6F70", PrivKind::DeviceId);
-    let short = udid.tail_chars(8);
-    c.text("a short device id", &msg!("{} is locked", Text::device(&short, false)), &format!("{} is locked", strobe::host::ios::short_udid("00008110-001A2B3C4D5E6F70")), "the phone is locked", &["4D5E6F70"]);
+    let short = private("00008110-001A2B3C4D5E6F70", PrivKind::DeviceId).tail_chars(8);
     if short.kind() != PrivKind::DeviceId { c.failed += 1; println!("FAIL tail_chars changed the kind"); }
-    c.text("an emulator", &msg!("{} is not a phone", Text::device(&private("emulator-5554", PrivKind::DeviceId), true)), "emulator-5554 is not a phone", "the emulator is not a phone", &["5554"]);
 
     // Refusal and Error: suffixed, append_detail, refusal lines' marks.
     let serial = private("R5CT20ABCDE", PrivKind::DeviceId);
@@ -223,8 +533,9 @@ fn api(c: &mut Check) {
     }
 }
 
-/// STROBE_DEV_CANARY=1: every marked part's local text is tagged, no public text is, and the raw value is not.
-fn canary(c: &mut Check) {
+/// STROBE_DEV_CANARY=1 (\`on\`): every marked part's local text is tagged, no public text is, and the raw value is
+/// not. Set to \`0\` or empty (\`!on\`): nothing is tagged.
+fn canary(c: &mut Check, on: bool) {
     let serial = private("R5CT20ABCDE", PrivKind::DeviceId);
     let who = [(private("tracker.exe", PrivKind::ForeignProc), 42.0)];
     let mut failed = std::collections::BTreeMap::new();
@@ -245,9 +556,12 @@ fn canary(c: &mut Check) {
         ("error", Error::from(r.clone()).message_text()),
     ];
     for (what, t) in &texts {
-        let ok = t.local().contains("CANARY_") && !t.public().contains("CANARY_");
+        let ok = t.local().contains("CANARY_") == on && !t.public().contains("CANARY_");
         c.failed += !ok as usize;
-        println!("{} canary {what}: {:?} -> {:?}", if ok { "ok  " } else { "FAIL" }, t.local(), t.public());
+        println!("{} canary {}{what}: {:?} -> {:?}", if ok { "ok  " } else { "FAIL" }, if on { "" } else { "off: " }, t.local(), t.public());
+    }
+    if !on {
+        return;
     }
     let short = &texts[8].1;
     if !short.local().ends_with("_4D5E6F70") { c.failed += 1; println!("FAIL the canary changed a private value itself: {:?}", short.local()); }
@@ -362,7 +676,7 @@ fn review(c: &mut Check) {
     }
     c.hides("output: a URL with credentials", &Text::external_output("fetch https://ann:pw9@example.test/x failed", None), None, &["pw9"]);
     c.hides("output: a share", &Text::external_output(r"copied \\\\fileserver\\northwind\\drop\\a.zip", None), None, &["northwind", "fileserver"]);
-    c.hides("output: a folder name with a space", &Text::external_output("built /opt/Northwind Corp/v1/app in 3 s", None), Some("built …/app in 3 s"), &["Northwind"]);
+    c.hides("output: a folder name with a space", &Text::external_output("built /opt/Northwind Corp/v1/app in 3 s", None), Some("built … …/app in 3 s"), &["Northwind"]);
     c.hides("output: numbers and units stay", &Text::external_output("120 /s, 3/4 done, 10 ms/run", None), Some("120 /s, 3/4 done, 10 ms/run"), &[]);
 
     // 11. A Text argument is written whole; clip(0) is empty.
@@ -373,8 +687,8 @@ fn review(c: &mut Check) {
 
 fn main() {
     let mut c = Check { failed: 0, show: std::env::args().any(|a| a == "--show") };
-    if std::env::args().any(|a| a == "--canary") {
-        canary(&mut c);
+    if let Some(mode) = std::env::args().find(|a| a.starts_with("--canary")) {
+        canary(&mut c, mode == "--canary");
         if c.failed > 0 { println!("{} canary example(s) failed", c.failed); std::process::exit(1); }
         return;
     }
@@ -513,6 +827,9 @@ fn main() {
     if broken.summary_text().spans().first().map(|s| s.at) != Some([0, 3]) { c.failed += 1; println!("FAIL a mark off a character boundary is not the whole field"); } else { println!("ok   a mark off a character boundary marks the whole field"); }
 
     review(&mut c);
+    review2(&mut c);
+    fuzz(&mut c);
+    sentences(&mut c);
     api(&mut c);
     if c.failed > 0 { println!("{} example(s) failed", c.failed); std::process::exit(1); }
 }
@@ -565,6 +882,10 @@ writeFileSync(join(dir, "src", "bin", "show.rs"), `${prelude}${examples}`)
     if (run.exitCode !== 0) problems.push(`examples failed (exit ${run.exitCode})`)
     const canary = Bun.spawnSync([exe, "--canary"], { stdout: "inherit", stderr: "inherit", env: { ...process.env, STROBE_DEV_CANARY: "1" } })
     if (canary.exitCode !== 0) problems.push(`the canary failed (exit ${canary.exitCode})`)
+    for (const off of ["0", ""]) {
+      const quiet = Bun.spawnSync([exe, "--canary-off"], { stdout: "inherit", stderr: "inherit", env: { ...process.env, STROBE_DEV_CANARY: off } })
+      if (quiet.exitCode !== 0) problems.push(`STROBE_DEV_CANARY=${JSON.stringify(off)} tagged text (exit ${quiet.exitCode})`)
+    }
   }
 } finally {
   // The snippets that must not compile go; the compiled dependencies stay warm in the target folder.

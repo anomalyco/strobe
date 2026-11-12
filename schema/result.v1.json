@@ -330,7 +330,8 @@
         "metric": { "type": "string" },
         "verdict": { "type": "string", "description": "refused (<validator>): <why>" },
         "verdict_kind": { "const": "refused" },
-        "refusal": { "$ref": "#/definitions/refusal" }
+        "refusal": { "$ref": "#/definitions/refusal" },
+        "spans": { "$ref": "#/definitions/spans", "description": "The private parts of verdict." }
       }
     },
     "gapPrimary": {
@@ -344,7 +345,8 @@
         "verdict_kind": { "const": "refused" },
         "decided": { "const": false },
         "holm_decided": { "type": ["boolean", "null"] },
-        "refusal": { "$ref": "#/definitions/refusal" }
+        "refusal": { "$ref": "#/definitions/refusal" },
+        "spans": { "$ref": "#/definitions/spans", "description": "The private parts of verdict." }
       }
     },
     "overhead": {

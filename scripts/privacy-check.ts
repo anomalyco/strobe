@@ -4,15 +4,18 @@
 //   (a) `Private` gains `Display` or `Debug` (derived or written, under any path), or `Text` gains `Display`:
 //       `format!` would take either whole, its private parts unmarked;
 //   (b) `IntoPiece` (what `msg!` takes) is implemented for `Private`, a path or a path's `Display`;
-//   (c) `.expose_local()` is used outside the files listed below, each with why, or the list names a file
-//       that must never expose a private value (validity, model, stats, driver, a11y, the public surfaces);
-//   (d) a `msg!` call (any delimiter) formats a path itself (`.display()`, `.to_string_lossy()`, `paths::plain`)
-//       where `Text::path` says it, or captures a variable or asks `{:?}` (the compiler refuses those too);
+//   (c) `expose_local` is called or named (`Private::expose_local`) outside the files listed below, each with
+//       a reason, or the list names a file that must never expose a private value (validity, model, stats,
+//       text, driver, a11y, the public surfaces);
+//   (d) a `msg!` call (any delimiter) formats a path itself (`.display()`, `.to_string_lossy()`, `.to_str()`,
+//       `paths::plain`) where `Text::path` says it, takes a `Text`'s local string (`.local()`, `.into_local()`)
+//       where it would take the `Text`, or has a format string (plain or raw) with a placeholder other than
+//       `{}`, `{0}` and `{:spec}` without `?`, `*` or `$` (the compiler refuses those too);
 //   (e) an OS call that reads another program's or the machine's names (`GetWindowTextW`, `GetClassNameW`,
 //       `kCGWindowOwnerName`, `USERPROFILE`, `COMPUTERNAME`, `gethostname`) appears outside the files that
 //       are its entry points;
-//   (f) src/text.rs names anything of the crate but `host::home` and `host::paths` (it sits below `model`;
-//       SPEC 4.3: nothing outside app/, cli and main names app).
+//   (f) src/text.rs or src/text/ names anything of the crate but `host::home` and `host::paths` (it sits below
+//       `model`; SPEC 4.3: nothing outside app/, cli and main names app).
 // It reads files only (no build). `bun scripts/dev/private-text.ts` proves the compiler half; `--self-test` runs
 // these checks on known bypasses instead of src/.
 //
@@ -27,7 +30,7 @@ const root = join(import.meta.dir, "..")
 const exposeAllowed: Record<string, string> = {}
 
 // Files that compose or publish text: none may ever expose a private value, whatever the list above says.
-const neverExpose = [/^src\/validity\.rs$/, /^src\/model\.rs$/, /^src\/stats\.rs$/, /^src\/text\.rs$/, /^src\/driver(\.rs|\/)/, /^src\/target\/a11y\//, /^src\/app\/pr(\.rs|\/)/, /^src\/app\/card(\.rs|\/)/, /^src\/app\/report\.rs$/]
+const neverExpose = [/^src\/validity\.rs$/, /^src\/model\.rs$/, /^src\/stats\.rs$/, /^src\/text(\.rs|\/)/, /^src\/driver(\.rs|\/)/, /^src\/target\/a11y\//, /^src\/app\/pr(\.rs|\/)/, /^src\/app\/card(\.rs|\/)/, /^src\/app\/report\.rs$/]
 
 // OS calls that read names of this machine or of other programs, and the entry points allowed to make them.
 const osNames: Record<string, string[]> = {
@@ -119,21 +122,23 @@ function check(file: string, raw: string): string[] {
   const problems: string[] = []
   const { code, bare } = lex(raw)
   // (a) Display or Debug for Private, Display for Text: written impls, under any path.
-  for (const m of bare.matchAll(/impl\s*(<[^{]*?>)?\s*(?:[\w:]*::)?(Display|Debug)\s+for\s+(?:[\w:]*::)?(Private|Text)\b/g)) {
+  for (const m of bare.matchAll(/impl\s*(<[^{]*?>)?\s*(?:[\w:]*::)?(Display|Debug)\s+for\s+(?:&\s*(?:'\w+\s+)?(?:mut\s+)?)?(?:[\w:]*::)?(Private|Text)\b/g)) {
     if (m[3] === "Text" && m[2] === "Debug") continue
     problems.push(`${file}:${at(bare, m.index!)}: ${m[3]} implements ${m[2]}: format! would take it unmarked`)
   }
-  // (a) derived: a derive list right above `struct Private`.
-  for (const m of bare.matchAll(/#\[derive\(([^)]*)\)\]\s*(?:#\[[^\]]*\]\s*)*pub\s+struct\s+Private\b/g)) {
+  // (a) derived: a derive list right above `struct Private`, whatever its visibility.
+  for (const m of bare.matchAll(/#\[derive\(([^)]*)\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+Private\b/g)) {
     for (const t of ["Debug", "Display"]) if (new RegExp(`\\b${t}\\b`).test(m[1])) problems.push(`${file}:${at(bare, m.index!)}: Private derives ${t}`)
   }
   // (b) IntoPiece for what msg! must refuse.
   for (const m of bare.matchAll(/impl\s*(<[^{]*?>)?\s*(?:[\w:]*::)?IntoPiece\s+for\s+([^{]+?)\s*\{/g)) {
     if (/\bPrivate\b|\bPath(Buf)?\b|path::Display|\bDisplay\s*</.test(m[2])) problems.push(`${file}:${at(bare, m.index!)}: IntoPiece for ${m[2].trim()}: msg! must refuse it`)
   }
-  // (c) expose_local outside its list (its definition aside).
-  for (const m of bare.matchAll(/\.expose_local\s*\(/g)) {
-    if (!(file in exposeAllowed)) problems.push(`${file}:${at(bare, m.index!)}: expose_local() outside the list in scripts/privacy-check.ts`)
+  // (c) expose_local outside its list, called or named (`Private::expose_local`, `.map(Private::expose_local)`);
+  // its definition in text.rs aside.
+  for (const m of bare.matchAll(/\bexpose_local\b/g)) {
+    if (file === "src/text.rs" && /\bfn\s+$/.test(bare.slice(Math.max(0, m.index! - 8), m.index!))) continue
+    if (!(file in exposeAllowed)) problems.push(`${file}:${at(bare, m.index!)}: expose_local outside the list in scripts/privacy-check.ts`)
   }
   // (d) msg! calls, any delimiter, balanced on the source without literals.
   for (const m of bare.matchAll(/\bmsg!\s*([(\[{])/g)) {
@@ -145,11 +150,15 @@ function check(file: string, raw: string): string[] {
       else if (bare[i] === close) depth--
     }
     const line = at(bare, m.index!)
-    if (/\.display\s*\(\s*\)|\.to_string_lossy\s*\(\s*\)|\bplain\s*\(/.test(bare.slice(m.index!, i)))
+    const call = bare.slice(m.index!, i)
+    if (/\.display\s*\(\s*\)|\.to_string_lossy\s*\(\s*\)|\.to_str\s*\(\s*\)|\bplain\s*\(/.test(call))
       problems.push(`${file}:${line}: msg! formats a path itself; Text::path(p, repo_root) says it with its public form`)
-    const fmt = /^\s*"((?:[^"\\]|\\.)*)"/.exec(code.slice(m.index! + m[0].length, i))?.[1] ?? ""
+    if (/\.local\s*\(\s*\)|\.into_local\s*\(\s*\)/.test(call)) problems.push(`${file}:${line}: msg! takes a Text's local string, its marks dropped; pass the Text itself`)
+    // The format string, plain or raw.
+    const lit = /^\s*(?:"((?:[^"\\]|\\.)*)"|r(#*)"([\s\S]*?)"\2)/.exec(code.slice(m.index! + m[0].length, i))
+    const fmt = lit ? (lit[1] ?? lit[3] ?? "") : ""
     for (const p of fmt.replace(/\{\{|\}\}/g, "").matchAll(/\{([^}]*)\}/g)) {
-      if (/^[A-Za-z_]|\?|\$|\*/.test(p[1])) problems.push(`${file}:${line}: msg! placeholder {${p[1]}}: positional arguments only, no capture and no {:?} (marks are lost)`)
+      if (!/^\d*(?::[^?*$]*)?$/.test(p[1])) problems.push(`${file}:${line}: msg! placeholder {${p[1]}}: positional arguments only, no capture and no {:?} (marks are lost)`)
     }
   }
   // (e) OS calls that read names, outside their entry points.
@@ -157,10 +166,11 @@ function check(file: string, raw: string): string[] {
     if (files.includes(file)) continue
     for (const m of code.matchAll(new RegExp(`\\b${name}\\b`, "g"))) problems.push(`${file}:${at(code, m.index!)}: ${name} outside its entry points (${files.join(", ")})`)
   }
-  // (f) text.rs is a leaf below model.
-  if (file === "src/text.rs") {
+  // (f) text.rs and its submodules are a leaf below model (`super::` in a submodule is text itself).
+  if (file === "src/text.rs" || file.startsWith("src/text/")) {
     for (const m of bare.matchAll(/\b(?:crate|super)::[\w:]+/g)) {
-      if (!textMayName.some((r) => r.test(m[0]))) problems.push(`${file}:${at(bare, m.index!)}: ${m[0]}: text.rs names only host::home and host::paths of the crate`)
+      const name = file === "src/text.rs" ? m[0] : m[0].replace(/^super::/, "crate::text::")
+      if (!textMayName.some((r) => r.test(name))) problems.push(`${file}:${at(bare, m.index!)}: ${m[0]}: text names only host::home and host::paths of the crate`)
     }
     if (/\bapp::|\bios::logs\b/.test(bare)) problems.push(`${file}: names app or the phone-log module`)
   }
@@ -183,6 +193,18 @@ const bad: [string, string][] = [
   ["src/app/x.rs", `fn j(hwnd: isize) { let n = GetWindowTextW(hwnd, 0, 0); }`],
   ["src/app/x.rs", `fn k() { let h = std::env::var("COMPUTERNAME"); }`],
   ["src/text.rs", `fn l() -> String { crate::app::pr::public("") }`],
+  // The second review's bypasses.
+  ["src/app/x.rs", `fn m(p: &P) -> String { Private::expose_local(p).clone() }`],
+  ["src/app/x.rs", `fn n(v: Vec<P>) -> Vec<&String> { v.iter().map(Private::expose_local).collect() }`],
+  ["src/app/x.rs", `fn o(t: &Text) -> Text { msg!("x: {}", t.local()) }`],
+  ["src/app/x.rs", `fn p(t: Text) -> Text { msg!("x: {}", t.into_local()) }`],
+  ["src/app/x.rs", `fn q(p: &Path) -> Text { msg!("x: {}", p.to_str().unwrap_or("")) }`],
+  ["src/app/x.rs", `fn r(e: &Error) -> Text { msg!(r#"stopped: {e:?}"#) }`],
+  ["src/app/x.rs", `fn s(α: &Error) -> Text { msg!("stopped: {α}") }`],
+  ["src/app/x.rs", `impl fmt::Display for &Private<String> {}`],
+  ["src/app/x.rs", `#[derive(Clone, Debug)]\npub(crate) struct Private<T>(T);`],
+  ["src/app/x.rs", `#[derive(Debug)]\nstruct Private<T>(T);`],
+  ["src/text/scrub.rs", `fn t() -> String { crate::app::pr::public("") }`],
 ]
 if (process.argv.includes("--self-test")) {
   const missed = bad.filter(([f, t]) => check(f, t).length === 0)
@@ -198,6 +220,7 @@ for (const { file, text } of sources) problems.push(...check(file, text))
 for (const f of Object.keys(exposeAllowed)) {
   if (!sources.some((s) => s.file === f)) problems.push(`scripts/privacy-check.ts: ${f} is listed for expose_local() and does not exist`)
   if (neverExpose.some((r) => r.test(f))) problems.push(`scripts/privacy-check.ts: ${f} composes or publishes text and may never expose a private value`)
+  if (!exposeAllowed[f].trim()) problems.push(`scripts/privacy-check.ts: ${f} is listed for expose_local() without a reason`)
 }
 
 if (problems.length) {

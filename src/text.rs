@@ -20,6 +20,16 @@
 //!   surface).
 //! - Any `String` made with `format!` from marked text (`format!("{e}")` of an `Error`, `t.local()`) has lost
 //!   its marks; nothing stops that but review.
+//! - Until the `Marks` bridge is retired, reading `r.summary`, `r.detail`, `r.fix`, `r.message()`,
+//!   `e.message` or `e.hint` as a `String` drops their marks, and so does a path wrapped in a
+//!   `std::io::Error` (`io::Error::other(format!(…, p.display()))`) before it becomes an `Error`.
+//! - `STROBE_DEV_CANARY` proves marks are carried: a marked part whose marks were dropped on the way shows
+//!   `CANARY_` on a public surface. It does not see a path or a URL no producer marked; only a run from a
+//!   canary-named folder and URL (`scripts/dev/public-text.ts`) does.
+
+mod scrub;
+
+pub use scrub::{public_path_in, scrub_url};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
@@ -192,7 +202,7 @@ impl fmt::Debug for Text {
 /// such text reaches a public surface). `Private::expose_local()` is untouched, so OS calls still work.
 fn canary() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("STROBE_DEV_CANARY").is_some())
+    *ON.get_or_init(|| std::env::var_os("STROBE_DEV_CANARY").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 impl Text {
@@ -347,12 +357,16 @@ impl Text {
         t
     }
 
-    /// The processes a CPU reservation moved, as its line names them after `N moved per block`: ` (name x3,
-    /// name, …)`, the four most moved; nothing in public (`3 moved per block`).
+    /// The processes a CPU reservation moved, as its line names them after `N moved per block`: ` (name ×3,
+    /// name, …)`, the four most moved; nothing in public (`3 moved per block`). None moved: ` ()`, as the
+    /// line writes it, unmarked.
     pub fn reserve_moved(moved: &BTreeMap<Private<String>, u32>) -> Text {
+        if moved.is_empty() {
+            return Text::from(" ()");
+        }
         let mut top: Vec<(&Private<String>, &u32)> = moved.iter().collect();
         top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        let names = top.iter().take(4).map(|(n, c)| if **c > 1 { format!("{} x{c}", n.0) } else { n.0.clone() }).collect::<Vec<_>>().join(", ");
+        let names = top.iter().take(4).map(|(n, c)| if **c > 1 { format!("{} ×{c}", n.0) } else { n.0.clone() }).collect::<Vec<_>>().join(", ");
         Text::marked(format!(" ({names}{})", if top.len() > 4 { ", …" } else { "" }), PrivKind::ForeignProc, "")
     }
 
@@ -392,10 +406,18 @@ impl Text {
         title.quoted_or("another window")
     }
 
-    /// A phone by its id (an adb serial, a wireless address, a UDID or its short form): `the phone` in
-    /// public, `the emulator` for an emulator.
+    /// A phone by its id, where the sentence names it by the id alone (an adb serial, a wireless address:
+    /// `{} is at 41 °C`): `the phone` in public, `the emulator` for an emulator. Where the sentence says
+    /// what the device is (`{} is an emulator`), say the id with `id.redacted("the device")`; where it
+    /// already says `the phone` and adds the id in parentheses, `Text::phone_id`.
     pub fn device(id: &Private<String>, emulator: bool) -> Text {
         id.redacted(if emulator { "the emulator" } else { "the phone" })
+    }
+
+    /// A phone's id in parentheses after the words `the phone` (`the phone{} is locked`): local ` (4D5E6F70)`,
+    /// nothing in public (`the phone is locked`).
+    pub fn phone_id(id: &Private<String>) -> Text {
+        Text::marked(format!(" ({})", id.0), id.1, "")
     }
 
     /// A path as `display()` writes it. In public: from the repository's root (`perf/app.bench.ts`), from
@@ -406,22 +428,24 @@ impl Text {
     pub fn path(p: &Path, repo_root: Option<&Path>) -> Text {
         let local = p.display().to_string();
         let repo = repo_root.map(|r| r.display().to_string());
-        let public = public_path(&local, repo.as_deref());
+        let public = scrub::public_path(&local, repo.as_deref());
         if public == local { Text::from(local) } else { Text::marked(local, PrivKind::LocalPath, public) }
     }
 
-    /// A URL; in public without its credentials and secret parameters (`scrub_url`).
+    /// A URL; in public without its credentials and secret parameters (`scrub_url`, whose rule is in
+    /// `text/scrub.rs`).
     pub fn url(url: &str) -> Text {
         let public = scrub_url(url);
         if public == url { Text::from(url) } else { Text::marked(url, PrivKind::UrlSecret, public) }
     }
 
     /// What another tool printed (a build's, a fixture's output). In public: without terminal escapes,
-    /// each absolute path said as `Text::path` says it (from the repository's root for one in it), each URL
-    /// scrubbed (`scrub_url`). A name the tool prints in a form of its own is not found.
+    /// each URL scrubbed and each absolute path said as `Text::path` says it, token by token, a token it
+    /// cannot read hidden whole (the rule is in `text/scrub.rs`). A name the tool prints in a form of its
+    /// own (not a path, not a URL) is not found.
     pub fn external_output(raw: &str, repo_root: Option<&Path>) -> Text {
         let repo = repo_root.map(|r| r.display().to_string());
-        let public = scrub_output(&strip_escapes(raw), repo.as_deref());
+        let public = scrub::scrub_output(raw, repo.as_deref());
         if public == raw { Text::from(raw) } else { Text::marked(raw, PrivKind::ToolOutput, public) }
     }
 }
@@ -436,288 +460,6 @@ fn shares_public(who: &[(Private<String>, f64)], place: &str) -> String {
         1 => format!("1 other process{place}, {peak:.0}% of a core"),
         n => format!("{n} other processes{place}, the busiest {peak:.0}% of a core"),
     }
-}
-
-/// A path's parts for comparison: `.` and `..` resolved, a drive (`c:`) first, the verbatim prefix and
-/// macOS's `/private` before `/var` and `/tmp` dropped.
-struct Split {
-    absolute: bool,
-    /// Its parts; a drive is the first.
-    parts: Vec<String>,
-    drive: bool,
-    /// A `..` climbed above the root (absolute) or out of where it starts (relative).
-    climbs: bool,
-    /// Compared without case (Windows).
-    fold: bool,
-}
-
-impl Split {
-    fn new(s: &str) -> Split {
-        let unverbatim;
-        let s = match s.strip_prefix(r"\\?\") {
-            Some(r) if r.get(..4).is_some_and(|u| u.eq_ignore_ascii_case(r"UNC\")) => {
-                unverbatim = format!(r"\\{}", &r[4..]);
-                unverbatim.as_str()
-            }
-            Some(r) => r,
-            None => s,
-        };
-        let b = s.as_bytes();
-        let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || matches!(b[2], b'/' | b'\\'));
-        let absolute = drive || s.starts_with(['/', '\\']);
-        let mut parts: Vec<String> = if drive { vec![s[..2].to_ascii_lowercase()] } else { Vec::new() };
-        let floor = parts.len();
-        let mut climbs = false;
-        for c in s[if drive { 2 } else { 0 }..].split(['/', '\\']) {
-            match c {
-                "" | "." => {}
-                ".." if absolute && parts.len() > floor => {
-                    parts.pop();
-                }
-                ".." => climbs = true,
-                c => parts.push(c.to_string()),
-            }
-        }
-        if !drive && absolute && parts.len() >= 2 && parts[0] == "private" && (parts[1] == "var" || parts[1] == "tmp") {
-            parts.remove(0);
-        }
-        Split { absolute, parts, drive, climbs, fold: cfg!(windows) || drive || s.contains('\\') }
-    }
-
-    /// Its parts below the drive.
-    fn names(&self) -> &[String] {
-        &self.parts[self.drive as usize..]
-    }
-
-    /// Its parts below `base`, if it is there. A base with no part of its own (`/`, `C:\`) holds nothing.
-    fn below(&self, base: &Split) -> Option<&[String]> {
-        let fold = self.fold || base.fold;
-        let same = |a: &String, b: &String| if fold { a.to_lowercase() == b.to_lowercase() } else { a == b };
-        let fits = self.absolute && base.absolute && !self.climbs && !base.climbs && !base.names().is_empty() && self.drive == base.drive && self.parts.len() >= base.parts.len();
-        (fits && self.parts.iter().zip(&base.parts).all(|(a, b)| same(a, b))).then(|| &self.parts[base.parts.len()..])
-    }
-}
-
-/// `path`'s public form (`Text::path`) against this machine's state folder and home.
-fn public_path(path: &str, repo: Option<&str>) -> String {
-    let state = crate::host::paths::state_path().display().to_string();
-    let home = crate::host::home().display().to_string();
-    public_path_in(path, repo, &state, &home)
-}
-
-/// `Text::path`'s public form of `path` given the repository's root, the state folder and the home folder;
-/// on its own for the dev check (`scripts/dev/private-text.ts`), which tries homes and roots this machine
-/// does not have.
-#[doc(hidden)]
-pub fn public_path_in(path: &str, repo: Option<&str>, state: &str, home: &str) -> String {
-    if path.is_empty() {
-        return String::new();
-    }
-    let expanded;
-    let path = match path.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
-            expanded = format!("{home}{rest}");
-            expanded.as_str()
-        }
-        _ => path,
-    };
-    let p = Split::new(path);
-    let names = p.names();
-    let tail = |lead: &str| names.last().map_or_else(|| lead.to_string(), |l| format!("{lead}/{l}"));
-    if !p.absolute {
-        return if p.climbs { tail("…") } else { path.to_string() };
-    }
-    if let Some(rest) = repo.and_then(|r| p.below(&Split::new(r))) {
-        return if rest.is_empty() { ".".into() } else { rest.join("/") };
-    }
-    if let Some(rest) = p.below(&Split::new(state)) {
-        return if rest.is_empty() { "<state>".into() } else { format!("<state>/{}", rest.join("/")) };
-    }
-    if let Some(rest) = p.below(&Split::new(home)) {
-        return match rest.len() {
-            0 => "~".into(),
-            1 => tail("~"),
-            _ => tail("~/…"),
-        };
-    }
-    tail("…")
-}
-
-/// A URL without what it holds of this machine or of someone's access: credentials (`user:pass@`, whatever
-/// they hold before the host), every parameter whose name says a secret (`token`, `accessToken`,
-/// `client_secret`, `api_key`, `sig`, …) in the path (`;k=v`), the query and the fragment (`#k=v`,
-/// `#/route?k=v`, `#a#k=v`); a `file:` URL's path as `Text::path` says it; a `data:` URL's content.
-pub fn scrub_url(url: &str) -> String {
-    let lower = url.get(..5).map(str::to_ascii_lowercase).unwrap_or_default();
-    if lower == "data:" {
-        return match url.find(',') {
-            Some(i) if i + 1 < url.len() => format!("{},<redacted>", &url[..i]),
-            Some(_) => url.to_string(),
-            None => "data:<redacted>".into(),
-        };
-    }
-    if lower == "file:" {
-        let path = url[5..].trim_start_matches(['/', '\\']);
-        let path = path.strip_prefix("localhost/").unwrap_or(path);
-        let path = if Split::new(path).drive { path.to_string() } else { format!("/{path}") };
-        return format!("file://{}", public_path(&path, None));
-    }
-    let (head, mut rest) = match url.find("://") {
-        Some(i) => (&url[..i + 3], &url[i + 3..]),
-        None => ("", url),
-    };
-    let mut out = head.to_string();
-    if !head.is_empty()
-        && let Some(at) = rest[..rest.find('/').unwrap_or(rest.len())].rfind('@')
-    {
-        out += "<redacted>@";
-        rest = &rest[at + 1..];
-    }
-    out + &scrub_params(rest)
-}
-
-/// Every `key=value` of `s` whose key says a secret, its value `<redacted>`; a value ends at `&`, `;`, `#`,
-/// `?` or a space.
-fn scrub_params(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let (mut copied, mut from) = (0, 0);
-    while let Some(eq) = s[from..].find('=').map(|e| e + from) {
-        let key_start = s[..eq].rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '[' | ']'))).map_or(0, |k| k + s[k..].chars().next().map_or(1, char::len_utf8));
-        let end = s[eq + 1..].find(|c: char| matches!(c, '&' | ';' | '#' | '?') || c.is_whitespace()).map_or(s.len(), |e| e + eq + 1);
-        if end > eq + 1 && secret_key(&s[key_start..eq]) {
-            out += &s[copied..eq + 1];
-            out += "<redacted>";
-            (copied, from) = (end, end);
-        } else {
-            from = eq + 1;
-        }
-    }
-    out + &s[copied..]
-}
-
-/// A parameter name that says a secret: a known one, or one ending in a secret's word whatever its case
-/// (`accessToken`, `client_secret`, `x-api-key`, `X-Amz-Signature`). It may hide a harmless one (`hotkey`).
-fn secret_key(k: &str) -> bool {
-    const EXACT: &[&str] = &["code", "sid", "sig", "jwt", "bearer", "cookie", "auth", "pass", "pwd", "otp", "nonce", "state"];
-    const ENDS: &[&str] = &["token", "secret", "key", "password", "passwd", "signature", "session", "sessionid", "session_id", "credential", "credentials", "authorization"];
-    let k = k.to_ascii_lowercase();
-    EXACT.contains(&k.as_str()) || ENDS.iter().any(|e| k.ends_with(e))
-}
-
-/// `s` without terminal escapes: CSI (`ESC [ … m`), OSC (`ESC ] … BEL` or `ESC \`), and two-byte ones.
-fn strip_escapes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        match it.next() {
-            Some('[') => {
-                for c in it.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                while let Some(c) = it.next() {
-                    if c == '\u{7}' || (c == '\u{1b}' && it.next_if_eq(&'\\').is_some()) {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Where a path or URL may start in a tool's output: after the text's start or one of these.
-fn starts_after(c: u8) -> bool {
-    c.is_ascii_whitespace() || b"\"'`()[]{}=,:;|<>".contains(&c)
-}
-
-/// What ends a path or URL in a tool's output.
-fn ends(c: char) -> bool {
-    matches!(c, '"' | '\'' | '`' | '<' | '>' | '|' | ';' | ',' | ')' | ']' | '}')
-}
-
-/// The length of a URL (`scheme://…`) at the start of `t`.
-fn url_len(t: &str) -> Option<usize> {
-    let scheme = t.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))).unwrap_or(t.len());
-    let ok = scheme > 0 && t.as_bytes()[0].is_ascii_alphabetic() && t[scheme..].starts_with("://");
-    ok.then(|| t.find(|c: char| c.is_whitespace() || ends(c)).unwrap_or(t.len()))
-}
-
-/// The length of an absolute path at the start of `t` (`/…`, `\…`, `C:\…`, `C:/…`, `~/…`): up to a space
-/// unless the next word goes on with a separator (`/opt/Some Corp/v1`), a quote, a bracket, or a `:` or `(`
-/// before a line number.
-fn path_len(t: &str) -> Option<usize> {
-    let b = t.as_bytes();
-    let sep = |i: usize| b.get(i).is_some_and(|c| matches!(c, b'/' | b'\\'));
-    let lead = if sep(0) {
-        1
-    } else if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && sep(2) {
-        3
-    } else if b.first() == Some(&b'~') && sep(1) {
-        2
-    } else {
-        return None;
-    };
-    let mut end = t.len();
-    for (i, c) in t.char_indices().skip(lead) {
-        let digit_next = || t[i + 1..].starts_with(|d: char| d.is_ascii_digit());
-        if ends(c) || (matches!(c, ':' | '(') && digit_next()) {
-            end = i;
-            break;
-        }
-        if c.is_whitespace() {
-            let word = t[i + 1..].split(char::is_whitespace).next().unwrap_or("");
-            let word = &word[..word.find(ends).unwrap_or(word.len())];
-            if word.is_empty() || word.starts_with(['/', '\\', '~']) || !word.contains(['/', '\\']) {
-                end = i;
-                break;
-            }
-        }
-    }
-    (end > lead).then_some(end)
-}
-
-/// A tool's output with each absolute path said as `Text::path` says it and each URL scrubbed. A path of
-/// one part outside the home, the state folder and the repository (`/s` in `120 /s`) stays.
-fn scrub_output(s: &str, repo: Option<&str>) -> String {
-    let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let (mut copied, mut i) = (0, 0);
-    while i < b.len() {
-        if i == 0 || starts_after(b[i - 1]) {
-            let rest = &s[i..];
-            if let Some(n) = url_len(rest) {
-                out += &s[copied..i];
-                out += &scrub_url(&rest[..n]);
-                (i, copied) = (i + n, i + n);
-                continue;
-            }
-            if let Some(n) = path_len(rest) {
-                let token = &rest[..n];
-                let public = public_path(token, repo);
-                if Split::new(token).names().len() > 1 || !public.starts_with('…') {
-                    out += &s[copied..i];
-                    out += &public;
-                    copied = i + n;
-                }
-                i += n;
-                continue;
-            }
-        }
-        i += 1;
-        while i < b.len() && !s.is_char_boundary(i) {
-            i += 1;
-        }
-    }
-    out + &s[copied..]
 }
 
 /// Any plain text is a `Text` with nothing marked: every `impl Into<String>` an `Error` or a `Refusal`
@@ -867,11 +609,10 @@ pub const fn positional_only(fmt: &str) {
         }
         if b[i] == b'{' {
             i += 1;
+            if i < b.len() && !matches!(b[i], b'}' | b':' | b'0'..=b'9') {
+                panic!("msg!: name no variable inside {{…}}; pass it as a positional argument, so its marks are kept");
+            }
             while i < b.len() && b[i] != b'}' {
-                let named = b[i].is_ascii_alphabetic() || b[i] == b'_';
-                if named && b[i - 1] == b'{' {
-                    panic!("msg!: name no variable inside {{…}}; pass it as a positional argument, so its marks are kept");
-                }
                 if b[i] == b'$' || b[i] == b'*' {
                     panic!("msg!: a width or precision from an argument is not taken; format that value first and pass it positional");
                 }
@@ -926,12 +667,18 @@ impl Marks {
         local
     }
 
-    /// `field`'s text as it now reads (`current`), with its marks.
+    /// `field`'s text as it now reads (`current`), with its marks. A private part of another field found in
+    /// it outside its own marks (fields swapped, combined, copied) hides it whole.
     pub fn text(&self, field: &str, current: &str) -> Text {
-        match self.0.iter().find(|(f, _)| f == field) {
+        let t = match self.0.iter().find(|(f, _)| f == field) {
             Some((_, made)) => reanchor(made, current),
             None => Text::from(current),
-        }
+        };
+        let mut others = self.0.iter().filter(|(f, _)| f != field).flat_map(|(_, o)| o.spans.iter().map(move |s| &o.local[s.at[0]..s.at[1]])).filter(|p| !p.is_empty());
+        let unmarked = |p: &str| {
+            (0..=t.local.len().saturating_sub(p.len())).any(|i| t.local.is_char_boundary(i) && t.local[i..].starts_with(p) && !t.spans.iter().any(|s| s.at[0] <= i && i + p.len() <= s.at[1]))
+        };
+        if others.any(unmarked) { Text::hidden(current, t.spans.first().map_or(PrivKind::Unknown, |s| s.kind)) } else { t }
     }
 
     /// The marks as result.json keeps them: per field, of its current text; a field with none (or no

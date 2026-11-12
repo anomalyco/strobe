@@ -277,7 +277,7 @@ pub enum Hidden {
 /// Why a validator refused: a run (in an `Error`) or one metric (in a `Comparison`). `summary`,
 /// `detail` and `fix` are the local text; `spans` keeps their private parts, which result.json writes
 /// beside them (`"spans": { "summary": [...] }`) when there are any.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(from = "RefusalRead")]
 pub struct Refusal {
     pub validator: ValidatorId,
@@ -326,6 +326,14 @@ impl From<RefusalRead> for Refusal {
     fn from(r: RefusalRead) -> Self {
         let spans = Marks::from_wire(r.spans, &[("summary", Some(&r.summary)), ("detail", r.detail.as_deref()), ("fix", r.fix.as_deref())]);
         Refusal { validator: r.validator, summary: r.summary, detail: r.detail, fix: r.fix, hidden: r.hidden, spans }
+    }
+}
+
+/// Two refusals are the same when they say the same with the same marks, however their marks were kept
+/// (set in another order, carried through `..r`, read back from result.json).
+impl PartialEq for Refusal {
+    fn eq(&self, o: &Self) -> bool {
+        self.validator == o.validator && self.hidden == o.hidden && self.summary_text() == o.summary_text() && self.detail_text() == o.detail_text() && self.fix_text() == o.fix_text()
     }
 }
 
