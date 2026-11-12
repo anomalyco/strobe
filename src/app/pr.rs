@@ -17,7 +17,7 @@ use crate::model::{self, Better, Error, Result, VerdictKind};
 use crate::stats;
 use crate::store;
 use extract::*;
-pub(crate) use extract::{judged, public};
+pub(crate) use extract::{judged, public, public_value};
 use github::*;
 pub use github::{Updated, head_commit, hero_level, relevel, splice, update_pr};
 pub use implementations::{claim, cpu_scope, factor_or_pct, fairness, range_x, ready_noun};

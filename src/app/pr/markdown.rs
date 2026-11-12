@@ -1292,6 +1292,8 @@ impl<'a> Doc<'a> {
             }
             match (v["kind"].as_str(), v["commit"].as_str()) {
                 (Some("dir"), Some(c)) => return c.to_string(),
+                // A folder in no repository: its path is this machine's, never published.
+                (Some("dir"), None) => return label_commit(v).unwrap_or_else(|| if fallback == "." { "<head folder>".into() } else { "<base folder>".into() }),
                 (Some(_), _) => return symbolic(s),
                 _ => {}
             }

@@ -652,6 +652,9 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     // Style and layout over script: the page's time goes to the browser's rendering of what script
     // changed (many elements, costly selectors), not to the script itself.
     let (style, layout_ms, script) = (v["main.style"].as_f64(), v["main.layout"].as_f64(), v["main.script"].as_f64().unwrap_or(0.0));
+    if style.is_some() || layout_ms.is_some() {
+        checked.push("style-layout-dominant");
+    }
     if let Some(sl) = style.zip(layout_ms).map(|(s, l)| s + l).or(style).or(layout_ms)
         && sl >= 20.0
         && sl > script
@@ -692,6 +695,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     // Work while idle: a recording with no input that still presents frames or keeps the main thread busy
     // (skipped on `wir:`, where a developer inspects their live Safari tab and may touch/scroll it).
     if meta["kind"] == "record" && meta["wir"] != true && v["interaction.n"].is_null() && v["scroll.n"].is_null() {
+        checked.push("work-while-idle");
         let seconds = meta["duration_ms"].as_f64().unwrap_or(0.0) / 1000.0;
         let fps = v["frames.n"].as_f64().unwrap_or(0.0) / seconds.max(1e-9);
         let busy = v["main.busy"].as_f64().unwrap_or(0.0);
@@ -800,13 +804,19 @@ pub fn insights(rec: &Rec) -> Result<Output> {
             at == VIA_DRIVER || at == crate::driver::SOURCE_URL || at.starts_with(&format!("{}:", crate::driver::SOURCE_URL))
         };
         let busy: f64 = rows.iter().filter(|r| r["name"] != "(idle)" && !driver(r)).map(|r| r["weight"].as_f64().unwrap_or(0.0)).sum();
-        // A module's name or `module+0x…` with no symbol: no function strobe can name.
+        // No symbol: a frame named by its module (`known.exe`, listed as `ntdll.dll (windows)`) or
+        // `module+0x…`. A symbol with no line info (a release build's symbol table, a public PDB) is a
+        // function strobe can name, though it has no file.
         let unsymbolized = |r: &Value| {
             let name = r["name"].as_str().unwrap_or("");
             h["native"] == true
-                && (r["where"].as_str().is_none_or(|w| w.is_empty() || w == "(native)")
-                    || name.contains("+0x")
-                    || h["unsymbolized"].as_array().into_iter().flatten().any(|u| u["module"].as_str() == Some(name)))
+                && (name.contains("+0x")
+                    || name.starts_with('[')
+                    || ["unsymbolized", "unsymbolized_any_frame"]
+                        .iter()
+                        .flat_map(|k| h[k].as_array().into_iter().flatten())
+                        .filter_map(|u| u["module"].as_str())
+                        .any(|m| m.split(" (").next().is_some_and(|m| m.eq_ignore_ascii_case(name))))
         };
         // One function holding a large part of the sampled CPU: where a change pays first. Not from
         // untimed snapshots (macOS `sample`: every thread, waiting ones too, no CPU time), and only a
@@ -903,6 +913,9 @@ pub fn insights(rec: &Rec) -> Result<Output> {
         );
     }
     // Crash or Jetsam caught on an iOS device during `[t0, t1 + 5s]`.
+    if meta["crashes"].is_array() {
+        checked.extend(["crash", "jetsam"]);
+    }
     for c in meta["crashes"].as_array().into_iter().flatten() {
         let rule = if c["kind"] == "jetsam" { "jetsam" } else { "crash" };
         hit(rule, "warn", c["summary"].as_str().unwrap_or("target process crashed or was jetsam-killed").to_string(), c.clone(), vec![q("log --source crash")]);

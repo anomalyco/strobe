@@ -94,8 +94,10 @@ pub fn run(args: &Args) -> Result<Output> {
     } else if let (Some(n), Some("pr")) = (args.get("update-pr"), args.get("format")) {
         data["pr_head_commit"] = json!(super::pr::head_commit(n, args.get("repo"))?);
     }
-    // A card or badge needs only the result: no views, no insights.
+    // A card or badge needs only the result: no views, no insights. Published: every string of it
+    // through `pr::public` first.
     if let Some(format @ ("card" | "badge")) = args.get("format") {
+        super::pr::public_value(&mut data);
         return super::card::report(args, &scratch, &data, format);
     }
     if experiment {
@@ -149,6 +151,11 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     }
     let format = args.get("format").unwrap_or("html");
+    // A PR block and a step summary are published: every string they read through `pr::public` first,
+    // the views and insights just attached too.
+    if matches!(format, "pr" | "summary") {
+        super::pr::public_value(&mut data);
+    }
     let markdown_out = matches!(format, "md" | "pr" | "summary");
     let out = match args.get("out") {
         Some(p) => std::path::PathBuf::from(p),
