@@ -512,7 +512,7 @@ fn check(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
                 if sec.suspects.is_empty() && sec.none.is_empty() {
                     sec.none.push("a check keeps no profile (--why always adds an attribution block of each case)".into());
                 }
-                if let Some(c) = cmd.record(s, "head") {
+                if let Some(c) = cmd.record(s, cmd.side_of(s, "head")) {
                     sec.next.push(("profile this case alone (one attribution block: CPU and allocation stacks, forced layouts, GC)".into(), c));
                 }
             }
@@ -700,8 +700,9 @@ struct Command {
     implementations: bool,
 }
 
-/// Flags a rerun leaves out: its own id, seed and cap, its output's form, and what it asks for itself.
-/// `--filter` stays (a rerun of a series of several names its case instead).
+/// Flags a rerun leaves out: its own id and cap, its output's form, and what it asks for itself.
+/// `--filter` stays (a rerun of a series of several names its case instead); `--seed` is the run's own
+/// seed when its hooks drew on it (`plan.used_random`: the workload), else left out.
 const DROP: [&str; 12] = ["id", "seed", "pairs", "why", "max-time", "resume", "json", "quiet", "plan", "verbose", "progress", "stop"];
 
 impl Command {
@@ -710,6 +711,11 @@ impl Command {
             .as_object()
             .map(|o| o.iter().filter(|(k, _)| !DROP.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string))).collect())
             .unwrap_or_default();
+        if r["plan"]["used_random"] == true
+            && let Some(seed) = r["plan"]["seed"].as_u64().map(|s| s.to_string()).or_else(|| r["args"]["flags"]["seed"].as_str().map(str::to_string))
+        {
+            flags.push(("seed".into(), seed));
+        }
         // A result that kept no flags (a check, an older comparison): each side from its variant.
         let variants = r["variants"].as_array().cloned().unwrap_or_default();
         let spec = |v: &Value| v["spec"].as_str().map(str::to_string);
@@ -739,8 +745,23 @@ impl Command {
             }
         }
         let path = r["args"]["pos"][0].as_str().or(r["file"].as_str()).unwrap_or("");
-        let file = (!run && !path.is_empty()).then(|| path.strip_prefix(r"\\?\").unwrap_or(path).to_string());
-        Command { file, flags, implementations: r["comparison"] == "implementations" }
+        // Forward slashes, which Windows reads too: a path with a `'` then needs no `\` beside it in
+        // double quotes, so PowerShell reads it as `sh` does.
+        let file = (!run && !path.is_empty()).then(|| path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/"));
+        // Two targets of one file (`--base <target> --head <target>[=<variant>]`): a comparison of
+        // implementations, or a check of both (whose variants name their targets).
+        let implementations = r["comparison"] == "implementations" || r["parity"].is_string() || variants.iter().any(|v| v["target"].is_string());
+        Command { file, flags, implementations }
+    }
+
+    /// The side (`base` or `head`) whose target a check's series ran, for two targets; else `role`.
+    fn side_of<'a>(&self, s: &Value, role: &'a str) -> &'a str {
+        let target = |side: &str| self.get(side).map(|x| x.split_once('=').map_or(x, |(t, _)| t).trim_start_matches("target:").to_string());
+        match s["target"].as_str() {
+            Some(t) if self.implementations && target("base").as_deref() == Some(t) => "base",
+            Some(t) if self.implementations && target("head").as_deref() == Some(t) => "head",
+            _ => role,
+        }
     }
 
     fn get(&self, k: &str) -> Option<&str> {
@@ -760,9 +781,9 @@ impl Command {
         {
             flags.push(("target".into(), t.into()));
         }
-        if self.get("params").is_none()
-            && let Some(p) = params(s)
-        {
+        // This series' own values, whatever the experiment swept (`--params all`, `n=1,n=3`).
+        if let Some(p) = params(s) {
+            flags.retain(|(k, _)| k != "params");
             flags.push(("params".into(), p));
         }
     }
@@ -782,7 +803,7 @@ impl Command {
     /// launches and a verdict. None when the check ran one side (no base to compare with).
     fn compare(&self, s: &Value) -> Option<String> {
         self.get("base")?;
-        let mut flags: Vec<(String, String)> = self.flags.iter().filter(|(k, _)| !matches!(k.as_str(), "check" | "runs" | "repeat" | "batch" | "noworse")).cloned().collect();
+        let mut flags: Vec<(String, String)> = self.flags.iter().filter(|(k, _)| !matches!(k.as_str(), "check" | "repeat" | "batch" | "noworse")).cloned().collect();
         self.narrow(s, &mut flags);
         Some(match &self.file {
             Some(f) => line("bench", Some(f), &flags),
@@ -801,24 +822,31 @@ impl Command {
         };
         let mut flags: Vec<(String, String)> = Vec::new();
         let target = if self.implementations {
+            // The side's target and its variant (`target=variant`) when it names one; a result that kept
+            // no flags, the series' target.
             let (t, v) = side.map(|x| x.split_once('=').map_or((x, None), |(t, v)| (t, Some(v)))).unwrap_or(("", None));
             if let Some(v) = v {
                 flags.push(("head".into(), v.into()));
             }
-            Some(t.trim_start_matches("target:").to_string()).filter(|t| !t.is_empty())
+            Some(t.trim_start_matches("target:").to_string()).filter(|t| !t.is_empty() && t != ".").or_else(|| s["target"].as_str().map(str::to_string))
         } else {
             flags.push(("head".into(), side.unwrap_or(".").into()));
-            self.get("target").map(str::to_string).or_else(|| s["target"].as_str().map(str::to_string))
+            s["target"].as_str().map(str::to_string).or_else(|| self.get("target").map(str::to_string))
         };
         if let Some(t) = target {
             flags.push(("target".into(), t));
         }
-        for k in ["headless", "mobile", "engine", "wayland", "style"] {
+        // What chose how it ran and what was measured: the same in the profile.
+        for k in ["headless", "mobile", "engine", "wayland", "style", "runs", "pin", "power", "seed"] {
             if let Some(v) = self.get(k) {
                 flags.push((k.into(), v.into()));
             }
         }
-        if let Some(p) = self.get("params").map(str::to_string).or_else(|| params(s)) {
+        // A native case's off-CPU waits go in its profile too (`record --bench` takes `waits` alone).
+        if self.get("probes") == Some("waits") {
+            flags.push(("probes".into(), "waits".into()));
+        }
+        if let Some(p) = params(s).or_else(|| self.get("params").map(str::to_string)) {
             flags.push(("params".into(), p));
         }
         Some(line("record", None, &[vec![("bench".to_string(), format!("{file}#{case}"))], flags].concat()))

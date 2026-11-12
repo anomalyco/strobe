@@ -28,6 +28,12 @@
 //                they share one launch's recording: no case is given the other's long task
 //   wait-driver  a page run that waits 300 ms for an element strobe's driver polls for: hot-function never names
 //                strobe-driver.js
+//   restyle      a page whose run toggles the width of 100 → 20,000 boxes: style and layout over script on head
+//                only; base measured style and layout below the threshold, so head's hit reads "over its threshold on
+//                head only", never "base not read for it"
+//   port, sized, rand  (more.bench.ts; scripts/dev/next-commands.ts --make) a case of two targets (lib, lib2), a case of a
+//                param n (2, and 4 with --params all), a case whose spin draws on ctx.random(): what each printed
+//                rerun and profile command must keep (its target, its own params, the seed)
 //
 // Commands (from <dir>; --headless keeps the page off the screen):
 //   strobe bench insights.bench.ts --base c0 --head c1 --filter regress,steady,cli-regress --pairs 6 --runs 3
@@ -43,6 +49,14 @@
 //                (head the working tree at c1: one hotPath row, harness.ts on both sides; two work rows)
 //   strobe bench batch.bench.ts --head c1 --check --batch 2 --headless
 //   strobe bench insights.bench.ts --head c1 --check --why always --filter wait-driver --headless
+//   strobe bench insights.bench.ts --base c0 --head c1 --filter restyle --pairs 4 --runs 3 --why always --headless
+//   two plain folders, no .git, in a folder whose name holds a space (`git archive c0 | tar -x -C "<d> x/v1"`, the
+//   same of c1 in v2), from <dir>; on Windows name one with a lowercase drive letter:
+//   strobe bench insights.bench.ts --base "<d> x/v1" --head "<d> x/v2" --filter regress,twofiles --pairs 6 --runs 3 --why always
+//                (one hotPath row of about +12 ms and two work rows, and hot-function on both sides: base too)
+//   strobe bench more.bench.ts --base lib --head lib2 --check --filter port
+//   strobe bench more.bench.ts --head c1 --check --filter sized --params all
+//   strobe bench more.bench.ts --base c0 --head c1 --check --filter rand --runs 2 --pin none --power keep
 // then `strobe query <exp> insights` of each.
 import { execFileSync } from "node:child_process"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
@@ -105,6 +119,7 @@ if (x < 0) console.log(x)
 writeFileSync(
   `${dir}/page.html`,
   `<!doctype html><title>insights</title>
+<style>.box { display: inline-block; width: 10px; height: 4px; margin: 1px } body.wide .box { width: 12px }</style>
 <p>leak page</p>
 <button id="spin" onclick="longTask(80)">spin</button>
 <script>
@@ -114,6 +129,8 @@ window.leakStep = (n) => { for (let i = 0; i < n; i++) window.kept.push(new Reta
 // One task of \`ms\` on the main thread.
 window.longTask = (ms) => { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 1); return x > 0 }
 // An element that appears after \`ms\`, for strobe's driver to wait for (and taken away again).
+// n boxes (kept between runs), whose width a class on the body sets: toggling it restyles and lays out every box.
+window.boxes = (n) => { const have = document.querySelectorAll(".box").length; for (let i = have; i < n; i++) { const d = document.createElement("div"); d.className = "box"; document.body.append(d) } return n }
 window.later = (ms) => { document.getElementById("late")?.remove(); setTimeout(() => { const p = document.createElement("p"); p.id = "late"; p.textContent = "late"; document.body.append(p) }, ms); return true }
 </script>`,
 )
@@ -154,6 +171,14 @@ export default bench({
     busy: { targets: ["lib"], primary: "run.duration", metrics: ["cpu.work"], run: (ctx: any) => ctx.call("hotPath", 300) },
     "cli-regress": { targets: ["cmd"], primary: "cpu.work", run: (ctx: any) => ctx.exec() },
     leak: { targets: ["page"], primary: "cpu.work", run: (ctx: any) => ctx.page.eval((n: number) => (window as any).leakStep(n), level(ctx.root).leak) },
+    restyle: {
+      targets: ["page"],
+      primary: "main.work",
+      run: async (ctx: any) => {
+        await ctx.untimed(() => ctx.page.eval((n: number) => (window as any).boxes(n), level(ctx.root).restyle))
+        await ctx.page.eval(() => document.body.classList.toggle("wide"))
+      },
+    },
     "http-stall": {
       targets: ["lib"],
       primary: "http.latency.p95",
@@ -221,10 +246,27 @@ export default bench({
 })
 `,
 )
+// next-commands.ts --make: two implementations of the same exports, a param (every case of a file runs each of its
+// values), a workload drawn from the seed.
+writeFileSync(
+  `${dir}/more.bench.ts`,
+  `import { bench, script } from "@hona/strobe"
+
+export default bench({
+  targets: { lib: script("./harness.ts"), lib2: script("./harness.ts") },
+  params: { n: { run: [2], more: [4] } },
+  cases: {
+    port: { targets: ["lib", "lib2"], primary: "cpu.work", run: (ctx: any) => ctx.call("hotPath", ctx.params.n) },
+    sized: { targets: ["lib"], primary: "cpu.work", run: (ctx: any) => ctx.call("hotPath", ctx.params.n) },
+    rand: { targets: ["lib"], primary: "cpu.work", run: (ctx: any) => ctx.call("hotPath", 2 + Math.floor(ctx.random() * 3)) },
+  },
+})
+`,
+)
 writeFileSync(`${dir}/strobe.json`, "{}\n")
 for (const [k, l] of [
-  [0, { hot: 20, cli: 30, leak: 0, swap: "a" }],
-  [1, { hot: 32, cli: 45, leak: 2000, swap: "b" }],
+  [0, { hot: 20, cli: 30, leak: 0, swap: "a", restyle: 100 }],
+  [1, { hot: 32, cli: 45, leak: 2000, swap: "b", restyle: 20000 }],
 ] as const) {
   writeFileSync(`${dir}/level.json`, JSON.stringify(l) + "\n")
   git("add", "-A")

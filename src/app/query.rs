@@ -848,7 +848,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                 };
                 // Its file from its checkout's root, as two builds share it (the hotspots view keeps the
                 // whole location and line).
-                let file = r["where"].as_str().map(diff::portable_location).filter(|w| !w.is_empty() && w != "(native)");
+                let file = r["where"].as_str().map(|w| diff::portable_location(w, diff::ran_from(meta))).filter(|w| !w.is_empty() && w != "(native)");
                 let at = file.as_deref().map(|w| format!(" ({w})")).unwrap_or_default();
                 hit(
                     "hot-function",

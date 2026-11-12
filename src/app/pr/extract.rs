@@ -897,7 +897,13 @@ pub(crate) fn public_value(v: &mut Value) {
         match v {
             Value::String(s) => *s = public(s),
             Value::Array(a) => a.iter_mut().for_each(walk),
-            Value::Object(o) => o.values_mut().for_each(walk),
+            Value::Object(o) => {
+                // The folder a variant ran from (a block's `variant_git.root`): this machine's alone.
+                if o.contains_key("spec") && o.contains_key("dirty") {
+                    o.remove("root");
+                }
+                o.values_mut().for_each(walk)
+            }
             _ => {}
         }
     }
