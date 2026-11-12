@@ -1,0 +1,10 @@
+{
+  "apps": {
+    "tray": {
+      "kind": "electron",
+      "exe": { "windows": "chrome.exe", "macos": "chrome", "linux": "chrome" },
+      "args": ["--headless=new", "--no-first-run", "--no-default-browser-check"],
+      "window": false
+    }
+  }
+}

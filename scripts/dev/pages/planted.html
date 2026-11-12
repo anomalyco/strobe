@@ -5,7 +5,8 @@ them, so two targets that differ only in it differ by exactly that:
                timer of <ms>: a browser's timer fires late by its own slack)
   ?vsyncs=<k>  the page first times the display's refresh (the median of 30 animation frames' gaps, V), then every
                animation frame spins k × V on the main thread and moves #box: the same plant at any refresh rate
-               (k 1.5: Chromium starts each late frame at once, so 2 frames are presented in every 3 vsyncs)
+               (k 1.5: Chromium starts each late frame at once, so 2 frames are presented in every 3 vsyncs);
+               #calibrated appears once V is timed
   ?click=<ms>  a click on #btn asks for an animation frame, which spins <ms> and then changes #btn's colour: with
                <ms> a whole number of vsyncs, interaction latency differs by exactly it (a spin in the click
                handler itself read about 7 ms less on a 60 Hz Mac)
@@ -45,7 +46,11 @@ if (q.has("vsyncs")) {
     if (!work) {
       if (last) gaps.push(t - last)
       last = t
-      if (gaps.length === 30) work = num("vsyncs") * gaps.sort((a, b) => a - b)[15]
+      if (gaps.length === 30) {
+        work = num("vsyncs") * gaps.sort((a, b) => a - b)[15]
+        // The bench's setup waits for this, so no run sees the unspun frames that timed V.
+        document.body.append(Object.assign(document.createElement("div"), { id: "calibrated" }))
+      }
     } else {
       spin(work)
     }
