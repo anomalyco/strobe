@@ -1065,6 +1065,7 @@ pub(super) fn warning_name(id: &str) -> &str {
         "StaleCalibration" => "Stale calibration",
         "VariantChanged" => "Variant changed",
         "HarnessOverlay" => "Harness overlay",
+        "Uncounted" => "Counter not counted",
         "ScreenChanged" => "Different screens",
         "NoPresentSource" => "Frame and latency metrics",
         other => other,
