@@ -799,6 +799,10 @@ async function main() {
       add(name, "no Greek mu", u, !fresh[u].mu)
       const ap = axisProblems(fresh[u].charts)
       add(name, "no axis prints two ticks alike or steps unevenly", u, !ap.length, ap.slice(0, 6).join("\n      "))
+      // The HTTP probe's stall floor is configured, not measured: `at least 50 ms` in every unit, as the
+      // terminal writes it (query::http STALL_MS); the measured threshold beside it follows the unit.
+      const floor = fresh[u].items.filter((i: Item) => /idle p95, at least/.test(i.t))
+      if (floor.length) add(name, "the stall floor reads 50 ms in every unit", u, floor.every((i: Item) => /at least 50 ms\)/.test(i.t)), floor.map((i: Item) => i.t.trim()).join(" | "))
       await textExpect(c, name, u, expect)
     }
     await specialExpect(c, name, url, view, path, expect)
