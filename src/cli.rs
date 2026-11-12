@@ -443,17 +443,21 @@ Use
                                   ScriptProfiler, Heap, Network, Safari/WebKit device logs and crashes (read-only)
   record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--video]
                                   record one bench case (it drives the page: clicks, keys) with the attribution probes
+                                  (its block ends with a heap snapshot; --probes waits adds off-CPU waits to a native
+                                  case; --probes memory exits 2: a case's leak run is bench --probes memory)
   record pid:<n>|proc:<name> [--probes timing|deep|waits|stacks-unprivileged] [--for 10s]
                                   any process from outside: OS present events (frames), CPU, GPU; deep: native stacks
                                   (--os-frames on a Chromium record adds the OS present events beside its trace)
   bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check | --blocks N] [--filter <cases>] [--pairs auto|N]
         [--why auto|always|never] [--trace lean|full] [--power high|keep]
         [--params k=v,…|all]           (all: every parameter's `more` values too)
-        [--probes memory --repeat N]   (a leak run per variant instead of pairs)
+        [--probes memory --repeat N]   (a leak run per variant instead of pairs; not with --check, which takes no
+                                        heap snapshot: exit 2)
         [--pixels | --pixels-only]     (compare base and head at the case's page.snapshot()s, after or instead of timing)
         [--video]                      (film untimed: the check run, or one warmed run per side after the timed pairs)
         [--check --batch N]            (up to N run cases per launch, each held to the launch's start after its reset)
-        [--check --runs N]             (N runs in each case's one launch, no warmup: values their median, [lowest … highest run])
+        [--check --runs N]             (N runs in each case's one launch, no warmup: values their median, [lowest … highest run];
+                                        runs that stepped down warn NotSteady)
         [--check --repeat R]           (R fresh cold launches per case, from 2: the median over them and each launch's value;
                                         not with --batch or --video)
         [--check --base <variant>]     (each case once on base and on head, each line base's under head's; nothing compared but
@@ -526,12 +530,15 @@ Use
                                   threads --timeline: each thread's CPU per second from the launch, exited ones too)
                                   (insights: rule hits with their evidence: dominant-thread (one thread off the UI thread
                                   doing most of the CPU), off-cpu-bound (runs that mostly waited), style-layout-dominant,
-                                  wakes-while-idle (idle recordings and idle native blocks), forced-layout, gc-pressure, …)
+                                  wakes-while-idle (idle recordings and idle native blocks), hot-function, http-stalls,
+                                  forced-layout, gc-pressure, …; exp_…: insights per series: verdict or status, ranked
+                                  suspects, the warnings that bear on it, the commands to run next)
   report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
                                   write a self-contained HTML (or markdown) report; pr: an experiment's tables for a PR body
                                   (md and pr print the markdown; the file's path goes to stderr; the view follows from the
                                   handle; a path to a result.json or meta.json is read as it is, nothing written beside it;
-                                  a bench --blocks run: HTML and md, its blocks' median and interval, no verdict)
+                                  a bench --blocks run: HTML and md, its blocks' median and interval, no verdict; a format
+                                  the handle has none of exits 2 before anything is written)
   report experiment <exp> --format summary [--out <file.md>]
                                   the result as short GitHub Markdown for a CI job's summary page ($GITHUB_STEP_SUMMARY):
                                   a check, pixels run, leak run or --blocks as one table (a check shows only exact
