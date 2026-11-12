@@ -525,8 +525,9 @@ fn text(file: &Path, variants: &[Variant], plan: &Value, notes: &[String]) -> St
             t += &format!("\n{}\n  refused  {}\n", s["label"].as_str().unwrap_or(""), refused_text(&s["refused"]));
             continue;
         }
-        let unit = if s["relative"] == true { "" } else { " (in the metric's unit)" };
-        let pct = |x: f64| if s["relative"] == true { format!("{:.1}%", 100.0 * (x.exp() - 1.0)) } else { format!("{x:.2}") };
+        // A difference in the metric's unit: a time as times print (`--unit`), a percentage in points.
+        let abs = crate::model::metric(s["primary"].as_str().unwrap_or("")).map_or("value", |d| if d.unit == "%" { "pp" } else { d.unit });
+        let pct = |x: f64| if s["relative"] == true { format!("{:.1}%", 100.0 * (x.exp() - 1.0)) } else { fmt::value(x, abs) };
         t += &format!(
             "\n{}  {}{}\n",
             s["label"].as_str().unwrap_or(""),
@@ -536,7 +537,7 @@ fn text(file: &Path, variants: &[Variant], plan: &Value, notes: &[String]) -> St
         t += &format!(
             "  spread   {}\n",
             match s["sigma"].as_f64() {
-                Some(sig) => format!("{} per pair{unit}, from {}", pct(sig), s["spread_source"].as_str().unwrap_or("")),
+                Some(sig) => format!("{} per pair, from {}", pct(sig), s["spread_source"].as_str().unwrap_or("")),
                 None => s["spread_source"].as_str().unwrap_or("").to_string(),
             }
         );
@@ -558,7 +559,7 @@ fn text(file: &Path, variants: &[Variant], plan: &Value, notes: &[String]) -> St
                 t += &format!(
                     "  smallest {} pairs decide an effect of about {} (80% of the time)\n",
                     s["detectable_at"],
-                    if s["relative"] == true { format!("{:.1}%", 100.0 * x) } else { format!("{x:.2}") }
+                    if s["relative"] == true { format!("{:.1}%", 100.0 * x) } else { fmt::value(x, abs) }
                 );
             }
         } else {

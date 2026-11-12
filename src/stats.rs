@@ -565,6 +565,25 @@ pub fn kind_of(c: &serde_json::Value) -> VerdictKind {
     c.get("verdict_kind").and_then(|k| serde_json::from_value(k.clone()).ok()).unwrap_or_else(|| verdict_kind(c["verdict"].as_str().unwrap_or(""), def_in(c)))
 }
 
+/// What comparison `c` (as result.json keeps it) decided, in words for people: its `verdict`, with a
+/// time's absolute bound or margin (`same (±520 µs)`, `no worse (≤1.20 ms, faster)`, `worse (>0.5 s)`)
+/// drawn again from `bound` in the unit times print in now. The words froze it in the unit, and at
+/// the digits, of the strobe that decided it (`same (±0 ms)` from a bound of 0.04 ms).
+pub fn verdict_text(c: &serde_json::Value) -> String {
+    let v = c["verdict"].as_str().unwrap_or("");
+    // A bound of exactly 0 (both medians 0: 2% of nothing) is one too: `same (±0 µs)`.
+    let bound = c["bound"].as_f64().filter(|b| b.is_finite() && *b >= 0.0);
+    let (true, Some(b)) = (c["relative"] == false && def_in(c).is_some_and(|d| d.unit == "ms"), bound) else { return v.to_string() };
+    for p in ["same (±", "no worse (≤", "worse (>"] {
+        if let Some(rest) = v.strip_prefix(p) {
+            // The bound ends at its `)` or at the `, faster` after it (a grouped number holds no space).
+            let Some(end) = [rest.find(')'), rest.find(", ")].into_iter().flatten().min() else { break };
+            return format!("{p}{}{}", crate::fmt::bound(0.0, false, b, "ms"), &rest[end..]);
+        }
+    }
+    v.to_string()
+}
+
 /// The refusal a `refused (<validator>): <why>` verdict names, for result.json files from before
 /// `refusal`.
 pub fn refusal_of(verdict: &str) -> Option<Refusal> {

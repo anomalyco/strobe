@@ -222,7 +222,8 @@ fn base_only(hits: impl IntoIterator<Item = Value>) -> Vec<Value> {
 fn verdict_line(c: &Value, aa: bool) -> String {
     let m = c["metric"].as_str().unwrap_or("");
     let kind = stats::kind_of(c);
-    let verdict = c["verdict"].as_str().unwrap_or("");
+    // A time's absolute bound drawn in the unit times print in (`stats::verdict_text`).
+    let verdict = stats::verdict_text(c);
     if kind == VerdictKind::Refused {
         return format!("{m} {verdict}");
     }
@@ -240,7 +241,10 @@ fn verdict_line(c: &Value, aa: bool) -> String {
                 let (e, l, h) = fmt::pct_ci(est, lo, hi);
                 format!("{e} [{l} … {h}]")
             }
-            (false, Some(lo), Some(hi)) => format!("{} [{} … {}]", fmt::signed(est, abs), fmt::signed(lo, abs), fmt::signed(hi, abs)),
+            (false, Some(lo), Some(hi)) => {
+                let v = fmt::signed_values(&[est, lo, hi], abs);
+                format!("{} [{} … {}]", v[0], v[1], v[2])
+            }
             (true, _, _) => fmt::pct(est),
             (false, _, _) => fmt::signed(est, abs),
         };
@@ -532,7 +536,8 @@ fn blocks(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
         format!("★ {m} {}", s["primary"]["verdict"].as_str().unwrap_or("refused"))
     } else if values.len() >= 2 {
         let (median, lo, hi, conf) = stats::median_interval(&values, 0.95);
-        format!("★ {m} median {} [{} … {}] ({:.0}% over {} blocks); nothing compared", fmt::value(median, unit), fmt::value(lo, unit), fmt::value(hi, unit), 100.0 * conf, values.len())
+        let v = fmt::values(&[median, lo, hi], unit);
+        format!("★ {m} median {} [{} … {}] ({:.0}% over {} blocks); nothing compared", v[0], v[1], v[2], 100.0 * conf, values.len())
     } else if let [v] = values[..] {
         format!("★ {m} {} (1 block: no interval); nothing compared", fmt::value(v, unit))
     } else {
@@ -672,7 +677,8 @@ fn pixels(r: &Value, s: &Value, sec: &mut Section) {
 fn bisect(r: &Value) -> Output {
     let id = r["id"].as_str().unwrap_or("");
     let mut text = format!("insights · {id} · a bisect of {} · {}\n", r["series"].as_str().unwrap_or(""), r["metric"].as_str().unwrap_or(""));
-    text += &format!("result    {}\n", r["verdict"].as_str().unwrap_or(""));
+    // The step verdicts it quotes drawn in the unit times print in now.
+    text += &format!("result    {}\n", crate::app::bisect::verdict_text(r));
     let mut next = Vec::new();
     let culprit = r["culprit"]["commit"].as_str();
     if let Some(step) = r["steps"].as_array().into_iter().flatten().find(|s| culprit.is_some() && s["commit"].as_str() == culprit)
@@ -700,10 +706,11 @@ struct Command {
     implementations: bool,
 }
 
-/// Flags a rerun leaves out: its own id and cap, its output's form, and what it asks for itself.
-/// `--filter` stays (a rerun of a series of several names its case instead); `--seed` is the run's own
-/// seed when its hooks drew on it (`plan.used_random`: the workload), else left out.
-const DROP: [&str; 12] = ["id", "seed", "pairs", "why", "max-time", "resume", "json", "quiet", "plan", "verbose", "progress", "stop"];
+/// Flags a rerun leaves out: its own id and cap, its output's form (`--unit` too: how it printed, not
+/// what it measured), and what it asks for itself. `--filter` stays (a rerun of a series of several
+/// names its case instead); `--seed` is the run's own seed when its hooks drew on it
+/// (`plan.used_random`: the workload), else left out.
+const DROP: [&str; 13] = ["id", "seed", "pairs", "why", "max-time", "resume", "json", "quiet", "plan", "verbose", "progress", "stop", "unit"];
 
 impl Command {
     fn of(r: &Value) -> Command {

@@ -378,8 +378,9 @@ fn windowless(n: &mut crate::target::native::Native, guard: &crate::target::isol
     let name = n.exe.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let mut text = format!("{name} · {}\nwindow   none (windowless)\n", n.exe.display());
     text += &match ended {
-        Some((code, at)) => format!("exited   with code {code} after {}\n", fmt::value(at.as_secs_f64() * 1e3, "ms")),
-        None => format!("running  after {} · {processes} process{}\n", fmt::value(wait.as_secs_f64() * 1e3, "ms"), if processes == 1 { "" } else { "es" }),
+        // Wall-clock durations (the watch's own, polled every 100 ms), not measured times: `850 ms`, `2.0 s`.
+        Some((code, at)) => format!("exited   with code {code} after {}\n", fmt::ms_duration(at.as_millis() as u64)),
+        None => format!("running  after {} · {processes} process{}\n", fmt::ms_duration(wait.as_millis() as u64), if processes == 1 { "" } else { "es" }),
     };
     for p in &problems {
         text += &format!("!        {p}\n");

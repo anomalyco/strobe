@@ -395,7 +395,7 @@ fn identity(variants: &[Variant], file: &Path, harness: &Harness, args: &Args, s
     // `--seed` is the workload only where a hook used it (`used_random`, set after the runs): the ledger
     // compares `seed` on its own. `--video` films untimed blocks after the timed ones: no verdict moves.
     // `--mobile`'s phone is the page's (`identity.engines`, by its hardware key), never its serial of the day.
-    const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "max-time", "plan", "seed", "video", "mobile"];
+    const SKIP: &[&str] = &["base", "head", "aa", "id", "json", "quiet", "verbose", "resume", "stop", "keep", "open", "progress", "max-time", "plan", "seed", "video", "mobile", "unit"];
     let flags: serde_json::Map<String, Value> = args.to_json()["flags"].as_object().into_iter().flatten().filter(|(k, _)| !SKIP.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
     // An implementation comparison's side is its target at a build: both are its identity, the build
     // resolved in that target's own project (its `cwd`'s repository and app profiles).
@@ -3333,7 +3333,8 @@ fn check_spread(s: &Value, name: &str) -> String {
     let unit = model::metric(name).map_or("", |d| d.unit);
     let mut out = String::new();
     if let (Some(lo), Some(hi)) = (s["spread"][name][0].as_f64(), s["spread"][name][1].as_f64()) {
-        out += &format!(" [{} … {}]", fmt::value(lo, unit), fmt::value(hi, unit));
+        let ends = if unit == "ms" { fmt::times(&[lo, hi], false) } else { vec![fmt::value(lo, unit), fmt::value(hi, unit)] };
+        out += &format!(" [{} … {}]", ends[0], ends[1]);
     }
     if let Some(each) = s["repeat"]["values"][name].as_array() {
         out += &format!(" ({})", each.iter().map(|v| v.as_f64().map_or("—".to_string(), |v| fmt::value(v, unit))).collect::<Vec<_>>().join(" · "));
@@ -3403,6 +3404,30 @@ fn check_output(
         s["state"] = json!(state);
         s["refusal"] = refusal;
     }
+    let (gaps, before, _, failed) = check_counts(&series);
+    let mut result = json!({
+        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "env": env, "plan": { "seed": seeded.0, "used_random": seeded.1 }, "variants": variants, "args": args,
+        "series": series, "warnings": warnings, "passed": failed == 0 && !halted, "stopped": stopped, "parity": matrix, "batch": batched,
+    });
+    let text = check_text(&result);
+    result["text"] = json!(text);
+    store::write_json(&dir.join("result.json"), &result)?;
+    let mut out = Output::new(text, result);
+    // Where the whole result is, as a comparison's `--json` says it.
+    out.json["result"] = json!(dir.join("result.json"));
+    let ran = out.json["series"].as_array().map_or(0, Vec::len) - gaps - before;
+    if failed > 0 {
+        out.code = 1;
+    } else if (gaps > 0 && require_parity) || (ran == 0 && before > 0) {
+        // Every case that could run was refused: nothing was checked.
+        out.code = 4;
+    }
+    Ok(out)
+}
+
+/// A check's cases by state: (parity gaps, refused before they ran, journeys whose sides differ,
+/// failed).
+fn check_counts(series: &[Value]) -> (usize, usize, usize, usize) {
     // A gap is listed, not failed; journeys whose sides differ (`journey_refusal`) fail.
     let gaps = series.iter().filter(|s| s["kind"] == "gap").count();
     // Refused before it ran (`check_engines`) or as it ran (`series_refusal`): listed, not failed, as a
@@ -3410,9 +3435,21 @@ fn check_output(
     let before = series.iter().filter(|s| s["kind"] == "refused").count();
     let refused = series.iter().filter(|s| s["journey_refusal"].is_object()).count();
     let failed = series.iter().filter(|s| !matches!(s["kind"].as_str(), Some("gap" | "refused")) && (s["passed"] != true || s["journey_refusal"].is_object())).count();
+    (gaps, before, refused, failed)
+}
+
+/// A check's text from its result.json: what `bench --check` printed, drawn again (in the unit times
+/// print in now).
+pub(crate) fn check_text(r: &Value) -> String {
+    let exp = r["id"].as_str().unwrap_or("");
+    let series: Vec<Value> = r["series"].as_array().cloned().unwrap_or_default();
+    let (gaps, before, refused, failed) = check_counts(&series);
+    let matrix = r["parity"].as_str();
+    let batched = &r["batch"];
+    let seeded = (r["plan"]["seed"].clone(), r["plan"]["used_random"] == true);
     // The builds checked, their commits included (a folder's name says none). An implementation check
     // names its sides on each case's line.
-    let mut text = variants
+    let mut text = r["variants"]
         .as_array()
         .into_iter()
         .flatten()
@@ -3617,7 +3654,7 @@ fn check_output(
             }
         }
     }
-    if let Some(m) = &matrix {
+    if let Some(m) = matrix {
         text += &format!("\nparity\n{m}");
     }
     let ran = series.len() - gaps - before;
@@ -3656,32 +3693,18 @@ fn check_output(
         if gaps > 0 { format!(", {gaps} parity gap{}", if gaps == 1 { "" } else { "s" }) } else { String::new() },
         if before > 0 { format!(", {before} refused") } else { String::new() }
     );
-    if let Some(l) = batch::line(&batched) {
+    if let Some(l) = batch::line(batched) {
         text += &l;
     }
     // A failure of a seeded workload is replayed by its seed.
     if failed > 0 && seeded.1 {
         text += &format!("seed  {0} (the hooks used ctx.random() or ctx.seed): add --seed {0} to replay the same workload\n", seeded.0);
     }
-    for w in &warnings {
-        text += &format!("{} {:<24}{}\n", if w.level == "warn" { "!" } else { "i" }, w.id, w.text);
+    for w in r["warnings"].as_array().into_iter().flatten() {
+        text += &format!("{} {:<24}{}\n", if w["level"] == "warn" { "!" } else { "i" }, w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or(""));
     }
     text += &format!("\n{exp}\n");
-    let result = json!({
-        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "env": env, "plan": { "seed": seeded.0, "used_random": seeded.1 }, "variants": variants, "args": args,
-        "series": series, "warnings": warnings, "passed": failed == 0 && !halted, "stopped": stopped, "parity": matrix, "batch": batched, "text": text,
-    });
-    store::write_json(&dir.join("result.json"), &result)?;
-    let mut out = Output::new(text, result);
-    // Where the whole result is, as a comparison's `--json` says it.
-    out.json["result"] = json!(dir.join("result.json"));
-    if failed > 0 {
-        out.code = 1;
-    } else if (gaps > 0 && require_parity) || (ran == 0 && before > 0) {
-        // Every case that could run was refused: nothing was checked.
-        out.code = 4;
-    }
-    Ok(out)
+    text
 }
 
 /// A leak run (`--probes memory`, SPEC §8.6): one memory block per variant, nothing paired. Each gets
@@ -3989,7 +4012,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
         };
         match both(ctx) {
             Ok(b) => {
-                progress(format!("  block {:>2}  {:>10}  {}{}", i + 1, fmt::value(val(&b, &s.primary), unit), steps_text(&b.steps), if b.locked { " · session locked" } else { "" }));
+                progress(format!("  block {:>2}  {:>13}  {}{}", i + 1, fmt::value(val(&b, &s.primary), unit), steps_text(&b.steps), if b.locked { " · session locked" } else { "" }));
                 if blocks.first().is_some_and(|f| (f.locked, f.display) != (b.locked, b.display)) && restarts < 3 {
                     restarts += 1;
                     progress("  the session locked or unlocked, or the display turned off or on, since the first block: the blocks start again in this state");
@@ -4259,7 +4282,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             let side = |i: usize| if ctx.implementations { variants[i].name.clone() } else { variants[i].role.to_string() };
             let (est_t, lo_t, hi_t) = change_ci(cmp.relative, cmp.estimate, cmp.lo, cmp.hi, def.unit);
             progress(format!(
-                "  pair {:>2}  {} {:>10}  {} {:>10}  {}  [{} … {}]  {}{eta}",
+                "  pair {:>2}  {} {:>13}  {} {:>13}  {}  [{} … {}]  {}{eta}",
                 n,
                 side(0),
                 fmt::value(val(&blocks[idx[0]], &s.primary), def.unit),
@@ -5015,7 +5038,7 @@ fn quota_of(s: &Series, b: &Block, runs: &[Option<u64>], whole: Option<u64>, bat
 fn quota_state(x: &Exec, throttled_ns: Option<u64>, mut b: Block) -> Block {
     let Some(ns) = throttled_ns.filter(|ns| *ns > 0 && !x.video && matches!(x.set, Set::Lean | Set::Timing)) else { return b };
     let ms = ns as f64 / 1e6;
-    let held_for = if ms < 1.0 { format!("{ms:.2} ms") } else { format!("{ms:.0} ms") };
+    let held_for = fmt::time(ms);
     let why = Refusal::new(ValidatorId::Throttled, format!("a CPU quota throttled strobe's cgroup, the target's, for {held_for} of throttled thread time during the measured runs (cpu.stat)"))
         .fix("run the bench outside the quota (a container's --cpus, systemd's CPUQuota, cpu.max), or raise it above what strobe and the target use");
     let held: Vec<String> = b.values.keys().filter(|m| load_metric(m) && !CPU_TIME.contains(&m.as_str())).cloned().collect();
@@ -5272,7 +5295,7 @@ fn self_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, kind: &str, mut 
     b
 }
 
-/// ` (6.0 ms/run over 50 ms runs; …)`: a share of a core over a block's measured runs as CPU per run, and
+/// ` (6,000 µs/run over 50,000 µs runs; …)`: a share of a core over a block's measured runs as CPU per run, and
 /// their mean length. Most of strobe's cost is fixed per run (its marks, reads and relay), so a short
 /// run (under 250 ms) shows it as a large share: said so. Nothing without runs.
 fn per_run(pct: f64, b: &Block) -> String {
@@ -5683,6 +5706,11 @@ fn change_ci(relative: bool, est: f64, lo: f64, hi: f64, unit: &str) -> (String,
     if relative {
         return fmt::pct_ci(est, lo, hi);
     }
+    // Times each at its own digits (`fmt::times`).
+    if unit == "ms" {
+        let [e, l, h]: [String; 3] = fmt::times(&[est, lo, hi], true).try_into().unwrap_or_default();
+        return (e, l, h);
+    }
     let unit = if unit == "%" { "pp" } else { unit };
     (fmt::signed(est, unit), fmt::signed(lo, unit), fmt::signed(hi, unit))
 }
@@ -5834,8 +5862,8 @@ fn leak_analysis(census: &[Value], dir: &Path, n: usize) -> Result<Value> {
     let series = |key: &str| -> Vec<f64> { census.iter().map(|c| key.split('.').fold(c, |v, k| &v[k]).as_f64().unwrap_or(f64::NAN)).collect() };
     let js = series("js_heap_bytes");
     let dom = series("dom.nodes");
-    let bytes = |v: f64| format!("{}{}", if v < 0.0 { "−" } else { "+" }, fmt::bytes(v.abs()));
-    let nodes = |v: f64| format!("{v:+.1} nodes");
+    let bytes = |v: f64| fmt::signed(v, "bytes");
+    let nodes = |v: f64| format!("{} nodes", crate::fmt::signed_fixed(v, 1));
     let bound = (0.001 * metrics::median(&js)).max(16_384.0);
     let mut js_v = growth(&js, n, bound, &bytes);
     let dom_v = growth(&dom, n, 1.0, &nodes);
@@ -12265,8 +12293,8 @@ fn leak_text(r: &Value, s: &Value, file: &str) -> String {
         let range = |g: &Value, show: &dyn Fn(f64) -> String| {
             format!("{} [{} … {}] per run", show(g["slope"].as_f64().unwrap_or(f64::NAN)), show(g["lo"].as_f64().unwrap_or(f64::NAN)), show(g["hi"].as_f64().unwrap_or(f64::NAN)))
         };
-        let bytes = |x: f64| format!("{}{}", if x < 0.0 { "−" } else { "+" }, fmt::bytes(x.abs()));
-        let nodes = |x: f64| format!("{x:+.1}");
+        let bytes = |x: f64| fmt::signed(x, "bytes");
+        let nodes = |x: f64| crate::fmt::signed_fixed(x, 1);
         out += &format!("\n{role} {}\n", v["label"].as_str().unwrap_or(""));
         // A native target: its processes' memory read between runs, no heap snapshots.
         if l["native_host"].is_object() {
@@ -12350,7 +12378,8 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
         out += &format!("\n★ {metric}  {}\n", s["primary"]["verdict"].as_str().unwrap_or("refused"));
     } else if values.len() >= 2 {
         let (median, lo, hi, conf) = stats::median_interval(&values, 0.95);
-        out += &format!("\n★ {metric}  median {}  [{} … {}] ({:.0}% over the blocks)\n", fmt::value(median, unit), fmt::value(lo, unit), fmt::value(hi, unit), 100.0 * conf);
+        let v = fmt::values(&[median, lo, hi], unit);
+        out += &format!("\n★ {metric}  median {}  [{} … {}] ({:.0}% over the blocks)\n", v[0], v[1], v[2], 100.0 * conf);
     } else if let [v] = values[..] {
         out += &format!("\n★ {metric}  {} ({})\n", fmt::value(v, unit), if blocks == 1 { "1 block".to_string() } else { format!("1 of {blocks} blocks") });
     } else {
@@ -12377,7 +12406,8 @@ fn blocks_text(r: &Value, s: &Value, file: &str) -> String {
             (None, 1) => fmt::value(got[0], unit),
             (None, _) => {
                 let (median, lo, hi, _) = stats::median_interval(&got, 0.95);
-                format!("median {}  [{} … {}]", fmt::value(median, unit), fmt::value(lo, unit), fmt::value(hi, unit))
+                let v = fmt::values(&[median, lo, hi], unit);
+                format!("median {}  [{} … {}]", v[0], v[1], v[2])
             }
         };
         out += &format!("  {m:<width$}  {text}\n");
@@ -12440,6 +12470,18 @@ fn aa_text(s: &Value) -> String {
         "\nA/A    the same build on both sides: any faster or slower is a false positive\n       primary: {primary} · {share}\n       stable counters (one value in every block): {}\n",
         if stable.is_empty() { "none".to_string() } else { stable.join(", ") }
     )
+}
+
+/// An experiment's text drawn again from its result.json, in the unit times print in now: a
+/// comparison's (`render`), a check's (`check_text`) or a bisect's (`bisect::text`). None for one whose
+/// stored text stands (a pixels run).
+pub(crate) fn rendered(r: &Value) -> Option<String> {
+    match r["kind"].as_str() {
+        Some("experiment") if r["series"].is_array() => Some(render(r)),
+        Some("check") if r["series"].is_array() => Some(check_text(r)),
+        Some("bisect") if r["steps"].is_array() => Some(super::bisect::text(r)),
+        _ => None,
+    }
 }
 
 pub(crate) fn render(r: &Value) -> String {
@@ -12584,7 +12626,7 @@ pub(crate) fn render(r: &Value) -> String {
             // A percentage compared as a difference is in percentage points (`cells`).
             let (b, h, delta, ci) = cells(&c);
             // An A/A's builds are the same: a direction it decided is a false positive, never a change.
-            let verdict = c["verdict"].as_str().unwrap_or("").to_string();
+            let verdict = stats::verdict_text(&c);
             let verdict = if aa && matches!(stats::kind_of(&c), VerdictKind::Better | VerdictKind::Worse) { format!("{verdict} ← false positive (A/A)") } else { verdict };
             table.push(vec![format!("{} {name}", if primary { "★" } else { " " }), b, h, delta, ci, verdict]);
         }

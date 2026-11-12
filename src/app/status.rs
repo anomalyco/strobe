@@ -231,7 +231,8 @@ pub fn run(args: &Args) -> Result<Output> {
             .get("speed_ms")
             .and_then(Value::as_f64)
             .map(|s| format!(
-                "speed check {s:.1} ms · {}{}{}",
+                "speed check {} · {}{}{}",
+                super::fmt::time(s),
                 calibration["at"].as_str().unwrap_or(""),
                 {
                     let failed: Vec<&str> = calibration["checks"].as_array().into_iter().flatten().filter(|c| c["ok"] == false).filter_map(|c| c["case"].as_str()).collect();

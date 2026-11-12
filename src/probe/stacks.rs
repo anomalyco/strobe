@@ -42,12 +42,12 @@ pub fn no_stacks() -> &'static str {
 pub fn stacks_how(d: &Deep) -> String {
     match &d.suspend {
         Some(s) => format!(
-            "; sampled without the deep helper by suspending each busy thread once per {:.0} ms of its CPU ({} threads; each stall {:.0} µs mean, {:.0} µs p99, {:.0} µs max; user frames only{})",
+            "; sampled without the deep helper by suspending each busy thread once per {:.0} ms of its CPU ({} threads; each stall {} mean, {} p99, {} max; user frames only{})",
             d.interval_us / 1e3,
             s.threads,
-            s.stall_us_mean,
-            s.stall_us_p99,
-            s.stall_us_max,
+            crate::fmt::time(s.stall_us_mean / 1e3),
+            crate::fmt::time(s.stall_us_p99 / 1e3),
+            crate::fmt::time(s.stall_us_max / 1e3),
             if s.capped > 0 { format!("; {} over the rate cap", s.capped) } else { String::new() }
         ),
         None => String::new(),

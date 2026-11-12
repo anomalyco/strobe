@@ -350,13 +350,17 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                     // clock must read the host's wall clock now, within a read bracketed on both sides.
                     let clock = |what: String| Error::from(Refusal::new(ValidatorId::ClockUnsynced, format!("{} launch: {what}: the page's clock does not match the host's", s.case)));
                     if at < started_ms - CLOCK_SLACK_MS || at > received + CLOCK_SLACK_MS {
-                        return Err(clock(format!("the page says until showed {:+.1} ms from the start, which strobe heard of at {:+.1} ms", at - started_ms, received - started_ms)));
+                        return Err(clock(format!(
+                            "the page says until showed {} from the start, which strobe heard of at {}",
+                            crate::fmt::time_signed(at - started_ms),
+                            crate::fmt::time_signed(received - started_ms)
+                        )));
                     }
                     let c0 = epoch_ms();
                     let now = page.eval("performance.timeOrigin + performance.now()")?.as_f64().unwrap_or(f64::NAN);
                     let c1 = epoch_ms();
                     if !(now >= c0 - CLOCK_SLACK_MS && now <= c1 + CLOCK_SLACK_MS) {
-                        return Err(clock(format!("the page's clock read {:+.1} ms from the host's wall clock in a read that took {:.1} ms", now - c0, c1 - c0)));
+                        return Err(clock(format!("the page's clock read {} from the host's wall clock in a read that took {}", crate::fmt::time_signed(now - c0), crate::fmt::time(c1 - c0))));
                     }
                     (at, page, cycles, ended)
                 }
@@ -481,7 +485,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 Some(at) if m.source == "page" && at < started_ms - CLOCK_SLACK_MS => {
                     return Err(Refusal::new(
                         ValidatorId::ClockUnsynced,
-                        format!("{} launch: the page marked {} {:.1} ms before strobe's navigation: the page's clock does not match the host's", s.case, m.name, started_ms - at),
+                        format!("{} launch: the page marked {} {} before strobe's navigation: the page's clock does not match the host's", s.case, m.name, crate::fmt::time(started_ms - at)),
                     )
                     .into());
                 }

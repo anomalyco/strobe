@@ -406,10 +406,12 @@ fn render(f: &Frame, topo: &Topology, cpu_name: &str, target: Option<(&Samples, 
         let secs = s.covered_ms.max(1.0) / 1000.0;
         if let (Some(cpu), Some(setup)) = (samples.cpu_ms, samples.setup_cpu_ms) {
             t += &format!(
-                "sampler      every {} ms, tree every {:.1} s  {cpu:.1} ms CPU ({:.2}% of one core), setup {setup:.1} ms\n",
+                "sampler      every {} ms, tree every {:.1} s  {} CPU ({:.2}% of one core), setup {}\n",
                 samples.interval_ms,
                 samples.tree_refresh_ms.unwrap_or(0.0) / 1000.0,
-                cpu / 10.0 / secs
+                super::fmt::time(cpu),
+                cpu / 10.0 / secs,
+                super::fmt::time(setup)
             );
         }
     }

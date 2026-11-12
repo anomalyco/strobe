@@ -157,7 +157,8 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     let mut shown: Vec<&crate::probe::present::Present> = p.presents.iter().filter(|x| pids.contains(&x.pid) && x.state == "displayed").collect();
     shown.sort_by_key(|x| x.screen_ns);
     let mut rows: Vec<Value> = Vec::new();
-    let mut lines: Vec<String> = Vec::new();
+    // (the line up to its frames, its frames, its outcome): the frames column is as wide as its widest.
+    let mut parts: Vec<(String, String, String)> = Vec::new();
     let (mut counts, mut whys): (BTreeMap<&str, usize>, BTreeMap<&str, usize>) = (BTreeMap::new(), BTreeMap::new());
     let mut needed: Vec<f64> = Vec::new();
     // Runs in time order (their keys sort as text: run:10 before run:2).
@@ -241,23 +242,29 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
                     if let BusyWhy::Behind { prev_input, .. } = why {
                         row["busy"]["prev_input_at_ms"] = json!((prev_input as f64 - timed.t0 as f64) / 1e6);
                     }
-                    format!("busy, {}{}", why.text(), need.map(|n| format!(" · needed +{n:.1} ms later")).unwrap_or_default())
+                    format!("busy, {}{}", why.text(), need.map(|n| format!(" · needed {} later", fmt::time_signed(n))).unwrap_or_default())
                 }
             };
             let frames_text = if around.is_empty() {
                 "no frame within a second".to_string()
             } else {
-                around.iter().map(|(ms, before)| format!("{ms:+.1}{}", if *before { "^" } else { "" })).collect::<Vec<_>>().join(" ")
+                around.iter().map(|(ms, before)| format!("{}{}", fmt::time_signed(*ms), if *before { "^" } else { "" })).collect::<Vec<_>>().join(" ")
             };
-            lines.push(format!(
-                "  {run:<8} {:>10}  {:<14} {:<15} frames {frames_text:<28} {said}\n",
-                format!("+{at_ms:.1} ms"),
-                kind(s),
-                change.map(|(by, ms)| format!("{by} {ms:+.1} ms")).unwrap_or_else(|| "no change".into()),
+            parts.push((
+                format!(
+                    "  {run:<8} {:>13}  {:<14} {:<15} frames ",
+                    fmt::time_signed(at_ms),
+                    kind(s),
+                    change.map(|(by, ms)| format!("{by} {}", fmt::time_signed(ms))).unwrap_or_else(|| "no change".into()),
+                ),
+                frames_text,
+                said,
             ));
             rows.push(row);
         }
     }
+    let fw = parts.iter().map(|p| p.1.chars().count()).max().unwrap_or(0).max(28);
+    let lines: Vec<String> = parts.iter().map(|(head, frames, said)| format!("{head}{frames:<fw$} {said}\n")).collect();
     if runs == 0 {
         return Err(Error::usage("no measured run of this recording matched (--case picks one case's runs)"));
     }
@@ -268,7 +275,7 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
         refresh.map(|r| format!(" of {}", fmt::value(r, "ms"))).unwrap_or_else(|| ", refresh unknown: 60 Hz assumed".into()),
         counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")
     );
-    text += "  run      at (in run)  input          proved by       frames (screen time from the input; ^ begun before it)  outcome\n";
+    text += "  run         at (in run)  input          proved by       frames (screen time from the input; ^ begun before it)  outcome\n";
     text += &first_lines(&lines, top);
     needed.sort_by(f64::total_cmp);
     if !needed.is_empty() {
@@ -356,10 +363,10 @@ select 'frame', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'frame_reporter.stat
         let around: Vec<f64> = frames[at.saturating_sub(1)..(at + 3).min(frames.len())].iter().map(|f| (f - ts) / 1e6).filter(|ms| ms.abs() < 1000.0).collect();
         let kind = kind.trim_start_matches("EVENT_TYPE_").to_ascii_lowercase();
         lines.push(format!(
-            "  {k:<8} {:>10}  {kind:<22} latency {:<10} frames {}\n",
-            format!("+{:.1} ms", (ts - t0) / 1e6),
+            "  {k:<8} {:>13}  {kind:<22} latency {:<13} frames {}\n",
+            fmt::time_signed((ts - t0) / 1e6),
             fmt::value(dur / 1e6, "ms"),
-            if around.is_empty() { "none presented within a second".to_string() } else { around.iter().map(|ms| format!("{ms:+.1}")).collect::<Vec<_>>().join(" ") }
+            if around.is_empty() { "none presented within a second".to_string() } else { around.iter().map(|ms| fmt::time_signed(*ms)).collect::<Vec<_>>().join(" ") }
         ));
         rows.push(json!({ "run": k, "at_ms": (ts - t0) / 1e6, "kind": kind, "latency_ms": dur / 1e6, "frames": around.iter().map(|ms| json!({ "screen_ms": ms })).collect::<Vec<_>>() }));
     }

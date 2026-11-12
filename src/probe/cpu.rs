@@ -86,11 +86,10 @@ impl Sampling {
         self.median_us > 1.5 * self.asked_us
     }
 
-    /// `sampled every 0.52 ms (asked 0.5 ms)`, `sampled every 2.0 ms (asked 1 ms: 2.0× coarser)`.
+    /// `sampled every 520 µs (asked 500 µs)`, `sampled every 2,000 µs (asked 1,000 µs: 2.0× coarser)`.
     pub fn text(&self) -> String {
-        let got = if self.median_us >= 1000.0 { format!("{:.1} ms", self.median_us / 1000.0) } else { format!("{:.2} ms", self.median_us / 1000.0) };
         let coarser = if self.coarse() { format!(": {:.1}× coarser", self.median_us / self.asked_us) } else { String::new() };
-        format!("sampled every {got} (asked {} ms{coarser})", self.asked_us / 1000.0)
+        format!("sampled every {} (asked {}{coarser})", crate::fmt::time(self.median_us / 1000.0), crate::fmt::time(self.asked_us / 1000.0))
     }
 }
 
@@ -154,14 +153,18 @@ pub fn missed_texts(missed: &Value, runtime: Option<&str>) -> Vec<String> {
             _ => "the runtime's sampler took no sample of it, or its gaps were cut to the cap",
         };
         out.push(format!(
-            "Missed: the main thread ran {main:.0} ms on a CPU in the measured runs (cpu.main) and the profile holds samples of {sampled:.0} ms of it: {:.0} ms ({:.0}%) has no sample, so rows undercount. {why}",
-            missed["ms"].as_f64().unwrap_or(0.0),
+            "Missed: the main thread ran {} on a CPU in the measured runs (cpu.main) and the profile holds samples of {} of it: {} ({:.0}%) has no sample, so rows undercount. {why}",
+            crate::fmt::time(main),
+            crate::fmt::time(sampled),
+            crate::fmt::time(missed["ms"].as_f64().unwrap_or(0.0)),
             100.0 * share
         ));
     }
     if main > 0.0 && sampled > WAITED_RATIO * main && sampled - main > WAITED_MS {
         out.push(format!(
-            "Waited: hotspot rows include time the main thread waited for a CPU (sampled {sampled:.0} ms vs cpu.main {main:.0} ms in the measured runs): a sample weighs the wall time to the next; record where the target's CPUs are not shared"
+            "Waited: hotspot rows include time the main thread waited for a CPU (sampled {} vs cpu.main {} in the measured runs): a sample weighs the wall time to the next; record where the target's CPUs are not shared",
+            crate::fmt::time(sampled),
+            crate::fmt::time(main)
         ));
     }
     out
@@ -258,15 +261,15 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
     for (when, s) in readings {
         if s.rtt_ns > MAX_RTT_NS {
             return Err(unsynced(format!(
-                "reading the host's clock {when} took {:.2} ms there and back (over {} ms), so strobe knows it only within half that",
-                s.rtt_ns as f64 / 1e6,
+                "reading the host's clock {when} took {} there and back (over {} ms), so strobe knows it only within half that",
+                crate::fmt::time(s.rtt_ns as f64 / 1e6),
                 MAX_RTT_NS / 1_000_000
             )));
         }
     }
     let drift = exit.offset_ns - ready.offset_ns;
     if drift.abs() > SYNC_NS {
-        return Err(unsynced(format!("the runtime's monotonic clock moved {:+.2} ms against strobe's between the host's start and its exit", drift / 1e6)));
+        return Err(unsynced(format!("the runtime's monotonic clock moved {} against strobe's between the host's start and its exit", crate::fmt::time_signed(drift / 1e6))));
     }
     let deltas: Vec<f64> = p["timeDeltas"].as_array().into_iter().flatten().map(|d| d.as_f64().unwrap_or(0.0)).collect();
     let samples = p["samples"].as_array().map_or(0, Vec::len);
@@ -329,9 +332,9 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         spans[k] = match s.spin {
             Some((x, y)) if x < a - SYNC_NS || y > b + SYNC_NS => {
                 return Err(unsynced(format!(
-                    "the host's spin {when} lies {:+.2} to {:+.2} ms from strobe's request around it, on the host's monotonic clock as strobe places it: that clock does not match strobe's",
-                    (x - a) / 1e6,
-                    (y - b) / 1e6
+                    "the host's spin {when} lies {} to {} from strobe's request around it, on the host's monotonic clock as strobe places it: that clock does not match strobe's",
+                    crate::fmt::time_signed((x - a) / 1e6),
+                    crate::fmt::time_signed((y - b) / 1e6)
                 )));
             }
             Some(span) => span,
@@ -346,12 +349,13 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         fit_ms[k] = (fit_ms[k].0.max((a - ns) / 1e6), fit_ms[k].1.min((b - ns) / 1e6));
     }
     let fits = format!(
-        "its spins' samples fit inside the spins moved {:+.2} to {:+.2} ms (start) and {:+.2} to {:+.2} ms (exit); {samples} samples, {lost:.3} µs truncated a sample, the wall clock's lead moved {:+.3} ms from the start to the exit",
-        fit_ms[0].0,
-        fit_ms[0].1,
-        fit_ms[1].0,
-        fit_ms[1].1,
-        (exit.wall_lead_us - ready.wall_lead_us) / 1e3
+        "its spins' samples fit inside the spins moved {} to {} (start) and {} to {} (exit); {samples} samples, {} truncated a sample, the wall clock's lead moved {} from the start to the exit",
+        crate::fmt::time_signed(fit_ms[0].0),
+        crate::fmt::time_signed(fit_ms[0].1),
+        crate::fmt::time_signed(fit_ms[1].0),
+        crate::fmt::time_signed(fit_ms[1].1),
+        crate::fmt::time(lost / 1e3),
+        crate::fmt::time_signed((exit.wall_lead_us - ready.wall_lead_us) / 1e3)
     );
     // The clocks match when each spin's samples sit inside the spin, within SYNC_NS. The samples fill the
     // spin, so a clock off by d puts them within d of one edge past it: the first and last samples are
@@ -370,10 +374,10 @@ pub fn rebase(p: &Value, rt: Runtime, ready: &Sync, exit: &Sync) -> Result<Rebas
         let tolerated = early + late == 0 || (o.len() >= 4 && early <= 1 && late <= 1 && 4 * (early + late) <= o.len());
         if !tolerated || worst.abs() > MAX_STRAY_NS {
             return Err(unsynced(format!(
-                "it puts {} of the {} samples of the spin in which the host read its clock {when} over 1 ms outside the spin ({early} early, {late} late; the farthest {:+.2} ms; {fits}): its clock does not match strobe's",
+                "it puts {} of the {} samples of the spin in which the host read its clock {when} over 1 ms outside the spin ({early} early, {late} late; the farthest {}; {fits}): its clock does not match strobe's",
                 early + late,
                 o.len(),
-                worst / 1e6
+                crate::fmt::time_signed(worst / 1e6)
             )));
         }
         outliers += early + late;

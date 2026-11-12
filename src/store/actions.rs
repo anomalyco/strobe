@@ -106,11 +106,11 @@ pub struct Sample {
 }
 
 impl Sample {
-    /// `sent 32.7 ms`, `unchanged`: as views show it.
+    /// `sent 32,700 µs`, `unchanged`: as views show it.
     pub fn text(&self) -> String {
         let edge = serde_json::to_value(self.edge).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
         match self.latency_ms {
-            Some(ms) => format!("{edge} {ms:.1} ms"),
+            Some(ms) => format!("{edge} {}", crate::fmt::time(ms)),
             None => edge,
         }
     }
