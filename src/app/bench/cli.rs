@@ -31,6 +31,8 @@ struct Ran {
     usage: host::spawn::Usage,
     metrics: BTreeMap<String, (f64, Option<Direction>)>,
     launch: f64,
+    /// The line is the shell's to run (`shell_line`): its commands are the shell's children.
+    shell_line: bool,
 }
 
 /// A run's commands summed, or None when one of them has no value.
@@ -48,22 +50,54 @@ fn line_for(asked: &Value, v: &Variant, target: &Value) -> Result<String> {
     line.ok_or_else(|| Error::usage("a cli target needs a command: cli(\"<line>\"), a cmd:<line> variant, or ctx.exec(\"<line>\")"))
 }
 
+/// Whether the shell, not the line's first program, is what `line` asks to run: it has, outside the OS
+/// shell's quotes, an operator that joins commands or redirects them (`&&`, `||`, `&`, `|`, `<`, `>`;
+/// on Unix also `;`, `(`, `)` and a new line) or, on Unix, a substitution (`$(…)`, a backquote: also
+/// inside double quotes). Then the line runs through the shell on every OS (`sh -c`, Windows `cmd /c`),
+/// all of it; a quoted operator is an argument and changes nothing. Quotes are the shell's own: `'…'`
+/// and `"…"` with `\` escapes on Unix; on Windows only `"…"`, and `^` escapes the next character, as cmd
+/// reads a line.
+pub(super) fn shell_line(line: &str) -> bool {
+    let unix = !cfg!(windows);
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if unix && !single => escaped = true,
+            '^' if !unix && !double => escaped = true,
+            '\'' if unix && !double => single = !single,
+            '"' if !single => double = !double,
+            '`' if unix && !single => return true,
+            '$' if unix && !single && chars.peek() == Some(&'(') => return true,
+            _ if single || double => {}
+            '&' | '|' | '<' | '>' => return true,
+            ';' | '(' | ')' | '\n' if unix => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// A line the shell can replace itself with (`exec`): one command, no variable assignment in front,
-/// nothing that joins commands (`;`, `&&`, `|`), redirects, subshells or command substitution, and no
-/// keyword or builtin that `exec` cannot run. Otherwise the shell runs the line and stays its parent.
+/// nothing the shell must run itself (`shell_line`), and no keyword or builtin that `exec` cannot run.
+/// Otherwise the shell runs the line and stays its parent.
 #[cfg(not(windows))]
 fn simple(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or("");
     const SHELL_WORDS: &[&str] =
         &["if", "for", "while", "until", "case", "{", "!", "[", "[[", "cd", "export", "set", "unset", ".", "source", "eval", "exec", "test", "alias", "ulimit", "umask", "time"];
-    !line.contains([';', '&', '|', '<', '>', '(', ')', '`', '\n']) && !line.contains("$(") && !first.contains('=') && !SHELL_WORDS.contains(&first)
+    !shell_line(line) && !first.contains('=') && !SHELL_WORDS.contains(&first)
 }
 
 /// The command for `line`, run in `root`. Unix: `sh -c`, as `exec <line>` when the line is one simple
 /// command, so the command is the child, not a shell around it. Windows: the line's first word as the
 /// program, so the child is the program itself (a relative path from `root`: Windows would resolve it
-/// from strobe's own folder); `shell` (a `.cmd` or `.bat`, or a word that is no executable) runs the
-/// line under cmd.
+/// from strobe's own folder); `shell` (a `.cmd` or `.bat`, a word that is no executable, or a line the
+/// shell must run: `shell_line`) runs the line under cmd.
 fn command(line: &str, shell: bool, root: &Path) -> Command {
     #[cfg(windows)]
     {
@@ -74,7 +108,7 @@ fn command(line: &str, shell: bool, root: &Path) -> Command {
             None => line.split_once(char::is_whitespace).map(|(p, r)| (p.to_string(), r.to_string())).unwrap_or((line.to_string(), String::new())),
         };
         let script = Path::new(&program).extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
-        if shell || script {
+        if shell || script || shell_line(line) {
             return crate::target::command::shell(line);
         }
         let path = Path::new(&program);
@@ -240,7 +274,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
     }
     let output: String = lines.join("\n");
     let output = if output.len() > 64 * 1024 { output[output.floor_char_boundary(output.len() - 64 * 1024)..].to_string() } else { output };
-    Ok((Ran { wall, usage, metrics, launch }, output))
+    Ok((Ran { wall, usage, metrics, launch, shell_line: shell_line(line) }, output))
 }
 
 /// Child processes' CPU from Windows' clock ticks needs this many ticks (15.6 ms each) per run before
@@ -377,8 +411,14 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     // started any needs enough ticks for its count to stand.
     let started = measured.iter().any(|r| r.0.iter().any(|x| x.usage.started > 0));
     let few_ticks = started && metrics::median(&ticks_ms) < TICKS_PER_RUN * tick_ms;
+    let shelled = measured.iter().any(|r| r.0.iter().any(|x| x.shell_line));
     let cpu_why = || {
-        let why = if few_ticks {
+        let why = if few_ticks && shelled {
+            format!(
+                "the command line has a shell operator outside quotes (&&, |, <, >), so cmd.exe runs it and its commands are cmd's children, whose CPU Windows counts only in 15.6 ms clock ticks; they took {} a run by that count, under the {TICKS_PER_RUN:.0} ticks a CPU time needs here (one tick more or less is several percent)",
+                fmt::value(metrics::median(&ticks_ms), "ms")
+            )
+        } else if few_ticks {
             format!(
                 "the command started other processes (a shell around it, a .cmd, a child), whose CPU Windows counts only in 15.6 ms clock ticks, and they took {} a run by that count (under {TICKS_PER_RUN:.0} ticks: one more or less, or work under a tick that reads 0, is several percent)",
                 fmt::value(metrics::median(&ticks_ms), "ms")
@@ -386,7 +426,12 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         } else {
             first_why(&|u| u.cpu_refused.clone()).unwrap_or_else(|| "this OS gave no CPU time for the command's processes".into())
         };
-        Refusal::new(ValidatorId::NotOnThisOs, why).fix("run the program itself (an .exe, not a .cmd or a shell line), or longer runs; run.duration still compares")
+        let fix = if few_ticks && shelled {
+            "time each command alone (a case's ctx.exec per command, or strobe run with one command a side), or give the run more work; run.duration still compares"
+        } else {
+            "run the program itself (an .exe, not a .cmd or a shell line), or longer runs; run.duration still compares"
+        };
+        Refusal::new(ValidatorId::NotOnThisOs, why).fix(fix)
     };
     let cpu_ok = |r: &[Ran]| cpu(r).filter(|_| !few_ticks);
     put("cpu.work", per(&cpu_ok), &|| Refusal { summary: format!("cpu.work: {}", cpu_why().summary), ..cpu_why() });
