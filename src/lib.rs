@@ -23,4 +23,5 @@ pub mod store;
 pub mod support;
 pub mod symbol;
 pub mod target;
+pub mod text;
 pub mod validity;
