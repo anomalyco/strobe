@@ -189,6 +189,8 @@ pub struct Owned {
     start: Option<u64>,
     /// The child's main thread, bound at the launch (Windows: before it first ran).
     main: Result<super::MainThread, super::MainLost>,
+    /// When the child was released to run (`released_ns`).
+    released_ns: u64,
     #[cfg(windows)]
     started: Started,
     /// Windows: the OS creating the process (`CreateProcessW`), apart from strobe's setup of it.
@@ -267,11 +269,11 @@ fn peak_floor(forks: bool) -> Option<u64> {
     Some(resident.map_or(peak, |r| (r * page + (1 << 20)).min(peak)))
 }
 
-/// Windows: the cycle clock and the wall clock, read together just before the child first runs.
-/// `run_to_exit` measures the cycle clock's rate from here to the exit, a span as long as the child's
-/// life even when it exited before strobe began to wait.
+/// Windows: the cycle clock and the wall clock (as an `Instant` and on `host::now_ns`'s clock), read
+/// together just before the child first runs. `run_to_exit` measures the cycle clock's rate from here
+/// to the exit, a span as long as the child's life even when it exited before strobe began to wait.
 #[cfg(windows)]
-type Started = (Option<u64>, std::time::Instant);
+type Started = (Option<u64>, std::time::Instant, u64);
 
 /// The OS creating a child (Windows' `CreateProcessW`, the `spawn` call alone): the calling thread's
 /// cycles and the cycle clock just before and just after it, and its wall time. What a person's
@@ -651,6 +653,16 @@ impl Owned {
         self.start
     }
 
+    /// When the child was released to run its program, on `host::now_ns`'s clock: what a launch's
+    /// time counts from (a command's `run.duration`, an app's and a terminal program's `launch.*`), so
+    /// strobe's set-up of the launch is before it. Windows: right before the suspended child resumes,
+    /// already in its job and on its CPUs (a child neither needs starts at once: right after its
+    /// creation). Unix: right before the spawn. macOS, an app Launch Services started: right before the
+    /// request (`macos::Opened::at_ns`).
+    pub fn released_ns(&self) -> u64 {
+        self.released_ns
+    }
+
     /// Windows: when the child first goes input idle (`win::input_idle`): the moment the shell's "app
     /// starting" pointer would clear for a launch of it. Call it right after the launch: its watch
     /// starts then, on a thread of its own. `NotOnThisOs` elsewhere.
@@ -939,7 +951,7 @@ impl Owned {
             };
             use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, WaitForSingleObject};
             use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
-            let (t0, w0) = self.started;
+            let (t0, w0, _) = self.started;
             let Proc::Child(child) = &self.process;
             let h = child.as_raw_handle();
             let ms = deadline.as_millis().min(u32::MAX as u128 - 1) as u32;
@@ -1282,7 +1294,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
             Some(t) => Ok(super::MainThread::of_handle(child.id(), t)),
             None => super::MainThread::attach(child.id()),
         };
-        Ok(Owned { process: Proc::Child(child), group: Some(Group { job }), unattributed: None, start: None, main, started, spawned })
+        Ok(Owned { process: Proc::Child(child), group: Some(Group { job }), unattributed: None, start: None, main, released_ns: started.2, started, spawned })
     }
     #[cfg(not(windows))]
     {
@@ -1300,6 +1312,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         // is a `pre_exec` closure too: Rust forks then.
         #[cfg(target_os = "linux")]
         let floor = peak_floor(_forks || cgroup.is_some());
+        let released_ns = super::now_ns();
         let child = cmd.spawn()?;
         let pgid = child.id();
         // `spawn` returns once the exec is done: whether the disclaim took is known now.
@@ -1313,6 +1326,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
             unattributed,
             start: super::start_time(pgid),
             main: super::MainThread::attach(pgid),
+            released_ns,
             #[cfg(target_os = "linux")]
             floor,
             #[cfg(target_os = "linux")]
@@ -1367,6 +1381,7 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
     let _ = home;
     #[cfg(target_os = "linux")]
     let floor = peak_floor(true);
+    let released_ns = super::now_ns();
     let child = cmd.spawn()?;
     let pgid = child.id();
     let start = super::start_time(pgid);
@@ -1377,6 +1392,7 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
         unattributed: None,
         start,
         main: super::MainThread::attach(pgid),
+        released_ns,
         #[cfg(target_os = "linux")]
         floor,
         #[cfg(target_os = "linux")]
@@ -1421,6 +1437,7 @@ pub fn open_owned(bundle: &super::macos::Bundle, args: &[String], env: &[(String
             Some(_) => super::MainThread::attach(pid),
             None => Err(super::MainLost::Gone("the app exited at once".into())),
         },
+        released_ns: opened.at_ns,
     };
     Ok((owned, opened))
 }
@@ -1504,7 +1521,7 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next};
     use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, GetProcessAffinityMask, OpenThread, ResumeThread, SetProcessAffinityMask, THREAD_SUSPEND_RESUME};
-    let clocks = || (super::tsc(), std::time::Instant::now());
+    let clocks = || (super::tsc(), std::time::Instant::now(), super::now_ns());
     if cpus.is_none() && job.is_none() {
         let (child, spawned) = Spawned::around(|| cmd.creation_flags(flags).spawn());
         return Ok((child?, false, clocks(), spawned, None));
