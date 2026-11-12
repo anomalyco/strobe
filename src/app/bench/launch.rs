@@ -95,14 +95,19 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     // An app's home is ready before the hook (folders, seed, profile files, a `{port}` a warm home
     // keeps), and the hook gets the environment and executable the app launches with, so it can start
     // what the app expects to find (a background service) the way the app would.
-    let app = if matches!(kind.as_str(), "app" | "exe" | "webview") { Some(with_gpu_cache(ctx, s, v, &target, variant_app(v, &target, &ctx.config)?)?) } else { None };
+    let app = if matches!(kind.as_str(), "app" | "exe" | "webview") { Some(variant_app(v, &target, &ctx.config)?) } else { None };
     // An app with `window: false` (a tray app), on the target or the profile this side runs: nothing to
     // wait for on screen, fit or film, as for a windowless native app (`native::launch_once`). Refused
-    // for this series alone, so the file's other targets and cases still run.
+    // for this series alone, so the file's other targets and cases still run, and before the GPU cache's
+    // preparation, which a later series' launch of this side would take as its first.
     let windowless = !web && app_windowless(&target, app.as_ref());
     if windowless {
         windowless_refusal(s, window_until.is_some())?;
     }
+    let app = match app {
+        Some(a) => Some(with_gpu_cache(ctx, s, v, &target, a)?),
+        None => None,
+    };
     if matches!(window_until, Some(super::native::Until::Painted | super::native::Until::Settled)) {
         if spec["screen"] == false {
             return Err(Error::usage(format!("{}: launch.until.window painted or settled reads the window's pixels; drop screen: false", s.case)));
@@ -714,9 +719,10 @@ pub(super) fn windowless_refusal(s: &Series, window_until: bool) -> Result<()> {
 /// `window: false` on a target whose processes (`pids`) put a normal window on screen anyway: none of a
 /// windowed target's guards held it (in front, uncovered, active), so its numbers may be a covered or
 /// inactive window's. A hidden window, a headless browser's and a tray icon are not on screen; a covered
-/// one is (macOS calls a window under others `cloaked`; Windows only one the compositor hides).
+/// one is (macOS and X11 call a window under others `cloaked`; Windows only one the compositor hides).
+/// Every check of a windowless target calls this one (page and native blocks, launches).
 pub(super) fn windowless_shown(name: &str, pids: &[u32]) -> Result<()> {
-    let on_screen = |w: &host::TopWindow| w.visible && !w.iconic && (cfg!(target_os = "macos") || !w.cloaked);
+    let on_screen = |w: &host::TopWindow| w.visible && !w.iconic && (!cfg!(windows) || !w.cloaked);
     match host::main_window(pids).filter(on_screen) {
         Some(w) => Err(Refusal::new(ValidatorId::VariantMismatch, format!("the target {name} declares window: false, yet it showed a window on screen ({}×{} pixels)", w.client.0, w.client.1))
             .fix("drop `window: false`, or keep the window hidden")

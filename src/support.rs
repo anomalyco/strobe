@@ -905,6 +905,16 @@ pub fn measures(runtime: Runtime, metric: &str, os: Os) -> bool {
         "cpu.main" | "cpu.main.busy" => only(&[Script, Native, NativeWindowless]),
         "ui.cpu" | "ui.wakes" => only(&[Native]),
         "memory.app.host" => only(&[Native, NativeWindowless]),
+        // A script's runs are timed on its host's CPU and clock, a page's on the browser's CPU: neither's
+        // threads' context switches or IO are read (`script_unread`, `page_unread`).
+        "cpu.wakes" | "io.read" | "io.write" => only(&[Native, NativeWindowless, Cli, Tty]),
+        // strobe's own input pacing and its driver's reads of a page or a windowed app's UI.
+        // (WebKit, WebDriver Classic, runs an input list as one batch inside the browser: no input times.)
+        "input.rate" | "input.gap.p95" => only(&[ChromiumPage, FirefoxPage, AndroidChrome, ChromiumApp, WebviewApp, Native]),
+        "driver.reads" | "driver.read_ms" => only(&[ChromiumPage, FirefoxPage, WebkitPage, AndroidChrome, ChromiumApp, WebviewApp, Native]),
+        // A browser's processes by their role.
+        "cpu.renderer" | "cpu.gpu" | "cpu.browser" => only(&[ChromiumPage, FirefoxPage, WebkitPage, ChromiumApp, WebviewApp]),
+        "memory.app.pss" => !matches!(runtime, Cli | Tty),
         _ => match Capability::of(metric) {
             Some(Capability::ProcessMemory) => runtime != Cli,
             Some(Capability::PageEngine) => runtime != Script,
@@ -920,6 +930,34 @@ pub fn measures(runtime: Runtime, metric: &str, os: Os) -> bool {
         _ => true,
     };
     target && here
+}
+
+/// Whether a target of a runtime reads a metric on an OS, by the matrix: its capability's row (none:
+/// never; a refused cell: not there) and the metric's own exceptions (`measures`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reads {
+    Yes,
+    /// On another OS only; the row's reason when its cell refuses it here.
+    NotHere(Option<&'static str>),
+    /// On no OS: no row of its capability for the runtime, or an exception that holds on every OS.
+    Never,
+}
+
+/// `Reads` of `metric` for `runtime` on `os`. A name with no capability (one strobe does not know) is
+/// not the matrix's to refuse: `Yes`.
+pub fn runtime_reads(runtime: Runtime, metric: &str, os: Os) -> Reads {
+    let Some(capability) = Capability::of(metric) else { return Reads::Yes };
+    let cell = |o: Os| row(runtime, capability).map(|r| *r.on(o));
+    let reads_on = |o: Os| cell(o).is_some_and(|c| !matches!(c, Cell::Refused(_))) && measures(runtime, metric, o);
+    if reads_on(os) {
+        Reads::Yes
+    } else if !Os::ALL.iter().any(|o| reads_on(*o)) {
+        Reads::Never
+    } else if let Some(Cell::Refused(why)) = cell(os) {
+        Reads::NotHere(Some(why))
+    } else {
+        Reads::NotHere(None)
+    }
 }
 
 /// A metric's path, by its name (`Capability::of`, `measures` for each side). `cpu.fixture` is the

@@ -1709,7 +1709,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     if milestones.iter().any(|m| m.source == "page") {
         return Err(Error::usage(format!("{}: a native app has no page marks; read milestones from its output or a log file", s.case)));
     }
-    let app = with_gpu_cache(ctx, s, v, &target, app(v, &target, &ctx.config)?)?;
+    // The GPU cache is prepared once the launch is known to run (`with_gpu_cache`, below the refusals).
+    let app = app(v, &target, &ctx.config)?;
     let windowless = super::launch::app_windowless(&target, Some(&app));
     let until = match window_until(s, &spec["until"])? {
         // A milestone of the app's own (an output or log line): the launch needs no window at all.
@@ -1732,6 +1733,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     if windowless {
         super::launch::windowless_refusal(s, false)?;
     }
+    let app = with_gpu_cache(ctx, s, v, &target, app)?;
     let capture = spec["screen"] != false && !windowless;
     if !capture && matches!(until, Until::Painted | Until::Settled) {
         return Err(Error::usage(format!("{}: launch.until.window painted or settled reads the window's pixels; drop screen: false", s.case)));

@@ -8,27 +8,32 @@
 // and STROBE_DEV_ELECTRON to an Electron executable (optional: the Electron targets are left out without it; on macOS
 // a re-signed copy too). The windowed targets need a display (left out on Linux without one). Build known.rs first
 // (see known/cli.bench.ts). From the repo root, the whole file, then one exe target run as a profile named on the
-// command line:
+// command line, then two profiles of one target (both need a display; the last launches nothing):
 //   strobe bench scripts/dev/tray/tray.bench.ts --head . --check
 //   strobe bench scripts/dev/tray/tray.bench.ts --head app:tray --check --target plain
+//   strobe bench scripts/dev/tray/tray.bench.ts --base app:desk --head app:tray --check --target tray --filter idle
 // Truth, per case and target:
-//   idle · tray, idle · nat: run (cpu.work). idle · tray fails "<exe> shows no window" on Windows and Linux at the
-//     bench's window fit (bench.rs, before W8-1 lands); on macOS it runs.
-//   frames · tray: frames.* and interaction.* no value or refused (nothing it draws reaches a display).
+//   idle · tray, idle · nat: run (cpu.work), on every OS: a windowless app's blocks check only that it shows no window.
+//   frames · tray: frames.* and interaction.* refused NotForTarget (nothing it draws reaches a display), on a software
+//     adapter too.
+//   gpu-memory · tray: gpu.vram and gpu.shared read on a GPU (NotOnThisOs on macOS), refused SoftwareGpu on a software
+//     adapter (Linux without a GPU): that adapter's reason, not the window's.
 //   launch · tray, stub: launch.ready about 1.2–1.3 s (the browser's start, the page served 800 ms late, its 200 ms
 //     task), with no window read or recorded. · desk: the same, with its window.
 //   hidden-page · stub-hid (shown, then hidden at once: its page reports visibilityState hidden): launch.ready and
 //     launch.hidden measured, never refused WindowHidden. · stub (never shown): its page may report visible, and then
 //     launch.hidden never matches (RunIncomplete).
-//   run-hidden · stub-hid: a run case of that page; the bench's own blocks still refuse it WindowHidden (bench.rs,
-//     before W8-1 lands), where it should run.
+//   run-hidden · stub-hid: a run case of that page: runs (cpu.work), never WindowHidden.
 //   launch-window · tray: refused NotForTarget ("cannot end on one"); · desk: launch.ready at its window.
 //   launch-painted · tray: launch.ready measured, launch.painted refused NotForTarget; · desk: launch.painted read
 //     (or NoPresentSource without the screen's pixels, SoftwareGpu on a software adapter: Xvfb). tray's refusal is
-//     SoftwareGpu there too, until bench.rs keeps a windowless app's NotForTarget (W8-1).
+//     NotForTarget there too.
 //   painted-primary · tray: refused NotForTarget before it launches (a primary of its pixels).
 //   liar · liar, stub-shown: declare window: false and show a window: refused VariantMismatch.
-//   plain (a bare exe, no profile; windowed): launch-window measured; with --head app:tray, refused NotForTarget.
+//   plain (a bare exe, no profile; windowed): launch-window measured; with --head app:tray, refused NotForTarget before it
+//     launches (with --base app:desk too: head shows no window).
+//   Two profiles of one target, one windowless: `--base app:desk --head app:tray --filter idle --target tray` refuses
+//     VariantMismatch before anything launches (a side with nothing on screen is measured without a trace).
 // No case stops the file: every other series still runs.
 import { bench, exe, native } from "@hona/strobe"
 import { join } from "node:path"
@@ -62,6 +67,7 @@ export default bench({
   cases: {
     idle: { targets: ["tray", "nat"], primary: "cpu.work", run: ({ page }: any) => page.wait(500) },
     frames: { targets: ["tray"], primary: "cpu.work", metrics: ["frames.dropped.pct", "interaction.p50"], run: ({ page }: any) => page.wait(500) },
+    "gpu-memory": { targets: ["tray"], primary: "cpu.work", metrics: ["gpu.vram", "gpu.shared"], run: ({ page }: any) => page.wait(500) },
     launch: { targets: ["tray", ...desk, ...(electron ? ["stub"] : [])], primary: "launch.ready", launch: { until: "#ready" } },
     "launch-window": { targets: ["tray", ...desk, ...(display ? ["plain"] : [])], primary: "launch.ready", launch: { until: { window: "visible" } } },
     "launch-painted": { targets: ["tray", ...desk], primary: "launch.ready", metrics: ["launch.painted"], launch: { until: "#ready" } },

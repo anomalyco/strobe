@@ -356,10 +356,13 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     let first_why = |f: &dyn Fn(&host::spawn::Usage) -> Option<String>| measured.iter().flat_map(|r| r.0.iter()).find_map(|x| f(&x.usage));
     let mut extra: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     let mut refused: BTreeMap<String, Refusal> = BTreeMap::new();
+    // A reading this OS or run did not give is refused only where the case declared it: one it never
+    // asked for is left out, not said.
+    let declared = declared_metrics(s);
     let mut put = |name: &str, values: BTreeMap<String, f64>, why: &dyn Fn() -> Refusal| {
         if values.len() == measured.len() {
             extra.insert(name.to_string(), values);
-        } else {
+        } else if declared.iter().any(|d| *d == name) {
             refused.insert(name.to_string(), why());
         }
     };
