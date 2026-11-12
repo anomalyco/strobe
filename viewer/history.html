@@ -56,6 +56,11 @@ tr.invalid td { color: var(--ink-4); }
 details summary { cursor: pointer; color: var(--ink-3); font-size: 13px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink-3); font-size: 12px; }
 .note { color: var(--ink-3); font-size: 13px; }
+.topbar { position: sticky; top: 0; z-index: 3; background: var(--canvas); display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin-top: -12px; padding: 12px 0 14px; border-bottom: 1px solid var(--border); }
+.seg { display: inline-flex; padding: 2px; border-radius: 7px; background: var(--surface-subtle); border: 1px solid var(--border); }
+.seg button { border: 0; background: transparent; padding: 3px 8px; border-radius: 5px; font: 500 12px/16px var(--mono); color: var(--ink-3); cursor: pointer; }
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
 </style>
 </head>
 <body>
@@ -63,10 +68,139 @@ details summary { cursor: pointer; color: var(--ink-3); font-size: 13px; }
 <script>
 const DATA = /*STROBE_DATA*/null;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+/* ---------- Time units (shared: viewer/report.html and viewer/history.html carry this block alike) ---------- */
+// Rust's `{:.d}`, which the text and markdown print with: the nearest decimal, an exact tie to even
+// (toFixed breaks a tie away from zero, so 12.5 MB read 13 MB here and 12 MB in the text).
+function rfix(v, d) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, Math.abs(v));
+  const hi = dv.getUint32(0), lo = dv.getUint32(4), exp = (hi >>> 20) & 0x7ff;
+  let mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
+  const e = exp === 0 ? -1074 : exp - 1075;
+  if (exp !== 0) mant |= 1n << 52n;
+  if (!Number.isFinite(v) || e >= 0) return v.toFixed(d);
+  const num = mant * 10n ** BigInt(d), den = 1n << BigInt(-e);
+  if ((num % den) * 2n !== den) return v.toFixed(d);
+  let q = num / den;
+  if (q % 2n === 1n) q += 1n;
+  const digits = q.toString().padStart(d + 1, "0");
+  const body = d ? `${digits.slice(0, -d)}.${digits.slice(-d)}` : digits;
+  return (v < 0 && q !== 0n ? "-" : "") + body;
+}
+
+// A measured time is stored in ms and shown in one unit for the whole page (fmt::TimeUnit): µs unless
+// the address (`#unit=ms`) or the page's data (`default_unit`) says otherwise, never promoted to a
+// larger unit as it grows. `finest`: the most decimals a time shows in the unit; a nonzero time that
+// would print as 0 there prints `<0.01 µs`, never 0.
+const TIME_UNITS = {
+  us: { label: "µs", perMs: 1000, finest: 2, name: "microseconds" },
+  ms: { label: "ms", perMs: 1, finest: 4, name: "milliseconds" },
+  s: { label: "s", perMs: 0.001, finest: 6, name: "seconds" },
+};
+let TIME_UNIT = "us";
+
+// `us`, `ms` or `s` from what an address or a page's data says (`µs` and `μs` too), else null.
+function parseTimeUnit(s) {
+  const k = String(s ?? "").trim().toLowerCase();
+  return k === "µs" || k === "μs" ? "us" : Object.hasOwn(TIME_UNITS, k) ? k : null;
+}
+
+const timeLabel = (unit = TIME_UNIT) => TIME_UNITS[unit].label;
+
+// Commas in a whole part of four or more digits: `18309038` → `18,309,038` (fmt::group).
+const groupDigits = (s) => String(s).replace(/^([-−+]?)(\d+)/, (_, sign, int) => sign + int.replace(/\B(?=(\d{3})+(?!\d))/g, ","));
+
+// Decimals a time of size `x` (≥ 0, in the shown unit) prints with (fmt::time_digits): every whole
+// digit and at least three significant ones (`738,147`, `42.0`, `1.23`, `0.738`, `0.0420`), at most
+// `finest`; taken again after rounding, so 99.96 prints `100`, not `100.0`.
+function timeDigits(x, finest) {
+  const d = (x) => {
+    if (x >= 100) return 0;
+    if (x >= 10) return 1;
+    if (x >= 1) return 2;
+    for (let k = 3; k <= Math.max(finest, 3); k++) if (x * 10 ** k >= 100) return Math.min(k, finest);
+    return finest;
+  };
+  const first = d(x);
+  return Math.min(d(parseFloat(rfix(x, first))), first);
+}
+
+// A time in ms in `unit` (fmt::time_parts): its digits grouped at `d` decimals (its own when null),
+// `<0.01` for a nonzero one that would print as 0, the minus sign on a negative one and `+` on a
+// positive one when `signed`. `num`: without the unit.
+function timeText(ms, { d = null, signed = false, num = false, unit = TIME_UNIT } = {}) {
+  if (!Number.isFinite(ms)) return "—";
+  const t = TIME_UNITS[unit];
+  const x = Math.abs(ms * t.perMs);
+  const dd = d ?? timeDigits(x, t.finest);
+  let body = "0";
+  if (x !== 0) {
+    const s = rfix(x, dd);
+    body = /[1-9]/.test(s) ? groupDigits(s) : `<${rfix(10 ** -t.finest, t.finest)}`;
+  }
+  const sign = ms < 0 ? "−" : ms > 0 && signed ? "+" : "";
+  return num ? sign + body : `${sign}${body} ${t.label}`;
+}
+
+// A time in ms with its unit: `18,309,038 µs`, `16.7 ms`, `0.0167 s` (fmt::time).
+const fmtTime = (ms, unit = TIME_UNIT) => timeText(ms, { unit });
+// Its number alone, where the unit is named once beside it (fmt::time_number): `18,309,038`.
+const fmtTimeNum = (ms, unit = TIME_UNIT) => timeText(ms, { num: true, unit });
+// A difference, signed (fmt::time_signed): `+1,234 µs`, `−42.0 µs`, `+<0.01 µs`, `0 µs`.
+const fmtTimeSigned = (ms, unit = TIME_UNIT) => timeText(ms, { signed: true, unit });
+// Times printed together, an estimate and its interval's ends (fmt::times): at the decimals the
+// largest of them prints with, so they line up (`+3.2 µs [−1.1 … +12.4 µs]`); one that would print as
+// 0 there keeps its first significant digit (`[0.03 … 52.0 µs]`).
+function fmtTimes(list, signed = false, unit = TIME_UNIT) {
+  const t = TIME_UNITS[unit];
+  const largest = list.map((v) => Math.abs(v * t.perMs)).filter(Number.isFinite).reduce((m, x) => Math.max(m, x), 0);
+  const common = timeDigits(largest, t.finest);
+  // fmt::digits_for(x, 0, finest): the decimals that show its first significant digit.
+  const first = (x) => {
+    const a = Math.abs(x);
+    if (!Number.isFinite(a) || a === 0) return 0;
+    for (let k = 0; k <= t.finest; k++) if (Math.round(a * 10 ** k) >= 1) return k;
+    return 0;
+  };
+  return list.map((v) => timeText(v, { d: Math.max(common, first(v * t.perMs)), signed, unit }));
+}
+
+// A comparison's verdict in words (stats::verdict_text): a time's absolute bound or margin (`same
+// (±520 µs)`, `no worse (≤1.20 ms, faster)`, `worse (>0.500 s)`) drawn again from `bound` in the shown
+// unit; any other verdict as it was stored. `unit`: the metric's.
+function verdictText(c, unit) {
+  const v = String(c?.verdict ?? "");
+  const b = c?.bound;
+  if (c?.relative !== false || unit !== "ms" || !(Number.isFinite(b) && b > 0)) return v;
+  for (const p of ["same (±", "no worse (≤", "worse (>"]) {
+    if (!v.startsWith(p)) continue;
+    const rest = v.slice(p.length);
+    const ends = [rest.indexOf(")"), rest.indexOf(", ")].filter((i) => i >= 0);
+    if (!ends.length) break;
+    return p + timeText(b) + rest.slice(Math.min(...ends));
+  }
+  return v;
+}
+
+// An axis tick in ms, in `unit` at the decimals the ticks' step needs (`250,000 µs`, `0.25 s`), signed
+// when `signed`; a sign only on what shows a nonzero digit (never `−0 µs`).
+function fmtTimeTick(t, ticks, signed = false, unit = TIME_UNIT) {
+  const k = TIME_UNITS[unit].perMs;
+  const fin = ticks.filter(Number.isFinite);
+  const step = (fin.length > 1 ? Math.abs(fin[1] - fin[0]) : Math.abs(fin[0] || 0)) * k;
+  const d = step > 0 ? Math.min(6, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) : 0;
+  const body = `${groupDigits(rfix(Math.abs(t) * k, d))} ${timeLabel(unit)}`;
+  if (!/[1-9]/.test(body)) return body;
+  return t < 0 ? "−" + body : signed && t > 0 ? "+" + body : body;
+}
+/* ---------- end of the shared time units ---------- */
+
 function val(v, unit) {
   if (v == null || !isFinite(v)) return "—";
   // A port's point: ln(head / base), shown as the change.
   if (unit === "ln_ratio") return pct(Math.exp(v) - 1);
+  if (unit === "ms") return fmtTime(v);
   // fmt::value's digits: below 10, as many decimals as show the first significant digit (0.003, not 0.00).
   const a = Math.abs(v);
   let d = a >= 100 ? 0 : a >= 10 ? 1 : 2;
@@ -75,11 +209,14 @@ function val(v, unit) {
     while (d <= 4 && Math.round(a * 10 ** d) < 1) d++;
     if (d > 4) d = 2;
   }
-  if (unit === "bytes") { const a = Math.abs(v); return a >= 1048576 ? (v / 1048576).toFixed(1) + " MB" : a >= 1024 ? (v / 1024).toFixed(0) + " KB" : v.toFixed(0) + " B"; }
-  if (unit === "%") return v.toFixed(d) + "%";
-  if (unit === "count") return Number.isInteger(v) ? String(v) : v.toFixed(1);
-  return v.toFixed(d) + (unit ? " " + unit : "");
+  if (unit === "bytes") { const a = Math.abs(v); return a >= 1048576 ? rfix(v / 1048576, 1) + " MB" : a >= 1024 ? rfix(v / 1024, 0) + " KB" : rfix(v, 0) + " B"; }
+  if (unit === "%") return rfix(v, d) + "%";
+  // Grouped like a time (fmt::value): `1,234,567`.
+  if (unit === "count") return groupDigits(Number.isInteger(v) ? String(v) : rfix(v, 1));
+  return rfix(v, d) + (unit ? " " + unit : "");
 }
+// Values printed together, a median and its interval's ends (fmt::values): times at one set of digits.
+const vals = (vs, unit) => unit === "ms" ? fmtTimes(vs) : vs.map(v => val(v, unit));
 // fmt::pct: none from 10%, one decimal from 0.1%, below that the first significant digit (up to three),
 // so a nonzero change never prints as 0.0%; no sign on what rounds to zero.
 const pct = r => {
@@ -90,7 +227,8 @@ const pct = r => {
     while (d <= 3 && Math.round(p * 10 ** d) < 1) d++;
     if (d > 3) d = 1;
   }
-  return (Math.round(p * 10 ** d) === 0 ? "" : r < 0 ? "−" : "+") + p.toFixed(d) + "%";
+  const body = rfix(p, d);
+  return (!/[1-9]/.test(body) ? "" : r < 0 ? "−" : "+") + body + "%";
 };
 // What a point is made of and how sure its interval is: `6 blocks · 97%`, a port's `3 pairs · 75%`.
 const sizeOf = (s, p) => `${p.n} ${s.meta.comparison === "implementations" ? "pairs" : "blocks"}${p.confidence ? " · " + Math.round(p.confidence * 100) + "%" : ""}`;
@@ -105,12 +243,10 @@ function chart(s, host) {
   if (!ys.length) { host.innerHTML = `<p class="note">No point with a value yet.</p>`; return; }
   let lo = Math.min(...ys), hi = Math.max(...ys);
   const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.05 || 1; lo -= pad; hi += pad;
-  // The y-axis's five labels: a millisecond axis that reaches a second in seconds, at the decimals its
-  // step needs; the left margin as wide as the widest label.
+  // The y-axis's five labels: a time axis in the page's unit at the decimals its step needs (never
+  // promoted to seconds); the left margin as wide as the widest label.
   const ticks = [0, 1, 2, 3, 4].map(k => lo + (hi - lo) * k / 4);
-  const secs = unit === "ms" && Math.max(Math.abs(lo), Math.abs(hi)) >= 1000;
-  const sd = Math.min(3, Math.max(0, -Math.floor(Math.log10((hi - lo) / 4000) + 1e-9)));
-  const labels = ticks.map(v => secs ? (v / 1000).toFixed(sd) + " s" : val(v, unit));
+  const labels = ticks.map(v => unit === "ms" ? fmtTimeTick(v, ticks) : val(v, unit));
   const L = Math.max(64, Math.ceil(Math.max(...labels.map(l => l.length)) * 11 * 0.62) + 10);
   const x = i => L + (pts.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (pts.length - 1));
   const y = v => T + (hi - v) / (hi - lo) * (H - T - B);
@@ -152,7 +288,7 @@ function chart(s, host) {
     if (i == null) { tip.style.display = "none"; return; }
     const p = pts[+i];
     tip.innerHTML = `<div class="mono">${esc(p.short)} · ${esc((p.at || "").slice(0, 16))}</div><div>${esc(p.subject)}</div>` +
-      (p.valid ? `<div class="mono">${esc(val(p.median, unit))} [${esc(val(p.lo, unit))} … ${esc(val(p.hi, unit))}] · ${esc(sizeOf(s, p))}</div>` : `<div>no value: ${esc(p.why)}</div>`) +
+      (p.valid ? `<div class="mono">${(([m, l, h]) => `${esc(m)} [${esc(l)} … ${esc(h)}]`)(vals([p.median, p.lo, p.hi], unit))} · ${esc(sizeOf(s, p))}</div>` : `<div>no value: ${esc(p.why)}</div>`) +
       `<div class="mono sub">${esc(p.exp)}</div>`;
     const r = host.getBoundingClientRect();
     tip.style.display = "block";
@@ -166,18 +302,22 @@ function changeRow(s, c) {
   // A port's confirmation compares the head alone, in its metric's unit (never a log ratio).
   const unit = (s.meta.comparison === "implementations" ? s.meta.metric_unit : s.meta.unit) || "";
   // A change is signed either way: a difference in the unit too (`−1.20 ms`, not `1.20 ms`).
-  const f = (v, rel) => rel ? pct(v) : v == null || !isFinite(v) ? "—" : (val(Math.abs(v), unit) === val(0, unit) ? "" : v < 0 ? "−" : v > 0 ? "+" : "") + val(Math.abs(v), unit);
+  const f = (v, rel) => rel ? pct(v) : v == null || !isFinite(v) ? "—" : unit === "ms" ? fmtTimeSigned(v) : (val(Math.abs(v), unit) === val(0, unit) ? "" : v < 0 ? "−" : v > 0 ? "+" : "") + val(Math.abs(v), unit);
   const cf = c.confirm || {};
+  // A paired difference of times and its interval at the digits they share (fmt::times).
+  const [ce, cl, ch] = !cf.relative && unit === "ms" && [cf.estimate, cf.lo, cf.hi].every(Number.isFinite) ? fmtTimes([cf.estimate, cf.lo, cf.hi], true) : [f(cf.estimate, cf.relative), f(cf.lo, cf.relative), f(cf.hi, cf.relative)];
   return `<tr><td class="mono">${esc(c.id)}</td><td><span class="pill ${tone(c)}">${esc(c.state)} ${esc(c.direction)}</span></td>
     <td class="mono">${esc(c.good_short)}..${esc(c.bad_short)}</td><td class="num mono">${esc(f(c.estimate, c.relative))}</td>
-    <td class="mono">${cf.verdict ? esc(f(cf.estimate, cf.relative)) + " [" + esc(f(cf.lo, cf.relative)) + " … " + esc(f(cf.hi, cf.relative)) + "] " + esc(cf.verdict) + "<br><span class='sub'>" + esc(cf.exp) + "</span>" : esc(c.why || "")}</td>
+    <td class="mono">${cf.verdict ? esc(ce) + " [" + esc(cl) + " … " + esc(ch) + "] " + esc(verdictText(cf, unit)) + "<br><span class='sub'>" + esc(cf.exp) + "</span>" : esc(c.why || "")}</td>
     <td>${c.culprit && c.culprit.short ? `<span class="mono">${esc(c.culprit.short)}</span> ${esc(c.culprit.subject)}` : c.bisect && c.bisect.verdict ? esc(c.bisect.verdict) : "—"}${c.alerted ? `<div class="sub">alerted: ${esc(c.alerted.text)}</div>` : ""}</td></tr>`;
 }
 
 function render() {
   const app = document.getElementById("app");
   if (!DATA) { app.innerHTML = "<p>No data.</p>"; return; }
-  let html = `<div><h1>History</h1><div class="sub">${esc(DATA.device)} · ${DATA.series.length} series · ${esc(DATA.created)}</div></div>
+  const units = Object.entries(TIME_UNITS).map(([k, t]) => `<button type="button" data-unit="${k}" aria-pressed="${TIME_UNIT === k}" title="Times in ${t.name}">${t.label}</button>`).join("");
+  let html = `<header class="topbar"><div><h1>History</h1><div class="sub">${esc(DATA.device)} · ${DATA.series.length} series · ${esc(DATA.created)}</div></div>
+    <div class="seg" role="group" aria-label="Time unit" title="Show every time in this unit">${units}</div></header>
     <div class="legend"><span>● median of a commit's blocks</span><span>│ its interval (each point says how sure: 6 blocks reach 97%, 3 pairs 75%)</span><span>— segment median</span><span>┊ change point (confirmed regressions red, improvements green, unconfirmed amber, rejected grey)</span><span>┆ comparator updated (a new baseline: segments restart)</span><span>× no value (refused)</span></div>`;
   DATA.series.forEach((s, k) => {
     const fp = s.meta.fingerprint || {};
@@ -190,13 +330,35 @@ function render() {
       ${s.changes.length ? `<table><tr><th>change</th><th>state</th><th>range</th><th>history</th><th>paired A/B</th><th>culprit</th></tr>${s.changes.map(c => changeRow(s, c)).join("")}</table>` : `<p class="note">No change points.</p>`}
       <details><summary>${s.points.length} points</summary><table><tr><th>date</th><th>commit</th><th>subject</th><th>median</th><th>interval</th><th>n</th><th>experiment</th></tr>
       ${s.points.slice().reverse().map(p => `<tr class="${p.valid ? "" : "invalid"}"><td class="mono">${esc((p.at || "").slice(0, 10))}</td><td class="mono">${esc(p.short)}</td><td>${esc(p.subject)}</td>
-        <td class="num mono">${p.valid ? esc(val(p.median, s.meta.unit)) : "—"}</td><td class="mono">${p.valid ? esc(val(p.lo, s.meta.unit)) + " … " + esc(val(p.hi, s.meta.unit)) : esc(p.why)}</td><td class="num mono">${p.valid ? esc(sizeOf(s, p)) : p.n}</td><td class="mono sub">${esc(p.exp)}</td></tr>`).join("")}</table></details>
+        ${(([m, l, h]) => `<td class="num mono">${p.valid ? esc(m) : "—"}</td><td class="mono">${p.valid ? esc(l) + " … " + esc(h) : esc(p.why)}</td>`)(vals([p.median, p.lo, p.hi], s.meta.unit))}<td class="num mono">${p.valid ? esc(sizeOf(s, p)) : p.n}</td><td class="mono sub">${esc(p.exp)}</td></tr>`).join("")}</table></details>
       ${(s.marks || []).length ? `<p class="note">${s.marks.map(m => m.t === "epoch" ? `Comparator updated (${esc(m.name)} ${esc(m.from)} → ${esc(m.to)}) at ${esc(m.short)}` : `${esc(m.from)} → ${esc(m.to)} at ${esc(m.short)}`).join("<br>")}</p>` : ""}
       <p class="note">${port ? `Points are ln(${esc(s.meta.head_name)} / ${esc(s.meta.base_name)}) of a few alternating pairs and never decide anything: a change point is a suspicion until a paired A/B of ${esc(s.meta.head_name)} alone at the commits around it confirms it.` : "Points are single-build blocks and never decide anything: a change point is a suspicion until a paired A/B of the commits around it confirms it."}</p></section>`;
   });
+  // Redrawn in place: the points tables stay open as they were.
+  const open = [...app.querySelectorAll("details")].map(d => d.open);
   app.innerHTML = html;
+  app.querySelectorAll("details").forEach((d, i) => { if (open[i]) d.open = true; });
+  app.querySelectorAll('[aria-label="Time unit"] button').forEach(b => b.addEventListener("click", () => setTimeUnit(b.dataset.unit)));
   DATA.series.forEach((s, k) => chart(s, document.getElementById("c" + k)));
 }
+
+// Every time on the page in one unit (`#unit=us|ms|s` in the address, kept with any other keys there).
+function setTimeUnit(unit) {
+  if (!Object.hasOwn(TIME_UNITS, unit)) return;
+  TIME_UNIT = unit;
+  const p = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+  p.set("unit", unit);
+  history.replaceState(null, "", "#" + p.toString());
+  const y = window.scrollY;
+  render();
+  window.scrollTo(0, y);
+}
+
+TIME_UNIT = parseTimeUnit(new URLSearchParams((location.hash || "").replace(/^#/, "")).get("unit")) || parseTimeUnit(DATA?.default_unit) || "us";
+addEventListener("hashchange", () => {
+  const u = parseTimeUnit(new URLSearchParams(location.hash.replace(/^#/, "")).get("unit"));
+  if (u && u !== TIME_UNIT) { TIME_UNIT = u; render(); }
+});
 render();
 </script>
 </body>
