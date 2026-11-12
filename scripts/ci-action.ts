@@ -462,9 +462,12 @@ function scrubText(text: string): string {
 }
 
 // Every quoted string in a clause that names `… of process <pid>`: a window's title or class, an element's
-// name and key (`button "Send" (key "send") of process 4120`).
+// name and key (`button "Send" (key "send") of process 4120`); and the app macOS names a window by (`a
+// window of <app> of process <pid>`).
 function scrubWindows(text: string): string {
-  return text.replace(/"(?:[^"\\]|\\.)*"(?=(?:[^";]|"(?:[^"\\]|\\.)*")*? of process \d)/g, '"…"')
+  return text
+    .replace(/"(?:[^"\\]|\\.)*"(?=(?:[^";]|"(?:[^"\\]|\\.)*")*? of process \d)/g, '"…"')
+    .replace(/\ba window of (?:(?!; ).)+? of process (\d)/g, "a window of process $1")
 }
 
 // A home folder as `~` where a path starts (never mid-path: `/tmp/x/home/y` stays): this runner user's own
