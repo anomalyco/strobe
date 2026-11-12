@@ -524,7 +524,8 @@ fn check(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
         // A `--noworse` failure's error lists its counters, each said on its own line below.
         let noworse = error.starts_with("--noworse:") && s["counters"].as_array().is_some_and(|c| c.iter().any(|c| c["passed"] == false));
         sec.result.push(if noworse { "FAILED: --noworse (each counter below)".to_string() } else { format!("FAILED: {}", error.lines().next().unwrap_or("")) });
-        if let Some(h) = s["hint"].as_str() {
+        // A failed base's hint is the series' too (`--check --base`): said once, as base's, below.
+        if let Some(h) = s["hint"].as_str().filter(|h| !(s["base"]["passed"] == false && s["base"]["hint"].as_str() == Some(*h))) {
             sec.next.push((format!("the failure's hint: {h}"), String::new()));
         }
         let seed = (r["plan"]["used_random"] == true).then(|| r["plan"]["seed"].to_string());
@@ -833,22 +834,29 @@ impl Command {
             // a ref, a URL or an app's name as it was given (never a `\` rewritten in one).
             let (pre, at) = v.split_once('=').map_or(("", v.as_str()), |(t, p)| (t, p));
             let local = Path::new(at.strip_prefix(r"\\?\").unwrap_or(at));
-            if local.is_absolute() {
-                if !Path::new(at).exists() {
+            if local.is_absolute() || crate::store::unc(at) {
+                // Another machine's folder (`//host/…`) is never asked about: that alone connects to it.
+                if crate::store::unc(at) || !Path::new(at).exists() {
                     gone.get_or_insert_with(|| format!("the folder its --{k} ran is not on this machine"));
                 }
                 let p = super::plain_path(at);
                 *v = if pre.is_empty() { p } else { format!("{pre}={p}") };
             }
         }
-        // The bench file where it is now: its path, else (a result from another machine, a moved
-        // checkout) its path in its repository when that is under the current folder; else none.
+        // The bench file where it is now: its path (on this disk: another machine's, `//host/…`, is never
+        // asked about), else (a result from another machine, a moved checkout) its path in its repository
+        // when that is under the current folder: a relative path of plain steps (no `..`, no root or
+        // drive); else none.
         let path = r["args"]["pos"][0].as_str().or(r["file"].as_str()).unwrap_or("");
+        let under_here = |f: &&str| {
+            let p = Path::new(f);
+            !f.is_empty() && !crate::store::unc(f) && p.components().all(|c| matches!(c, std::path::Component::Normal(_))) && p.is_file()
+        };
         let file = if run || path.is_empty() {
             None
-        } else if Path::new(path).is_file() {
+        } else if !crate::store::unc(path) && Path::new(path).is_file() {
             Some(super::plain_path(path))
-        } else if let Some(rel) = r["file_repo"].as_str().filter(|f| Path::new(f).is_file()) {
+        } else if let Some(rel) = r["file_repo"].as_str().filter(under_here) {
             Some(rel.replace('\\', "/"))
         } else {
             gone = Some(format!("its bench file {} is not on this machine", Path::new(&super::plain_path(path)).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
@@ -1043,8 +1051,9 @@ pub(super) fn quoting_note() -> Option<(&'static str, String)> {
     }
 }
 
-/// A word `sh` and PowerShell both pass whole and as written: bare when it holds only letters, digits
-/// and `_-./:=+%^` (never PowerShell's stop-parsing `--%`); else in single quotes (literal in both), a
+/// A word `sh`, zsh and PowerShell all pass whole and as written: bare when it holds only letters,
+/// digits and `_-./:=+%` and does not start with `=` (never PowerShell's stop-parsing `--%`); else in
+/// single quotes (literal in each), a
 /// word with a single quote (`'`, or a typographic one PowerShell reads as one) in double quotes where
 /// it holds none of either shell's specials there (`"` and its typographic forms, `$`, `\`, backtick,
 /// `!`). A word that holds both has no spelling both shells read alike: it is quoted for the shell of
@@ -1054,7 +1063,9 @@ pub(super) fn quote(w: &str) -> String {
     if w.contains(DOUBLE_QUOTES) {
         QUOTED.with(|q| q.set((q.get().0, true)));
     }
-    if !w.is_empty() && !w.contains("--%") && w.chars().all(|c| c.is_alphanumeric() || "_-./:=+%^".contains(c)) {
+    // Not `^` (zsh's `extendedglob` negates with it: `HEAD^`) nor a leading `=` (zsh expands `=word` to
+    // the program `word`'s path): both quoted.
+    if !w.is_empty() && !w.contains("--%") && !w.starts_with('=') && w.chars().all(|c| c.is_alphanumeric() || "_-./:=+%".contains(c)) {
         w.to_string()
     } else if !w.contains(SINGLE_QUOTES) {
         format!("'{w}'")

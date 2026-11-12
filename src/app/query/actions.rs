@@ -84,11 +84,12 @@ pub fn experiment(result: &Value, home: Option<&Path>, args: &Args, top: usize) 
 }
 
 /// The file a result's `actions.path` names, in the folder the result is in: its last part alone, when
-/// that is a name a bench writes (letters, digits, `-`, ending `.actions.json.gz`).
+/// that is a name a bench writes (letters, digits, `-`, ending `.actions.json.gz`), and in a folder a
+/// person named a regular file of its own (`store::held_file`: no link out of it).
 fn beside(home: &Path, path: &str) -> Option<std::path::PathBuf> {
     let name = path.rsplit(['/', '\\']).next()?;
     let stem = name.strip_suffix(".actions.json.gz")?;
-    (!stem.is_empty() && stem.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')).then(|| home.join(name))
+    (!stem.is_empty() && stem.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')).then(|| crate::store::held_file(home, name)).flatten()
 }
 
 /// The rows (`--phase` filters, `--top` bounds the text) and the redacted log as JSON.

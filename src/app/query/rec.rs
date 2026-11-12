@@ -35,6 +35,8 @@ pub struct Rec {
     gecko: OnceLock<Option<Value>>,
     /// The gaps between consecutive samples of the CPU profiles (µs), read with them.
     gaps: Mutex<Vec<f64>>,
+    /// A folder a person named: held while it is read (`store::Named`).
+    _named: Option<store::Named>,
 }
 
 pub(super) type Rows = Vec<Vec<Option<String>>>;
@@ -112,8 +114,16 @@ pub(super) fn cached<T>(r: &Result<T>) -> Result<&T> {
 impl Rec {
     pub fn open(dir: &Path) -> Rec {
         let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
-        // A meta.json strobe did not write here (a folder named by its path) is read as any named file is.
+        // A meta.json strobe did not write here (a folder named by its path) is read as any named file is
+        // (`query::by_path` read and checked it first, with its refusals).
         let meta = if stored { store::read_json(&dir.join("meta.json")) } else { store::read_named_json(&dir.join("meta.json")) }.unwrap_or(Value::Null);
+        Rec::with_meta(dir, meta, None)
+    }
+
+    /// A recording whose meta.json is read already: a folder a person named (`query::by_path`), held
+    /// while it is read.
+    pub(crate) fn with_meta(dir: &Path, meta: Value, named: Option<store::Named>) -> Rec {
+        let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
         // Its id as the file says when that is a plain id, else its folder's: it names caches and shows
         // in text, so never a path (`store::plain_id`).
         let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| store::plain_id(n));
@@ -134,6 +144,7 @@ impl Rec {
             trace: Mutex::new(BTreeMap::new()),
             gecko: OnceLock::new(),
             gaps: Mutex::new(Vec::new()),
+            _named: named,
         }
     }
 
@@ -147,7 +158,7 @@ impl Rec {
     /// (`query::by_path`).
     pub fn named(handle: &str) -> Result<Rec> {
         match super::by_path(handle)? {
-            Some(super::ByPath::Recording(dir)) => Ok(Rec::open(&dir)),
+            Some(super::ByPath::Recording(dir, meta, named)) => Ok(Rec::with_meta(&dir, meta, named)),
             Some(super::ByPath::Experiment(..)) => Err(Error::usage(format!("{handle} is an experiment's result, not a recording"))),
             None => Rec::resolve(handle),
         }
@@ -320,7 +331,7 @@ impl Rec {
     /// `(idle)`, as `probe::cpu::Rebased::sampled_in` counts it. One read of the profile for every group.
     pub(super) fn host_sampled(&self, groups: &[Vec<(u64, u64)>]) -> Result<(Vec<f64>, f64)> {
         let bytes = self.host_bytes()?;
-        let prof: CpuProfile = parse(&bytes)?;
+        let prof: CpuProfile = parse(&bytes, &self.dir.join(crate::probe::cpu::WHOLE_HOST))?;
         let t = HostTimes::of(&prof);
         let idle: std::collections::HashSet<u64> = prof.nodes.iter().filter(|n| matches!(n.call_frame.name.as_ref(), "(root)" | "(idle)")).map(|n| n.id).collect();
         let sum = |spans: &[(f64, f64)]| -> f64 { t.weights(spans, &[]).iter().zip(&prof.samples).filter(|(_, id)| !idle.contains(*id)).map(|(w, _)| w).sum() };
@@ -334,11 +345,12 @@ impl Rec {
         if !path.is_file() {
             return Err(Error::usage(format!(
                 "{} has no whole host profile: --source host|startup|setup and a script's --phase read a script target's attribution recording, and one from before strobe cut its profile to the runs covers the whole host already (strobe query {} hotspots)",
-                self.id, self.id
+                self.id,
+                self.handle()
             )));
         }
         let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(std::fs::File::open(&path)?), &mut bytes)?;
+        std::io::Read::read_to_end(&mut store::gunzip(&path)?, &mut bytes)?;
         Ok(bytes)
     }
 
@@ -346,7 +358,7 @@ impl Rec {
     /// `probe::cpu::weights` weighs them.
     fn load_script(&self, spans: &[(f64, f64)], untimed: &[(f64, f64)], host: HostFrames) -> Result<Stacks> {
         let bytes = self.host_bytes()?;
-        let prof: CpuProfile = parse(&bytes)?;
+        let prof: CpuProfile = parse(&bytes, &self.dir.join(crate::probe::cpu::WHOLE_HOST))?;
         let w = HostTimes::of(&prof).weights(spans, untimed);
         let mut out = Stacks::default();
         self.add_profile(&mut out, &prof, host, |i| w.get(i).copied().filter(|w| *w > 0.0));
@@ -372,7 +384,7 @@ impl Rec {
         let mut out = Stacks::default();
         for p in profiles {
             let bytes = std::fs::read(&p)?;
-            let prof: CpuProfile = parse(&bytes)?;
+            let prof: CpuProfile = parse(&bytes, &p)?;
             // `timeDeltas[i]`: the gap from sample i − 1 to sample i. A V8 profile's last sample has no
             // gap after it: it weighs the profile's median gap, as a Firefox thread's last sample does.
             let gaps: Vec<f64> = prof.time_deltas.iter().skip(1).copied().collect();
@@ -443,7 +455,7 @@ impl Rec {
         let mut out = Stacks::default();
         for p in profiles {
             let bytes = std::fs::read(&p)?;
-            let prof: AllocProfile = parse(&bytes)?;
+            let prof: AllocProfile = parse(&bytes, &p)?;
             let sym = self.sym.lock().unwrap_or_else(|e| e.into_inner());
             // Per node: samples and the variance of the bytes V8 scaled them up to. V8 samples an
             // allocation of s bytes with probability p = 1 − e^(−s/B) and counts it as s/p; its
@@ -532,8 +544,8 @@ impl HostTimes {
 }
 
 /// A profile from JSON: profiles nest one level per stack frame, past serde_json's default limit.
-fn parse<'a, T: serde::Deserialize<'a>>(bytes: &'a [u8]) -> Result<T> {
-    store::deep_enough(bytes, Path::new("a profile of this recording"))?;
+fn parse<'a, T: serde::Deserialize<'a>>(bytes: &'a [u8], path: &Path) -> Result<T> {
+    store::deep_enough(bytes, path)?;
     let mut de = serde_json::Deserializer::from_slice(bytes);
     de.disable_recursion_limit();
     Ok(T::deserialize(&mut de)?)
@@ -818,6 +830,26 @@ pub(crate) fn measured_keys(meta: &Value) -> Option<Vec<String>> {
     Some(cases.iter().flat_map(|c| c["runs"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string))).collect())
 }
 
+/// A run's key as strobe writes it in a meta.json and its trace's marks (`run:3`, `warm:0`): letters,
+/// digits, `_`, `-`, `.` and `:`, at most 64.
+pub(crate) fn run_key(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 64 && k.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-.:".contains(&c))
+}
+
+/// Refuses a meta.json whose words that go into a trace query (its run marks' token, its measured runs'
+/// keys, a batch's runs) are not as strobe writes them: a meta.json read by its path is anyone's.
+pub(crate) fn sql_words(meta: &Value, file: &Path) -> Result<()> {
+    if let Some(t) = meta.get("token").filter(|t| !t.is_null())
+        && !t.as_str().is_some_and(|t| t.is_empty() || store::plain_id(t))
+    {
+        return Err(Error::usage(format!("{}: its token {t} is not a plain id (letters, digits, _ and -), as every token strobe writes is: not read", file.display())));
+    }
+    if let Some(k) = measured_keys(meta).into_iter().flatten().find(|k| !run_key(k)) {
+        return Err(Error::usage(format!("{}: its measured run {k:?} is not a run key (letters, digits, _ - . :), as strobe writes them: not read", file.display())));
+    }
+    Ok(())
+}
+
 /// Orders two rows by one column: numbers as numbers, NULL first, else as text.
 fn cell_cmp(x: &[Option<String>], y: &[Option<String>], i: usize) -> std::cmp::Ordering {
     let (a, b) = (x.get(i).cloned().flatten(), y.get(i).cloned().flatten());
@@ -835,8 +867,11 @@ const IN_RUN: &str = "s.ts >= w.t0 and s.ts < w.t1 and not exists (select 1 from
 /// every run), and `_wp` each with the renderers the page was in (`metrics::windows_sql`); `_u`: the
 /// runs' untimed stretches (`ctx.untimed`), whose slices no part counts (`IN_RUN`).
 pub(crate) fn windows_sql(token: &str, measured: Option<&[String]>) -> String {
+    // Only words strobe writes reach the SQL: a token is a plain id and a run key `run:3` (`run_key`);
+    // anything else from a meta.json (`sql_words` refuses it first) matches no mark.
+    let token = if store::plain_id(token) { token } else { "" };
     let keep = match measured {
-        Some(keys) => format!("k in ({})", keys.iter().map(|k| format!("'strobe:{token}:{}'", k.replace('\'', ""))).collect::<Vec<_>>().join(",")),
+        Some(keys) => format!("k in ({})", keys.iter().filter(|k| run_key(k)).map(|k| format!("'strobe:{token}:{k}'")).collect::<Vec<_>>().join(",")),
         None => "k glob '*:run:*' and k not glob '*:phase:*'".to_string(),
     };
     format!(

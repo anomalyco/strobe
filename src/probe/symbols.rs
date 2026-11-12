@@ -246,10 +246,11 @@ impl Symbolizer {
     }
 
     /// A file of the recording's `maps/` folder an index entry names (`maps/<n>.map.gz`): only a plain
-    /// file name there, never a path elsewhere.
+    /// file name there, never a path elsewhere, and in a folder a person named a regular file of its own
+    /// (`store::held_file`: no link or junction out of it).
     fn held(&self, entry: &Value) -> Option<PathBuf> {
         let name = entry.as_str()?.strip_prefix("maps/")?;
-        (!name.is_empty() && !name.starts_with('.') && name.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))).then(|| self.dir.join("maps").join(name))
+        (!name.is_empty() && !name.starts_with('.') && !name.contains('/')).then(|| crate::store::held_file(&self.dir, &format!("maps/{name}"))).flatten()
     }
 
     /// A call site from a trace stack (`url`, 0-based line and column, the minified function name): the
@@ -280,7 +281,7 @@ impl Symbolizer {
             .entry(url.to_string())
             .or_insert_with(|| {
                 let mut text = String::new();
-                flate2::read::GzDecoder::new(std::fs::File::open(&file).ok()?).read_to_string(&mut text).ok()?;
+                crate::store::gunzip(&file).ok()?.read_to_string(&mut text).ok()?;
                 let v: Value = serde_json::from_str(&text).ok()?;
                 let lines = v["lines"].as_array()?.iter().filter_map(Value::as_i64).collect();
                 let functions = v["functions"].as_array()?.iter().filter_map(|f| Some((f[0].as_i64()?, f[1].as_i64()?, f[2].as_str()?.to_string()))).collect();
@@ -316,8 +317,7 @@ impl Symbolizer {
         let mut maps = self.maps.borrow_mut();
         let map = maps.entry(url.to_string()).or_insert_with(|| {
             let mut text = String::new();
-            let f = std::fs::File::open(self.held(&entry["map"])?).ok()?;
-            flate2::read::GzDecoder::new(f).read_to_string(&mut text).ok()?;
+            crate::store::gunzip(&self.held(&entry["map"])?).ok()?.read_to_string(&mut text).ok()?;
             SourceMap::parse(&text)
         });
         let Some(o) = map.as_ref().and_then(|m| m.lookup(line0 as usize, col0, if minified.starts_with('(') { "" } else { minified })) else { return plain };

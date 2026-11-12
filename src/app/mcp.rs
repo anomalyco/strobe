@@ -429,9 +429,11 @@ fn to_args(name: &str, input: &Value) -> Result<(Vec<String>, u64, Option<String
         }
         "report" => {
             let h = get("handle").ok_or_else(|| Error::usage("report needs handle"))?;
-            // A tracked series or a bench file's history, an experiment, a recording, or a result's file.
-            let view = get("view").unwrap_or_else(|| super::report::view_of(&h).into());
-            a.push(view);
+            // A tracked series or a bench file's history, an experiment, a recording, or a result's file:
+            // without a view, `report <handle>` takes it from what the handle holds (read once).
+            if let Some(view) = get("view") {
+                a.push(view);
+            }
             a.push(h);
         }
         "look" => {

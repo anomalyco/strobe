@@ -860,7 +860,7 @@ const NOISE: [&str; 9] = [
 
 pub fn timeline(dir: &Path) -> Option<Timeline> {
     let mut raw = Vec::new();
-    flate2::read::GzDecoder::new(std::fs::File::open(dir.join(PROFILE)).ok()?).read_to_end(&mut raw).ok()?;
+    crate::store::gunzip(&dir.join(PROFILE)).ok()?.read_to_end(&mut raw).ok()?;
     let profile = read_profile(&raw).ok()?;
     let all = threads(&profile).ok()?;
     let idle = profile["meta"]["categories"].as_array().and_then(|c| c.iter().position(|c| c["name"] == "Idle")).map(|i| i as u64);

@@ -20,13 +20,14 @@ pub fn run(args: &Args, top: usize) -> Result<Output> {
     let phase = args.get("phase");
     // A result.json, a meta.json or the folder of either, named by its path: read as it is.
     match super::by_path(handle)? {
-        Some(super::ByPath::Experiment(_, result)) => return experiment(&result, phase, top),
-        Some(super::ByPath::Recording(dir)) => return recording(&dir, phase, top),
+        Some(super::ByPath::Experiment(_, result, _named)) => return experiment(&result, phase, top),
+        Some(super::ByPath::Recording(dir, _, _named)) => return recording(&dir, phase, top),
         None => {}
     }
     if let Some((a, b)) = handle.split_once("..") {
-        let side = |h: &str| super::Rec::named(h).map(|r| r.dir);
-        return pair(&side(a)?, &side(b)?, phase, top);
+        // Each side opened as a person named it, and held while it is read.
+        let (a, b) = (super::Rec::named(a)?, super::Rec::named(b)?);
+        return pair(&a.dir, &b.dir, phase, top);
     }
     let dir = store::resolve(handle)?;
     if store::is_experiment(&dir) {

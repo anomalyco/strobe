@@ -4,7 +4,7 @@
 //! strobe's own CPU, GPU and memory, and the recording's validity and context. Protobuf by hand: only
 //! the fields written here.
 
-use crate::model::Result;
+use crate::model::{Error, Result};
 use crate::probe::symbols::{Frame, Symbolizer};
 use crate::store;
 use serde_json::{Value, json};
@@ -99,15 +99,22 @@ pub struct Built {
 
 /// Writes `out` from the recording in `dir` and says what went in.
 pub fn build(dir: &Path, out: &Path) -> Result<Built> {
-    let meta = store::read_json(&dir.join("meta.json")).unwrap_or(Value::Null);
-    let mut b = Builder::default();
+    // A folder a person named (not in the store) is read as it is: its meta.json as any named file, its
+    // maps without the sources on disk they name, its gzip files bounded (`store::gunzip`).
+    let stored = store::in_store(dir);
+    let meta = if stored { store::read_json(&dir.join("meta.json")) } else { store::read_named_json(&dir.join("meta.json")) }.unwrap_or(Value::Null);
+    let mut b = Builder { stored, ..Builder::default() };
     let chrome = dir.join("trace.pftrace");
     let mut file = Vec::new();
     if chrome.is_file() {
         // A trace is a sequence of packets: appending strobe's keeps both whole.
         let raw = std::fs::read(&chrome)?;
         if raw.starts_with(&[0x1f, 0x8b]) {
-            flate2::read::GzDecoder::new(raw.as_slice()).read_to_end(&mut file)?;
+            let limit = store::gz_limit(&chrome).unwrap_or(u64::MAX);
+            flate2::read::GzDecoder::new(raw.as_slice()).take(limit.saturating_add(1)).read_to_end(&mut file)?;
+            if file.len() as u64 > limit {
+                return Err(Error::usage(format!("{}: expands to more than {} MB, 64 times its size, which no trace strobe keeps does: not read", chrome.display(), limit >> 20)));
+            }
         } else {
             file = raw;
         }
@@ -176,9 +183,7 @@ fn packet(out: &mut Vec<u8>, p: &Pb) {
 }
 
 fn read_gz<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    let mut text = String::new();
-    flate2::read::GzDecoder::new(std::fs::File::open(path).ok()?).read_to_string(&mut text).ok()?;
-    serde_json::from_str(&text).ok()
+    serde_json::from_str(&store::gunzip_string(path).ok()?).ok()
 }
 
 /// What the Chrome trace says about the page: strobe's marks (run and phase edges) and the threads
@@ -302,6 +307,9 @@ struct Builder {
     trace_span: Option<(u64, u64)>,
     /// Measured runs in host time: anchors for samples that carry no time.
     runs: Vec<(u64, u64)>,
+    /// The recording is one strobe keeps (`store::in_store`): its maps' original sources may be read from
+    /// where it says they are.
+    stored: bool,
 }
 
 /// One debug annotation's value.
@@ -1085,7 +1093,7 @@ impl Builder {
         if profiles.is_empty() && allocs.is_empty() && whole.is_none() {
             return;
         }
-        let sym = Symbolizer::open(dir);
+        let sym = if self.stored { Symbolizer::open(dir) } else { Symbolizer::open_held(dir) };
         // Without a Chrome trace (a script target) the samples need a thread of their own: the host's
         // process and main thread where the recording names them.
         let own = (!self.built.chrome).then(|| {
@@ -1276,7 +1284,7 @@ impl Builder {
                 self.count("runs and phases");
             }
         }
-        let sym = Symbolizer::open(dir);
+        let sym = if self.stored { Symbolizer::open(dir) } else { Symbolizer::open_held(dir) };
         let lib_of = |a: u64| -> Option<&(u64, u64, String, String)> {
             let i = t.libs.partition_point(|l| l.0 <= a).checked_sub(1)?;
             Some(&t.libs[i]).filter(|l| a < l.1)

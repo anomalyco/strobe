@@ -1001,7 +1001,8 @@ fn parse(path: &Path) -> Result<Snapshot> {
     let mut magic = [0u8; 2];
     let gz = file.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b];
     file.seek(SeekFrom::Start(0))?;
-    let src: Box<dyn Read> = if gz { Box::new(flate2::read::MultiGzDecoder::new(std::io::BufReader::with_capacity(1 << 20, file))) } else { Box::new(file) };
+    // Outside the store, a gzip file is bounded (`store::gunzip`).
+    let src: Box<dyn Read> = if gz { crate::store::gunzip(path)? } else { Box::new(file) };
     let mut sc = Scan { src, buf: vec![0; 1 << 20], pos: 0, len: 0 };
     document(&mut sc).map_err(|e| Error::msg(format!("{}: {}", path.display(), e.message)))
 }
@@ -1011,7 +1012,7 @@ fn document(sc: &mut Scan) -> Result<Snapshot> {
     let (mut nf, mut ncol, mut ecol) = (0usize, Vec::new(), Vec::new());
     let (mut info_fields, mut tree_fields, mut loc_fields) = (Vec::new(), Vec::new(), Vec::new());
     let (mut counts, mut raw_locs, mut raw_infos) = (Vec::<u32>::new(), Vec::<u32>::new(), Vec::<u32>::new());
-    let mut tree = Value::Null;
+    let mut tree = Vec::new();
     let mut key = Vec::new();
     sc.expect(b'{')?;
     loop {
@@ -1067,8 +1068,10 @@ fn document(sc: &mut Scan) -> Result<Snapshot> {
                 tree_fields = names(&meta["trace_node_fields"]);
                 loc_fields = names(&meta["location_fields"]);
                 s.root = (v["root_index"].as_u64().unwrap_or(0) / nf as u64) as u32;
-                let n = v["node_count"].as_u64().unwrap_or(0) as usize;
-                let e = v["edge_count"].as_u64().unwrap_or(0) as usize;
+                // Room for what the header says, but never more than a million up front: the counts are
+                // the file's word, and the columns grow as the nodes and edges are read.
+                let n = v["node_count"].as_u64().unwrap_or(0).min(1 << 20) as usize;
+                let e = v["edge_count"].as_u64().unwrap_or(0).min(1 << 20) as usize;
                 for col in [&mut s.name, &mut s.id, &mut s.size, &mut counts] {
                     col.reserve(n);
                 }
@@ -1133,9 +1136,7 @@ fn document(sc: &mut Scan) -> Result<Snapshot> {
             b"locations" => sc.ints(|x| raw_locs.push(x as u32))?,
             b"trace_function_infos" => sc.ints(|x| raw_infos.push(x as u32))?,
             b"trace_tree" => {
-                let mut raw = Vec::new();
-                sc.value(Some(&mut raw))?;
-                tree = serde_json::from_slice(&raw)?;
+                sc.value(Some(&mut tree))?;
             }
             _ => sc.value(None)?,
         }
@@ -1167,20 +1168,67 @@ fn document(sc: &mut Scan) -> Result<Snapshot> {
     let cols = ["function_id", "name", "script_name", "script_id", "line", "column"].map(|f| at(&info_fields, f, usize::MAX));
     s.trace_infos = raw_infos.chunks_exact(fi).map(|f| cols.map(|c| f.get(c).copied().unwrap_or(0))).collect();
     let tf = (at(&tree_fields, "id", 0), at(&tree_fields, "function_info_index", 1), at(&tree_fields, "children", 4), tree_fields.len().max(5));
-    walk_tree(&tree, tf, NONE, &mut s.trace_nodes);
+    walk_tree(&tree, tf, &mut s.trace_nodes);
     if s.trace.len() != n || s.trace_infos.is_empty() {
         s.trace = Vec::new();
     }
     Ok(s)
 }
 
-/// `trace_tree`: [id, function_info_index, count, size, [children…]] repeated, nested.
-fn walk_tree(v: &Value, f: (usize, usize, usize, usize), parent: u32, out: &mut HashMap<u32, (u32, u32)>) {
-    let Some(a) = v.as_array() else { return };
-    for node in a.chunks_exact(f.3) {
-        let id = node[f.0].as_u64().unwrap_or(0) as u32;
-        out.insert(id, (node[f.1].as_u64().unwrap_or(0) as u32, parent));
-        walk_tree(&node[f.2], f, id, out);
+/// `trace_tree`, as its JSON text: [id, function_info_index, count, size, [children…]] repeated,
+/// nested one array per stack frame (as deep as the JavaScript stack that allocated). Read in one pass
+/// with a stack of its own, never by recursion: a deep tree is as safe as a flat one. Each node maps
+/// its id to (function_info_index, parent id).
+fn walk_tree(raw: &[u8], f: (usize, usize, usize, usize), out: &mut HashMap<u32, (u32, u32)>) {
+    // One open array: its parent node's id, the field of its node being read, and that node's id and
+    // function so far.
+    struct Open {
+        parent: u32,
+        field: usize,
+        id: u32,
+        info: u32,
+    }
+    let mut open: Vec<Open> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'[' => {
+                // A node's children (its field `f.2`) are its own; the outermost array has no parent.
+                let parent = match open.last_mut() {
+                    Some(o) if o.field % f.3 == f.2 => {
+                        out.insert(o.id, (o.info, o.parent));
+                        o.id
+                    }
+                    Some(o) => o.id,
+                    None => NONE,
+                };
+                open.push(Open { parent, field: 0, id: 0, info: 0 });
+                i += 1;
+            }
+            b']' => {
+                open.pop();
+                if let Some(o) = open.last_mut() {
+                    o.field += 1;
+                }
+                i += 1;
+            }
+            b'0'..=b'9' | b'-' => {
+                let start = i;
+                while i < raw.len() && matches!(raw[i], b'0'..=b'9' | b'-' | b'.' | b'e' | b'E' | b'+') {
+                    i += 1;
+                }
+                let x = std::str::from_utf8(&raw[start..i]).ok().and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0).max(0.0) as u32;
+                if let Some(o) = open.last_mut() {
+                    match o.field % f.3 {
+                        k if k == f.0 => o.id = x,
+                        k if k == f.1 => o.info = x,
+                        _ => {}
+                    }
+                    o.field += 1;
+                }
+            }
+            _ => i += 1,
+        }
     }
 }
 

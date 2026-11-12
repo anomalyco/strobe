@@ -28,7 +28,11 @@
 //     keeps for another result; it keeps its own ledger;
 //   - a word no spelling passes to both shells (a `'` beside `$`) is quoted for this OS's shell and said so
 //     (`quoted_for`): only that shell's reading is checked;
-//   - what a check's insights must say: base's error and hint when base failed, a `--noworse` failure once.
+//   - no word zsh reads differently is left bare: one starting with `=` (EQUALS) or holding a `^` (extendedglob);
+//   - what a check's insights must say: base's error and its hint once when base failed (the series gives the same
+//     hint as its own), a `--noworse` failure once;
+//   - a hint outside insights (`query <folder> threads` of a recording with no trace) names a recording read by its
+//     path by that path, quoted alike, never its id.
 // `--make` first builds scripts/dev/insights-repo.ts's repository in a folder named `O'Connor repo` (a `'` and a space
 // in every path) and runs cheap checks there, in a state folder of this run's own, for the shapes a real result has
 // (`MAKE` below: two targets of one case on one build named by its folder or a ref, two targets checked against each
@@ -45,6 +49,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { homedir, platform, tmpdir } from "os"
 import { join } from "path"
 import { fileURLToPath } from "url"
+import { gzipSync } from "zlib"
 
 const argv = process.argv.slice(2)
 const opt = (n: string) => (argv.includes(`--${n}`) ? argv[argv.indexOf(`--${n}`) + 1] : undefined)
@@ -76,6 +81,31 @@ function argvVia(shell: "sh" | "pwsh", rest: string): string[] | string {
     return JSON.parse(p.stdout.toString())
   } catch {
     return `${shell} printed no argv: ${p.stdout.toString().trim()}`
+  }
+}
+
+// What zsh, a third shell people paste into, reads differently from sh in a word left bare: a leading `=`
+// (`=word` is the program word's path, EQUALS) and a `^` (`extendedglob` negation, `HEAD^`). Quoted words pass.
+function zshReads(c: string): string | undefined {
+  let quote: string | null = null
+  let start = true
+  for (const ch of c) {
+    if (quote) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      start = false
+      continue
+    }
+    if (ch === " ") {
+      start = true
+      continue
+    }
+    if (ch === "^") return "a bare ^, which zsh's extendedglob reads as a negation"
+    if (ch === "=" && start) return "a bare word starting with =, which zsh expands to a program's path"
+    start = false
   }
 }
 
@@ -267,7 +297,11 @@ const synthetic: [string, J][] = [
   ["exp_syn_onetarget", { ...comparison([series("port", "lib2", worse)], {}), args: { command: "bench", pos: [benchFile] }, variants: [{ label: "c0", spec: "c0", target: "lib2" }, { label: "c1", spec: "c1", target: "lib2" }] }],
   // Checks as the bench writes them with a base: one whose base failed (its error and hint are base's), one
   // whose `--noworse` counter failed (said once).
-  ["exp_syn_basefail", { ...comparison([{ kind: "check", label: "load · page", case: "load", target: "page", target_kind: "web", passed: false, state: "fail", primary: { metric: "cpu.work" }, error: "base failed, so head was checked against nothing (base's error is on its line)", base: { passed: false, error: "the script host failed to load:\nerror: Cannot find module './lib' from 'perf/x.bench.ts'\n    at resolve", hint: "export lib from base too, or --filter this case out until it lands" } }], { head: "c1", base: "c0", check: "true" }), kind: "check" }],
+  // (The bench also gives the series base's hint as its own, `hint`: said once.)
+  ["exp_syn_basefail", { ...comparison([{ kind: "check", label: "load · page", case: "load", target: "page", target_kind: "web", passed: false, state: "fail", primary: { metric: "cpu.work" }, error: "base failed, so head was checked against nothing (base's error is on its line)", hint: "export lib from base too, or --filter this case out until it lands", base: { passed: false, error: "the script host failed to load:\nerror: Cannot find module './lib' from 'perf/x.bench.ts'\n    at resolve", hint: "export lib from base too, or --filter this case out until it lands" } }], { head: "c1", base: "c0", check: "true" }), kind: "check" }],
+  // Words zsh reads differently: a case starting with `=` (`=fast` is the program fast's path) and a ref with `^`
+  // (`extendedglob` negation).
+  ["exp_syn_zsh", comparison([series("=fast", "page", underpowered)], { head: "git:HEAD^", base: "c0", filter: "=fast" }, { variants: [{ label: "c0", spec: "c0" }, { label: "HEAD^", spec: "git:HEAD^" }] })],
   ["exp_syn_noworse", { ...comparison([{ kind: "check", label: "load · page", case: "load", target: "page", target_kind: "web", passed: false, state: "fail", primary: { metric: "cpu.work" }, error: "--noworse: count.items 1 → 2 · worse", counters: [{ metric: "count.items", passed: false, state: "worse", text: "count.items 1 → 2 · worse" }], base: { passed: true, values: {} } }], { head: "c1", base: "c0", check: "true", noworse: "count.items" }), kind: "check" }],
 ]
 // What each result's insights must say beyond its commands (series index → a test of its result lines).
@@ -276,8 +310,11 @@ const sayings: Record<string, (out: J) => string | undefined> = {
     const lines: string[] = o.series?.[0]?.result ?? []
     if (!lines.some((l) => l.includes("base FAILED: the script host failed to load:"))) return "base's error is not shown"
     if (!lines.some((l) => l.includes("Cannot find module './lib'"))) return "base's error's later lines are not shown"
-    if (!(o.series?.[0]?.next ?? []).some((n: J) => String(n.why).includes("export lib from base"))) return "base's hint is not shown"
+    const hints = (o.series?.[0]?.next ?? []).filter((n: J) => String(n.why).includes("export lib from base")).length
+    if (hints === 0) return "base's hint is not shown"
+    if (hints > 1) return `base's hint, the series' too, is said ${hints} times`
   },
+  exp_syn_zsh: (o) => (commandsOf(o).length ? undefined : "no command printed to check its = and ^ words"),
   exp_syn_noworse: (o) => {
     const lines: string[] = o.series?.[0]?.result ?? []
     const n = lines.filter((l) => l.includes("count.items 1 → 2")).length
@@ -437,6 +474,8 @@ for (const [id, env, state] of runs) {
     }
     // A result read from its path is named by that path: never by an id strobe keeps for another result.
     if (resultFile && /[\\/]/.test(id) && result.id && c.split(/\s+/).some((w) => w.replace(/^['"]|['"]$/g, "") === result.id)) fail(`${c} names ${result.id}, which strobe keeps for another result; this one was read from its path`)
+    const z = zshReads(c)
+    if (z) fail(`${c}: ${z}`)
     const rest = c.slice("strobe ".length)
     for (const shell of shells) {
       if ((shell === "sh" && !sh) || (shell === "pwsh" && !pwsh)) continue
@@ -463,6 +502,33 @@ for (const [id, env, state] of runs) {
   // `--show`: each synthetic or made result's insights as text.
   if (argv.includes("--show") && ours) {
     console.log(Bun.spawnSync([STROBE, "query", id, "insights"], { stdout: "pipe", env: { ...process.env, ...env } }).stdout.toString())
+  }
+}
+// A hint outside insights names a recording read by its path by that path, quoted as insights quote it: the
+// thread view of the hand-made folder (no trace, a thread timeline) points at `--timeline`.
+writeFileSync(join(handmade, "timeline.json.gz"), gzipSync(JSON.stringify({ threads: [] })))
+{
+  const p = Bun.spawnSync([STROBE, "query", handmade, "threads"], { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...fakeEnv } })
+  const said = p.stderr.toString() + p.stdout.toString()
+  const c = said.match(/strobe query .* threads --timeline/)?.[0]
+  if (!c) {
+    console.log(`FAIL ${handmade} threads: no --timeline hint in ${JSON.stringify(said.trim())}`)
+    failed++
+  } else {
+    const z = zshReads(c)
+    if (z) {
+      console.log(`FAIL ${handmade} threads: ${c}: ${z}`)
+      failed++
+    }
+    for (const shell of (["sh", "pwsh"] as const).filter((s) => (s === "sh" ? sh : pwsh))) {
+      checked++
+      const a = argvVia(shell, c.slice("strobe ".length))
+      const why = typeof a === "string" ? a : (check(a, fakeState, missingOk) ?? (a[1].replace(/\\/g, "/") === handmade.replace(/\\/g, "/") ? undefined : `names ${a[1]}, not the folder read`))
+      if (why) {
+        console.log(`FAIL ${handmade} threads [${shell}] ${c}\n     ${why}`)
+        failed++
+      }
+    }
   }
 }
 rmSync(work, { recursive: true, force: true })

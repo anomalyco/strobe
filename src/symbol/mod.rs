@@ -10,7 +10,7 @@ use crate::probe::stacks::Deep;
 use crate::probe::symbols::Frame;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 pub const KERNEL: u64 = 0xFFFF_8000_0000_0000;
@@ -20,9 +20,7 @@ pub fn read_deep(dir: &Path) -> Result<Option<Deep>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let mut text = String::new();
-    flate2::read::GzDecoder::new(std::fs::File::open(&path)?).read_to_string(&mut text)?;
-    Ok(Some(serde_json::from_str(&text)?))
+    Ok(Some(serde_json::from_str(&crate::store::gunzip_string(&path)?)?))
 }
 
 /// Writes `value` as gzipped JSON, whole or not at all (`store::write_atomic`).
@@ -204,13 +202,10 @@ pub fn resolve_cached(dir: &Path, deep: &Deep, cache: &str) -> Result<HashMap<St
     // it holds one, else each address by its module's name, and no file it names is opened or written.
     let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
     let cache = dir.join(cache);
-    if let Ok(f) = std::fs::File::open(&cache) {
-        let mut text = String::new();
-        if flate2::read::GzDecoder::new(f).read_to_string(&mut text).is_ok()
-            && let Ok(v) = serde_json::from_str::<HashMap<String, Resolved>>(&text)
-        {
-            return Ok(v);
-        }
+    if let Ok(text) = crate::store::gunzip_string(&cache)
+        && let Ok(v) = serde_json::from_str::<HashMap<String, Resolved>>(&text)
+    {
+        return Ok(v);
     }
     // Modules per process, by base; the kernel's under pid 0.
     let mut modules: HashMap<u32, Vec<&crate::probe::stacks::Module>> = HashMap::new();

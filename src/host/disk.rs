@@ -54,6 +54,11 @@ pub fn stat(path: &Path) -> std::io::Result<Item> {
 /// its reclaimable bytes by 0.03% against asking every file (SPEC §5.14).
 const ASKED: u64 = 1 << 20;
 
+/// How many names the file at `path` has (hard links), asked of the file itself, not through a link.
+pub fn names(path: &Path) -> Option<u32> {
+    os::links(path)
+}
+
 /// How many names `item` (in `dir`) has: Unix's listing says; Windows asks the file.
 fn links(dir: &Path, item: &mut Item) -> u32 {
     if item.links == 0 {

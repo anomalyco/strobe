@@ -95,9 +95,244 @@ pub fn remove(dir: &Path) -> host::disk::Removed {
 }
 
 /// Marks a recording or experiment used now (`<dir>/.used`): `strobe prune` ages data by its last use.
+/// Not while a folder a person named is being read (`Named`): an id found in such a file (a foreign
+/// result's recordings, a meta.json's experiment) marks nothing of the store.
 fn touch(dir: &Path) {
+    if reading_named() {
+        return;
+    }
     if let Ok(f) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(".used")) {
         let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// How many folders a person named are being read now, on any thread (`Named`).
+static NAMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// While held, a folder or file a person named on the command line (not one strobe keeps) is being
+/// read: what such a file says must not make strobe look at anything outside it. Readers that would
+/// (a `package.json` up from a frame's file, a git checkout's root, whether a path in a result exists,
+/// a `.used` stamp) do not, on every thread, while any is held: a daemon reading a stored recording at
+/// the same moment only names fewer packages.
+pub struct Named(());
+
+impl Named {
+    pub fn hold() -> Named {
+        NAMED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Named(())
+    }
+}
+
+impl Drop for Named {
+    fn drop(&mut self) {
+        NAMED.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Whether a named folder or file is being read (`Named`).
+pub fn reading_named() -> bool {
+    NAMED.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
+/// Whether `dir` is a folder strobe keeps: one directly in `recordings/` or `experiments/`.
+pub fn kept(dir: &Path) -> bool {
+    dir.parent().is_some_and(|p| p == paths::recordings() || p == paths::experiments())
+}
+
+/// The rule for a file inside a folder a person named on the command line: it is read only if it is a
+/// regular file there: not a symbolic link, a junction or any other reparse point (Windows), not a file
+/// with other hard links (Unix: another name of a file elsewhere), not a device or pipe.
+pub fn regular(path: &Path) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(path) else { return false };
+    if !m.file_type().is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        if m.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    crate::host::disk::names(path).is_some_and(|n| n <= 1)
+}
+
+/// A name a folder's own files give for another of its files (a map index's `maps/0.map.gz`, a
+/// video.json's `video.mp4`, a check's actions file): only plain steps (letters, digits, `_`, `-`, `.`;
+/// no `.` or `..` step, no separator but `/`, no drive or stream syntax). `regular` then decides whether it
+/// is read.
+pub fn plain_name(name: &str) -> bool {
+    !name.is_empty() && name.split('/').all(|s| !s.is_empty() && s != "." && s != ".." && s.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-.".contains(&c)))
+}
+
+/// A file of `dir` by a name one of its files gives: inside it (`plain_name`), and, in a folder a
+/// person named, a regular file (`regular`). In a folder strobe keeps, as it is.
+pub fn held_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    if !plain_name(name) {
+        return None;
+    }
+    let p = dir.join(name);
+    let ok = if kept(dir) { p.is_file() } else { folders_plain(dir, name) && regular(&p) };
+    ok.then_some(p)
+}
+
+/// Every folder on the way to `name` inside `dir` is a real folder (no link, junction or reparse point).
+fn folders_plain(dir: &Path, name: &str) -> bool {
+    let mut at = dir.to_path_buf();
+    let steps: Vec<&str> = name.split('/').collect();
+    for s in &steps[..steps.len().saturating_sub(1)] {
+        at = at.join(s);
+        if !real_folder(&at) {
+            return false;
+        }
+    }
+    true
+}
+
+/// A folder that is a folder there, not a link, junction or other reparse point.
+fn real_folder(p: &Path) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(p) else { return false };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if m.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    m.file_type().is_dir()
+}
+
+/// The most entries, and the deepest folders, a named folder may hold (a recording holds a few dozen
+/// files, its `maps/` and `import/` one level down).
+const NAMED_ENTRIES: usize = 20_000;
+const NAMED_DEPTH: usize = 4;
+
+/// A folder a person named (a recording's or an experiment's, copied or from another machine), checked
+/// once before anything in it is read: every entry, to `NAMED_DEPTH` folders down, is a regular file
+/// (`regular`) or a real folder, with a plain name (no `:` stream syntax). A folder that holds a link
+/// out of it (a symbolic link, a junction, a hard link) is refused with the entry's name, so a file the
+/// recording's readers open by its fixed name (`frames.json`, `cpu-0.cpuprofile`, …) is always the
+/// folder's own. strobe's own folders are not checked.
+pub fn named_folder(dir: &Path) -> Result<()> {
+    if kept(dir) {
+        return Ok(());
+    }
+    // The folder itself may be a link the person typed: what is inside it is checked.
+    if !dir.is_dir() {
+        return Err(Error::usage(format!("{}: not a folder", dir.display())));
+    }
+    let mut todo = vec![(dir.to_path_buf(), 0usize)];
+    let mut seen = 0usize;
+    while let Some((at, depth)) = todo.pop() {
+        for e in std::fs::read_dir(&at).map_err(|e| Error::usage(format!("{}: {e}", at.display())))?.flatten() {
+            seen += 1;
+            if seen > NAMED_ENTRIES {
+                return Err(Error::usage(format!("{}: more than {NAMED_ENTRIES} entries, more than a recording or an experiment holds: not read", dir.display())));
+            }
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            let refuse = |what: &str| Err(Error::usage(format!("{}: {what}, so nothing in this folder is read (a named folder's files must be its own)", p.display())));
+            if name.contains(':') {
+                return refuse("a name with a `:` (a stream or a drive)");
+            }
+            if real_folder(&p) {
+                if depth + 1 < NAMED_DEPTH {
+                    todo.push((p, depth + 1));
+                }
+            } else if !regular(&p) {
+                return refuse("a link, junction, hard-linked or special file");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` lies in strobe's own store (`recordings/`, `experiments/`): what strobe wrote there.
+/// Anything else (a folder named by its path) is read with the bounds below.
+pub fn in_store(path: &Path) -> bool {
+    path.starts_with(paths::recordings()) || path.starts_with(paths::experiments())
+}
+
+/// A path that names another machine or a device rather than this disk: `//host/…`, `\\host\…`,
+/// `\\?\UNC\…`, `\\.\pipe\…`, also as a `file:` URL's path. Opening, or only asking whether one
+/// exists, connects to that host (SMB, and on Windows sends the user's credentials): strobe never asks
+/// of a path it read from a file.
+pub fn unc(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let p = match p.strip_prefix("file:") {
+        // `file:///x` is this disk's `/x`; `file:////host/x` and `file://host/x` name a host.
+        Some(rest) => match rest.strip_prefix("//") {
+            Some(r) if r.starts_with('/') => r.to_string(),
+            Some(r) => return !(r.starts_with("localhost/") || r == "localhost"),
+            None => return false,
+        },
+        None => p,
+    };
+    match p.strip_prefix("//") {
+        // `\\?\C:\x` is this disk's, as a verbatim path; `\\?\UNC\host\x` another machine's.
+        Some(rest) if rest.starts_with("?/") => rest[2..].to_ascii_uppercase().starts_with("UNC/"),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Whether strobe may look on the disk for something a frame or a result names (a `package.json` up
+/// from a script's file, a git checkout's root, whether a bench file is here): never for another
+/// machine's path (`unc`), and never while a folder or file a person named is read (`Named`).
+pub fn may_look(path: &str) -> bool {
+    !unc(path) && !reading_named()
+}
+
+/// The most a JSON file outside the store is read whole (`read_json`; the largest one strobe writes is
+/// well under 100 MB).
+pub const MAX_OUTSIDE_JSON: u64 = 1 << 30;
+
+/// How much a gzip file outside the store may expand to: 64 times its size (the most any file strobe
+/// writes expands is 19 times, a thread timeline; a heap snapshot 6), at least 64 MiB, at most 4 GiB.
+/// A file in the store is read whole, as strobe wrote it.
+pub fn gz_limit(path: &Path) -> Option<u64> {
+    if in_store(path) {
+        return None;
+    }
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    Some(len.saturating_mul(64).clamp(64 << 20, 4 << 30))
+}
+
+/// A gzip file's contents as they are read (`MultiGzDecoder`), outside the store bounded by `gz_limit`:
+/// past it the read fails with why.
+pub fn gunzip(path: &Path) -> std::io::Result<Box<dyn std::io::Read>> {
+    let f = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
+    let gz = flate2::read::MultiGzDecoder::new(f);
+    Ok(match gz_limit(path) {
+        None => Box::new(gz),
+        Some(limit) => Box::new(Capped { inner: gz, left: limit, limit, path: path.to_path_buf() }),
+    })
+}
+
+/// A gzip file's text (`gunzip`).
+pub fn gunzip_string(path: &Path) -> std::io::Result<String> {
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut gunzip(path)?, &mut text)?;
+    Ok(text)
+}
+
+/// A reader that fails once more than `limit` bytes came out of it.
+struct Capped<R> {
+    inner: R,
+    left: u64,
+    limit: u64,
+    path: PathBuf,
+}
+
+impl<R: std::io::Read> std::io::Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n as u64 > self.left {
+            return Err(std::io::Error::other(format!("{}: expands to more than {} MB, 64 times its size, which no file strobe writes does: not read", self.path.display(), self.limit >> 20)));
+        }
+        self.left -= n as u64;
+        Ok(n)
     }
 }
 
@@ -109,6 +344,11 @@ fn discard(dir: &Path) {
 }
 
 pub fn experiment_dir(id: &str) -> Result<PathBuf> {
+    // A person's `--id` (bench, bisect) names a folder of the store: only a plain id, as handles are
+    // (`resolve` finds no other), short enough for a bisect's steps (`<id>_s<k>`).
+    if !plain_id(id) || id.len() > 96 {
+        return Err(Error::usage(format!("--id {id}: an experiment's id is letters, digits, _ and - (at most 96), as every handle is: then strobe query {id} finds it")));
+    }
     let dir = paths::experiments().join(id);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -233,6 +473,12 @@ pub fn index() -> Vec<Value> {
 
 pub fn read_json(path: &std::path::Path) -> Result<Value> {
     use serde::Deserialize;
+    if !in_store(path)
+        && let Ok(m) = std::fs::metadata(path)
+        && m.len() > MAX_OUTSIDE_JSON
+    {
+        return Err(Error::usage(format!("{}: {} MB, more than any file strobe writes ({} MB at most): not read", path.display(), m.len() >> 20, MAX_OUTSIDE_JSON >> 20)));
+    }
     let bytes = std::fs::read(path)?;
     deep_enough(&bytes, path)?;
     // Profiles nest one level per stack frame; serde_json stops at 128 by default.
@@ -241,10 +487,14 @@ pub fn read_json(path: &std::path::Path) -> Result<Value> {
     Ok(Value::deserialize(&mut de)?)
 }
 
-/// The deepest JSON strobe reads: profiles nest one level per stack frame (the deepest kept here held
-/// 83), and reading or dropping a value recurses once per level, so a file nested far deeper (a
-/// crafted one) would overflow the thread's stack: refused before it is parsed.
-pub const MAX_JSON_DEPTH: usize = 2048;
+/// The deepest JSON strobe reads: an allocation profile nests two levels per stack frame (V8 keeps 128
+/// frames of a sampled allocation; the deepest file kept here nests 83), and reading or dropping a value
+/// recurses once per level, so a file nested far deeper (a crafted one) would overflow the thread's
+/// stack: refused before it is parsed. Measured on Windows release builds (serde_json 1.0.154, this
+/// profile): a 1 MiB main thread (MSVC, the ARM64 release) overflows past 3,018 levels of
+/// `serde_json::Value` and 2,324 of a typed profile node, a 2 MiB one (the x64 release's GNU main
+/// thread, every spawned thread) past 6,142 and 4,764: at least 4.5 times this.
+pub const MAX_JSON_DEPTH: usize = 512;
 
 /// Refuses JSON nested past `MAX_JSON_DEPTH` (strings skipped, one pass over the bytes).
 pub fn deep_enough(bytes: &[u8], path: &Path) -> Result<()> {

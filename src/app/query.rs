@@ -28,43 +28,52 @@ pub use rec::{Part, Rec, Stacks, Weight};
 /// A result or a recording named by its path rather than its handle, as `report` reads them: read as it
 /// is, from anywhere (a copy, a fixture), and nothing is written beside it.
 pub(super) enum ByPath {
-    /// An experiment's result.json (named, or in the folder named), and what it holds (read once).
-    Experiment(std::path::PathBuf, Value),
-    /// A recording's folder (named, or its meta.json named).
-    Recording(std::path::PathBuf),
+    /// An experiment's result.json (named, or in the folder named), what it holds (read once), and, for
+    /// one strobe does not keep, the hold while it is read (`store::Named`).
+    Experiment(std::path::PathBuf, Value, Option<store::Named>),
+    /// A recording's folder (named, or its meta.json named), its meta.json (read once and checked), and
+    /// the hold.
+    Recording(std::path::PathBuf, Value, Option<store::Named>),
 }
 
 /// `handle` as a path a person named: a result.json (a file holding an experiment's `series`, or a
-/// bisect's), a meta.json, or a folder holding either. None when no file or folder of that name is here
-/// (a handle, `a..b`), or for a plain id (`store::plain_id`) that names a folder holding neither. A file
-/// that is no result or meta.json strobe can read (too large, not JSON, nested past serde_json's limit)
-/// is refused with why (`store::read_named_json`). Nothing read from it is ever joined to a path:
-/// the recordings a result names resolve by plain id in the store alone.
+/// bisect's), a meta.json, or a folder holding either: the one resolver `query`, `report` and MCP's
+/// tools read a path with. None when no file or folder of that name is here (a handle, `a..b`), or for a
+/// plain id (`store::plain_id`) that names a folder holding neither. A file that is no result or
+/// meta.json strobe can read (too large, not JSON, nested past serde_json's limit, a token or run key
+/// strobe does not write) is refused with why (`store::read_named_json`, `rec::sql_words`), and so is a
+/// named folder holding a link out of it (`store::named_folder`). Nothing read from it is ever joined to
+/// a path: the recordings a result names resolve by plain id in the store alone.
 pub(super) fn by_path(handle: &str) -> Result<Option<ByPath>> {
     let Ok(p) = std::path::absolute(handle) else { return Ok(None) };
     let p = p.as_path();
+    let held = |dir: &Path| (!store::kept(dir)).then(store::Named::hold);
     if p.is_dir() {
-        return Ok(if p.join("result.json").is_file() {
-            let file = p.join("result.json");
-            let v = experiment_json(&file)?;
-            Some(ByPath::Experiment(file, v))
-        } else if p.join("meta.json").is_file() {
-            Some(ByPath::Recording(p.to_path_buf()))
-        } else if store::plain_id(handle) {
-            None
-        } else {
-            return Err(Error::usage(format!("{handle}: a folder with no result.json or meta.json in it: not an experiment or a recording")));
-        });
+        let (result, meta) = (p.join("result.json"), p.join("meta.json"));
+        if !result.is_file() && !meta.is_file() {
+            if store::plain_id(handle) {
+                return Ok(None);
+            }
+            return Err(Error::usage(format!("{handle}: a folder with no result.json or meta.json in it: not an experiment's or a recording's folder")));
+        }
+        store::named_folder(p)?;
+        let named = held(p);
+        return Ok(Some(if result.is_file() { ByPath::Experiment(result.clone(), experiment_json(&result)?, named) } else { ByPath::Recording(p.to_path_buf(), recording_meta(&meta)?, named) }));
     }
     if !p.is_file() {
         return Ok(None);
     }
     let dir = p.parent().unwrap_or(Path::new(".")).to_path_buf();
     if p.file_name().is_some_and(|n| n == "meta.json") {
-        return Ok(Some(ByPath::Recording(dir)));
+        store::named_folder(&dir)?;
+        let named = held(&dir);
+        return Ok(Some(ByPath::Recording(dir, recording_meta(p)?, named)));
     }
+    // A result.json alone: what is read beside it (a check's actions) is the folder's own regular file
+    // by a plain name (`store::held_file`).
+    let named = held(&dir);
     match experiment_json(p) {
-        Ok(v) => Ok(Some(ByPath::Experiment(p.to_path_buf(), v))),
+        Ok(v) => Ok(Some(ByPath::Experiment(p.to_path_buf(), v, named))),
         // A plain id that happens to name a file here is still a handle.
         Err(_) if store::plain_id(handle) => Ok(None),
         Err(e) => Err(e),
@@ -74,7 +83,19 @@ pub(super) fn by_path(handle: &str) -> Result<Option<ByPath>> {
 /// An experiment's result named by its path: a comparison's, a check's (`series` a list) or a bisect's.
 fn experiment_json(file: &Path) -> Result<Value> {
     let v = store::read_named_json(file)?;
-    if v["series"].is_array() || v["kind"] == "bisect" { Ok(v) } else { Err(Error::usage(format!("{}: not an experiment's result.json (no series) or a recording's meta.json", file.display()))) }
+    if v["series"].is_array() || v["kind"] == "bisect" {
+        Ok(v)
+    } else {
+        Err(Error::usage(format!("{}: not an experiment's result.json (no series, not a bisect) or a recording's meta.json: strobe reads only those by their path", file.display())))
+    }
+}
+
+/// A recording's meta.json named by its path (or in the folder named): read as any named file is, its
+/// refusals said (never a blank recording), and the words of it that go into a trace query checked.
+fn recording_meta(file: &Path) -> Result<Value> {
+    let meta = store::read_named_json(file)?;
+    rec::sql_words(&meta, file)?;
+    Ok(meta)
 }
 
 /// A path as a printed command's word: forward slashes (which Windows reads too), a canonical path's
@@ -82,6 +103,21 @@ fn experiment_json(file: &Path) -> Result<Value> {
 /// shells (`exp_insights::quote`).
 pub(super) fn path_word(p: &Path) -> String {
     exp_insights::quote(&plain_path(&p.display().to_string()))
+}
+
+/// What a printed command names the recording in `dir` by: its id when strobe keeps it, else the path it
+/// was read from, quoted (`path_word`), as `Rec::handle` does.
+pub(super) fn handle_of(dir: &Path) -> String {
+    match dir.file_name().filter(|_| dir.parent().is_some_and(|p| p == crate::host::paths::recordings())) {
+        Some(id) => id.to_string_lossy().to_string(),
+        None => path_word(dir),
+    }
+}
+
+/// Two recordings as one word of a printed command (`a..b`), each named as `Rec::handle` names it.
+pub(super) fn pair_word(a: &Rec, b: &Rec) -> String {
+    let raw = |r: &Rec| if r.stored() { r.id.clone() } else { plain_path(&r.dir.display().to_string()) };
+    exp_insights::quote(&format!("{}..{}", raw(a), raw(b)))
 }
 
 /// A local path as a person types it, in forward slashes (Windows reads them too).
@@ -109,7 +145,7 @@ pub fn run(args: &Args) -> Result<Output> {
         return http::run(args, top);
     }
     let path = match by_path(handle)? {
-        Some(ByPath::Experiment(file, result)) => return experiment(result, Some(file.as_path()), args, view, top),
+        Some(ByPath::Experiment(file, result, _named)) => return experiment(result, Some(file.as_path()), args, view, top),
         other => other,
     };
     // (`store::resolve` marks what it resolves used: never a folder named by its path.)
@@ -135,11 +171,11 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some((a, b)) = handle.split_once("..").filter(|_| path.is_none()) {
         return pair(a, b, view, args, top);
     }
-    let dir = match path {
-        Some(ByPath::Recording(dir)) => dir,
-        _ => store::resolve(handle)?,
+    let rec = match path {
+        Some(ByPath::Recording(dir, meta, named)) => Rec::with_meta(&dir, meta, named),
+        _ => Rec::resolve(handle)?,
     };
-    recording(&dir, view, args, top)
+    recording(rec, view, args, top)
 }
 
 /// An experiment's view, from its result (stored, or read from a path).
@@ -162,7 +198,7 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
             // result names is one strobe keeps, by its plain id, never a path.
             let mut recs: Vec<String> = result["series"].as_array().into_iter().flatten().filter_map(|s| s["recording"].as_str().map(str::to_string)).collect();
             if result["kind"] == "check" && recs.len() == 1 {
-                return recording(&store::resolve(&recs.remove(0))?, view, args, top);
+                return recording(Rec::resolve(&recs.remove(0))?, view, args, top);
             }
             // `--blocks N` compares nothing: its attribution recordings are head's alone (`--why
             // always`), one per series, and one answers for the experiment.
@@ -173,7 +209,7 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
                 let heads: Vec<String> = series.iter().filter_map(|s| s["attribution"]["head"].as_str().map(str::to_string)).collect();
                 let id = result["id"].as_str().unwrap_or("this experiment");
                 return match heads.as_slice() {
-                    [one] => recording(&store::resolve(one)?, view, args, top),
+                    [one] => recording(Rec::resolve(one)?, view, args, top),
                     [] => {
                         let timed: Vec<&str> = series.iter().flat_map(|s| s["timing_recordings"].as_array().into_iter().flatten()).filter_map(|t| t["recording"].as_str()).collect();
                         let others = if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): strobe query <rec> {other} with one of {}", timed.join(", ")) };
@@ -186,7 +222,9 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
             }
             // A view of two recordings answers for the experiment: each series' base..head.
             if diff::VIEWS.contains(&other) {
-                return diff::experiment(&result, other, args, top);
+                // What a printed command names it by: its id, or the path it was read from.
+                let exp = source.map_or_else(|| result["id"].as_str().unwrap_or("").to_string(), path_word);
+                return diff::experiment(&result, &exp, other, args, top);
             }
             for s in result["series"].as_array().into_iter().flatten() {
                 recs.extend(["base", "head"].iter().filter_map(|r| s["attribution"][r].as_str().map(str::to_string)));
@@ -245,9 +283,8 @@ pub(super) fn folder_key(dir: &Path) -> String {
 }
 
 /// A recording's view.
-fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> {
-    let dir = dir.to_path_buf();
-    let mut rec = Rec::open(&dir);
+fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output> {
+    let dir = rec.dir.clone();
     let case = args.get("case").map(|c| one_case(&mut rec, c, view)).transpose()?;
     let meta = &rec.meta;
     let trace = dir.join("trace.pftrace");
@@ -301,11 +338,13 @@ fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> 
         "frames" if meta["wir"] == true => Err(Error::refused(
             "EngineUnsupported",
             "WebKit's Web Inspector reports main-thread RenderingFrame records, not screen presentation times or dropped refreshes",
-            format!("strobe query {} hotspots · strobe query {} layout", rec.id, rec.id),
+            format!("strobe query {} hotspots · strobe query {} layout", rec.handle(), rec.handle()),
         )),
-        "threads" if meta["wir"] == true => Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no per-thread CPU or wake counters", format!("strobe query {} hotspots", rec.id))),
+        "threads" if meta["wir"] == true => {
+            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no per-thread CPU or wake counters", format!("strobe query {} hotspots", rec.handle())))
+        }
         "gpu" if meta["wir"] == true => {
-            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", format!("strobe query {} memory --by layer", rec.id)))
+            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", format!("strobe query {} memory --by layer", rec.handle())))
         }
         "frames" if dir.join("frames.json").exists() || meta["native"] == true => native_frames(&dir, top, case.as_ref().map(|c| c.runs.as_slice())),
         "inputs" => inputs::inputs(&dir, meta, args.num("top")?.map(|t| t as usize), case.as_ref().map(|c| c.runs.as_slice())),
@@ -337,9 +376,9 @@ fn recording(dir: &Path, view: &str, args: &Args, top: usize) -> Result<Output> 
         "threads" if !trace.exists() => Err(Error::usage(format!(
             "this recording kept no thread counters (no trace, no threads.json){}",
             if dir.join("timeline.json.gz").is_file() {
-                format!(": its threads over time are in strobe query {} threads --timeline", rec.id)
+                format!(": its threads over time are in strobe query {} threads --timeline", rec.handle())
             } else if dir.join("deep.json.gz").is_file() {
-                format!(": a native stack capture answers strobe query {} hotspots --by package", rec.id)
+                format!(": a native stack capture answers strobe query {} hotspots --by package", rec.handle())
             } else {
                 String::new()
             }
@@ -1763,7 +1802,6 @@ fn native_gpu(dir: &Path, meta: &Value) -> Result<Output> {
     if !os.is_object() {
         return Err(Error::usage("this recording has no GPU readings: they come from timing recordings (record, bench blocks kept with --keep or attribution)"));
     }
-    let id = meta["id"].as_str().unwrap_or("");
     let mut text = String::from("gpu      the target's processes, from the OS's per-process GPU statistics, over the recording\n");
     if let Some(line) = super::bench::gpu_line(&meta["screen"]["gpu"]) {
         text += &format!("adapter  {line}\n");
@@ -1806,7 +1844,7 @@ fn native_gpu(dir: &Path, meta: &Value) -> Result<Output> {
     }
     let v = &meta["values"];
     match (v["frames.n"].as_f64().filter(|_| dir.join("presents.json.gz").exists()), meta["presents_refused"].as_str().or(meta["os_frames"]["refused"].as_str())) {
-        (Some(n), _) => text += &format!("frames   {n:.0} on screen (OS present events): strobe query {id} frames\n"),
+        (Some(n), _) => text += &format!("frames   {n:.0} on screen (OS present events): strobe query {} frames\n", handle_of(dir)),
         (None, Some(why)) => text += &format!("frames   refused: {why}\n"),
         _ => text += "frames   none recorded (no window, or no OS present events)\n",
     }
@@ -1878,7 +1916,7 @@ pub fn native_threads(dir: &Path, top: usize) -> Result<Output> {
     }
     // Threads that exited before the end, from the timeline (sampled every half second from the launch).
     let mut exited_json = Vec::new();
-    if let Some(t) = read_timeline(dir) {
+    if let Ok(Some(t)) = read_timeline(dir) {
         let end = t.ticks.last().copied().unwrap_or(t.t0_ns);
         let listed: std::collections::BTreeSet<u64> = all.iter().filter_map(|r| r["tid"].as_u64()).collect();
         let mut gone: Vec<(&crate::probe::wakes::TimelineThread, f64)> = t
@@ -1919,17 +1957,22 @@ pub fn native_threads(dir: &Path, top: usize) -> Result<Output> {
     ))
 }
 
-fn read_timeline(dir: &Path) -> Option<crate::probe::wakes::TimelineData> {
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(std::fs::File::open(dir.join("timeline.json.gz")).ok()?), &mut text).ok()?;
-    serde_json::from_str(&text).ok()
+/// The thread timeline, None without one; a file outside the store that expands past its bound is
+/// refused with why (`store::gunzip`).
+fn read_timeline(dir: &Path) -> Result<Option<crate::probe::wakes::TimelineData>> {
+    let path = dir.join("timeline.json.gz");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = store::gunzip_string(&path).map_err(|e| Error::usage(e.to_string()))?;
+    Ok(serde_json::from_str(&text).ok())
 }
 
 /// `query <rec> threads --timeline`: each thread's CPU per second (or coarser for long recordings)
 /// from the launch, threads that exited included, with the runs marked, so work that starts late
 /// and stops shows when it ran.
 fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
-    let t = read_timeline(dir)
+    let t = read_timeline(dir)?
         .ok_or_else(|| Error::usage("this recording has no thread timeline: native recordings, kept native bench blocks and script attribution recordings have one (from this strobe on)"))?;
     let meta = store::read_json(&dir.join("meta.json")).unwrap_or(Value::Null);
     let end = t.ticks.last().copied().unwrap_or(t.t0_ns);
@@ -2120,7 +2163,7 @@ fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     }
     text += &format!(
         "an input counts when the app changed its accessibility tree after it and was not drawing already or still to show an earlier input (SPEC §7.4); each input, and why one gave no sample: strobe query {} inputs\n",
-        dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+        handle_of(dir)
     );
     let processes: Vec<Value> = by_pid.iter().map(|(pid, n)| json!({ "pid": pid, "frames": n })).collect();
     Ok(Output::new(text, json!({ "runs": runs_json, "refresh_ms": refresh, "processes": processes })))
@@ -2420,7 +2463,7 @@ pub fn hotspots_scoped(rec: &Rec, by: &str, top: usize, sort: Sort, scope: Scope
         header += &format!("\n! {t}");
     }
     if stacks.weights.is_empty() && runs && named.is_some() {
-        header += &format!("\n! no sample in these runs: the host ran no JavaScript there that its sampler saw; strobe query {} hotspots --source host has the whole host process", rec.id);
+        header += &format!("\n! no sample in these runs: the host ran no JavaScript there that its sampler saw; strobe query {} hotspots --source host has the whole host process", rec.handle());
     }
     let mut out = rank(stacks, by, top, &header, |us| fmt::value(us / 1000.0, "ms"), Some(sort));
     if let Some(m) = missed {
@@ -2691,8 +2734,7 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sor
             out.text += &format!("  … {} more processes (--json lists every one)\n", processes.len() - shown);
         }
     }
-    let deep: Option<crate::probe::stacks::Deep> =
-        std::fs::File::open(dir.join("deep.json.gz")).ok().and_then(|f| serde_json::from_reader(std::io::BufReader::new(flate2::read::GzDecoder::new(f))).ok());
+    let deep: Option<crate::probe::stacks::Deep> = store::gunzip(&dir.join("deep.json.gz")).ok().and_then(|f| serde_json::from_reader(f).ok());
     // What share of the processes' CPU the samples stand for: the tree's own cycles around the capture
     // where strobe read them (`record pid:`), else what strobe's own sampler saw its threads use. Both
     // span the whole capture, so the samples counted are all the capture took (its own count: a block
@@ -3728,7 +3770,10 @@ pub fn package(url: &str) -> String {
         let first = parts.next().unwrap_or("");
         return if first.starts_with('@') { format!("{first}/{}", parts.next().unwrap_or("")) } else { first.to_string() };
     }
-    let declared = Path::new(url).ancestors().skip(1).take(12).find_map(|d| store::read_json(&d.join("package.json")).ok()?["name"].as_str().map(str::to_string));
+    // Never another machine's path (`//host/…`), and never while a folder a person named is read: its
+    // frames' files are not this disk's (`store::may_look`).
+    let declared =
+        store::may_look(url).then(|| Path::new(url).ancestors().skip(1).take(12).find_map(|d| store::read_json(&d.join("package.json")).ok()?["name"].as_str().map(str::to_string))).flatten();
     if let Some(name) = declared {
         return name;
     }

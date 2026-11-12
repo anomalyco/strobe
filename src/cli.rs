@@ -533,6 +533,9 @@ Use
                                   memory: --by process|layer|allocator --at <i>; a phone's page lists its processes from
                                   Chromium's dump, with no OS memory;
                                   threads --timeline: each thread's CPU per second from the launch, exited ones too)
+                                  (a handle may be a path: a result.json, a meta.json or the folder of either, read as
+                                  it is, as report reads it; a named folder holding a link out of it is refused, and
+                                  nothing it says makes strobe look elsewhere on the disk or the network)
                                   (insights: rule hits with their evidence: dominant-thread (one thread off the UI thread
                                   doing most of the CPU), off-cpu-bound (runs that mostly waited), style-layout-dominant,
                                   wakes-while-idle (idle recordings and idle native blocks), hot-function, http-stalls,
@@ -541,7 +544,8 @@ Use
   report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
                                   write a self-contained HTML (or markdown) report; pr: an experiment's tables for a PR body
                                   (md and pr print the markdown; the file's path goes to stderr; the view follows from the
-                                  handle; a path to a result.json or meta.json is read as it is, nothing written beside it;
+                                  handle; a path to a result.json, a meta.json or the folder of either is read as query
+                                  reads it, nothing written beside it;
                                   a bench --blocks run: HTML and md, its blocks' median and interval, no verdict; a format
                                   the handle has none of exits 2 before anything is written)
   report experiment <exp> --format summary [--out <file.md>]

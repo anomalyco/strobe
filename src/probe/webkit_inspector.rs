@@ -109,10 +109,7 @@ pub fn write_owner_gz<T: Serialize>(path: &Path, val: &T) -> Result<()> {
 }
 
 pub fn read_gz_json(path: &Path) -> Result<Value> {
-    let f = std::fs::File::open(path)?;
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut flate2::read::MultiGzDecoder::new(f), &mut text)?;
-    Ok(serde_json::from_str(&text)?)
+    Ok(serde_json::from_str(&crate::store::gunzip_string(path)?)?)
 }
 
 /// Runs WebKit Inspector attribution over `for_ms` on `session`, then takes a Heap v3 snapshot and
