@@ -106,6 +106,15 @@ fn touch(dir: &Path) {
     }
 }
 
+/// Marks a folder of the store used now (`touch`), as a view of it by its exact id does (the daemon's
+/// `/report/`, `/video/`, `/perfetto/open/`: a report looked at in the browser every day is not pruned
+/// as unused). Only a folder directly in `recordings/` or `experiments/`.
+pub fn used(dir: &Path) {
+    if kept(dir) {
+        touch(dir);
+    }
+}
+
 /// How many folders a person named are being read now, on any thread (`Named`).
 static NAMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
