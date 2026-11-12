@@ -82,8 +82,10 @@ When a design change is agreed, update this file in the same change.
   None on Windows; never Playwright's WebKit build (§13.1).
 - Deep mode (§13.4): one UAC (Windows) or one sudo (Linux) during `up`.
 
-Tools may be installed but not on PATH (desktop-app shells). strobe looks in known install
-locations, not only PATH.
+Tools may be installed but not on PATH (desktop-app shells). strobe looks on PATH first, as the
+user's shell would, then in known install locations (`host::find_exe`). Only absolute PATH folders count
+(an empty entry or `.` would run a program in the current folder, an untrusted checkout's), and on
+Unix only a file with an execute bit.
 
 ## 3. Glossary
 
@@ -573,6 +575,11 @@ which this folder's list cannot show, is a `slot` line (`slot_elsewhere` in `--j
 CI runner (§10.1 `SharedRunner`) a `! runner  shared: <why>; …` line names what still works there
 and ends `; a dedicated runner in a virtual machine says RUNNER_ENVIRONMENT=self-hosted or
 CI_SHARED_ENVIRONMENT=false`, the problems list says so, and `env.shared_runner` holds the reason.
+The `bun` line (in `up` too) names the Bun that runs bench files and its version (`bun_version`): the
+first `bun` on PATH, else `~/.bun/bin`'s, else Homebrew's on macOS (`runner::find_bun`; every tool
+strobe looks for is taken from PATH first, then from its known install places, §2). A Bun before 1.4.0
+by SemVer's order (a 1.4.0 pre-release is before it; a version without three numbers is not called
+old) reads `!` with `(ctx.playwright needs Bun 1.4.0 or later: update this Bun)` (§9.6 `prepare`).
 `--calibrate` runs the full calibration (§10.3). `--fast` skips the 3 s idle-load sample and the slow
 device reads (an adb server that refuses the loopback connection is given up after 200 ms, as
 usbmuxd is): `status --fast` 2.0 s → 0.56 s on adais.
@@ -798,7 +805,16 @@ to 3 times per block; a run that failed, or a validator, still ends it. Two such
 (load average 35–70 on a shared Mac) once lost a 40-minute experiment with its finished pairs. A
 navigation the browser refuses for its address (a blocked port, a bad scheme or URL, a host that does
 not resolve: `net::ERR_UNSAFE_PORT` and its kin) fails the case at once: running the launch again
-cannot pass. A page's address in such errors, and on a failed step's `page:` line, is cut to 80
+cannot pass. An evaluation in the page that never ended (`Runtime.evaluate`,
+`Runtime.callFunctionOn`, `Runtime.awaitPromise`, BiDi's `script.evaluate` and `script.callFunction`
+with no reply) once the block's own page work began (its `prepare` ran) is the page's, refused
+`RunIncomplete` ("the page stopped answering"), never retried: the browser answered, the page did
+not, and a new launch meets the same page (macOS: a frame wait on a popup's hidden opener took 6
+minutes a case in 4 tries). One while the browser attaches (its first blank page, Firefox's chrome
+reads, fitting the viewport) is a launch that may pass, retried as before. A launch macOS held
+before it ran (Gatekeeper waiting for a person after a download or an update, §13.1) is not retried
+either: it exits 3 with the step, for browsers, `app:`/`exe:` and native targets, launch cases too
+(`isolate::held_at_launch`). A page's address in such errors, and on a failed step's `page:` line, is cut to 80
 characters with its length (a 4 KB `data:` page).
 
 Every series in the file (case × target × params, narrowed by `--filter`, `--target` and
@@ -1242,7 +1258,10 @@ a second target or arguments after `--` (a native app's own). Each mode refuses 
 (exit 2): a native look `--element`, `--full`, `--size`, `--scale`, `--chars`, `--headed`,
 `--engine`, `--mobile`, `--type`, `--press`; a `tty:` look the page's and the app's flags,
 `--engine` and `--mobile`; a `wir:` look `--size`, `--scale`, `--headed`, `--engine`, `--mobile`,
-`--type`, `--press` and the app's flags. Only a page look takes `--engine` (anything but `chromium`
+`--type`, `--press` and the app's flags. A target of another command is a usage error (exit 2)
+before anything launches, never an address to navigate to: `pid:`, `proc:`, `cdp:` and `ws://` name
+`strobe record <target>`, and `node:` and `bun:` a bench file's `script()` target or `record
+pid:<pid>` (it navigated to the text: `net::ERR_ABORTED`, exit 124). Only a page look takes `--engine` (anything but `chromium`
 refused `EngineUnsupported`, exit 4). Exit 124 when the load event or `--until` never came; the
 page's own errors are listed, not an exit code. The MCP tool `look` (§17) is this command, so an
 agent checks a screen without a shell. `--mobile[=<serial>]`: the page in Chrome on an Android phone or
@@ -1522,7 +1541,14 @@ falls in one category (`app::prune::CATEGORIES`):
   adais every folder removal held its folder open without `FILE_SHARE_DELETE` (the checks above all
   pass through it). The hostile `.strobe-macos-library.json` cases (an id `-g`, an id `../Other`, a
   place outside the Library, a place through `..`, a link at an expected place, places older than
-  the home) are in the script for macOS and not yet run there.
+  the home) pass on air (macOS 27, M4): places older than the launch and another app's named in the
+  record stay, the place the launch made goes, a link at an expected place is neither removed nor
+  followed; there prune-check passes 34 of 34 (status and `Total reclaimed space` equal to `du -k`;
+  macOS has no `flock` command, so its lease holders use perl's `flock`, the same flock(2)),
+  prune-lease 11 of 11 (macOS moves no driver cache, so a prune between launches keeps the seed copy
+  and no launch claims a GPU cache state) and prune-auto 11 of 11. air's real state, read only:
+  `status --disk` 55.6 GB (binary; `du` 59.7 GB decimal, the same bytes), `prune --dry-run` 179
+  entries, 51.1 GB (builds 48.5 GB in 19), recordings and experiments kept.
   `scripts/dev/prune-lease.ts` on both: while a `bench --check` of a git ref runs, the plan keeps its
   worktree `in use` and `prune --force` leaves it; the bench made the worktree over a stale entry;
   once it ended the worktree was a cache the plan removes; the bench's `reap_dead_owners` of a dead
@@ -1744,8 +1770,7 @@ of style and layout after the run's own reading, or layouts where the run's `lay
 `main.layout` reads 0, and the series declares a metric read before that frame, the series warns
 `HeadlessFrame` with the time and those metrics (a step that wrote 2,000 cells' widths through
 `page.eval` and read nothing: 7.53 ms left to the frame on adais; the same change through a click is
-laid out inside the run, no warning). Read before the frame: `run.duration`, `cpu.*` (the run's edge;
-not `cpu.wakes`, whose threads' switches are read after the frame), and the trace's metrics over the run (`main.paint`, `main.gc`, `layout.shift`, `gpu.compile`; with a
+laid out inside the run, no warning). Read before the frame: `run.duration`, `cpu.*` (the run's edge), and the trace's metrics over the run (`main.paint`, `main.gc`, `layout.shift`, `gpu.compile`; with a
 full trace also `main.busy` and `main.tasks.long`). The counters' metrics hold the frame in every
 trace set (`main.work`, `main.script`, `main.layout`, `main.style`, `layout.count`, `style.count`, and
 a lean block's `main.busy`), so a series that declares only them gets no warning. An element wait
@@ -3656,7 +3681,18 @@ path names an executable the build never makes or replaces.
   with Playwright (`ctx.playwright.page`, the very page strobe drives, matched by CDP target id), when
   Playwright is installed next to the bench file, and only on targets with a debug port: on a page in
   another engine reading `ctx.playwright` throws, typed as `EngineUnsupported` (Playwright connects
-  over CDP), with the fix naming `ctx.addInitScript` and `ctx.mock`. `ctx.url` is the URL strobe opens next; a production web build is
+  over CDP), with the fix naming `ctx.addInitScript` and `ctx.mock`. Under a Bun before 1.4.0
+  Playwright's `connectOverCDP` never opens its WebSocket (it times out after 30 s: macOS and Windows,
+  Playwright 1.56 and 1.65; Bun 1.3.0 and 1.3.14 hang, 1.4.0 connects in about 0.1 s), so the runner
+  does not try: reading `ctx.playwright` there throws 'ctx.playwright needs Bun 1.4.0 or later: under
+  Bun <version> (<that bun's path>) …' with the fix naming that binary (`<path> upgrade` for Bun's own
+  install, else its package manager; §5.4 says which Bun strobe takes). A connection that fails for
+  any reason (and a Playwright that connected but found no context or not strobe's page, whose
+  connection it closes) fails only a `prepare` that reads `ctx.playwright`; one that uses only
+  `ctx.addInitScript` and `ctx.mock` runs. The runner closes a block's Fetch session, Playwright and
+  relay at its `close`, and at the next `block` when a block ended without one (a refusal, a retry),
+  so no later hook sees them. A launch case's `prepare` that throws refuses its series
+  `RunIncomplete`, as a run case's does. `ctx.url` is the URL strobe opens next; a production web build is
   its own server, so mock the API under `new URL(url).origin`. Playwright stays connected for the
   whole block, so routes and init scripts keep working. What `prepare` returns is
   `ctx.prepared` in `setup`, `run` and `reset` (for example a mock's event transport).
@@ -5209,7 +5245,14 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   point, where the first move goes, not on it: the posted move is pumped before the one
   `SetCursorPos` makes, and Chromium drops a move to its last mouse location (os-input failed 0 of 9
   on a busy laptop with the cursor parked on the point, and passed 9 of 9 at 89–100% busy beside it).
-  None within a second, points that do not map by one
+  A probe's landing is the page's last trusted move once 50 ms passed with no other (its uncapped
+  move count unchanged): macOS Chromium delivered the move from beside the point with the one onto
+  it, so the first move read was 3 units off and every page measured from outside was refused (the
+  third point off the map). Past the wait's limit plus 100 ms, three or more moves since its first
+  read are someone else's (a person, a trackpad's inertia, another program: strobe posts at most two
+  a probe), refused `InputMismatch` naming how many pointer moves came, never waited out; one or two
+  (strobe's own arriving late, one bump of the mouse) settle as usual, and 50 ms later the last
+  landing stands. None within a second, points that do not map by one
   scale, a third point that lands over 2 page pixels from where the map puts it, or a viewport the
   map puts outside the window's frame (within 3 units), refuse the block `InputMismatch`, whose text
   names the window class and process the moves were posted to and says when the cursor could not be
@@ -5322,7 +5365,7 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
 | `SoftwareGpu` | the target renders on a software adapter (SwiftShader, WARP and the Microsoft Basic Render Driver, llvmpipe, lavapipe, softpipe: `validity::is_software_gpu`) and a frame or GPU metric is requested; a native app: its GPU work ran on such an adapter. Per metric for a headed page (a virtual display such as Xvfb, a machine without a GPU): what reached a display and every `gpu.*` metric (`validity::software_drawn`) leave its values and show refused, a primary among them refuses the block, and CPU, main-thread work, memory and milestones stay, with a warning that the browser's CPU metrics include the rasterization a GPU would do (compare them only with runs on the same setup). Headless, `Headless` refuses what reached no display instead (`software_refusals`, in `record` and in every page block of a bench: `browser_seen` refuses a drawn primary when the block's browser starts, `software_state` takes the rest out of the block with its frame lists). A native app on strobe's Wayland compositor on a machine with no GPU render node (`/dev/dri/renderD*`): the compositor composites with pixman and the app draws in software, so `gpu.*` is refused (a `gpu.*` primary before anything builds) and a warning says `cpu.work` holds the app's own rasterization |
 | `DevBuild` | a dev or unminified build is measured for timing (Vite client, a framework's dev build, `NODE_ENV` not `production`; a native app whose executable imports a debug C runtime, such as `ucrtbased.dll`: strobe reads only the executable's header slices and needs an import entry, where it once read a 115 MB executable whole per block) |
 | `DebuggerAttached` | an iPhone tab (`wir:`) that another debugger (Safari's Web Inspector) already holds, refused before strobe attaches (`target/wir.rs`). Not built: the desktop check that a debugger, DevTools or a non-timing probe is attached during a timing block |
-| `WindowHidden` | the window is minimized, hidden, occluded or `visibilityState` is not `visible`; a native app's main window hidden, minimized or cloaked at the start or end of the runs, or another window over the point strobe would click (the OS hit-tests elsewhere). On macOS the app must also be the active app (strobe makes it so in every block); while someone uses the Mac the block does not refuse but waits, holding nothing, until a minute passes without input, then activates the app and runs it again; a block whose app lost the front while nobody used the Mac (another app opened a window or took focus by itself) is discarded and runs again, up to 5 times |
+| `WindowHidden` | the window is minimized, hidden, occluded or `visibilityState` is not `visible`; a native app's main window hidden, minimized or cloaked at the start or end of the runs, or another window over the point strobe would click (the OS hit-tests elsewhere). On macOS the app must also be the active app (strobe makes it so in every block); while someone uses the Mac the block does not refuse but waits, holding nothing, until a minute passes without input, then activates the app and runs it again; a block whose app lost the front while nobody used the Mac (another app opened a window or took focus by itself) is discarded and runs again, up to 5 times. A frame wait (the frame after a run, headed or headless, `until: "frame"`, the frame after scrolling an element into view, the display's frame period, the frames after a commanded resize) on a page hidden for 200 ms without a break (`document.hidden`: on macOS Chromium a `window.open` popup hides its opener) refuses here, whatever the series measures: a hidden page's timers clamp, its frames stop and its renderer is backgrounded, so its run is no valid run. Never a 60 s wait, never a retried launch; the fix names a popup the case opened. The wait arms no timer on a visible page: a `visibilitychange` listener arms one 200 ms timer while the page is hidden, with the browser's own timer and listener calls kept before the page's scripts |
 | `WrongScreen` | a block's window or page is not on the screen its case's (or target's) `expect` names (§9.6): a title, a dialog or heading, an address, or selectors that must be visible, read before the runs and after them (never inside one). A first-run dialog over the pane the case meant fails the block instead of timing it. Before a native app's runs, only titles are checked unless setup already drove the app: reading its tree there would connect strobe to it for the runs. Not an `expect.heading` on a native window that shows a Chromium web view whose tree was read and held no heading: that is `NotForTarget` (UI Automation gives such a client the content's form controls only; fix: a webview() or app() target, or `expect.title` / `expect.visible`, §13.7) |
 | `UnpacedSpin` | a native app presented more frames in a run than the display refreshed, plus ten: its frame metrics are refused |
 | `NoPresentSource` | a presented-frame or input-latency metric of a native app with no presentation times, or no input that reacted (refuses that metric); every frame and latency metric of a block when the OS's present events lost the way to the screen of any present of the target's processes in its measured runs (Windows: a DirectComposition surface's, as Firefox's WebRender presents; counted with none, its frames would read short or 0); a headed page on Linux with neither `DISPLAY` nor `WAYLAND_DISPLAY`, refused before anything builds (`web::refusal`: a bench's series, a record) and again at the launch |
@@ -5344,7 +5387,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `NotOnThisOs` | a declared metric this OS gives strobe no way to read for another process (refuses that metric, with the OS's reason): the §13.6 matrix |
 | `EngineUnsupported` | a target, metric, probe set, hook or case kind needs a browser engine strobe does not drive on it: a webview target on Linux (WebKitGTK) or macOS (WKWebView), refused before anything launches with the fix `kind: "native"` (§13.8); and a page's engine that gives strobe no way to measure it (Firefox: `main.*`, `layout.count`, `style.count`, `layout.shift`, `gpu.compile`, `js.heap.*`, `span.*`, `frames.presented.p*`, attribution and memory probes and a launch's attribution block, `ctx.playwright`; `canvas.*` on a page without WebGPU; WebKit also launch cases (no preload script), `net.*`, `input.rate`, `input.gap.p95`, `ctx.mock`, a window `scale`, pointer input where the browser drops it (WPE's headless view), `page.scroll` on a Firefox page that emulates a phone and a `page.drag` there that the browser would pan (headless Firefox does not pan on touch, §9.6), `emulate` (`"mobile"` or `"touch"`) on WebKit (§13.1), and `count.*`, `canvas.*`, `interaction.*`, `scroll.latency.*` of a run that loaded a document, a `page.goto` after `ctx.addInitScript`), or an engine strobe cannot run here (`webkit` on Windows for good, Safari `--headless`, a window `scale` on WebKit, a Firefox before 148 known from its `application.ini`, or one that lists no chrome context at its first chrome read, §13.1; and `look --engine` other than chromium, §5.12): a primary refuses its series before anything builds, with the closest metric the engine has, and the rest of the file runs (§5.6 "Refused series"); a declared secondary is refused per block, and an undeclared one (a default secondary, a descriptive row) is left out of the block's values |
 | `Headless` | a frame, input-latency, scrolling, canvas or GPU-use metric of a page that runs headless (`--headless`, a target's `headless`): a primary refuses its series before anything builds (§5.6 "Refused series"); a secondary is refused per block; a run of a headless page measured from outside that sends input (no window for the OS's input); `page.window` on a headless page. A native app on the headless Wayland compositor strobe runs (§13.7 "Wayland"): `frames.*`, `interaction.*`, `scroll.*`, `display.*`, `launch.painted` and `launch.settled` (a display primary before anything builds, a secondary per block), and a launch that ends on an element's frame or the window's pixels (`until`: a selector, `window: "painted"` or `"settled"`; before anything builds) |
-| `NotForTarget` | a declared metric this kind of target or case has none of, refused alone: `main.script` of a page block whose runs called `page.eval()` (Chromium's `ScriptDuration` leaves it out); `main.tasks.long` of a lean trace, which has no RunTask slices (a primary before anything builds); a `script()` target's `cpu.wakes`, `io.read`, `io.write`; a browser engine's metric or a frame stage split on a native app; frames, latency and `display.*` of an app with no window (`window: false`); `ui.*` without a main window; a run's metric on a launch case and a launch's on a run case; `cpu.fixture` without a `fixture()`; `cpu.foreign` with `--pin none`; a page launch's memory (its browser started before it) and Node's own timing from a launch that gave none (`launch.inspect`); a `tty()` target's metrics outside what it measures, and `tty.frame.*` of a program that drew no synchronized frames. A `cli()` target's metrics outside what it measures from outside its commands. Also: a page launch's `until` on an image or pixels (it is timed in its own document); an image locator or pixel wait on a terminal, a `page.window` action other than a resize or `restore` there, and a `page` call a terminal does not take; `page.window` on a windowless native target or a phone's page; `--video` of a target with no window or one strobe attached to; reduced motion on a native app whose profile declares none, or on a `command()` launch case; `look --until image=` of a `tty:` or `wir:` target; an image or pixel wait in a timed run of a phone's page; `expect.heading` of a native window showing a Chromium web view with no heading in its tree (§13.7); and on a phone (`--mobile`) what strobe reads from this computer's processes and OS (`cpu.*` but `cpu.fixture`, `memory.*`, `gpu.*` but `gpu.compile`, `ui.*`, `energy.*`, `io.*`; `validity::phone_refusal`), a target that is no phone target, a launch case, and `record --mobile --probes memory` (a bench leak run on a phone runs: 8.6) |
+| `NotForTarget` | a declared metric this kind of target or case has none of, refused alone: `main.script` of a page block whose runs called `page.eval()` (Chromium's `ScriptDuration` leaves it out); `main.tasks.long` of a lean trace, which has no RunTask slices (a primary before anything builds); a `script()` target's `cpu.wakes`, `io.read`, `io.write`; a page's (a browser's, or an app's over DevTools) `cpu.wakes`, `io.*` and `ui.*`, which its run edges do not read (on macOS the fix names `cpu.idle_wakes`; `page_unread`); a browser engine's metric or a frame stage split on a native app; frames, latency and `display.*` of an app with no window (`window: false`); `ui.*` without a main window; a run's metric on a launch case and a launch's on a run case; `cpu.fixture` without a `fixture()`; `cpu.foreign` with `--pin none`; a page launch's memory (its browser started before it) and Node's own timing from a launch that gave none (`launch.inspect`); a `tty()` target's metrics outside what it measures, and `tty.frame.*` of a program that drew no synchronized frames. A `cli()` target's metrics outside what it measures from outside its commands. Also: a page launch's `until` on an image or pixels (it is timed in its own document); an image locator or pixel wait on a terminal, a `page.window` action other than a resize or `restore` there, and a `page` call a terminal does not take; `page.window` on a windowless native target or a phone's page; `--video` of a target with no window or one strobe attached to; reduced motion on a native app whose profile declares none, or on a `command()` launch case; `look --until image=` of a `tty:` or `wir:` target; an image or pixel wait in a timed run of a phone's page; `expect.heading` of a native window showing a Chromium web view with no heading in its tree (§13.7); and on a phone (`--mobile`) what strobe reads from this computer's processes and OS (`cpu.*` but `cpu.fixture`, `memory.*`, `gpu.*` but `gpu.compile`, `ui.*`, `energy.*`, `io.*`; `validity::phone_refusal`), a target that is no phone target, a launch case, and `record --mobile --probes memory` (a bench leak run on a phone runs: 8.6) |
 | `Throttled` | a headless Chromium page with the console display off (`DisplayOff`; not a phone's, not an implementation comparison's side): its frames and timers run on a throttled clock of its own, so `run.duration`, `phase.*`, `span.*`, `main.busy`, `main.busy.cdp`, `cpu.app.total`, `cpu.process.total`, `cpu.renderer`, `cpu.gpu` and `cpu.browser` are refused (`input.rate` and `input.gap.p95` stand: a headless page paces drags and paced wheel steps at 60 Hz on strobe's own clock, having no display to follow; a primary among the refused: its series is refused before anything builds when the display is off then, and when it turns off mid-bench, after one try to wake an unlocked session's display, that series is refused and the rest of the file runs; per metric in a `--check`), while `cpu.work`, `main.work` and its parts, counts, `net.*` and memory stay (Firefox unaffected); or the block-start speed check (a fixed JS workload in the page) runs more than 1.5× slower than this device's calibration: emulated throttling, thermal throttling, power saving or battery mode. Native targets have no page: strobe runs a fixed integer workload on the target's CPUs before the launch, once those CPUs are quiet (two 100 ms looks under 5% mean busy and no CPU over 25%, up to 10 s: the last block's app may still be freeing its memory and GPU objects), and compares it with this device's reference for that CPU mask: the median of its last 20 passing checks there (`<state>/native-speed.json`, per mask; the first check sets it). A slow check is tried again: up to 3 slow tries on quiet CPUs, and for up to 2 minutes while other processes keep the target's CPUs over 25% of a core busy during the check (never past `--max-time`: a check it cuts short while still slow is neither `Throttled` nor `Background`, and the bench ends there as in any wait, §9.1 "Stop rule"; `Throttled` says how many tries it had). Slow while other work was busy there is `Background` (naming the busiest processes), not `Throttled`. A `--check` (and `record --bench`, which runs one) compares nothing, so it never waits for a speed check or refuses on one: it runs the check once (native: after at most 2 s for the CPUs to quiet; a page: no second check, and none after the runs), and a slow one is a warning with the text the refusal would have (`! Background` or `! Throttled`, ending "the check ran at once (a timed block would wait that out, or refuse)"); the block runs at once. A loaded machine once held a native `--check` 20 minutes in `Background` waits. A page's slow check runs once more after the CPUs settle (the same quiet wait, up to 10 s, then 2 s): a burst passes (the page's own work just after its load, a neighbour on a VM's host, a process that just ended) while throttling lasts, so a second slow check refuses the block (`Background` or `Throttled`, by the other work during it, saying it was slow twice and quoting the first) and a fast one lets the runs go on. Such a block is accepted only if one more check, right after its measured runs (no wait), is at speed too: then a `Throttled` note (info) quotes the first; slow again refuses the block as above, quoting the first. It never goes on silently. The busiest processes named are every process but the browser's and strobe's own, strobe's tree included and marked `the bench's` (the runner, the servers it started: their work counts as other work on the target's CPUs, and once went unnamed as "system work"). strobe reads the processes before the idle counters at the check's start and after them at its end, so its own reading is outside the span (read inside it, it showed as a quarter of a core of other work on vps). On Linux the other work carries the idle counters' resolution (`±N%`: `/proc/stat` counts idle in 10 ms ticks, so over a check of tens of ms each CPU's reading is off by up to a tick). A Linux guest reads the hypervisor's steal over the check on the target's CPUs (`/proc/stat`'s steal, their mean) and names it as a cause from 0.5% of those CPUs' time (`none named (hypervisor steal 37% of those CPUs during the check)`, and after the named processes when there are some); under that, `none named (system work; 0% hypervisor steal)`; bare metal and other OSes say `none named (system work)`. The native check reads the process lists outside the idle counters' span and takes strobe's own CPU over the span out of the busy time, rather than assuming its check thread used one whole core (with a single target CPU, other work could then never read above 0) A CPU quota (Linux's CPU controller: `cpu.max`, a container's `--cpus`, systemd's `CPUQuota`) throttles without slowing a one-thread check: strobe reads the throttled time of its own cgroup and of every cgroup above it that has a quota (`cpu.stat`'s `throttled_usec`, v1 `throttled_time` under `cpu,cpuacct` or else `cpu`; which files is found once, and with no quota nothing is read) around each `run` call (`Runner::throttled`, `host::cgroup_throttled_ns`), and over the whole block for a launch case. A rise over a timing or check block's measured runs refuses what a quota moves (`load_metric`: times, CPU shares, `metric.*`, `app.*`, wakes per second), not CPU time (`cpu.work`, `ui.cpu`, `cpu.fixture`, `cli.launch`: a quota delays work and adds none); the refusal gives the throttled thread time (`0.42 ms` under a millisecond). On vps, strobe and an A/A of a 114 ms command in a cgroup with `cpu.max 50000 100000` printed `run.duration` 242 ms and 219 ms as values (`unthrottled` on the plan line) before this. `cli()` and `script()` targets run no speed check: their plan line says `speed not checked` |
 | `Background` (refusing) | the native speed check stayed slow for 2 minutes (one `--max-time` cut short refuses nothing: the bench ends there, §9.1) while other processes kept the target's CPUs busy (an antivirus scanning new files, an update, a build): the message names the busiest. A timed bench block waits it out first, holding nothing (a minute, then until the CPUs are quiet, and the check again), up to 15 times, about an hour: on a shared machine another agent's build ends. Blocks that run through a locked session (a headless page, a windowless app) wait the same way: they once ended the bench at the first busy check. Never in a `--check`: there it is a warning and the block runs (`Throttled` above) |
 | `BackgroundPriority` | the target runs at background priority, inherited from strobe or its own: macOS `taskpolicy -b` (`PRIO_DARWIN_PROCESS`), Windows' idle priority class, efficiency mode (EcoQoS) or background mode (very low memory priority), Linux `SCHED_IDLE` or nice 19. The OS keeps it on efficiency cores, at low clocks or behind other work: a drag in an Electron app read 83–91% dropped frames under `taskpolicy -b` against 0.4% at normal priority. Refuses frame and input-latency metrics (`frames.*`, `interaction.*`, `scroll.*`, `canvas.*`, `input.*`, `launch.painted`, `launch.settled`): a primary among them refuses the bench before anything builds (strobe's own priority) or at the block (the target's), a secondary shows refused, and `record` prints `frames refused`. CPU, memory and counters stay, with a warning to compare them only with runs at the same priority. Attribution and memory blocks are untimed and keep running. `record pid:` measures a process as its user runs it and is not checked |
@@ -5372,7 +5415,7 @@ anything builds; any run case's block (a `--check`, one target's) whose window i
 | `WirelessTransport` | a timed run on a phone reached by adb over the network (`adb connect`, wireless debugging): the radio's work and the link's latency are in the numbers. Untimed runs take it |
 | `NotProfileable` | attribution that needs the phone's own profilers (native stacks with simpleperf or Perfetto's `traced_perf`) on an app without `<profileable android:shell="true"/>` (iOS: without `get-task-allow`). Reserved: no target strobe drives on a phone takes on-device native stacks yet, so nothing refuses it now (a phone's Chrome is attributed through DevTools, which needs none) |
 | `MouseNotEnabled` | a `tty()` target's mouse call (`click`, `hover`, `move`, `drag`, `wheel`, `scroll`, a mouse button's `down`/`up`) needs mouse reporting the program has not turned on (clicks and the wheel after `?1000`, moves with a button held after `?1002`, any move after `?1003`; 13.9): a terminal would send nothing, so strobe sends nothing rather than bytes the program would read as keys. Refused before anything is sent |
-| `AnchorNotFound` | an image locator (or an image `until`, `waitFor`) showed nowhere in the call's timeout at its threshold (9.6 "Image anchors"): the message gives the best place's score, where it was and, when that failed, how far its colours were; the capture searched is kept as `failed-<step>-anchor.png` |
+| `AnchorNotFound` | an image locator (or an image `until`, `waitFor`) showed nowhere in the call's timeout at its threshold (9.6 "Image anchors"): the message gives the best place's score, where it was and, when its shape matched but its colours did not, how far apart they were against what the threshold allows (`(1 − threshold) × 510 + 8` per channel); then the fix says the screen shows the shape in other colours and never offers a lower threshold, which widens the colour check too and would take the wrong place; the capture searched is kept as `failed-<step>-anchor.png` |
 | `AnchorAmbiguous` | an image locator for input matched two or more places, and still did 50 ms later: input aimed at it would be a guess. `page.query({ image })` lists them; a region, a tighter crop or a higher threshold makes it one |
 | `SharedRunner` | a CI runner other jobs share (`host::shared_runner`, `env.shared_runner`). `RUNNER_ENVIRONMENT=github-hosted` and `CI_SHARED_ENVIRONMENT=true` are shared, and nothing overrides them; otherwise a CI flag (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`, `TF_BUILD`, `BUILDKITE`, any value but false, 0, no or off) in a virtual machine (`env.virtual_machine`) is taken for shared unless the job says it is dedicated: `RUNNER_ENVIRONMENT=self-hosted` or `CI_SHARED_ENVIRONMENT` false, 0, no or off (these bypass only that guess; there is no other override). Its CPUs and memory move with its neighbours' load, so nothing timed there holds. Machine-wide, not transient (exit 4). Refused before anything builds: `bench --blocks N`, `bench --bisect`, `record` with `--probes timing` (the default), `track` (all but `--schedules` and `--unschedule`), `strobe run -- <command>` and `plan --pilot` (plain `plan` and `--plan` run). A comparison (`--base`, `--aa`, `strobe run --base … --head …`) refuses each series whose primary is no exact counter (listed refused, the rest run; none left: the bench's own refusal `a timed comparison (primary …)`); in a series that runs, every metric but an exact counter is refused and a counter is compared only exactly (6 pairs that each held it; fewer: `N pairs, and on … a counter compares only exactly, which takes 6 pairs`). No pair runs that could not count: no secondary keeps the pairs going for Holm's family, the counter and HTTP probe passes do not run (perf counters and `http.*` are refused there anyway), and a counter primary that moved stops the pairs at the first pair that shows it (from pair 2), refused `the counter did not hold one value …`. `--resume` there never keeps a comparison series' earlier verdicts: a finished series runs again (its secondaries may hold another host's timings), and anywhere a series finished before the resume is kept only when this run does not refuse it. `dom.nodes` counts as an exact counter there (`model::is_ci_counter`). Unaffected: `config`, `plan` and `--plan`, `--check` (with `--base`, `--target` and `--noworse`, §5.6), leak runs, `--pixels-only`, `record --probes attribution|memory`, `record --bench`, `query`, `report`, `look`, `status`. Message `<what>: this is <why>, whose CPUs and memory other jobs share, so its times and readings move with their load` (the guess's why: `a CI job (CI is set) in a virtual machine (<vm>), taken for a shared runner (a dedicated one: RUNNER_ENVIRONMENT=self-hosted or CI_SHARED_ENVIRONMENT=false)`); fix: time it on a dedicated runner (a CI job in a virtual machine that is one says `RUNNER_ENVIRONMENT=self-hosted` or `CI_SHARED_ENVIRONMENT=false`; a GitHub-hosted runner never is), or here run `bench --check` (with `--base <ref>` and `--noworse` on exact counters), a leak run or `record --probes attribution` (§26) |
 
@@ -5447,7 +5490,7 @@ emits:
 | `TickSampledCpu` | warn | a `cli()` run's `cpu.work` holds child processes' CPU from Windows' clock ticks (where strobe did not hold them): their share of `cpu.work` (§9.6) |
 | **What a run counted** | | |
 | `EndedCpu` | info | once per series: processes ended inside measured runs (or before a launch was ready), and `cpu.work` holds the CPU they used, from Linux's launch cgroups or the handles Windows strobe held from each process's start: how many runs, the median ms, and on Windows the executables that used the most (§9.6) |
-| `HeadlessFrame` | warn | a headless run's last step left at least 1.0 ms and 5% of `main.work` of style and layout (or layouts the run read 0 of) to the frame after the run, and the series declares a metric read before that frame (`run.duration`, `cpu.*` but `cpu.wakes`, the trace's metrics over the run): names those metrics and the time; pass `{ until: [selector, "frame"] }` (§7.3) |
+| `HeadlessFrame` | warn | a headless run's last step left at least 1.0 ms and 5% of `main.work` of style and layout (or layouts the run read 0 of) to the frame after the run, and the series declares a metric read before that frame (`run.duration`, `cpu.*`, the trace's metrics over the run): names those metrics and the time; pass `{ until: [selector, "frame"] }` (§7.3) |
 | `Counters` | info | a series' counter blocks ran apart from its timing blocks (Linux, §7.5): how many pairs each kind got |
 | `HttpProbe` | info, warn | info: a series' HTTP probe blocks ran apart from its clean timing blocks, and how many pairs each kind got (or that the other kind failed); warn: a block's probes could not be kept in a recording (§8.9) |
 | `Attribution` | info, warn | where the attribution blocks went (`→ rec_…`), or why there is none (an engine strobe has no profiler for) |
@@ -6467,7 +6510,18 @@ resolve to native symbols; the residue stays visible as `unresolved`.
   their stderr into the profile (`stderr.log`): a browser that exits before its debugging port opens,
   with nothing else of its launch running, fails at once with its exit code and last lines, never after
   the 30 s wait for the port (Edge's launcher exits 0 once it hands the window to a process it started,
-  which carries on).
+  which carries on). On macOS a browser (or an `app:`/`exe:` app, a native app's window, a native
+  launch case's window or milestone) that showed nothing in its wait and of whose launch nothing ran
+  past the kernel's exec was held by macOS, as Gatekeeper holds an app not yet opened since a download
+  or an update (the kernel logs 'Security policy would not allow process'): every live process of its
+  set by home (none gone or a zombie: an exit at the deadline is no held launch) made under 40 Mach
+  system calls, and their user-mode CPU with reaped children's (a wrapper's child that worked counts)
+  is under 0.3 ms. On air, 3–4 s after the start, a held Firefox 159 made 16–17 Mach calls with
+  0.04–0.16 ms of user-mode CPU (0.3–1.4 ms in all, so CPU in all cannot tell); programs that ran and
+  then waited (a C `pause()`, a Rust sleep, `/bin/sleep`, a shell running a paused child) made 83–313
+  Mach calls with 0.38–2.5 ms of user-mode CPU. Then: exit 3 with the step (an app bundle: open it
+  once from the Finder and allow it, or System Settings > Privacy & Security > Open Anyway; a bare
+  binary: Open Anyway), never retried (§5.6 "Launches that fail and pass"; `isolate::held_at_launch`).
 - `SoftwareGpu` checks `SystemInfo.getInfo` before measuring, per metric (10.1). Its device list puts
   first the adapter Chromium's GL renderer names (`auxAttributes.glRenderer`, ANGLE's `NVIDIA … (0x00002C05)
   Direct3D11`): by device id, else by name (a Linux OpenGL adapter named from pci.ids by the marketing
@@ -8607,8 +8661,12 @@ most were checked on a locked Windows session, a Linux VM without a display and 
   renderer's perf refusal, X11 video, a headed WebKitGTK under a desktop's settings daemon.
 - macOS: screen video (ScreenCaptureKit into AVAssetWriter), GPU time against a GPU-bound app,
   `ri_child_*_time` in ns, `interaction.*` from a pixel proof under the 2% budget, a visible Dock's
-  work area, Safari Technology Preview, plain `bun` under the terminal bench with its cache, an
-  app bundle that needs a permission its parent had, and the HTTP probe (§8.9).
+  work area, Safari Technology Preview, an app bundle that needs a permission its parent had, the
+  HTTP probe (§8.9), Firefox on macOS (on air 159.0.1 is held by Gatekeeper until a person opens it
+  once). Checked on air (macOS 27, M4, 60 Hz) on 2026-11-12: plain `bun` under the
+  terminal bench leaves its Library cache as it was, OS input to headed Chromium (9 of 9), a native
+  app's pixel anchors, waits and input latency, a page measured from outside, startup still running
+  into run 1 (`NotSteady` naming the thread), `query inputs`, `look exe:`, the prune checks.
 - Phones: everything on a real Android phone (thermal and battery readings, a PIN lock, Wi-Fi adb,
   a channel given to strobe, touch slop and timing, a fixture through `adb reverse`, the 10-pair
   `--aa` and calibration); a headed phone's touch `interaction.*`; on an iPhone, driven Safari
@@ -8659,7 +8717,40 @@ describe it now. The sections above say what strobe does; this list only dates i
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
 
-**After 0.28.0**
+**After 0.29.0**
+
+- 2026-11-12 · cleanup/mac · under a Bun before 1.4.0 the runner does not connect Playwright (its
+  `connectOverCDP` hangs 30 s there: an outside bench read 0 of 4 cases); reading `ctx.playwright`
+  throws with the fix `bun upgrade`, and any failed connection fails only a `prepare` that reads
+  `ctx.playwright`; `status` prints the Bun version (5.4, 9.6). A browser that opened no port in 30 s
+  and used no CPU on macOS was held at launch (Gatekeeper after a download or update: the kernel logs
+  'Security policy would not allow process'): the error says so with the fix 'open <app> once from the
+  Finder', and the block is not launched 3 more times (it was 2 minutes a case). `look pid:` and `look
+  cdp:` are usage errors naming `record` (they navigated to the text: `net::ERR_ABORTED`) (5.12, 13.1).
+  The OS input map takes a probe's landing once no other move followed for 50 ms (macOS Chromium
+  delivered the move from beside the point with the one onto it: every page measured from outside
+  was refused `InputMismatch`, 3 units off); `AnchorNotFound` for a shape found in other colours says
+  so and offers no lower threshold (9.6, 10.1). The prune checks run on macOS (`du -k`, perl's
+  `flock`, no driver cache store there): air 34 of 34, 11 of 11, 11 of 11. After review: the map's
+  wait ends by its limit plus 100 ms when three or more moves keep coming (`InputMismatch`; they held
+  it for as long as they came, 33 s on air), and strobe's own late move or one bump still settles;
+  tools come from absolute PATH folders first (executable files only on Unix), then their known
+  places (`find_exe`; Bun's: `~/.bun/bin`, then Homebrew's), and the Bun error names the binary; one
+  SemVer rule for an old Bun in `status`, `up` and the runner (exactly three runs of digits); the
+  runner clears a block's connections before it awaits their close, at the next `block` too, and a
+  prepare strobe gave up on writes nothing into the next block; a launch held by macOS is exit 3,
+  judged on its live set's Mach system calls and user-mode CPU with reaped children, for `app:`/`exe:` and native
+  targets and launch cases too; a launch case's prepare that throws refuses its series; `look
+  proc:`/`ws://`/`node:`/`bun:` are usage errors. A frame wait on a page hidden for 200 ms without a
+  break refuses `WindowHidden` for every series, headed or headless (a hidden page's run is no valid
+  run), and arms no timer on a visible page; an in-page evaluation with no reply after the block's page
+  work began is `RunIncomplete`, never a failed launch, while one during the browser's attach is still
+  retried: the macOS popup cases took 11 and 21 s, refused `WindowHidden`, where each took about 6
+  minutes in 4 launches (2, 5.6, 9.10, 10.1, 13.1). A page's declared `cpu.wakes`, `io.*` and `ui.*`
+  are refused `NotForTarget` (its run edges read none of them; a comparison dropped the row unsaid),
+  on macOS naming `cpu.idle_wakes` (10.1).
+
+**0.29.0** (1c9e9b3, 2026-11-12)
 
 - 2026-11-11 · cleanup/prune · `strobe prune` (caches unused now, data when named and older than 30
   days, never a recording a kept experiment names; the plan first, `--force` without a terminal,

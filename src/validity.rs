@@ -94,7 +94,7 @@ pub fn window_visible(page: &Page) -> Result<()> {
         // strobe makes it the active app only once nobody has used the Mac for a minute: a bench waits for that.
         let hidden = if cfg!(target_os = "macos") && page.cdp().is_none() { Hidden::NotActive } else { Hidden::Other };
         return Err(Refusal::window_hidden(hidden, format!("the page reports visibilityState={state}"))
-            .fix("keep the window visible and unminimized while strobe measures; browsers throttle hidden windows")
+            .fix("keep the window visible and unminimized while strobe measures (on macOS a popup the case opens hides the page that opened it: close it in the run); browsers throttle hidden windows")
             .into());
     }
     Ok(())

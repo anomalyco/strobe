@@ -277,7 +277,11 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                     (Some(b), Some(p)) => (json!(b.ws), json!(p.target)),
                     _ => (Value::Null, Value::Null),
                 };
-                let r = ctx.runner.call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &init)?;
+                // A prepare that throws (`ctx.playwright` under an old Bun, say) refuses its series, as a run case's does.
+                let r = ctx
+                    .runner
+                    .call("prepare", json!({ "endpoint": endpoint, "target": target_id, "engine": engine }), t, &init)
+                    .map_err(|e| crate::runner::incomplete("prepare", "prepare", e, "", "fix the target's prepare in the bench file"))?;
                 super::first_page(&variant_url(v, &target)?, r.get("url").and_then(Value::as_str))?
             } else {
                 variant_url(v, &target)?

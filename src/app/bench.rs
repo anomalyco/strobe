@@ -502,8 +502,45 @@ const LAUNCH_RETRIES: u32 = 3;
 /// as opposed to a run that failed or a validator that refused.
 fn transient(e: &Error) -> bool {
     // Unreachable (255): no debugging port, a connection that closed. A timeout (124) only from CDP or
-    // BiDi: a call with no reply; a hook or a wait that timed out is the bench's own.
+    // BiDi: a call with no reply; a hook or a wait that timed out is the bench's own. An evaluation in
+    // the page with no reply once the block's page work began is the page's (`page_hang`), refused
+    // before it gets here; one while the browser attaches (its first blank page, Firefox's chrome
+    // reads) is a launch that may pass.
     e.validator().is_none() && !bad_address(e) && (e.code == 255 || (e.code == 124 && (e.message.starts_with("cdp ") || e.message.starts_with("bidi "))))
+}
+
+/// A page block's errors once its page work began (`run_chunk`'s `page_work`): an evaluation in the
+/// page that never answered (no reply in 60 s: a promise the page never settled, a main thread that
+/// stopped) is `RunIncomplete`, never a failed launch run again: the browser answered, the page did not,
+/// and a new launch meets the same page (macOS: a frame wait on a popup's hidden opener took 6 minutes a
+/// case in 4 launches).
+fn page_hang(r: Result<Launch>) -> Result<Launch> {
+    const IN_PAGE: [&str; 5] = ["cdp Runtime.evaluate:", "cdp Runtime.callFunctionOn:", "cdp Runtime.awaitPromise:", "bidi script.evaluate:", "bidi script.callFunction:"];
+    let settle = |e: Error| {
+        if e.code == 124 && e.validator().is_none() && IN_PAGE.iter().any(|p| e.message.starts_with(p)) {
+            crate::runner::incomplete(
+                "the page stopped answering",
+                "page",
+                e,
+                "",
+                "something kept the page's main thread busy or paused for a minute (a hang, a modal dialog, a debugger): see what it ran; a new launch would meet the same page",
+            )
+        } else {
+            e
+        }
+    };
+    match r {
+        Err(e) => Err(settle(e)),
+        Ok(mut l) => {
+            l.abort = l.abort.take().map(settle);
+            for c in &mut l.cases {
+                if let Err(e) = c {
+                    *e = settle(e.clone());
+                }
+            }
+            Ok(l)
+        }
+    }
 }
 
 /// A navigation the browser refused for its address (a port it blocks, a scheme or URL it cannot
@@ -7269,6 +7306,23 @@ pub(super) fn script_unread_refusal(m: &str) -> Refusal {
         .fix("measure cpu.work, or run the code as a cli() command, whose wakes and IO strobe counts")
 }
 
+/// What a page block (a browser's or an app's page over DevTools) gives no reading of: its run edges read
+/// the browser's processes' CPU and the OS's per-process counters, never their threads' switches or IO,
+/// and a page has no native UI thread.
+pub(super) fn page_unread(m: &str) -> bool {
+    matches!(m, "cpu.wakes" | "io.read" | "io.write" | "ui.cpu" | "ui.wakes")
+}
+
+pub(super) fn page_unread_refusal(m: &str) -> Refusal {
+    let r =
+        Refusal::new(ValidatorId::NotForTarget, format!("{m}: a page's runs read the browser's CPU and the OS's per-process counters, not its threads' context switches, IO or a native UI thread"));
+    if m == "cpu.wakes" && cfg!(target_os = "macos") {
+        r.fix("measure cpu.idle_wakes (the CPU package's wakes from idle the browser caused), or measure the app as a native() target, whose thread wakes strobe counts")
+    } else {
+        r.fix("measure cpu.work or main.work, or measure the app as a native() target, whose thread wakes and IO strobe counts")
+    }
+}
+
 /// What one case of a page launch ran (`run_chunk`), kept until the launch's trace is read.
 struct PageCase {
     /// Its first run's index among the launch's runs: its runs are `run:<base + i>`.
@@ -7376,6 +7430,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         steps.borrow_mut().push((name.to_string(), lapped.get().elapsed().as_secs_f64() * 1e3));
         lapped.set(Instant::now());
     };
+    // Set once the block's own page work begins (its `prepare` ran): an evaluation in the page that never
+    // answers after that is the page's (`page_hang`), never a failed launch to run again.
+    let page_work = Cell::new(false);
     let result = (|| -> Result<Launch> {
         let seen = browser_seen(ctx, s, v, headless, !matches!(set, Set::Attribution | Set::Memory), &browser)?;
         let software = seen.software;
@@ -7886,6 +7943,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         }
         lap("prepare");
         prepared.set(true);
+        page_work.set(true);
         // A phone's screen as its first page saw it, kept with the block.
         let mut phone_screen = Value::Null;
         if !app {
@@ -8283,8 +8341,17 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // step: its frames come from a clock of the browser's own, which with the display off took
             // 60 to 165 ms for two (SPEC 7.2); the frame is waited for after the run, untimed.
             let frame_after = !outside && !hooks.ended_untimed();
+            // A page the run left hidden (macOS hides a popup's opener) refuses the run `WindowHidden`,
+            // headed or headless, whatever the series measures: a hidden page's timers clamp, its frames
+            // stop and its renderer is backgrounded. A frame wait that times out is the run's, never a
+            // failed launch.
+            let frame_wait = |what: &str| {
+                driver
+                    .dispatch("frame", &[])
+                    .map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), what, e, "", "the page drew no frame after the run; see what keeps its main thread busy"))
+            };
             if frame_after && !headless {
-                driver.dispatch("frame", &[])?;
+                frame_wait("frame")?;
             }
             let t1 = host::now_ns();
             let (fast1, tsc1) = fast_read(true);
@@ -8313,7 +8380,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // holds its frame. What the frame did after `c1` is what `HeadlessFrame` names.
             let mut left = (f64::NAN, f64::NAN);
             if frame_after && headless {
-                driver.dispatch("frame", &[])?;
+                frame_wait("frame")?;
                 let c2 = counters();
                 left = (c2[2] - c1[2] + c2[3] - c1[3], c2[4] - c1[4]);
                 if c2.iter().all(|v| v.is_finite()) {
@@ -9168,7 +9235,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let real = deferred_ms >= 1.0 && deferred_ms >= 0.05 * work_ms;
                 let only_there = deferred_n > 0.0 && (layouts == 0.0 || layout_ms == 0.0);
                 let misses = |m: &str| {
-                    // `cpu.wakes` is counted from a reading after the frame.
+                    // A page refuses `cpu.wakes` (`page_unread`).
                     m == "run.duration"
                         || (m.starts_with("cpu.") && m != "cpu.wakes")
                         || matches!(m, "main.paint" | "main.gc" | "layout.shift" | "gpu.compile")
@@ -9275,6 +9342,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     if let Some(r) = validity::engine_refusal(engine, m).or(phone_side).or(webgpu).or(preload) {
                         values.remove(m);
                         refused.insert(m.clone(), r);
+                    }
+                    if page_unread(m) && !values.contains_key(m) && !refused.contains_key(m) {
+                        refused.insert(m.clone(), page_unread_refusal(m));
                     }
                 }
                 // A run in which a process of the browser ended and what it used is not known: the set's CPU
@@ -9569,6 +9639,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
         out.extend(failed.map(Err));
         Ok(Launch { cases: out, abort, notes, actions: None, log_at, case_ms, first_run: None })
     })();
+    let result = if page_work.get() { page_hang(result) } else { result };
     lapped.set(Instant::now());
     // A timed block whose phone got hot during it describes a throttling phone (`Thermal`): it runs again.
     let cooled = on_phone.filter(|_| x.measures_time()).map_or(Ok(()), |p| p.still_cool());
@@ -10860,6 +10931,9 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, config:
     }
     if t["kind"] == "script" && script_unread(&s.primary) {
         return Ok(Some(script_unread_refusal(&s.primary)));
+    }
+    if !is_native(t) && !matches!(t["kind"].as_str(), Some("script" | "cli" | "tty")) && page_unread(&s.primary) {
+        return Ok(Some(page_unread_refusal(&s.primary)));
     }
     // An app's page traced over DevTools as a page is: lean unless --trace full.
     if matches!(t["kind"].as_str(), Some("app" | "exe" | "webview")) && s.primary == "main.tasks.long" && args.get("trace") != Some("full") {

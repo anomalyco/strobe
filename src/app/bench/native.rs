@@ -1843,11 +1843,10 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 }
                 guard.check("while the app started")?;
                 if Instant::now() > deadline {
-                    return Err(Error::refused(
-                        "RunIncomplete",
-                        format!("{} launch: milestone {name} never matched in {} s", s.case, timeout.as_secs()),
-                        "check the milestone's match and where it looks",
-                    ));
+                    let waited = format!("{} launch: milestone {name} never matched in {} s", s.case, timeout.as_secs());
+                    return Err(
+                        isolate::held_at_launch(n.pid, Some(&n.home), &n.exe, &waited).unwrap_or_else(|| Error::refused("RunIncomplete", waited, "check the milestone's match and where it looks"))
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -1864,7 +1863,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 }
                 guard.check("while the app started")?;
                 if Instant::now() > deadline {
-                    return Err(Error::refused("RunIncomplete", format!("{} launch: no window in {} s", s.case, timeout.as_secs()), "check that the app opens a window"));
+                    let waited = format!("{} launch: no window in {} s", s.case, timeout.as_secs());
+                    return Err(isolate::held_at_launch(n.pid, Some(&n.home), &n.exe, &waited).unwrap_or_else(|| Error::refused("RunIncomplete", waited, "check that the app opens a window")));
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
@@ -1984,7 +1984,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 }
                 guard.check("while the app started")?;
                 if Instant::now() > deadline {
-                    return Err(Error::refused("RunIncomplete", format!("{} launch: its window never {} in {} s", s.case, until_text(&until), timeout.as_secs()), "check that the app opens a window"));
+                    let waited = format!("{} launch: its window never {} in {} s", s.case, until_text(&until), timeout.as_secs());
+                    return Err(isolate::held_at_launch(n.pid, Some(&n.home), &n.exe, &waited).unwrap_or_else(|| Error::refused("RunIncomplete", waited, "check that the app opens a window")));
                 }
             };
             (sample.at, sample.cycles, sample.root, sample.ended)
