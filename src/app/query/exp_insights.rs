@@ -582,8 +582,8 @@ struct Command {
     several: bool,
 }
 
-/// Flags a rerun of one series leaves out: its own seed, cap and page, and what it asks for itself.
-const DROP: [&str; 9] = ["seed", "pairs", "filter", "why", "max-time", "resume", "json", "quiet", "plan"];
+/// Flags a rerun of one series leaves out: its own id, seed and cap, its output's form, and what it asks for itself.
+const DROP: [&str; 10] = ["id", "seed", "pairs", "filter", "why", "max-time", "resume", "json", "quiet", "plan"];
 
 impl Command {
     fn of(r: &Value, series: usize) -> Command {

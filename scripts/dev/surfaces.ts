@@ -498,20 +498,22 @@ function checkBlocks(s: J, text: string, html: string) {
   const strip = lines.find((l) => l.startsWith("Blocks: "))?.slice(8) ?? ""
   const tb = blocksLine.split(" · "), hb = strip.split(" · ")
   if (tb.length !== hb.length || tb.some((x, i) => x !== hb[i] && !near(x, hb[i], u))) flagIt("CRIT", `html ${s.label} ${m}`, `blocks "${strip}", the text's "${blocksLine}"`)
-  // Declared metrics: the same words and numbers (the text pads columns; the page does not).
+  // Each metric line (declared, then the main thread's of a windowless target): the same numbers (the text pads
+  // columns; the page does not).
   for (const l of sec.split("\n").filter((l) => /^ {2}[a-z][\w.{}=,-]+ {2,}/.test(l) && !l.trim().startsWith("blocks ") && !l.trim().startsWith("rec "))) {
     const [name, ...rest] = l.trim().split(/ {2,}/)
     const want = squash(rest.join(" "))
     const i = lines.indexOf(name)
     const got = i >= 0 ? lines[i + 1] ?? "" : lines.find((x) => x.startsWith(`${name} `))?.slice(name.length + 1) ?? ""
     if (!got) {
-      flagIt("HIGH", `html ${s.label} ${name}`, "no row for a declared metric the text shows")
+      flagIt("HIGH", `html ${s.label} ${name}`, "no row for a metric the text shows")
       continue
     }
     const a = want.match(NUM) ?? [], b = got.match(NUM) ?? []
     const words = (x: string) => x.replace(NUM, "#")
-    if (a.length !== b.length || a.some((x, k) => x !== b[k] && !near(x, b[k], unitOf(name)))) flagIt("HIGH", `html ${s.label} ${name}`, `"${got}", the text's "${want}"`)
-    else if (words(want) !== words(got)) flagIt("LOW", `html ${s.label} ${name}`, `the same numbers in other words: "${got}", the text's "${want}"`)
+    // The page may say more after the values (`(1 block)`, `(range over 2 blocks, 50% median coverage)`).
+    if (b.length < a.length || a.some((x, k) => x !== b[k] && !near(x, b[k], unitOf(name)))) flagIt("HIGH", `html ${s.label} ${name}`, `"${got}", the text's "${want}"`)
+    else if (!words(got).startsWith(words(want))) flagIt("LOW", `html ${s.label} ${name}`, `the same numbers in other words: "${got}", the text's "${want}"`)
   }
 }
 
