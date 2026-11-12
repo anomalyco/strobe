@@ -22,4 +22,5 @@ pub mod stats;
 pub mod store;
 pub mod symbol;
 pub mod target;
+pub mod text;
 pub mod validity;
