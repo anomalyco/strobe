@@ -64,8 +64,9 @@ const strobe = (...args: string[]) => {
 // Allocated bytes under `p`, by `du` (each file once, links not followed): the independent measure.
 const du = (p: string) => {
   const exe = win ? "C:\\Program Files\\Git\\usr\\bin\\du.exe" : "du"
-  const r = spawnSync(exe, ["-s", "-x", "-B1", p], { encoding: "utf8" })
-  return Number(r.stdout.split(/\s/)[0])
+  // macOS's du has no -B: it counts KiB with -k.
+  const r = spawnSync(exe, ["-s", "-x", mac ? "-k" : "-B1", p], { encoding: "utf8" })
+  return Number(r.stdout.split(/\s/)[0]) * (mac ? 1024 : 1)
 }
 // Every path under `p` but strobe's own bookkeeping a prune writes (its lock, the kept walks).
 const listing = (p: string): string[] => {
@@ -271,8 +272,11 @@ const holders = win
       ps(`$f=[IO.File]::Open('${locked}','Open','Read','None'); Start-Sleep 600`),
       ps(`$f=[IO.File]::Open('${heldStamp}','OpenOrCreate','ReadWrite','ReadWrite,Delete'); $f.Lock(0,1); Start-Sleep 600`),
     ]
-  : // In a group of its own: the sleep flock starts holds the lock too, and ends with the group.
-    [stamp2, heldStamp].map((s) => spawn("flock", ["-s", s, "sleep", "600"], { stdio: "ignore", detached: true }))
+  : mac
+    ? // macOS has no flock command: perl's flock is the same flock(2) shared lock.
+      [stamp2, heldStamp].map((s) => spawn("perl", ["-e", 'use Fcntl ":flock"; open(F, ">>", $ARGV[0]) or die; flock(F, LOCK_SH) or die; sleep 600', s], { stdio: "ignore", detached: true }))
+    : // In a group of its own: the sleep flock starts holds the lock too, and ends with the group.
+      [stamp2, heldStamp].map((s) => spawn("flock", ["-s", s, "sleep", "600"], { stdio: "ignore", detached: true }))
 await Bun.sleep(3000)
 
 try {
