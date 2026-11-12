@@ -10,14 +10,15 @@ use std::time::Duration;
 
 pub const VERSION: &str = "v59.1";
 
-/// Release asset and its pinned sha256 for this OS and CPU.
-fn asset() -> Option<(&'static str, &'static str)> {
+/// Release asset for this OS and CPU: its name, its pinned sha256, and the pinned sha256 of the
+/// trace_processor_shell it holds (what `ensure` writes and checks before running it).
+fn asset() -> Option<(&'static str, &'static str, &'static str)> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", _) => Some(("windows-amd64.zip", "f7ce9e3f43cb2c0c0525e79861054aa1a50a800bb88023b990d767247c80ac88")),
-        ("linux", "x86_64") => Some(("linux-amd64.zip", "7deb8c2572c6ae7ec80cd719d388041079827b0c44a1659694d5d88faa4f501e")),
-        ("linux", "aarch64") => Some(("linux-arm64.zip", "8f59e2cf7197c8de388ab4765a650eaf1774a405b1753c54a9741910b6f11350")),
-        ("macos", "x86_64") => Some(("mac-amd64.zip", "392cb203372f8904a138d7f5e0d5c6163b1657cb772b6036807bbb8247bcdadd")),
-        ("macos", "aarch64") => Some(("mac-arm64.zip", "91b2cb63c706526a2c067c219115f9f044fa8467459868757bae15c97906037f")),
+        ("windows", _) => Some(("windows-amd64.zip", "f7ce9e3f43cb2c0c0525e79861054aa1a50a800bb88023b990d767247c80ac88", "3acc5aca1c764541033a82ba3bb0a47524b5c3c0aa194eea8d9a7b0cdb346bdc")),
+        ("linux", "x86_64") => Some(("linux-amd64.zip", "7deb8c2572c6ae7ec80cd719d388041079827b0c44a1659694d5d88faa4f501e", "2434129a3af4dc9e2034a476f7b76447b490975213e301769310d3bd0d5d6458")),
+        ("linux", "aarch64") => Some(("linux-arm64.zip", "8f59e2cf7197c8de388ab4765a650eaf1774a405b1753c54a9741910b6f11350", "a08e4836171c87be3ba5834eef3489aa8803476d35f292ed7feaccae252747d0")),
+        ("macos", "x86_64") => Some(("mac-amd64.zip", "392cb203372f8904a138d7f5e0d5c6163b1657cb772b6036807bbb8247bcdadd", "df38039845244c353c399994748599345cf08f740491b5832e7feb9a4dbcc476")),
+        ("macos", "aarch64") => Some(("mac-arm64.zip", "91b2cb63c706526a2c067c219115f9f044fa8467459868757bae15c97906037f", "8488edbefadfc4be152cda1d42d9bfcede8b47638295eb85eb3bad8cd148fdf4")),
         _ => None,
     }
 }
@@ -32,8 +33,31 @@ pub fn path() -> PathBuf {
     host::paths::engine().join(VERSION).join(exe_name())
 }
 
+/// Whether the engine is there and is the pinned build (`verified`).
 pub fn installed() -> bool {
-    path().is_file()
+    let exe = path();
+    exe.is_file() && verified(&exe)
+}
+
+/// The installed engine was hashed and matched its pinned digest in this process.
+static VERIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `exe` is the pinned trace_processor_shell (`asset`), hashed once per process: a file that is
+/// not (a write cut short, a file something else put there) is never run, and `ensure` extracts it again.
+fn verified(exe: &Path) -> bool {
+    if VERIFIED.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let ok = asset().is_some_and(|(_, _, want)| sha256(exe).is_ok_and(|got| got == want));
+    if ok {
+        VERIFIED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    ok
+}
+
+/// The pinned digest of this OS and CPU's trace_processor_shell, which `ensure` checked.
+pub fn digest() -> Option<&'static str> {
+    asset().map(|a| a.2)
 }
 
 /// Downloads and verifies a release asset into the engine folder; returns the archive path.
@@ -67,26 +91,33 @@ pub fn download(name: &str, sha: &str) -> Result<PathBuf> {
 /// download the engine on a new device.
 static INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The engine, the pinned build (`verified`): downloaded and extracted when missing, extracted again
+/// when the file there is not it.
 pub fn ensure() -> Result<PathBuf> {
     let exe = path();
-    if exe.is_file() {
+    if exe.is_file() && verified(&exe) {
         return Ok(exe);
     }
     let _one = INSTALL.lock().unwrap_or_else(|e| e.into_inner());
-    if exe.is_file() {
+    if exe.is_file() && verified(&exe) {
         return Ok(exe);
     }
-    let (name, sha) = asset().ok_or_else(|| Error::msg("no trace_processor build for this OS and CPU"))?;
+    let (name, sha, want) = asset().ok_or_else(|| Error::msg("no trace_processor build for this OS and CPU"))?;
     let archive = download(name, sha)?;
     let bytes = match std::fs::read(&archive) {
         Ok(b) => b,
         // Another strobe installed it and removed the archive meanwhile.
-        Err(_) if exe.is_file() => return Ok(exe),
+        Err(_) if exe.is_file() && verified(&exe) => return Ok(exe),
         Err(e) => return Err(e.into()),
     };
     let body = unzip_one(&bytes, |n| n.ends_with(exe_name()))?.ok_or_else(|| Error::msg(format!("{name} has no {}", exe_name())))?;
-    // Whole and runnable or not at all: `installed` takes any file at this path for the engine.
+    let got: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
+    if got != want {
+        return Err(Error::msg(format!("{name}'s {}: sha256 {got} does not match the pinned {want}", exe_name())));
+    }
+    // Whole and runnable or not at all, over a file that was not the pinned build.
     host::paths::write_executable(&exe, &body).map_err(|e| Error::msg(format!("write {}: {e}", exe.display())))?;
+    VERIFIED.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = std::fs::remove_file(&archive);
     Ok(exe)
 }
