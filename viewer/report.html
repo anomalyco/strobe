@@ -112,6 +112,8 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html {
+  /* A section scrolled to (`#metric=`, `#scope=`, a metric's row) starts below the sticky header. */
+  scroll-padding-top: 76px;
   background: var(--canvas);
   color: var(--ink);
   font: 14px/20px var(--sans);
@@ -151,7 +153,14 @@ header.topbar {
   flex-wrap: wrap;
   padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--canvas);
+  margin-top: -12px;
+  padding-top: 12px;
 }
+.unit-seg button { padding: 3px 8px; font-family: var(--mono); }
 
 .brand-cluster {
   display: flex;
@@ -266,7 +275,7 @@ header.topbar {
 .sc-verdict.win { color: var(--win-ink); }
 .sc-verdict.loss { color: var(--loss-ink); }
 .sc-verdict.warn { color: var(--warn-ink); }
-.sc-sub { font: 12px/16px var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-sub { font: 12px/16px var(--mono); color: var(--ink-3); overflow-wrap: break-word; }
 
 /* Elevated Card Surface */
 .card-surface {
@@ -403,6 +412,8 @@ header.topbar {
 
 .ba-val { font: 600 26px/32px var(--display); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
 .ba-val.muted { color: var(--ink-2); font-weight: 500; }
+.ba-val.long { font-size: 22px; }
+.ba-val.longer { font-size: 18px; }
 .ba-arrow { font: 400 20px/32px var(--sans); color: var(--ink-4); }
 .ba-commits {
   margin-top: 8px;
@@ -422,7 +433,8 @@ header.topbar {
 /* Single-sided attribution & Live Heap */
 .single-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.6fr) minmax(100px, 1.15fr) 92px 86px;
+  /* `--v-w`: the value column as wide as its longest number (`numW`), never narrower than it was. */
+  grid-template-columns: minmax(180px, 1.6fr) minmax(100px, 1.15fr) max(92px, var(--v-w, 0px)) 86px;
   column-gap: 16px;
   align-items: center;
   min-height: 38px;
@@ -441,7 +453,7 @@ header.topbar {
 }
 @media (max-width: 720px) {
   .single-row {
-    grid-template-columns: minmax(0, 1.4fr) minmax(64px, 0.8fr) 78px;
+    grid-template-columns: minmax(0, 1.4fr) minmax(64px, 0.8fr) max(78px, var(--v-w, 0px));
     padding: 7px 16px;
     column-gap: 10px;
   }
@@ -699,7 +711,7 @@ select.metric-picker {
 
 /* Main-Thread Phase Breakdown (Timed) */
 .phase-bars { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
-.phase-bar-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) 76px; gap: 12px; align-items: center; }
+.phase-bar-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) max(76px, var(--v-w, 0px)); gap: 12px; align-items: center; }
 .phase-track { height: 14px; border-radius: 4px; background: var(--surface-subtle); overflow: hidden; display: flex; }
 .phase-seg { height: 100%; display: block; }
 .ph-script { background: var(--ph-script); }
@@ -707,10 +719,11 @@ select.metric-picker {
 .ph-layout { background: var(--ph-layout); }
 .ph-other { background: var(--ph-other); }
 
-.phase-table { border-top: 1px solid var(--hairline); }
+/* Numbers too long for a narrow window scroll sideways, never cut. */
+.phase-table { border-top: 1px solid var(--hairline); overflow-x: auto; }
 .phase-trow {
   display: grid;
-  grid-template-columns: minmax(130px, 1.2fr) minmax(130px, 1.2fr) 92px minmax(110px, 1fr);
+  grid-template-columns: minmax(130px, 1.2fr) minmax(max(130px, var(--ba-w, 0px)), 1.2fr) max(92px, var(--d-w, 0px)) minmax(max(110px, var(--r-w, 0px)), 1fr);
   gap: 12px;
   align-items: center;
   min-height: 34px;
@@ -720,7 +733,7 @@ select.metric-picker {
 }
 .phase-trow.hd { font-size: 11.5px; color: var(--ink-3); min-height: 28px; }
 @media (max-width: 640px) {
-  .phase-trow { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) 78px; }
+  .phase-trow { grid-template-columns: minmax(0, 1.1fr) minmax(max(0px, var(--ba-w, 0px)), 1fr) max(78px, var(--d-w, 0px)); }
   .phase-trow .ph-ci-col { display: none; }
 }
 .ph-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 7px; }
@@ -735,10 +748,10 @@ select.metric-picker {
   color: var(--ink-2);
 }
 
-.attr-table { display: flex; flex-direction: column; }
+.attr-table { display: flex; flex-direction: column; overflow-x: auto; }
 .attr-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.55fr) 136px minmax(110px, 1.35fr) 92px;
+  grid-template-columns: minmax(180px, 1.55fr) max(136px, var(--ba-w, 0px)) minmax(110px, 1.35fr) max(92px, var(--d-w, 0px));
   column-gap: 16px;
   align-items: center;
   min-height: 38px;
@@ -758,7 +771,7 @@ select.metric-picker {
 
 @media (max-width: 720px) {
   .attr-row {
-    grid-template-columns: minmax(0, 1.4fr) minmax(72px, 0.9fr) 78px;
+    grid-template-columns: minmax(0, 1.4fr) minmax(72px, 0.9fr) max(78px, var(--d-w, 0px));
     padding: 7px 16px;
     column-gap: 10px;
   }
@@ -951,7 +964,7 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .forest-wrap { overflow-x: auto; }
 .forest-row {
   display: grid;
-  grid-template-columns: minmax(175px, 1.4fr) 74px 74px 72px minmax(150px, 1.8fr) 136px 116px;
+  grid-template-columns: minmax(175px, 1.4fr) var(--num-w, 74px) var(--num-w, 74px) var(--delta-w, 72px) minmax(150px, 1.8fr) 136px 116px;
   column-gap: 12px;
   align-items: center;
   min-height: 34px;
@@ -1083,7 +1096,7 @@ details[open] > summary .chev { transform: rotate(90deg); }
 }
 .mover-row {
   display: grid;
-  grid-template-columns: 108px minmax(0, 1.4fr) 140px 88px auto;
+  grid-template-columns: 108px minmax(0, 1.4fr) max(140px, var(--ba-w, 0px)) max(88px, var(--d-w, 0px)) auto;
   gap: 10px;
   align-items: center;
   padding: 6px 14px;
@@ -1092,7 +1105,7 @@ details[open] > summary .chev { transform: rotate(90deg); }
 }
 .mover-row:first-of-type { border-top: 0; }
 @media (max-width: 720px) {
-  .mover-row { grid-template-columns: 92px minmax(0, 1fr) 82px; }
+  .mover-row { grid-template-columns: 92px minmax(0, 1fr) max(82px, var(--d-w, 0px)); }
   .mover-row .mv-ba, .mover-row .mv-act { display: none; }
 }
 .mv-kind { font: 500 11px/16px var(--mono); color: var(--ink-3); }
@@ -1343,7 +1356,7 @@ svg .zeroline { stroke: var(--ink-4); stroke-width: 1; }
 .impl-thumbs figcaption { font: 11px/16px var(--mono); color: var(--ink-3); margin-top: 4px; }
 .impl-attr-sub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 10px 24px 0; border-top: 1px solid var(--border); }
 .impl-attr-title { font: 600 12px/18px var(--sans); color: var(--ink-2); }
-.impl-bar-row { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr) 64px; gap: 8px; align-items: center; font: 12px/18px var(--sans); padding: 2px 0; }
+.impl-bar-row { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr) max(64px, var(--v-w, 0px)); gap: 8px; align-items: center; font: 12px/18px var(--sans); padding: 2px 0; }
 .impl-bar-row .fn-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .impl-bar-track { height: 8px; background: var(--surface-subtle); position: relative; }
 .impl-bar-track i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
@@ -1355,11 +1368,13 @@ svg .zeroline { stroke: var(--ink-4); stroke-width: 1; }
 .life-block { padding: 12px 24px 16px; border-top: 1px solid var(--border); }
 .life-hd { font: 600 12px/18px var(--sans); color: var(--ink-2); margin-bottom: 6px; }
 .life-hd span { font-weight: 400; color: var(--ink-3); }
-.life-row { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr) 88px 88px 48px; gap: 10px; align-items: center; font: 12px/20px var(--sans); border-bottom: 1px solid var(--hairline); }
+.life-row { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr) max(88px, var(--v-w, 0px)) max(88px, var(--v-w, 0px)) 48px; gap: 10px; align-items: center; font: 12px/20px var(--sans); border-bottom: 1px solid var(--hairline); }
 .life-row.hd { color: var(--ink-3); font-weight: 600; }
 .life-row .mono { text-align: right; font-variant-numeric: tabular-nums; }
+/* A number is never broken across lines: its column widens instead (`numW`). */
+.attr-row > .mono, .single-row > .mono, .phase-trow > .mono, .phase-bar-row > .mono, .life-row > .mono, .mover-row > .mono, .impl-bar-row > .mono { white-space: nowrap; }
 .life-note { font: 12px/18px var(--sans); color: var(--ink-3); margin-top: 8px; }
-@media (max-width: 640px) { .life-row { grid-template-columns: minmax(0, 1fr) 70px 70px 40px; } .life-row .share-track { display: none; } }
+@media (max-width: 640px) { .life-row { grid-template-columns: minmax(0, 1fr) max(70px, var(--v-w, 0px)) max(70px, var(--v-w, 0px)) 40px; } .life-row .share-track { display: none; } }
 /* HTTP probe: stalled cohorts, one bar per probe (its latency; a timeout reaches past the top) */
 .http-sub { padding: 12px 24px 4px; border-top: 1px solid var(--border); font: 600 12px/18px var(--sans); color: var(--ink-2); }
 .http-sub span { font-weight: 400; color: var(--ink-3); }
@@ -1439,6 +1454,8 @@ const state = {
 
 let observers = [];
 let pairPaintFns = [];
+// Each video's player by its source, kept across redraws (renderVideoSection).
+const VIDEOS = new Map();
 
 /* ---------- DOM & SVG Helpers ---------- */
 function h(tag, attrs, ...kids) {
@@ -1468,9 +1485,12 @@ function applyAttrs(el, attrs) {
 function appendKids(el, kids) {
   for (const k of kids.flat(Infinity)) {
     if (k == null || k === false) continue;
-    el.append(k instanceof Node ? k : String(k));
+    el.append(k instanceof Node ? k : keepTimes(String(k)));
   }
 }
+
+// A time never breaks between its number and its unit (`200,000 µs` on one line, as the Markdown's `nb`).
+const keepTimes = (s) => s.replace(/(\d) (µs|ms|s)(?!\w)/g, "$1\u00a0$2");
 
 function makeChevSvg(size = 12) {
   return S("svg", { width: size, height: size, viewBox: "0 0 12 12", fill: "none" },
@@ -1573,15 +1593,22 @@ function catalogOf(name) {
 }
 
 function unitOf(name) {
+  // A series with no primary (a pixels run) names no metric: once a page that stopped drawing.
+  name = String(name ?? "");
   const cat = catalogOf(name)?.unit;
   if (cat) return cat;
   // Families resolve by their base, as model::metric does.
   if (/^(span|phase|launch)\../.test(name)) return "ms";
   if (/^count\../.test(name)) return "count";
   if (name === "display.hz") return "Hz";
-  if (name === "run.duration" || name === "cpu.work" || name === "main.work" || name === "main.script" || name === "main.layout" || name === "main.style") return "ms";
-  if (/^(frames|interaction|scroll)\./.test(name) && /\.(p50|p90|p95|p99|max)$/.test(name)) return "ms";
-  if (name === "frames.dropped.pct" || name === "main.busy" || name.startsWith("cpu.") || name === "gpu.process.3d") return "%";
+  // A time model::METRICS keeps (a page without the catalog), and the times a kept block's recording
+  // holds outside it (`untimed.ms`, `warmup.stepped.first|last`): in ms, before `cpu.` reads as a share.
+  if (/^(run\.duration|cpu\.(work|main|pty_host|fixture)|ui\.cpu|cli\.launch|gpu\.compile|untimed\.ms|main\.(work|script|gc|layout|style|paint))$/.test(name)) return "ms";
+  if (/^warmup\.stepped\./.test(name) || /^driver\..*_ms$/.test(name)) return "ms";
+  if (/^(frames|canvas|interaction|scroll|tty|http|input)\./.test(name) && /\.(p50|p90|p95|p99|max)$/.test(name)) return "ms";
+  if (name === "cpu.wakes" || name === "cpu.idle_wakes") return "/s";
+  if (name === "cpu.instructions") return "instructions";
+  if (name === "frames.dropped.pct" || name === "main.busy" || name === "main.busy.cdp" || name.startsWith("cpu.") || name === "gpu.process.3d") return "%";
   if (name === "js.heap.growth") return "MB/min";
   if (name === "dom.nodes.growth") return "count/min";
   if (name.startsWith("memory.") || name === "gpu.vram" || name === "js.heap.used" || name === "leak.suspects.retained") return "MB";
@@ -1609,8 +1636,10 @@ for (const s of Array.isArray(STROBE?.data?.series) ? STROBE.data.series : []) {
 }
 const absUnit = (u) => (u === "%" ? "pp" : u);
 
+/* ---------- Time units (shared: viewer/report.html and viewer/history.html carry this block alike) ---------- */
 // Rust's `{:.d}`, which the text and markdown print with: the nearest decimal, an exact tie to even
-// (toFixed breaks a tie away from zero, so 12.5 MB read 13 MB here and 12 MB in the text).
+// (toFixed breaks a tie away from zero, so 12.5 MB read 13 MB here and 12 MB in the text). One that
+// shows as zero has no sign (`0.00`, never `-0.00`).
 function rfix(v, d) {
   const dv = new DataView(new ArrayBuffer(8));
   dv.setFloat64(0, Math.abs(v));
@@ -1618,9 +1647,12 @@ function rfix(v, d) {
   let mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
   const e = exp === 0 ? -1074 : exp - 1075;
   if (exp !== 0) mant |= 1n << 52n;
-  if (!finite(v) || e >= 0) return v.toFixed(d);
+  const fixed = () => { const s = v.toFixed(d); return Number.isFinite(v) && !/[1-9]/.test(s) ? s.replace(/^-/, "") : s; };
+  if (!Number.isFinite(v)) return fixed();
+  // A whole number of 2^52 or more: its exact digits, as Rust prints them (toFixed writes `1e+307`).
+  if (e >= 0) return (v < 0 ? "-" : "") + (mant << BigInt(e)).toString() + (d ? "." + "0".repeat(d) : "");
   const num = mant * 10n ** BigInt(d), den = 1n << BigInt(-e);
-  if ((num % den) * 2n !== den) return v.toFixed(d);
+  if ((num % den) * 2n !== den) return fixed();
   let q = num / den;
   if (q % 2n === 1n) q += 1n;
   const digits = q.toString().padStart(d + 1, "0");
@@ -1628,25 +1660,162 @@ function rfix(v, d) {
   return (v < 0 && q !== 0n ? "-" : "") + body;
 }
 
+// 2^53: from here a double no longer holds every integer, so its whole digits would be the binary
+// number's, not the value's (fmt::EXACT).
+const EXACT = 2 ** 53;
+// A number too large to print exactly in scientific notation with three significant digits (fmt::sci,
+// Rust's `{:.2e}`): `1.00e307`, `-4.50e16`; the exact decimal of the double rounded, a tie to even
+// (toExponential breaks a tie upward), no `+`. `v`: finite, |v| ≥ EXACT (a whole number).
+function sci(v) {
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, Math.abs(v));
+  const hi = dv.getUint32(0), lo = dv.getUint32(4);
+  const mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo) | (1n << 52n);
+  const s = (mant << BigInt(((hi >>> 20) & 0x7ff) - 1075)).toString();
+  let head = BigInt(s.slice(0, 3)), exp = s.length - 1;
+  const rest = s.slice(3), half = "5" + "0".repeat(Math.max(0, rest.length - 1));
+  if (rest > half || (rest === half && head % 2n === 1n)) head += 1n;
+  if (head === 1000n) { head = 100n; exp += 1; }
+  const h = head.toString();
+  return `${v < 0 ? "-" : ""}${h[0]}.${h.slice(1)}e${exp}`;
+}
+
+// A measured time is stored in ms and shown in one unit for the whole page (fmt::TimeUnit): µs unless
+// the address (`#unit=ms`) or the page's data (`default_unit`) says otherwise, never promoted to a
+// larger unit as it grows. `finest`: the most decimals a time shows in the unit; a nonzero time that
+// would print as 0 there prints `<0.01 µs`, never 0.
+const TIME_UNITS = {
+  us: { label: "µs", perMs: 1000, finest: 2, name: "microseconds" },
+  ms: { label: "ms", perMs: 1, finest: 4, name: "milliseconds" },
+  s: { label: "s", perMs: 0.001, finest: 6, name: "seconds" },
+};
+let TIME_UNIT = "us";
+
+// `us`, `ms` or `s` from what an address or a page's data says (`µs` and `μs` too), else null.
+function parseTimeUnit(s) {
+  const k = String(s ?? "").trim().toLowerCase();
+  return k === "µs" || k === "μs" ? "us" : Object.hasOwn(TIME_UNITS, k) ? k : null;
+}
+
+const timeLabel = (unit = TIME_UNIT) => TIME_UNITS[unit].label;
+
+// Commas in a whole part of four or more digits: `18309038` → `18,309,038` (fmt::group).
+const groupDigits = (s) => String(s).replace(/^([-−+]?)(\d+)/, (_, sign, int) => sign + int.replace(/\B(?=(\d{3})+(?!\d))/g, ","));
+
+// Decimals a time of size `x` (≥ 0, in the shown unit) prints with (fmt::time_digits): every whole
+// digit and at least three significant ones (`738,147`, `42.0`, `1.23`, `0.738`, `0.0420`), at most
+// `finest`; taken again after rounding, so 99.96 prints `100`, not `100.0`.
+function timeDigits(x, finest) {
+  const d = (x) => {
+    if (x >= 100) return 0;
+    if (x >= 10) return 1;
+    if (x >= 1) return 2;
+    for (let k = 3; k <= Math.max(finest, 3); k++) if (x * 10 ** k >= 100) return Math.min(k, finest);
+    return finest;
+  };
+  const first = d(x);
+  return Math.min(d(parseFloat(rfix(x, first))), first);
+}
+
+// A time in ms in `unit` (fmt::time_parts): its digits grouped at `d` decimals (its own when null),
+// `<0.01` for a nonzero one that would print as 0 (one that scaling underflows to 0 too), the minus
+// sign on a negative one and `+` on a positive one when `signed`; `—` for one that scaling overflows.
+// `num`: without the unit.
+function timeText(ms, { d = null, signed = false, num = false, unit = TIME_UNIT } = {}) {
+  if (!Number.isFinite(ms)) return "—";
+  const t = TIME_UNITS[unit];
+  const x = Math.abs(ms * t.perMs);
+  if (!Number.isFinite(x)) return "—";
+  const dd = d ?? timeDigits(x, t.finest);
+  let body = "0";
+  if (x >= EXACT) body = sci(x);
+  else if (ms !== 0) {
+    const s = rfix(x, dd);
+    body = /[1-9]/.test(s) ? groupDigits(s) : `<${rfix(10 ** -t.finest, t.finest)}`;
+  }
+  const sign = ms < 0 ? "−" : ms > 0 && signed ? "+" : "";
+  return num ? sign + body : `${sign}${body} ${t.label}`;
+}
+
+// A time in ms with its unit: `18,309,038 µs`, `16.7 ms`, `0.0167 s` (fmt::time).
+const fmtTime = (ms, unit = TIME_UNIT) => timeText(ms, { unit });
+// Its number alone, where the unit is named once beside it (fmt::time_number): `18,309,038`.
+const fmtTimeNum = (ms, unit = TIME_UNIT) => timeText(ms, { num: true, unit });
+// A difference, signed (fmt::time_signed): `+1,234 µs`, `−42.0 µs`, `+<0.01 µs`, `0 µs`.
+const fmtTimeSigned = (ms, unit = TIME_UNIT) => timeText(ms, { signed: true, unit });
+// Times printed together, an estimate and its interval's ends (fmt::times): each as it prints alone
+// (`+3.20 µs [−1.10 … +12.4 µs]`). Shared decimals would print a small end with fewer digits than its
+// own (0.05 ms beside 250 ms as `0.1 ms`) or a large one with digits it does not have (`12.40`).
+const fmtTimes = (list, signed = false, unit = TIME_UNIT) => list.map((v) => timeText(v, { signed, unit }));
+
+// A comparison's verdict in words (stats::verdict_text): a time's absolute bound or margin (`same
+// (±520 µs)`, `no worse (≤1.20 ms, faster)`, `worse (>0.500 s)`) drawn again from `bound` in the shown
+// unit; any other verdict as it was stored. `unit`: the metric's.
+function verdictText(c, unit) {
+  const v = String(c?.verdict ?? "");
+  const b = c?.bound;
+  if (c?.relative !== false || unit !== "ms" || !(Number.isFinite(b) && b >= 0)) return v;
+  for (const p of ["same (±", "no worse (≤", "worse (>"]) {
+    if (!v.startsWith(p)) continue;
+    const rest = v.slice(p.length);
+    const ends = [rest.indexOf(")"), rest.indexOf(", ")].filter((i) => i >= 0);
+    if (!ends.length) break;
+    return p + timeText(b) + rest.slice(Math.min(...ends));
+  }
+  return v;
+}
+
+// An axis tick in ms, in `unit` at the decimals the ticks' step needs (`250,000 µs`, `0.25 s`), signed
+// when `signed`; a sign only on what shows a nonzero digit (never `−0 µs`).
+function fmtTimeTick(t, ticks, signed = false, unit = TIME_UNIT) {
+  const { perMs: k, finest } = TIME_UNITS[unit];
+  const fin = ticks.filter(Number.isFinite);
+  const step = (fin.length > 1 ? Math.abs(fin[1] - fin[0]) : Math.abs(fin[0] || 0)) * k;
+  // Never finer than a time prints (0.01 µs, 0.0001 ms, 0.000001 s): `timeAxis` keeps a step that large.
+  const d = step > 0 ? Math.min(finest, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) : 0;
+  const body = `${groupDigits(rfix(Math.abs(t) * k, d))} ${timeLabel(unit)}`;
+  if (!/[1-9]/.test(body)) return body;
+  return t < 0 ? "−" + body : signed && t > 0 ? "+" + body : body;
+}
+
+// A time axis's range in ms, widened about its middle to at least four of the shown unit's finest
+// steps, so no two of its ticks print alike (`0.000004 s` three times on one axis).
+function timeAxis(lo, hi, unit = TIME_UNIT) {
+  const { perMs, finest } = TIME_UNITS[unit];
+  const min = (4 * 10 ** -finest) / perMs;
+  if (!(hi - lo < min)) return [lo, hi];
+  const mid = (lo + hi) / 2;
+  return [mid - min / 2, mid + min / 2];
+}
+
+// Rust's f64::round: half away from zero (Math.round takes −0.5 to 0).
+const rround = (x) => Math.sign(x) * Math.round(Math.abs(x));
+
 // fmt::digits_for: decimals that show a number's first significant digit, from `min` to `max`.
 function digitsFor(v, min, max) {
   const a = Math.abs(v);
-  if (!finite(a) || a === 0) return min;
+  if (!Number.isFinite(a) || a === 0) return min;
   // Dust no decimal up to max shows reads at min (fmt::digits_for), not `0.000`.
   let d = 0;
-  while (d <= max && Math.round(a * 10 ** d) < 1) d++;
+  while (d <= max && rround(a * 10 ** d) < 1) d++;
   if (d > max) d = min;
   return Math.min(max, Math.max(min, d));
 }
 
 // The text's `fmt::value`, so every surface prints a number the same way.
 function fmtVal(v, u) {
-  if (!finite(v)) return "—";
+  if (!Number.isFinite(v)) return "—";
+  if (u === "ms") return fmtTime(v);
+  // Too large to print exactly: three significant digits with the unit as it would have been
+  // (`1.00e307`, `1.00e307 instr`, `1.00e307 B`), never a cast's or the binary number's digits.
+  if (Math.abs(v) >= EXACT) {
+    const n = sci(v);
+    return u === "count" || u === "value" || !u ? n : u === "%" ? n + "%" : u === "/s" ? n + "/s" : u === "instructions" ? n + " instr" : u === "bytes" ? n + " B" : `${n} ${u}`;
+  }
   const d0 = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : digitsFor(v, 2, 4);
   // A value that rounds to zero prints as 0 at two decimals, without a sign (fmt::value).
   let d = d0;
-  if (Math.round(v * 10 ** d) === 0) { v = 0; d = Math.min(d, 2); }
-  if (u === "ms") return rfix(v, d) + " ms";
+  if (rround(v * 10 ** d) === 0) { v = 0; d = Math.min(d, 2); }
   if (u === "%") return rfix(v, d) + "%";
   if (u === "pp") return rfix(v, d) + " pp";
   // Like every unit (fmt::value): a 0.287 MB heap once printed `0 MB` beside a ±4% interval.
@@ -1665,7 +1834,8 @@ function fmtVal(v, u) {
     if (a >= 1024) return rfix(v / 1024, Math.abs(v / 1024) >= 10 ? 0 : 1) + " KB";
     return rfix(v, 0) + " B";
   }
-  if (u === "count") return Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : rfix(v, 1);
+  // Grouped like a time (fmt::value): `1,234,567`.
+  if (u === "count") return groupDigits(Math.abs(v - Math.round(v)) < 1e-9 ? String(rround(v)) : rfix(v, 1));
   if (u === "instructions") {
     const a = Math.abs(v);
     if (a >= 1e9) return rfix(v / 1e9, 2) + " G instr";
@@ -1677,8 +1847,31 @@ function fmtVal(v, u) {
   return rfix(v, d) + (u ? " " + u : "");
 }
 
-const fmtBare = (v, u) => fmtVal(v, u).replace(/\s*(ms|MB|Hz|pp|%)$/, "");
-const shortNum = (v) => (!finite(v) ? "—" : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
+// Round ticks across [lo, hi], about `count` of them: 1, 2 or 5 times a power of ten apart.
+function niceTicks(lo, hi, count) {
+  if (!(hi > lo)) return [lo];
+  const raw = (hi - lo) / Math.max(1, count);
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const f = raw / mag;
+  const step = (f >= 7.5 ? 10 : f >= 3.5 ? 5 : f >= 1.5 ? 2 : 1) * mag;
+  const out = [];
+  for (let i = Math.ceil(lo / step - 1e-9); i * step <= hi + 1e-9; i++) {
+    out.push(i === 0 ? 0 : +(i * step).toPrecision(10));
+  }
+  return out;
+}
+/* ---------- end of the shared time units ---------- */
+
+// Values printed together, a median and its interval's ends (fmt::values): times at one set of digits,
+// any other unit each as fmtVal prints it.
+const fmtValues = (vs, u) => (u === "ms" ? fmtTimes(vs) : vs.map((v) => fmtVal(v, u)));
+
+// A number column's width for the longest of `texts` (mono at `px`; a character is at most 0.62em):
+// a table sets it as `--v-w`, `--d-w`, … and its column is never narrower than its own default.
+const numW = (texts, px = 12) => `${Math.ceil(Math.max(0, ...texts.map((t) => String(t ?? "").length)) * px * 0.62) + 4}px`;
+
+// A value without its unit, where the next one names it (`738,147 → 640,112 µs`).
+const fmtBare = (v, u) => (u === "ms" ? fmtTimeNum(v) : fmtVal(v, u).replace(/\s*(MB|Hz|pp|%)$/, ""));
 const capFirst = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
 
 function fmtBytes(bytes) {
@@ -1706,8 +1899,10 @@ function fmtSignedBytes(bytes) {
 function pctWith(r, digits) {
   if (!finite(r)) return "—";
   const p = r * 100;
+  // A fraction past a double's range once it is a percentage (1e307 → inf) is no number to print.
+  if (!finite(p)) return "—";
   const zero = Math.round(Math.abs(p) * 10 ** digits) === 0;
-  return (zero ? "" : p < 0 ? "−" : "+") + rfix(Math.abs(p), digits) + "%";
+  return (zero ? "" : p < 0 ? "−" : "+") + (Math.abs(p) >= EXACT ? sci(Math.abs(p)) : rfix(Math.abs(p), digits)) + "%";
 }
 const pctDefault = (p) => (Math.abs(p) >= 10 ? 0 : digitsFor(p, 1, 3));
 function fmtPct(r) {
@@ -1728,30 +1923,27 @@ function pctCI(est, lo, hi) {
 // The text's `fmt::signed`: one that shows as zero has no sign (`0 MB`, not `−0 MB`).
 function fmtSigned(v, u) {
   if (!finite(v)) return "—";
+  if (u === "ms") return fmtTimeSigned(v);
   const body = fmtVal(Math.abs(v), u);
   // fmt::signed: no sign when every digit it shows is 0.
   if (!/[1-9]/.test(body)) return body;
   return v < 0 ? "−" + body : v > 0 ? "+" + body : body;
 }
 
-function fmtSignedMatched(vA, vB, u) {
-  if (!finite(vA) || !finite(vB)) return "—";
-  const d = u === "Hz" ? 0 : Math.abs(vA) >= 100 ? 0 : Math.abs(vA) >= 10 ? 1 : digitsFor(vA, 2, 4);
-  const f = 10 ** d;
-  const diff = Math.round(vB * f) / f - Math.round(vA * f) / f;
-  const body = Math.abs(diff).toFixed(d) + (u ? " " + u : "");
-  return diff < -1e-9 ? "−" + body : diff > 1e-9 ? "+" + body : body;
-}
 
 // A ratio's estimate and ends at the interval's digits, as the text prints them (`fmt::pct_ci`).
 const ciOf = (c) => (finite(c?.estimate) && finite(c?.lo) && finite(c?.hi) ? pctCI(c.estimate, c.lo, c.hi) : null);
-const fmtDelta = (v, c, u) => (c?.relative !== false ? (v === c?.estimate && ciOf(c) ? ciOf(c)[0] : fmtPct(v)) : fmtSigned(v, absUnit(u)));
-const fmtRange = (c, u, sep = " to ") => (!finite(c?.lo) || !finite(c?.hi) ? "—" : c.relative !== false && ciOf(c) ? `${ciOf(c)[1]}${sep}${ciOf(c)[2]}` : `${fmtDelta(c.lo, c, u)}${sep}${fmtDelta(c.hi, c, u)}`);
+// A difference of times and its interval, printed together (`fmt::times`).
+const timeCiOf = (c) => (finite(c?.estimate) && finite(c?.lo) && finite(c?.hi) ? fmtTimes([c.estimate, c.lo, c.hi], true) : finite(c?.lo) && finite(c?.hi) ? ["—", ...fmtTimes([c.lo, c.hi], true)] : null);
+const fmtDelta = (v, c, u) => (c?.relative !== false ? (v === c?.estimate && ciOf(c) ? ciOf(c)[0] : fmtPct(v)) : u === "ms" && v === c?.estimate && timeCiOf(c) ? timeCiOf(c)[0] : fmtSigned(v, absUnit(u)));
+const fmtRange = (c, u, sep = " to ") => (!finite(c?.lo) || !finite(c?.hi) ? "—" : c.relative !== false && ciOf(c) ? `${ciOf(c)[1]}${sep}${ciOf(c)[2]}` : u === "ms" ? `${timeCiOf(c)[1]}${sep}${timeCiOf(c)[2]}` : `${fmtDelta(c.lo, c, u)}${sep}${fmtDelta(c.hi, c, u)}`);
 const fmtBound = (c, u) => (c?.relative !== false ? `±${parseFloat(((c?.bound ?? 0.02) * 100).toPrecision(3))}%` : `±${fmtVal(c?.bound ?? 0.5, absUnit(u))}`);
-// A no-worse margin as the verdict words it: `≤2%`, `≤0.50 ms`.
+// A no-worse margin as the verdict words it: `≤2%`, `≤500 µs`.
 const fmtMargin = (c, u) => `≤${c?.relative !== false ? `${parseFloat(((c?.noworse ?? c?.bound ?? 0.02) * 100).toPrecision(3))}%` : fmtVal(c?.noworse ?? c?.bound ?? 0.5, absUnit(u))}`;
 const fmtP = (p) => (!finite(p) ? "—" : p < 0.001 ? "<0.001" : p < 0.1 ? p.toFixed(3) : p.toFixed(2));
 
+// A wall-clock stretch (a series' runtime, a recording's length, an estimate): `850 ms`, `12.3 s`,
+// `4 min` in every unit (fmt::ms_duration), never a measured time.
 function fmtDuration(ms) {
   if (!finite(ms)) return "—";
   if (ms < 1000) return `${Math.round(ms)} ms`;
@@ -1767,30 +1959,21 @@ function lin(d0, d1, r0, r1) {
   return fn;
 }
 
-function niceTicks(lo, hi, count) {
-  if (!(hi > lo)) return [lo];
-  const raw = (hi - lo) / Math.max(1, count);
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const f = raw / mag;
-  const step = (f >= 7.5 ? 10 : f >= 3.5 ? 5 : f >= 1.5 ? 2 : 1) * mag;
-  const out = [];
-  for (let i = Math.ceil(lo / step - 1e-9); i * step <= hi + 1e-9; i++) {
-    out.push(i === 0 ? 0 : +(i * step).toPrecision(10));
-  }
-  return out;
+
+// An axis tick's label: a time axis in the page's unit at the decimals its step needs (`250,000 µs`,
+// never promoted to seconds), signed when `signed`; any other tick as `fmt` gives it.
+function fmtAxisTick(t, u, ticks, fmt, signed = false) {
+  return u === "ms" ? fmtTimeTick(t, ticks, signed) : fmt(t);
 }
 
-// An axis tick's label: a millisecond axis that reaches a second reads in seconds (`18 s`, `18.05 s`,
-// never `18050 ms`) at the decimals its step needs, signed when `signed`; any other tick as `fmt` gives it.
-function fmtAxisTick(t, u, ticks, fmt, signed = false) {
-  const top = Math.max(0, ...ticks.filter(finite).map((x) => Math.abs(x)));
-  if (u !== "ms" || top < 1000) return fmt(t);
-  const step = ticks.length > 1 ? Math.abs(ticks[1] - ticks[0]) / 1000 : top / 1000;
-  const d = step > 0 ? Math.min(3, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) : 0;
-  const body = `${rfix(Math.abs(t) / 1000, d)} s`;
-  // A sign only on what shows a nonzero digit (fmt::signed): never `−0.0 s`.
-  if (!/[1-9]/.test(body)) return body;
-  return t < 0 ? "−" + body : signed && t > 0 ? "+" + body : body;
+// Ticks across [lo, hi] whose labels fit `w` px side by side (mono at `px`): fewer ticks while the
+// widest label would run into its neighbour.
+function fittedTicks(lo, hi, want, w, label, px = 10.5) {
+  for (let n = want; ; n--) {
+    const ticks = niceTicks(lo, hi, n);
+    const widest = Math.max(0, ...ticks.map((t) => String(label(t, ticks)).length)) * px * 0.62;
+    if (n <= 2 || ticks.length < 2 || widest + 8 <= (w * Math.abs(ticks[1] - ticks[0])) / (hi - lo)) return ticks;
+  }
 }
 
 // The left margin a y-axis needs for its tick labels (mono, `px` high, right-aligned `gap` px from the
@@ -2150,6 +2333,9 @@ function render() {
     renderExperiment(STROBE.data);
   }
   app.querySelectorAll(".chart-host").forEach((box) => box.measureNow());
+  // A section scrolled to starts below the sticky header, however high it wraps.
+  const bar = app.querySelector("header.topbar");
+  if (bar) document.documentElement.style.scrollPaddingTop = `${Math.ceil(bar.getBoundingClientRect().height) + 12}px`;
   window.scrollTo(0, scrollPos);
 }
 
@@ -2175,8 +2361,36 @@ function selectSeries(idx) {
   state.distOpen = false;
   state.openRows.clear();
   state.flameZoom = 0;
-  history.replaceState(null, "", "#series=" + idx);
+  setHash({ series: idx, metric: null });
   render();
+}
+
+// The address keeps the view (`#series=1&scope=host&metric=cpu.work&unit=ms`): a change sets its own
+// keys and keeps the others.
+function setHash(changes) {
+  const p = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+  for (const [k, v] of Object.entries(changes)) {
+    if (v == null) p.delete(k);
+    else p.set(k, String(v));
+  }
+  history.replaceState(null, "", "#" + p.toString());
+}
+
+// Every measured time on the page in one unit: the switch redraws the whole page in it, tables,
+// headline, charts and their axes.
+function setTimeUnit(unit) {
+  if (!Object.hasOwn(TIME_UNITS, unit)) return;
+  TIME_UNIT = unit;
+  setHash({ unit });
+  render();
+}
+
+function unitSwitch() {
+  return h("div", { class: "seg unit-seg", role: "group", "aria-label": "Time unit", title: "Show every time in this unit" },
+    Object.entries(TIME_UNITS).map(([k, t]) =>
+      h("button", { type: "button", "data-unit": k, "aria-pressed": String(TIME_UNIT === k), title: `Times in ${t.name}`, onclick: () => setTimeUnit(k) }, t.label)
+    )
+  );
 }
 
 function renderExperiment(r) {
@@ -2227,7 +2441,8 @@ function renderExperiment(r) {
             "aria-pressed": String(state.cliOpen),
             onclick: () => { state.cliOpen = !state.cliOpen; render(); },
           }, state.cliOpen ? "Report view" : "CLI output")
-        : null
+        : null,
+      unitSwitch()
     )
   );
 
@@ -2561,9 +2776,9 @@ function buildHeroProse(r, s, c, cl, aa) {
   }
 
   const savedWork = m === "main.busy" && workComp && finite(workComp.base) && finite(workComp.head)
-    ? `, saving ~${Math.round(Math.abs(workComp.base - workComp.head))} ms of CPU work per ${finite(runDur) ? fmtDuration(runDur) + " " : ""}run`
+    ? `, saving ~${fmtVal(Math.abs(workComp.base - workComp.head), "ms")} of CPU work per ${finite(runDur) ? fmtVal(runDur, "ms") + " " : ""}run`
     : m === "main.work" && finite(runDur)
-      ? ` (${fmtSignedMatched(c.base, c.head, "ms")} per ${fmtDuration(runDur)} run)`
+      ? ` (${fmtSigned(c.head - c.base, "ms")} per ${fmtVal(runDur, "ms")} run)`
       : "";
 
   // The pairs that moved the way the verdict did: head better in them for a win, worse for a loss.
@@ -2654,9 +2869,17 @@ function renderVideoSection(player) {
     return { ...sd, v, runs, offset: run ? run.start_s : 0, markers: v.markers || [] };
   });
   const label = (sd) => sd.role === "recording" ? "This recording" : sideWord(sd.role, true);
+  // A player is made once per video and kept across redraws (a unit switch): its frame, pause and
+  // speed stay as they were, and the video is never decoded again.
+  const fresh = [];
   const els = sides.map((sd) => {
-    const el = h("video", { class: "vid-el", src: sd.src, preload: "auto", playsinline: true });
-    el.muted = true;
+    let el = VIDEOS.get(sd.src);
+    if (!el) {
+      el = h("video", { class: "vid-el", src: sd.src, preload: "auto", playsinline: true });
+      el.muted = true;
+      VIDEOS.set(sd.src, el);
+      fresh.push(el);
+    }
     return el;
   });
   const lo = Math.min(0, ...sides.map((sd) => -sd.offset));
@@ -2670,7 +2893,7 @@ function renderVideoSection(player) {
   const playBtn = h("button", { type: "button", class: "btn-ghost", onclick: () => {
     if (els[0].paused) { seek(now()); els.forEach((el) => el.play().catch(() => {})); } else els.forEach((el) => el.pause());
   } }, "Play");
-  const rates = [0.25, 1].map((r) => h("button", { type: "button", class: "btn-ghost vid-rate", "aria-pressed": String(r === 1), onclick: (e) => {
+  const rates = [0.25, 1].map((r) => h("button", { type: "button", class: "btn-ghost vid-rate", "aria-pressed": String(r === els[0].playbackRate), onclick: (e) => {
     els.forEach((el) => { el.playbackRate = r; });
     for (const b of e.currentTarget.parentNode.querySelectorAll(".vid-rate")) b.setAttribute("aria-pressed", String(b === e.currentTarget));
   } }, `${r}×`));
@@ -2696,7 +2919,7 @@ function renderVideoSection(player) {
     }
     for (const m of sd.markers) {
       const t = m.t_s - sd.offset;
-      const tip = `${label(sd)} · ${m.label} at ${fmtT(t)}${m.press_s != null ? ` (press ${fmtT(m.press_s - sd.offset)})` : ""}${m.reaction_s != null ? ` · reaction on screen ${((m.reaction_s - m.t_s) * 1000).toFixed(0)} ms later` : ""}`;
+      const tip = `${label(sd)} · ${m.label} at ${fmtT(t)}${m.press_s != null ? ` (press ${fmtT(m.press_s - sd.offset)})` : ""}${m.reaction_s != null ? ` · reaction on screen ${fmtVal((m.reaction_s - m.t_s) * 1000, "ms")} later` : ""}`;
       if (m.kind === "phase") {
         svg.append(S("rect", { x: x(t), y: y + rowH - 7, width: Math.max(2, x((m.end_s ?? m.t_s) - sd.offset) - x(t)), height: 4, class: "vid-phase", onclick: () => seek(t) }, S("title", {}, tip)));
         continue;
@@ -2726,7 +2949,7 @@ function renderVideoSection(player) {
     playBtn.textContent = els[0].paused ? "Play" : "Pause";
     requestAnimationFrame(tick);
   };
-  els[0].addEventListener("loadedmetadata", () => seek(0), { once: true });
+  if (fresh.includes(els[0])) els[0].addEventListener("loadedmetadata", () => seek(0), { once: true });
   requestAnimationFrame(tick);
   const kinds = [...new Set(sides.map((sd) => sd.v.kind))];
   return h("section", { class: "card-surface" },
@@ -2984,7 +3207,9 @@ function renderImplAttribution(r, s, nameOf) {
     const list = lists[key](role);
     if (!list.length) return h("div", { class: "sec-sub" }, "—");
     const max = maxOf(key, role);
-    return list.map((t) => h("div", { class: "impl-bar-row" },
+    // Both columns' numbers as wide as the longest of either.
+    const vw = numW(roles.flatMap((x) => lists[key](x).map((t) => fmt(t.ms, x))));
+    return list.map((t) => h("div", { class: "impl-bar-row", style: `--v-w:${vw}` },
       h("span", { class: "fn-name mono", title: t.title || t.name }, t.name),
       h("div", { class: "impl-bar-track" }, h("i", { style: `width:${(100 * t.ms) / max}%` })),
       h("span", { class: "mono", style: "text-align:right" }, fmt(t.ms, role))
@@ -3119,6 +3344,25 @@ function renderImplAttribution(r, s, nameOf) {
   );
 }
 
+// An implementation's claim (pr::claim, `takes 12,400 µs less time in open`) with its amount drawn
+// again from the estimate when the claim is a time compared by difference: the amount is the time in
+// the words that reads the estimate's size as it was printed (in any unit, at three significant
+// digits or more). Words with no such time (a ratio, `2.4×`, another number) stay as stored.
+function claimText(words, c, u) {
+  words = String(words || "");
+  if (c?.relative !== false || u !== "ms" || !finite(c?.estimate)) return words;
+  const want = Math.abs(c.estimate);
+  const perMs = { "µs": 1000, "μs": 1000, us: 1000, ms: 1, s: 0.001 };
+  for (const m of words.matchAll(/(<?)(\d[\d,]*(?:\.\d+)?)\s?(µs|μs|us|ms|s)(?!\w)/g)) {
+    const n = parseFloat(m[2].replace(/,/g, "")) / perMs[m[3]];
+    const step = (0.5 * 10 ** -((m[2].split(".")[1] || "").length)) / perMs[m[3]];
+    if (m[1] ? want <= n : Math.abs(n - want) <= Math.max(step, n * 0.005)) {
+      return words.slice(0, m.index) + fmtVal(want, "ms") + words.slice(m.index + m[0].length);
+    }
+  }
+  return words;
+}
+
 function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
   const c = s.primary || {};
   const m = c.metric || "?";
@@ -3129,7 +3373,7 @@ function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
   // counted as decided only once it held across the journeys (Holm).
   if (SIDES && (cl.tone === "win" || cl.tone === "loss")) {
     const better = cl.tone === "win";
-    if (s.claim) headline = `${SIDES.head} ${s.claim} than ${SIDES.base}`;
+    if (s.claim) headline = `${SIDES.head} ${claimText(s.claim, c, u)} than ${SIDES.base}`;
     pill = c.holm_decided === false
       ? `${better ? "Better" : "Worse"} on its own · not after Holm across the journeys`
       : `${better ? "Better" : "Worse"} than ${SIDES.base}`;
@@ -3165,6 +3409,12 @@ function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
     : looks.length > 1 && ciPct > 95.1
       ? `${ciPct}% CI (${looks.length}-check adjusted)`
       : `${ciPct}% CI`;
+  // Base and head side by side at the size their longer number fits in (a time of hundreds of seconds
+  // reads in nine digits of µs).
+  const baseText = fmtVal(cl.kind === "refused" ? null : c.base, u);
+  const headText = fmtVal(cl.kind === "refused" ? null : c.head, u);
+  const baLen = Math.max(baseText.length, headText.length);
+  const baSize = baLen > 16 ? " longer" : baLen > 13 ? " long" : "";
 
   return h("section", { class: "card-surface" },
     caveatEl,
@@ -3184,12 +3434,12 @@ function renderVerdictCard(r, s, aa, baseTag, headTag, baseVar, headVar) {
           h("div", { class: "ba-compare" },
             h("div", { class: "ba-col" },
               h("span", { class: "ba-label" }, h("i", { class: "swatch base" }), SIDES ? baseTag : `Base · ${baseTag}`),
-              h("span", { class: "ba-val muted" }, fmtVal(cl.kind === "refused" ? null : c.base, u))
+              h("span", { class: `ba-val muted${baSize}` }, baseText)
             ),
             h("span", { class: "ba-arrow" }, SIDES ? "vs" : "→"),
             h("div", { class: "ba-col" },
               h("span", { class: "ba-label" }, h("i", { class: `swatch head ${cl.tone}` }), SIDES ? headTag : `Head · ${headTag}`),
-              h("span", { class: "ba-val" }, fmtVal(cl.kind === "refused" ? null : c.head, u))
+              h("span", { class: `ba-val${baSize}` }, headText)
             )
           ),
           baseVar?.subject || headVar?.subject
@@ -3222,7 +3472,9 @@ function drawEquivalenceRuler(w, c, m, u, cl, aa) {
     return svg;
   }
   const bnd = Math.abs(c.bound ?? 0.02);
-  const maxAbs = Math.max(Math.abs(c.lo), Math.abs(c.hi), Math.abs(c.estimate || 0), bnd * 1.6) * 1.22 || 0.05;
+  const span = Math.max(Math.abs(c.lo), Math.abs(c.hi), Math.abs(c.estimate || 0), bnd * 1.6) * 1.22 || 0.05;
+  // A difference of times: at least a few of the shown unit's finest steps either side of 0.
+  const maxAbs = c.relative === false && u === "ms" ? timeAxis(-span, span)[1] : span;
   const padX = 16;
   const x = lin(-maxAbs, maxAbs, padX, w - padX);
   const cy = 28;
@@ -3253,13 +3505,16 @@ function drawEquivalenceRuler(w, c, m, u, cl, aa) {
 
   const rel = c.relative !== false;
   const tickCount = Math.max(3, Math.floor(w / 85));
-  const rawTicks = rel ? niceTicks(-maxAbs * 100, maxAbs * 100, tickCount).map((t) => t / 100) : niceTicks(-maxAbs, maxAbs, tickCount);
+  const absTick = (t, ticks) => fmtAxisTick(t, absUnit(u), ticks, (v) => fmtSigned(v, absUnit(u)), true);
+  const rawTicks = rel ? niceTicks(-maxAbs * 100, maxAbs * 100, tickCount).map((t) => t / 100) : fittedTicks(-maxAbs, maxAbs, tickCount, w - 2 * padX, absTick);
   for (const t of rawTicks) {
     const tx = x(t);
-    const lbl = t === 0 ? "0%" : rel ? `${t > 0 ? "+" : "−"}${parseFloat(Math.abs(t * 100).toPrecision(6))}%` : fmtAxisTick(t, absUnit(u), rawTicks, (v) => fmtSigned(v, absUnit(u)), true);
+    const lbl = t === 0 && rel ? "0%" : rel ? `${t > 0 ? "+" : "−"}${parseFloat(Math.abs(t * 100).toPrecision(6))}%` : absTick(t, rawTicks);
+    // A long label at the edge stays inside the chart.
+    const half = (lbl.length * 10.5 * 0.62) / 2;
     svg.append(
       S("line", { x1: tx, y1: axisY, x2: tx, y2: axisY + 4, class: "axisline" }),
-      S("text", { x: tx, y: axisY + 15, "text-anchor": "middle", style: "font-size:10.5px" }, lbl)
+      S("text", { x: Math.max(half, Math.min(w - half, tx)), y: axisY + 15, "text-anchor": "middle", style: "font-size:10.5px" }, lbl)
     );
   }
 
@@ -3355,6 +3610,8 @@ function renderImpactStrip(s, imp, aa) {
   const respCol = respCands.length
     ? (() => {
         const lead = pickHeadline(respCands);
+        // Every candidate refused: nothing to lead with (the page once stopped drawing here).
+        if (!lead) return inactivePillar(s.target_kind === "script" ? "Duration" : "Responsiveness", "Refused", "Its timings were refused in this series.");
         return pillarEl(s.target_kind === "script" ? "Duration" : "Responsiveness", lead, respCands.filter((x) => x !== lead).map((x) => metricSubRow(x, aa)), aa);
       })()
     : inactivePillar("Responsiveness", "Passive case", "Workload has no discrete user input events.");
@@ -3542,8 +3799,9 @@ function drawPairedRaw(w, ps, metric, u, cl, aa, comp) {
   let y0 = Math.min(...vals), y1 = Math.max(...vals);
   if (y1 - y0 <= 0) { const pad = Math.abs(y0) * 0.05 || 1; y0 -= pad; y1 += pad; }
   const yPad = (y1 - y0) * 0.14;
-  const y = lin(y0 - yPad, y1 + yPad, H - m.b, m.t);
-  const ticks = niceTicks(y0 - yPad, y1 + yPad, 4);
+  const [ya, yb] = u === "ms" ? timeAxis(y0 - yPad, y1 + yPad) : [y0 - yPad, y1 + yPad];
+  const y = lin(ya, yb, H - m.b, m.t);
+  const ticks = niceTicks(ya, yb, 4);
   const suffix = u === "%" ? "%" : u === "count" ? "" : " " + u;
   const labels = ticks.map((t) => fmtAxisTick(t, u, ticks, (v) => `${parseFloat(v.toPrecision(6))}${suffix}`));
   m.l = axisLeft(labels, m.l);
@@ -3597,9 +3855,10 @@ function drawPairDeltas(w, ps, deltas, comp, metric, u, rel, cl, aa) {
   const allVals = [0, ...deltas.filter(finite), finite(comp.estimate) ? comp.estimate : 0, bnd, -bnd];
   let y0 = Math.min(...allVals), y1 = Math.max(...allVals);
   const pad = (y1 - y0) * 0.14 || 0.02;
-  const y = lin(y0 - pad, y1 + pad, H - m.b, m.t);
-  const rawTicks = rel ? niceTicks((y0 - pad) * 100, (y1 + pad) * 100, 4).map((t) => t / 100) : niceTicks(y0 - pad, y1 + pad, 4);
-  const labels = rawTicks.map((t) => (t === 0 ? "0%" : rel ? `${t > 0 ? "+" : "−"}${parseFloat(Math.abs(t * 100).toPrecision(5))}%` : fmtAxisTick(t, absUnit(u), rawTicks, (v) => fmtSigned(v, absUnit(u)), true)));
+  const [ya, yb] = !rel && u === "ms" ? timeAxis(y0 - pad, y1 + pad) : [y0 - pad, y1 + pad];
+  const y = lin(ya, yb, H - m.b, m.t);
+  const rawTicks = rel ? niceTicks(ya * 100, yb * 100, 4).map((t) => t / 100) : niceTicks(ya, yb, 4);
+  const labels = rawTicks.map((t) => (t === 0 && rel ? "0%" : rel ? `${t > 0 ? "+" : "−"}${parseFloat(Math.abs(t * 100).toPrecision(5))}%` : fmtAxisTick(t, absUnit(u), rawTicks, (v) => fmtSigned(v, absUnit(u)), true)));
   m.l = axisLeft(labels, m.l);
   const x = lin(0.6, P + 0.4, m.l, w - m.r);
 
@@ -3804,7 +4063,13 @@ function renderMainThreadPhaseSection(s, aa) {
         h("span", { class: "sec-sub" }, `Timed across all ${s.pairs || blocks.length / 2} launch pairs · profiler off · ${confPctStr} paired intervals`)
       )
     ),
-    h("div", { class: "card-bd" },
+    // Each number column as wide as its longest number.
+    h("div", { class: "card-bd", style: [
+      `--v-w:${numW([fmtVal(bTotal, "ms"), fmtVal(hTotal, "ms")])}`,
+      `--ba-w:${numW(phases.map((p) => `${fmtBare(p.c.base, "ms")} → ${fmtVal(p.c.head, "ms")}`), 11.5)}`,
+      `--d-w:${numW(phases.map((p) => (finite(p.c.lo) && finite(p.c.hi) ? fmtDelta(p.c.estimate, p.c, "ms") : "—")), 12.5)}`,
+      `--r-w:${numW(phases.flatMap((p) => (finite(p.c.lo) && finite(p.c.hi) ? fmtRange(p.c, "ms", "\u0000").split("\u0000") : ["—"])), 11)}`,
+    ].join(";") },
       h("div", { class: "phase-bars" },
         barRow("Base", "base", bScript, bStyle, bLayout, bOther, bTotal),
         barRow("Head", "head", hScript, hStyle, hLayout, hOther, hTotal)
@@ -3827,15 +4092,16 @@ function renderMainThreadPhaseSection(s, aa) {
           const deltaTxt = finite(c.lo) && finite(c.hi) ? fmtDelta(c.estimate, c, "ms") : "—";
           return h("div", { class: "phase-trow" },
             h("span", { style: "font-weight:500;display:flex;align-items:center" }, h("i", { class: `ph-dot ${p.cls}` }), p.name),
-            h("span", { class: "mono", style: "color:var(--ink-2);font-size:11.5px" },
-              `${fmtBare(c.base, "ms")} → ${fmtVal(c.head, "ms")}`,
+            h("span", { class: "mono", style: "color:var(--ink-2);font-size:11.5px;white-space:normal" },
+              h("span", { style: "white-space:nowrap" }, `${fmtBare(c.base, "ms")} → ${fmtVal(c.head, "ms")}`),
               cntNote ? h("span", { style: "color:var(--ink-3)" }, cntNote) : null
             ),
             h("span", { class: "mono", style: `text-align:right;font-weight:${clear && !aa ? 600 : 400};color:${clear && !aa && c.hi < 0 ? "var(--win-ink)" : clear && !aa && c.lo > 0 ? "var(--loss-ink)" : "var(--ink-2)"}` },
               deltaTxt
             ),
-            h("span", { class: "mono ph-ci-col", style: "text-align:right;color:var(--ink-3);font-size:11px" },
-              finite(c.lo) && finite(c.hi) ? fmtRange(c, "ms", " … ") : "—"
+            // A long interval wraps between its ends, never inside a number.
+            h("span", { class: "mono ph-ci-col", style: "text-align:right;color:var(--ink-3);font-size:11px;white-space:normal" },
+              finite(c.lo) && finite(c.hi) ? fmtRange(c, "ms", "\u0000").split("\u0000").flatMap((end, i) => [i ? " … " : null, h("span", { style: "white-space:nowrap" }, end)]) : "—"
             )
           );
         })
@@ -4052,11 +4318,11 @@ function renderCpuHotspotsSection(s, aa) {
 
   let noteText = null;
   if (aa) {
-    noteText = `A/A control: both profiled launches ran identical code (${shortNum(workB)} vs ${shortNum(workH)} ms/run with V8 profiler attached); differences below show single-launch sampling variance.`;
+    noteText = `A/A control: both profiled launches ran identical code (${fmtBare(workB, "ms")} vs ${fmtVal(workH, "ms")}/run with V8 profiler attached); differences below show single-launch sampling variance.`;
   } else if (drifted) {
-    noteText = `Profiled in 1 separate diagnostic launch per build so V8 sampling never perturbs timed runs (profiler overhead shifted that single pair's total work to ${shortNum(workB)} → ${shortNum(workH)} ms/run; read function deltas below as directional attribution).`;
+    noteText = `Profiled in 1 separate diagnostic launch per build so V8 sampling never perturbs timed runs (profiler overhead shifted that single pair's total work to ${fmtBare(workB, "ms")} → ${fmtVal(workH, "ms")}/run; read function deltas below as directional attribution).`;
   } else if (maxAbs < 1.0) {
-    noteText = `Largest individual ${byFile ? "file" : "function"} shift was under 1 ms/run (${fmtSigned(rows[0]?.delta || 0, "ms")}); the change is distributed across small calls within single-launch sampling noise.`;
+    noteText = `Largest individual ${byFile ? "file" : "function"} shift was under ${fmtVal(1, "ms")}/run (${fmtSigned(rows[0]?.delta || 0, "ms")}); the change is distributed across small calls within single-launch sampling noise.`;
   }
 
   const mappedPct = (hs.head.mapped_samples || hs.base.mapped_samples) ? " · source-mapped" : "";
@@ -4074,6 +4340,9 @@ function renderCpuHotspotsSection(s, aa) {
       )
     : null;
 
+  const baText = (x) => `${x.b ? fmtBare(x.bv, "ms") : "<" + fmtBare(floorB, "ms")} → ${x.hd ? fmtBare(x.hv, "ms") : "<" + fmtBare(floorH, "ms")} ${timeLabel()}`;
+  const dText = (x) => `${x.b && x.hd ? "" : x.delta > 0 ? "≥ " : "≤ "}${fmtSigned(x.delta, "ms")}`;
+
   return h("section", { class: "card-surface", id: "why" },
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
@@ -4083,7 +4352,7 @@ function renderCpuHotspotsSection(s, aa) {
       h("div", { class: "card-hd-right" }, scopeToggle, toggle)
     ),
     noteText ? h("div", { class: "attr-note" }, noteText) : null,
-    h("div", { class: "attr-table" },
+    h("div", { class: "attr-table", style: `--ba-w:${numW(rows.map(baText), 11.5)};--d-w:${numW(rows.map(dText))}` },
       h("div", { class: "attr-row hd" },
         h("span", {}, byFile ? "File / script" : "Function & caller"),
         h("span", { class: "col-ba" }, "Base → Head"),
@@ -4095,7 +4364,6 @@ function renderCpuHotspotsSection(s, aa) {
         const width = Math.max(0.8, Math.abs(posPct(x.delta) - posPct(0)));
         const saved = x.delta < 0;
         const barCls = saved ? (aa ? "saved-aa" : "saved") : "added";
-        const prefix = x.b && x.hd ? "" : x.delta > 0 ? "≥ " : "≤ ";
 
         const rawB = x.b ? (byFile ? { name: x.name, where: x.b.fullFile, weight: x.b.weight, stacks: x.b.stacks || [] } : x.b) : null;
         const rawH = x.hd ? (byFile ? { name: x.name, where: x.hd.fullFile, weight: x.hd.weight, stacks: x.hd.stacks || [] } : x.hd) : null;
@@ -4128,9 +4396,7 @@ function renderCpuHotspotsSection(s, aa) {
                 )
               : null
           ),
-          h("span", { class: "mono col-ba", style: "color:var(--ink-3);font-size:11.5px" },
-            `${x.b ? shortNum(x.bv) : "<" + shortNum(floorB)} → ${x.hd ? shortNum(x.hv) : "<" + shortNum(floorH)} ms`
-          ),
+          h("span", { class: "mono col-ba", style: "color:var(--ink-3);font-size:11.5px" }, baText(x)),
           h("div", { class: "div-track" },
             h("i", { class: "div-zero" }),
             h("i", { class: `div-bar ${barCls}`, style: `left:${left}%;width:${width}%` })
@@ -4138,7 +4404,7 @@ function renderCpuHotspotsSection(s, aa) {
           h("span", {
             class: "mono",
             style: `text-align:right;font-weight:${Math.abs(x.delta) >= 1 && !aa ? 600 : 400};color:${saved && Math.abs(x.delta) >= 1 && !aa ? "var(--win-ink)" : "var(--ink-2)"}`,
-          }, `${prefix}${fmtSigned(x.delta, "ms")}`)
+          }, dText(x))
         );
 
         return isOpen ? [rowEl, renderStackDrawer(rawB, rawH)] : [rowEl];
@@ -4146,8 +4412,8 @@ function renderCpuHotspotsSection(s, aa) {
     ),
     h("div", { class: "attr-foot" },
       [
-        progB || progH ? `Runtime / VM: ${progB ? shortNum(rowMs(progB) / runsB) : "—"} → ${progH ? shortNum(rowMs(progH) / runsH) : "—"} ${host ? "ms" : "ms/run"}` : null,
-        gcB || gcH ? `V8 GC profiler samples: ${gcB ? shortNum(rowMs(gcB) / runsB) : "—"} → ${gcH ? shortNum(rowMs(gcH) / runsH) : "—"} ${host ? "ms" : "ms/run"}` : null,
+        progB || progH ? `Runtime / VM: ${progB ? fmtBare(rowMs(progB) / runsB, "ms") : "—"} → ${progH ? fmtBare(rowMs(progH) / runsH, "ms") : "—"} ${timeLabel()}${host ? "" : "/run"}` : null,
+        gcB || gcH ? `V8 GC profiler samples: ${gcB ? fmtBare(rowMs(gcB) / runsB, "ms") : "—"} → ${gcH ? fmtBare(rowMs(gcH) / runsH, "ms") : "—"} ${timeLabel()}${host ? "" : "/run"}` : null,
         `${hs.base.samples ?? "?"} / ${hs.head.samples ?? "?"} samples (${host ? CPU_SCOPE_WORDS[scope] : `${runsB} runs`}, idle excluded)`,
       ].filter(Boolean).join("  ·  ")
     ),
@@ -4217,7 +4483,7 @@ function renderForcedLayoutSection(s, aa) {
     zeroForced
       ? h("div", { class: "attr-foot", style: "border-top:0" }, "Clean: zero synchronous forced layouts or style recalculations detected in either build.")
       : merged.length
-        ? h("div", { class: "attr-table" },
+        ? h("div", { class: "attr-table", style: `--ba-w:${numW(merged.map((x) => `${fmtBare(x.bv, "ms")} → ${fmtVal(x.hv, "ms")}`), 11.5)};--d-w:${numW(merged.map((x) => fmtSigned(x.delta, "ms")))}` },
             h("div", { class: "attr-row hd" },
               h("span", {}, "JavaScript call site forcing layout / style"),
               h("span", { class: "col-ba" }, "Base → Head / run"),
@@ -4249,7 +4515,7 @@ function renderForcedLayoutSection(s, aa) {
                   ),
                   h("div", { class: "fn-caller-hint" }, `${fmtVal(x.evB, "count")} → ${fmtVal(x.evH, "count")} forced events/run`)
                 ),
-                h("span", { class: "mono col-ba", style: "color:var(--ink-3);font-size:11.5px" }, `${shortNum(x.bv)} → ${fmtVal(x.hv, "ms")}`),
+                h("span", { class: "mono col-ba", style: "color:var(--ink-3);font-size:11.5px" }, `${fmtBare(x.bv, "ms")} → ${fmtVal(x.hv, "ms")}`),
                 h("div", { class: "div-track" },
                   h("i", { class: "div-zero" }),
                   h("i", { class: `div-bar ${barCls}`, style: `left:${left}%;width:${width}%` })
@@ -4869,7 +5135,7 @@ function renderFramePacingSection(r, s, imp) {
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
         h("h2", { class: "sec-title" }, "Frame pacing & jank tail"),
-        h("span", { class: "sec-sub" }, `1 vsync = ${shortNum(vs)} ms (${Math.round(imp.hz)} Hz) · pooled over ${gaps.launchesB}+${gaps.launchesH} launches`)
+        h("span", { class: "sec-sub" }, `1 vsync = ${fmtVal(vs, "ms")} (${Math.round(imp.hz)} Hz) · pooled over ${gaps.launchesB}+${gaps.launchesH} launches`)
       ),
       h("div", { class: "card-hd-right" },
         h("button", {
@@ -5002,9 +5268,12 @@ function drawDistCurve(w, arrs, vs, isCdf) {
       S("text", { x: m.l - 6, y: y(t) + 3.5, "text-anchor": "end", style: "font-size:10px" }, `${Math.round(t * 100)}%`)
     );
   }
-  const xTicks = niceTicks(0, xmax, 5);
+  const xTicks = fittedTicks(0, xmax, 5, w - m.l - m.r, (t, ts) => fmtTimeTick(t, ts), 10);
   for (const t of xTicks) {
-    svg.append(S("text", { x: x(t), y: H - 6, "text-anchor": "middle", style: "font-size:10px" }, fmtAxisTick(t, "ms", xTicks, (v) => `${parseFloat(v.toPrecision(4))} ms`)));
+    // A long label at the edge stays inside the chart.
+    const lbl = fmtTimeTick(t, xTicks);
+    const half = (lbl.length * 10 * 0.62) / 2;
+    svg.append(S("text", { x: Math.max(half, Math.min(w - half, x(t))), y: H - 6, "text-anchor": "middle", style: "font-size:10px" }, lbl));
   }
   svg.append(S("line", { x1: m.l, y1: H - m.b, x2: w - m.r, y2: H - m.b, class: "axisline" }));
 
@@ -5044,7 +5313,8 @@ function renderAllMetricsDisclosure(s, aa) {
       // Tested: rows a test ran on (a refused or untested secondary had none).
       h("span", { class: "sec-sub" }, `${tested.filter((x) => !["untested", "refused"].includes(x.c.verdict_kind) && !/^(—|refused)/.test(x.c.verdict || "")).length} hypothesis-tested · ${desc.length} context metrics · click any row to inspect pairs`)
     ),
-    h("div", { class: "forest-wrap" },
+    // The value columns as wide as their longest number (12px mono), never narrower than they were.
+    h("div", { class: "forest-wrap", style: `--num-w:${Math.max(74, Math.ceil(Math.max(0, ...items.flatMap((x) => [fmtVal(x.c.base, unitOf(x.c.metric)), fmtVal(x.c.head, unitOf(x.c.metric))].map((t) => t.length))) * 7.3))}px;--delta-w:${Math.max(72, Math.ceil(Math.max(0, ...items.map((x) => fmtDelta(x.c.estimate, x.c, unitOf(x.c.metric)).length)) * 7.3))}px` },
       h("div", { class: "forest-row hd" },
         h("span", {}, "Metric"),
         h("span", { style: "text-align:right" }, sideWord("base", true)),
@@ -5124,7 +5394,8 @@ function forestRow(item, dom, focus, aa) {
     h("span", { class: "mono", style: "text-align:right" }, fmtVal(c.head, u)),
     h("span", { class: "mono", style: `text-align:right;color:${cl.tone === "win" ? "var(--win-ink)" : cl.tone === "loss" ? "var(--loss-ink)" : "var(--ink-2)"}` }, fmtDelta(c.estimate, c, u)),
     track,
-    h("span", { class: "mono", style: "color:var(--ink-3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, fmtRange(c, u, " … ")),
+    // A long interval wraps between its ends, never inside a number.
+    h("span", { class: "mono", style: "color:var(--ink-3);font-size:11px" }, fmtRange(c, u, "\u0000").split("\u0000").flatMap((end, i) => [i ? " … " : null, h("span", { style: "white-space:nowrap" }, end)])),
     h("span", { style: `font-size:12px;color:${cl.tone === "win" ? "var(--win-ink)" : cl.tone === "loss" ? "var(--loss-ink)" : "var(--ink-3)"}` }, outcomeStr)
   );
 }
@@ -5205,7 +5476,7 @@ function renderRigFooter(r, s, imp) {
       h("div", { class: "rig-hd" }, "Display, GPU & browser"),
       gpu.devices?.[0] ? h("div", {}, `${gpu.devices[0]}${gpu.compositing ? ` (${gpu.compositing})` : ""}`) : null,
       r.browser ? h("div", {}, `${r.browser}${win ? ` · ${win.width}×${win.height}` : ""}`) : null,
-      finite(imp?.hz) ? h("div", {}, `${Math.round(imp.hz)} Hz refresh (${shortNum(imp.vs)} ms vsync)`) : null
+      finite(imp?.hz) ? h("div", {}, `${Math.round(imp.hz)} Hz refresh (${fmtVal(imp.vs, "ms")} vsync)`) : null
     ),
     h("div", { class: "rig-col" },
       h("div", { class: "rig-hd" }, s ? "Experimental protocol" : "Recording details"),
@@ -5483,7 +5754,7 @@ function renderSingleMainThreadPhases(v, perturbed) {
           "Profilers ran during this recording, so main-thread phase durations reflect the profiled target rather than unprofiled speed."
         )
       : null,
-    h("div", { class: "card-bd" },
+    h("div", { class: "card-bd", style: `--v-w:${numW([fmtVal(tot, "ms"), ...items.map(([, , ms]) => fmtVal(ms, "ms"))])}` },
       h("div", { class: "phase-bars", style: perturbed ? "opacity:0.75" : "" },
         h("div", { class: "phase-bar-row" },
           h("span", { class: "missed-lbl" }, "Work"),
@@ -5497,7 +5768,7 @@ function renderSingleMainThreadPhases(v, perturbed) {
         )
       ),
       h("div", { class: "phase-table" },
-        items.map(([name, cls, ms, note]) => h("div", { class: "phase-trow", style: "grid-template-columns:minmax(140px,1.4fr) minmax(80px,1fr) 84px 68px" },
+        items.map(([name, cls, ms, note]) => h("div", { class: "phase-trow", style: "grid-template-columns:minmax(140px,1.4fr) minmax(80px,1fr) max(84px, var(--v-w, 0px)) 68px" },
           h("span", { style: "font-weight:500;display:flex;align-items:center" }, h("i", { class: `ph-dot ${cls}` }), name),
           h("span", { class: "mono", style: "color:var(--ink-3);font-size:11.5px" }, note || ""),
           h("span", { class: "mono", style: `text-align:right;font-weight:${perturbed ? 400 : 500};${perturbed ? "color:var(--ink-3)" : ""}` }, fmtVal(ms, "ms")),
@@ -5548,7 +5819,7 @@ function renderSingleCpuHotspots(side) {
       ),
       h("div", { class: "card-hd-right" }, scopeToggle, toggle)
     ),
-    h("div", { class: "attr-table" },
+    h("div", { class: "attr-table", style: `--v-w:${numW(activeRows.map((r) => fmtVal(rowMs(r) / runs, "ms")))}` },
       h("div", { class: "single-row hd" },
         h("span", {}, byFile ? "File / script" : "Function & caller"),
         h("span", {}, "Self-time share"),
@@ -5637,7 +5908,7 @@ function renderSingleForcedLayout(lay, defaultRuns) {
     zeroForced
       ? h("div", { class: "attr-foot", style: "border-top:0" }, "Clean: zero synchronous forced layouts or style recalculations detected.")
       : rows.length
-        ? h("div", { class: "attr-table" },
+        ? h("div", { class: "attr-table", style: `--v-w:${numW(rows.map((r) => fmtVal(rowMs(r), "ms")))}` },
             h("div", { class: "single-row hd" },
               h("span", {}, "JavaScript call site forcing layout / style"),
               h("span", {}, "Forced time share"),
@@ -5821,7 +6092,8 @@ function renderMemoryRecording(m) {
     ),
     h("div", { class: "top-actions" },
       h("span", { class: "ref-pill" }, "probes: memory"),
-      h("span", { class: `status-pill ${validState[0]}` }, validState[1])
+      h("span", { class: `status-pill ${validState[0]}` }, validState[1]),
+      unitSwitch()
     )
   );
 
@@ -6200,7 +6472,8 @@ function renderRecording(m) {
     ),
     h("div", { class: "top-actions" },
       m.probes ? h("span", { class: "ref-pill" }, `probes: ${m.probes}`) : null,
-      h("span", { class: `status-pill ${validState[0]}` }, validState[1])
+      h("span", { class: `status-pill ${validState[0]}` }, validState[1]),
+      unitSwitch()
     )
   );
 
@@ -6389,7 +6662,7 @@ function renderLifecycleBlock(sides) {
     const rows = w.lifecycle || [];
     const maxWall = Math.max(...rows.map((r) => (finite(r.wall_ms) ? r.wall_ms : 0)), 1);
     const mod = w.modules;
-    return h("div", { class: "life-block" },
+    return h("div", { class: "life-block", style: `--v-w:${numW(rows.flatMap((r) => [finite(r.wall_ms) ? fmtVal(r.wall_ms, "ms") : "", fmtVal(finite(r.sampled_ms) ? r.sampled_ms : 0, "ms")]))}` },
       h("div", { class: "life-hd" }, `By lifecycle${name ? ` · ${name}` : ""} `,
         h("span", {}, "· each part's wall time on strobe's clock and the JavaScript sampled in it, as a share of wall time, not CPU")),
       rows.length
@@ -6439,11 +6712,26 @@ const httpQ = (m, k) => {
   return finite(m?.[k]) ? fmtVal(m[k], "ms") : "—";
 };
 
-// A cohort's words as `query http` says them (`says`), or, from an older strobe, its held time alone.
-function cohortSays(c) {
-  if (c.says) return c.says;
-  if (!finite(c.held_ms)) return "none of them was answered";
-  return `the server answered none for ${c.held_past_timeout ? "at least " : ""}${fmtVal(c.held_ms, "ms")}`;
+// A cohort's words as `query http` says them (query::http `says`), drawn again in the page's unit:
+// one stall it answered none of them in, or stalls back to back; and its timeouts (at the timeout as
+// configured). A cohort from before its fields keeps its own words.
+function cohortSays(c, timeoutMs) {
+  if (c.says && !finite(c.held_ms) && c.waves == null) return c.says;
+  const least = c.held_past_timeout ? "at least " : "";
+  const waves = c.waves || 1;
+  const carried = c.carried || 0;
+  let held = !finite(c.held_ms)
+    ? "none of them was answered"
+    : waves <= 1
+      ? `the server answered none for ${least}${fmtVal(c.held_ms, "ms")}`
+      : `spanned ${waves} stalls over ${least}${fmtVal(c.held_ms, "ms")} (longest silence ${finite(c.longest_silence_ms) ? fmtVal(c.longest_silence_ms, "ms") : "—"}; ${carried} probe${carried === 1 ? "" : "s"} waited across a brief drain)`;
+  const n = c.timeouts || 0;
+  if (n > 0) {
+    const k = c.timeouts_past_answers || 0;
+    const still = k === 0 ? "" : k === n && n === 1 ? ", still out after every answer" : k === n ? ", all still out after every answer" : k === 1 ? ", one of them still out after every answer" : `, ${k} of them still out after every answer`;
+    held += ` · ${n} timed out at ${finite(timeoutMs) ? timeoutMs : "?"} ms${still}`;
+  }
+  return held;
 }
 
 function renderCohortRow(c, timeoutMs) {
@@ -6454,12 +6742,12 @@ function renderCohortRow(c, timeoutMs) {
   const spans = (c.waves || 1) > 1;
   return h("div", { class: "cohort-row" },
     h("span", { class: "cohort-at" }, at, h("br"), `${c.probes} probes`),
-    h("div", { class: "cohort-bars", "aria-label": `latencies: ${lat.map((l) => (finite(l) ? l.toFixed(0) : "timeout")).join(", ")} ms` },
+    h("div", { class: "cohort-bars", "aria-label": `latencies: ${lat.map((l) => (finite(l) ? fmtBare(l, "ms") : "timeout")).join("; ")} ${timeLabel()}` },
       lat.map((l) => finite(l)
-        ? h("i", { style: `height:${Math.max(6, (100 * l) / top)}%`, title: `${l.toFixed(0)} ms` })
+        ? h("i", { style: `height:${Math.max(6, (100 * l) / top)}%`, title: fmtVal(l, "ms") })
         : h("i", { class: "timeout", title: `timed out at ${timeoutMs} ms: its latency is past it, unknown` }))
     ),
-    h("span", { class: `cohort-says${spans ? " spans" : ""}` }, capFirst(cohortSays(c)))
+    h("span", { class: `cohort-says${spans ? " spans" : ""}` }, capFirst(cohortSays(c, timeoutMs)))
   );
 }
 
@@ -6554,13 +6842,14 @@ function drawBlocksStrip(vals, p, u, n) {
       ? h("i", {
           class: "blk-band",
           style: `left:${x(p.lo)};width:calc(${x(p.hi)} - ${x(p.lo)})${blocks95(p) ? "" : ";background:none;border-style:dashed"}`,
-          title: `${capFirst(blocksIntervalWords(p, n))}: ${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`,
+          title: `${capFirst(blocksIntervalWords(p, n))}: ${fmtValues([p.median, p.lo, p.hi], u).slice(1).join(" … ")}`,
         })
       : null,
     finite(p.median) ? h("i", { class: "blk-med", style: `left:${x(p.median)}`, title: `median ${fmtVal(p.median, u)}` }) : null,
     vals.map((v, i) => (finite(v) ? h("i", { class: "blk-dot", style: `left:${x(v)}`, title: `block ${i + 1}: ${fmtVal(v, u)}` }) : null)),
     h("span", { class: "blk-tick", style: `left:${x(min)}` }, fmtVal(min, u)),
-    min !== max ? h("span", { class: "blk-tick", style: `left:${x(max)}` }, fmtVal(max, u)) : null
+    // One tick when both ends print alike (738.1 and 738.4 ms both read `738 ms`).
+    fmtVal(min, u) !== fmtVal(max, u) ? h("span", { class: "blk-tick", style: `left:${x(max)}` }, fmtVal(max, u)) : null
   );
 }
 
@@ -6571,7 +6860,8 @@ function blocksText(x, n) {
   if (x.refused) return `refused in ${x.refused_blocks} of ${n} blocks (${String(x.refused).replace(`: ${x.metric}: `, ": ")})`;
   const got = (x.values || []).filter(finite);
   if (finite(x.median)) {
-    return `median ${fmtVal(x.median, u)}  [${fmtVal(x.lo, u)} … ${fmtVal(x.hi, u)}]${blocks95(x) ? "" : ` (range over ${got.length} blocks, ${finite(x.confidence) ? coverageStr(x.confidence) : "unknown"} median coverage)`}`;
+    const [m, lo, hi] = fmtValues([x.median, x.lo, x.hi], u);
+    return `median ${m}  [${lo} … ${hi}]${blocks95(x) ? "" : ` (range over ${got.length} blocks, ${finite(x.confidence) ? coverageStr(x.confidence) : "unknown"} median coverage)`}`;
   }
   if (got.length === 1) return `${fmtVal(got[0], u)} (1 block)`;
   return "no value (nothing in these blocks measured it)";
@@ -6586,6 +6876,8 @@ function renderBlocksSeries(r, s) {
   const vals = p.values || [];
   const refused = !!p.verdict || !!p.refused;
   const headTag = shortRef((r.variants || [])[0]);
+  // The median and its interval printed together, as the text prints them.
+  const [medT, loT, hiT] = fmtValues([p.median, p.lo, p.hi], u);
   const pills = [s.engine && s.engine !== "chromium" ? s.engine : null, s.headless ? "headless" : null, s.session === "locked" ? "session locked" : s.session === "mixed" ? "session mixed" : null].filter(Boolean);
   const warns = dedupWarnings([...(r.warnings || []), ...(s.warnings || [])]).filter((w) => w.level === "warn" || w.level === "error");
   const cmds = [
@@ -6605,15 +6897,15 @@ function renderBlocksSeries(r, s) {
             pills.map((x) => h("span", { class: "ref-pill" }, x))
           ),
           h("h1", { class: "hero-headline" },
-            refused ? `${labelOf(m)} not measured` : finite(p.median) ? `${labelOf(m)}: median ${fmtVal(p.median, u)}` : vals.filter(finite).length === 1 ? `${labelOf(m)}: ${fmtVal(vals.find(finite), u)} (1 block)` : `${labelOf(m)}: no value`
+            refused ? `${labelOf(m)} not measured` : finite(p.median) ? `${labelOf(m)}: median ${medT}` : vals.filter(finite).length === 1 ? `${labelOf(m)}: ${fmtVal(vals.find(finite), u)} (1 block)` : `${labelOf(m)}: no value`
           ),
           h("p", { class: "hero-prose" },
             refused
               ? blocksText(p, n)
               : finite(p.median)
                 ? blocks95(p)
-                  ? [`One build measured in ${n} fresh blocks. The median's 95% interval over the blocks is `, h("strong", {}, `${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`), `. Nothing was compared: no better, worse or same is claimed.`]
-                  : [`One build measured in ${n} fresh blocks. The median's ${blocksIntervalWords(p, n)} is `, h("strong", {}, `${fmtVal(p.lo, u)} … ${fmtVal(p.hi, u)}`), `. Nothing was compared: no better, worse or same is claimed.`]
+                  ? [`One build measured in ${n} fresh blocks. The median's 95% interval over the blocks is `, h("strong", {}, `${loT} … ${hiT}`), `. Nothing was compared: no better, worse or same is claimed.`]
+                  : [`One build measured in ${n} fresh blocks. The median's ${blocksIntervalWords(p, n)} is `, h("strong", {}, `${loT} … ${hiT}`), `. Nothing was compared: no better, worse or same is claimed.`]
                 : `One build measured in ${n} block${n === 1 ? "" : "s"}: an interval needs two or more. Nothing was compared.`
           ),
           renderShown(s)
@@ -6697,6 +6989,15 @@ function renderExperimentInsightsSection(r, s) {
 
   const aa = !!r.plan?.aa;
 
+  const shown = movers.slice(0, 9).map((mv) => {
+    const delta = (mv.head_per_run ?? 0) - (mv.base_per_run ?? 0);
+    const isBytes = mv.unit === "bytes";
+    const baStr = isBytes
+      ? `${fmtBytes(mv.base_per_run)} → ${fmtBytes(mv.head_per_run)}`
+      : `${fmtBare(mv.base_per_run, "ms")} → ${fmtVal(mv.head_per_run, "ms")}`;
+    return { mv, delta, isBytes, baStr, dStr: isBytes ? fmtSignedBytes(delta) : fmtSigned(delta, "ms") };
+  });
+
   return h("section", { class: "card-surface", id: "insights" },
     h("div", { class: "card-hd" },
       h("div", { class: "card-hd-left" },
@@ -6706,18 +7007,14 @@ function renderExperimentInsightsSection(r, s) {
     ),
     h("div", { class: "card-bd" },
       movers.length
-        ? h("div", { class: "movers-block" },
+        ? h("div", { class: "movers-block", style: `--ba-w:${numW(shown.map((x) => x.baStr), 11.5)};--d-w:${numW(shown.map((x) => x.dStr), 12.5)}` },
             h("div", { class: "movers-hd" }, "What changed most between base and head (1 profiled launch / side)"),
-            movers.slice(0, 9).map((mv) => {
-              const delta = (mv.head_per_run ?? 0) - (mv.base_per_run ?? 0);
-              const isBytes = mv.unit === "bytes";
-              const baStr = isBytes
-                ? `${fmtBytes(mv.base_per_run)} → ${fmtBytes(mv.head_per_run)}`
-                : `${shortNum(mv.base_per_run)} → ${fmtVal(mv.head_per_run, "ms")}`;
-              const dStr = isBytes ? fmtSignedBytes(delta) : fmtSigned(delta, "ms");
+            shown.map(({ mv, delta, isBytes, baStr, dStr }) => {
               const improved = delta < 0;
               const cmd = mv.handles?.[0];
-              return h("div", { class: "mover-row", title: mv.title },
+              // Its line as the text words it, in the page's unit.
+              const line = `${mv.kind}: ${mv.function} ${isBytes ? fmtBytes(mv.base_per_run) : fmtVal(mv.base_per_run, "ms")} → ${isBytes ? fmtBytes(mv.head_per_run) : fmtVal(mv.head_per_run, "ms")} per run (${dStr})`;
+              return h("div", { class: "mover-row", title: line },
                 h("span", { class: "mv-kind" }, mv.kind),
                 h("span", { class: "mono", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)" }, mv.function),
                 h("span", { class: "mono mv-ba", style: "color:var(--ink-3);font-size:11.5px;text-align:right" }, baStr),
@@ -7310,7 +7607,10 @@ function drawLeakSeriesChart(w, headArr, baseArr, gStats, halfN, fmtFn, tone) {
   const yHiBound = y1 + yPad;
   const y = lin(yLoBound, yHiBound, H - m.b, m.t);
 
-  const rawYTicks = niceTicks(yLoBound, yHiBound, 4);
+  // Bytes print in binary units: their ticks are round in the unit they print in (2.0, 3.0 MB), not in
+  // bytes (2,000,000 B apart reads 1.91, 3.81 MB).
+  const per = fmtFn === fmtBytes ? (yHiBound >= 1024 * 1024 ? 1024 * 1024 : yHiBound >= 1024 ? 1024 : 1) : 1;
+  const rawYTicks = niceTicks(yLoBound / per, yHiBound / per, 4).map((t) => t * per);
   const yTicks = fmtFn === fmtCount ? rawYTicks.filter((t) => Math.abs(t - Math.round(t)) < 1e-9) : rawYTicks;
   const labels = yTicks.map(fmtFn);
   m.l = axisLeft(labels, m.l, 10);
@@ -7417,7 +7717,8 @@ function renderBisect(r) {
             type: "button", class: "btn-ghost", "aria-pressed": String(state.cliOpen),
             onclick: () => { state.cliOpen = !state.cliOpen; render(); },
           }, state.cliOpen ? "Report view" : "CLI output")
-        : null
+        : null,
+      unitSwitch()
     )
   );
 
@@ -7484,7 +7785,8 @@ function renderBisect(r) {
     }
     if (String(st.verdict || "").startsWith("same")) return { tag: "Not moved", detail: "Not moved", cls: "same", tone: "neutral" };
     const cl = classify(st, st.metric || metric, false);
-    return { tag: `Moved (${st.verdict})`, detail: `Moved (${st.verdict})`, cls: "moved", tone: cl.tone };
+    const words = verdictText(st, unitOf(st.metric || metric));
+    return { tag: `Moved (${words})`, detail: `Moved (${words})`, cls: "moved", tone: cl.tone };
   };
 
   // Shared interval domain across all steps
@@ -7516,7 +7818,7 @@ function renderBisect(r) {
     }, `${(c.short || st.short || c.commit || "").slice(0, 8)} · ${out.tag}`);
     el.addEventListener("pointerenter", (e) => showTip(e, `Step ${st.step} · ${c.short || st.short}`, [
       c.subject || st.subject ? ["Subject", c.subject || st.subject] : null,
-      ["Outcome", st.verdict || out.detail],
+      ["Outcome", verdictText(st, unitOf(st.metric || metric)) || out.detail],
     ]));
     el.addEventListener("pointermove", moveTip);
     el.addEventListener("pointerleave", hideTip);
@@ -7570,7 +7872,7 @@ function renderBisect(r) {
           h("span", { class: "bnode-arrow" }, "→"),
           h("span", {
             class: `bnode ${out.cls === "undecided" ? "undecided" : out.cls === "moved" ? "culprit" : ""}`,
-            title: `Step ${st.step}: ${st.subject || ""} (${st.verdict})`,
+            title: `Step ${st.step}: ${st.subject || ""} (${verdictText(st, unitOf(st.metric || metric))})`,
           }, `${st.short?.slice(0, 8) || st.commit?.slice(0, 8)} · ${out.tag}`),
         ];
       }),
@@ -7695,6 +7997,14 @@ function renderBisect(r) {
   if (scope === "runs" || Object.hasOwn(CPU_SCOPES, scope ?? "")) state.cpuScope = scope;
   const metric = asked("metric");
   if (metric) state.focusMetric = metric;
+  // The unit the address asks, else the one the report was written in, else µs.
+  TIME_UNIT = parseTimeUnit(asked("unit")) || parseTimeUnit(STROBE?.default_unit) || "us";
+  // An address edited by hand to another unit redraws in it; one without `unit=` goes back to the
+  // report's own unit.
+  addEventListener("hashchange", () => {
+    const u = parseTimeUnit(new URLSearchParams(location.hash.replace(/^#/, "")).get("unit")) || parseTimeUnit(STROBE?.default_unit) || "us";
+    if (u !== TIME_UNIT) { TIME_UNIT = u; render(); }
+  });
   render();
   const shown = metric ? document.getElementById("evidence") : scope ? document.querySelector('[aria-label="CPU profile scope"]')?.closest("section") : null;
   shown?.scrollIntoView({ block: "start" });
