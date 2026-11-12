@@ -537,7 +537,9 @@ export default bench({
   from there. `script("../src/x.mjs")` outside the harness runs each side's own copy; `i
   HarnessOverlay` means strobe placed a file base lacked, so both run that one.
 - A `count.*` only `--noworse` names is decided per series over both sides: once any block counted it,
-  a block that counted none reads 0 (`0 → 5 · worse`); a case that never counts it prints nothing of it.
+  a block that counted none reads 0 (`0 → 5 · worse`); a case that never counts it prints nothing of it
+  (native cases too). `! Uncounted`: no run of any case counted it, so nothing compared it: it never
+  happened on either side, or the name is wrong (the warning lists the counters the cases declare).
 
 ### Native apps, webviews, terminals
 

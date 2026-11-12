@@ -900,11 +900,20 @@ checked; only the --noworse counters compared, exactly`. `--noworse` adds its ma
 `noworse`: `Series::flagged`) is decided per series, across both sides and every block or launch
 (`flagged_counts`): once any of them counted it, one that counted none of it (and refused nothing of
 it) reads 0, with a 0 spread where it keeps one (`--runs N`), since a code path that never ran on one
-side is a count of 0 there; when none counted it, the series has none of it and prints nothing about
-it (it is not in `declared`), and a launch case does not refuse it. Through 0.29.0 such a counter read
-0 in a case that never counted it (`count.x 0 → 0 · no worse (exact)`). Now (adais and vps): base 0
-→ head 5 reads `count.fallbacks 0 → 5 · worse (exact)`, exit 1; 5 → 0 `no worse`; launches of 1 and 0
-`did not hold one value (1, 0)`; a timed comparison lists it as a secondary. In result.json the series keeps `base` (base's
+side is a count of 0 there; the block's kept recording gets the same 0 in its `meta.json` values, so
+`query <rec> summary` agrees with result.json. When none counted it, the series has none of it and
+prints nothing about it (it is not in `declared`); a check whose head failed still lists one base
+counted. No block refuses such a counter for not counting it: not a launch case, not a native block
+(native, app and exe targets, a native side of an implementation comparison; through 0.29.0 refused
+`NotForTarget: count.x is not measured for a native app`). A name no case declares and no run of any
+case counted, in the whole experiment, warns `Uncounted` once (§10.2): `--noworse count.falbacks: no
+run of any case counted it, so nothing compared it: either what it counts never happened on either
+side (0 on both, nothing to hold), or no case counts that name (check it: the cases declare
+count.items)` (`no case declares a counter` when none does); the exit code stays. Through 0.29.0 such
+a counter read 0 in a case that never counted it (`count.x 0 → 0 · no worse (exact)`). Now (adais and
+vps): base 0 → head 5 reads `count.fallbacks 0 → 5 · worse (exact)`, exit 1; 5 → 0 `no worse`;
+launches of 1 and 0 `did not hold one value (1, 0)`; a timed comparison lists it as a secondary. In
+result.json the series keeps `base` (base's
 side, as head's fields), `base_values` and `counters` (`metric`, `margin` as a fraction, `state`
 `no_worse`, `worse`, `unstable`, `missing` or `not_compared`, `passed`, `stable`, `base` and `head`
 medians, `base_runs`, `head_runs`, `why`, `text`). This is the comparison a shared CI runner allows
@@ -3049,8 +3058,10 @@ flowchart LR
   or `after the block began (before its first page loaded)` (an untimed page block not on a phone runs
   the browser's thread timeline from before the target's prepare and first page load, `before its
   prepare` for an app; strobe's own speed checks, the one run again after a slow one too, are left out
-  of the stretch before run 1, their ticks counted neither busy nor watched, and each run's edges take
-  a tick, so no tick holds both a run's CPU and what came before it; the OS sampler starts there too, its other readers taking a run's
+  of the stretch before run 1, their ticks counted neither busy nor watched; a run's start takes a
+  tick, and its end another right after the measured window closes, before the reads after it and the
+  reset, as native, script and terminal blocks' do, so no tick holds both a run's CPU and what came
+  before or after it; the OS sampler starts there too, its other readers taking a run's
   window as before). A `tty()` check keeps a thread timeline of the program too and says `busy from
   0.0 s to 2.0 s after the program started, while run 1 ran from 0.6 s to 3.1 s`. The
   timeline sees no other process, so other work on the target's CPUs cannot hold up the second half (in
@@ -5527,7 +5538,7 @@ emits:
 | `CursorNotParked` | warn | a native block's OS cursor could not be moved onto the pointer's points, so hover tracking saw it elsewhere |
 | `GpuCacheGrowing` | warn | a variant's GPU shader caches still grew in its third warm-up block (§13.2) |
 | `VariantChanged` | warn | a folder variant's commit or uncommitted changes differ, when a series builds it, from when the bench started: later series measure what it holds then |
-| `HarnessOverlay` | warn, info | the harness copied into a variant's folder replaced a file its commit tracks (warn) or placed one it lacked (info), and its script, cli or tty target runs that file (a script's entry, a word of `run` or `build`, or of a `cli()` case's own `ctx.exec("<line>")`): that side runs the bench's own copy, so what differs in it is gone from the comparison |
+| `HarnessOverlay` | warn, info | the harness copied into a variant's folder replaced a file its commit tracks (warn) or placed one it lacked (info), and its script, cli or tty target runs that file (a script's entry, a word of `run` or `build`, a tty's `run` from its `cwd`, or a word of a `cli()` case's own `ctx.exec("<line>")`): that side runs the bench's own copy, so what differs in it is gone from the comparison. A `script()` entry outside the harness that a git ref lacks is placed too (info); one the ref holds is never replaced (§9.6). Said once each, also as a progress line (`!` warn, `i` info); only the warning reaches a PR block (§9.5) |
 | `Uncounted` | warn | a `count.<name>` only `--noworse` names, which no case declares and no run of any case counted: nothing compared it; either what it counts never happened on either side, or no case counts that name (the warning lists the counters the cases declare) |
 | `Unattributed` | warn | macOS: a launched app bundle did not become its own responsible process, so its XPC services are missing from its CPU, memory, wakes and GPU (§13.2); in a native block's experiment and a native `record` |
 | `PixelsDiffer` | warn | `--pixels`: base and head drew different pixels at a snapshot |
