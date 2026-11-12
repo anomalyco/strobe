@@ -103,6 +103,15 @@ impl Host {
         matches!(self, Host::WindowsX64 | Host::MacosArm64 | Host::LinuxX64)
     }
 
+    /// The host of this OS whose evidence the matrix holds.
+    pub fn primary_of(self) -> Host {
+        match self.os() {
+            Os::Windows => Host::WindowsX64,
+            Os::Macos => Host::MacosArm64,
+            Os::Linux => Host::LinuxX64,
+        }
+    }
+
     /// `windows-x64`, as result.json writes it.
     pub fn name(self) -> &'static str {
         match self {
@@ -220,12 +229,18 @@ impl Runtime {
 
     /// The runtime of a bench target as the runner describes it (`describe["targets"][name]`, after
     /// `--engine` set every page's `engine`). `windowless`: the target opens no window (`window: false`
-    /// on it or its app profile); `phone`: the bench runs its pages on a phone (`--mobile`). None for
-    /// a kind strobe does not know.
+    /// on it or its app profile); `phone`: the bench runs its phone targets on a phone (`--mobile`). None
+    /// where strobe runs nothing: a kind or engine it does not know, and under `--mobile` every target but
+    /// a Chromium page that emulates a phone (`phone_refusal` refuses the rest before anything runs).
     pub fn of_target(target: &Value, windowless: bool, phone: bool) -> Option<Runtime> {
-        Some(match target["kind"].as_str()? {
-            "web" | "url" if phone => Runtime::AndroidChrome,
-            "web" | "url" => match target["engine"].as_str().and_then(|e| WebEngine::parse(e).ok()).unwrap_or_default() {
+        let kind = target["kind"].as_str()?;
+        let page = matches!(kind, "web" | "url");
+        if phone {
+            let engine = Runtime::engine(target)?;
+            return (page && target["emulate"] == "mobile" && engine == WebEngine::Chromium).then_some(Runtime::AndroidChrome);
+        }
+        Some(match kind {
+            _ if page => match Runtime::engine(target)? {
                 WebEngine::Chromium => Runtime::ChromiumPage,
                 WebEngine::Firefox => Runtime::FirefoxPage,
                 WebEngine::Webkit => Runtime::WebkitPage,
@@ -239,6 +254,57 @@ impl Runtime {
             "tty" => Runtime::Tty,
             _ => return None,
         })
+    }
+
+    /// A page target's engine: Chromium when it names none, None when it names one strobe does not know.
+    fn engine(target: &Value) -> Option<WebEngine> {
+        match target["engine"].as_str() {
+            None => Some(WebEngine::Chromium),
+            Some(e) => WebEngine::parse(e).ok(),
+        }
+    }
+
+    /// The runtime of a `strobe record` target (after a local page became its `file://` address):
+    /// `engine` (`--engine`), `phone` (`--mobile`), `native` (an app profile of kind native, or
+    /// `--native`), `webview` (a profile of kind webview), `windowless` (`--windowless`). `pid:` and
+    /// `proc:` are a process measured from outside, as a native app is. None for a trace import
+    /// (`file:` of a trace: nothing was measured) and anything strobe does not record.
+    pub fn of_record(target: &str, engine: Option<WebEngine>, phone: bool, native: bool, webview: bool, windowless: bool) -> Option<Runtime> {
+        let has = |p: &str| target.starts_with(p);
+        Some(if has("wir:") {
+            Runtime::IosSafari
+        } else if has("pid:") || has("proc:") {
+            Runtime::Native
+        } else if has("app:") || has("exe:") {
+            match (native, webview) {
+                (true, _) if windowless => Runtime::NativeWindowless,
+                (true, _) => Runtime::Native,
+                (false, true) => Runtime::WebviewApp,
+                (false, false) => Runtime::ChromiumApp,
+            }
+        } else if has("cdp:") || has("ws://") {
+            Runtime::ChromiumApp
+        } else if has("http://") || has("https://") || has("file://") {
+            match engine.unwrap_or_default() {
+                WebEngine::Chromium if phone => Runtime::AndroidChrome,
+                _ if phone => return None,
+                WebEngine::Chromium => Runtime::ChromiumPage,
+                WebEngine::Firefox => Runtime::FirefoxPage,
+                WebEngine::Webkit => Runtime::WebkitPage,
+            }
+        } else {
+            return None;
+        })
+    }
+
+    /// A page in a browser strobe launched: what "a page measured from outside" can be.
+    pub fn is_page(self) -> bool {
+        matches!(self, Runtime::ChromiumPage | Runtime::FirefoxPage | Runtime::WebkitPage)
+    }
+
+    /// Measured on another device (a phone) from this host: its path is said "from" the host.
+    pub fn on_device(self) -> bool {
+        matches!(self, Runtime::AndroidChrome | Runtime::IosSafari)
     }
 }
 
@@ -268,8 +334,11 @@ pub enum Capability {
     HardwareCounters,
     /// Wakes of the CPU package from idle (macOS): a whole-chip count the OS attributes per process.
     PackageIdle,
-    /// Frames on screen: presented frames, their intervals and drops, a page's canvas frames.
+    /// Frames on screen: presented frames, their intervals and drops (a browser's trace, the OS's presents).
     Frames,
+    /// A page's own WebGPU canvas frames, from strobe's hook on the canvas context (`canvas.*`): no
+    /// frame on screen proves it, so evidence of `Frames` says nothing of it.
+    Canvas,
     /// Input to presentation: discrete inputs' and scrolls' latency.
     InputLatency,
     /// The OS's GPU use and memory per process.
@@ -288,7 +357,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 14] = [
+    pub const ALL: [Capability; 15] = [
         Capability::WallAndCounts,
         Capability::PageEngine,
         Capability::ProcessCpu,
@@ -296,6 +365,7 @@ impl Capability {
         Capability::HardwareCounters,
         Capability::PackageIdle,
         Capability::Frames,
+        Capability::Canvas,
         Capability::InputLatency,
         Capability::Gpu,
         Capability::Pixels,
@@ -315,6 +385,7 @@ impl Capability {
             Capability::HardwareCounters => "hardware_counters",
             Capability::PackageIdle => "package_idle",
             Capability::Frames => "frames",
+            Capability::Canvas => "canvas",
             Capability::InputLatency => "input_latency",
             Capability::Gpu => "gpu",
             Capability::Pixels => "pixels",
@@ -335,6 +406,7 @@ impl Capability {
             Capability::HardwareCounters => "hardware counters",
             Capability::PackageIdle => "package idle wakes",
             Capability::Frames => "frames",
+            Capability::Canvas => "canvas frames",
             Capability::InputLatency => "input latency",
             Capability::Gpu => "GPU",
             Capability::Pixels => "pixels",
@@ -349,11 +421,37 @@ impl Capability {
         Capability::ALL.into_iter().find(|c| c.name() == s)
     }
 
-    /// A metric's capability, families by their base (`model::metric`); None for a name strobe does not know.
+    /// A metric's capability, families by their base (`model::metric`). Stricter than the catalog's own
+    /// lookup, which every metric name strobe reads goes through and keeps as it is: a `{…}` filter only
+    /// on `net.requests` and `net.bytes`, and the launch package's names (`RESERVED_LAUNCH`) are no
+    /// milestone of `Launch` until the catalog has them. Any other `launch.<name>` is a milestone the
+    /// bench file names, so it stays `Launch`. None for a name strobe does not know.
     pub fn of(metric: &str) -> Option<Capability> {
+        if let Some((base, rest)) = metric.split_once('{')
+            && (!matches!(base, "net.requests" | "net.bytes") || !rest.ends_with('}') || rest.len() < 2)
+        {
+            return None;
+        }
+        let known = model::METRICS.iter().any(|d| d.name == metric);
+        if !known && metric.strip_prefix("launch.").is_some_and(|m| RESERVED_LAUNCH.contains(&m)) {
+            return None;
+        }
         model::metric(metric).map(|d| d.capability)
     }
+
+    /// One of the capabilities a target's row in the README's summary rolls up (`target_support`): what
+    /// every run of the target measures, never a capability that is preview by its nature or needs
+    /// hardware beyond the machine (package idle wakes, GPU, frames, input, pixels, the launch signals).
+    pub fn core(self) -> bool {
+        CORE.contains(&self)
+    }
 }
+
+/// The capabilities a target's summary rolls up (`Capability::core`).
+pub const CORE: [Capability; 5] = [Capability::WallAndCounts, Capability::PageEngine, Capability::ProcessCpu, Capability::ProcessMemory, Capability::TtyGrid];
+
+/// Launch metrics the launch package (OS launch feedback) defines: no path until they are catalog entries.
+pub const RESERVED_LAUNCH: [&str; 4] = ["bounces", "checkin", "input_idle", "startup_notify"];
 
 impl fmt::Display for Capability {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -446,6 +544,7 @@ const LAUNCH_SIGNAL: &str = "no fixture gives the OS's launch feedback a known a
 const LAUNCH: &str = "launch.ready of known/native.bench.ts ready-0 and ready-300 ran in --check only; no paired A/A or planted A/B";
 const PAGE_LAUNCH: &str = "no planted page launch has run on this OS; the planted launch case is in scripts/dev/known/planted.bench.ts, which has not landed";
 const PIXELS: &str = "canvas.bench.ts ran in --check only, and a one-key timed block costs over the 2% budget";
+const CANVAS: &str = "no fixture draws a known number of WebGPU canvas frames; frames' evidence never runs the canvas hook";
 const TTY: &str = "known/tty.bench.ts passes --check with its known frames, bytes and 20 ms answers; no paired A/A or planted A/B";
 const HTTP: &str = "http-probe.bench.ts recovers its stall cohorts, but its timed A/A had 6 clean pairs and no planted A/B ran";
 const FIREFOX: &str = "Firefox ran headless --check and leak runs (a 100 KB/run plant read +100 KB/run); no paired A/A or planted A/B of a run metric";
@@ -475,10 +574,11 @@ const NO_WEBVIEW: &str = "webview() targets drive the OS's webview only on Windo
 
 const LINUX_CLI_CPU: &str = "100 A/As of one command said same 99 times, and a 20 M against 22 M loop read cpu.work +9.2% [+8.1 … +11] for +10%; no known-answer cpu.work of known/cli.bench.ts nor a boundary refusal is recorded";
 const LINUX_CLI_MEMORY: &str = "memory.peak is refused under strobe's own resident set (the floor said); no known answer above it or paired A/B is recorded";
-const LINUX_SCRIPT_CPU: &str = "derive/script.bench.ts read 198 to 204 ms for a 200 ms child, but a planted 2× loop read cpu.work +104% [+103 … +105], which misses +100% (a VM's CPU time)";
+const LINUX_SCRIPT_CPU: &str = "derive/script.bench.ts read 198 to 204 ms for a 200 ms child; the planted 2× loop that read cpu.work +104% [+103 … +105] ran on 2026-11-06, before 758dc27 read a run's edges at t0 and t1 (the old reading scaled each run by its process walk, about 3 ms here: +104% for +100%): run planted.bench.ts again";
 const LINUX_SCRIPT_COUNTERS: &str =
     "a planted 1×/2× loop read cpu.instructions +100% [+100 … +100] (A/A spread 0.022%), but the loop is no committed fixture and ran before the counter blocks' fixes of 2026-11-08";
-const LINUX_PAGE_CPU: &str = "a busy-wait's cpu.work reads 20% under its wall time in a VM (steal), so no known answer holds here";
+const LINUX_PAGE_CPU: &str =
+    "the known page spins on wall time, and in a VM with 20% steal its renderer ran 80 ms of 100 (cpu.work read 20% under): needs a fixed-work page and a check of the VM's steal";
 const LINUX_NATIVE_CPU: &str = "known tick read 405 ms for 400.9; its A/A (+0.2% [−0.3 … +0.7], 8 pairs) and planted 2× (+97% [+96 … +98] for +96.8%) ran on 0.11.0 with an app outside scripts/dev, before cpu.work's run edges changed (758dc27): run both again on a committed fixture";
 const LINUX_COUNTERS: &str = "a native app's instructions were read with no known answer; no committed fixture plants them";
 
@@ -510,6 +610,7 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::ChromiumPage, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_UNRUN), linux: Preview(COUNTERS_UNRUN) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::Frames, windows: Preview(WIN_FRAMES), macos: Preview(MAC_FRAMES), linux: Preview(NO_DISPLAY) },
+    Row { runtime: Runtime::ChromiumPage, capability: Capability::Canvas, windows: Preview(CANVAS), macos: Preview(CANVAS), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::InputLatency, windows: Preview(WIN_INPUT), macos: Preview(MAC_INPUT), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::Gpu, windows: Preview(GPU_TRUTH), macos: Preview(GPU_TRUTH), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::Pixels, windows: Preview(PIXELS), macos: Preview(MAC_UNRUN), linux: Preview(NO_DISPLAY) },
@@ -522,6 +623,7 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::FirefoxPage, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_FIREFOX), linux: Preview(COUNTERS_UNRUN) },
     Row { runtime: Runtime::FirefoxPage, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
     Row { runtime: Runtime::FirefoxPage, capability: Capability::Frames, windows: Preview(FIREFOX_FRAMES), macos: Preview(MAC_FIREFOX), linux: Preview(NO_DISPLAY) },
+    Row { runtime: Runtime::FirefoxPage, capability: Capability::Canvas, windows: Preview(CANVAS), macos: Preview(MAC_FIREFOX), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::FirefoxPage, capability: Capability::InputLatency, windows: Preview(FIREFOX_FRAMES), macos: Preview(MAC_FIREFOX), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::FirefoxPage, capability: Capability::Gpu, windows: Preview(GPU_TRUTH), macos: Preview(GPU_TRUTH), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::FirefoxPage, capability: Capability::Pixels, windows: Preview(PIXELS), macos: Preview(MAC_FIREFOX), linux: Preview(NO_DISPLAY) },
@@ -534,16 +636,17 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::WebkitPage, capability: Capability::HardwareCounters, windows: Refused(NO_WEBKIT), macos: Preview(MAC_SAFARI), linux: Preview(COUNTERS_UNRUN) },
     Row { runtime: Runtime::WebkitPage, capability: Capability::PackageIdle, windows: Refused(NO_WEBKIT), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
     Row { runtime: Runtime::WebkitPage, capability: Capability::Frames, windows: Refused(NO_WEBKIT), macos: Preview(MAC_SAFARI), linux: Preview(NO_DISPLAY) },
+    Row { runtime: Runtime::WebkitPage, capability: Capability::Canvas, windows: Refused(NO_WEBKIT), macos: Preview(CANVAS), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::WebkitPage, capability: Capability::InputLatency, windows: Refused(NO_WEBKIT), macos: Preview(MAC_SAFARI), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::WebkitPage, capability: Capability::Gpu, windows: Refused(NO_WEBKIT), macos: Preview(GPU_TRUTH), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::WebkitPage, capability: Capability::Pixels, windows: Refused(NO_WEBKIT), macos: Preview(MAC_SAFARI), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::WebkitPage, capability: Capability::HttpProbe, windows: Refused(NO_WEBKIT), macos: Preview(MAC_SAFARI), linux: Preview(HTTP) },
     Row { runtime: Runtime::AndroidChrome, capability: Capability::WallAndCounts, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
     Row { runtime: Runtime::AndroidChrome, capability: Capability::PageEngine, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
-    Row { runtime: Runtime::AndroidChrome, capability: Capability::ProcessCpu, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
-    Row { runtime: Runtime::AndroidChrome, capability: Capability::ProcessMemory, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
     Row { runtime: Runtime::AndroidChrome, capability: Capability::Frames, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
+    Row { runtime: Runtime::AndroidChrome, capability: Capability::Canvas, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
     Row { runtime: Runtime::AndroidChrome, capability: Capability::InputLatency, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
+    Row { runtime: Runtime::AndroidChrome, capability: Capability::Pixels, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
     Row { runtime: Runtime::AndroidChrome, capability: Capability::HttpProbe, windows: Preview(PHONE), macos: Preview(PHONE), linux: Preview(PHONE) },
     Row { runtime: Runtime::IosSafari, capability: Capability::WallAndCounts, windows: Preview(IPHONE), macos: Preview(IPHONE), linux: Preview(IPHONE) },
     Row { runtime: Runtime::IosSafari, capability: Capability::PageEngine, windows: Preview(IPHONE), macos: Preview(IPHONE), linux: Preview(IPHONE) },
@@ -554,6 +657,7 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::ChromiumApp, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(APP), linux: Preview(APP) },
     Row { runtime: Runtime::ChromiumApp, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
     Row { runtime: Runtime::ChromiumApp, capability: Capability::Frames, windows: Preview(APP), macos: Preview(APP), linux: Preview(NO_DISPLAY) },
+    Row { runtime: Runtime::ChromiumApp, capability: Capability::Canvas, windows: Preview(CANVAS), macos: Preview(CANVAS), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumApp, capability: Capability::InputLatency, windows: Preview(APP), macos: Preview(APP), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumApp, capability: Capability::Gpu, windows: Preview(GPU_TRUTH), macos: Preview(GPU_TRUTH), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumApp, capability: Capability::Pixels, windows: Preview(APP), macos: Preview(APP), linux: Preview(NO_DISPLAY) },
@@ -567,6 +671,7 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::WebviewApp, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Refused(NO_WEBVIEW), linux: Refused(NO_WEBVIEW) },
     Row { runtime: Runtime::WebviewApp, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Refused(NO_WEBVIEW), linux: Refused(NO_WEBVIEW) },
     Row { runtime: Runtime::WebviewApp, capability: Capability::Frames, windows: Preview(WEBVIEW), macos: Refused(NO_WEBVIEW), linux: Refused(NO_WEBVIEW) },
+    Row { runtime: Runtime::WebviewApp, capability: Capability::Canvas, windows: Preview(CANVAS), macos: Refused(NO_WEBVIEW), linux: Refused(NO_WEBVIEW) },
     Row { runtime: Runtime::WebviewApp, capability: Capability::InputLatency, windows: Preview(WEBVIEW), macos: Refused(NO_WEBVIEW), linux: Refused(NO_WEBVIEW) },
     Row { runtime: Runtime::WebviewApp, capability: Capability::Gpu, windows: Preview(GPU_TRUTH), macos: Refused(NO_WEBVIEW), linux: Refused(NO_WEBVIEW) },
     Row { runtime: Runtime::WebviewApp, capability: Capability::Pixels, windows: Preview(WEBVIEW), macos: Refused(NO_WEBVIEW), linux: Refused(NO_WEBVIEW) },
@@ -607,18 +712,31 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::Tty, capability: Capability::WallAndCounts, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
     Row { runtime: Runtime::Tty, capability: Capability::ProcessCpu, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
     Row { runtime: Runtime::Tty, capability: Capability::ProcessMemory, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
+    Row { runtime: Runtime::Tty, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_UNRUN), linux: Preview(COUNTERS_UNRUN) },
+    Row { runtime: Runtime::Tty, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
     Row { runtime: Runtime::Tty, capability: Capability::TtyGrid, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
     Row { runtime: Runtime::Tty, capability: Capability::Launch, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
     Row { runtime: Runtime::Tty, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
 ];
 
-/// OS input (`fairness.input == "os"`: a native side or a page from outside driven through the OS):
-/// what each side measured also depends on where the OS delivered strobe's input.
+/// OS input: strobe's input reached a side through the OS (`fairness.input == "os"`, or a headed page
+/// measured from outside that took input): what it measured also depends on where the OS delivered it.
 pub const OS_INPUT: Modifier = Modifier {
     windows: Preview("OS input reached headed pages and native apps in --check runs; no planted latency was recovered through it"),
     macos: Preview("OS input to headed Chromium arrived 9 of 9 times on an Apple silicon laptop; no planted latency was recovered through it"),
     linux: Preview("XTest input has run only under a virtual display; a real display's has not"),
 };
+
+const OUTSIDE: &str = "a page measured from outside (its runs on the host's clock, its frames the OS's presents) has run in --check only; no known answer was recovered that way";
+
+/// A page measured from outside (`cross_engine`: a page beside another engine's target, in an
+/// implementation comparison or a check of several targets): Chromium's trace is off, its runs and
+/// phases are timed on the host's clock and its frames are the OS's presents. A page's evidence comes
+/// from its trace, so it says nothing of these (`OUTSIDE_CAPABILITIES`).
+pub const OUTSIDE_PAGE: Modifier = Modifier { windows: Preview(OUTSIDE), macos: Preview(OUTSIDE), linux: Preview(OUTSIDE) };
+
+/// What measuring a page from outside changes: its wall time and phases, its frames and its input latency.
+pub const OUTSIDE_CAPABILITIES: [Capability; 3] = [Capability::WallAndCounts, Capability::Frames, Capability::InputLatency];
 
 /// The row of a runtime and capability; None: strobe measures no metric of that capability for that
 /// kind of target.
@@ -654,17 +772,39 @@ pub enum Sides {
     Two { base: Runtime, head: Runtime },
 }
 
-/// What else a series' metric passed through (SPEC §21.1): strobe read the window's pixels in a run or
-/// ended a launch on them (`driver.pixel_reads` over 0, `launch.until` on a window's paint or pixels),
-/// or drove a side through the OS's input (`fairness.input == "os"`).
+/// What else a series' metric passed through (SPEC §21.1), from what its blocks did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Through {
-    pub pixels: bool,
+    /// The base side (a single target's only side) read the window's pixels (`uses_pixels`).
+    pub base_pixels: bool,
+    /// An implementation comparison's head side read them.
+    pub head_pixels: bool,
+    /// strobe's input reached a side through the OS: `fairness.input == "os"`, and any headed page
+    /// measured from outside that took input (a check of several targets writes no `fairness`).
     pub os_input: bool,
+    /// A page side was measured from outside (`Series::cross_engine`: an implementation comparison's
+    /// side, or a page in a check of several targets).
+    pub outside_page: bool,
+}
+
+/// What made a path preview, in the order a reason names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+    /// The runtime and capability themselves have no known-answer check on this OS.
+    Capability,
+    /// A side read the window's pixels, whose reads have none.
+    Pixels,
+    /// A page measured from outside.
+    OutsidePage,
+    /// Input through the OS.
+    OsInput,
+    /// Checked on the OS's primary architecture only.
+    Architecture,
 }
 
 /// A path's support as result.json writes it (`series[].support`): its tier and what decided it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathSupport {
     pub tier: Support,
     /// The runtime the tier is of: the only one, or in an implementation comparison the side whose
@@ -673,35 +813,271 @@ pub struct PathSupport {
     pub capability: Capability,
     pub host: Host,
     pub os_input: bool,
+    /// A side read the window's pixels.
     pub pixels: bool,
+    pub outside_page: bool,
+    /// What made it preview; empty when verified.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_by: Vec<Cause>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_runtime: Option<Runtime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_runtime: Option<Runtime>,
 }
 
-/// One side's tier: its runtime and capability, and its pixels when the series read them.
-fn side(runtime: Runtime, capability: Capability, host: Host, through: Through) -> Option<Support> {
-    let own = support(runtime, capability, host)?;
-    if through.pixels { Some(own.min(support(runtime, Capability::Pixels, host)?)) } else { Some(own) }
+/// A cell's part in a path: None when refused, else what it adds to `causes` (nothing when verified on
+/// a primary host; `Architecture` when verified on its OS's other one).
+fn note(cell: &Cell, host: Host, cause: Cause, causes: &mut Vec<Cause>) -> Option<()> {
+    let c = match cell {
+        Cell::Refused(_) => return None,
+        Cell::Verified(_) if host.primary() => return Some(()),
+        Cell::Verified(_) => Cause::Architecture,
+        Cell::Preview(_) => cause,
+    };
+    if !causes.contains(&c) {
+        causes.push(c);
+    }
+    Some(())
 }
 
-/// The support of a metric's path: each side's runtime with the capability (and pixels when the series
-/// read them), the least of the sides, and OS input's when a side was driven through it. None when any
-/// part is refused there: a refused path has no label.
+/// One side's causes: its runtime and capability, its pixels when it read them, and a page's outside
+/// measurement. None when a part is refused (or has no row) there.
+fn side(runtime: Runtime, capability: Capability, host: Host, pixels: bool, outside: bool, causes: &mut Vec<Cause>) -> Option<()> {
+    let os = host.os();
+    note(row(runtime, capability)?.on(os), host, Cause::Capability, causes)?;
+    if pixels {
+        note(row(runtime, Capability::Pixels)?.on(os), host, Cause::Pixels, causes)?;
+    }
+    if outside && runtime.is_page() && OUTSIDE_CAPABILITIES.contains(&capability) {
+        note(OUTSIDE_PAGE.on(os), host, Cause::OutsidePage, causes)?;
+    }
+    Some(())
+}
+
+/// The support of a capability's path: each side's runtime with the capability (with pixels on the side
+/// that read them, and a page's outside measurement), both sides of an implementation comparison, and
+/// OS input when a side was driven through it; verified only when every part is. None when any part is
+/// refused there: a refused path has no label.
 pub fn resolve(sides: Sides, capability: Capability, host: Host, through: Through) -> Option<PathSupport> {
-    let (runtime, tier, base_runtime, head_runtime) = match sides {
-        Sides::One(r) => (r, side(r, capability, host, through)?, None, None),
+    let mut causes = Vec::new();
+    let (runtime, base_runtime, head_runtime) = match sides {
+        Sides::One(r) => {
+            side(r, capability, host, through.base_pixels, through.outside_page, &mut causes)?;
+            (r, None, None)
+        }
         Sides::Two { base, head } => {
-            let (b, h) = (side(base, capability, host, through)?, side(head, capability, host, through)?);
-            (if h < b { head } else { base }, b.min(h), Some(base), Some(head))
+            let (mut b, mut h) = (Vec::new(), Vec::new());
+            side(base, capability, host, through.base_pixels, through.outside_page, &mut b)?;
+            side(head, capability, host, through.head_pixels, through.outside_page, &mut h)?;
+            let runtime = if b.is_empty() && !h.is_empty() { head } else { base };
+            for c in b.into_iter().chain(h) {
+                if !causes.contains(&c) {
+                    causes.push(c);
+                }
+            }
+            (runtime, Some(base), Some(head))
         }
     };
-    let tier = if through.os_input { tier.min(os_input(host)?) } else { tier };
-    Some(PathSupport { tier, runtime, capability, host, os_input: through.os_input, pixels: through.pixels, base_runtime, head_runtime })
+    if through.os_input {
+        note(OS_INPUT.on(host.os()), host, Cause::OsInput, &mut causes)?;
+    }
+    causes.sort();
+    let tier = if causes.is_empty() { Support::Verified } else { Support::Preview };
+    let pixels = through.base_pixels || (matches!(sides, Sides::Two { .. }) && through.head_pixels);
+    Some(PathSupport { tier, runtime, capability, host, os_input: through.os_input, pixels, outside_page: through.outside_page, preview_by: causes, base_runtime, head_runtime })
 }
 
-/// A metric's path, by its name (`model::metric`); None for a name strobe does not know or a refused path.
+/// Whether a target of this runtime reads this metric on this OS at all, beyond its capability's row:
+/// the metrics only one kind of target reads (their catalog entries say which), and what an OS gives
+/// no way to read (`outside::not_on_this_os`, the counters' table in SPEC 7.5). A plan names its
+/// metrics before anything runs, so its lookup says "not measured" where the run would refuse.
+pub fn measures(runtime: Runtime, metric: &str, os: Os) -> bool {
+    use Runtime::*;
+    let base = metric.split_once('{').map_or(metric, |(b, _)| b);
+    let family = |p: &str| base.strip_prefix(p).is_some_and(|r| !r.is_empty());
+    let only = |rs: &[Runtime]| rs.contains(&runtime);
+    let target = match base {
+        _ if family("metric.") => only(&[Cli]),
+        _ if family("app.") => only(&[Tty]),
+        "cli.launch" | "memory.peak" => only(&[Cli]),
+        "cpu.pty_host" => only(&[Tty]),
+        "js.heap.retained" => only(&[Script]),
+        "cpu.main" | "cpu.main.busy" => only(&[Script, Native, NativeWindowless]),
+        "ui.cpu" | "ui.wakes" => only(&[Native]),
+        "memory.app.host" => only(&[Native, NativeWindowless]),
+        _ => match Capability::of(metric) {
+            Some(Capability::ProcessMemory) => runtime != Cli,
+            Some(Capability::PageEngine) => runtime != Script,
+            _ => true,
+        },
+    };
+    let here = match base {
+        "gpu.vram" | "gpu.shared" | "memory.app.host" | "ui.wakes" | "cpu.foreign" => os != Os::Macos,
+        "memory.app.pss" => os == Os::Linux,
+        "cpu.pty_host" => os == Os::Windows,
+        "energy.cpu" | "cpu.idle_wakes" => os == Os::Macos,
+        "cpu.instructions" => os != Os::Windows,
+        _ => true,
+    };
+    target && here
+}
+
+/// A metric's path, by its name (`Capability::of`, `measures` for each side). `cpu.fixture` is the
+/// CPU of the bench file's fixture, a process of this computer beside either side, read as a windowless
+/// process's whatever the sides are (a phone's page too). None for a name strobe does not know, a
+/// metric no side reads, or a refused path.
 pub fn resolve_metric(sides: Sides, metric: &str, host: Host, through: Through) -> Option<PathSupport> {
-    resolve(sides, Capability::of(metric)?, host, through)
+    let capability = Capability::of(metric)?;
+    if metric == "cpu.fixture" {
+        return resolve(Sides::One(Runtime::NativeWindowless), capability, host, Through::default());
+    }
+    let os = host.os();
+    let read = match sides {
+        Sides::One(r) => measures(r, metric, os),
+        Sides::Two { base, head } => measures(base, metric, os) && measures(head, metric, os),
+    };
+    if !read {
+        return None;
+    }
+    resolve(sides, capability, host, through)
+}
+
+/// A comparison's support (`comparison.support`): none when the comparison was refused, else its path's.
+pub fn resolve_comparison(sides: Sides, metric: &str, host: Host, through: Through, refused: bool) -> Option<Support> {
+    if refused {
+        return None;
+    }
+    resolve_metric(sides, metric, host, through).map(|p| p.tier)
+}
+
+/// Several paths as one (result.json's root `support`, a check's summary line): the least of them,
+/// None when there is none.
+pub fn overall(tiers: impl IntoIterator<Item = Support>) -> Option<Support> {
+    tiers.into_iter().min()
+}
+
+/// Whether a launch case is timed by the window's pixels: `until` a window's paint or settling, an
+/// image, or `{ pixels }` (an `until` list's any). Such a launch writes no `driver.pixel_reads`.
+pub fn launch_uses_pixels(launch: &Value) -> bool {
+    let one = |u: &Value| matches!(u["window"].as_str(), Some("painted" | "settled")) || u["image"].is_string() || u.get("pixels").is_some_and(Value::is_object);
+    let until = &launch["until"];
+    match until.as_array() {
+        Some(list) => list.iter().any(one),
+        None => one(until),
+    }
+}
+
+/// Whether a side of a series read the window's pixels: its blocks did in a run or untimed
+/// (`driver.pixel_reads` over 0), it is a launch case timed by them (`launch_uses_pixels`), or the bench
+/// compared snapshots of it (`--pixels`, `--pixels-only`).
+pub fn uses_pixels(pixel_reads: f64, launch: &Value, snapshots: bool) -> bool {
+    pixel_reads > 0.0 || launch_uses_pixels(launch) || snapshots
+}
+
+impl PathSupport {
+    /// What the path is, as every surface says it: `native · process CPU on macOS arm64`,
+    /// `native vs chromium page · launch (window pixels) on Windows x64`, `chrome on a phone · page engine
+    /// (from macOS arm64)`. A script's page-engine metric is its JS heap.
+    pub fn describe(&self) -> String {
+        let who = match (self.base_runtime, self.head_runtime) {
+            (Some(b), Some(h)) if b != h => format!("{} vs {}", b.label(), h.label()),
+            _ => self.runtime.label().to_string(),
+        };
+        let what = if self.capability == Capability::PageEngine && self.runtime == Runtime::Script { "JS heap" } else { self.capability.label() };
+        let via: Vec<&str> =
+            [(self.pixels, "window pixels"), (self.outside_page, "page measured from outside"), (self.os_input, "OS input")].into_iter().filter(|(on, _)| *on).map(|(_, w)| w).collect();
+        let device = self.runtime.on_device() || self.base_runtime.is_some_and(Runtime::on_device) || self.head_runtime.is_some_and(Runtime::on_device);
+        let mut s = format!("{who} · {what}");
+        match (via.is_empty(), device) {
+            (true, false) => s += &format!(" on {}", self.host.label()),
+            (false, false) => s += &format!(" ({}) on {}", via.join(", "), self.host.label()),
+            (true, true) => s += &format!(" (from {})", self.host.label()),
+            (false, true) => s += &format!(" ({}; from {})", via.join(", "), self.host.label()),
+        }
+        s
+    }
+
+    /// Why the path is preview, each cause in words; None when verified.
+    pub fn why(&self) -> Option<String> {
+        if self.tier == Support::Verified {
+            return None;
+        }
+        let two = self.base_runtime.zip(self.head_runtime).is_some_and(|(b, h)| b != h);
+        let parts: Vec<String> = self
+            .preview_by
+            .iter()
+            .map(|c| match c {
+                Cause::Capability if two => format!("the {} side is not yet checked against a known-answer fixture", self.runtime.label()),
+                Cause::Capability => "not yet checked against a known-answer fixture".to_string(),
+                Cause::Pixels => "its reads of the window's pixels are not yet checked against a known answer".to_string(),
+                Cause::OutsidePage => "a page measured from outside (the host's clock, the OS's frames) is not yet checked against a known answer".to_string(),
+                Cause::OsInput => "input through the OS is not yet checked against a known answer".to_string(),
+                Cause::Architecture => format!("verified on {} only", self.host.primary_of().label()),
+            })
+            .collect();
+        Some(parts.join("; "))
+    }
+
+    /// The one line a surface prints: `verified (…)`, or `preview (…: runtime checks held; …)`.
+    pub fn phrase(&self) -> String {
+        match self.why() {
+            None => format!("verified ({})", self.describe()),
+            Some(why) => format!("preview ({}: runtime checks held; {why})", self.describe()),
+        }
+    }
+}
+
+/// A target's summary on a host (the README's table): the least support of the core capabilities
+/// (`CORE`) it runs there; None when it runs none of them there.
+pub fn target_support(runtime: Runtime, host: Host) -> Option<Support> {
+    overall(CORE.iter().filter_map(|c| support(runtime, *c, host)))
+}
+
+/// What `strobe status` says of this host's paths, from the matrix alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusSupport {
+    pub host: Host,
+    /// Each runtime with a capability verified here, with those capabilities.
+    pub verified: Vec<(Runtime, Vec<Capability>)>,
+    /// Paths strobe runs here that are preview, and paths it refuses on this OS.
+    pub preview: usize,
+    pub refused: usize,
+}
+
+impl StatusSupport {
+    /// `verified on Windows x64: cli (wall time and counts, process CPU) · 82 more paths preview`, or
+    /// when none is: `every path is preview on Windows x64: none is checked against a known answer here yet`.
+    pub fn line(&self) -> String {
+        if self.verified.is_empty() {
+            return if self.host.primary() {
+                format!("every path is preview on {}: none is checked against a known answer here yet", self.host.label())
+            } else {
+                format!("every path is preview on {}: known answers are checked on {} only", self.host.label(), self.host.primary_of().label())
+            };
+        }
+        let v: Vec<String> = self.verified.iter().map(|(r, cs)| format!("{} ({})", r.label(), cs.iter().map(|c| c.label()).collect::<Vec<_>>().join(", "))).collect();
+        format!("verified on {}: {} · {} more paths preview", self.host.label(), v.join(", "), self.preview)
+    }
+
+    /// `status --json`'s `support`.
+    pub fn json(&self) -> Value {
+        let verified: Vec<Value> = self.verified.iter().map(|(r, cs)| serde_json::json!({ "runtime": r, "capabilities": cs })).collect();
+        serde_json::json!({ "host": self.host, "verified": verified, "preview": self.preview, "refused": self.refused })
+    }
+}
+
+/// This host's paths by support (`strobe status`).
+pub fn status_summary(host: Host) -> StatusSupport {
+    let mut out = StatusSupport { host, verified: Vec::new(), preview: 0, refused: 0 };
+    for r in SUPPORT_MATRIX {
+        match support(r.runtime, r.capability, host) {
+            Some(Support::Verified) => match out.verified.iter_mut().find(|(rt, _)| *rt == r.runtime) {
+                Some((_, cs)) => cs.push(r.capability),
+                None => out.verified.push((r.runtime, vec![r.capability])),
+            },
+            Some(Support::Preview) => out.preview += 1,
+            None => out.refused += 1,
+        }
+    }
+    out
 }

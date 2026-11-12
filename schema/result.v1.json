@@ -14,6 +14,7 @@
     "text": { "type": "string", "description": "The text output." },
     "result": { "type": "string", "description": "--json only: the path of result.json." },
     "decided": { "type": "boolean", "description": "experiment: every series' primary got a verdict and nothing stopped the bench." },
+    "support": { "oneOf": [{ "$ref": "#/definitions/support" }, { "type": "null" }], "description": "The least support of the series that ran (SPEC 21.1); null when none ran. Absent in older results." },
     "passed": { "type": "boolean", "description": "check: every case passed." },
     "parity": { "type": ["string", "null"], "description": "check of several targets: the parity matrix, as the text output prints it." },
     "batch": {
@@ -231,6 +232,7 @@
         "hardware_counters",
         "package_idle",
         "frames",
+        "canvas",
         "input_latency",
         "gpu",
         "pixels",
@@ -249,14 +251,20 @@
       "description": "A series' path (SPEC 21.1): its primary's runtime, capability and host, the pixels and OS input it went through, and the least support of its parts.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["tier", "runtime", "capability", "host", "os_input", "pixels"],
+      "required": ["tier", "runtime", "capability", "host", "os_input", "pixels", "outside_page"],
       "properties": {
         "tier": { "$ref": "#/definitions/support" },
         "runtime": { "$ref": "#/definitions/runtime", "description": "The only side's, or in an implementation comparison the less checked side's (base when alike)." },
         "capability": { "$ref": "#/definitions/capability" },
         "host": { "$ref": "#/definitions/host" },
-        "os_input": { "type": "boolean", "description": "A side was driven through the OS's input (fairness.input os)." },
-        "pixels": { "type": "boolean", "description": "strobe read the window's pixels in a run, or a launch ended on them." },
+        "os_input": { "type": "boolean", "description": "strobe's input reached a side through the OS (fairness.input os, or a headed page measured from outside that took input)." },
+        "pixels": { "type": "boolean", "description": "A side read the window's pixels: in a run, a launch timed by them, or compared snapshots." },
+        "outside_page": { "type": "boolean", "description": "A page side was measured from outside (cross-engine: the host's clock, the OS's frames)." },
+        "preview_by": {
+          "type": "array",
+          "items": { "enum": ["capability", "pixels", "outside_page", "os_input", "architecture"] },
+          "description": "What made it preview: the runtime and capability themselves, pixels, an outside page, OS input, or a host off its OS's primary architecture. Absent when verified."
+        },
         "base_runtime": { "$ref": "#/definitions/runtime", "description": "implementations: base's runtime." },
         "head_runtime": { "$ref": "#/definitions/runtime", "description": "implementations: head's runtime." }
       }
@@ -313,7 +321,8 @@
         "across": { "enum": ["compared", "care", "per_side"], "description": "implementations: the metric's comparability class (SPEC 7.1); per_side never reaches a comparison (refused NotComparable when declared)." },
         "care_note": { "type": "string", "description": "across care: what the number sums on each side, printed wherever it is." },
         "p_repeated": { "type": ["number", "null"], "description": "implementations, primary: the p-value adjusted for the series' sequential looks." },
-        "holm_decided": { "type": ["boolean", "null"], "description": "implementations, primary: still decided after Holm across the journeys." }
+        "holm_decided": { "type": ["boolean", "null"], "description": "implementations, primary: still decided after Holm across the journeys." },
+        "support": { "$ref": "#/definitions/support", "description": "Its metric's path (SPEC 21.1); absent when refused, and in older results." }
       }
     },
     "perSide": {
@@ -334,7 +343,8 @@
         "metric": { "enum": ["js.heap.growth", "memory.app.host"] },
         "verdict": { "type": ["string", "null"] },
         "verdict_kind": { "$ref": "#/definitions/verdictKind" },
-        "decided": { "type": ["boolean", "null"] }
+        "decided": { "type": ["boolean", "null"] },
+        "support": { "$ref": "#/definitions/support", "description": "Its metric's path (SPEC 21.1); absent when refused, and in older results." }
       }
     },
     "checkPrimary": {
@@ -423,6 +433,7 @@
         "kind": { "type": "string", "description": "runs, launch or leak; check (--check), pixels (--pixels-only), blocks (--blocks: one build's timed blocks, nothing compared)." },
         "params": { "type": ["object", "null"] },
         "primary": { "anyOf": [{ "$ref": "#/definitions/comparison" }, { "$ref": "#/definitions/leakPrimary" }, { "$ref": "#/definitions/checkPrimary" }, { "$ref": "#/definitions/blocksPrimary" }, { "$ref": "#/definitions/gapPrimary" }] },
+        "support": { "oneOf": [{ "$ref": "#/definitions/pathSupport" }, { "type": "null" }], "description": "Its primary's path (SPEC 21.1); null for a parity gap or a series refused before it ran. Absent in older results." },
         "headless": { "type": "boolean", "description": "A page target ran in a headless browser (--headless, or the target's headless): no display, so its frame, input-to-screen latency, scroll, canvas and GPU-use metrics are refused (Headless); CPU, counters, memory and input pacing stay." },
         "engine": { "enum": ["chromium", "firefox", "webkit", null], "description": "A page target's browser engine (--engine, or the target's engine)." },
         "input": { "enum": ["desktop", "hybrid", "touch", "none", null], "description": "The input devices the series' pages saw (each block keeps its own). desktop: a fine pointer that hovers, nothing coarse, no touch, which a page target sees unless it emulates a device, headless too (checked before setup: DeviceMismatch); a page target with emulate: \"mobile\" sees touch and one with emulate: \"touch\" hybrid, checked the same way; an app's page (Electron, a webview, a command's browser) sees the machine's: hybrid (a fine pointer with touch beside it), touch (no fine pointer), none (no pointer at all). Sides that saw different ones are refused (VariantMismatch). Part of a page series' tracked fingerprint. Null without a page, and in results from before strobe recorded it." },

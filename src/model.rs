@@ -512,7 +512,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.frames",
-        capability: Capability::Frames,
+        capability: Capability::Canvas,
         unit: "count",
         better: Better::Higher,
         kind: Kind::Timed,
@@ -523,7 +523,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p50",
-        capability: Capability::Frames,
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -534,7 +534,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p95",
-        capability: Capability::Frames,
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -545,7 +545,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.p99",
-        capability: Capability::Frames,
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
@@ -556,7 +556,7 @@ pub const METRICS: &[MetricDef] = &[
     },
     MetricDef {
         name: "canvas.interval.max",
-        capability: Capability::Frames,
+        capability: Capability::Canvas,
         unit: "ms",
         better: Better::Lower,
         kind: Kind::Timed,
