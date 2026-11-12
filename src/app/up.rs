@@ -129,9 +129,9 @@ pub fn run(args: &Args) -> Result<Output> {
     } else {
         install_self(&mut s)?
     };
-    // Engine.
+    // Engine: `ensure` hashed the file there (extracted again when it was not the pinned build).
     match engine::ensure() {
-        Ok(p) => s.line("✓", "engine", format!("trace_processor {} · sha256 ok · {}", engine::VERSION, p.display())),
+        Ok(p) => s.line("✓", "engine", format!("trace_processor {} · sha256 {}… ok · {}", engine::VERSION, engine::digest().map_or("", |d| &d[..12]), p.display())),
         Err(e) => s.line("✗", "engine", e.message),
     }
     // Deep mode: present events and native stacks (one UAC prompt when something is missing).

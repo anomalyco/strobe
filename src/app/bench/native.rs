@@ -807,6 +807,10 @@ fn runs(
                 }
             }
             let first = warmup.first().unwrap_or(0);
+            // A check that measured its second run (`Warmup::after`): run 1 is not what it measured.
+            if first > 0 && base == 0 {
+                first_run = None;
+            }
             let warm_ms: f64 = runs[..first].iter().map(|r| r.total).sum::<f64>() + 0.0;
             let steps = vec![("warmup".to_string(), warm_ms), ("runs".to_string(), (began.elapsed().as_secs_f64() * 1e3 - warm_ms).max(0.0))];
             // In a batch the app must outlive the case: one it ended fails the case that did it.
@@ -1237,7 +1241,8 @@ fn runs(
                 }
             }
             for m in declared_metrics(s).into_iter() {
-                if values.contains_key(m) || refused.contains_key(m) {
+                // A counter only `--noworse` names that no run counted is the series' to decide (`flagged_counts`).
+                if values.contains_key(m) || refused.contains_key(m) || (!s.case_declares(m) && m.starts_with("count.")) {
                     continue;
                 }
                 refused.insert(m.clone(), missing(m, &have));
