@@ -65,6 +65,12 @@ pub fn run(args: &Args) -> Result<Output> {
     let webkit = [false, true].into_iter().any(|h| crate::target::webkit::find(h).is_some());
     let webkit_text = crate::target::webkit::describe();
     let bun = runner::find_bun();
+    let bun_version = bun.as_ref().and_then(|b| host::output(std::process::Command::new(b).arg("--version")));
+    // Under Bun 1.3 Playwright's connectOverCDP never connects (the runner refuses ctx.playwright there).
+    let bun_old = bun_version.as_deref().is_some_and(|v| {
+        let n: Vec<u32> = v.split(['.', '-', '+']).take(3).map_while(|p| p.parse().ok()).collect();
+        n.len() == 3 && (n[0], n[1]) < (1, 4)
+    });
     let state: Value = std::fs::read_to_string(host::paths::state_dir().join("state.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let recordings = store::list("rec", 5);
     let experiments = store::list("exp", 5);
@@ -144,7 +150,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let (disk_text, disk_json) = disk.status(args.has("disk"));
     let json = json!({
         "env": env, "topology": { "groups": groups, "vcache": vcache }, "busy": busy,
-        "browser": browser, "firefox": firefox, "webkit": if webkit { Value::String(webkit_text.clone()) } else { Value::Null }, "bun": bun, "engine": { "installed": engine::installed(), "version": engine::VERSION, "path": engine::path() },
+        "browser": browser, "firefox": firefox, "webkit": if webkit { Value::String(webkit_text.clone()) } else { Value::Null }, "bun": bun, "bun_version": bun_version, "engine": { "installed": engine::installed(), "version": engine::VERSION, "path": engine::path() },
         "calibration": calibration, "recordings": recordings.iter().map(|r| &r.0).collect::<Vec<_>>(),
         "experiments": experiments.iter().map(|r| &r.0).collect::<Vec<_>>(), "disk_bytes": disk_json["total_bytes"], "disk": disk_json,
         "session_locked": locked, "background_priority": qos, "timer_coalescing": timers, "valid": problems.is_empty(), "problems": problems,
@@ -213,7 +219,13 @@ pub fn run(args: &Args) -> Result<Output> {
     for (i, (mark, line)) in super::up::android_lines(&android).iter().enumerate() {
         t += &format!("  {mark} {}{line}\n", if i == 0 { "android    " } else { "           " });
     }
-    t += &format!("  {} bun        {}\n", mark(bun.is_some()), bun.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into()));
+    t += &format!(
+        "  {} bun        {}{}{}\n",
+        mark(bun.is_some() && !bun_old),
+        bun.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into()),
+        bun_version.as_deref().map(|v| format!(" · {v}")).unwrap_or_default(),
+        if bun_old { " (ctx.playwright needs Bun 1.4.0 or later: bun upgrade)" } else { "" }
+    );
     t += &format!("  {} deep       {}\n", mark(deep.presents() && deep.helper), deep_text);
     t += &format!("  {} native     {}\n", mark(native_ok), native_text);
     t += &format!("  {} engine     trace_processor {}{}\n", mark(engine::installed()), engine::VERSION, if engine::installed() { "" } else { " (not downloaded)" });

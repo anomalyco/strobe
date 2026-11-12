@@ -573,6 +573,8 @@ which this folder's list cannot show, is a `slot` line (`slot_elsewhere` in `--j
 CI runner (§10.1 `SharedRunner`) a `! runner  shared: <why>; …` line names what still works there
 and ends `; a dedicated runner in a virtual machine says RUNNER_ENVIRONMENT=self-hosted or
 CI_SHARED_ENVIRONMENT=false`, the problems list says so, and `env.shared_runner` holds the reason.
+The `bun` line names the Bun that runs bench files and its version (`bun_version`); a Bun before 1.4.0
+reads `!` with `(ctx.playwright needs Bun 1.4.0 or later: bun upgrade)` (§9.6 `prepare`).
 `--calibrate` runs the full calibration (§10.3). `--fast` skips the 3 s idle-load sample and the slow
 device reads (an adb server that refuses the loopback connection is given up after 200 ms, as
 usbmuxd is): `status --fast` 2.0 s → 0.56 s on adais.
@@ -3656,7 +3658,12 @@ path names an executable the build never makes or replaces.
   with Playwright (`ctx.playwright.page`, the very page strobe drives, matched by CDP target id), when
   Playwright is installed next to the bench file, and only on targets with a debug port: on a page in
   another engine reading `ctx.playwright` throws, typed as `EngineUnsupported` (Playwright connects
-  over CDP), with the fix naming `ctx.addInitScript` and `ctx.mock`. `ctx.url` is the URL strobe opens next; a production web build is
+  over CDP), with the fix naming `ctx.addInitScript` and `ctx.mock`. Under a Bun before 1.4.0
+  Playwright's `connectOverCDP` never opens its WebSocket (it times out after 30 s: macOS and Windows,
+  Playwright 1.56 and 1.65; Bun 1.3.0 and 1.3.14 hang, 1.4.0 connects in about 0.1 s), so the runner
+  does not try: reading `ctx.playwright` there throws 'ctx.playwright needs Bun 1.4.0 or later: …'
+  with the fix `bun upgrade`. A connection that fails for any reason fails only a `prepare` that
+  reads `ctx.playwright`; one that uses only `ctx.addInitScript` and `ctx.mock` runs. `ctx.url` is the URL strobe opens next; a production web build is
   its own server, so mock the API under `new URL(url).origin`. Playwright stays connected for the
   whole block, so routes and init scripts keep working. What `prepare` returns is
   `ctx.prepared` in `setup`, `run` and `reset` (for example a mock's event transport).
@@ -8659,6 +8666,10 @@ what was built but not yet run on a device is in §21.
 
 **After 0.28.0**
 
+- 2026-11-12 · cleanup/mac · under a Bun before 1.4.0 the runner does not connect Playwright (its
+  `connectOverCDP` hangs 30 s there: an outside bench read 0 of 4 cases); reading `ctx.playwright`
+  throws with the fix `bun upgrade`, and any failed connection fails only a `prepare` that reads
+  `ctx.playwright`; `status` prints the Bun version (5.4, 9.6).
 - 2026-11-11 · cleanup/prune · `strobe prune` (caches unused now, data when named and older than 30
   days, never a recording a kept experiment names; the plan first, `--force` without a terminal,
   `--dry-run`, measured `Total reclaimed space`); cache leases and stamps (`host::cache`); removal

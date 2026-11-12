@@ -275,6 +275,8 @@ const state: {
   env: Record<string, string> | null
   exe: string | null
   playwright: any
+  /** Why Playwright did not connect for this block (thrown when a hook reads ctx.playwright). */
+  playwrightError: unknown
   prepared: unknown
   mocks: { pattern: string; test: RegExp; handler: Function }[]
   session: any
@@ -290,7 +292,7 @@ const state: {
   usedRandom: boolean
   /** What the file's `setupKey` gave for the block's case (`ctx.setupKey`); undefined without one. */
   setupKey: unknown
-} = { case: "", params: {}, target: "", variant: "base", url: "", root: "", home: null, env: null, exe: null, playwright: null, prepared: undefined, mocks: [], session: null, fixture: null, engine: "chromium", relay: null, devtools: null, seed: 0, caseSeed: 0, stream: () => 0, usedRandom: false, setupKey: undefined }
+} = { case: "", params: {}, target: "", variant: "base", url: "", root: "", home: null, env: null, exe: null, playwright: null, playwrightError: null, prepared: undefined, mocks: [], session: null, fixture: null, engine: "chromium", relay: null, devtools: null, seed: 0, caseSeed: 0, stream: () => 0, usedRandom: false, setupKey: undefined }
 
 // Seeds (SPEC §9.6): a case's seed is mix(experiment seed, case + "\n" + its params as canonical JSON), so
 // base and head, and every target of a journey, get the same one. Each hook call starts its own stream
@@ -513,6 +515,7 @@ const prepareContext = () => seeded({
   root: state.root,
   get playwright() {
     if (state.engine === "chromium") {
+      if (state.playwrightError) throw state.playwrightError
       if (!state.playwright) throw new Error(`ctx.playwright needs Playwright: install playwright or @playwright/test next to ${file}`)
       return state.playwright
     }
@@ -598,6 +601,12 @@ async function playwright(endpoint: string, target: string) {
   const names = ["playwright", "@playwright/test", "playwright-core"]
   const resolved = names.map((n) => { try { return Bun.resolveSync(n, from) } catch { return undefined } }).find(Boolean)
   if (!resolved) return null
+  // Under Bun 1.3 Playwright's DevTools WebSocket never opens: connectOverCDP waits out its 30 s and
+  // times out (macOS and Windows, Playwright 1.56 and 1.65; Bun 1.4.0 connects in about 0.1 s).
+  if (Bun.semver.order(Bun.version, "1.4.0") < 0)
+    throw Object.assign(new Error(`ctx.playwright needs Bun 1.4.0 or later: under Bun ${Bun.version} Playwright's connectOverCDP never connects to the browser (it times out after 30 s)`), {
+      hint: "update Bun (bun upgrade), which runs bench files; a prepare that uses only ctx.addInitScript and ctx.mock works under this Bun",
+    })
   // A bench path canonicalized on Windows starts with \\?\, which Bun's import() cannot load.
   const { chromium } = await import(resolved.replace(/^\\\\\?\\/, ""))
   const browser = await chromium.connectOverCDP(endpoint)
@@ -811,7 +820,9 @@ async function handle(op: string, args: any) {
       try {
         if (target?.prepare) {
           state.devtools = args.endpoint ? { endpoint: args.endpoint, target: args.target } : null
-          if (args.endpoint) state.playwright = await playwright(args.endpoint, args.target)
+          // A Playwright that cannot connect fails only a prepare that reads ctx.playwright.
+          state.playwrightError = null
+          if (args.endpoint) state.playwright = await playwright(args.endpoint, args.target).catch((e) => ((state.playwrightError = e), null))
           stream("prepare")
           launchHook = "the target's prepare"
           state.prepared = await target.prepare(prepareContext())
@@ -865,7 +876,7 @@ async function handle(op: string, args: any) {
       if (state.session) await state.session.detach().catch(() => {})
       if (state.playwright) await state.playwright.browser.close().catch(() => {})
       if (state.relay) state.relay.end()
-      Object.assign(state, { playwright: null, session: null, mocks: [], relay: null, devtools: null })
+      Object.assign(state, { playwright: null, playwrightError: null, session: null, mocks: [], relay: null, devtools: null })
       if (errors.length) throw new AggregateError(errors, `teardown failed: ${errors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`)
       return true
     }
