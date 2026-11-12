@@ -4,8 +4,9 @@
 //   rustc -O -o known scripts/dev/known/known.rs        (known.exe on Windows)
 // Every mode prints what it did as `strobe:metric truth_<name>=<value>` lines (a cli() target's metric.*).
 //
-//   spin <ms> [threads]         each thread runs <ms> of CPU (Linux: its own CPU clock; Windows: wall time on
-//                               a core of its own, so CPU = wall when nothing else runs there)
+//   spin <ms> [threads]         each thread runs <ms> of CPU, counted by its own CPU clock (Linux, macOS) or its
+//                               cycle count over the timestamp counter's rate (Windows x64), so time off the CPU
+//                               does not shorten it (Windows ARM64: wall time)
 //   sleep <ms>                  wall time, no CPU
 //   timer <hz> <ms>             wakes <hz> times a second for <ms> (each wake a voluntary context switch)
 //   alloc <mb> <ms> [free_ms]   <mb> MiB private, every page written, held <ms>; then freed, held <free_ms>
@@ -22,7 +23,8 @@
 //                               A hop that cannot start fails (exit code nonzero)
 //   io <write_mb> <read_mb>     writes <write_mb> MiB to a file in 64 KiB writes, reads <read_mb> MiB of it (macOS,
 //                               which counts disk bytes: uncached and without read-ahead, so both reach the disk)
-//   ready <ms> <text>           prints <text> after <ms>, then idles for 60 s
+//   ready <ms> <text>           prints <text> after a busy-wait of <ms> wall time (no timer slack), then idles
+//                               for 60 s
 //   duty <pct> <threads> [s]    long-running: each thread busy <pct>% of every 100 ms (wall), for [s] (60) s
 //   spawner <ms> <gap_ms> [s]   long-running: runs a child that spins <ms> and exits, then sleeps <gap_ms>,
 //                               again for [s] (60) s: (<ms> / (<ms> + <gap_ms>)) of a core, all of it in
@@ -46,9 +48,13 @@
 //   hold <mb> [s]               long-running: <mb> MiB private written once, then idle, for [s] (60) s
 //   startup <ms> [s] [text]     long-running: a thread named `loader` spins <ms> of its CPU from the launch (a
 //                               slow startup), then prints [text] (READY); the process idles for [s] (60) s
-//   tty <bytes> <delay_ms>      terminal app: raw input; on each key, after <delay_ms>, one synchronized
-//                               frame that rewrites row 1 with <bytes> cells (alternating A and B); `q` quits.
-//                               Prints `ready` on row 0 first.
+//   tty <bytes> <delays> [paste]  terminal app: raw input; on each key, after the next of <delays> (ms, a list
+//                               taken in turn: `20` or `20,120`), one synchronized frame that rewrites row 1
+//                               with <bytes> cells (alternating A and B); `q` quits. Prints `ready` on row 0
+//                               first. With `paste`, turns on bracketed paste (ESC [?2004h) and answers a whole
+//                               paste (ESC [200~ … ESC [201~) once, at its end
+//   cooked <bytes> <delay_ms>   terminal app in line mode (Unix: the terminal echoes each key itself); on each
+//                               line, after <delay_ms>, one frame as `tty` draws; `q` in a line quits
 //   frames <n> <bytes> <gap_ms> terminal app: <n> synchronized frames of <bytes> cells, <gap_ms> apart, then
 //                               `done` and idles until `q`
 use std::io::{Read, Write};
@@ -103,9 +109,14 @@ mod os {
         unsafe { clock_gettime(clock, &mut ts) };
         ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
     }
-    /// This thread's CPU time in ns (CLOCK_THREAD_CPUTIME_ID).
-    pub fn thread_cpu_ns() -> Option<u64> {
+    pub fn anchor() {}
+    /// This thread's CPU clock (CLOCK_THREAD_CPUTIME_ID, ns).
+    pub fn thread_cycles() -> Option<u64> {
         Some(clock_ns(c::THREAD_CPU))
+    }
+    /// A span of `thread_cycles` in ns: they are ns here.
+    pub fn cycles_ns(d: u64) -> Option<f64> {
+        Some(d as f64)
     }
     /// This process's CPU time in ns, every thread (CLOCK_PROCESS_CPUTIME_ID).
     pub fn process_cpu_ns() -> u64 {
@@ -193,6 +204,13 @@ mod os {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetCurrentProcess() -> Handle;
+        #[cfg(target_arch = "x86_64")]
+        fn GetCurrentThread() -> Handle;
+        #[cfg(target_arch = "x86_64")]
+        fn QueryThreadCycleTime(t: Handle, cycles: *mut u64) -> i32;
+        #[cfg(target_arch = "x86_64")]
+        fn QueryProcessCycleTime(p: Handle, cycles: *mut u64) -> i32;
+        #[cfg(not(target_arch = "x86_64"))]
         fn GetProcessTimes(p: Handle, c: *mut u64, e: *mut u64, k: *mut u64, u: *mut u64) -> i32;
         fn K32GetProcessMemoryInfo(p: Handle, c: *mut Counters, cb: u32) -> i32;
         fn CreateFileMappingW(f: Handle, sa: *const u8, prot: u32, hi: u32, lo: u32, name: *const u16) -> Handle;
@@ -202,14 +220,60 @@ mod os {
         fn GetConsoleMode(h: Handle, m: *mut u32) -> i32;
         fn SetConsoleMode(h: Handle, m: u32) -> i32;
     }
-    pub fn thread_cpu_ns() -> Option<u64> {
+    // x64: Windows counts a thread's and a process's CPU in cycles of the invariant timestamp counter (the units
+    // strobe's QueryProcessCycleTime reading uses), so a spin counts its own cycles: work, which time spent off the
+    // CPU (preempted) does not shorten. The counter's rate is read against the wall clock from `anchor`, taken
+    // first thing in main. Elsewhere (ARM64, where the cycle counter's units are unchecked) a spin is wall time.
+    #[cfg(target_arch = "x86_64")]
+    static ANCHOR: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
+    pub fn anchor() {
+        #[cfg(target_arch = "x86_64")]
+        ANCHOR.get_or_init(|| (std::time::Instant::now(), unsafe { core::arch::x86_64::_rdtsc() }));
+    }
+    /// The timestamp counter's ticks a nanosecond since `anchor`; None until 1 ms has passed.
+    #[cfg(target_arch = "x86_64")]
+    fn ticks_per_ns() -> Option<f64> {
+        let (t0, c0) = ANCHOR.get()?;
+        let (c1, ns) = (unsafe { core::arch::x86_64::_rdtsc() }, t0.elapsed().as_nanos() as f64);
+        (ns >= 1e6).then(|| c1.wrapping_sub(*c0) as f64 / ns)
+    }
+    /// This thread's cycle count (x64); None elsewhere.
+    pub fn thread_cycles() -> Option<u64> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut c = 0u64;
+            unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+            Some(c)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         None
     }
-    /// Kernel + user time of this process in ns (clock ticks: 15.6 ms steps).
+    /// A span of `thread_cycles` in ns; None in the process's first 1 ms, before the counter's rate is known.
+    pub fn cycles_ns(d: u64) -> Option<f64> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            ticks_per_ns().map(|r| d as f64 / r)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = d;
+            None
+        }
+    }
+    /// This process's CPU in ns: its cycle count (x64), else kernel + user time (clock ticks: 15.6 ms steps).
     pub fn process_cpu_ns() -> u64 {
-        let (mut c, mut e, mut k, mut u) = (0, 0, 0, 0);
-        unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
-        (k + u) * 100
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut c = 0u64;
+            unsafe { QueryProcessCycleTime(GetCurrentProcess(), &mut c) };
+            ticks_per_ns().map(|r| (c as f64 / r) as u64).unwrap_or(0)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let (mut c, mut e, mut k, mut u) = (0, 0, 0, 0);
+            unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+            (k + u) * 100
+        }
     }
     /// (peak private commit KiB, 0): Windows keeps no per-process switch count.
     pub fn rusage_self() -> (i64, i64) {
@@ -249,21 +313,23 @@ mod os {
     }
 }
 
-/// Runs `ms` of this thread's CPU: by its own CPU clock where there is one, else by wall time.
+/// Runs `ms` of this thread's CPU: by its own CPU clock (Linux, macOS) or cycle count (Windows x64), so time off
+/// the CPU does not shorten it; else (Windows ARM64) by wall time.
 fn spin(ms: f64) -> f64 {
-    let ns = (ms * 1e6) as u64;
+    let ns = ms * 1e6;
     let wall = Instant::now();
     let mut x = 0u64;
-    match os::thread_cpu_ns() {
-        Some(start) => {
-            while os::thread_cpu_ns().unwrap() - start < ns {
-                for i in 0..1000 {
-                    x = x.wrapping_mul(6364136223846793005).wrapping_add(i);
-                }
+    match os::thread_cycles() {
+        Some(start) => loop {
+            for i in 0..1000 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(i);
             }
-        }
+            if os::cycles_ns(os::thread_cycles().unwrap_or(start).wrapping_sub(start)).is_some_and(|d| d >= ns) {
+                break;
+            }
+        },
         None => {
-            while (wall.elapsed().as_nanos() as u64) < ns {
+            while (wall.elapsed().as_nanos() as f64) < ns {
                 for i in 0..1000 {
                     x = x.wrapping_mul(6364136223846793005).wrapping_add(i);
                 }
@@ -307,7 +373,17 @@ fn frame(out: &mut impl Write, n: usize, cells: usize) -> usize {
     f.len()
 }
 
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The length of the longest tail of `hay` that is a start of `needle` (shorter than it).
+fn partial(hay: &[u8], needle: &[u8]) -> usize {
+    (1..needle.len().min(hay.len() + 1)).rev().find(|&k| hay.ends_with(&needle[..k])).unwrap_or(0)
+}
+
 fn main() {
+    os::anchor();
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("");
     let cpu0 = os::process_cpu_ns();
@@ -454,7 +530,12 @@ fn main() {
             metric("read_bytes", got as f64);
         }
         "ready" => {
-            thread::sleep(ms(arg(&args, 2, 500.0)));
+            // A busy-wait, not a sleep: a sleep wakes late by the OS timer's slack (up to 15 ms on Windows), on
+            // the long side only.
+            let start = Instant::now();
+            while start.elapsed() < ms(arg(&args, 2, 500.0)) {
+                std::hint::spin_loop();
+            }
             println!("{}", args.get(3).map(String::as_str).unwrap_or("READY"));
             std::io::stdout().flush().unwrap();
             thread::sleep(Duration::from_secs(60));
@@ -580,24 +661,98 @@ fn main() {
                 out.write_all(b"\x1b[3;1Hdone").unwrap();
                 out.flush().unwrap();
             }
-            let (cells, delay) = (arg(&args, 2, 40.0) as usize, arg(&args, 3, 20.0));
+            let cells = arg(&args, 2, 40.0) as usize;
+            // Per-answer delays, in turn: `20` or `20,120`.
+            let delays: Vec<f64> = args.get(3).map(|s| s.split(',').filter_map(|d| d.parse().ok()).collect()).filter(|d: &Vec<f64>| !d.is_empty()).unwrap_or_else(|| vec![20.0]);
+            let paste = mode == "tty" && args.get(4).is_some_and(|a| a == "paste");
+            if paste {
+                out.write_all(b"\x1b[?2004h").unwrap();
+                out.flush().unwrap();
+            }
             let mut n = 0;
-            let mut buf = [0u8; 64];
+            let mut answer = |out: &mut std::io::Stdout| {
+                thread::sleep(ms(delays[n % delays.len()]));
+                frame(out, n, cells);
+                n += 1;
+            };
+            let (mut buf, mut pending, mut in_paste) = ([0u8; 4096], Vec::<u8>::new(), false);
             loop {
                 let got = std::io::stdin().read(&mut buf).unwrap_or(0);
-                if got == 0 || buf[..got].contains(&b'q') {
+                if got == 0 {
                     break;
                 }
-                if mode == "tty" {
-                    thread::sleep(ms(delay));
-                    frame(&mut out, n, cells);
-                    n += 1;
+                if mode != "tty" {
+                    if buf[..got].contains(&b'q') {
+                        break;
+                    }
+                    continue;
+                }
+                if !paste {
+                    if buf[..got].contains(&b'q') {
+                        break;
+                    }
+                    answer(&mut out);
+                    continue;
+                }
+                // Bracketed paste: what comes between ESC [200~ and ESC [201~ is one paste, answered once at its
+                // end; a key outside one is answered as a key; `q` quits only outside a paste.
+                pending.extend_from_slice(&buf[..got]);
+                loop {
+                    if in_paste {
+                        match find(&pending, b"\x1b[201~") {
+                            Some(j) => {
+                                pending.drain(..j + 6);
+                                in_paste = false;
+                                answer(&mut out);
+                            }
+                            None => break,
+                        }
+                    } else {
+                        let start = find(&pending, b"\x1b[200~");
+                        // Without a start, keep back a tail that may be the start's first bytes.
+                        let keys = start.unwrap_or(pending.len() - partial(&pending, b"\x1b[200~"));
+                        if pending[..keys].contains(&b'q') {
+                            return;
+                        }
+                        if keys > 0 {
+                            answer(&mut out);
+                        }
+                        match start {
+                            Some(i) => {
+                                pending.drain(..i + 6);
+                                in_paste = true;
+                            }
+                            None => {
+                                pending.drain(..keys);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             return;
         }
+        "cooked" => {
+            // A line-mode program (Unix): the terminal's own echo shows each key at once, and the program answers a
+            // line, after <delay_ms>, with one frame.
+            let (cells, delay) = (arg(&args, 2, 40.0) as usize, arg(&args, 3, 20.0));
+            let mut out = std::io::stdout();
+            out.write_all(b"\x1b[2J\x1b[1;1Hready\x1b[3;1H").unwrap();
+            out.flush().unwrap();
+            let mut n = 0;
+            for line in std::io::stdin().lines() {
+                let Ok(line) = line else { break };
+                if line.contains('q') {
+                    break;
+                }
+                thread::sleep(ms(delay));
+                frame(&mut out, n, cells);
+                n += 1;
+            }
+            return;
+        }
         _ => {
-            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|burst|pulse|hold|startup|tty|frames> …");
+            eprintln!("usage: known <spin|sleep|timer|alloc|shm|mapfile|tree|breakaway|orphan|io|ready|duty|wake|tick|burst|pulse|hold|startup|tty|frames|cooked> …");
             std::process::exit(2);
         }
     }

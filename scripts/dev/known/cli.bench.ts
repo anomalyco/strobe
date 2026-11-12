@@ -11,12 +11,14 @@
 // RunIncomplete, and strobe ends it: no known process left after); twice 2 commands of 150 ms;
 // timer 100 wakes a second; alloc 200 MiB touched (alloc-small 4 MiB, under strobe's own resident set); io 40 MiB written, 24 MiB read; orphan leaves a process
 // running (refused RunIncomplete).
-// Paired runs (`strobe run --base "<known> …" --head "<known> …"`): a spin is CPU by the thread's CPU clock on Linux
-// and macOS, but wall time on Windows (no thread CPU clock), so on Windows other work on the same CPUs makes it do
-// less CPU than planted, and on Linux and macOS it waits out the CPUs it is denied, so its wall time is no plant:
-// plant wall time with `sleep 150` vs `sleep 300` there. Each process's own launch and exit (sleep's cpu.work and
+// Paired runs (`strobe run --base "<known> …" --head "<known> …"`): a spin is CPU work, counted by the thread's CPU
+// clock (Linux, macOS) or cycle count (Windows x64), so other work on the same CPUs cannot make it do less; it waits
+// out the CPU it is denied, so its wall time is no plant when the CPUs are shared: plant wall time with `sleep 150`
+// vs `sleep 300`. (Before the cycle count, a Windows spin was wall time: three children sharing two CPUs with a
+// spinner did 313-391 ms of CPU for 1200 planted; now 1214.7-1215.7 ms, 1200 plus their launches.) Each process's own launch and exit (sleep's cpu.work and
 // run.duration less its 500 ms) is the fixed cost b0 of a planted ratio; page tables add 100 KiB per 50 MiB of
-// alloc on Windows (4 KiB pages, 8 bytes each), which memory.peak counts.
+// alloc on Windows (4 KiB pages, 8 bytes each), which memory.peak counts. The tree's parent spends 20-30 ms of its
+// own CPU launching three children on Windows, but 180-240 ms in 3 of 14 runs there: the plant is the children's.
 import { bench, cli } from "@hona/strobe"
 import { join } from "node:path"
 
