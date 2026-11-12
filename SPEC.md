@@ -1746,8 +1746,10 @@ every unit (§5.11), and `scripts/dev/surfaces.ts` every surface of every experi
 
 What is no measured time prints as before, in every unit: a wall-clock duration (a recording's
 length, a block's `time` line, an ETA, a wait, a run's length in a PR block's `per 77 ms run`:
-`850 ms`, `12.3 s`, `2.5 min`), a configured value (a cadence, a timeout, a threshold such as the
-HTTP probe's `at least 50 ms` or `≥ 1 ms/run`), a duration given to strobe (`--for 10s`), the names
+`850 ms`, `12.3 s`, `2.5 min`; a place on a timeline, a cohort's `run:3 +1.25 s` or `busy from 0.0 s to
+2.0 s`; the OS input map's own wait clock, `pointer moves in 352 ms`), a configured value (a cadence,
+a timeout, a threshold such as the HTTP probe's `at least 50 ms`, `≥ 1 ms/run`, `by 20 ms or more`,
+a page hidden for 200 ms), a duration given to strobe (`--for 10s`), the names
 in `strobe open`'s trace, and text strobe stored when it measured: warnings, refusals and notes, a
 pixels run's text, a `--check --noworse` counter's `text`, calibration's `summary`. Those keep the
 unit of the strobe that wrote them. Outputs this file quotes from runs before the release that
