@@ -95,7 +95,7 @@ fn run_with(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize, plan_runs: Op
                 match cut {
                     Some(c) => {
                         let whole = c[i].1.per_recording();
-                        Ok(Side { stacks: c[i].0, runs: whole.is_none().then(|| r.runs().or(plan_runs)).flatten(), untimed: false, whole })
+                        Ok(Side { stacks: c[i].0, runs: whole.is_none().then(|| r.runs().or(plan_runs)).flatten(), untimed: false, whole, ran: ran_from(&r.meta) })
                     }
                     None => side(r, kind, plan_runs, over(i)),
                 }
@@ -236,45 +236,196 @@ struct Side<'a> {
     /// A script target's whole host process (`--source host`) or one part of its life (`--source
     /// startup|setup`), which no run count divides: what it reads.
     whole: Option<&'static str>,
+    /// The folder its block ran its variant from (`ran_from`).
+    ran: Option<String>,
 }
 
 /// A side's stacks; `over` stands in for its native samples (one thread's or one phase's).
 fn side<'a>(rec: &'a Rec, kind: Kind, plan_runs: Option<u64>, over: Option<&'a NativeStacks>) -> Result<Side<'a>> {
     let missing = || Error::usage(format!("{} has no native samples; record with --probes deep", rec.id));
     let runs = rec.runs().or(plan_runs);
+    let ran = ran_from(&rec.meta);
     match kind {
-        Kind::Cpu => Ok(Side { stacks: rec.cpu()?, runs, untimed: false, whole: None }),
+        Kind::Cpu => Ok(Side { stacks: rec.cpu()?, runs, untimed: false, whole: None, ran }),
         Kind::Native => {
             let n = match over {
                 Some(n) => n,
                 None => rec.native()?.ok_or_else(missing)?,
             };
-            Ok(Side { stacks: &n.stacks, runs: (!n.untimed).then_some(runs).flatten(), untimed: n.untimed, whole: None })
+            Ok(Side { stacks: &n.stacks, runs: (!n.untimed).then_some(runs).flatten(), untimed: n.untimed, whole: None, ran })
         }
-        Kind::Alloc => Ok(Side { stacks: rec.alloc()?, runs, untimed: false, whole: None }),
+        Kind::Alloc => Ok(Side { stacks: rec.alloc()?, runs, untimed: false, whole: None, ran }),
         Kind::Layout => {
             let f = super::forced(rec)?;
-            Ok(Side { stacks: &f.stacks, runs: (f.runs > 0).then_some(f.runs as u64), untimed: false, whole: None })
+            Ok(Side { stacks: &f.stacks, runs: (f.runs > 0).then_some(f.runs as u64), untimed: false, whole: None, ran })
         }
     }
 }
 
-/// Where a frame is, as two checkouts and two builds share it: its path from the first step a checkout
-/// does not name (a monorepo's `packages/`, `crates/`, `apps/`, a toolchain's `library/`, else the
-/// last `src/` or `lib/`), a dependency's from its package (`node_modules/…`, a cargo crate without
-/// its version or hash), or a script URL without origin, query and bundler hash. The checkout's own
-/// folder (a worktree named after a branch or a commit) never takes part.
+/// Where a frame is, as two checkouts and two builds share it: a dependency's path from its package
+/// (`node_modules/…`, a cargo crate without its version or hash); a file of the side's own checkout
+/// from that checkout's root (`Checkout`); else its path from the first step a checkout does not name
+/// (strobe's `builds/<commit>/`, a monorepo's `packages/`, `crates/`, `apps/`, a toolchain's `library/`,
+/// else the last `src/` or `lib/`), or a script URL without origin, query and bundler hash. The
+/// checkout's own folder (a worktree named after a branch or a commit, `.`) never takes part.
 fn portable_file(f: &Frame) -> String {
+    portable_in(f, None)
+}
+
+fn portable_in(f: &Frame, root: Option<&str>) -> String {
     if f.file.is_empty() && f.url.is_empty() {
         return "(native)".into();
     }
     if !f.mapped && !f.url.is_empty() {
-        return portable_path(&crate::heapsnap::portable_url(&f.url));
+        // A `file:` URL's path as the disk names it (`%20` a space), as its checkout's root is.
+        if f.url.starts_with("file:")
+            && let Some(p) = local_path(f)
+        {
+            return portable_path(&p, root);
+        }
+        return portable_path(&crate::heapsnap::portable_url(&f.url.replace('\\', "/")), None);
     }
-    portable_path(&f.file.replace('\\', "/"))
+    portable_path(&f.file.replace('\\', "/"), root)
 }
 
-fn portable_path(p: &str) -> String {
+/// A path as one form: `/`-separated, no `\\?\`, a drive letter in capitals (`c:/x` and `C:/x` are one
+/// folder), `/C:/…` from a URL as `C:/…`.
+pub(super) fn normal_path(p: &str) -> String {
+    let p = p.replace('\\', "/");
+    let p = p.strip_prefix("//?/").unwrap_or(&p);
+    let p = if p.len() > 2 && p.as_bytes()[0] == b'/' && p.as_bytes()[2] == b':' { &p[1..] } else { p };
+    match p.as_bytes() {
+        [d, b':', ..] if d.is_ascii_alphabetic() => format!("{}{}", (*d as char).to_ascii_uppercase(), &p[1..]),
+        _ => p.to_string(),
+    }
+}
+
+/// `%XX` escapes of a URL's path decoded (`my%20repo` → `my repo`).
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match (b[i], b.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(x)) => {
+                out.push(x);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A frame's file on this computer, `/`-separated (a `file:` script URL's path, or a native frame's
+/// source file), when it names one.
+fn local_path(f: &Frame) -> Option<String> {
+    let raw = if !f.mapped && !f.url.is_empty() {
+        let p = f.url.strip_prefix("file://")?;
+        percent_decoded(p.split(['?', '#']).next().unwrap_or(p))
+    } else {
+        f.file.clone()
+    };
+    let p = normal_path(&raw);
+    (p.starts_with('/') || (p.len() > 2 && p.as_bytes()[1] == b':' && p.as_bytes()[2] == b'/')).then_some(p)
+}
+
+/// A dependency's file, which `portable_path` names by its package.
+fn dependency(p: &str) -> bool {
+    ["/node_modules/", "/registry/src/", "/git/checkouts/"].iter().any(|d| p.contains(d))
+}
+
+/// Where one side's own files are checked out, so a file is named from its checkout's root on both sides
+/// (`harness.ts` in `builds/<commit>/` and in `.` is one file): the folder the block ran its variant
+/// from (`variant_git.root` in its meta: a checkout, strobe's worktree of a ref, a plain folder), for
+/// the files under it; else the folder holding the `.git` above a file, found on disk; else, for a
+/// recording from before blocks kept their root and read where its files are not, the folder the
+/// side's own script files share.
+#[derive(Default)]
+struct Checkout {
+    ran: Option<String>,
+    roots: HashMap<String, Option<String>>,
+    shared: Option<String>,
+}
+
+/// The folder a block ran its variant from (`variant_git.root`), in `normal_path`'s form.
+pub(super) fn ran_from(meta: &Value) -> Option<String> {
+    meta["variant_git"]["root"].as_str().filter(|r| !r.is_empty()).map(|r| normal_path(r).trim_end_matches('/').to_string())
+}
+
+/// `p` under `root` (both in `normal_path`'s form): the rest, without its leading `/`.
+fn under<'a>(p: &'a str, root: &str) -> Option<&'a str> {
+    p.strip_prefix(root)?.strip_prefix('/')
+}
+
+impl Checkout {
+    fn of(stacks: &Stacks, ran: Option<String>) -> Checkout {
+        let mut c = Checkout { ran, ..Checkout::default() };
+        let mut shared: Option<Vec<String>> = None;
+        for f in stacks.frames.iter().filter(|f| !f.mapped && f.url.starts_with("file:")) {
+            let Some(p) = local_path(f).filter(|p| !dependency(p)) else { continue };
+            if c.root(&p).is_some() {
+                continue;
+            }
+            let dir: Vec<String> = p.split('/').map(str::to_string).collect::<Vec<_>>().split_last().map(|(_, d)| d.to_vec()).unwrap_or_default();
+            shared = Some(match shared {
+                None => dir,
+                Some(s) => s.iter().zip(&dir).take_while(|(a, b)| a == b).map(|(a, _)| a.clone()).collect(),
+            });
+        }
+        // Never a file system's root or a drive alone.
+        c.shared = shared.filter(|s| s.iter().filter(|x| !x.is_empty()).count() >= 2).map(|s| s.join("/"));
+        c
+    }
+
+    /// The checkout root above a file: the folder its block ran from, else the nearest folder with a
+    /// `.git` in it.
+    fn root(&mut self, file: &str) -> Option<String> {
+        if let Some(r) = self.ran.as_deref().filter(|r| under(file, r).is_some()) {
+            return Some(r.to_string());
+        }
+        let dir = file.rsplit_once('/').map(|(d, _)| d.to_string())?;
+        if let Some(r) = self.roots.get(&dir) {
+            return r.clone();
+        }
+        let found = std::path::Path::new(&dir).ancestors().find(|a| !a.as_os_str().is_empty() && a.join(".git").exists()).map(|a| normal_path(&a.display().to_string()));
+        self.roots.insert(dir, found.clone());
+        found
+    }
+
+    fn file(&mut self, f: &Frame) -> String {
+        let root = local_path(f).filter(|p| !dependency(p)).and_then(|p| self.root(&p)).or_else(|| self.shared.clone());
+        portable_in(f, root.as_deref())
+    }
+}
+
+/// A hotspots row's location (`file:///…/server/auth/util.ts:1:21`, a URL, a native frame's file) as
+/// two checkouts share it, without its line: `server/auth/util.ts`. `ran`: the folder its block ran
+/// its variant from (`ran_from`).
+pub(super) fn portable_location(at: &str, ran: Option<String>) -> String {
+    let line = regex_lite::Regex::new(r"(:\d+){1,2}$").expect("pattern");
+    let at = line.replace(at, "").to_string();
+    let url = at.contains("://");
+    let f = Frame {
+        name: String::new(),
+        file: if url { String::new() } else { at.clone() },
+        line: 0,
+        column: 0,
+        url: if url { at.clone() } else { String::new() },
+        mapped: false,
+        name_from: None,
+        package: None,
+    };
+    let root = local_path(&f).filter(|p| !dependency(p)).and_then(|p| Checkout { ran, ..Checkout::default() }.root(&p));
+    portable_in(&f, root.as_deref())
+}
+
+fn portable_path(p: &str, root: Option<&str>) -> String {
+    let p = p.replace('\\', "/");
+    let p = p.strip_prefix("//?/").unwrap_or(&p);
     let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
     let from = |i: usize| parts[i..].join("/");
     // A JavaScript dependency: its package path (bun's `.bun/<pkg>@<version>/node_modules/` too).
@@ -286,15 +437,26 @@ fn portable_path(p: &str) -> String {
     if let Some(i) = parts.windows(2).rposition(|w| w == ["registry", "src"]).filter(|i| parts.len() > i + 3) {
         return format!("{}/{}", unversioned(parts[i + 3]), parts[i + 4..].join("/"));
     }
-    let rest: &[&str] = match parts.windows(2).rposition(|w| w == ["git", "checkouts"]) {
-        Some(i) if parts.len() > i + 4 => &parts[i + 4..],
-        _ => &parts,
-    };
     // A build script's output: `<crate>-<16 hex>/out/…` keeps the crate.
     let hashless = |s: &str| match s.rsplit_once('-') {
         Some((n, h)) if h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()) => n.to_string(),
         _ => s.to_string(),
     };
+    let rest: &[&str] = match parts.windows(2).rposition(|w| w == ["git", "checkouts"]) {
+        Some(i) if parts.len() > i + 4 => return parts[i + 4..].iter().map(|s| hashless(s)).collect::<Vec<_>>().join("/"),
+        _ => &parts,
+    };
+    // A file of the side's own checkout: its whole path from the checkout's root (`/C:/…` from a URL is `C:/…`).
+    let bare = normal_path(p);
+    if let Some(rel) = root.and_then(|r| under(&bare, r)) {
+        return rel.split('/').filter(|s| !s.is_empty()).map(hashless).collect::<Vec<_>>().join("/");
+    }
+    // A git ref strobe checked out (`<state>/builds/<commit>/…`) read where it is no longer: the path
+    // from the commit's folder, whole.
+    let commit = |s: &str| (7..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit());
+    if let Some(i) = rest.windows(2).rposition(|w| w[0] == "builds" && commit(w[1])).filter(|i| rest.len() > i + 2) {
+        return rest[i + 2..].iter().map(|s| hashless(s)).collect::<Vec<_>>().join("/");
+    }
     let tail = |i: usize| rest[i..].iter().map(|s| hashless(s)).collect::<Vec<_>>().join("/");
     if let Some(i) = rest.iter().rposition(|s| matches!(*s, "packages" | "crates" | "apps" | "library")) {
         return tail(i);
@@ -313,8 +475,8 @@ struct Portable {
 }
 
 impl Portable {
-    fn ids(&mut self, stacks: &Stacks) -> Vec<u32> {
-        stacks.frames.iter().map(|f| self.key((f.name.clone(), portable_file(f)))).collect()
+    fn ids(&mut self, stacks: &Stacks, at: &mut Checkout) -> Vec<u32> {
+        stacks.frames.iter().map(|f| self.key((f.name.clone(), at.file(f)))).collect()
     }
 
     fn key(&mut self, key: (String, String)) -> u32 {
@@ -375,7 +537,8 @@ fn weighted(sides: [Side; 2], kind: Kind, by: &str) -> Weighted {
     let mut rows: BTreeMap<(String, String), Row> = BTreeMap::new();
     let (mut total, mut samples) = ([0.0; 2], [0u64; 2]);
     for (s, side) in sides.iter().enumerate() {
-        let ids = portable.ids(side.stacks);
+        let mut checkout = Checkout::of(side.stacks, side.ran.clone());
+        let ids = portable.ids(side.stacks, &mut checkout);
         let mut packages = BTreeMap::new();
         for wt in &side.stacks.weights {
             let Some(f) = wt.stack.last().map(|&i| &side.stacks.frames[i as usize]) else { continue };
@@ -387,9 +550,9 @@ fn weighted(sides: [Side; 2], kind: Kind, by: &str) -> Weighted {
             let driven = super::Driven::of(&wt.stack, &side.stacks.frames);
             let (name, at) = match by {
                 "function" if driven == Some(super::Driven::Native) => (f.name.clone(), super::VIA_DRIVER.to_string()),
-                "function" => (f.name.clone(), portable_file(f)),
+                "function" => (f.name.clone(), checkout.file(f)),
                 _ if driven.is_some() => (driven.map_or("", super::Driven::label).to_string(), String::new()),
-                "file" if !f.file.is_empty() || !f.url.is_empty() => (portable_file(f), String::new()),
+                "file" if !f.file.is_empty() || !f.url.is_empty() => (checkout.file(f), String::new()),
                 _ => (super::row_key(f, by, &mut packages), String::new()),
             };
             let row = rows.entry((name.clone(), at.clone())).or_insert_with(|| Row { name, at, v: [0.0; 2], n: [0; 2], var: [0.0; 2], stacks: HashMap::new() });
@@ -548,11 +711,13 @@ impl Weighted {
 
 /// An experiment series' insights: what moved most between the base and head profiled launches (CPU
 /// self time, forced layout and allocations by function, per run, outside sampling noise), then the
-/// head recording's own insights. Each side's sources load once, both sides at once. A view that is
-/// not per run on both sides (untimed native samples, an unknown run count) names no mover.
+/// head recording's own insights, each marked by whether base's recording has the same rule's hit
+/// (`sides`: both, or head only), and the rules that fired on base alone. Each side's sources load
+/// once, both sides at once. A view that is not per run on both sides (untimed native samples, an
+/// unknown run count) names no mover.
 pub fn series_insights(base: &Rec, head: &Rec, plan_runs: Option<u64>) -> Result<Output> {
     std::thread::scope(|s| {
-        s.spawn(|| base.preload(&ATTRIBUTION_PARTS, true, true, false));
+        s.spawn(|| base.preload(&ATTRIBUTION_PARTS, true, true, true));
         head.preload(&ATTRIBUTION_PARTS, true, true, true);
     });
     let mut text = String::new();
@@ -580,10 +745,18 @@ pub fn series_insights(base: &Rec, head: &Rec, plan_runs: Option<u64>) -> Result
         }
     }
     let own = super::insights(head)?;
-    for line in own.text.lines().skip(1) {
-        text += &format!("{line}\n");
+    let mut hits = own.json["insights"].as_array().cloned().unwrap_or_default();
+    // Head's hits are marked against base's only where base's recording was read: one that could not
+    // be says nothing of base.
+    let base_only = match super::insights(base) {
+        Ok(theirs) => super::mark_sides(&mut hits, &theirs.json),
+        Err(_) => Vec::new(),
+    };
+    text += &super::hits_text(&hits);
+    for b in &base_only {
+        text += &format!("i base only: {}\n", b["title"].as_str().unwrap_or(""));
     }
-    Ok(Output::new(text, json!({ "movers": movers, "head": own.json["insights"] })))
+    Ok(Output::new(text, json!({ "movers": movers, "head": hits, "base_only": base_only })))
 }
 
 /// The diff flame of an experiment series (SPEC §11.2): CPU time and allocations as one call tree of
@@ -630,7 +803,7 @@ fn tree<const N: usize>(sides: [Side; N], kind: Kind) -> Value {
     let mut portable = Portable::default();
     let mut nodes = vec![Node { frame: u32::MAX, parent: usize::MAX, v: [0.0; N], kids: HashMap::new() }];
     for (s, side) in sides.iter().enumerate() {
-        let ids = portable.ids(side.stacks);
+        let ids = portable.ids(side.stacks, &mut Checkout::of(side.stacks, side.ran.clone()));
         for wt in &side.stacks.weights {
             if wt.stack.last().is_none_or(|&i| skipped(&side.stacks.frames[i as usize].name)) {
                 continue;

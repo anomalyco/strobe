@@ -334,10 +334,13 @@ fn variants_json(variants: &[Variant]) -> Value {
 }
 
 /// What a recording says about the variant it ran: the commit, uncommitted changes and their hash
-/// (what the build read), so a kept or `--check` recording still names its code later.
+/// (what the build read), so a kept or `--check` recording still names its code later; and the folder
+/// it ran from (`root`: a checkout, strobe's worktree of a ref, a plain folder), from which `query`
+/// names its files as the other side's (a local path: owner-only, never published).
 fn variant_git(v: &Variant) -> Value {
     let changes = v.state.as_deref().and_then(|s| s.split_once(' ')).map(|(_, h)| &h[..12.min(h.len())]).filter(|_| v.dirty);
-    json!({ "spec": v.spec, "commit": v.commit, "dirty": v.dirty, "changes": changes })
+    let root = v.root.as_ref().filter(|_| !matches!(v.kind, Kind::Cmd(_))).map(|r| r.display().to_string());
+    json!({ "spec": v.spec, "commit": v.commit, "dirty": v.dirty, "changes": changes, "root": root })
 }
 
 /// What a variant is for the rerun ledger: a commit (with a hash of a folder's uncommitted changes),
@@ -2688,7 +2691,19 @@ pub fn run(args: &Args) -> Result<Output> {
         let matrix = journey::matrix(&mut series_out);
         let batched = batching.as_ref().map_or(Value::Null, batch::Batching::summary);
         let stopped = halted.as_ref().map_or(Value::Null, |h| json!({ "code": h.code, "why": h.message, "validator": h.validator(), "not_run": not_run }));
-        let mut out = check_output(&exp, &dir, &file, series_out, ctx.warnings, matrix, args.has("require-parity"), (seed, used_random), batched, (json!(env), stopped), variants_json(&variants))?;
+        let mut out = check_output(
+            &exp,
+            &dir,
+            &file,
+            series_out,
+            ctx.warnings,
+            matrix,
+            args.has("require-parity"),
+            (seed, used_random),
+            batched,
+            (json!(env), stopped),
+            (variants_json(&variants), ctx.saved["args"].clone()),
+        )?;
         // A check that stopped (a stop, the user's state disturbed, launches that kept failing) ends with
         // that error's code.
         if let Some(h) = &halted {
@@ -3368,7 +3383,8 @@ fn check_output(
     seeded: (u32, bool),
     batched: Value,
     ran: (Value, Value),
-    variants: Value,
+    // The variants checked, and the command's arguments (what `query <exp> insights` reruns).
+    (variants, args): (Value, Value),
 ) -> Result<Output> {
     let (env, stopped) = ran;
     let halted = stopped.is_object();
@@ -3652,7 +3668,7 @@ fn check_output(
     }
     text += &format!("\n{exp}\n");
     let result = json!({
-        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "env": env, "plan": { "seed": seeded.0, "used_random": seeded.1 }, "variants": variants,
+        "id": exp, "kind": "check", "file": file, "created": super::record::now_iso(), "env": env, "plan": { "seed": seeded.0, "used_random": seeded.1 }, "variants": variants, "args": args,
         "series": series, "warnings": warnings, "passed": failed == 0 && !halted, "stopped": stopped, "parity": matrix, "batch": batched, "text": text,
     });
     store::write_json(&dir.join("result.json"), &result)?;

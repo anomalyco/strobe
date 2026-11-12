@@ -1,6 +1,8 @@
 //! What a result says, read for the report: each comparison's outcome, the pairs of a series, and helpers over the result.
 
 use super::*;
+use regex_lite::Regex;
+use std::sync::LazyLock;
 
 // ---------- outcome of one comparison ----------
 
@@ -702,7 +704,7 @@ pub(super) fn plain_refusal(id: &str, why: &str) -> String {
         "DisplayOff" => "display off".into(),
         "PatternInput" => "acted through accessibility, no input to time".into(),
         _ if why.is_empty() => id.to_string(),
-        _ => first_clause(&scrub_paths(&why), 90),
+        _ => first_clause(&why, 90),
     }
 }
 
@@ -719,7 +721,8 @@ pub(super) fn permission(text: &str) -> Option<(&'static str, &'static str)> {
 /// processes on the machine (% of a core): …`, `busiest processes on the machine: …`, `busiest
 /// processes (% of a core): …`, `busiest processes: …`; a list ends at `; ` or at the parenthesis
 /// around it; `none named (…)` names none and stays. `ReservedCpus`' lists of the processes it moved or
-/// could not move go, their counts stay.
+/// could not move go, their counts stay. A window that covered the target's is named by its process id,
+/// never its title.
 pub(crate) fn scrub_public(s: &str) -> String {
     const LISTS: [(&str, &str); 5] = [
         ("(busiest elsewhere: ", ""),
@@ -728,12 +731,21 @@ pub(crate) fn scrub_public(s: &str) -> String {
         ("busiest processes (% of a core): ", ""),
         ("busiest processes: ", ""),
     ];
-    let pct = regex_lite::Regex::new(r"(\d+(?:\.\d+)?)%").expect("pattern");
-    // `ReservedCpus` (a context note): the processes it moved, and those it could not, by name.
-    let moved = regex_lite::Regex::new(r"moved per block \([^)]*\)").expect("pattern");
-    let unmoved = regex_lite::Regex::new(r"(\d+) could not be moved: .*?(; \d+% put back|$)").expect("pattern");
-    let s = moved.replace_all(s, "moved per block");
-    let s = unmoved.replace_all(&s, "$1 could not be moved$2");
+    if s.contains('\n') {
+        return s.split('\n').map(scrub_public).collect::<Vec<_>>().join("\n");
+    }
+    static PCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+(?:\.\d+)?)%").expect("pattern"));
+    // One share of a list: a name (anything but `; `), then its percentage.
+    static SHARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:[^;]|;[^ ])*?\s\d+(?:\.\d+)?%").expect("pattern"));
+    // `ReservedCpus` (a context note): the processes it moved, and those it could not, by name; the moved
+    // list ends where the note goes on (`, N more started`, `; N could not be moved`, `; N% put back`),
+    // whatever its names hold, or at its line's end.
+    static MOVED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"moved per block \(.*?\)(, \d+ more started|; \d+ could not be moved|; \d+% put back|$)").expect("pattern"));
+    static UNMOVED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+) could not be moved: .*?(; \d+% put back|$)").expect("pattern"));
+    let (pct, share) = (&*PCT, &*SHARE);
+    let s = MOVED.replace_all(s, "moved per block$1");
+    let s = UNMOVED.replace_all(&s, "$1 could not be moved$2");
+    let s = foreign_line(&s);
     let mut out = String::new();
     let mut rest: &str = &s;
     loop {
@@ -743,11 +755,23 @@ pub(crate) fn scrub_public(s: &str) -> String {
         };
         let wrapped = marker.starts_with('(');
         let list_start = at + marker.len();
-        // The list: to the parenthesis that closes it (or one around it), else to the next `; ` outside
-        // parentheses, else to the end.
+        // A list of shares (`name 130%, name 14%`) ends after its last share, whatever its names hold (a
+        // parenthesis of its own, `app).exe`). Any other list: to the parenthesis that closes it (or one
+        // around it), else to the next `; ` outside parentheses, else to the end.
+        let mut shared = list_start;
+        while let Some(m) = share.find(&rest[shared..]) {
+            shared += m.end();
+            if !rest[shared..].starts_with(", ") {
+                break;
+            }
+            shared += 2;
+        }
         let bytes = rest.as_bytes();
         let (mut depth, mut end) = (0i32, rest.len());
-        let mut i = list_start;
+        let mut i = if shared > list_start { bytes.len() } else { list_start };
+        if shared > list_start {
+            end = shared - if rest[..shared].ends_with(", ") { 2 } else { 0 };
+        }
         while i < bytes.len() {
             match bytes[i] {
                 b'(' => depth += 1,
@@ -782,13 +806,157 @@ pub(crate) fn scrub_public(s: &str) -> String {
     }
 }
 
-/// Local paths out: a user's home as `~`, other absolute paths by their last part.
+/// What another program shows, out of public text: a title, element or class name strobe quoted (`"…"`)
+/// in a clause that names that program's process (`… of process 4120`, `(pid 4120)`, before the next
+/// `; `), and the app in `a window of <app> of process <pid>`. The process id stays. Covers every way
+/// strobe names what covered or overlaid the target (`another window covers the point (x, y): "<title>" of
+/// process <pid>`, `window "<title>" of process <pid>`, `pane "<name>" (key "<id>") of process <pid>`,
+/// `a "<class>" window of process <pid>`, `"<title>" (pid <pid>) is …`, `"<title>" of process <pid> covers
+/// the region`).
+/// One line (`scrub_public` gives it a line at a time: strobe's messages are one line each, a title
+/// Debug-quoted with its newlines escaped, so nothing on another line pairs with or stands near one).
+fn foreign_line(line: &str) -> String {
+    static OF_PROCESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" of process (\d+)").expect("pattern"));
+    static PID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" of process \d+|\(pid \d+\)").expect("pattern"));
+    // The app of `a window of <app> of process <pid>`: up to the first ` of process N` within its clause,
+    // which a `; `, a table cell's ` | ` or the next `a window of` ends (a name may hold `&`, `|`, `<`, or
+    // the escapes a cell made of them: `&amp;`, `\|`). What this gave (`a window of process 4122`) has
+    // no ` of process` left in its clause, so a second pass changes nothing, whatever the app was called
+    // (`process monitor`).
+    const OWNER: &str = "a window of ";
+    let mut owned = String::new();
+    let mut rest = line;
+    while let Some(at) = rest.find(OWNER) {
+        let (head, tail) = rest.split_at(at + OWNER.len());
+        owned += head;
+        rest = tail;
+        let clause = [rest.find("; "), rest.find(" | "), rest.find(OWNER)].into_iter().flatten().min().unwrap_or(rest.len());
+        if let Some(c) = OF_PROCESS.captures(&rest[..clause]) {
+            let m = c.get(0).expect("match");
+            owned += &format!("process {}", &c[1]);
+            rest = &rest[m.end()..];
+        }
+    }
+    let line = owned + rest;
+    let pid = &*PID;
+    let b = line.as_bytes();
+    // A `"` a backslash escapes is inside a string, not one of its ends.
+    let escaped = |i: usize| b[..i].iter().rev().take_while(|c| **c == b'\\').count() % 2 == 1;
+    // From each process named, back through its clause: the quoted strings that lead to it (a title, an
+    // element and its key, a class), each close to the next, never across `; ` outside quotes.
+    let mut blank: Vec<(usize, usize)> = Vec::new();
+    for m in pid.find_iter(&line) {
+        let mut i = m.start();
+        let mut gap = 0;
+        while i > 0 && gap <= 40 {
+            i -= 1;
+            if b[i] == b'"' && !escaped(i) {
+                let Some(open) = (0..i).rev().find(|&j| b[j] == b'"' && !escaped(j)) else { break };
+                blank.push((open, i));
+                (i, gap) = (open, 0);
+            } else if b[i] == b' ' && i > 0 && b[i - 1] == b';' {
+                break;
+            } else {
+                gap += 1;
+            }
+        }
+    }
+    blank.sort_unstable();
+    blank.dedup();
+    let mut out = String::new();
+    let mut at = 0;
+    for (open, close) in blank {
+        if open < at {
+            continue;
+        }
+        out += &line[at..open];
+        out += "\"…\"";
+        at = close + 1;
+    }
+    out + &line[at..]
+}
+
+/// Text for a public surface (a PR block, a step summary, a card): other programs' names and a
+/// person's folders out (`scrub_paths`, then `scrub_public`). Everything published passes here before
+/// anything cuts it short.
+pub(crate) fn public(s: &str) -> String {
+    s.split('\n').map(|l| scrub_public(&scrub_paths(l))).collect::<Vec<_>>().join("\n")
+}
+
+/// Every string of a result passed through `public`, before a public surface (PR block, step
+/// summary, card, badge) reads any of it: a field no renderer scrubs on its own (a new one, a cut
+/// before the scrub) holds no name or path to show. The bench file's path from its repository is kept
+/// first (`file_repo`), which only the local path can say.
+pub(crate) fn public_value(v: &mut Value) {
+    if v["file_repo"].is_null()
+        && let Some(f) = v["file"].as_str().filter(|f| !f.is_empty())
+    {
+        v["file_repo"] = Value::String(super::repo_relative(f));
+    }
+    fn walk(v: &mut Value) {
+        match v {
+            Value::String(s) => *s = public(s),
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            Value::Object(o) => {
+                // The folder a variant ran from (a block's `variant_git.root`): this machine's alone.
+                if o.contains_key("spec") && o.contains_key("dirty") {
+                    o.remove("root");
+                }
+                o.values_mut().for_each(walk)
+            }
+            _ => {}
+        }
+    }
+    walk(v);
+}
+
+/// Where a path starts in text: the text's start, a delimiter, a `file:` URL's `//` (and the `/` before a
+/// drive), or Windows' `\\?\`; never inside a longer path (a folder named `home` below another).
+const PATH_START: &str = r#"(^|file:///?|\\\\\?\\|[\s"'`(\[=,:|<>])"#;
+
+/// Local paths out: a user's home as `~` (this machine's wherever it is, `/root` or a home below another
+/// folder, and any `…/Users/<name>` or `/home/<name>`, either separator, any case), then other absolute
+/// Windows paths by their last part.
 pub(super) fn scrub_paths(s: &str) -> String {
-    // `C:/Users/x/…` too, or the drive letter stayed behind (`C:~/…`).
-    let home = regex_lite::Regex::new(r"([A-Za-z]:)?(/Users|/home)/[^/\s`|)]+").expect("pattern");
-    let s = home.replace_all(s, "~");
-    let drive = regex_lite::Regex::new(r#"(\\\\\?\\)?\b[A-Za-z]:[\\/](?:[^\s\\/|`)<>"]+[\\/])+"#).expect("pattern");
-    drive.replace_all(&s, "…/").to_string()
+    // `\\?\` goes with the home it led; a `file:` URL keeps its scheme.
+    let keep = |c: &regex_lite::Captures| if c[1].starts_with('\\') { String::new() } else { c[1].to_string() };
+    // Each pass to a fixed point: a match takes the delimiter before it, so the next path of a list
+    // (`/home/a:/home/b`) is found by the next pass, its delimiter kept.
+    let fixed = |re: &regex_lite::Regex, s: String, with: &dyn Fn(&regex_lite::Captures) -> String| {
+        let mut s = s;
+        loop {
+            let next = re.replace_all(&s, |c: &regex_lite::Captures| with(c)).to_string();
+            if next == s {
+                return s;
+            }
+            s = next;
+        }
+    };
+    // This machine's home, whole, then a separator or the name's end (left in place): `/home/ann`
+    // never matches in `/home/anna`. A UNC home (`\\server\users\ann`) leads with two separators.
+    static HOME: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        let home = crate::host::home().display().to_string();
+        let home = home.trim_end_matches(['/', '\\']);
+        let parts: Vec<&str> = home.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+        if parts.len() < 2 && !(parts.len() == 1 && !parts[0].ends_with(':')) {
+            return None;
+        }
+        let lead = if home.starts_with(['/', '\\']) { r"[\\/]{1,2}" } else { "" };
+        Regex::new(&format!(r"(?i){PATH_START}{lead}{}([\\/]|[^\w.\-~?]|$)", parts.iter().map(|p| regex_lite::escape(p)).collect::<Vec<_>>().join(r"[\\/]"))).ok()
+    });
+    // Another user's home: `[X:]\Users\<name>`, `/home/<name>`, WSL's `/mnt/<drive>/Users/<name>`, an
+    // ostree `/var/home/<name>`, a share's `\\<server>\Users\<name>`. A name ends at a separator, a
+    // space, a quote, `,;:[]()|<>`; a full stop after it ends a sentence.
+    static OTHER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(r#"(?i){PATH_START}(?:[\\/]mnt[\\/][a-z]|[\\/]var|[\\/]{{2}}[\w.\-$]+)?(?:[A-Z]:)?[\\/](?:Users|home)[\\/]([^/\\\s"'`|()<>,;:\[\]]+)"#)).expect("pattern")
+    });
+    static DRIVE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(\\\\\?\\)?\b[A-Za-z]:[\\/](?:[^\s\\/|`)<>"]+[\\/])+"#).expect("pattern"));
+    let mut s = s.to_string();
+    if let Some(re) = &*HOME {
+        s = fixed(re, s, &|c| format!("{}~{}", keep(c), &c[2]));
+    }
+    let s = fixed(&OTHER, s, &|c| format!("{}~{}", keep(c), if c[2].ends_with('.') { "." } else { "" }));
+    DRIVE.replace_all(&s, "…/").to_string()
 }
 
 /// A prebuilt executable as a report names it in public: `exe:…/base/app`, the last two parts of
@@ -965,6 +1133,8 @@ pub(super) fn warning_name(id: &str) -> &str {
         "TimerCoalescing" => "Timer coalescing",
         "StaleCalibration" => "Stale calibration",
         "VariantChanged" => "Variant changed",
+        "HarnessOverlay" => "Harness overlay",
+        "Uncounted" => "Counter not counted",
         "ScreenChanged" => "Different screens",
         "NoPresentSource" => "Frame and latency metrics",
         other => other,
@@ -1037,7 +1207,7 @@ pub(super) fn fixed_href(r: &Value, s: &Value, role: &str) -> Option<String> {
 }
 
 pub(super) fn local_path(s: &str) -> bool {
-    s.starts_with('/') || s.starts_with('\\') || s.starts_with("~") || s.as_bytes().get(1) == Some(&b':') || s.starts_with("./") || s.starts_with("../")
+    s.starts_with('/') || s.starts_with('\\') || s.starts_with('~') || s.starts_with('…') || s.as_bytes().get(1) == Some(&b':') || s.starts_with("./") || s.starts_with("../")
 }
 
 /// The commit in a variant's label (`<name>@<sha>…`).
@@ -1055,7 +1225,14 @@ pub(super) fn tag(v: &Value) -> String {
     let spec = v["spec"].as_str().unwrap_or("");
     let dirty = v["dirty"] == true || label.ends_with("(dirty)");
     let sha = v["commit"].as_str().map(|c| c.chars().take(10).collect::<String>()).or_else(|| label_commit(v));
-    let Some(sha) = sha else { return if local_path(spec) || spec == "." { "working tree".into() } else { symbolic(spec) } };
+    let Some(sha) = sha else {
+        return match () {
+            _ if spec == "." => "working tree".into(),
+            // A folder in no repository, by any path: its name is this machine's.
+            _ if v["kind"] == "dir" || local_path(spec) => "a folder".into(),
+            _ => symbolic(spec),
+        };
+    };
     let is_ref = !spec.is_empty() && spec != "." && !local_path(spec) && !spec.chars().all(|c| c.is_ascii_hexdigit()) && v["kind"] != "dir";
     let mut t = if is_ref { format!("{spec}@{sha}") } else { sha };
     if dirty {
@@ -1085,9 +1262,11 @@ pub(super) fn short_label(label: &str) -> &str {
     label.rsplit_once(" · ").map(|(a, _)| a).unwrap_or(label)
 }
 
-/// A warning's text up to its first `: ` detail list, at most `max` characters.
+/// A warning's text up to its first `: ` detail list, at most `max` characters. Only public text is cut
+/// (`public` first), so no cut leaves part of a name the scrub would have found whole.
 pub(super) fn first_clause(text: &str, max: usize) -> String {
-    let t = text.trim();
+    let t = public(text);
+    let t = t.trim();
     if t.chars().count() <= max {
         return t.to_string();
     }
