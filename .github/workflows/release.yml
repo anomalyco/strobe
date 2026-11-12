@@ -177,6 +177,73 @@ jobs:
         timeout-minutes: 60
         run: bun scripts/release.ts --bin bin ${{ startsWith(github.ref, 'refs/tags/v') && '--publish' || '' }}
 
+  # Once the release is on npm, its GitHub Release: strobe's changelog. The notes are the commits since the
+  # previous release tag (main takes direct pushes, so GitHub's pull-request notes would be empty), read
+  # through the API with this run's token: no checkout, no repository code, no secrets. Nothing here can fail
+  # the release: a note that cannot be built leaves a link to the commits, and a failed job is only reported.
+  github-release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Notes
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          version="${TAG#v}"
+          prev=$(gh api "repos/$REPO/tags?per_page=100" --paginate --jq '.[].name' | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | awk -v t="$TAG" '$0 == t { print p; exit } { p = $0 }')
+          # One line per commit, oldest first. A work-package prefix (`W5-3: `, `W6-3 review (wip): `,
+          # `w7b review 2: `) goes;
+          # merges, version bumps, formatting fixes and ci/docs/chore commits (`docs:`, `SPEC …`, one package
+          # folding another's text: `W6-1's text …`) are left out. The subject is escaped: no HTML, emphasis,
+          # code span, math, link or list syntax takes effect, and no `@name` notifies anyone. GitHub renders
+          # `$…$` as math even when escaped (`\$`, `&#36;`): only a `$` in a span of its own stays a `$`.
+          notes_jq=$(cat <<'JQ'
+          .commits[]
+          | select(.parents | length == 1)
+          | (.commit.message | split("\n")[0] | gsub("\r"; "") | sub("^[Ww][0-9]+(-[0-9]+|[a-z])[^:']*: "; "")) as $s
+          | select($s | test("^(release: v?[0-9]|fmt: ([A-Za-z0-9_./-]+\\.rs|rustfmt|cargo fmt)|ci:|docs:|chore:|[Mm]erge |SPEC\\b|W[0-9]+-[0-9]+'s )") | not)
+          | "- " + ($s
+              | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")
+              | gsub("(?<c>[\\\\`*_~|\\[\\]])"; "\\\(.c)")
+              | gsub("\\$"; "<span>$</span>")
+              | gsub("@(?<c>[A-Za-z0-9])"; "@\u200b\(.c)")
+              | sub("^(?<c>[-+#])"; "\\\(.c)")
+              | sub("^(?<n>[0-9]+)(?<p>[.)])"; "\(.n)\\\(.p)"))
+            + " (" + .sha[0:7] + ")"
+          JQ
+          )
+          {
+            echo "Install: \`bun add -d @hona/strobe@$version\` (or \`strobe update\`). npm: https://www.npmjs.com/package/@hona/strobe/v/$version"
+            if [ -n "$prev" ]; then
+              lines=$(gh api "repos/$REPO/compare/$prev...$TAG?per_page=100" --paginate | jq -r "$notes_jq")
+              if [ -n "$lines" ]; then
+                printf '\n## Changes since %s\n\n%s\n' "$prev" "$lines"
+              fi
+              printf '\nAll commits: https://github.com/%s/compare/%s...%s\n' "$REPO" "$prev" "$TAG"
+            fi
+          } > notes.part
+          # Whole or not at all: a step that failed midway leaves no notes.md, and the release says where the commits are.
+          mv notes.part notes.md
+          cat notes.md
+      - name: Release
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "$TAG is a pre-release: no GitHub Release"; exit 0; fi
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then echo "$TAG already has a release"; exit 0; fi
+          [ -s notes.md ] || echo "The commits of this release: https://github.com/$REPO/commits/$TAG" > notes.md
+          # Latest only for the highest version: a patch of an older minor, tagged later, leaves it where it is.
+          top=$(gh api "repos/$REPO/tags?per_page=100" --paginate --jq '.[].name' | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -n 1) || top=""
+          latest=false
+          [ "$TAG" = "$top" ] && latest=true
+          gh release create "$TAG" -R "$REPO" --verify-tag --latest="$latest" --title "strobe ${TAG#v}" --notes-file notes.md
+
   # Once the release is on npm, the action's tag for its minor version (v0.29 for v0.29.1) moves to it:
   # `uses: anomalyco/strobe@v0.29` takes each patch release of 0.29 (pre-1.0, a minor version may break).
   # Only forward, never to a commit the tag's current one is not an ancestor of, and never for a
