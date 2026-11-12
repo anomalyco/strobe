@@ -92,6 +92,15 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     if web && window_until.is_some() {
         return Err(Error::usage(format!("{}: a web target's launch is timed in the page, which has no window of its own: time it to a selector", s.case)));
     }
+    // An app with `window: false` (a tray app): nothing to wait for on screen, fit or film, as for a
+    // windowless native app (`native::launch_once`).
+    let windowless = !web && super::windowless_target(&target, &ctx.config);
+    if windowless && window_until.is_some() {
+        return Err(Error::usage(format!("{}: the app shows no window (window: false), so its launch cannot end on one: time it to a selector in its page or to a milestone", s.case)));
+    }
+    if windowless && let Some(m) = declared_metrics(s).into_iter().find(|m| *m == "launch.painted" || *m == "launch.settled") {
+        return Err(Error::usage(format!("{}: {m} reads the window's pixels, and the app shows no window (window: false)", s.case)));
+    }
     if matches!(window_until, Some(super::native::Until::Painted | super::native::Until::Settled)) {
         if spec["screen"] == false {
             return Err(Error::usage(format!("{}: launch.until.window painted or settled reads the window's pixels; drop screen: false", s.case)));
@@ -171,7 +180,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     phone_window(&mut window, &target, &emulation, headless_of(ctx, s));
     ctx.used = Some(window.clone());
     // An attribution launch reads no pixels, unless they are what ends it.
-    let screen = !web && spec["screen"] != false && (!profile || window_until.is_some());
+    let screen = !web && !windowless && spec["screen"] != false && (!profile || window_until.is_some());
     let inspect_port = if spec["inspect"] == true && !profile { Some(free_port()?) } else { None };
     let mut guard = None;
     // The time stamp counter's rate, from two readings around the launch: cycles to ms.
@@ -212,7 +221,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // An app's windows stay on top without focus (an occluded window never paints); `screen` also
         // captures their pixels. Timed to the window, each look goes to the wait below too, with the
         // process set's cycles, as a native launch's does. An app with `window: false` has none to keep up.
-        let sampler = (!web && (window_until.is_some() || !super::windowless_target(&target, &ctx.config))).then(|| {
+        let sampler = (!web && !windowless).then(|| {
             let stop = stop.clone();
             let timed = window_until.is_some();
             std::thread::spawn(
@@ -409,6 +418,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // A webview app's launch is not moved or sized: the block records the window it opened.
         if let (WebBrowser::Chromium(b), Page::Chromium(p)) = (&browser, &page)
             && b.embedded
+            && !windowless
         {
             ctx.used = Some(crate::target::webview::fit(b, p, None, false)?);
         }
@@ -519,7 +529,13 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         if !web && declares(s, "memory.app.") {
             memory(&browser.processes(), &mut values);
         }
-        let why_no_pixels = if web { "a page's launch is timed in the page; window pixels are an app, exe or command target's".to_string() } else { no_pixels(screen) };
+        let why_no_pixels = if web {
+            "a page's launch is timed in the page; window pixels are an app, exe or command target's".to_string()
+        } else if windowless {
+            "the app shows no window (window: false)".to_string()
+        } else {
+            no_pixels(screen)
+        };
         let mut refused = refusals(s, &values, &why_no_pixels, web);
         if launch_lost && refused.contains_key("cpu.work") {
             refused.insert("cpu.work".into(), super::super::record::cpu_lost("cpu.work", 1, 1, if web { "the browser" } else { "the app (a launcher that handed over, a helper)" }));
@@ -1046,24 +1062,24 @@ impl Watch {
             }
             cdp.send("Target.setAutoAttach", p, None)
         };
-        let running = cdp.send("Target.getTargets", json!({}), None)?;
+        // Auto-attach first, then the list: a page that opens between the two is paused for its observer
+        // either way, and is either in the list or arrives as an attach event later.
         attach(true).or_else(|_| attach(false))?;
+        let running = cdp.send("Target.getTargets", json!({}), None)?;
         let a = Arc::new(Attacher { cdp: cdp.clone(), observer, profile, tx, stop: stop.clone(), late: late.clone(), pages: pages.clone(), seen: Mutex::new(Default::default()) });
         // Pages that already ran when strobe connected (a browser opens its first page at startup): armed
-        // here, before strobe navigates one. Auto-attach attaches them too; their sessions are the ones
-        // armed, so each page has one session. A browser whose auto-attach left one out gets it attached.
-        let mut open: std::collections::BTreeMap<String, Value> =
-            running["targetInfos"].as_array().into_iter().flatten().filter(|t| is_page(t)).map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t.clone())).collect();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !open.is_empty() {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else { break };
-            let Ok(ev) = events.recv_timeout(left) else { break };
-            if ev["method"] == "Target.attachedToTarget" {
-                open.remove(ev["params"]["targetInfo"]["targetId"].as_str().unwrap_or(""));
-            }
+        // here, before strobe navigates one. Auto-attach attaches them too, and Chromium sends those
+        // attach events before its answer to `setAutoAttach`, on the one connection, so they are queued
+        // now: taken without waiting (this runs inside a timed app launch). Their sessions are the ones
+        // armed, so each page has one session; a page auto-attach left out is attached here.
+        while let Ok(ev) = events.try_recv() {
             a.event(&ev);
         }
-        for (id, info) in &open {
+        for info in running["targetInfos"].as_array().into_iter().flatten().filter(|t| is_page(t)) {
+            let id = info["targetId"].as_str().unwrap_or("");
+            if a.seen.lock().unwrap().contains(id) {
+                continue;
+            }
             let attached = cdp.send("Target.attachToTarget", json!({ "targetId": id, "flatten": true }), None);
             if let Some(session) = attached.ok().as_ref().and_then(|r| r["sessionId"].as_str()) {
                 a.page(session, info);
