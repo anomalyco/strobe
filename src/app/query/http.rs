@@ -18,12 +18,21 @@ const STALL_MS: f64 = 50.0;
 pub fn run(args: &Args, top: usize) -> Result<Output> {
     let handle = args.pos.first().ok_or_else(|| Error::usage("query needs a handle: strobe query rec_… http"))?;
     let phase = args.get("phase");
+    // A result.json, a meta.json or the folder of either, named by its path: read as it is.
+    match super::by_path(handle)? {
+        Some(super::ByPath::Experiment(_, result, _named)) => return experiment(&result, phase, top),
+        Some(super::ByPath::Recording(dir, _, _named)) => return recording(&dir, phase, top),
+        None => {}
+    }
     if let Some((a, b)) = handle.split_once("..") {
-        return pair(&store::resolve(a)?, &store::resolve(b)?, phase, top);
+        // Each side opened as a person named it, and held while it is read.
+        let (a, b) = (super::Rec::named(a)?, super::Rec::named(b)?);
+        return pair(&a.dir, &b.dir, phase, top);
     }
     let dir = store::resolve(handle)?;
     if store::is_experiment(&dir) {
-        return experiment(&dir, phase, top);
+        let result = store::read_json(&dir.join("result.json")).map_err(|_| Error::usage("this experiment has no result yet: query it once it ends"))?;
+        return experiment(&result, phase, top);
     }
     recording(&dir, phase, top)
 }
@@ -346,7 +355,10 @@ fn recording(dir: &Path, phase: Option<&str>, top: usize) -> Result<Output> {
         text = text.replacen("measured  ", &format!("phase {p}  "), 1);
     }
     text += &v.cohort_text(&j);
-    text += &format!("next      strobe open {} (the probes beside the runs)\n", v.id);
+    // `strobe open` reads strobe's own recordings: one named by its path has no such line.
+    if dir.parent().is_some_and(|p| p == crate::host::paths::recordings()) {
+        text += &format!("next      strobe open {} (the probes beside the runs)\n", v.id);
+    }
     Ok(Output::new(text, j))
 }
 
@@ -462,8 +474,7 @@ pub fn recording_json(dir: &Path, top: usize) -> Option<Value> {
 }
 
 /// An experiment's probe blocks: each one's summary, and where its probes are kept.
-fn experiment(dir: &Path, phase: Option<&str>, top: usize) -> Result<Output> {
-    let result = store::read_json(&dir.join("result.json")).map_err(|_| Error::usage("this experiment has no result yet: query it once it ends"))?;
+fn experiment(result: &Value, phase: Option<&str>, top: usize) -> Result<Output> {
     let mut rows: Vec<Vec<String>> = vec![["series", "side", "block", "p50", "p95", "max", "timeouts", "errors", "missed", "recording"].iter().map(|s| s.to_string()).collect()];
     let ms = |v: &Value| v.as_f64().map_or("—".to_string(), |x| fmt::value(x, "ms"));
     let out: Vec<Value> = result["series"].as_array().into_iter().flatten().flat_map(|s| entries(s, phase, top, false)).collect();

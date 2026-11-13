@@ -9,15 +9,27 @@ use super::{Output, Rec, fmt, hits_text, insights, leak_class, leak_classes, mar
 use crate::model::{Result, VerdictKind};
 use crate::stats;
 use serde_json::{Value, json};
+use std::path::Path;
 
-pub fn run(r: &Value) -> Result<Output> {
+/// `source`: the result.json it was read from when named by its path (`query <path> insights`).
+pub fn run(r: &Value, source: Option<&std::path::Path>) -> Result<Output> {
     let id = r["id"].as_str().unwrap_or("");
     if r["kind"] == "bisect" {
         return Ok(bisect(r));
     }
     let series: Vec<&Value> = r["series"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
-    let cmd = Command::of(r);
+    quoting_reset();
+    let mut cmd = Command::of(r);
+    // A result read from its path: its commands name that path (what strobe keeps of its id, if
+    // anything, may be another result).
+    if let Some(f) = source {
+        cmd.exp = super::path_word(f);
+        cmd.from_path = true;
+    }
     let mut text = format!("insights · {id} · {}\n", what(r, &series));
+    if let Some(why) = &cmd.gone {
+        text += &format!("here     no rerun or profile command: {why}\n");
+    }
     // The experiment's own warnings bear on every series: said once.
     let shared = warnings(&r["warnings"]);
     if !shared.is_empty() {
@@ -27,12 +39,21 @@ pub fn run(r: &Value) -> Result<Output> {
         text += &format!("stopped  {}\n", st.get("why").and_then(Value::as_str).unwrap_or("the bench stopped before every series ran"));
     }
     let mut out = Vec::new();
+    let mut body = String::new();
     for s in series {
         let sec = section(r, s, &cmd);
-        text += &sec.text();
+        body += &sec.text();
         out.push(sec.json());
     }
-    Ok(Output::new(text, json!({ "experiment": id, "kind": r["kind"], "comparison": r["comparison"], "warnings": shared, "series": out })))
+    let shell = quoting_note();
+    if let Some((_, note)) = &shell {
+        text += &format!("quoting  {note}\n");
+    }
+    text += &body;
+    Ok(Output::new(
+        text,
+        json!({ "experiment": id, "kind": r["kind"], "comparison": r["comparison"], "warnings": shared, "series": out, "unrunnable_here": cmd.gone, "quoted_for": shell.map(|s| s.0) }),
+    ))
 }
 
 /// One series' insights.
@@ -101,6 +122,13 @@ impl Section {
         j
     }
 
+    /// A command to run next, when there is one that runs here.
+    fn then(&mut self, why: impl Into<String>, c: Option<String>) {
+        if let Some(c) = c {
+            self.next.push((why.into(), c));
+        }
+    }
+
     /// A kept recording's hits under `source`, or why it gives none.
     fn read(&mut self, source: String, rec: &str) {
         match kept(rec) {
@@ -158,7 +186,7 @@ fn section(r: &Value, s: &Value, cmd: &Command) -> Section {
     match s["kind"].as_str() {
         _ if s["not_run"] == true => {
             sec.result.push("not run: the bench stopped before this series".into());
-            if let Some(id) = r["id"].as_str().filter(|id| crate::store::resolve(id).is_ok_and(|d| d.join("state.json").is_file())) {
+            if let Some(id) = r["id"].as_str().filter(|id| !cmd.from_path && crate::store::resolve(id).is_ok_and(|d| d.join("state.json").is_file())) {
                 sec.next.push(("go on with the series not run".into(), format!("strobe bench --resume {id}")));
             }
         }
@@ -173,7 +201,7 @@ fn section(r: &Value, s: &Value, cmd: &Command) -> Section {
         Some("check") => check(r, s, cmd, &mut sec),
         Some("blocks") => blocks(r, s, cmd, &mut sec),
         Some("leak") => leak(r, s, cmd, &mut sec),
-        Some("pixels") => pixels(r, s, &mut sec),
+        Some("pixels") => pixels(s, cmd, &mut sec),
         _ => comparison(r, s, cmd, &mut sec),
     }
     sec
@@ -336,7 +364,7 @@ fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     };
     let attr = &s["attribution"];
     let (b, h) = (attr["base"].as_str(), attr["head"].as_str());
-    let id = r["id"].as_str().unwrap_or("");
+    let id = cmd.exp.as_str();
     let profile = "untimed, under the profilers; one launch per side, so an interval covers sampling alone, not launch to launch";
     if r["comparison"] == "implementations" {
         // Two implementations share no code: each side's own hits, under its name.
@@ -415,7 +443,7 @@ fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
         VerdictKind::Underpowered | VerdictKind::Unclear => {
             let pairs = s["pairs"].as_u64().unwrap_or(0);
             if let Some(n) = p["needed_pairs"].as_u64().filter(|n| *n > pairs) {
-                sec.next.push((format!("~{n} pairs for an 80% chance to decide the primary (projected from these pairs' spread)"), cmd.bench(s, &[("pairs", Some(&n.to_string()))])));
+                sec.then(format!("~{n} pairs for an 80% chance to decide the primary (projected from these pairs' spread)"), cmd.bench(s, &[("pairs", Some(&n.to_string()))]));
             }
         }
         VerdictKind::Stopped if crate::store::resolve(id).is_ok_and(|d| d.join("state.json").is_file()) => {
@@ -426,7 +454,7 @@ fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     // Secondaries the gate kept untested for want of pairs (Holm).
     let holm = s["holm_pairs"].as_u64().unwrap_or(0);
     if s["pairs"].as_u64().unwrap_or(0) < holm && s["decided"] == true {
-        sec.next.push((format!("the secondaries can only clear Holm's correction from {holm} pairs"), cmd.bench(s, &[("pairs", Some(&holm.to_string()))])));
+        sec.then(format!("the secondaries can only clear Holm's correction from {holm} pairs"), cmd.bench(s, &[("pairs", Some(&holm.to_string()))]));
     }
     if sec.suspects.is_empty() && sec.none.is_empty() {
         sec.none.push("no recording kept".into());
@@ -483,18 +511,41 @@ fn check(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
             (None, Some(why)) => format!("refused: {why}"),
             (None, None) => "no value".to_string(),
         };
-        sec.result.push(format!("passed · ★ {m} {value}"));
+        // A command's peak memory where its block measured it, asked for or not (`strobe run --check`
+        // declares none: a Linux command smaller than strobe's own resident set has no peak of its own).
+        let peak = s["values"]["memory.peak"]
+            .as_f64()
+            .filter(|_| s["target_kind"] == "cli" && m != "memory.peak")
+            .map(|p| format!(" · memory.peak {}", fmt::value(p, crate::model::metric("memory.peak").map_or("bytes", |d| d.unit))))
+            .unwrap_or_default();
+        sec.result.push(format!("passed · ★ {m} {value}{peak}"));
     } else {
         let error = s["error"].as_str().unwrap_or("failed");
-        sec.result.push(format!("FAILED: {}", error.lines().next().unwrap_or("")));
-        if let Some(h) = s["hint"].as_str() {
+        // A `--noworse` failure's error lists its counters, each said on its own line below.
+        let noworse = error.starts_with("--noworse:") && s["counters"].as_array().is_some_and(|c| c.iter().any(|c| c["passed"] == false));
+        sec.result.push(if noworse { "FAILED: --noworse (each counter below)".to_string() } else { format!("FAILED: {}", error.lines().next().unwrap_or("")) });
+        // A failed base's hint is the series' too (`--check --base`): said once, as base's, below.
+        if let Some(h) = s["hint"].as_str().filter(|h| !(s["base"]["passed"] == false && s["base"]["hint"].as_str() == Some(*h))) {
             sec.next.push((format!("the failure's hint: {h}"), String::new()));
         }
         let seed = (r["plan"]["used_random"] == true).then(|| r["plan"]["seed"].to_string());
-        sec.next.push(("run this case alone again".into(), cmd.bench(s, &[("seed", seed.as_deref())])));
+        sec.then("run this case alone again", cmd.bench(s, &[("seed", seed.as_deref())]));
     }
+    // A base that could not run the case (`--check --base`): its own error, every line, and its hint.
+    if s["base"]["passed"] == false {
+        let error = s["base"]["error"].as_str().unwrap_or("failed");
+        let mut lines = error.lines().filter(|l| !l.trim().is_empty());
+        sec.result.push(format!("base FAILED: {}", lines.next().unwrap_or("")));
+        sec.result.extend(lines.map(|l| format!("  {}", l.trim_end())));
+        if let Some(h) = s["base"]["hint"].as_str() {
+            sec.next.push((format!("base's hint: {h}"), String::new()));
+        }
+    }
+    // Each counter that failed `--noworse`, in its own words (they begin with its name).
     for c in s["counters"].as_array().into_iter().flatten().filter(|c| c["passed"] == false) {
-        sec.result.push(format!("--noworse {}: {}", c["metric"].as_str().unwrap_or(""), c["text"].as_str().or(c["state"].as_str()).unwrap_or("")));
+        let m = c["metric"].as_str().unwrap_or("");
+        let text = c["text"].as_str().or(c["state"].as_str()).unwrap_or("");
+        sec.result.push(if text.starts_with(m) { format!("--noworse {text}") } else { format!("--noworse {m}: {text}") });
     }
     if let Some(rec) = s["attribution"].as_str() {
         sec.read(format!("the attribution block {rec} (warmed, its measured runs under the profilers, untimed)"), rec);
@@ -546,7 +597,10 @@ fn blocks(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     sec.result.push(line);
     if let Some(rec) = s["attribution"]["head"].as_str() {
         sec.read(format!("head's attribution block {rec} (after its timed blocks, profiled, untimed)"), rec);
-        sec.next.push(("where its time goes, by package and function".into(), format!("strobe query {rec} hotspots --by package")));
+        // Only a recording on this machine has a view to show.
+        if sec.suspects.iter().any(|(src, _)| src.contains(rec)) {
+            sec.next.push(("where its time goes, by package and function".into(), format!("strobe query {rec} hotspots --by package")));
+        }
         return;
     }
     let timed: Vec<&str> = s["timing_recordings"].as_array().into_iter().flatten().filter_map(|t| t["recording"].as_str()).collect();
@@ -561,7 +615,7 @@ fn blocks(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
             if timed.is_empty() {
                 sec.none.push("a timed block runs no profiler, and no attribution block ran".into());
             }
-            sec.next.push(("profile head after its timed blocks (one attribution block)".into(), cmd.bench(s, &[("why", Some("always"))])));
+            sec.then("profile head after its timed blocks (one attribution block)", cmd.bench(s, &[("why", Some("always"))]));
         }
     }
 }
@@ -590,7 +644,9 @@ fn leak(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
                 sec.result.push(format!("{side}{what}: {}{}", g["verdict"].as_str().unwrap_or(""), if growth(g) == VerdictKind::Worse { range(g, show) } else { String::new() }));
             }
         }
+        // Its memory block's views only while the recording is on this machine.
         let rec = l["recording"].as_str();
+        let present = rec.is_some_and(|r| crate::store::resolve(r).is_ok());
         let kinds: Vec<VerdictKind> = ["native_host", "js_heap", "dom_nodes"].iter().filter(|k| l[**k].is_object()).map(|k| growth(&l[*k])).collect();
         let grows = kinds.contains(&VerdictKind::Worse);
         let named = !l["native_host"].is_object() && !l["suspects"]["refused"].is_string();
@@ -607,7 +663,7 @@ fn leak(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
             hits.push(json!({
                 "rule": "leak-suspect", "level": if grows && own { "warn" } else { "info" },
                 "title": format!("{} from the first half still alive at the end", leak_class(c)),
-                "evidence": c, "handles": rec.map(|r| vec![format!("strobe query {r} leaks")]).unwrap_or_default(),
+                "evidence": c, "handles": rec.filter(|_| present).map(|r| vec![format!("strobe query {r} leaks")]).unwrap_or_default(),
             }));
         }
         let Some(rec) = rec else { continue };
@@ -626,6 +682,9 @@ fn leak(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
             sec.suspects.push((format!("{side}memory block {rec}{what}"), hits));
         }
         let whose = if roles.len() > 1 { format!("{role}: ") } else { String::new() };
+        if !present {
+            continue;
+        }
         if grows && named {
             sec.next.push((format!("{whose}retainer paths of what stayed alive"), format!("strobe query {rec} leaks")));
             sec.next.push((format!("{whose}the live heap at the end, by class"), format!("strobe query {rec} heap")));
@@ -638,13 +697,15 @@ fn leak(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
     if let [b, h] = roles[..]
         && let (Some(b), Some(h)) = (s["leak"][b]["recording"].as_str(), s["leak"][h]["recording"].as_str())
         && !implementations
+        && crate::store::resolve(b).is_ok()
+        && crate::store::resolve(h).is_ok()
     {
         let view = if snapshots { "heap" } else { "memory" };
         sec.next.push((format!("the two sides' {}, side by side", if snapshots { "live heaps by class" } else { "memory by process" }), format!("strobe query {b}..{h} {view}")));
     }
     if unclear {
         let n = s["runs_per_half"].as_u64().or(r["args"]["flags"]["repeat"].as_str().and_then(|x| x.parse().ok())).unwrap_or(5);
-        sec.next.push((format!("an unclear growth narrows with more runs (this ran {n} per half)"), cmd.bench(s, &[("repeat", Some(&(2 * n).to_string()))])));
+        sec.then(format!("an unclear growth narrows with more runs (this ran {n} per half)"), cmd.bench(s, &[("repeat", Some(&(2 * n).to_string()))]));
     }
 }
 
@@ -660,7 +721,7 @@ fn growth(g: &Value) -> VerdictKind {
     }
 }
 
-fn pixels(r: &Value, s: &Value, sec: &mut Section) {
+fn pixels(s: &Value, cmd: &Command, sec: &mut Section) {
     let frames: Vec<&Value> = s["pixels"].as_array().into_iter().flatten().collect();
     let differ: Vec<&str> = frames.iter().filter(|p| p["state"] == "differ").filter_map(|p| p["name"].as_str()).collect();
     sec.result.push(if differ.is_empty() {
@@ -670,7 +731,7 @@ fn pixels(r: &Value, s: &Value, sec: &mut Section) {
     });
     sec.none.push("a pixels run compares screenshots; it times nothing to explain".into());
     if !differ.is_empty() {
-        sec.next.push(("the frames and their diffs side by side".into(), format!("strobe report experiment {} --open", r["id"].as_str().unwrap_or(""))));
+        sec.next.push(("the frames and their diffs side by side".into(), format!("strobe report experiment {} --open", cmd.exp)));
     }
 }
 
@@ -683,6 +744,7 @@ fn bisect(r: &Value) -> Output {
     let culprit = r["culprit"]["commit"].as_str();
     if let Some(step) = r["steps"].as_array().into_iter().flatten().find(|s| culprit.is_some() && s["commit"].as_str() == culprit)
         && let Some(e) = step["experiment"].as_str()
+        && crate::store::resolve(e).is_ok_and(|d| crate::store::is_experiment(&d) && d.join("result.json").is_file())
     {
         next.push(json!({ "why": "the culprit against the good commit: its suspects", "command": format!("strobe query {e} insights") }));
     }
@@ -700,10 +762,25 @@ fn bisect(r: &Value) -> Output {
 /// made that run one of a kind. Every command it prints parses as strobe's own parser reads it
 /// (`scripts/dev/next-commands.ts` checks them under `sh` and PowerShell).
 struct Command {
-    /// The bench file; None for `strobe run`, whose file is strobe's own.
+    /// The bench file as a command names it (a local path, forward slashes); None for `strobe run`,
+    /// whose file is strobe's own, and when it is not on this machine (`gone`).
     file: Option<String>,
+    /// `strobe run --base "<command>" --head "<command>"`.
+    run: bool,
     flags: Vec<(String, String)>,
+    /// The sides name targets of the file (an implementation comparison, a check of two targets, one
+    /// target's variant): a rerun keeps them as they are and adds no `--target`.
     implementations: bool,
+    /// The file's targets the result names (its series' and its variants'), by name.
+    targets: std::collections::BTreeSet<String>,
+    /// What a command names the experiment by: its id, or the path of the result read.
+    exp: String,
+    /// The result was read from its path (`query <path> insights`): what strobe keeps of that id is
+    /// not this result.
+    from_path: bool,
+    /// Why no rerun or profile can be printed: the bench file, or a folder a side ran, is not here (a
+    /// result from another machine, a checkout since removed).
+    gone: Option<String>,
 }
 
 /// Flags a rerun leaves out: its own id and cap, its output's form (`--unit` too: how it printed, not
@@ -744,21 +821,67 @@ impl Command {
         // `strobe run --base "<command>" --head "<command>"`: its bench file is strobe's own, its sides
         // `cmd:` variants.
         let run = flags.iter().any(|(k, v)| k == "head" && v.starts_with("cmd:"));
-        if run {
-            for (k, v) in &mut flags {
-                if (k == "head" || k == "base") && v.starts_with("cmd:") {
-                    *v = v["cmd:".len()..].to_string();
+        let mut gone = None;
+        for (k, v) in &mut flags {
+            if k != "head" && k != "base" {
+                continue;
+            }
+            if let Some(line) = v.strip_prefix("cmd:") {
+                *v = line.to_string();
+                continue;
+            }
+            // A folder as the bench kept it (its full path, `<target>=<folder>` too) as a person types it;
+            // a ref, a URL or an app's name as it was given (never a `\` rewritten in one).
+            let (pre, at) = v.split_once('=').map_or(("", v.as_str()), |(t, p)| (t, p));
+            let local = Path::new(at.strip_prefix(r"\\?\").unwrap_or(at));
+            if local.is_absolute() || crate::store::unc(at) {
+                // Another machine's folder (`//host/…`) is never asked about: that alone connects to it.
+                if crate::store::unc(at) || !Path::new(at).exists() {
+                    gone.get_or_insert_with(|| format!("the folder its --{k} ran is not on this machine"));
                 }
+                let p = super::plain_path(at);
+                *v = if pre.is_empty() { p } else { format!("{pre}={p}") };
             }
         }
+        // The bench file where it is now: its path (on this disk: another machine's, `//host/…`, is never
+        // asked about), else (a result from another machine, a moved checkout) its path in its repository
+        // when that is under the current folder: a relative path of plain steps (no `..`, no root or
+        // drive); else none.
         let path = r["args"]["pos"][0].as_str().or(r["file"].as_str()).unwrap_or("");
-        // Forward slashes, which Windows reads too: a path with a `'` then needs no `\` beside it in
-        // double quotes, so PowerShell reads it as `sh` does.
-        let file = (!run && !path.is_empty()).then(|| path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/"));
-        // Two targets of one file (`--base <target> --head <target>[=<variant>]`): a comparison of
-        // implementations, or a check of both (whose variants name their targets).
-        let implementations = r["comparison"] == "implementations" || r["parity"].is_string() || variants.iter().any(|v| v["target"].is_string());
-        Command { file, flags, implementations }
+        let under_here = |f: &&str| {
+            let p = Path::new(f);
+            !f.is_empty() && !crate::store::unc(f) && p.components().all(|c| matches!(c, std::path::Component::Normal(_))) && p.is_file()
+        };
+        let file = if run || path.is_empty() {
+            None
+        } else if !crate::store::unc(path) && Path::new(path).is_file() {
+            Some(super::plain_path(path))
+        } else if let Some(rel) = r["file_repo"].as_str().filter(under_here) {
+            Some(rel.replace('\\', "/"))
+        } else {
+            gone = Some(format!("its bench file {} is not on this machine", Path::new(&super::plain_path(path)).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+            None
+        };
+        let mut targets: std::collections::BTreeSet<String> = r["series"].as_array().into_iter().flatten().filter_map(|s| s["target"].as_str().map(str::to_string)).collect();
+        targets.extend(variants.iter().filter_map(|v| v["target"].as_str().map(str::to_string)));
+        // Sides that name targets of the file: a comparison of implementations, one target's variant
+        // (`--head <target>[=<variant>]`, whose variant names its target), or a check of two targets
+        // (`--check --base <target> --head <target>`: its one variant is the bench file's own folder, where
+        // a check of two builds has two). Not a parity matrix alone: two targets of one case checked on
+        // one build (`--head <folder> --check`) name builds, not targets.
+        let pair_check = r["kind"] == "check" && !run && flags.iter().any(|(k, _)| k == "base") && variants.len() == 1;
+        let implementations = r["comparison"] == "implementations" || pair_check || variants.iter().any(|v| v["target"].is_string());
+        Command { file, run, flags, implementations, targets, exp: r["id"].as_str().unwrap_or("").to_string(), from_path: false, gone }
+    }
+
+    /// Whether a side's spec names a target of the file (`target:<name>`, `<name>`, `<name>=<variant>`).
+    fn names_target(&self, side: &str) -> bool {
+        side.starts_with("target:") || self.targets.contains(side.split_once('=').map_or(side, |(t, _)| t))
+    }
+
+    /// Whether a rerun or a profile can be printed: the bench file and the folders its sides ran are here.
+    fn here(&self) -> bool {
+        self.gone.is_none() && (self.run || self.file.is_some())
     }
 
     /// The side (`base` or `head`) whose target a check's series ran, for two targets; else `role`.
@@ -782,10 +905,11 @@ impl Command {
         }
         flags.retain(|(k, _)| k != "filter");
         flags.push(("filter".into(), s["case"].as_str().unwrap_or("").into()));
-        if self.get("target").is_none()
-            && !self.implementations
+        // Its own target, whatever `--target` picked (`a,b`, `app*`); sides that name targets pick theirs.
+        if !self.implementations
             && let Some(t) = s["target"].as_str()
         {
+            flags.retain(|(k, _)| k != "target");
             flags.push(("target".into(), t.into()));
         }
         // This series' own values, whatever the experiment swept (`--params all`, `n=1,n=3`).
@@ -795,21 +919,26 @@ impl Command {
         }
     }
 
-    /// The experiment again for this series alone, with `set` (None: the flag left out).
-    fn bench(&self, s: &Value, set: &[(&str, Option<&str>)]) -> String {
+    /// The experiment again for this series alone, with `set` (None: the flag left out). None when it
+    /// cannot run here (`gone`).
+    fn bench(&self, s: &Value, set: &[(&str, Option<&str>)]) -> Option<String> {
+        if !self.here() {
+            return None;
+        }
         let mut flags: Vec<(String, String)> = self.flags.iter().filter(|(k, _)| !set.iter().any(|(s, _)| s == k)).cloned().collect();
         flags.extend(set.iter().filter_map(|(k, v)| Some((k.to_string(), (*v)?.to_string()))));
         self.narrow(s, &mut flags);
-        match &self.file {
+        Some(match &self.file {
             Some(f) => line("bench", Some(f), &flags),
             None => line("run", None, &flags),
-        }
+        })
     }
 
     /// A check of base and head (`--check --base`) timed as a comparison of the same two: pairs of fresh
-    /// launches and a verdict. None when the check ran one side (no base to compare with).
+    /// launches and a verdict. None when the check ran one side (no base to compare with), or when it
+    /// cannot run here.
     fn compare(&self, s: &Value) -> Option<String> {
-        self.get("base")?;
+        self.get("base").filter(|_| self.here())?;
         let mut flags: Vec<(String, String)> = self.flags.iter().filter(|(k, _)| !matches!(k.as_str(), "check" | "repeat" | "batch" | "noworse")).cloned().collect();
         self.narrow(s, &mut flags);
         Some(match &self.file {
@@ -818,29 +947,23 @@ impl Command {
         })
     }
 
-    /// `strobe record --bench <file>#<case>` on one side: that side's variant (an implementation's
-    /// `target[=variant]`: its target and variant). None for `strobe run` (commands have no profile).
+    /// `strobe record --bench <file>#<case>` on one side: that side's build (a side naming a target:
+    /// its variant, `.` without one) and the series' own target. None for `strobe run` (commands have
+    /// no profile), and when it cannot run here.
     fn record(&self, s: &Value, role: &str) -> Option<String> {
-        let file = self.file.as_ref()?;
+        let file = self.file.as_ref().filter(|_| self.here())?;
         let case = s["case"].as_str()?;
         let side = match role {
             "base" if self.get("aa").is_some() => self.get("head"),
             other => self.get(other),
         };
-        let mut flags: Vec<(String, String)> = Vec::new();
-        let target = if self.implementations {
-            // The side's target and its variant (`target=variant`) when it names one; a result that kept
-            // no flags, the series' target.
-            let (t, v) = side.map(|x| x.split_once('=').map_or((x, None), |(t, v)| (t, Some(v)))).unwrap_or(("", None));
-            if let Some(v) = v {
-                flags.push(("head".into(), v.into()));
-            }
-            Some(t.trim_start_matches("target:").to_string()).filter(|t| !t.is_empty() && t != ".").or_else(|| s["target"].as_str().map(str::to_string))
-        } else {
-            flags.push(("head".into(), side.unwrap_or(".").into()));
-            s["target"].as_str().map(str::to_string).or_else(|| self.get("target").map(str::to_string))
+        let head = match side {
+            None => ".",
+            Some(x) if self.names_target(x) => x.split_once('=').map_or(".", |(_, v)| v),
+            Some(x) => x,
         };
-        if let Some(t) = target {
+        let mut flags: Vec<(String, String)> = vec![("head".into(), head.into())];
+        if let Some(t) = s["target"].as_str().map(str::to_string).or_else(|| self.get("target").filter(|t| !t.contains([',', '*'])).map(str::to_string)) {
             flags.push(("target".into(), t));
         }
         // What chose how it ran and what was measured: the same in the profile.
@@ -884,23 +1007,76 @@ fn line(command: &str, file: Option<&str>, flags: &[(String, String)]) -> String
             crate::cli::Kind::Switch => format!(" --{k}"),
             crate::cli::Kind::Optional if v.is_empty() || v == "true" => format!(" --{k}"),
             crate::cli::Kind::Optional => format!(" {}", quote(&format!("--{k}={v}"))),
+            // PowerShell drops a `--%` argument however it is quoted (its stop-parsing token): one word,
+            // `--<flag>=--%`, as strobe's parser reads it.
+            _ if v == "--%" => format!(" {}", quote(&format!("--{k}={v}"))),
             _ => format!(" --{k} {}", quote(v)),
         };
     }
     out
 }
 
-/// A word both `sh` and PowerShell pass whole and as written: bare when it holds only letters, digits
-/// and `_-./:=+%^`; else in single quotes (literal in both); a word with a `'` in double quotes, where
-/// it holds none of `"$\` and backtick (each shell's escapes), else as `sh` writes it.
-fn quote(w: &str) -> String {
-    if !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || "_-./:=+%^".contains(c)) {
+/// What PowerShell reads as a single quote: `'` and the typographic ones (`‘ ’ ‚ ‛`).
+const SINGLE_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+/// What PowerShell reads as a double quote: `"` and the typographic ones (`“ ” „`).
+const DOUBLE_QUOTES: [char; 4] = ['"', '\u{201C}', '\u{201D}', '\u{201E}'];
+
+thread_local! {
+    /// The words `quote` could spell for one shell only since `quoting_reset` (one with a single quote and
+    /// one of `"$\` or a backtick), and whether one holds a `"` (which Windows PowerShell 5.1 drops from an
+    /// argument it passes to a program).
+    static QUOTED: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
+}
+
+/// Starts a printout's quoting record (`quoting_note`).
+pub(super) fn quoting_reset() {
+    QUOTED.with(|q| q.set((false, false)));
+}
+
+/// The line to print above commands `quote` spelled for one shell since `quoting_reset`: the shell they
+/// are for (`powershell` on Windows, `sh` elsewhere) and why.
+pub(super) fn quoting_note() -> Option<(&'static str, String)> {
+    let (host, dquote) = QUOTED.with(std::cell::Cell::get);
+    let shell = if cfg!(windows) { "powershell" } else { "sh" };
+    match (host, dquote && cfg!(windows)) {
+        (true, _) => Some((
+            shell,
+            format!(
+                "the commands below are quoted for {}: a word holds a quote and one of \" $ \\ or a backtick, which no one spelling passes to both sh and PowerShell",
+                if cfg!(windows) { "PowerShell 7 (pwsh)" } else { "sh" }
+            ),
+        )),
+        (false, true) => Some(("powershell", "a word below holds a \", which Windows PowerShell 5.1 drops from an argument: paste these in PowerShell 7 (pwsh) or sh".to_string())),
+        _ => None,
+    }
+}
+
+/// A word `sh`, zsh and PowerShell all pass whole and as written: bare when it holds only letters,
+/// digits and `_-./:=+%` and does not start with `=` (never PowerShell's stop-parsing `--%`); else in
+/// single quotes (literal in each), a
+/// word with a single quote (`'`, or a typographic one PowerShell reads as one) in double quotes where
+/// it holds none of either shell's specials there (`"` and its typographic forms, `$`, `\`, backtick,
+/// `!`). A word that holds both has no spelling both shells read alike: it is quoted for the shell of
+/// the OS strobe runs on (PowerShell's `'…''…'` on Windows, `'…'\''…'` elsewhere), and `quoting_note`
+/// says so.
+pub(super) fn quote(w: &str) -> String {
+    if w.contains(DOUBLE_QUOTES) {
+        QUOTED.with(|q| q.set((q.get().0, true)));
+    }
+    // Not `^` (zsh's `extendedglob` negates with it: `HEAD^`) nor a leading `=` (zsh expands `=word` to
+    // the program `word`'s path): both quoted.
+    if !w.is_empty() && !w.contains("--%") && !w.starts_with('=') && w.chars().all(|c| c.is_alphanumeric() || "_-./:=+%".contains(c)) {
         w.to_string()
-    } else if !w.contains('\'') {
+    } else if !w.contains(SINGLE_QUOTES) {
         format!("'{w}'")
-    } else if !w.contains(['"', '$', '\\', '`']) {
+    } else if !w.contains(DOUBLE_QUOTES) && !w.contains(['$', '\\', '`', '!']) {
         format!("\"{w}\"")
     } else {
-        format!("'{}'", w.replace('\'', r"'\''"))
+        QUOTED.with(|q| q.set((true, q.get().1)));
+        if cfg!(windows) {
+            format!("'{}'", w.chars().map(|c| if SINGLE_QUOTES.contains(&c) { format!("{c}{c}") } else { c.to_string() }).collect::<String>())
+        } else {
+            format!("'{}'", w.replace('\'', r"'\''"))
+        }
     }
 }

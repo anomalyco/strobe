@@ -292,7 +292,12 @@ impl ActionLog {
         let raw = std::fs::read(path)?;
         let text = if raw.starts_with(&[0x1f, 0x8b]) {
             let mut t = Vec::new();
-            flate2::read::GzDecoder::new(raw.as_slice()).read_to_end(&mut t)?;
+            // Outside the store, bounded as every gzip file there is (`store::gz_limit`).
+            let limit = crate::store::gz_limit(path).unwrap_or(u64::MAX);
+            flate2::read::GzDecoder::new(raw.as_slice()).take(limit.saturating_add(1)).read_to_end(&mut t)?;
+            if t.len() as u64 > limit {
+                return Err(Error::usage(format!("{}: expands to more than {} MB, 64 times its size, which no file strobe writes does: not read", path.display(), limit >> 20)));
+            }
             t
         } else {
             raw

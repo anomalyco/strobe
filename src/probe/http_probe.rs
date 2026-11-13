@@ -1246,7 +1246,7 @@ pub fn write(dir: &std::path::Path, data: &Data) -> Result<()> {
 
 pub fn read(dir: &std::path::Path) -> Option<Data> {
     let mut text = String::new();
-    flate2::read::GzDecoder::new(std::fs::File::open(dir.join(FILE)).ok()?).read_to_string(&mut text).ok()?;
+    crate::store::gunzip(&dir.join(FILE)).ok()?.read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
 }
 

@@ -523,6 +523,9 @@ pub const LONG_TASK_NS: i64 = 50_000_000;
 const OVERLAP: &str = "s.dur >= 0 and s.ts < w.t1 and s.ts + max(s.dur, 1) > w.t0";
 
 pub fn read(trace: &Path, token: &str) -> Result<BlockData> {
+    // A token goes into the SQL only as strobe writes one (a plain id): a meta.json read by its path is
+    // anyone's, and any other one matches no mark.
+    let token = if crate::store::plain_id(token) { token } else { "" };
     let sql = format!(
         r#"
 create perfetto table _m as

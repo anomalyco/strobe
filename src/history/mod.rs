@@ -165,6 +165,11 @@ pub fn list() -> Vec<Series> {
 
 /// A series id or a unique prefix of one.
 pub fn resolve(handle: &str) -> Result<String> {
+    // Only a plain id names a series' file (`ser_` and letters, digits, `_`, `-`): never a path out of
+    // this device's history folder.
+    if !handle.starts_with("ser_") || !crate::store::plain_id(handle) {
+        return Err(Error::usage(format!("no tracked series {handle}: a series is ser_ and its id's letters and digits (strobe history lists them)")));
+    }
     if exists(handle) {
         return Ok(handle.to_string());
     }
@@ -193,5 +198,6 @@ pub fn save_schedules(s: &[Value]) -> Result<()> {
 pub fn alert_path(change: &str) -> PathBuf {
     let d = dir().join("alerts");
     let _ = std::fs::create_dir_all(&d);
-    d.join(format!("{change}.json"))
+    // A change's id as strobe writes it (`chg_` and hex); anything else from a hand-edited file: one fixed name.
+    d.join(format!("{}.json", if crate::store::plain_id(change) { change } else { "chg" }))
 }

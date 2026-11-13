@@ -76,7 +76,7 @@ pub fn recording(handle: &str) -> Result<(PathBuf, String)> {
 fn recording_by(handle: &str, find: impl Fn(&str) -> Result<PathBuf>) -> Result<(PathBuf, String)> {
     let (h, pick) = handle.split_once('/').map_or((handle, None), |(a, b)| (a, Some(b)));
     // A request's or a command's handle reaches the store only as a plain id, never as a path.
-    if !plain_handle(h) {
+    if !store::plain_id(h) {
         return Err(Error::usage(format!("{h}: a handle is an id (rec_…, exp_…) or its first letters: letters, digits, _ and -")));
     }
     let dir = find(h)?;
@@ -135,7 +135,7 @@ fn recording_by(handle: &str, find: impl Fn(&str) -> Result<PathBuf>) -> Result<
     };
     let rec = rec.ok_or_else(|| Error::usage(format!("{handle}: no such recording; {exp} has {}", choices())))?;
     // An id the result names is a plain id before it reaches the store or the session's page.
-    if !plain_handle(&rec) {
+    if !store::plain_id(&rec) {
         return Err(Error::usage(format!("{handle}: {exp}'s result names a recording by something other than an id, which strobe does not open")));
     }
     let dir = find(&rec).map_err(|_| Error::usage(format!("{rec} (from {handle}) is no longer stored")))?;
@@ -152,7 +152,7 @@ fn exact(h: &str) -> Result<PathBuf> {
     } else {
         vec![paths::recordings(), paths::experiments()]
     };
-    roots.into_iter().map(|r| r.join(h)).find(|d| plain_handle(h) && d.is_dir()).ok_or_else(|| Error::usage("not found"))
+    roots.into_iter().map(|r| r.join(h)).find(|d| store::plain_id(h) && d.is_dir()).ok_or_else(|| Error::usage("not found"))
 }
 
 /// A request's handle as a stored folder (`exact`): `/report/<id>`, `/video/<id>`.
@@ -331,12 +331,6 @@ fn ui_file(file: &str) -> Option<PathBuf> {
     (found.starts_with(&root) && found.is_file()).then_some(found)
 }
 
-/// Whether a plain id names it: letters, digits, `_` and `-` (a handle a request or a command gives,
-/// before it reaches the store: never a path).
-pub fn plain_handle(h: &str) -> bool {
-    !h.is_empty() && h.len() <= 128 && h.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
-}
-
 /// A request the viewer's servers answer at all: one addressed to this machine's loopback by the name
 /// a browser on it uses (`Host: 127.0.0.1:<port>` or `localhost:<port>`, so a page whose name was
 /// rebound to 127.0.0.1 is refused), and, with an `Origin`, a GET from these pages themselves (or the
@@ -435,8 +429,19 @@ fn open_request(handle: &str, port: u16) -> http::Response {
     let alive = |token: &str, rpc: Option<u16>| {
         session(token).is_some() && rpc.is_none_or(|p| std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], p)), std::time::Duration::from_millis(300)).is_ok())
     };
+    // A view that opened marks what it opened used (and the experiment it was named through): never a
+    // failed or refused one.
+    let stamp = || {
+        store::used(&dir);
+        if let Ok(top) = exact(handle.split('/').next().unwrap_or(handle))
+            && store::is_experiment(&top)
+        {
+            store::used(&top);
+        }
+    };
     opened.retain(|(_, t, rpc)| alive(t, *rpc));
     if let Some((_, token, rpc)) = opened.iter().find(|(r, _, _)| *r == id) {
+        stamp();
         return http::Response::new(200, html, session_page(token, &json!({ "recording": id, "rpc_port": rpc })));
     }
     if opened.len() >= MAX_OPENED {
@@ -450,6 +455,7 @@ fn open_request(handle: &str, port: u16) -> http::Response {
     match started {
         Ok(s) => {
             opened.push((id.clone(), s.token.clone(), s.rpc));
+            stamp();
             http::Response::new(200, html, session_page(&s.token, &json!({ "recording": id, "rpc_port": s.rpc })))
         }
         Err(_) => http::Response::text(500, "it could not be opened: strobe open in a terminal says why"),

@@ -136,10 +136,19 @@ fn text_of(path: &Path, b: Vec<u8>) -> Result<String> {
     text.ok_or_else(|| Error::usage(format!("{}: is not UTF-8 or UTF-16 text", path.display())).hint("save it as UTF-8"))
 }
 
+/// The most a strobe.json is read (the largest kept anywhere here is a few KB).
+const MAX_CONFIG: u64 = 4 << 20;
+
 /// One strobe.json, parsed; an absent file is empty. A file that cannot be read or does not parse
 /// fails here (never taken for an absent one, whose defaults it may have meant to change); what
 /// parses but is wrong comes back as problems, first in file order.
 fn read(path: &Path) -> Result<(Map<String, Value>, Vec<Problem>)> {
+    // A file, of a size a settings file has: never a pipe or a device read without end.
+    match std::fs::metadata(path) {
+        Ok(m) if !m.is_file() => return Err(Error::usage(format!("{}: not a file", path.display()))),
+        Ok(m) if m.len() > MAX_CONFIG => return Err(Error::usage(format!("{}: {} MB, more than a strobe.json holds ({} MB at most)", path.display(), m.len() >> 20, MAX_CONFIG >> 20))),
+        _ => {}
+    }
     let text = match std::fs::read(path) {
         Ok(b) => text_of(path, b)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Map::new(), Vec::new())),

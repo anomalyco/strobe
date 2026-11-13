@@ -1183,6 +1183,35 @@ Views and their flags in §11.1. `a..b` compares two recordings, one view side b
 experiment (`query exp_… hotspots`) answers with each series' base..head attribution recordings.
 Not built: `--max-bytes` (agents get top-K rows, §17).
 
+A handle may be a path: a `result.json` (an experiment's `series`, or a bisect's), a `meta.json`, or a
+folder holding either (`./exp_x/`, a copy, another machine's). `query`, `report` and MCP's `query` and
+`report` read a path through one resolver (`query::by_path`), the file parsed once; `report <path>`
+takes its view from what it holds. A folder with neither file, any other JSON object, and a meta.json
+that is not JSON, larger than 256 MB or nested past 128 levels are refused with why (exit 2), never
+read as a blank recording. A folder a person named is read as it is, and nothing in it reaches past it:
+- every entry, four folders down, must be a regular file or a real folder as its own metadata says (no
+  symbolic link, junction or mount point, device, pipe or socket, no `:` stream; a file a cloud-sync
+  client keeps and a hard-linked copy are regular files), else the folder is refused naming the entry
+  (`a symbolic link, junction, mount point or special file`); the folder's parent, not the folder, is
+  where `strobe.json`'s display unit is looked for; a name its files give for another of its files (a map index's
+  `maps/0.map.gz`, `video.json`'s file, a check's actions file) is a plain relative name inside it;
+- a map's `map_dir` (where a stored recording's original sources are) is never read, nor a module it
+  names (`Symbolizer::open_held`), also for `sql`'s Perfetto trace; its gzip files expand to at most
+  64 times their size (64 MiB to 4 GiB; the most a file strobe writes expands is 19 times) and its
+  other JSON files are read up to 1 GiB;
+- what its files say never makes strobe look elsewhere: no `package.json` or `.git` up from a frame's
+  file, no `.used` mark on a stored experiment it names, no existence check of a path from it on
+  another machine (`//host/…`, `file:////host/…`, `\\?\UNC\…`: asking alone connects to that host),
+  a `file_repo` only as a relative path of plain steps under the current folder; its token and run keys
+  reach a trace query only as strobe writes them (a plain id; `run:3`), else it is refused;
+- a printed command or hint names it by its path, quoted for sh, zsh and PowerShell (§11.3).
+Any JSON strobe reads, stored or named, nests at most 512 levels (an allocation profile two per frame
+of V8's 128: measured on Windows release builds, a 1 MiB main thread overflows past 2,324 levels of a
+typed profile node and 3,018 of a `serde_json::Value`). A heap snapshot's `trace_tree` (one level per
+allocating frame, any depth) is read without recursion, and no count in a file reserves memory past
+a million entries up front. A `ser_…` handle and `bench`/`bisect --id` are plain ids (letters, digits,
+`_`, `-`; an id at most 96), refused otherwise with that rule.
+
 ### 5.8 `strobe report`
 
 ```
@@ -1221,7 +1250,7 @@ Wall-clock durations, configured values and stored text stay as written there to
 Writes a self-contained artifact from a view in the catalog (§11.2) and prints its path (`md` and
 `pr` print the markdown on stdout and the path on stderr). The view follows from the handle when it
 is not named (`exp_…` an experiment, `rec_…` a recording, `ser_…` or a bench file a tracked history).
-A path to a `result.json` or `meta.json` is read as it is: its markdown is printed, nothing is written
+A path to a `result.json`, a `meta.json` or the folder of either is read as `query` reads it (5.7): its markdown is printed, nothing is written
 beside it (HTML and cards go to strobe's run folder), and it keeps the rerun ledger it holds (this
 machine's index is not its history). `--open` opens it in the system browser. Agents show the path
 with the Review pane preview.
@@ -6717,10 +6746,14 @@ without attribution printed a header and nothing else.
   `--runs`, `--pin`, `--power`, `--seed`, and `--probes waits`); for a check of two targets it names
   the target that case ran, and its comparison reruns `--base <target> --head <target>`. Only the
   flags that command reads (`cli::FLAGS`), a switch bare, `--mobile` bare or `--mobile=<serial>`; and
-  every word quoted alike for `sh` and PowerShell (bare when it holds only letters, digits and
-  `_-./:=+%^`, else in single quotes; a path holding `'` in double quotes). No placeholder: every
-  command runs as printed (`scripts/dev/next-commands.ts` parses them under both shells and checks
-  each keeps its series' case, target, params and measured flags).
+  every word quoted alike for `sh`, zsh and PowerShell (bare when it holds only letters, digits and
+  `_-./:=+%` and does not start with `=`, else in single quotes: zsh reads a bare `=word` as a
+  program's path and a bare `^` as `extendedglob` negation, `HEAD^`; a path holding `'` in double
+  quotes). No placeholder: every command runs as printed (`scripts/dev/next-commands.ts` parses them
+  under both shells, checks no word zsh reads otherwise is bare, and checks each keeps its series'
+  case, target, params and measured flags). A hint outside insights (a refusal's fix, `threads`'
+  pointer to `--timeline`) names a recording or experiment read by its path by that path, quoted the
+  same, never its id. A check whose failed base gave the series its hint says that hint once.
 
 Facts and pointers only: nothing it says goes past what the experiment holds. Known answers:
 `scripts/dev/insights-repo.ts` (its cases and commands in its header). An experiment's movers come

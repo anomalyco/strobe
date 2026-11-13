@@ -193,7 +193,10 @@ pub fn version() -> String {
 pub fn repo_relative(file: &str) -> String {
     let clean = file.trim_start_matches(r"\\?\").replace('\\', "/");
     let path = std::path::Path::new(&clean);
-    for dir in path.ancestors().skip(1) {
+    // Looked for on this disk only: never another machine's path, never while a file a person named is
+    // read (`store::may_look`); then its file name.
+    let look = crate::store::may_look(file);
+    for dir in path.ancestors().skip(1).filter(|_| look) {
         if dir.join(".git").exists()
             && let Ok(rel) = path.strip_prefix(dir)
         {
