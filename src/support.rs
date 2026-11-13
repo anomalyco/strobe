@@ -814,7 +814,7 @@ const WIN_NATIVE_CPU_RUN: Evidence = Evidence {
     known: "cpu.work 399.2 ms vs 400.6 ms (tick-8) and duty 998 ms vs 1000 ms; planted 2x read +100.04% [+99.66 … +100.32] vs +99.71%",
     aa: "tick-4 against itself, 9 pairs: cpu.work −0.02% [−0.26 … +0.14], same (±2%)",
     planted: "tick-4 to tick-8: 199.53 to 399.12 ms, +100.04% [+99.66 … +100.32] for +99.71% with tick-0's 0.58 ms",
-    boundary: "exits (as run then: a 200 ms spin, which exited before its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, so it exits inside its first run, refused the same way",
+    boundary: "exits refused RunIncomplete: its 200 ms form as run then exited before its first run, and the landed 500 ms form, checked on this machine with strobe 0.32.0, exited during its first run",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };
@@ -826,7 +826,7 @@ const WIN_NATIVE_MEMORY_RUN: Evidence = Evidence {
     known: "memory.app.private +50.10 MiB vs +50 MiB and 100 KiB of page tables (hold-50 to hold-100)",
     aa: "hold-100 against itself: memory.app.private 0.00% [−0.01 … +0.01], same (±2%)",
     planted: "hold-50 to hold-100: 50.96 to 101.06 MiB, +98.31% [+98.29 … +98.33] for +98.30%",
-    boundary: "exits (as run then: a 200 ms spin, which exited before its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, so it exits inside its first run, refused the same way",
+    boundary: "exits refused RunIncomplete: its 200 ms form as run then exited before its first run, and the landed 500 ms form, checked on this machine with strobe 0.32.0, exited during its first run",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };
@@ -838,7 +838,7 @@ const LINUX_NATIVE_CPU_RUN: Evidence = Evidence {
     known: "cpu.work 401.2 ms vs 401.0 ms (tick-8) and duty 1000.6 ms vs 1000 ms; planted 2x read +99.31% [+98.76 … +99.72] vs +99.48%",
     aa: "tick-4 against itself, 9 pairs: cpu.work −0.20% [−0.48 … +0.10], same (±2%)",
     planted: "tick-4 to tick-8: 201.33 to 401.08 ms, +99.31% [+98.76 … +99.72] for +99.48% with tick-0's 1.04 ms",
-    boundary: "exits (as run then: a 200 ms spin, which exited during its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, refused the same way",
+    boundary: "exits refused RunIncomplete during its first run, both its 200 ms form as run then and the landed 500 ms form (checked with strobe 0.32.0)",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };
@@ -847,10 +847,10 @@ const LINUX_NATIVE_MEMORY_RUN: Evidence = Evidence {
     version: "v0.31.0",
     machine: "Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal)",
     fixture: "scripts/dev/known/planted.bench.ts",
-    known: "memory.app.private +50.00 MiB vs +50 MiB planted (hold-50 to hold-100); hold 150 MB vs 150 MiB + 0.12 MB idle",
+    known: "memory.app.private +50.00 MiB vs +50 MiB planted (hold-50 to hold-100)",
     aa: "hold-100 against itself: memory.app.private 0.000% [−0.004 … +0.002], same (±2%)",
     planted: "hold-50 to hold-100: 50.125 to 100.13 MiB, +99.75% [+99.74 … +99.75] for +99.75%",
-    boundary: "exits (as run then: a 200 ms spin, which exited during its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, refused the same way",
+    boundary: "exits refused RunIncomplete during its first run, both its 200 ms form as run then and the landed 500 ms form (checked with strobe 0.32.0)",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };

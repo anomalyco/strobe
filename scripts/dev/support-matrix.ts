@@ -869,8 +869,12 @@ export function items(t: string[]): Item[] {
 
 // The canonical texts of a span in a file's text, one per item it names (several: a fn per OS under cfg); null
 // when it names none.
+// A file's tokens and items, kept per text: a check reads each span of a file at a few revisions, many times.
+const parsedTexts = new Map<string, { t: string[]; its?: Item[] }>()
 export function spanTexts(text: string, sel: string | null, js: boolean): string[] | null {
-  const t = tokens(text.replace(/\r\n/g, "\n"), js)
+  let p = parsedTexts.get(text)
+  if (!p) parsedTexts.set(text, (p = { t: tokens(text.replace(/\r\n/g, "\n"), js) }))
+  const t = p.t
   if (sel === null) return [canon(t)]
   if (sel.startsWith("@")) {
     const anchor = tokens(sel.slice(1), js)
@@ -884,7 +888,7 @@ export function spanTexts(text: string, sel: string | null, js: boolean): string
     }
     return null
   }
-  const found = items(t).filter((it) => it.key === sel || (!sel.includes("::") && !sel.includes(" ") && it.key.endsWith(`::${sel}`)))
+  const found = (p.its ??= items(t)).filter((it) => it.key === sel || (!sel.includes("::") && !sel.includes(" ") && it.key.endsWith(`::${sel}`)))
   return found.length ? found.map((it) => canon(t.slice(it.from, it.to + 1))) : null
 }
 
@@ -1015,10 +1019,11 @@ export const WATCH: Watch[] = [
       "src/app/bench/script.rs#Host::request",
       "sdk/bench/src/host.mjs#@try { const fn",
       "src/app/bench.rs#self_state",
+      "src/app/bench.rs#impl SelfCost",
       "src/app/bench.rs#script_unread",
       "src/app/bench.rs#script_unread_refusal",
     ],
-    why: "a script run: chunk holds its edges (the request's send and reply on the host clock), its CPU windows and the block's values; Host::spawn starts the host and reads which runtime it is; request is the round trip timed; host.mjs's call block is what runs inside it; the cells' boundaries are OverheadBudget for sub-millisecond runs (self_state) and NotForTarget for cpu.wakes and io.* (script_unread_refusal); the heap, clock and exit ops beside the call are no part of a run's wall or CPU",
+    why: "a script run: chunk holds its edges (the request's send and reply on the host clock), its CPU windows and the block's values; Host::spawn starts the host and reads which runtime it is; request is the round trip timed; host.mjs's call block is what runs inside it; the cells' boundaries are OverheadBudget for sub-millisecond runs (self_state, from strobe's and the runner's share of a core that SelfCost measures) and NotForTarget for cpu.wakes and io.* (script_unread_refusal); the heap, clock and exit ops beside the call are no part of a run's wall or CPU",
   },
   // ----- the processes a run's CPU, memory and counters are of -----
   {
@@ -1291,7 +1296,11 @@ function fileAt(rev: string, path: string): string | null {
 // The code checked: the working tree (its history HEAD's), or the tree a landing would leave (`--landing`), whose
 // history is its tips'.
 export type Tree = { what: string; read: (path: string) => string | null; tips: string[] }
-export const WORKING: Tree = { what: "the working tree", read: (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : null), tips: ["HEAD"] }
+const cached = (read: (path: string) => string | null) => {
+  const seen = new Map<string, string | null>()
+  return (p: string) => (seen.has(p) ? seen.get(p)! : (seen.set(p, read(p)), seen.get(p)!))
+}
+export const WORKING: Tree = { what: "the working tree", read: cached((p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : null)), tips: ["HEAD"] }
 
 // What a watched span reads in a file source: null when the file or item is not there.
 function spanIn(read: (path: string) => string | null, spec: string): string[] | null {
@@ -1399,7 +1408,7 @@ function landing(args: string[]): number {
       console.error(`${ref} does not merge into ${onto} cleanly:\n${merged.stdout.toString()}${merged.stderr.toString()}`)
       return 1
     }
-    tree = { what: `${ref} merged into ${onto}`, read: (p) => git(["show", `${id}:${p}`]), tips: [onto, ref] }
+    tree = { what: `${ref} merged into ${onto}`, read: cached((p) => git(["show", `${id}:${p}`])), tips: [onto, ref] }
   }
   const text = tree.read("src/support.rs")
   if (text === null) {
@@ -1408,6 +1417,7 @@ function landing(args: string[]): number {
   }
   const s = parseSupport(text)
   const problems: string[] = [...s.evidenceProblems]
+  watchChecks(s, (m) => problems.push(m), tree)
   rotProblems(s, (m) => problems.push(m), undefined, tree)
   const branchOnly = new Set<string>()
   for (const r of s.rows) for (const os of OSES) {
@@ -1428,16 +1438,16 @@ function landing(args: string[]): number {
   return 0
 }
 
-// WATCH itself: every cell it names is a row (or a runtime's), every span names code in the working tree, a
+// WATCH itself: every cell it names is a row (or a runtime's), every span names code in the tree checked (the working tree, or a landing's), a
 // group gives its why.
-function watchChecks(s: Support, fail: (m: string) => void) {
+function watchChecks(s: Support, fail: (m: string) => void, tree: Tree = WORKING) {
   for (const g of WATCH) {
     if (!g.why.trim()) fail(`WATCH ${g.spans[0]}: a group says why its spans are the ones`)
     for (const c of g.cells) {
       const [rt, cap] = c.split(" · ")
       if (c !== "*" && !(s.runtimes.includes(rt) && (cap === "*" || s.rows.some((r) => r.runtime === rt && r.capability === cap)))) fail(`WATCH names ${c}, which is no row of SUPPORT_MATRIX`)
     }
-    for (const spec of g.spans) if (spanIn(WORKING.read, spec) === null) fail(`WATCH: ${spec} names no code in the working tree (renamed or moved? map the code that computes it now)`)
+    for (const spec of g.spans) if (spanIn(tree.read, spec) === null) fail(`WATCH: ${spec} names no code in ${tree.what} (renamed or moved? map the code that computes it now)`)
   }
 }
 
