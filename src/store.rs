@@ -492,7 +492,8 @@ pub fn deep_enough(bytes: &[u8], path: &Path) -> Result<()> {
     if shallow(bytes) { Ok(()) } else { Err(Error::usage(format!("{}: JSON nested more than {MAX_JSON_DEPTH} levels deep, which no file strobe writes is: not read", path.display()))) }
 }
 
-/// Whether JSON nests at most `MAX_JSON_DEPTH` levels (strings skipped, one pass over the bytes): what`n/// every reader that turns serde_json's recursion limit off checks first (a file, or a message from a`n/// browser or a device, whose depth a page or a file decides).
+/// Whether JSON nests at most `MAX_JSON_DEPTH` levels. Readers check this before disabling serde_json's
+/// recursion limit for a file or a message from a browser or device.
 pub fn shallow(bytes: &[u8]) -> bool {
     let (mut depth, mut string, mut escape) = (0usize, false, false);
     for &c in bytes {

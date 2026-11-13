@@ -862,7 +862,9 @@ names the hook once (`setup: …`, not `setup: setup: …`). Under each case, `-
 last 10 lines the bench file's hooks wrote to the console during it (`console.log`/`error`; the
 rest stay in the experiment's `runner.log`, whose path it names). Each passing case keeps its
 block's recording and prints it (`rec  rec_… · strobe query rec_… threads`), and `query <exp> <view>`
-on a check of one case answers from that recording (with several, it lists them). Before anything
+on a check of one case answers from that recording, except that profile views such as `hotspots`,
+`layout` and `gc` use the case's attribution recording when the check kept one. With several cases,
+query lists the recordings. An untraced check does not recommend `frames` in its summary. Before anything
 runs, every bench prints the builds it runs with their commits (`head app@f2a281b501 (dirty)`, or
 `base … → head …`; an implementation comparison names its sides as before), and a check's text
 starts with that line. A check's

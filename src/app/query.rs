@@ -188,7 +188,7 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
     match view {
         "summary" | "progress" => {
             // A result read from its path keeps the ledger it holds: this machine's index is not its history.
-            let text = live_ledger(&mut result, source.is_none());
+            let text = live_ledger(&mut result, source);
             Ok(Output::new(text, result))
         }
         "insights" => exp_insights::run(&result, source),
@@ -196,7 +196,16 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
         other => {
             // A check of one case has one recording: its views answer for the experiment. A recording a
             // result names is one strobe keeps, by its plain id, never a path.
-            let mut recs: Vec<String> = result["series"].as_array().into_iter().flatten().filter_map(|s| s["recording"].as_str().map(str::to_string)).collect();
+            let profile = matches!(view, "hotspots" | "alloc" | "gc" | "layout" | "style" | "heap" | "shifts" | "waits");
+            let mut recs: Vec<String> = result["series"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| {
+                    let check_profile = (result["kind"] == "check" && profile).then(|| s["attribution"].as_str()).flatten();
+                    check_profile.or_else(|| s["recording"].as_str()).map(str::to_string)
+                })
+                .collect();
             if result["kind"] == "check" && recs.len() == 1 {
                 return recording(Rec::resolve(&recs.remove(0))?, view, args, top);
             }
@@ -293,6 +302,11 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
     match view {
         "summary" => {
             let mut text = super::record::summary_text(meta);
+            // A copied recording's stored id may name something else here. Its report is always a
+            // useful next step; unlike `open`, `report` accepts the actual folder.
+            if !rec.stored() {
+                text = text.lines().map(|line| if line.starts_with("next     ") { format!("next     strobe report recording {} --open\n", rec.handle()) } else { format!("{line}\n") }).collect();
+            }
             if let Some(c) = &case {
                 text += &format!("case     {}: the values are its runs' ({}); a duration above is the whole launch's\n", meta["label"].as_str().unwrap_or(&c.name), c.runs.join(" "));
             }
@@ -448,9 +462,31 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
 /// An experiment's text with its rerun ledger as of now (SPEC §14.2): the text froze the ledger when
 /// the bench ended, and experiments on the same variants since then count too, as the report's do.
 /// A comparison's or a check's text is drawn again from its numbers, in the unit times print in now.
-fn live_ledger(result: &mut Value, update: bool) -> String {
+fn live_ledger(result: &mut Value, source: Option<&Path>) -> String {
     let mut text = result["text"].as_str().unwrap_or("").to_string();
-    if !result["identity"].is_object() || !update {
+    if let Some(source) = source {
+        let id = result["id"].as_str().unwrap_or("");
+        let word = path_word(source);
+        let rendered = super::bench::rendered(result).unwrap_or(text);
+        // Change command operands only: labels, descriptions, and recording ids remain as measured.
+        let resume = format!("resume  strobe bench --resume {id}");
+        text = String::with_capacity(rendered.len());
+        for line in rendered.split_inclusive('\n').filter(|l| l.trim_end() != resume) {
+            if line.trim_start().starts_with("actions  ") || line.trim_start().starts_with("strobe report experiment ") || line.starts_with(&format!("{id} · strobe ")) {
+                let (prefix, cmd) = line.rsplit_once("strobe ").unwrap_or((line, ""));
+                if let Some((verb, tail)) = ["report experiment", "query"].iter().find_map(|v| cmd.strip_prefix(&format!("{v} {id}")).map(|tail| (v, tail)))
+                    && (tail.is_empty() || tail.starts_with(char::is_whitespace))
+                {
+                    text += &format!("{prefix}strobe {verb} {word}{tail}");
+                    continue;
+                }
+            }
+            text += line;
+        }
+        result["text"] = json!(text);
+        return text;
+    }
+    if !result["identity"].is_object() {
         if let Some(t) = super::bench::rendered(result) {
             result["text"] = json!(t);
             return t;
@@ -667,7 +703,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                     if sites.is_empty() { "no allocation profile".into() } else { sites.join(", ") }
                 ),
                 json!({ "gc": g["values"], "share_of_work": share, "sites": sites }),
-                if meta["engine"] == "firefox" { vec![q("gc"), q("hotspots")] } else { vec![q("gc"), q("alloc")] },
+                std::iter::once(q("gc")).chain(if meta["engine"] == "firefox" { rec.cpu().is_ok().then(|| q("hotspots")) } else { rec.alloc().is_ok().then(|| q("alloc")) }).collect(),
             );
         }
     }
@@ -776,7 +812,7 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                     // Which thread, as two launches share it: its name and start module (ids differ).
                     "subject": format!("{name} {}", t["module"].as_str().unwrap_or("")),
                 }),
-                vec![q("threads"), q(&format!("hotspots --thread {}", t["tid"]))],
+                std::iter::once(q("threads")).chain(dir.join("deep.json.gz").is_file().then(|| q(&format!("hotspots --thread {}", t["tid"])))).collect(),
             );
         }
     }
@@ -877,9 +913,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                 format!("long tasks: {n:.0} main-thread tasks over 50 ms in the recording, the longest {}: input waits that long", fmt::value(worst, "ms")),
                 json!({ "count": n, "longest_ms": worst }),
                 if dir.join("trace.pftrace").is_file() {
-                    vec![q("sql \"select ts, dur / 1e6 as ms from slice where name = 'RunTask' and depth = 0 and dur > 50e6 order by dur desc limit 20\""), q("hotspots")]
+                    std::iter::once(q("sql \"select ts, dur / 1e6 as ms from slice where name = 'RunTask' and depth = 0 and dur > 50e6 order by dur desc limit 20\""))
+                        .chain(rec.cpu().is_ok().then(|| q("hotspots")))
+                        .collect()
                 } else {
-                    [vec![q("hotspots")], open.clone()].concat()
+                    rec.cpu().is_ok().then(|| q("hotspots")).into_iter().chain(open.clone()).collect()
                 },
             );
         }
@@ -897,7 +935,11 @@ pub fn insights(rec: &Rec) -> Result<Output> {
                 "warn",
                 format!("work while idle: with no input, the page presented {fps:.1} frames per second and kept its main thread {busy:.1}% busy: an animation, a timer or polling"),
                 json!({ "frames_per_second": fps, "main_busy_pct": busy }),
-                vec![q("frames"), q("hotspots")],
+                (!meta["frames_refused"].is_string() && meta["traced"] != false && (dir.join("frames.json").is_file() || dir.join("trace.pftrace").is_file()))
+                    .then(|| q("frames"))
+                    .into_iter()
+                    .chain(rec.cpu().is_ok().then(|| q("hotspots")))
+                    .collect(),
             );
         }
     }
@@ -2662,7 +2704,7 @@ pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sor
     let dir = rec.dir.as_path();
     let missing = || {
         if rec.meta["kind"] == "block" && rec.meta["probes"] != "attribution" {
-            no_profile(&rec.meta, "native samples", "hotspots")
+            no_profile(rec, "native samples", "hotspots")
         } else {
             Error::usage("this recording has no native samples; record with --probes deep")
         }
@@ -2894,7 +2936,7 @@ pub struct Forced {
 
 fn forced(rec: &Rec) -> Result<&Forced> {
     cached(rec.forced.get_or_init(|| {
-        attribution_meta(&rec.meta, "layout")?;
+        attribution_meta(rec, "layout")?;
         let rows = rec.part(Part::Layout)?;
         let measured = measured_runs(&rec.meta, &rows);
         let sym = rec.sym.lock().unwrap_or_else(|e| e.into_inner());
@@ -3003,7 +3045,7 @@ pub struct Invalidation {
 
 fn invalidation(rec: &Rec) -> Result<Invalidation> {
     firefox_gap(rec, Gap::Style)?;
-    attribution_meta(&rec.meta, "style")?;
+    attribution_meta(rec, "style")?;
     let rows = rec.part(Part::Style)?;
     let measured = measured_runs(&rec.meta, &rows);
     let sym = rec.sym.lock().unwrap_or_else(|e| e.into_inner());
@@ -3302,7 +3344,7 @@ fn run_phases(rec: &Rec) -> Result<Option<(String, Value)>> {
 /// Garbage collection in the measured runs: collections, the main-thread pause they cost (incremental
 /// marking steps included) and the work they did on helper threads, from attribution traces.
 pub fn gc(rec: &Rec) -> Result<Output> {
-    attribution_meta(&rec.meta, "gc")?;
+    attribution_meta(rec, "gc")?;
     let rows = rec.part(Part::Gc)?;
     let measured = measured_runs(&rec.meta, &rows);
     #[derive(Default, Clone, Copy)]
@@ -3402,9 +3444,9 @@ pub fn gc(rec: &Rec) -> Result<Output> {
     Ok(Output::new(text, json!({ "values": values, "runs": per_run })))
 }
 
-fn attribution_meta(meta: &Value, view: &str) -> Result<()> {
-    if meta["probes"] != "attribution" {
-        return Err(no_profile(meta, "attribution stacks or GC phases (this view needs an attribution recording)", view));
+fn attribution_meta(rec: &Rec, view: &str) -> Result<()> {
+    if rec.meta["probes"] != "attribution" {
+        return Err(no_profile(rec, "attribution stacks or GC phases (this view needs an attribution recording)", view));
     }
     Ok(())
 }
@@ -3413,13 +3455,45 @@ fn attribution_meta(meta: &Value, view: &str) -> Result<()> {
 /// never runs a profiler (it would weigh on the times the block measures), its experiment's
 /// attribution blocks do (`--why always`, or a series whose primary differs); anything else is
 /// recorded again with `--probes attribution`.
-pub(crate) fn no_profile(meta: &Value, what: &str, view: &str) -> Error {
+pub(crate) fn no_profile(rec: &Rec, what: &str, view: &str) -> Error {
+    let meta = &rec.meta;
     match meta["experiment"].as_str().filter(|_| meta["kind"] == "block" && meta["probes"] != "attribution") {
         Some(exp) => {
-            let read = if diff::VIEWS.contains(&view) { format!("strobe query {exp} {view} reads the experiment's") } else { format!("strobe query {exp} names the experiment's") };
-            Error::usage(format!(
-                "this recording has no {what}: it is a timed block of {exp}, and a timed block runs no profiler (it would weigh on the times it measures); attribution blocks have them: {read}, and bench --why always runs them (one per side, or one of head with --check or --blocks N)"
-            ))
+            // A copied recording's experiment belongs to its source machine. For a stored recording,
+            // read the exact parent, not a prefix, and match its own series (not another case's profile).
+            let result = (rec.stored() && store::plain_id(exp)).then(|| store::read_json(&crate::host::paths::experiments().join(exp).join("result.json")).ok()).flatten();
+            let check = result.as_ref().is_some_and(|r| r["kind"] == "check") || meta["check"] == true;
+            let profile = result
+                .as_ref()
+                .filter(|_| check)
+                .and_then(|r| r["series"].as_array())
+                .and_then(|s| s.iter().find(|s| s["recording"] == rec.id))
+                .and_then(|s| s["attribution"].as_str())
+                .filter(|id| *id != rec.id && store::plain_id(id) && crate::host::paths::recordings().join(id).join("meta.json").is_file());
+            let kind = if check {
+                "check"
+            } else if result.is_some() {
+                "timed"
+            } else {
+                "bench"
+            };
+            let hint = profile.map_or_else(
+                || "run the bench again with --why always to keep an attribution recording".to_string(),
+                |id| {
+                    let dir = crate::host::paths::recordings().join(id);
+                    // A kept profile need not have every probe. Don't send a person from one refusal to
+                    // another (for instance, invalidation tracking is optional even with --why always).
+                    let ext = match view {
+                        "hotspots" => "cpuprofile",
+                        "alloc" => "heapprofile",
+                        _ => "",
+                    };
+                    let has_profile = !ext.is_empty() && std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|f| f.path().extension().is_some_and(|e| e == ext));
+                    let next = if has_profile || view == "hotspots" && dir.join("deep.json.gz").is_file() { view } else { "summary" };
+                    format!("its attribution recording is {id}: strobe query {id} {next}")
+                },
+            );
+            Error::usage(format!("this recording has no {what}: it is a {kind} block of {exp}, recorded without the profiler; {hint}"))
         }
         // It ran under the profilers already: recording it again the same way adds nothing (a Bun
         // script host's missing allocation samples are refused before this, `firefox_gap`).

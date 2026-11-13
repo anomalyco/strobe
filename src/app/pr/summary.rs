@@ -140,8 +140,8 @@ fn check(r: &Value, series: &[&Value]) -> String {
         if state != "pass" {
             notes.push(why(s));
         }
-        // A base that failed fails nothing of head's: it compares no counter.
-        if s["base"]["passed"] == false {
+        // A failed base fails the check. Keep its reason if the case's own error didn't already give it.
+        if s["base"]["passed"] == false && !s["error"].as_str().is_some_and(|e| e.starts_with("base failed (")) {
             notes.push(format!("base failed: {}", cell(&first_clause(&scrub_public(s["base"]["error"].as_str().unwrap_or("").lines().next().unwrap_or("")), 140))));
         }
         let note = notes.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join("<br>");
@@ -215,7 +215,7 @@ fn counters_cell(s: &Value) -> String {
             "worse" => format!(" **worse** (--noworse\u{a0}{margin})"),
             "unstable" => " **unstable**".to_string(),
             "missing" => " **missing in head**".to_string(),
-            "not_compared" => " not compared".to_string(),
+            "not_compared" => " **not compared**".to_string(),
             _ => String::new(),
         };
         parts.push(p);

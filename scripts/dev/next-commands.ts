@@ -531,6 +531,36 @@ writeFileSync(join(handmade, "timeline.json.gz"), gzipSync(JSON.stringify({ thre
     }
   }
 }
+// Follow the advice, not just the syntax. These two recordings and their parent check belong to this
+// invocation. Render a report but don't open a browser; never run commands from an arbitrary result.
+let followed = 0
+{
+  const lean = "rec_syn_untraced", prof = "rec_handmade", exp = "exp_syn_onecheck"
+  const folder = (id: string) => join(fakeState, id.startsWith("rec_") ? "recordings" : "experiments", id)
+  for (const id of [lean, prof, exp]) mkdirSync(folder(id), { recursive: true })
+  for (const file of ["cpu-0.cpuprofile", "meta.json"]) cpSync(join(handmade, file), join(folder(prof), file))
+  writeFileSync(join(folder(lean), "meta.json"), JSON.stringify({ kind: "block", id: lean, probes: "lean", traced: false, frames_refused: "Headless: no display", experiment: exp, values: {} }))
+  const run = (...a: string[]) => Bun.spawnSync([STROBE, ...a], { env: { ...process.env, ...fakeEnv }, stdout: "pipe", stderr: "pipe", timeout: 15000 })
+  const fail = (why: string) => { console.log(`FAIL check recording: ${why}`); failed++ }
+  for (const attribution of [undefined, prof]) {
+    writeFileSync(join(folder(exp), "result.json"), JSON.stringify({ id: exp, kind: "check", series: [{ recording: lean, attribution }] }))
+    for (const view of ["summary", "hotspots", "layout", "style", "gc"]) {
+      const p = run("query", lean, view), text = p.stdout.toString() + p.stderr.toString()
+      if (view === "summary" ? p.exitCode !== 0 : p.exitCode !== 2 || !text.includes("check block")) fail(`${view}: ${text}`)
+      const commands = [...text.matchAll(/strobe (query|report) ([^·;\n]+)/g)]
+      if (view === "summary" && !commands.length || attribution && view === "hotspots" && !commands.some(m => m[2].trim() === `${prof} hotspots`)) fail(`missing next view in ${text}`)
+      for (const [, cmd, tail] of commands) {
+        const a = tail.trim().split(/\s+/).filter(x => x !== "--open")
+        if (![lean, prof, exp].some(id => a.includes(id))) { fail(`unexpected handle: ${cmd} ${tail}`); continue }
+        const next = run(cmd, ...a)
+        if (next.exitCode !== 0) fail(`${cmd} ${tail}: ${next.stderr}`)
+        followed++
+      }
+    }
+    if (run("query", exp, "hotspots").exitCode !== (attribution ? 0 : 2)) fail("the check's hotspots did not use its profile")
+  }
+}
+console.log(`${followed} follow-up views executed`)
 rmSync(work, { recursive: true, force: true })
 console.log(`${checked} command parses (sh${pwsh ? " and PowerShell" : ""}): ${failed ? `${failed} failed` : "all run as written"}`)
 process.exit(failed ? 1 : 0)
