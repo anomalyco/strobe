@@ -1467,20 +1467,199 @@ fn lopsided_background(blocks: &[Block], pairs: &[(usize, usize)], names: [&str;
             Some(if raw * credit > 0.0 { raw - raw.signum() * credit.abs().min(raw.abs()) } else { raw })
         })
         .collect();
-    if d.len() < 2 {
-        return None;
-    }
-    let p = stats::wilcoxon_p(&d);
-    let head = metrics::median(&d) > 0.0;
-    let n = d.iter().filter(|x| if head { **x >= BACKGROUND_PCT } else { **x <= -BACKGROUND_PCT }).count();
+    let (head, n, p) = lopsided(&d, BACKGROUND_PCT)?;
     let side = if head { names[1] } else { names[0] };
-    (p <= LOPSIDED_P && n >= d.len().div_ceil(2)).then(|| {
+    Some(
         Refusal::new(
             ValidatorId::Background,
             format!("other work ran on the target's CPUs during {side}'s blocks more than the other side's: a quarter core or more apart in {n} of {} pairs (signed-rank p {p:.3})", d.len()),
         )
-        .fix("let that work finish or keep it off the bench's CPUs, then run the bench again")
-    })
+        .fix("let that work finish or keep it off the bench's CPUs, then run the bench again"),
+    )
+}
+
+/// Pairs' differences (head − base) that lean one way: an exact signed-rank test at p ≤ `LOPSIDED_P`,
+/// and at least half the pairs `apart` or more apart toward that side. Whether head's side is the
+/// heavier, how many pairs are that far apart, and p.
+fn lopsided(d: &[f64], apart: f64) -> Option<(bool, usize, f64)> {
+    if d.len() < 2 {
+        return None;
+    }
+    let p = stats::wilcoxon_p(d);
+    let head = metrics::median(d) > 0.0;
+    let n = d.iter().filter(|x| if head { **x >= apart } else { **x <= -apart }).count();
+    (p <= LOPSIDED_P && n >= d.len().div_ceil(2)).then_some((head, n, p))
+}
+
+/// Hypervisor steal (% of the target's CPUs' time, `steal.pct`) a pair's blocks must differ by to
+/// count toward `lopsided_steal`: a guest that lost 2% more of its time on one side is slower by about
+/// that much there, the equivalence bound.
+const STEAL_APART_PCT: f64 = 2.0;
+
+/// `Background` from the hypervisor (SPEC §10.2): a virtual machine's host gave its CPUs to something
+/// else during one side's blocks more than the other's, as `lopsided_background` tests other work in
+/// the guest. Linux only: no other OS reports steal.
+fn lopsided_steal(blocks: &[Block], pairs: &[(usize, usize)], names: [&str; 2]) -> Option<Refusal> {
+    let steal = |b: usize| blocks[b].values.get("steal.pct").copied();
+    let d: Vec<f64> = pairs.iter().filter_map(|&(a, b)| Some(steal(b)? - steal(a)?)).collect();
+    let (head, n, p) = lopsided(&d, STEAL_APART_PCT)?;
+    let side = if head { names[1] } else { names[0] };
+    Some(
+        Refusal::new(
+            ValidatorId::Background,
+            format!(
+                "the hypervisor took the CPUs away during {side}'s blocks more than the other side's: steal {STEAL_APART_PCT:.0}% or more apart in {n} of {} pairs (signed-rank p {p:.3})",
+                d.len()
+            ),
+        )
+        .fix("run the bench again when the virtual machine's host is quieter, or on bare metal"),
+    )
+}
+
+/// How far the pairs without other work may move the primary's estimate (percentage points; a quarter
+/// of the bound for a metric compared by difference) for that work to have changed nothing. On the
+/// recorded desk runs (Windows, 9950X3D: the 32 A/A and A/B benches with 6 or more such pairs) they
+/// moved it 0.26 pp at most, 0.16 pp at the 90th percentile.
+const CLEAN_SHIFT_PP: f64 = 0.5;
+
+/// Other work (% of one core) that one block of a pair had more of than the other: a burst on one side
+/// only (a build started mid-block, a scan of the fresh head) moves that pair by itself, so it runs
+/// again. On the recorded desk runs, pairs 1 to 2 cores apart sat 12.6% from their run's median at the
+/// 90th percentile, 2 cores or more 18%; pairs half a core to a core apart 3.0%, near the 1.6% of
+/// pairs with no other work. Half a core (the first guess) would have run 207 pairs again in 53 of the
+/// 134 recorded runs, a core 91 in 38.
+const BURST_PCT: f64 = 100.0;
+
+/// How many times one pair runs again for a one-sided burst before it is kept (and the paired test,
+/// `lopsided_background`, judges what stays).
+const BURST_RETRIES: usize = 2;
+
+/// The pair's blocks' other work when one had `BURST_PCT` or more than the other: (base's, head's),
+/// by the blocks' order in `blocks`.
+fn one_sided(a: &Block, b: &Block) -> Option<(f64, f64)> {
+    let f = |x: &Block| x.values.get("cpu.foreign.max").copied().filter(|v| v.is_finite());
+    let (fa, fb) = (f(a)?, f(b)?);
+    ((fa - fb).abs() >= BURST_PCT).then(|| if a.variant == "base" { (fa, fb) } else { (fb, fa) })
+}
+
+/// Whether other work on the target's CPUs can move what the series measures (`load_metric`): its
+/// primary or a metric it declares. A series of memory, I/O or counts gets no `Background` note.
+fn moved_by_load(s: &Series) -> bool {
+    declared_metrics(s).iter().any(|m| load_metric(m))
+}
+
+/// What the series' primary says about the blocks with other work, for `background_note`.
+struct LoadImpact<'a> {
+    /// The primary as reported; None for `--blocks`, which compares nothing.
+    primary: Option<&'a Comparison>,
+    /// The primary over the pairs neither of whose blocks had other work, when there were at least
+    /// the design's fewest pairs of them and fewer than all.
+    clean: Option<(usize, Comparison)>,
+    /// The fewest pairs that decide anything (the design's first look).
+    min_pairs: usize,
+    /// The physical cores the target could run on.
+    cores: Option<usize>,
+    /// The pairs that ran again for a one-sided burst.
+    redone: usize,
+    /// `lopsided_background` refused the series' times.
+    lopsided: bool,
+}
+
+/// The series' one `Background` note on other work during its blocks (SPEC §10.2), or none: none
+/// when no block had a quarter core of it or nothing the series measures moves with load (memory,
+/// I/O, counts). `info` when it changed nothing decided: the pairs without it give the primary's
+/// verdict and an estimate within `CLEAN_SHIFT_PP`, or the target's physical cores had room for it
+/// beside the target and the primary's interval stayed inside the bound. `warn` otherwise. It names
+/// no process (the progress does; the blocks keep them): a published note says only how much.
+fn background_note(s: &Series, blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
+    if !moved_by_load(s) {
+        return None;
+    }
+    let redone = match at.redone {
+        0 => String::new(),
+        1 => "; 1 pair with it on one side only ran again".to_string(),
+        n => format!("; {n} pairs with it on one side only ran again"),
+    };
+    let measured: Vec<&Block> = blocks.iter().filter(|b| b.values.get("cpu.foreign.max").is_some_and(|f| f.is_finite())).collect();
+    let flagged: Vec<&Block> = measured.iter().copied().filter(|b| b.values["cpu.foreign.max"] >= BACKGROUND_PCT).collect();
+    if flagged.is_empty() {
+        return (at.redone > 0).then(|| validity::info("Background", format!("other work on the measured CPUs hit one side of a pair only{redone}; no block kept had a quarter core of it")));
+    }
+    let foreign: Vec<f64> = flagged.iter().map(|b| b.values["cpu.foreign.max"]).collect();
+    let top = flagged.iter().copied().max_by(|a, b| a.values["cpu.foreign.max"].total_cmp(&b.values["cpu.foreign.max"])).unwrap_or(flagged[0]);
+    let peak = top.values["cpu.foreign.max"];
+    let rate = format!(
+        "other work of a quarter core or more ran on the measured CPUs in {} of {} blocks ({:.0}%; median {:.0}%, peak {:.0}% of a core in pair {} {})",
+        flagged.len(),
+        measured.len(),
+        100.0 * flagged.len() as f64 / measured.len() as f64,
+        metrics::median(&foreign),
+        peak,
+        top.pair + 1,
+        top.variant
+    );
+    let Some(p) = at.primary else {
+        return Some(validity::warn("Background", format!("{rate}{redone}; the blocks' values include it")));
+    };
+    let unit = model::metric(&p.metric).map_or("", |d| d.unit);
+    let shift = |x: f64| if p.relative { format!("{:+.2} pp", 100.0 * x) } else { fmt::signed(x, unit) };
+    if at.lopsided {
+        return Some(validity::warn("Background", format!("{rate}{redone}; one side had more of it: what it moves is refused (below)")));
+    }
+    if p.kind == VerdictKind::Refused {
+        return Some(validity::warn("Background", format!("{rate}{redone}; the primary was refused, so nothing shows it changed nothing")));
+    }
+    // (a) The pairs without it decide the same.
+    let tolerance = if p.relative { CLEAN_SHIFT_PP / 100.0 } else { 0.25 * p.bound };
+    if let Some((n, c)) = &at.clean
+        && c.kind == p.kind
+        && (c.estimate - p.estimate).abs() <= tolerance
+    {
+        return Some(validity::info("Background", format!("{rate}{redone}; the {n} pairs without it give the same verdict (estimate {})", shift(c.estimate - p.estimate))));
+    }
+    // (b) Room beside the target on its physical cores, and an interval the work did not widen past the bound.
+    let own = |b: &Block| ["cpu.app.total", "cpu.process.total"].iter().find_map(|m| b.values.get(*m).copied().filter(|v| v.is_finite())).unwrap_or(100.0);
+    let busiest = flagged.iter().map(|b| own(b) + b.values["cpu.foreign.max"]).fold(0.0, f64::max);
+    let half = (p.hi - p.lo) / 2.0;
+    let tight = p.kind == VerdictKind::Same || (p.kind.decided() && half <= p.bound);
+    if let Some(cores) = at.cores.filter(|c| busiest <= 100.0 * *c as f64 && tight) {
+        let half = if p.relative { fmt::pct(half) } else { fmt::value(half, unit) };
+        return Some(validity::info(
+            "Background",
+            format!("{rate}{redone}; the target's {cores} physical cores had room for it (at most {busiest:.0}% of a core with the target's own), and the primary's interval stayed within ±{half}"),
+        ));
+    }
+    let impact = match &at.clean {
+        Some((n, c)) if c.kind != p.kind => format!("the {n} pairs without it give another verdict ({})", c.verdict),
+        Some((n, c)) => format!("the {n} pairs without it move the estimate {}", shift(c.estimate - p.estimate)),
+        None if !p.kind.decided() => "the primary is not decided".to_string(),
+        None => format!("fewer than {} pairs ran without it, and the target's cores had no room to spare", at.min_pairs),
+    };
+    Some(validity::warn("Background", format!("{rate}{redone}; {impact}")))
+}
+
+/// The physical cores the target may run on: those of its pinned CPUs, else of every CPU strobe may
+/// use. None where the OS names no cores (macOS).
+fn target_cores(pin: Option<u64>) -> Option<usize> {
+    let topo = host::topology();
+    let cpus = pin.unwrap_or_else(|| topo.all());
+    let n = topo.cores.iter().filter(|c| c.mask & cpus != 0).count();
+    (n > 0).then_some(n)
+}
+
+/// The busiest processes during a series' blocks with other work, for the progress (never a
+/// published note): each name once, at its most.
+fn busiest_during(blocks: &[Block]) -> String {
+    let mut most: BTreeMap<&str, f64> = BTreeMap::new();
+    for b in blocks.iter().filter(|b| b.values.get("cpu.foreign.max").is_some_and(|f| *f >= BACKGROUND_PCT)) {
+        for (n, p) in &b.background {
+            let e = most.entry(n.as_str()).or_insert(0.0);
+            *e = e.max(*p);
+        }
+    }
+    let mut v: Vec<(&str, f64)> = most.into_iter().collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    v.iter().take(3).map(|(n, p)| format!("{n} {p:.0}%")).collect::<Vec<_>>().join(", ")
 }
 
 /// What other work on the target's CPUs or a CPU quota moves by itself: times and CPU shares
@@ -2797,6 +2976,11 @@ pub fn run(args: &Args) -> Result<Output> {
             out.code = h.code;
         }
         return Ok(out);
+    }
+    if let Some(vm) = &env.virtual_machine
+        && let Some(w) = ctx.warnings.iter_mut().find(|w| w.id == "VirtualMachine")
+    {
+        w.text = vm_text(vm, &series_out, ctx.pin.is_none());
     }
     if pixels_only {
         let mut text = String::new();
@@ -4419,6 +4603,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     // The analysers of one build's blocks: HighVariance, MultimodalDistribution, NotSteady,
     // Background, StateDrift (Drift is a trend of pair differences: none here).
     analyse(s, def, &blocks, &[], false, ["base", "head"], &mut warnings);
+    warnings.extend(background_note(s, &blocks, &LoadImpact { primary: None, clean: None, min_pairs: 0, cores: None, redone: 0, lopsided: false }));
     warnings.extend(observer_reads(&blocks, "head", "head", is_native(&target)));
     warnings.extend(observer_pixels(&blocks, "head", "head"));
     warnings.extend(full_trace_warning(ctx, &target));
@@ -4534,6 +4719,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let probe = probing(s);
     let main_http = main_probes(s);
     let from = if halted.is_some() { max_pairs } else { pairs.len() };
+    // Pairs that ran again for a burst of other work on one side only (`one_sided`).
+    let mut bursts = 0usize;
     'pairs: for pair in from..max_pairs {
         if stop_requested() {
             halted = Some(stop_error());
@@ -4541,7 +4728,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         }
         let order: [usize; 2] = if pair % 2 == 0 { [0, 1] } else { [1, 0] };
         let mut idx = [0usize; 2];
-        let mut redone = 0;
+        let (mut redone, mut redone_bg) = (0, 0);
         loop {
             let start = blocks.len();
             for &v in &order {
@@ -4574,15 +4761,36 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 let seen = flagged_counts(s, blocks.iter_mut());
                 ctx.noworse_seen.extend(seen);
             }
+            let discard = |blocks: &mut Vec<Block>| {
+                for b in blocks.drain(start..) {
+                    if let Some(dir) = b.recording.as_deref().and_then(|id| store::resolve(id).ok()) {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                }
+            };
             // Base and head of a pair share one lock state and one display state, or the pair runs again.
             if blocks[start].locked == blocks[start + 1].locked && blocks[start].display == blocks[start + 1].display {
-                break;
+                // A burst of other work on one side's CPUs only moves this pair by itself: it runs again,
+                // up to `BURST_RETRIES` times, while the series has time left. What it then keeps, the
+                // paired test (`lopsided_background`) and the series' note judge.
+                let burst = one_sided(&blocks[start], &blocks[start + 1]).filter(|_| redone_bg < BURST_RETRIES && load_metric(&s.primary) && share.is_none_or(|t| Instant::now() < t));
+                let Some((fb, fh)) = burst else { break };
+                let heavy = if fh > fb { 1 } else { 0 };
+                let who = busiest_during(&blocks[start..]);
+                discard(&mut blocks);
+                redone_bg += 1;
+                bursts += 1;
+                progress(format!(
+                    "  pair {}: other work during {}'s block only, {:.0}% of a core more than the other's{}: pair discarded, running it again ({redone_bg} of {BURST_RETRIES})",
+                    pair + 1,
+                    side_of(ctx, &variants[heavy]),
+                    (fh - fb).abs(),
+                    if who.is_empty() { String::new() } else { format!(" (busiest elsewhere: {who})") }
+                ));
+                validity::wait_quiet(ctx.pin, Duration::from_secs(5));
+                continue;
             }
-            for b in blocks.drain(start..) {
-                if let Some(dir) = b.recording.as_deref().and_then(|id| store::resolve(id).ok()) {
-                    let _ = std::fs::remove_dir_all(dir);
-                }
-            }
+            discard(&mut blocks);
             redone += 1;
             if redone >= 5 {
                 return Err(Error::refused(
@@ -4955,7 +5163,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // Other work that ran with one side's timing blocks moves that side's numbers by itself (SPEC §10.2):
     // what it moves decides nothing. Refused before the gate and Holm, so no such row takes a share of
     // the family, and the per-block flags no longer say the blocks were kept.
-    if let Some(why) = lopsided_background(tb, tp, names) {
+    // The hypervisor's steal, tested the same way (a virtual machine's host loaded during one side).
+    let lopsided = [lopsided_background(tb, tp, names), lopsided_steal(tb, tp, names)];
+    for why in lopsided.iter().flatten() {
         if load_metric(&s.primary) && primary.kind != VerdictKind::Refused {
             if primary_decided {
                 progress(format!("  {}: the verdict at the last look is withdrawn: {}", s.primary, why.summary));
@@ -4966,11 +5176,28 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         for c in secondaries.iter_mut().chain(descriptive.iter_mut()).filter(|c| load_metric(&c.metric) && c.kind != VerdictKind::Refused) {
             c.refuse(why.clone());
         }
-        for w in warnings.iter_mut().filter(|w| w.id == "Background") {
-            if let Some(t) = w.text.strip_suffix("; blocks kept, flagged") {
-                w.text = format!("{t}; the series' times are refused (below)");
-            }
+    }
+    // What the other work did to the rest (SPEC §10.2): one note, before the refusals it leads to.
+    let flagged = |i: usize| blocks[i].values.get("cpu.foreign.max").is_some_and(|f| *f >= BACKGROUND_PCT);
+    // The pairs the primary was decided over (a series that ran on for its secondaries kept its look's).
+    let looked = &pairs[..primary.n.min(pairs.len())];
+    let clean: Vec<(f64, f64)> = looked.iter().filter(|&&(a, b)| !flagged(a) && !flagged(b)).map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).collect();
+    let impact = LoadImpact {
+        primary: Some(&primary),
+        clean: (clean.len() >= min_pairs && clean.len() < looked.len()).then(|| (clean.len(), compare_primary(&clean, def))),
+        min_pairs,
+        cores: target_cores(ctx.pin),
+        redone: bursts,
+        lopsided: lopsided[0].is_some(),
+    };
+    if let Some(note) = background_note(s, &blocks, &impact) {
+        let who = busiest_during(&blocks);
+        if !who.is_empty() {
+            progress(format!("  other work on the measured CPUs in some blocks (busiest elsewhere: {who})"));
         }
+        warnings.push(note);
+    }
+    for why in lopsided.iter().flatten() {
         warnings.push(validity::warn("Background", format!("{}: nothing it moves is decided; rerun once that work is done", why.summary)));
     }
     // A shared runner (`SharedRunner`): exact counters that held one value are all that compares.
@@ -6197,18 +6424,6 @@ fn analyse(s: &Series, def: &MetricDef, blocks: &[Block], pairs: &[(usize, usize
             w.push(validity::warn("CounterUnstable", format!("{name} varied between blocks of one build ({}): compared like a timed metric, by its noise, not exactly", spread.join("; "))));
         }
     }
-    // Other work on the measured CPUs during a run: kept, flagged (SPEC §10.2).
-    let busy: Vec<String> = blocks
-        .iter()
-        .filter(|b| b.values.get("cpu.foreign.max").is_some_and(|f| *f >= BACKGROUND_PCT))
-        .map(|b| {
-            let who = b.background.iter().map(|(n, p)| format!("{n} {p:.0}%")).collect::<Vec<_>>().join(", ");
-            format!("pair {} {}: up to {:.0}% of a core{}", b.pair + 1, b.variant, b.values["cpu.foreign.max"], if who.is_empty() { String::new() } else { format!(" (busiest elsewhere: {who})") })
-        })
-        .collect();
-    if !busy.is_empty() {
-        w.push(validity::warn("Background", format!("other work ran on the measured CPUs during {} block(s): {}; blocks kept, flagged", busy.len(), busy.join("; "))));
-    }
     for b in blocks {
         if b.nodes.len() >= 3 {
             let first = b.nodes[0] as f64;
@@ -6461,6 +6676,65 @@ fn busiest_others(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>)
     out.sort_by(|x, y| y.1.total_cmp(&x.1));
     out.truncate(3);
     out
+}
+
+/// `VirtualMachine` after the series, with what the timed blocks saw of the host and the guest: the
+/// hypervisor's steal (Linux) and, unpinned, the other processes' CPU in the guest.
+fn vm_text(vm: &str, series: &[Value], unpinned: bool) -> String {
+    let read = |key: &str| -> Vec<f64> { series.iter().flat_map(|s| s["blocks"].as_array().into_iter().flatten()).filter_map(|b| b["values"][key].as_f64()).collect() };
+    let steal = read("steal.pct");
+    let mut seen = Vec::new();
+    if unpinned {
+        let cpus = host::topology().all().count_ones();
+        seen.push(format!("unpinned on {cpus} CPU{}", if cpus == 1 { "" } else { "s" }));
+    }
+    if !steal.is_empty() {
+        let (lo, hi) = (steal.iter().copied().fold(f64::INFINITY, f64::min), steal.iter().copied().fold(0.0, f64::max));
+        seen.push(format!("hypervisor steal {lo:.1}–{hi:.1}% across {} blocks", steal.len()));
+    }
+    let other = read("cpu.foreign");
+    if unpinned && !other.is_empty() {
+        seen.push(format!("other work in the guest median {:.0}% of a core", metrics::median(&other)));
+    }
+    let seen = seen.iter().map(|s| format!("; {s}")).collect::<String>();
+    format!("running in a virtual machine ({vm}{seen}): its timings move with the host's load; prefer bare metal")
+}
+
+/// Every process outside strobe's own tree between two snapshots: their CPU summed, as % of one core
+/// (one that started meanwhile counted from zero; one that also ended meanwhile is not seen), and the
+/// three busiest from 5% up.
+fn other_processes(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>)) -> (f64, Vec<(String, f64)>) {
+    let ours: std::collections::BTreeSet<u32> = host::tree_pids(std::process::id()).into_iter().collect();
+    let before: BTreeMap<u32, u64> = a.1.iter().map(|p| (p.pid, p.cpu_ns)).collect();
+    let span = b.0.saturating_sub(a.0).max(1) as f64;
+    let each: Vec<(String, f64)> =
+        b.1.iter().filter(|p| p.pid != 0 && !ours.contains(&p.pid)).map(|p| (p.name.clone(), 100.0 * p.cpu_ns.saturating_sub(before.get(&p.pid).copied().unwrap_or(0)) as f64 / span)).collect();
+    let total = each.iter().map(|(_, p)| p).sum();
+    let mut busiest: Vec<(String, f64)> = each.into_iter().filter(|(_, p)| *p >= 5.0).collect();
+    busiest.sort_by(|x, y| y.1.total_cmp(&x.1));
+    busiest.truncate(3);
+    (total, busiest)
+}
+
+/// A timed block's steal (`steal.pct`, % of the target's CPUs' time) and, where nothing is pinned, the
+/// other processes' CPU over it as its `cpu.foreign` (`other_processes`): the whole block, its setup
+/// and launch too, since an unpinned target's CPUs are every CPU. A case that declares `cpu.foreign`
+/// keeps its refusal (it is other work on pinned CPUs over the runs).
+fn guest_load(s: &Series, mut b: Block, steal: Option<f64>, guest: Option<(f64, Vec<(String, f64)>)>) -> Block {
+    if let Some(st) = steal.filter(|x| x.is_finite()) {
+        b.values.insert("steal.pct".into(), st);
+    }
+    if let Some((pct, who)) = guest
+        && !b.values.contains_key("cpu.foreign.max")
+        && !declared_metrics(s).iter().any(|m| m.starts_with("cpu.foreign"))
+    {
+        b.values.insert("cpu.foreign".into(), pct);
+        b.values.insert("cpu.foreign.max".into(), pct);
+        if pct >= BACKGROUND_PCT && b.background.is_empty() {
+            b.background = who;
+        }
+    }
+    b
 }
 
 /// What the screen was doing over a block or recording, for its meta and `query summary`: the
@@ -7120,7 +7394,15 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         // The HTTP probe its setup asks for (SPEC §8.9), on strobe's own CPUs; a batch's launch runs none.
         ctx.runner.http_probe(cases.len() == 1 && x.probes_http(), ctx.runner_pin.or_else(thread_pin));
         let quota = host::cgroup_throttled_ns();
+        // Other work during a timed block (SPEC §10.2 `Background`): the hypervisor's steal (Linux), and
+        // where nothing is pinned (a VM's few vCPUs, `--pin none`), the other processes' CPU over the
+        // block, which the runs' own reading (`cpu.foreign`, on pinned CPUs) cannot give.
+        let timed = x.measures_time() && cases.len() == 1 && ctx.phone.is_none();
+        let steal = timed.then(validity::Steal::start);
+        let procs = (timed && ctx.pin.is_none() && !cfg!(target_os = "macos")).then(|| (host::now_ns(), host::all_processes()));
         let launch = any_launch(ctx, cases, v, pair, x);
+        let steal = steal.and_then(|s| s.pct(ctx.pin));
+        let guest = procs.map(|a| other_processes(&a, &(host::now_ns(), host::all_processes())));
         let mut http = ctx.runner.take_http();
         let whole = quota.zip(host::cgroup_throttled_ns()).map(|(a, b)| b.saturating_sub(a));
         let runs_throttled = ctx.runner.throttled().to_vec();
@@ -7160,10 +7442,13 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 Some(report) => r.map(|mut b| {
                     b.reserve = Some(json!({ "moved": report.moved_total(), "started": report.started, "failed": report.failed.len(), "restored": report.restored, "overhead_pct": report.overhead_pct, "setup_ms": report.setup_ms }));
                     b.overhead.get_or_insert_with(Overhead::default).reserve_pct = Some(report.overhead_pct);
+                    // What the reservation moved ran on the other CPUs: not the target's other work.
+                    b.background.retain(|(n, _)| !report.moved.contains_key(n.split(" (").next().unwrap_or(n)));
                     b
                 }),
                 None => r,
             };
+            let r = r.map(|b| guest_load(s, b, steal, guest.clone()));
             let kind = ctx.describe["targets"][v.target_of(s)]["kind"].as_str().unwrap_or("").to_string();
             let r = r.map(|b| self_state(ctx, s, v, x, &kind, b)).map(|b| declared_state(ctx, s, v, x, b)).inspect(|b| restate_recording(ctx, s, v, b));
             // A timed or check block that refused its primary refuses the block, as a native one does:

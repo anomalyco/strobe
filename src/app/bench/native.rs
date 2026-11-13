@@ -1246,7 +1246,8 @@ fn runs(
             }
             for m in declared_metrics(s).into_iter() {
                 // A counter only `--noworse` names that no run counted is the series' to decide (`flagged_counts`).
-                if values.contains_key(m) || refused.contains_key(m) || (!s.case_declares(m) && m.starts_with("count.")) {
+                // A counter only a counter block measures here is that block's to give (`take_metrics`).
+                if values.contains_key(m) || refused.contains_key(m) || (!s.case_declares(m) && m.starts_with("count.")) || (!x.counters && super::counted_apart(m)) {
                     continue;
                 }
                 refused.insert(m.clone(), missing(m, &have));
