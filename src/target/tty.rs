@@ -950,7 +950,8 @@ mod win {
                         if h.is_null() {
                             false
                         } else {
-                            let ok = hosts().contains(pid) && SetProcessAffinityMask(h, mask as usize) != 0;
+                            let (mut proc_mask, mut sys_mask) = (0, 0);
+                            let ok = hosts().contains(pid) && GetProcessAffinityMask(h, &mut proc_mask, &mut sys_mask) != 0 && SetProcessAffinityMask(h, mask as usize & sys_mask) != 0;
                             CloseHandle(h);
                             ok
                         }

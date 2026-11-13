@@ -942,13 +942,20 @@ lists only distinct recordings that answer the requested view, with its argument
 Listing checks sources in series order without marking a recording used or building a trace. Only when style,
 trace inputs or trace-only runs need run marks does listing read the trace: once per recording generation,
 with the run keys and their invalidation flags cached atomically under strobe's run folder, never in the recording.
+If file identity or change information is unavailable, or the cache cannot be locked or written, listing reads the trace without relying on the cache.
 It does not execute the SQL being offered. Without a kept profile it explains how to collect one. For a profile view,
 `--case` on the check selects the case's own attribution recording. If all candidates fail identically, query returns
-that error unchanged. Otherwise it names each distinct reason with its first series and recording (`recording_errors`
-in JSON): exit 1 if any candidate had a read error (1), else 4 if all returned 4, else 2.
+the shared reason without singling out a recording for its fix. Otherwise it names each distinct reason with its first series and recording (`recording_errors`
+in JSON): exit 124 if any candidate timed out, else 255 if any engine was unavailable, else 1 if any had a read error, else 4 if all returned 4, else 2.
 The top-level validator is the shared validator, or null when candidates disagree.
 Local summaries and Markdown of a copy name its path in follow-up commands and never offer to resume it.
-An untraced check does not recommend `frames` in its summary. Before anything
+For a command about another recording, put its complete `rec_…` folder next to `result.json` in the
+copy. The summary and Markdown link to that copy's metadata by path, else to the recording's exact ID
+if it is stored here. Otherwise they keep the ID and say to supply its folder separately. A pruned
+recording of a stored result likewise keeps its ID but no command.
+An untraced check does not recommend `frames` in its summary. A lean headless page check has no
+presented frames, even with `--trace full`. `--why always` keeps a separate attribution recording:
+its `frames` view reads pipeline rows, not evidence that a frame reached a display. Before anything
 runs, every bench prints the builds it runs with their commits (`head app@f2a281b501 (dirty)`, or
 `base … → head …`; an implementation comparison names its sides as before), and a check's text
 starts with that line. A check's
@@ -1472,7 +1479,10 @@ shared). `--once` prints one view and exits. Not built: the focused target's fra
   (the same build id, below; the same bytes for copies without one): nothing to do. A daemon left
   running its bench restarts as the installed build once no bench runs in it (it checks once a
   minute and runs the installed copy's `up --skip deep,mcp,calibrate`; only a daemon running from
-  the install folder does).
+  the install folder does). To install without asking the daemon to stop or start, run the **new** binary's
+  `up --skip daemon,deep,mcp,calibrate` instead of `update`. This installs the binaries and skill but does
+  not change autostart, refresh the helper or register MCP. It does not disable an installed daemon's
+  own idle build check.
 
   **Build id.** `build.rs` hashes every source file of the binaries (FNV-1a over `src`, the bench
   SDK, the viewer, the skill, the calibration page, `Cargo.toml`, `Cargo.lock`), the target and the
@@ -8862,7 +8872,8 @@ so nothing needs a display: it runs on a locked session and on a server alike (`
 - **Input** is the bytes a terminal sends, stamped on the host clock when written. Keys use xterm's
   encoding (application cursor keys once `?1` is set), or the progressive keyboard protocol's
   `CSI … u` once the program pushed flags (disambiguate, event types with releases, every key); a key
-  with no bytes (a modifier alone, F13 and up without "every key") is a usage error. The mouse goes as
+  that `press` cannot encode is a usage error. `down` and `up` honor `until` from the write, or from the
+  call if no bytes go out (a held modifier or an unreported key release). The mouse goes as
   SGR reports (`?1006`) or X10 bytes, only once the program turned reporting on: clicks after `?1000`,
   drags after `?1002`, moves after `?1003`; else `MouseNotEnabled` (§10.1), never bytes the program
   would read as keys. `wheel` and `scroll` send notches (a terminal has no pixels; `scroll` paces them

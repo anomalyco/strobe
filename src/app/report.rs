@@ -751,6 +751,7 @@ fn markdown(data: &Value, path: Option<&std::path::Path>, recording: bool) -> St
         super::record::summary_text(data)
     };
     let text = if let Some(p) = path { query::path_text(&text, data, p, recording) } else { text };
+    let text = if recording { text } else { query::recording_links(&text, path) };
     format!("```\n{}\n```\n", text.trim_end())
 }
 

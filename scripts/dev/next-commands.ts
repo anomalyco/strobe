@@ -45,7 +45,7 @@
 //   bun scripts/dev/next-commands.ts [--strobe <exe>] [--make] [--show] [exp_… …]
 //
 // Exit 1 when a command fails.
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs"
 import { homedir, platform, tmpdir } from "os"
 import { join } from "path"
 import { fileURLToPath } from "url"
@@ -376,6 +376,7 @@ if (argv.includes("--make")) {
     ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "regress,waits"]],
     // A page whose time is restyling, headless: a lean check recording and an attribution one.
     ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "restyle", "--headless"]],
+    ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--trace", "full", "--filter", "restyle", "--headless"]],
     ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "restyle", "--headless", "--style"]],
     // A failed case.
     ["bench", ["fails.bench.ts", "--head", ".", "--check"]],
@@ -587,6 +588,13 @@ let followed = 0
   for (const id of made) {
     const result = JSON.parse(readFileSync(join(folder(id), "result.json"), "utf8"))
     for (const s of result.series ?? []) {
+      if (s.case === "restyle" && s.recording) {
+        const lean = JSON.parse(readFileSync(join(folder(s.recording),"meta.json"),"utf8"))
+        const why = go(["query",s.recording,"frames"],4)
+        if (lean.traced !== false || !why.includes("Headless:") || why.includes("--trace full") || !why.includes("--why always")) fail(`headless frames: ${why}`)
+        if (typeof s.attribution === "string") { go(["query",s.attribution,"frames"],0); followed++ }
+        console.log(`headless frames: ${s.recording} (trace ${result.args?.flags?.trace ?? "default"}): 4; attribution ${s.attribution ?? "not requested"}`)
+      }
       if (!s.recording || typeof s.attribution !== "string" || !existsSync(join(folder(s.attribution), "trace.pftrace"))) continue
       for (const view of ["layout", "gc", "style"]) {
         const available = run("query", s.attribution, view).exitCode === 0
@@ -676,11 +684,16 @@ let followed = 0
         if (p.exitCode !== 2 || !text.includes(profileViews.includes(view) ? "--why always" : "no kept recording")) fail(`${tag}: ${text}`)
       } else if (!want.length) {
         // Forwarding a single case prefixes the source to the same refusal.
-        const why = direct.map(r=>r.stderr.toString().trim().replace(/^strobe: /, ""))
-        const distinct = [...new Set(why.map((w,i)=>w.replaceAll(ids[i],"<recording>")))]
+        const why = direct.map(r=>{
+          const msg = r.stderr.toString().trim().replace(/^strobe: /, "")
+          if (!listing || view !== "threads") return msg
+          return msg.replace(/: its threads over time are in strobe query \S+ threads --timeline$/, ": request threads with --timeline for the recorded timeline")
+            .replace(/: a native stack capture answers strobe query \S+ hotspots --by package$/, ": use the hotspots view of the native stack capture instead")
+        })
+        const distinct = [...new Set(why)]
         if (distinct.length === 1) {
           if (!why[0] || p.exitCode !== direct[0].exitCode || !text.includes(why[0])) fail(`${tag}: not the direct refusal (${why[0]}): ${text}`)
-        } else if (p.exitCode !== (direct.some(r=>r.exitCode===1)?1:direct.every(r=>r.exitCode===4)?4:2) || !text.startsWith("strobe: no recording of this check answers") || !why.filter((w,i)=>why.findIndex((x,j)=>x.replaceAll(ids[j],"<recording>")===w.replaceAll(ids[i],"<recording>"))===i).every(w=>text.includes(w.split("\n")[0]))) fail(`${tag}: missing mixed reasons: ${text}`)
+        } else if (p.exitCode !== ([124,255,1].find(code=>direct.some(r=>r.exitCode===code)) ?? (direct.every(r=>r.exitCode===4)?4:2)) || !text.startsWith("strobe: no recording of this check answers") || !distinct.every(w=>text.includes(w.split("\n")[0]))) fail(`${tag}: missing mixed reasons: ${text}`)
       } else if (series.length === 1 && ids.length === 1 && !shared) {
         if (p.exitCode !== 0 || !text.includes(`${series[0].label} · ${ids[0]}`)) fail(`${tag}: not forwarded from ${ids[0]}`)
       } else {
@@ -732,6 +745,31 @@ let followed = 0
     }
     for(const v of ["style","inputs","runs"]){go(["query",legacy,v],v==="style" && invalidate===15?2:0);followed++}
   }
+  // Break the cache, not the trace. Check a failed publication, an unusable lock on a warm
+  // (deliberately stale) entry and a file in place of the entire cache directory.
+  const probe = join(fakeState,"run","probe")
+  const factsName = readdirSync(probe).find(n=>n.endsWith(".json") && JSON.parse(readFileSync(join(probe,n),"utf8")).runs["run:1"] === true)
+  if (!factsName) throw Error("no warm trace facts for run:1")
+  const facts = join(probe, factsName), lock = facts.replace(/\.json$/, ".lock"), warm = JSON.parse(readFileSync(facts,"utf8"))
+  const uncached = () => advice(["query",exp,"style"],[`${legacy} style`])
+  rmSync(facts); mkdirSync(facts); uncached(); rmSync(facts,{recursive:true})
+  put(probe,factsName,{...warm,runs:{}}); rmSync(lock); mkdirSync(lock); uncached()
+  rmSync(probe,{recursive:true}); writeFileSync(probe,""); uncached(); rmSync(probe)
+  // No download or traffic to the registry: the sandbox's missing engine goes through a dead
+  // local proxy. The second recording has no run list or trace (2). Preserve both reasons.
+  const engine = join(fakeState,"engine"); renameSync(engine,engine+".saved")
+  try {
+    const offline = { ...process.env, ...fakeEnv, HTTPS_PROXY:"http://127.0.0.1:1", https_proxy:"http://127.0.0.1:1", NO_PROXY:"", no_proxy:"" }
+    for (const reverse of [false,true]) {
+      const series = [c("trace",legacy),c("no trace",second)]
+      writeResult({kind:"check",series:reverse?series.reverse():series})
+      const p = Bun.spawnSync([STROBE,"query",exp,"runs","--json"],{env:offline,timeout:15000})
+      const j = JSON.parse(p.stdout.toString())
+      if (p.exitCode!==255 || j.code!==255 || JSON.stringify(j.recording_errors?.map((r:J)=>r.code))!==JSON.stringify(reverse?[2,255]:[255,2])) fail(`offline engine: ${p.stdout} ${p.stderr}`)
+    }
+  } finally {
+    rmSync(engine,{recursive:true,force:true}); renameSync(engine+".saved",engine)
+  }
   for (const id of made) {
     const r = JSON.parse(readFileSync(join(folder(id),"result.json"),"utf8"))
     for (const s of r.series ?? []) if (s.attribution && typeof s.attribution === "string" && existsSync(join(folder(s.attribution),"trace.pftrace"))) {
@@ -776,6 +814,10 @@ let followed = 0
       writeResult({kind:"check",series:pairs.slice(0,2).map(([name,id])=>c(name,id,id))})
       const cli=JSON.parse(go(["query",exp,view,"--json"],4)),one=JSON.parse(go(["query",pairs[0][1],view,"--json"],4)),t=mcp(view)
       if(JSON.stringify(cli)!==JSON.stringify(one) || t.structuredContent?.validator!==one.validator || t.structuredContent?.hint!==one.hint)fail("same reason with different IDs did not collapse")
+      for(const h of [file,exp]) for(const v of ["frames","threads","gpu"]) {
+        const shared = JSON.parse(go(["query",h,v,"--json"],4))
+        if (shared.recording_errors || !shared.hint || /rec_syn_|strobe query/.test(shared.hint)) fail(`not a recording-neutral ${v} fix: ${shared.hint}`)
+      }
       console.log(`collapsed frames: ${go(["query",exp,view],4).trim()}\n${JSON.stringify(cli)}\nMCP: ${JSON.stringify(t)}`)
     }
   }
@@ -843,6 +885,37 @@ let followed = 0
   checkText(prof,prof,"strobe query HANDLE hotspots",go(["query",prof,"summary"],0))
   for(const a of [["query",folder(prof),"summary"],["report",folder(prof),"--format","md"]]) checkText(prof,prof,"strobe query HANDLE hotspots",go(a,0))
   const paths=[...byPath,filmed]
+  // Two views of the same result: the command is local to its reader, not its producer.
+  // Use new IDs so no fixture left in this run's store can satisfy a missing recording.
+  const carry = ["rec_carry_launch","rec_carry_profile","rec_carry_video"]
+  const carried = { ...c("carried",carry[0],carry[1]), video:{head:carry[2]}, state:"pass" }
+  writeResult({kind:"check",series:[carried]})
+  const writeCarried = (dir:string) => {
+    for(const id of carry) put(join(dir,id),"meta.json",{id,kind:"record",probes:"attribution",values:{}})
+    cpSync(join(handmade,"cpu-0.cpuprofile"),join(dir,carry[1],"cpu-0.cpuprofile"))
+  }
+  const verifyCarried = (h:string, from:"copy"|"store"|"missing") => {
+    for(const a of [["query",h,"summary"],["report",h,"--format","md"]]) {
+      const text = go(a,0)
+      const lines = text.split(/\r?\n/).filter(l=>/^      (rec  |why  |video    )/.test(l))
+      if(lines.length!==3) fail(`expected rec/why/video lines: ${text}`)
+      for(const [i,line] of lines.entries()) {
+        const id = line.trim().split(/\s+/)[1], cmd = line.split(" · strobe ").at(1)
+        if(!carry.includes(id)) fail(`lost provenance: ${line}`)
+        if(from==="missing") {
+          if(cmd || !line.includes(h===exp?"no longer stored":"not in this copy")) fail(`missing note: ${line}`)
+        } else {
+          const words = cmd && argvVia(sh?"sh":"pwsh",cmd)
+          const expected = from==="copy" ? join(copy,id,"meta.json").replace(/\\/g,"/") : id
+          if(!Array.isArray(words) || !words.includes(expected)) fail(`wrong source: ${line}`)
+          else { go(words.filter(w=>w!=="--open"),0); followed++ }
+        }
+      }
+    }
+  }
+  verifyCarried(file,"missing"); writeCarried(join(fakeState,"recordings")); verifyCarried(file,"store")
+  writeCarried(copy); verifyCarried(file,"copy")
+  for(const id of carry) rmSync(folder(id),{recursive:true}); verifyCarried(exp,"missing"); verifyCarried(file,"copy")
   for (const kind of ["implementations","video","blocks"]) {
     const dir=join(copy,kind),id=`exp_copy_${kind}`
     const s=kind==="blocks" ? synthetic.find(([n])=>n==="exp_syn_blocks")![1].series[0] : series("first","page",worse,{attribution:{base:prof,head:p2},video:kind==="video"?{base:prof,head:p2}:null})

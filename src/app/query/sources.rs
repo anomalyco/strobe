@@ -76,16 +76,9 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
         match recording_view(Rec::open(&dir), view, &args, top, true) {
             Ok(_) => commands.push(format!("strobe query {id} {tail}")),
             Err(e) => {
-                // Compare whole ID words, not substrings of a different recording's handle.
-                let canonical = |s: &str| {
-                    s.split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-                        .map(|word| {
-                            let end = word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').len();
-                            if &word[..end] == id { format!("<recording>{}", &word[end..]) } else { word.to_owned() }
-                        })
-                        .collect::<String>()
-                };
-                if distinct.insert((e.code, e.validator().map(|v| v.name()), canonical(&e.message), e.hint.as_deref().map(canonical))) {
+                // Shared refusals have recording-neutral text. Different trace paths or fixes naming
+                // different profiles are case-specific: preserve those rows rather than return the first.
+                if distinct.insert((e.code, e.validator().map(|v| v.name()), e.message.clone(), e.hint.clone())) {
                     reasons.push((label, id, e));
                 }
             }
@@ -95,8 +88,8 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
         if reasons.len() == 1 {
             return Err(reasons.remove(0).2);
         }
-        let code = if reasons.iter().any(|(_, _, e)| e.code == 1) {
-            1
+        let code = if let Some(code) = [124, 255, 1].into_iter().find(|c| reasons.iter().any(|(_, _, e)| e.code == *c)) {
+            code
         } else if reasons.iter().all(|(_, _, e)| e.code == 4) {
             4
         } else {

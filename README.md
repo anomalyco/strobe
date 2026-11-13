@@ -85,6 +85,11 @@ terminal programs, servers, libraries and commands, on Windows, macOS and Linux.
 **Agents:** read [skill/SKILL.md](skill/SKILL.md). `bunx strobe up` installs `strobe` on your PATH, the
 skill as the `strobe` skill, and registers strobe's MCP server.
 
+`strobe update` refreshes the installed copy. A daemon running a bench finishes it before switching
+builds. To install without starting or stopping the daemon during setup, run `bunx strobe up --skip
+daemon,deep,mcp,calibrate` **from a project pinned to the version you want**. An installed daemon
+checks for the new build once a minute and switches when idle; this does not pin its version.
+
 **CI:** With the default `fail-on: worse`, a failed check fails the PR job. Set `noworse` to hold
 exact counters to base: a worse counter fails the job, as does a check that ran but compared none.
 A leak found with `leak` or a regression in dedicated-runner `mode: compare` also fails the job.

@@ -49,7 +49,7 @@ pub fn stat(path: &Path) -> std::io::Result<Item> {
 }
 
 /// Identity and change time of a file, including replacements that preserve length and mtime.
-pub fn generation(path: &Path) -> std::io::Result<String> {
+pub fn generation(path: &Path) -> Option<String> {
     os::generation(path)
 }
 
@@ -609,14 +609,14 @@ mod os {
         std::fs::symlink_metadata(path).ok().map(|m| m.nlink() as u32)
     }
 
-    pub fn generation(path: &Path) -> std::io::Result<String> {
-        let m = std::fs::metadata(path)?;
-        Ok(format!("{}:{}:{}:{}:{}:{}:{}", m.dev(), m.ino(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec(), m.len()))
+    pub fn generation(path: &Path) -> Option<String> {
+        let m = std::fs::metadata(path).ok()?;
+        (m.ino() != 0).then(|| format!("{}:{}:{}:{}:{}:{}:{}", m.dev(), m.ino(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec(), m.len()))
     }
 
     pub fn same_file(f: &std::fs::File, path: &Path) -> Option<bool> {
         let (a, b) = (f.metadata().ok()?, std::fs::symlink_metadata(path).ok()?);
-        Some((a.dev(), a.ino()) == (b.dev(), b.ino()))
+        (a.ino() != 0 && b.ino() != 0).then(|| (a.dev(), a.ino()) == (b.dev(), b.ino()))
     }
 
     pub fn free(path: &Path) -> Option<u64> {
@@ -910,12 +910,12 @@ mod os {
         let mut id: FILE_ID_INFO = unsafe { std::mem::zeroed() };
         // SAFETY: an open handle and a structure the call fills.
         if unsafe { GetFileInformationByHandleEx(h, FileIdInfo, (&mut id as *mut FILE_ID_INFO).cast(), std::mem::size_of::<FILE_ID_INFO>() as u32) } != 0 {
-            return Some((id.VolumeSerialNumber, id.FileId.Identifier));
+            return (id.FileId.Identifier != [0; 16]).then_some((id.VolumeSerialNumber, id.FileId.Identifier));
         }
         let i = info(h)?;
         let mut b = [0u8; 16];
         b[..8].copy_from_slice(&((i.nFileIndexHigh as u64) << 32 | i.nFileIndexLow as u64).to_le_bytes());
-        Some((i.dwVolumeSerialNumber as u64, b))
+        (b != [0; 16]).then_some((i.dwVolumeSerialNumber as u64, b))
     }
 
     pub fn same_file(f: &std::fs::File, path: &Path) -> Option<bool> {
@@ -924,16 +924,19 @@ mod os {
         Some(handle_id(f.as_raw_handle())? == handle_id(at.0)?)
     }
 
-    pub fn generation(path: &Path) -> std::io::Result<String> {
+    pub fn generation(path: &Path) -> Option<String> {
+        use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo};
-        let f = open(path, FILE_READ_ATTRIBUTES)?;
-        let (volume, id) = handle_id(f.0).ok_or_else(std::io::Error::last_os_error)?;
+        // Follow the same file the reader opens, including a trace reached through a link.
+        let f = std::fs::File::open(path).ok()?;
+        let h = f.as_raw_handle();
+        let (volume, id) = handle_id(h)?;
         let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
         // SAFETY: the handle is open and info is a writable FILE_BASIC_INFO.
-        if unsafe { GetFileInformationByHandleEx(f.0, FileBasicInfo, (&mut info as *mut FILE_BASIC_INFO).cast(), std::mem::size_of_val(&info) as u32) } == 0 {
-            return Err(std::io::Error::last_os_error());
+        if unsafe { GetFileInformationByHandleEx(h, FileBasicInfo, (&mut info as *mut FILE_BASIC_INFO).cast(), std::mem::size_of_val(&info) as u32) } == 0 || info.ChangeTime == 0 {
+            return None;
         }
-        Ok(format!("{volume}:{id:?}:{}:{}:{}", info.CreationTime, info.ChangeTime, info.LastWriteTime))
+        Some(format!("{volume}:{id:?}:{}:{}:{}:{}", info.CreationTime, info.ChangeTime, info.LastWriteTime, f.metadata().ok()?.len()))
     }
 
     /// Of the volume a path ends on: through a junction (a state folder linked elsewhere) to its target's.

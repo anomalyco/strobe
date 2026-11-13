@@ -5,6 +5,7 @@ mod diff;
 mod exp_insights;
 pub(super) mod http;
 mod inputs;
+mod links;
 mod rec;
 mod sources;
 mod trace_facts;
@@ -25,6 +26,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub use diff::{ATTRIBUTION_PARTS, diff_tree, series_insights, side_tree};
+pub(super) use links::recording_links;
 pub use rec::{Part, Rec, Stacks, Weight};
 
 /// A result or a recording named by its path rather than its handle, as `report` reads them: read as it
@@ -194,7 +196,8 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
     match view {
         "summary" | "progress" => {
             // A result read from its path keeps the ledger it holds: this machine's index is not its history.
-            let text = live_ledger(&mut result, source);
+            let text = recording_links(&live_ledger(&mut result, source), source);
+            result["text"] = json!(text);
             Ok(Output::new(text, result))
         }
         "insights" => exp_insights::run(&result, source),
@@ -375,13 +378,13 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
         "frames" if meta["wir"] == true => Err(Error::refused(
             "EngineUnsupported",
             "WebKit's Web Inspector reports main-thread RenderingFrame records, not screen presentation times or dropped refreshes",
-            format!("strobe query {} hotspots · strobe query {} layout", rec.handle(), rec.handle()),
+            "use an attribution recording for hotspots or layout; neither view measures screen presentation",
         )),
         "threads" if meta["wir"] == true => {
-            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no per-thread CPU or wake counters", format!("strobe query {} hotspots", rec.handle())))
+            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no per-thread CPU or wake counters", "use hotspots on an attribution recording to see where code ran"))
         }
         "gpu" if meta["wir"] == true => {
-            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", format!("strobe query {} memory --by layer", rec.handle())))
+            Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", "use the memory view with --by layer on a recording with layer readings"))
         }
         "frames" if dir.join("frames.json").exists() || meta["native"] == true => {
             if probe {
@@ -413,18 +416,25 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
         // A Chromium page block that traced nothing (`traced: false`: a headless page's lean block traces
         // only for a metric read from the trace) has no frames to read: said, never a trace engine's error.
         "frames" if !trace.exists() => Err(match meta["frames_refused"].as_str().and_then(crate::model::Refusal::from_line) {
-            Some(r) => r.fix("bench --trace full, or a headed run (no --headless), keeps a trace with the page's frames").into(),
-            None if meta["traced"] == false => Error::usage("this block took no trace: nothing it measured needs one; record or bench with --trace full, or headed, to keep one"),
-            None => Error::usage("this recording kept no trace, so it has no frames: bench --trace full, or a headed run (no --headless), keeps one"),
+            Some(r) if r.validator == crate::model::ValidatorId::Headless && meta["kind"] == "block" && meta["probes"] == "lean" && !other_engine => {
+                r.fix("presented frames need a display; for pipeline rows only, run the page check with --why always and query frames on its separate attribution recording").into()
+            }
+            Some(r) => r.into(),
+            None if meta["traced"] == false => Error::usage("this block took no trace and kept no presented frames"),
+            None => Error::usage("this recording kept no trace or presented frames"),
         }),
         "frames" if probe => available(),
         "frames" => frames(&trace, meta, top),
         "threads" if !trace.exists() => Err(Error::usage(format!(
             "this recording kept no thread counters (no trace, no threads.json){}",
             if dir.join("timeline.json.gz").is_file() {
-                format!(": its threads over time are in strobe query {} threads --timeline", rec.handle())
+                if probe { ": request threads with --timeline for the recorded timeline".into() } else { format!(": its threads over time are in strobe query {} threads --timeline", rec.handle()) }
             } else if dir.join("deep.json.gz").is_file() {
-                format!(": a native stack capture answers strobe query {} hotspots --by package", rec.handle())
+                if probe {
+                    ": use the hotspots view of the native stack capture instead".into()
+                } else {
+                    format!(": a native stack capture answers strobe query {} hotspots --by package", rec.handle())
+                }
             } else {
                 String::new()
             }
@@ -2489,7 +2499,7 @@ impl<'a> Scope<'a> {
             }
         };
         if let (Some(s), false) = (source, script) {
-            return Err(Error::usage(format!("--source {s} reads a script target's host process; {} is no script recording", rec.id)));
+            return Err(Error::usage(format!("--source {s} reads a script target's host process; this is no script recording")));
         }
         if let Some(s) = source.filter(|_| args.has("native") || args.get("thread").is_some() || args.get("pid").is_some()) {
             return Err(Error::usage(format!("--source {s} reads the host's JavaScript profile; --native, --thread and --pid read native samples: one or the other")));
@@ -2567,7 +2577,7 @@ pub(super) fn scoped_cpu<'r>(rec: &'r Rec, scope: Scope, owned: &'r mut Option<S
             let name = scope.life().unwrap_or("");
             let spans = life_spans(rec, name);
             if spans.is_empty() {
-                return Err(no_life_span(rec, name));
+                return Err(no_life_span(name));
             }
             Ok(owned.insert(rec.phase_cpu(&spans, &[])?))
         }
@@ -2608,7 +2618,7 @@ fn probe_cpu(rec: &Rec, scope: Scope) -> Result<Output> {
         Scope::Startup | Scope::Setup => {
             let name = scope.life().unwrap_or("");
             if life_spans(rec, name).is_empty() {
-                return Err(no_life_span(rec, name));
+                return Err(no_life_span(name));
             }
             rec.host_file()?;
         }
@@ -2619,15 +2629,14 @@ fn probe_cpu(rec: &Rec, scope: Scope) -> Result<Output> {
     available()
 }
 
-fn no_life_span(rec: &Rec, name: &str) -> Error {
-    Error::usage(format!("--source {name}: {} keeps no {name} span (a script recording from before strobe kept its host's lifecycle_spans)", rec.id))
+fn no_life_span(name: &str) -> Error {
+    Error::usage(format!("--source {name}: no {name} span (a script recording from before strobe kept its host's lifecycle_spans)"))
 }
 
 /// A phase's stretches in a script recording's measured runs and those runs' untimed stretches (ns on
 /// strobe's clock), from `runs.json`.
 fn script_phase(rec: &Rec, phase: &str) -> Result<(Spans, Spans)> {
-    let f = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS))
-        .map_err(|_| Error::usage(format!("--phase: {} keeps no runs.json (a script recording from before strobe kept its runs' phase marks)", rec.id)))?;
+    let f = store::read_json(&rec.dir.join(crate::probe::cpu::RUNS)).map_err(|_| Error::usage("--phase: no runs.json (a script recording from before strobe kept its runs' phase marks)"))?;
     let measured = rec::measured_keys(&rec.meta);
     let (mut spans, mut untimed) = (Vec::new(), Vec::new());
     for r in f["runs"].as_array().into_iter().flatten().filter(|r| measured.as_ref().is_none_or(|m| m.iter().any(|k| r["run"] == k.as_str()))) {
@@ -2636,7 +2645,7 @@ fn script_phase(rec: &Rec, phase: &str) -> Result<(Spans, Spans)> {
         untimed.extend(r["untimed"].as_array().into_iter().flatten().filter_map(|u| Some((u[0].as_u64()?, u[1].as_u64()?))));
     }
     if spans.is_empty() {
-        return Err(Error::usage(format!("no phase {phase:?} in {}'s measured runs", rec.id)));
+        return Err(Error::usage(format!("no phase {phase:?} in the measured runs")));
     }
     Ok((spans, untimed))
 }
@@ -3416,7 +3425,7 @@ fn runs_read(rec: &Rec, probe: bool) -> Result<Output> {
         ("", Vec::new())
     };
     if rows.is_empty() {
-        return Err(Error::usage(format!("{} keeps no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window has none", rec.id)));
+        return Err(Error::usage("no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window has none"));
     }
     if probe {
         return available();

@@ -1043,7 +1043,10 @@ export function webview<P = any>(appOrPath: string, opts: WebviewOptions & Side 
  * it), `click`, `hover`, `move`, `drag`, `wheel` and `scroll` (wheel notches) as mouse reports only once the
  * program turned the mouse on (else refused `MouseNotEnabled`), `window({ resize: { width: cols, height: rows } })`.
  * Selectors find text on the grid (`"text=Ask anything"`, `text==` a whole row) and points are cells (`[col, row]`
- * from 0). Measures `tty.latency.p50`/`p95` (an input to the first grid change it caused), `tty.updates`,
+ * from 0). `tty.latency` ends at the first grid change; `tty.settle` at the last before 50 ms of stillness.
+ * Neither proves the answer is finished: pieces over 50 ms apart or output over 1 s late can look like the
+ * next input's answer. Wait for idle after a two-redraw click; time slow work in a phase ending at final text
+ * or app state. Also measures `tty.updates`,
  * `tty.frames` (synchronized output, `?2026`), `tty.frame.p50`/`p95`, `tty.bytes`, `tty.cells`, and from outside
  * its processes `cpu.work`, `cpu.app.total`, `cpu.wakes`, `memory.app.private`, `io.*`; Windows' console host
  * `cpu.pty_host` apart, never the program's. Launch cases end on text: `launch: { until: "text=…" }`.

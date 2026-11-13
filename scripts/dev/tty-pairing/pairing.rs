@@ -93,7 +93,12 @@ fn cell(kind: &str, pattern: &str, d: u64, shape: Response) -> &'static str {
     let log = p.wire.borrow();
     let mut verdict = "ok";
     let mut shifted = std::collections::BTreeMap::new();
-    for (sent, commit) in samples {
+    // A release can wait for a frame without contributing a latency sample. Its witnessed wait
+    // can explain how its own delayed answer came to be credited to the next press.
+    let mut observations: Vec<_> = samples.into_iter().map(|(s,c)| (s,c,true)).collect();
+    observations.extend(p.frame_hits.borrow().iter().map(|&(s,c)| (s,c,false)));
+    observations.sort_unstable();
+    for (sent, commit, measured) in observations {
         let answer = log.iter().find(|w| w.at == sent).unwrap().first.unwrap();
         if answer == commit {
             continue;
@@ -105,16 +110,19 @@ fn cell(kind: &str, pattern: &str, d: u64, shape: Response) -> &'static str {
         // If the earlier input already took a late piece, its *first* change may in turn be
         // credited to this one. Follow only a chain witnessed in the program's answer log.
         let inherited = log.iter().filter(|w| w.at < sent && w.first == Some(commit)).find_map(|w| shifted.get(&w.at)).copied();
-        verdict = if late {
+        let reason = if late {
             "out·1s"
         } else if piece {
             "out·parts"
         } else if let Some(reason) = inherited {
             reason
-        } else {
+        } else if measured {
             return "WRONG";
+        } else {
+            continue;
         };
-        shifted.insert(sent, verdict);
+        shifted.insert(sent, reason);
+        if measured { verdict = reason; }
     }
     verdict
 }
@@ -141,6 +149,24 @@ fn table() {
 }
 
 fn rows() -> Result<()> {
+    let mut p = Program::new(120 * MS, One);
+    p.kitty = 8 | 2; // every key, including releases
+    let page = Driver::new(&p, None);
+    for (edge, key) in [("down","Shift"), ("press","a"), ("up","Shift")] {
+        call(&page, edge, json!([key,{"until":"frame"}]))?;
+        assert!(p.now_ns() > p.wire.borrow().last().unwrap().first.unwrap());
+    }
+    let (lat, _) = result(&page, &p, window(end(&page, &p)));
+    assert!(tty::ambiguous(&lat).is_none());
+    assert_eq!(lat.ms, [120.]);
+    assert_eq!(p.wire.borrow()[1].bytes, b"\x1b[97;2u");
+    for (edge,key) in [("down","Shift"),("up","Shift"),("up","x")] {
+        let p = Program::new(0, Silent);
+        let page = Driver::new(&p, None);
+        assert_eq!(call(&page, edge, json!([key,{"until":"frame","timeout":5}])).unwrap_err().code,124);
+        assert!(p.wire.borrow().is_empty() && page.inputs().is_empty());
+    }
+    println!("modifier hold: both reported edges wait; only the shifted key is sampled; no-byte edges still wait");
     assert!(!strobe::driver::press_needs_focus(&json!({"burst":true})));
     assert!(strobe::driver::press_needs_focus(&json!({"selector":"#field","burst":true})));
     assert!(!strobe::probe::present::frames::burst_refusal(1).contains("type with burst"));

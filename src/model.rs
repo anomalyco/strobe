@@ -1118,7 +1118,7 @@ pub const METRICS: &[MetricDef] = &[
         words: TIME,
         min_n: 1,
         across: Across::Compared,
-        about: "terminal targets: an input to the last grid change it set off, once the grid then held still (50 ms) before the next input, median",
+        about: "terminal at rest: input to the last grid change before 50 ms of stillness, median, not necessarily the finished answer. Output in pieces over 50 ms apart or over 1 s late can look like the next input's answer. Wait for final text or app state; for a click that redraws twice, wait for idle",
     },
     MetricDef {
         name: "tty.settle.p95",
@@ -1129,7 +1129,7 @@ pub const METRICS: &[MetricDef] = &[
         words: TIME,
         min_n: 20,
         across: Across::Compared,
-        about: "terminal targets: input to the last grid change it set off, 95th percentile",
+        about: "terminal at rest: input to the last grid change before 50 ms of stillness, 95th percentile, not necessarily the finished answer. Output in pieces over 50 ms apart or over 1 s late can look like the next input's answer. Wait for final text or app state; for a click that redraws twice, wait for idle",
     },
     MetricDef {
         name: "tty.updates",
