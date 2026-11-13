@@ -103,7 +103,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "bench",
-        description: "Run a .bench.ts file: every series (case × target × params) gets a verdict from pairs of fresh launches (A B, B A …). Refuses invalid setups; a series refused on its own (exit 4: its engine, an overhead budget) ends alone and the rest of the file runs. A server hosted in a script() target is probed from strobe's own threads when setup calls ctx.httpProbe({ url, authorization, expect }): declare http.latency.p95 or http.timeouts, and cpu.main for its main thread alone (the runnable example: node_modules/@hona/strobe/README.md). On a shared CI runner (GitHub-hosted) timing is refused (SharedRunner): check (with base and noworse on exact counters) and leak runs work there. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
+        description: "Run a .bench.ts file: a timed comparison pairs fresh launches (A B, B A …) for each series (case × target × params). A worse verdict is not an error: read series[].primary.verdict_kind. If every non-gap primary is refused, the run exits 4. A server hosted in a script() target is probed from strobe's own threads when setup calls ctx.httpProbe({ url, authorization, expect }): declare http.latency.p95 or http.timeouts, and cpu.main for its main thread alone (the runnable example: node_modules/@hona/strobe/README.md). On a shared CI runner (GitHub-hosted) timing is refused (SharedRunner): check (with base and noworse on exact counters) and leak runs work there. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
         args: &[("file", "absolute path to the .bench.ts file (not with stop or resume)")],
         flags: &[
             (
@@ -117,7 +117,7 @@ const TOOLS: &[Tool] = &[
             ("aa", "same build on both sides (checks the method)"),
             (
                 "check",
-                "validate the file: each case once on head (one launch; runs N runs in it, repeat R launches), pass or fail with a screenshot, no statistics, no verdict; with base (a build) each case once on base too (a case base cannot build or run fails, exit 1: head was checked against nothing), and noworse holds head's exact counters to base's",
+                "validate the workload without a timing verdict. With a base build, check each case on base then head. A base build error stops the check before the case runs; a run error on either side or a block refusal fails the case (exit 1). A preflight refusal is listed separately; all non-gap cases refused: 4. Two bare target names check parity on the current build, not counters against a base build.",
             ),
             (
                 "batch",
@@ -138,9 +138,9 @@ const TOOLS: &[Tool] = &[
             ("equivalence", "equivalence bound in % (default 2)"),
             (
                 "noworse",
-                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear; a timed worse still exits 0: read verdict_kind); \"metric=2%,metric2=5%\" per metric; a bare exact counter (count.items) is 0%, a bare other metric exits 2. With check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's; each row ends no_worse, worse, unstable, missing or not_compared, and any but no_worse fails the case (exit 1). A count.* only this names is the series' once any block of either side counted it (a block that counted none then reads 0); never counted: nothing of it, and an Uncounted warning. A check whose cases compared none of the counters it names exits 4 (nothing compared is no pass): check the name against the runs' ctx.count calls, and declare a counter a run counts only on some paths in that case's metrics, so 0 on both sides compares as no worse",
+                "non-inferiority: 2% asks whether head's primary is at most 2% worse; metric=2% sets a metric's margin. Only exact counters default to 0%. With check and a base build: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes). no_worse passes; worse, unstable, missing or not_compared fails (1). If cases ran without failure but no counter compared, exit 4 even if passed is true. If both sides refused every counter, read the refused lines. For Uncounted, check the spelling against ctx.count; declare a conditional counter in its case's metrics to compare 0 with 0.",
             ),
-            ("plan", "do not run: estimate pairs and minutes per series from earlier experiments here, builds and the bench slot's queue"),
+            ("plan", "estimate pairs and minutes before running: a series with no measured block time here reports unknown (null), not a guess"),
             ("effect", "with plan: the expected change of the primary in % (default: what the last run of the series measured, else 0)"),
             ("pilot", "with plan: run 4 pairs first to learn the spread"),
             ("pairs", "auto (default) or a number"),
@@ -173,7 +173,7 @@ const TOOLS: &[Tool] = &[
                 "the run's deadline, e.g. 30m: no series, pair or wait (the bench slot, busy CPUs, a locked session, a launch that runs again) starts or runs past it; a comparison keeps its verdicts, a check stops (exit 124, resumable)",
             ),
             ("unlock-wait", "a series that needs a presenting window waits at most this long for an unlock, or on macOS for nobody to use the Mac (default: no limit), e.g. 2h"),
-            ("require-verdict", "exit 5 when a series has no verdict"),
+            ("require-verdict", "timed comparison: exit 5 if undecided, 4 if any primary is refused or a journey is a parity gap"),
             ("require-parity", "implementation comparisons: exit 4 when a journey is a parity gap (one side cannot run it)"),
             ("stop", "exp_… (a unique prefix works): ask that running experiment to stop; it keeps what finished"),
             ("resume", "exp_…: go on with a stopped experiment from its finished pairs"),
@@ -226,7 +226,7 @@ const TOOLS: &[Tool] = &[
         args: &[
             (
                 "handle",
-                "rec_…, exp_… or ser_… (a tracked series); a .bench.ts file for its tracked history; or the absolute path of a result.json, a meta.json or the folder of either (read as it is, nothing written beside it: HTML and cards go to strobe's run folder)",
+                "rec_…, exp_… or ser_… (a tracked series); a .bench.ts file for its tracked history; or an absolute path to result.json, meta.json or their folder. For path inputs, md, pr and summary return Markdown without writing a report file; HTML, cards and badges go to strobe's run/reports folder unless out is given.",
             ),
             ("view", "experiment, recording or history (default from the handle)"),
         ],

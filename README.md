@@ -20,11 +20,11 @@ that it works (add `--base "<command>"` to run both once).
   <img alt="44% less CPU time, 78.0% less memory, better in 8 of 8 pairs; before 7,052 µs, this PR 3,904 µs" src="docs/card-light.png">
 </picture>
 
-The exit code says whether strobe measured, never which side won: a comparison exits 0 when head is
-worse too, so read its verdict (`faster` or `less`, `slower` or `more`, `same`, `unclear`,
-`underpowered`, `refused`), or pass `--require-verdict` to exit 5 when it cannot tell. A `--check`
-exits 1 when a case fails (also when base cannot run it), and 4 when it was asked to hold counters to
-base (`--noworse`) and compared none.
+Read the verdict to see which command won, or read `series[].primary.verdict_kind` in `--json`.
+`strobe run` exits 0 even when head is slower or `worse`. An `unclear` or `underpowered` result also
+exits 0 unless you pass `--require-verdict` (then 5). A refused comparison exits 4. To check that
+both commands run, add `--check`: a command that fails makes the check exit 1; timings from a check
+are not a verdict.
 
 Known issue: on Windows a command line starts its first program directly, so `a && b`, `a | b` or
 `a > out` measures `a` alone. Wrap such a line in `cmd /c "a && b"` on both sides, or use a script. A
@@ -85,8 +85,11 @@ terminal programs, servers, libraries and commands, on Windows, macOS and Linux.
 **Agents:** read [skill/SKILL.md](skill/SKILL.md). `bunx strobe up` installs `strobe` on your PATH, the
 skill as the `strobe` skill, and registers strobe's MCP server.
 
-**CI:** the GitHub Action runs each case once on every pull request and holds exact counters (requests,
-bytes, DOM nodes, your own `count.*`) to the base commit's; it never times on a shared runner.
+**CI:** With the default `fail-on: worse`, a failed check fails the PR job. Set `noworse` to hold
+exact counters to base: a worse counter fails the job, as does a check that ran but compared none.
+A leak found with `leak` or a regression in dedicated-runner `mode: compare` also fails the job.
+In your own script, check the exit code of `bench --check --base <ref> --noworse count.items` (1 for
+failure, 4 if cases ran but compared no counter). For timed comparisons, read the verdict, not the exit code.
 Inputs: [action.yml](action.yml); design: [SPEC.md §26](SPEC.md#26-ci-the-github-action-actionyml).
 
 **Changes:** each release's notes are on [GitHub Releases](https://github.com/anomalyco/strobe/releases).

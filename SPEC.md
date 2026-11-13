@@ -510,43 +510,52 @@ Not built: `node:<port>` and `bun:<port>` (an inspector endpoint, §13.5: a Node
 
 | Code | Meaning |
 |---|---|
-| 0 | success: the command did what it was asked; for `bench`, see "How a bench ends" below (a comparison exits 0 whatever its verdict) |
+| 0 | normal completion; not a claim that head won or that every series was compared |
 | 1 | general error; a `--check` case that failed |
 | 2 | usage error |
 | 3 | needs a human (UAC, consent in the app, Safari's remote automation, a `prune` with no terminal to confirm on and no `--force`); the exact step is printed |
-| 4 | refused: a validator failed; the result names it and the fix |
+| 4 | refused; also a required parity gap, or a counter check that ran but held nothing to base |
 | 5 | inconclusive (`unclear` or `underpowered`), only with `--require-verdict` |
 | 124 | timeout (also a bench whose `--unlock-wait` ran out: what finished is written, `--resume` goes on) |
 | 130 | `bench` stopped (Ctrl-C, SIGINT, SIGTERM or `--stop`): what finished is written, `--resume` goes on |
 | 255 | target or device unreachable |
 
-**How a bench ends** (`bench`, `strobe run --base … --head …`, the same rules). The exit code says
-whether strobe measured what it was asked to, never which side won: a timed comparison exits 0 when
-head is slower or `worse`, so read each series' `verdict_kind`. A check is no verdict: it runs each
-case once (each side once with `--base`) and proves that the bench runs and that every declared metric
-gives a value or a stated refusal. A check that was asked to compare (`--noworse`) and compared
-nothing has not passed: it exits 4.
+**How a bench ends.** For a timed comparison (including `strobe run --base … --head …`), read
+`series[].primary.verdict_kind` for the outcome; slower is not an error. A check asks whether the
+workload runs, not whether it is faster. For `--check --noworse`, **check the process exit code**:
+`result.json`'s `passed` means no case failed and the check did not stop. It can be true on exit 4.
+An up-front refusal of the whole file can exit 4 without writing `result.json` at all.
 
 | Run | Ending | What it prints | Exit |
 |---|---|---|---|
 | `--check` (one build) | every case passes | `pass <case>  <values>`; `N of N cases passed (…; nothing compared)` | 0 |
 | | a case fails: a run threw or timed out, its primary or `until` gave nothing, a refused primary in its block | `FAIL <case>  <why>`, `fix: …`; `M of N cases passed` | 1 |
-| | a case refused before it ran (its primary is one its target, engine or mode never gives) | `refused <case>  <validator>: <why>`, `, K refused` | 0 beside cases that ran; 4 when every case was refused |
+| | a known preflight refusal (e.g. headless frame primary, windowless launch waiting for a window, unsupported engine, display too small, two builds that run the same fixed target) | `refused <case>  <validator>: <why>` beside other cases; the first refusal if all were ruled out up front | 0 beside passing cases; 4 if every non-gap case was refused |
+| `--check --runs N` or `--check --repeat R` | N runs in one launch, or R fresh launches; still no timing verdict | median and `[lowest … highest run]`, or median and each launch's value | as `--check`; use `--repeat` to repeat a launch case. With `--why always`, `--runs` applies to attribution instead |
 | `--check --base <build>` | both sides run every case | head's line, `base  <values> · rec <id>` under it; `…; base and head each checked; nothing compared: the same command without --check times head against base` | 0 |
-| | base cannot build or run a case | `FAIL <case>  base failed (<base's first error>), so head was checked against nothing`, `head  <values>`, `base  failed: <whole error>`; `, K failed on base` | 1 |
-| `--check --base <build> --noworse <counters>` | every row compared, none worse | `noworse  count.items 3 → 3 · no worse (≤0.5) (exact)`; `…; only the --noworse counters compared, exactly` | 0 |
+| | base cannot build | build error; the check stops before the case runs on either side | 1 |
+| | base built but failed the case | `FAIL`, `base  failed: <whole error>`, `K failed on base`; if head passed, `so head was checked against nothing` and head's values; if head failed too, head's own error | 1 |
+| `--check --base <build> --noworse <counters>` | at least one counter compared, no row or case failed | `noworse  count.items 3 → 3 · no worse (≤0.5) (exact)`; `…; only the --noworse counters compared, exactly` | 0 |
 | | a row `worse`, `unstable`, `missing` or `not_compared` | `! noworse  <why>`, `FAIL <case>  --noworse: …` | 1 |
-| | no case compared any counter the flag names | `…; no --noworse counter was measured on both sides, so nothing was compared (exit 4): …`, `! Uncounted` | 4 |
-| `--check --batch N` | as `--check` | `batch  N cases in L launches (--batch N): …` | as `--check`; 1 after three launches in a row failed before any case |
-| `--check --base <target> --head <target>` (two targets) | as `--check`, with the parity matrix | `gap  <case>  <why>`, `, K parity gaps`; a journey whose sides differ: `refused  this journey: …` | 0 with gaps (4 with `--require-parity`); 1 for a journey whose sides differ |
+| | cases ran, none failed, no counter compared | `nothing was compared (exit 4)`; `! Uncounted` for a counter not counted anywhere, or `every --noworse counter was refused on both sides (the refused lines say why)` without that warning | 4 |
+| `--check --batch N` | eligible run cases share a launch on one build; a failed case ends its launch | case lines, then `batch  <cases> cases in <launches> launches (--batch N)` for batched cases | as `--check`; three consecutive batch launches failing before a case runs stop the check (1); with `--base` or `--repeat`: 2 |
+| `--check --base <target> --head <target>` | check two bare target names on the current build; no timed comparison or `--noworse` | one line per case and target; parity matrix for shared journeys; `gap` for an unsupported journey; `refused  this journey` if the two runs disagree | 0 with gaps alone; 4 with `--require-parity`; 1 if a case fails or the journeys disagree; adding `--noworse` exits 2 |
 | `--base <variant>` (timed), `--aa`, `strobe run --base … --head …` | every series decides | the verdict table, `★` primary first | 0, also for `slower`, `more`, `worse` |
 | | a series has no verdict | `unclear`, `underpowered` | 0; 5 with `--require-verdict` |
-| | a series refused (before it ran, or its primary after its pairs) | `not run: <validator>: <why> · fix: …`, `refused (<validator>)` | 0 beside series that decided; 4 when every compared series' primary is refused, or any with `--require-verdict` |
+| | a series refused before or during timing | `not run: <validator>: <why>` or `refused (<validator>)` | 0 beside a series whose primary was not refused, even if undecided; 4 when every non-gap primary is refused, or any with `--require-verdict` |
 | implementation comparison (`--base <target> --head <target>`) | a journey one side cannot run | `gap` in the matrix | 0; 4 with `--require-parity` or `--require-verdict` |
-| `--blocks N` | values per block, nothing compared | `★ <metric>  <median> [<lo> … <hi>]` | 0; 4 when every series is refused |
-| any of them | stopped (Ctrl-C, SIGTERM, `--stop`); `--max-time` or `--unlock-wait` ran out | what finished, `stopped` with why | 130; 124 |
+| `--blocks N` | one build, nothing compared | `★ <metric>  median <value> [<lo> … <hi>]`, or the single block's value | 0; 4 when every series is refused |
+| `--probes memory` | growth per run on each variant, not an A/B | `leaks`, `grows, then levels off`, `no growth` or `unclear` | 0 even for a leak (`worse`); 5 for an undecided primary with `--require-verdict`; 4 for every primary refused (or any with `--require-verdict`) |
+| `--pixels-only --base <variant>` | compare the snapshots taken | `same`, `differ`, `only base` or `only head` | 0 if all snapshot rows are `same` (including no rows); 1 if a snapshot differs or exists on only one side |
+| `--bisect <good>..<bad>` | search one series for the commit that moved it | `found: <sha>`, `no change` or `unclear` | 0 for a completed search; 5 for `outcome: unclear` with `--require-verdict` |
+| timed comparison, `--max-time` reached in the series loop | keep finished pairs and verdicts | `max time` for a cut series; `MaxTime` lists series that had no time for a pair | normal comparison rules: 0, or 5 if undecided with `--require-verdict`; not a timeout exit |
+| deadline before the first series in the display-fit slot wait; non-comparison mode out of time; `--unlock-wait` exhausted | wait ended, or work left unfinished | timeout reason; `stopped` and work kept if the bench got that far | 124 |
+| Ctrl-C, SIGTERM or `bench --stop <exp>` | the running bench stops | what finished; `stopped` | 130 for the stopped run, not for the command requesting the stop |
+| `bench --resume <exp>` | resume the saved command with its original flags and completed work | `finished before the resume: kept` for reused series; then that mode's result | same exit rules as the saved mode; no saved state or still running: 2 |
 
-When a check compared nothing (exit 4), check each name against the runs' `ctx.count("…")` calls
+On a check, case failures (1) take precedence over missing counter comparisons or parity gaps (4).
+If every entry is a gap, no counter check ran: gaps alone exit 0 unless `--require-parity` is set.
+When `Uncounted` says a check compared nothing (exit 4), check each name against the runs' `ctx.count("…")` calls
 first: the `Uncounted` note offers a name the bench file counts one typo away. When a run case counts
 the counter only on some paths, declare it in that case's metrics (`metrics: ["count.fallbacks"]`): a
 declared counter reads 0 when it never fires, so 0 on both sides compares as no worse. §5.6 "A check
@@ -847,11 +856,11 @@ case (batched or not) is not run and `--resume` runs it, a series cut mid-pairs 
 N pairs" (resumable), as do its counter or timing pass and the report's stopped line,
 `--pixels-only` exits 124 too, and the block that met the wait had its recordings discarded before it
 waited. `--max-time <duration>` is the whole run's deadline in every mode, `--check` included: no
-series starts after it and no wait for the machine's state runs past it (busy CPUs, the speed
-check's retries, a launch that runs again, a locked session, someone at the Mac); a comparison then
-keeps its pairs and verdicts, anything else stops as here, exit 124 (§9.1 "Stop rule"). Not the
-queue for the bench slot (§10.1 `ConcurrentBench`): a bench waiting for another bench's slot waits
-on past it. Both a stop and an unlock wait that ran out keep the experiment's warm GPU cache stores for
+series starts after it. The cap includes waits for the bench slot, quiet CPUs, a speed check or launch
+retry, an unlock, or an idle Mac. A timed comparison keeps its pairs and verdicts under the ordinary
+exit rules in §5.2; a display-fit slot wait before the first series can still time out (124). Other
+modes stop with 124 (§9.1 "Stop rule", §10.1 `ConcurrentBench`). Both a stop and an unlock wait
+that ran out keep the experiment's warm GPU cache stores for
 `--resume`, and `track` and `bisect` take a bench that ended either way as that error, never as a
 partial answer (a bisect step without its pairs would otherwise move `good`). `--stop` and `--resume`
 together are a usage error. On Windows and in a
@@ -965,13 +974,15 @@ launches each (`--runs`, `--repeat`; one launch per case and side, so not with `
 the other is a usage error naming both forms. The case's line is head's, with `base  <declared values> · rec
 <id>` under it (and what head's line shows undeclared, `memory.peak` of a command, `cpu.main` of a
 script, where base measured it).
-A base that cannot build or run the case fails it (exit 1): head was checked against nothing. The
-case's error is `base failed (<base's first error>), so head was checked against nothing` (base's first
+A base build error stops the check before that case runs on either side (exit 1). If the build
+succeeds but base cannot run the case, the case fails (exit 1). When head passed, the error is
+`base failed (<base's first error>), so head was checked against nothing` (base's first
 line, and the next one when the first ends in `:`, as a script host's load error does), its fix and
 refusal are base's (what `query <exp> insights` and the step summary read), the `base` line shows the
 whole error (`base  failed: <first line>`, each later line under it) and base's fix when the case's
 line did not give it (`base fix: …`), a `head` line shows what head measured with its recording, and
-the summary counts it (`0 of 1 cases passed, 1 failed on base`). Through 0.33.0 a base failure never
+the summary counts it (`0 of 1 cases passed, 1 failed on base`). If both runs failed, head's own
+error leads and base's error appears under it. Through 0.33.0 a base run failure never
 failed the case (`base failed, so no counter of it is compared: <its first line only>`, empty when that
 line ended in `:`) and the check exited 0. A case that measures something only head has (the export,
 route or element the change adds) therefore fails `--check --base`, since base runs head's bench file
@@ -1008,7 +1019,7 @@ refused on that case as a declared one is (`count.*` keeps the rule below). Line
 count.items 3 → 5 · worse (>0.5) (exact)` (`!` when it fails). The summary ends:
 - `base and head each checked; only the --noworse counters compared, exactly` when some row compared
   (`no_worse`, `worse` or `unstable`);
-- when none did, anywhere in the run, the check exits **4**, not 0 (0.33.0 and earlier exited 0): it
+- when cases ran but no counter compared anywhere, the check exits **4**, not 0 (0.33.0 and earlier exited 0): it
   was asked to hold counters to base and held none. A failing case's exit 1 wins. The summary says
   which: `…; no --noworse counter was measured on both sides, so nothing was compared (exit 4): check
   each name against the runs' ctx.count calls first (the Uncounted note says which names the cases
@@ -1017,7 +1028,8 @@ count.items 3 → 5 · worse (>0.5) (exact)` (`!` when it fails). The summary en
   sides, so nothing was compared (exit 4): only launch cases ran, and a count.<name> counter is a run
   case's`; `…; every --noworse counter was refused on both sides (the refused lines say why), so
   nothing was compared (exit 4)`; and, when a declared counter's row failed, `…; no --noworse counter
-  was compared, and a case that declares one failed for it (its line says why)` (exit 1).
+  was compared, and a case that declares one failed for it (its line says why)` (exit 1). If every
+  entry was a parity gap, no case ran; the gap rule applies instead (§5.2).
 `--noworse` adds its margins to every series
 (in every mode). A `count.<name>` only the flag names (not the case's primary, `metrics` or own
 `noworse`: `Series::flagged`) is decided per series, across both sides and every block or launch
@@ -1204,7 +1216,8 @@ fix (and no pair panels), a heading of "Not measured" only when no series decide
 no point for it. Gaps are not checked. When every series is refused, the run is refused (exit 4) with
 the first series' refusal, its label in front.
 **A series refused while it runs** (exit 4 of its own: `OverheadBudget`, `NoPhase`, an engine that
-cannot run here, …) ends alone, in every mode (comparison, `--check`, `--blocks N`, leak runs): it is
+cannot run here, …) ends alone in comparisons, `--blocks N` and leak runs. In `--check`, a refusal
+of the block after launch fails the case (exit 1); a refused secondary alone does not. In the other modes it is
 listed refused (kind `refused`; or, after some blocks, its kind with `stopped: refused`, its primary
 refused with the validator and its finished blocks kept) and the rest of the file runs. A primary a
 look already decided keeps its verdict; the refusal is a `Stopped` warning on the series. A series
@@ -1216,8 +1229,9 @@ the refusal whole (summary, detail, fix). Refusals of the machine stop the bench
 `WirelessTransport`), except a headless Chromium page's wall-time primary refused `Throttled` with
 the display off, which ends that series alone (§10.1), as do a stop, `--max-time`, a lost phone (exit
 255) and the user's state disturbed (no refusal). Exit 4 when every series that is not a gap is
-refused (a check: when every case that could run was refused), or with `--require-verdict` when any
-is. A refused series is checkpointed done: `--resume` keeps it. A `--blocks` run whose every series
+refused (a check: when every non-gap case was refused before launch). In a timed comparison or leak
+run, `--require-verdict` makes any refused primary exit 4. A refused series is checkpointed done:
+`--resume` can keep it. A `--blocks` run whose every series
 was refused still ends with `<exp> · strobe query <exp>`. A bench in which nothing ran (no series
 finished, nothing saved) ends with its error and `stopped: nothing ran`, never a `--resume` hint. The
 check's summary counts them `N refused`. The engine, the browser's version and headless go into the rerun ledger's
@@ -1355,8 +1369,10 @@ Any JSON strobe reads, stored or named, nests at most 512 levels (an allocation 
 of V8's 128: measured on Windows release builds, a 1 MiB main thread overflows past 2,324 levels of a
 typed profile node and 3,018 of a `serde_json::Value`). A heap snapshot's `trace_tree` (one level per
 allocating frame, any depth) is read without recursion, and no count in a file reserves memory past
-a million entries up front. A `ser_…` handle and `bench`/`bisect --id` are plain ids (letters, digits,
-`_`, `-`; an id at most 96), refused otherwise with that rule.
+a million entries up front. A store handle is a plain id (1–128 ASCII letters, digits, `_` or `-`);
+a unique prefix works, and a tracked-series handle starts with `ser_`. Experiment `--id` (`bench`,
+including `bench --bisect`, and paired `run`) is at most 96 characters. `record --id` requires
+`rec_` followed by 1–64 of the same characters.
 
 ### 5.8 `strobe report`
 
@@ -1396,9 +1412,11 @@ Wall-clock durations, configured values and stored text stay as written there to
 Writes a self-contained artifact from a view in the catalog (§11.2) and prints its path (`md` and
 `pr` print the markdown on stdout and the path on stderr). The view follows from the handle when it
 is not named (`exp_…` an experiment, `rec_…` a recording, `ser_…` or a bench file a tracked history).
-A path to a `result.json`, a `meta.json` or the folder of either is read as `query` reads it (5.7): its markdown is printed, nothing is written
-beside it (HTML and cards go to `<state>/run/reports/<its id when plain, else file-<12 hex of its
-folder>>/`, or where `--out` says), and it keeps the rerun ledger it holds (this
+A path to a `result.json`, a `meta.json` or the folder of either is read as `query` reads it (§5.7).
+For a path input, `md`, `pr` and `summary` print Markdown to stdout without writing a report file
+unless `--out` is given. HTML (the default), cards and badges go to `<state>/run/reports/<key>/`
+unless `--out` names a destination. The key is the file's plain id, else `file-` and a 12-digit
+hex hash. Nothing is written beside the input by default. The result keeps its rerun ledger (this
 machine's index is not its history). `--open` opens it in the system browser. Agents show the path
 with the Review pane preview.
 
@@ -2576,13 +2594,13 @@ blocks and a page on screen trace as before; counter and memory blocks trace not
 and parts, counts, CPU, memory and network come from where they always did (the Performance domain,
 the OS). Its recording's `meta.json` says `"traced": false` (true for a block that traced; absent on
 older recordings) and has no `trace.pftrace`; no trace_processor runs for it. `query <rec> summary`
-works; `query <rec> frames` answers with the recording's own refusal (`Headless: the page ran headless,
-so nothing it drew reached a display`, exit 4, fix `bench --trace full, or a headed run (no
---headless), keeps a trace with the page's frames`), and the other views that read a trace say why
-there is none (exit 2): `layout`, `style` and `gc` need an attribution recording, as of any timed
-block; `threads` says `this recording kept no thread counters (no trace, no threads.json)`; a view of
-the trace's run marks says `this block took no trace: nothing it measured needs one; record or bench
-with --trace full, or headed, to keep one`. Checked with 0.34.0 on adais (`url()` page, `--check
+works. `query <rec> frames` gives the recorded refusal: `Headless` for a headless page or `NotForTarget`
+for an app with `window: false` (exit 4). A full trace does not put frames on a display.
+`layout`, `style` and `gc` need an attribution recording; `threads` says it kept no thread counters
+when there is neither a trace nor `threads.json` (exit 2). `query <a>..<b> threads`, or `frames`
+without a recorded `frames_refused` reason, says `this block took no trace` (exit 2). Select
+`bench --trace full` for trace data or `--why always` for an attribution recording.
+Checked with 0.34.0 on adais (`url()` page, `--check
 --headless`). An undeclared `main.paint` (a descriptive row) is absent from
 such a comparison. A Chromium run's `goto` places no mark of strobe's in the page (each new document
 marks itself), so nothing of strobe's is billed to `main.work`.

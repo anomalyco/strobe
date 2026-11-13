@@ -455,7 +455,7 @@ Use
                                   memory)
   record pid:<n>|proc:<name> [--probes timing|deep|waits|stacks-unprivileged] [--for 10s]
                                   any process from outside: OS present events (frames), CPU, GPU; deep: stacks
-                                  (--os-frames on a Chromium record adds the OS present events to its trace)
+                                  (--os-frames on Chromium keeps OS present events beside its trace)
   bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check | --blocks N] [--filter <cases>]
         [--pairs auto|N] [--why auto|always|never] [--trace lean|full] [--power high|keep]
                                   run an experiment: a verdict per series (case × target × params); --check
@@ -474,18 +474,14 @@ Use
         [--check --repeat R]           (R fresh cold launches per case, from 2: the median over them and each
                                         launch's value; not with --batch or --video)
         [--check --base <variant>]     (each case once on base and on head, each line base's under head's;
-                                        nothing compared but --noworse's exact counters; a case base cannot
-                                        build or run fails, exit 1: head was checked against nothing)
-        [--check --noworse count.x=0%,…]  (with --base: exact counters only (count.*, net.requests, net.bytes,
-                                        tty.frames, dom.nodes; a bare name is 0%); each must hold one value
-                                        per side (2 runs with a reset, else 2 launches) and head stay within
-                                        its margin of base, or the case fails, exit 1 (worse, unstable,
-                                        missing, not_compared); a count.* only --noworse names reads 0 in a
-                                        block that counted none once any block of either side counted it, and
-                                        nothing at all when none did; a check that compared none of the
-                                        counters it names exits 4 (Uncounted says why): check the name against
-                                        the runs' ctx.count calls, and declare a counter a run counts only on
-                                        some paths in that case's metrics)
+                                        nothing compared but --noworse's exact counters; a base build error
+                                        stops the check; a base run error fails the case, exit 1)
+        [--check --noworse count.x]    With a base build, hold exact counters to base (count.*, net.requests,
+                                      net.bytes, tty.frames, dom.nodes). A bare counter means 0%.
+                                      A worse, unstable, missing or not_compared row fails the case (1).
+                                      With no failed cases but no counter compared in any case that ran: 4.
+                                      If both sides refused it, read the refused lines. For Uncounted,
+                                      check its spelling; declare a conditional count in the case's metrics.
         [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a
                                         comparison keeps the pairs it has, anything else stops, exit 124)
         [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over
@@ -516,10 +512,11 @@ Use
                                   when a folder or ref has that name
         a shared CI runner (GitHub-hosted) refuses timing (SharedRunner): --check (with --base and --noworse
                                   on exact counters), leak runs and record --probes attribution run there
-        exit: a comparison 0 whatever its verdicts (read them; --require-verdict: 5 when one is undecided, 4
-                                  when one is refused), 4 when every series is refused; a check 0 when every
-                                  case passed, 1 when one failed, 4 when it compared nothing it was asked to
-                                  (--noworse) or every case was refused; 124 timeout, 130 stopped
+        exit: timed comparisons   0 even on worse (read primary.verdict_kind); 4 if all primaries refused.
+                                  --require-verdict: 5 undecided, 4 for a refused primary or parity gap.
+              checks              1 if a case fails (including a block refusal); gaps alone: 0, or 4 with
+                                  --require-parity. All non-gap cases refused up front: 4. For --noworse,
+                                  check the exit code too: passed can be true when no counter compared (4).
   plan <file.bench.ts> [--base <variant>] [--head <variant>] [--filter …] [--effect <pct>] [--pilot]
                                   before a bench: pairs and minutes per series from earlier runs here, builds,
                                   the slot's queue (= bench --plan; --pilot runs 4 pairs first to learn the
@@ -578,9 +575,9 @@ Use
   report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
                                   write a self-contained HTML (or markdown) report; pr: an experiment's tables
                                   for a PR body
-                                  (md and pr print the markdown; the file's path goes to stderr; the view
-                                  follows from the handle; a path to a result.json, a meta.json or the folder
-                                  of either is read as query reads it, nothing written beside it; a bench
+                                  (a path to result.json, meta.json or their folder: as query reads it.
+                                  md, pr and summary print to stdout; no Markdown file unless --out is given.
+                                  HTML, cards and badges default to strobe's run/reports folder; a bench
                                   --blocks run: HTML and md, its blocks' median and interval, no verdict; a
                                   format the handle has none of exits 2 before anything is written)
   report experiment <exp> --format summary [--out <file.md>]
@@ -663,8 +660,10 @@ Use
                                   cli.launch, cpu.wakes, memory.peak, io.*, and metric.<name> from
                                   `strobe:metric <name>=<value>` lines it prints (--aa --head: an A/A)
                                   (--check: each command once, --head alone or --base too: cpu.work,
-                                  run.duration and memory.peak, nothing compared; a base that fails fails the
-                                  check; --noworse needs timed pairs)
+                                  run.duration and peak memory when measured. Exit 0 if the commands ran,
+                                  1 if one failed. Nothing compared; --check --noworse is a usage error (2).)
+                                  Timed: 0 even on worse; read series[].primary.verdict_kind in --json.
+                                  Refused: 4. Undecided: 0, or 5 with --require-verdict.
                                   (Windows, a known issue: a line is started directly, its first word the
                                   program, so after a real program &&, ||, |, < and > go to it as arguments
                                   and only its first command runs and is measured: wrap the line in cmd /c \"…\"
@@ -715,8 +714,8 @@ Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells th
           (--filter, --target, --params, --metrics, --noworse, --skip given twice add up; any other flag
           given twice with another value is a usage error; so is a flag the command does not take: strobe
           <command> --help lists its flags)
-Handles   rec_…, exp_…, ser_… and --id are plain ids: letters, digits, _ and - (an id at most 96); a
-          unique prefix of a handle works; query and report also take a path (above)
+Handles   plain ids: ASCII letters, digits, _ and -; a unique prefix works. Experiment --id: 1–96 characters.
+          Recording --id: rec_ plus 1–64 such characters. query and report also take a path (above).
 Clean-up  strobe ends what it launched; a process it cannot prove it launched it leaves alone, and the
           command ends with a line per such process (its pid and why; --json: left_alone; the state
           folder's log/left-alone.log; strobe status says when there were any in the last day)

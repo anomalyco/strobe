@@ -62,28 +62,35 @@ The design and every rule behind this file: SPEC.md.
 
 ### How a run ends (the exit code says whether strobe measured, never who won)
 
-- A timed comparison (`--base`, `--aa`, `strobe run --base … --head …`) exits 0 whatever the verdict,
-  `slower` and `worse` included: read the `★` line or `verdict_kind`. `--require-verdict`: 5 when a
-  series is `unclear` or `underpowered`, 4 when one is refused. Every compared series refused: 4.
+- A timed comparison can exit 0 on `slower` or `worse`: read `series[].primary.verdict_kind`.
+  Every non-gap primary refused: 4. `--require-verdict`: 5 if undecided, 4 if any primary is refused
+  or any journey is a parity gap. `--require-parity` alone makes gaps exit 4, not undecided results.
 - A check is no verdict: each case once (each side once with `--base`), proving the bench runs and each
   declared metric gives a value or a stated refusal.
   - `--check`: 0 when every case passes; 1 when one `FAIL`s (its `fix:` line says what to change); a
-    case `refused` before it ran is listed and exits 0 beside the rest, 4 when every case was refused.
+    preflight refusal is listed beside passing cases; all non-gap cases refused up front: 4.
+    A block refusal during the check fails its case (1); a refused secondary alone does not.
   - `--check --base <ref>`: base's line under head's; the summary ends `base and head each checked;
-    nothing compared: the same command without --check times head against base` (exit 0). A case base
-    cannot build or run FAILs (exit 1): `base failed (<base's error>), so head was checked against
-    nothing`, `, 1 failed on base`. A case that measures what only head has (a new export, route or
-    element) fails that way: leave it out with `--filter` until the change merges.
+    nothing compared: the same command without --check times head against base` (exit 0 if both ran).
+    A base build error stops the check before the case runs (1). A base run error fails the case (1):
+    `1 failed on base`; head's values if it passed, head's error if it failed too. Leave head-only cases
+    out with `--filter` until the change merges.
   - `--check --base <ref> --noworse count.x`: each counter row ends `no worse` (passes), `worse`,
-    `unstable`, `missing` or `not_compared` (each fails the case, exit 1). A check that compared none of
-    the counters it names exits **4**, not 0 (`nothing was compared (exit 4)`): a check that compared
-    nothing has not passed. Fix: check the name against the runs' `ctx.count("…")` calls (the
-    `Uncounted` note offers a near one); when a run counts it only on some paths, declare it on that
-    case (`metrics: ["count.x"]`), so 0 on both sides compares as no worse.
-  - `--check --base <target> --head <target>`: the parity matrix; a gap exits 0 (4 with
-    `--require-parity`), a journey whose sides differ fails (1).
-- `--blocks N`: values, nothing compared; 4 when every series is refused. Any run: 130 stopped, 124
-  timed out (`--max-time`, `--unlock-wait`), resumable.
+    `unstable`, `missing` or `not_compared` (each fails the case, exit 1). If cases ran and none failed
+    but no counter compared, exit **4**, even with `passed: true` in JSON. If both sides refused every
+    counter, read the refused lines. For `Uncounted`, check the spelling against `ctx.count`; if the run
+    counts it only on some paths, add `metrics: ["count.x"]` on that case so 0 → 0 compares.
+  - `--check --base <target> --head <target>`: shared journeys get a parity matrix, not a counter
+    comparison. Gaps alone exit 0 (even if no case ran), or 4 with `--require-parity`; a mismatch or
+    case failure exits 1. With two bare targets, `--noworse` exits 2: it needs two builds.
+- `--blocks N`: one build's values, no verdict. `--probes memory`: a leak run exits 0 even for `leaks`
+  (`worse`); 5 if undecided with `--require-verdict`. Both modes exit 4 if every series is refused.
+- `--pixels-only`: 1 if snapshots differ or one side lacks one, otherwise 0 on completion. `--bisect`:
+  `found`, `no change`, `unclear` exit 0; `--require-verdict` makes an `unclear` search exit 5.
+- Stops and caps: 130 stopped; 124 for an exhausted `--unlock-wait` or a non-comparison timeout.
+  A timed comparison hitting `--max-time` keeps its finished pairs and normal exit rules (usually
+  0, or 5 if undecided with `--require-verdict`). The slot wait for display fit before the first
+  series can still exit 124. Resume stopped work with `bench --resume <exp>` if state was saved.
 
 ### Why is it slow?
 
@@ -210,9 +217,10 @@ The design and every rule behind this file: SPEC.md.
   what frames cost is `main.paint` beside `main.style` and `main.layout`.
 - A headless page's lean block (and a `window: false` app's) takes no trace unless a case declares
   `phase.*`, `span.*`, `layout.shift`, `main.gc`, `gpu.compile` or `main.paint`: its `meta.json` says
-  `"traced": false`. `query <rec> summary` works; `query <rec> frames` refuses `Headless` (exit 4);
-  `layout`, `style`, `gc` need an attribution recording; a view of the trace says `this block took no
-  trace`. For a trace: `--trace full`, a headed run, or `--why always`.
+  `"traced": false`. `summary` works. `frames` refuses `Headless` for the page or `NotForTarget` for
+  the windowless app (4). `layout`, `style` and `gc` need attribution; `threads` lacks thread counters;
+  `query a..b threads` says `this block took no trace` (2). For trace data use `bench --trace full`;
+  for attribution use `--why always`.
 - A locked session runs what needs no presenting window: scripts, `cli()`, `tty()`, leak runs,
   headless pages, `window: false` native cases measuring `cpu.*`, `memory.*`, `gpu.vram`, `io.*`,
   `count.*`, `phase.*`, and any native case under `--check`. Compare them only with locked runs.
@@ -369,8 +377,8 @@ noisy discovery evidence, or leave them out.
   - `VariantMismatch`, `DisplayTooSmall`, `DeviceMismatch`, `InputMismatch`: the sides differ.
   - `SharedRunner`: a CI runner other jobs share; no timing there. `--check`, counters against base, leak
     runs and attribution work (In CI, above); timing needs a machine of its own.
-- A refused primary refuses its series; the rest of the file runs. A series refused while it runs
-  (`OverheadBudget`, `NoPhase`) ends alone too: `refused` in the listing, `--resume` keeps it. Only
+- In comparisons, single-build blocks and leak runs, a series refused while it runs (`NoPhase`, for
+  example) ends alone: `refused` in the listing. In a check its block refusal fails the case (1). Only
   the machine's refusals (`SessionLocked`, `Background`, `Thermal`, …) stop the bench. Every series
   refused: exit 4.
 - `!` lines warn next to a kept number; `i` lines inform. Read them before trusting a number:
@@ -463,14 +471,15 @@ strobe update [<version>] [--from <path>] [--check] [--force]
   element hit and the latency sample.
 - A result or recording someone sent you: `strobe query <path> <view>` and `strobe report <path>` take
   a `result.json` (a comparison, check or bisect), a `meta.json`, or the folder of either, read as it
-  is: nothing is written beside it (a report goes to `<state>/run/reports/`; `--format md|pr` prints
-  to stdout, `--out` writes where you say), and nothing it names makes strobe open other files, walk
+  is: HTML, cards and badges go to `<state>/run/reports/`; Markdown (`md`, `pr`, `summary`) goes to
+  stdout without a report file unless you give `--out`. Nothing it names makes strobe open other files, walk
   up the disk or reach a network path. Refused (exit 2) with the limit: a file over 256 MB or nested
   over 128 levels, not JSON, or no result or meta.json; a named folder holding a link, junction, mount
   point or special file (four folders down, 20,000 entries at most). Copies, hard links and
   cloud-synced folders read fine. Commands it prints name the path, not an id.
-- Handles (`rec_…`, `exp_…`, `ser_…`) and `bench --id` are plain ids: letters, digits, `_`, `-`; a
-  path given as a handle is read as a path or refused, never joined into the store.
+- Store handles are plain ids: ASCII letters, digits, `_`, `-`; a unique prefix works. Experiment
+  `--id` (`bench`, `bench --bisect`, paired `run`) allows 1–96 characters. For `record --id`, use
+  `rec_` plus 1–64 such characters. A path is never joined into the store as a handle.
 - `look`: a page in a headless browser, a native app, an iPhone tab or a terminal program, nothing
   measured: titles, headings (what `expect` checks), visible text or keyed elements, console errors
   and a screenshot. Use it to check a UI loads; it works on a locked session. A page look is Chromium
@@ -491,8 +500,7 @@ strobe update [<version>] [--from <path>] [--check] [--force]
   `unit: "ms"` on `status`, `record`, `bench`, `query`, `report`, `look` prints that call's times in ms.
 - Exit codes: `0` · `1` error (a failed check) · `2` usage · `3` needs a human · `4` refused (or a
   check that compared nothing it was asked to) · `5` inconclusive (with `--require-verdict`) · `124`
-  timeout or an unlock wait that ran out · `130` stopped · `255` unreachable. A timed comparison exits
-  0 whatever its verdict ("How a run ends", above).
+  timeout or an unlock wait that ran out · `130` stopped · `255` unreachable. See "How a run ends" above.
 - result.json (`--json`): read each comparison's `verdict_kind` (`better`, `worse`, `same`,
   `no_worse`, `unclear`, `underpowered`, `refused`, `untested`, …) and a refused metric's
   `refusal.validator`, never the `verdict` words. Schema:
@@ -641,7 +649,7 @@ export default bench({
   a block that counted none reads 0 (`0 → 5 · worse`); a case that never counts it prints nothing of it
   (native cases too). `! Uncounted`: no run of any case counted it, so nothing compared it: it never
   happened on either side, or the name is wrong (it offers a near name the file counts, or lists the
-  declared ones). A check that compared no named counter exits 4. A declared counter at 0 → 0 whose
+  declared ones). If cases ran but compared no named counter, the check cannot pass. A declared 0 → 0 whose
   name is one typo from one the file counts passes with `did you mean …?`.
 
 ### Native apps, webviews, terminals
