@@ -9397,6 +9397,149 @@ most were checked on a locked Windows session, a Linux VM without a display and 
 - Known gaps by design: load on CPUs outside the target's mask is not refused, and a target
   suspended from outside reads as slow wall time.
 
+### 21.1 Support
+
+What strobe has checked against a known answer, by runtime and capability on each OS's primary
+architecture (`SUPPORT_MATRIX` in `src/support.rs`; `bun scripts/dev/support-matrix.ts --host <host>`
+prints it with each preview's reason). A cell is verified when one machine of that OS passed all four
+parts: the fixture's known answer, an A/A of 8 or more pairs that reads `same`, a planted A/B whose
+interval covers the truth, and the path's boundary refusal. Its line names the date, the build that
+ran it, the machine, the fixture, and what was planted against what strobe read; the cell's
+`Evidence` also holds its A/A, planted A/B and boundary. `preview`: strobe measures it, not yet
+checked that way on that OS; `—`: strobe refuses it there. Off the primary architecture (Windows
+arm64, macOS x64, Linux arm64) every cell is preview.
+
+A verified cell holds only for the code that produced its numbers. `support-matrix.ts --check` (CI
+runs it, with the whole history) compares the code that computes each verified cell (its `WATCH` spans,
+items with their attributes and modifiers) at the evidence's build, or at the commit a person reviewed
+(`reviewed_at`), with the tree, comments and formatting aside. Any other change fails the check until
+the cell is run again, flipped to preview, or reviewed. Both commits must be in the checked commit's
+history, the review after the build, and a review's `reviewed_why` names every span that changed
+between them and a commit; a review of no change fails. A branch that sets either lands by fast-forward
+or merge commit, never by squash or cherry-pick (re-stamped after a rebase); `bun
+scripts/dev/support-matrix.ts --landing <branch>` says before the landing whether its stamps hold on
+main. `doc-check.ts` holds this table to the matrix: one row per matrix row, in its order, each
+verified line exact.
+
+| Runtime · capability | Windows x64 | macOS arm64 | Linux x64 |
+|---|---|---|---|
+| `chromium_page` · `wall_and_counts` | preview | preview | preview |
+| `chromium_page` · `page_engine` | preview | preview | preview |
+| `chromium_page` · `process_cpu` | preview | preview | preview |
+| `chromium_page` · `process_memory` | preview | preview | preview |
+| `chromium_page` · `hardware_counters` | — | preview | preview |
+| `chromium_page` · `package_idle` | — | preview | — |
+| `chromium_page` · `frames` | preview | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, frames.interval.p95 33.334 ms vs 2 vsyncs and 16.667 ms vs 1; dropped 33.5% vs 33.3%) | preview |
+| `chromium_page` · `canvas` | preview | preview | preview |
+| `chromium_page` · `input_latency` | preview | verified (2026-11-12, e93fc36, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, interaction.p50 Δ 149.8 ms vs 150 ms planted (click-150 over click-0)) | preview |
+| `chromium_page` · `gpu` | preview | preview | preview |
+| `chromium_page` · `pixels` | preview | preview | preview |
+| `chromium_page` · `launch` | preview | preview | preview |
+| `chromium_page` · `http_probe` | preview | preview | preview |
+| `firefox_page` · `wall_and_counts` | preview | preview | preview |
+| `firefox_page` · `page_engine` | preview | preview | preview |
+| `firefox_page` · `process_cpu` | preview | preview | preview |
+| `firefox_page` · `process_memory` | preview | preview | preview |
+| `firefox_page` · `hardware_counters` | — | preview | preview |
+| `firefox_page` · `package_idle` | — | preview | — |
+| `firefox_page` · `frames` | preview | preview | preview |
+| `firefox_page` · `canvas` | preview | preview | preview |
+| `firefox_page` · `input_latency` | preview | preview | preview |
+| `firefox_page` · `gpu` | preview | preview | preview |
+| `firefox_page` · `pixels` | preview | preview | preview |
+| `firefox_page` · `launch` | preview | preview | preview |
+| `firefox_page` · `http_probe` | preview | preview | preview |
+| `webkit_page` · `wall_and_counts` | — | preview | preview |
+| `webkit_page` · `page_engine` | — | preview | preview |
+| `webkit_page` · `process_cpu` | — | preview | preview |
+| `webkit_page` · `process_memory` | — | preview | preview |
+| `webkit_page` · `hardware_counters` | — | preview | preview |
+| `webkit_page` · `package_idle` | — | preview | — |
+| `webkit_page` · `frames` | — | preview | preview |
+| `webkit_page` · `canvas` | — | preview | preview |
+| `webkit_page` · `input_latency` | — | preview | preview |
+| `webkit_page` · `gpu` | — | preview | preview |
+| `webkit_page` · `pixels` | — | preview | preview |
+| `webkit_page` · `http_probe` | — | preview | preview |
+| `android_chrome` · `wall_and_counts` | preview | preview | preview |
+| `android_chrome` · `page_engine` | preview | preview | preview |
+| `android_chrome` · `frames` | preview | preview | preview |
+| `android_chrome` · `canvas` | preview | preview | preview |
+| `android_chrome` · `input_latency` | preview | preview | preview |
+| `android_chrome` · `pixels` | preview | preview | preview |
+| `android_chrome` · `http_probe` | preview | preview | preview |
+| `ios_safari` · `wall_and_counts` | preview | preview | preview |
+| `ios_safari` · `page_engine` | preview | preview | preview |
+| `chromium_app` · `wall_and_counts` | preview | preview | preview |
+| `chromium_app` · `page_engine` | preview | preview | preview |
+| `chromium_app` · `process_cpu` | preview | preview | preview |
+| `chromium_app` · `process_memory` | preview | preview | preview |
+| `chromium_app` · `hardware_counters` | — | preview | preview |
+| `chromium_app` · `package_idle` | — | preview | — |
+| `chromium_app` · `frames` | preview | preview | preview |
+| `chromium_app` · `canvas` | preview | preview | preview |
+| `chromium_app` · `input_latency` | preview | preview | preview |
+| `chromium_app` · `gpu` | preview | preview | preview |
+| `chromium_app` · `pixels` | preview | preview | preview |
+| `chromium_app` · `launch` | preview | preview | preview |
+| `chromium_app` · `launch_signal` | preview | preview | preview |
+| `chromium_app` · `http_probe` | preview | preview | preview |
+| `webview_app` · `wall_and_counts` | preview | — | — |
+| `webview_app` · `page_engine` | preview | — | — |
+| `webview_app` · `process_cpu` | preview | — | — |
+| `webview_app` · `process_memory` | preview | — | — |
+| `webview_app` · `hardware_counters` | — | — | — |
+| `webview_app` · `package_idle` | — | — | — |
+| `webview_app` · `frames` | preview | — | — |
+| `webview_app` · `canvas` | preview | — | — |
+| `webview_app` · `input_latency` | preview | — | — |
+| `webview_app` · `gpu` | preview | — | — |
+| `webview_app` · `pixels` | preview | — | — |
+| `webview_app` · `launch` | preview | — | — |
+| `webview_app` · `launch_signal` | preview | — | — |
+| `webview_app` · `http_probe` | preview | — | — |
+| `native` · `wall_and_counts` | preview | preview | preview |
+| `native` · `process_cpu` | preview | preview | preview |
+| `native` · `process_memory` | preview | preview | preview |
+| `native` · `hardware_counters` | — | preview | preview |
+| `native` · `package_idle` | — | preview | — |
+| `native` · `frames` | preview | preview | preview |
+| `native` · `input_latency` | preview | preview | preview |
+| `native` · `gpu` | preview | preview | preview |
+| `native` · `pixels` | preview | preview | preview |
+| `native` · `launch` | preview | preview | preview |
+| `native` · `launch_signal` | preview | preview | preview |
+| `native` · `http_probe` | preview | preview | preview |
+| `native_windowless` · `wall_and_counts` | preview | preview | preview |
+| `native_windowless` · `process_cpu` | verified (2026-11-13, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/native.bench.ts`, cpu.work 399.2 ms vs 400.6 ms (tick-8) and duty 998 ms vs 1000 ms; planted 2x read +100.04% [+99.66 … +100.32] vs +99.71%) | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/native.bench.ts`, cpu.work 402 ms vs 400.9 ms (tick-8) and cpu.wakes 50.0/s vs 50/s; planted 2x read +100.3% [+98.5 … +101.3]) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/native.bench.ts`, cpu.work 401.2 ms vs 401.0 ms (tick-8) and duty 1000.6 ms vs 1000 ms; planted 2x read +99.31% [+98.76 … +99.72] vs +99.48%) |
+| `native_windowless` · `process_memory` | verified (2026-11-13, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/planted.bench.ts`, memory.app.private +50.10 MiB vs +50 MiB and 100 KiB of page tables (hold-50 to hold-100)) | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, memory.app.private +50.03 MiB vs +50 MiB planted (hold-50 to hold-100)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, memory.app.private +50.00 MiB vs +50 MiB planted (hold-50 to hold-100)) |
+| `native_windowless` · `hardware_counters` | — | verified (2026-11-12, e93fc36, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cpu.instructions 2x by rate +99.99% vs +100% ±0.25% and 2x by count 1015.08 M vs 1015.27 M; energy.cpu 2x +99.9% [+96.0 … +101.2]) | preview |
+| `native_windowless` · `package_idle` | — | preview | — |
+| `native_windowless` · `gpu` | preview | preview | preview |
+| `native_windowless` · `launch` | preview | preview | preview |
+| `native_windowless` · `http_probe` | preview | preview | preview |
+| `script` · `wall_and_counts` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.10 ms vs 150 ms planted; spin 300.79 ms vs 300 ms + 0.7 ms call (its check on e93fc36)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.07 ms vs 150 ms planted; spin 301.7 ms vs 300 ms + 1.4 ms call) |
+| `script` · `page_engine` | preview | preview | preview |
+| `script` · `process_cpu` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cpu.work 300.32 ms vs 300 ms (its check on e93fc36); planted 2x read +100.18% [+99.94 … +100.46]) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, cpu.work 300.65 ms vs 300 ms; planted 2x read +99.69% [+99.45 … +99.80] vs +99.65% at 0.00% steal) |
+| `script` · `process_memory` | preview | preview | preview |
+| `script` · `hardware_counters` | — | preview | preview |
+| `script` · `package_idle` | — | preview | — |
+| `script` · `http_probe` | preview | preview | preview |
+| `cli` · `wall_and_counts` | preview | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin run.duration Δ 150.29 ms vs 150 ms planted; metric.truth_cpu_ms 150 and 300 exact) | preview |
+| `cli` · `process_cpu` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, cpu.work 302.4 ms vs 300 ms plus a 2 ms launch and tree 1204.8 ms vs 1200 ms; planted Δ 149.97 ms and 600.01 ms vs 150 and 600 ms) |
+| `cli` · `process_memory` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB) |
+| `cli` · `http_probe` | preview | preview | preview |
+| `tty` · `wall_and_counts` | preview | preview | preview |
+| `tty` · `process_cpu` | preview | preview | preview |
+| `tty` · `process_memory` | preview | preview | preview |
+| `tty` · `hardware_counters` | — | preview | preview |
+| `tty` · `package_idle` | — | preview | — |
+| `tty` · `tty_grid` | preview | preview | preview |
+| `tty` · `launch` | preview | preview | preview |
+| `tty` · `http_probe` | preview | preview | preview |
+| OS input (`OS_INPUT`) | preview | preview | preview |
+| a page measured from outside (`OUTSIDE_PAGE`) | preview | preview | preview |
+
 ## 22. Phases
 
 Phase 0 runs two tracks in parallel.
@@ -9428,6 +9571,20 @@ describe it now. The sections above say what strobe does; this list only dates i
 2026-11-09 this section also held the notes of where and how each change was checked, with their
 numbers (`git show 3ed0413:SPEC.md`, §24); what still matters of them moved into the sections, and
 what was built but not yet run on a device is in §21.
+
+**After 0.34.0**
+
+- 2026-11-13 · cleanup/support-verified · 20 cells verified from the promotion runs: Windows x64 cli
+  process CPU and memory, windowless native CPU and memory; Linux x64 cli process CPU and memory,
+  script wall time and CPU, windowless native CPU and memory; macOS arm64
+  cli wall time, CPU and memory, script wall time and CPU, headed Chromium frames and input latency,
+  windowless native CPU, memory and counters (21.1's table, each cell's `Evidence` in
+  `src/support.rs`); `Evidence.reviewed_at` and `reviewed_why`; `support-matrix.ts --check` fails
+  when the code that computes a verified cell changed since its evidence or review (`WATCH`, `--rot`
+  prints each span), and when its evidence or review commit is not in the checked history or a review
+  does not name what changed (`--landing <branch>` checks a landing first); doc-check holds 21.1 to the
+  matrix and its evidence records; the preview reasons say what the runs found and which run each cell
+  still needs (21.1).
 
 **After 0.30.0**
 
