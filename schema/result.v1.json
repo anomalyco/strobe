@@ -107,7 +107,7 @@
       "type": ["object", "null"],
       "description": "implementations: what both sides shared, as measured.",
       "properties": {
-        "window": { "type": ["object", "null"], "properties": { "client_dip": { "type": "array", "items": { "type": "number" } }, "scale": { "type": ["number", "null"] }, "display": { "type": ["string", "null"] }, "hz": { "type": ["number", "null"] } } },
+        "window": { "type": ["object", "null"], "properties": { "client_dip": { "type": ["array", "null"], "items": { "type": "number" } }, "frame": { "type": "array", "items": { "enum": ["base", "head"] } }, "scale": { "type": ["number", "null"] }, "display": { "type": ["string", "null"] }, "hz": { "type": ["number", "null"] } } },
         "adapter": { "type": ["string", "null"] },
         "input": { "enum": ["os", "devtools", "none"], "description": "os: the sides got OS input (a native side, or a page measured from outside); devtools: two pages driven through DevTools; none: the runs sent no input." },
         "frames": { "type": ["string", "null"], "description": "Where frames came from on both sides (the OS present source), or null without frames." },

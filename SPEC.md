@@ -5880,7 +5880,7 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   (`shown.<side>.thumb_start`, `thumb_end`).
 - **result.json** (`schema/result.v1.json`): `comparison` (`builds` | `implementations`),
   `variants[].{name, target, target_kind, engine, repo, process_set {median_count, by_program}}`,
-  `fixture`, `fairness { window {client_dip, scale, display, hz}, adapter, input, frames, gpu_cache,
+  `fixture`, `fairness { window {client_dip, scale, frame, display, hz}` (null without a measured size on both sides), `adapter, input, frames, gpu_cache,
   priority, observer {base, head, reads_per_run} }`, `scoreboard { journeys, compared, better, same,
   worse, unclear, gaps, better_alone, worse_alone, family, all_no_worse }` (the journeys as one
   family, §9.3; the text output's `family` line), each primary's `p_repeated` and `holm_decided`

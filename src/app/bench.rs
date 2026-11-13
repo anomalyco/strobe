@@ -1234,19 +1234,19 @@ fn fairness(ctx: &Ctx, variants: &[Variant], series: &[Value]) -> Value {
             .filter(|b| b["variant"] == role)
             .find_map(|b| serde_json::from_value::<[f64; 3]>(b["client"].clone()).ok().map(|c| (c, b["frame"] == true)))
     };
-    let (client, scale, frame) = match (measured("base"), measured("head")) {
+    let window = match (measured("base"), measured("head")) {
         (Some(b), Some(h)) => {
             let (c, _) = if b.1 && !h.1 { h } else { b };
             let framed: Vec<&str> = [("base", b.1), ("head", h.1)].into_iter().filter(|x| x.1).map(|x| x.0).collect();
-            (json!([c[0], c[1]]), json!(c[2]), json!(framed))
+            json!({ "client_dip": [c[0], c[1]], "scale": c[2], "frame": framed, "display": Value::Null, "hz": host::refresh_at(w.x + 20, w.y + 20) })
         }
-        _ => (Value::Null, Value::Null, json!([])),
+        _ => Value::Null,
     };
     let gpu_cache = ctx.gpu_cache.values().next().map(|n| n.split(':').next().unwrap_or("").to_string());
     let some = |v: &Value| v["ops"].as_object().is_some_and(|o| !o.is_empty());
     let gave_input = series.iter().any(|s| some(s) || s["blocks"].as_array().into_iter().flatten().any(some));
     json!({
-        "window": { "client_dip": client, "scale": scale, "frame": frame, "display": Value::Null, "hz": host::refresh_at(w.x + 20, w.y + 20) },
+        "window": window,
         "adapter": ctx.gpu["devices"].as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null),
         // Pages against a native implementation get OS input, as native apps always do; two pages DevTools
         // input; runs that gave no input (scripts, commands, journeys without steps) none.
