@@ -2552,8 +2552,12 @@ pub fn run(args: &Args) -> Result<Output> {
     for why in engines.into_iter().filter_map(web::patched) {
         ctx.warnings.push(validity::warn("PatchedBrowser", why));
     }
+    // Machine-wide, before anything runs: where the blocks measure the other work on the target's CPUs
+    // themselves (`cpu.foreign`, every OS with CPU affinity), each series' note says what reached them
+    // and whether it mattered, so this is context; on macOS nothing else says it.
     if busy > 0.10 {
-        ctx.warnings.push(validity::warn("Background", format!("{:.0}% of all CPUs were busy before the run; close heavy apps for tighter intervals", busy * 100.0)));
+        let text = format!("{:.0}% of all CPUs were busy before the run; close heavy apps for tighter intervals", busy * 100.0);
+        ctx.warnings.push(if cfg!(target_os = "macos") { validity::warn("Background", text) } else { validity::info("Background", text) });
     }
     if env.on_battery {
         ctx.warnings.push(validity::warn("Battery", "on battery: clocks may drop mid-run; plug in"));
@@ -4774,10 +4778,15 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             if blocks[start].locked == blocks[start + 1].locked && blocks[start].display == blocks[start + 1].display {
                 // A burst of other work on one side's CPUs only moves this pair by itself: it runs again,
                 // up to `BURST_RETRIES` times, while the series has time left. What it then keeps, the
-                // paired test (`lopsided_background`) and the series' note judge.
+                // paired test (`lopsided_background`) and the series' note judge. One that the pair kept
+                // before also had on the same side is no burst but a pattern: it stays, for that test.
                 let burst = one_sided(&blocks[start], &blocks[start + 1]).filter(|_| redone_bg < BURST_RETRIES && load_metric(&s.primary) && share.is_none_or(|t| Instant::now() < t));
                 let Some((fb, fh)) = burst else { break };
                 let heavy = if fh > fb { 1 } else { 0 };
+                let before = pairs.last().and_then(|&(a, b)| one_sided(&blocks[a], &blocks[b]));
+                if before.is_some_and(|(pb, ph)| (ph > pb) == (fh > fb)) {
+                    break;
+                }
                 let who = busiest_during(&blocks[start..]);
                 discard(&mut blocks);
                 redone_bg += 1;
