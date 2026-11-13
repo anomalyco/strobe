@@ -1275,17 +1275,26 @@ const git = (args: string[]) => {
 let fetched = false
 // A revision's commit, or null when this repository has none by that name. A shallow clone fetches its history
 // once (CI checks out the whole history; this is for a local shallow clone).
+const commits = new Map<string, string | null>()
 function commitOf(rev: string): string | null {
+  if (commits.has(rev)) return commits.get(rev)!
   const id = () => git(["rev-parse", "--verify", "-q", `${rev}^{commit}`])?.trim() || null
   if (id() === null && !fetched) {
     fetched = true
     if (git(["rev-parse", "--is-shallow-repository"])?.trim() === "true") git(["fetch", "-q", "--unshallow", "--tags", "origin"])
     else git(["fetch", "-q", "--tags", "origin"])
   }
-  return id()
+  const c = id()
+  commits.set(rev, c)
+  return c
 }
 // `a` is `b` or one of its ancestors: in its history, so no landing of `b` can lose it.
-const isAncestor = (a: string, b: string) => git(["merge-base", "--is-ancestor", `${a}^{commit}`, `${b}^{commit}`]) !== null
+const ancestry = new Map<string, boolean>()
+const isAncestor = (a: string, b: string) => {
+  const k = `${a} ${b}`
+  if (!ancestry.has(k)) ancestry.set(k, git(["merge-base", "--is-ancestor", `${a}^{commit}`, `${b}^{commit}`]) !== null)
+  return ancestry.get(k)!
+}
 const shown = new Map<string, string | null>()
 function fileAt(rev: string, path: string): string | null {
   const key = `${rev}:${path}`
@@ -1400,7 +1409,8 @@ function landing(args: string[]): number {
   }
   let tree: Tree
   if (isAncestor(onto, ref)) {
-    tree = { what: `${ref} fast-forwarded onto ${onto}`, read: (p) => fileAt(commitOf(ref)!, p), tips: [ref] }
+    const id = commitOf(ref)!
+    tree = { what: `${ref} fast-forwarded onto ${onto}`, read: cached((p) => fileAt(id, p)), tips: [ref] }
   } else {
     const merged = Bun.spawnSync(["git", "merge-tree", "--write-tree", onto, ref], { cwd: root, stdout: "pipe", stderr: "pipe" })
     const id = merged.stdout.toString().split("\n")[0].trim()
