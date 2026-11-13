@@ -553,6 +553,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     hs.push(h1);
                     let host_timed: u64 = hs.chunks(2).map(|p| p.get(1).copied().unwrap_or(p[0]).saturating_sub(p[0])).sum();
                     let pty_ms = rate.map_or(f64::NAN, |r| host_timed as f64 / r);
+                    cost.target_ms(cpu + if cfg!(windows) { pty_ms } else { 0.0 });
                     let in_timed = |ns: u64| ns >= t0 && ns <= t1 && !timed.untimed.iter().any(|g| ns >= g.0 && ns < g.1);
                     let ups: Vec<term::Update> = tty.updates(t0, t1).into_iter().filter(|u| in_timed(u.commit_ns)).collect();
                     let bytes: u64 = tty.bytes(t0, t1).saturating_sub(timed.untimed.iter().map(|g| tty.bytes(g.0, g.1.saturating_sub(1))).sum());
@@ -946,6 +947,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         }
         let lapped = Instant::now();
         let clock = host::tsc();
+        let load = super::LoadStart::launch();
         let tty = Tty::spawn(&tspec, ctx.pin, super::thread_pin())?;
         ctx.target_qos = host::background_qos(Some(tty.pid));
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
@@ -978,6 +980,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
                 ready.is_some()
             })
         };
+        let load = load.map(super::LoadStart::stop);
         let procs_at_ready = host::process_set(tty.pid, Some(&home.dir));
         // A process of the launch that ended before it was ready took its CPU with it (every count starts
         // at 0 at the spawn), unless its launch's cgroup kept it (`host::launch_ended_cpu`, read with the
@@ -1019,6 +1022,9 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
             }
         }
         let ups = tty.updates(tty.started_ns, ready_ns);
+        if let Some(l) = load {
+            l.launch(values.get("cpu.work").copied())
+        }
         values.insert("tty.updates".into(), ups.len() as f64);
         values.insert("tty.frames".into(), ups.iter().filter(|u| u.synced).count() as f64);
         values.insert("tty.bytes".into(), tty.bytes(tty.started_ns, ready_ns) as f64);

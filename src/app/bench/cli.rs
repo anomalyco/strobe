@@ -335,6 +335,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         hooks.end();
         r.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw, timed out, or a command failed"))?;
         let done = std::mem::take(&mut *ran.borrow_mut());
+        cost.target_ms(cpu(&done).unwrap_or(f64::NAN));
         if done.is_empty() {
             return Err(Error::refused("RunIncomplete", format!("{} run: it ran no command outside ctx.untimed", s.case), "call ctx.exec() in the case's run"));
         }

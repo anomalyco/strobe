@@ -192,6 +192,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     let mut guard = None;
     // The time stamp counter's rate, from two readings around the launch: cycles to ms.
     let clock = (host::tsc(), Instant::now());
+    let mut load = super::LoadStart::launch();
     let (mut browser, started): (WebBrowser, Started) = match kind.as_str() {
         "app" | "exe" | "webview" => {
             let app = app.as_ref().ok_or_else(|| Error::msg("internal: an app target without its app"))?;
@@ -309,6 +310,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             cpu0 = procs.iter().map(|p| p.cycles).sum();
             // From strobe's send on the host's wall clock, the clock the page's `until` time is on.
             let at = epoch_ms();
+            load = super::LoadStart::launch();
             page.start_navigation(&first)?;
             at
         } else {
@@ -316,7 +318,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         };
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         // `cpu1` holds what ended processes used where that is known (`ended`).
-        let (ready_at, page, cpu1, ended) = match &window_until {
+        let (ready_at, page, cpu1, ended, load) = match &window_until {
             Some(until) => {
                 let deadline = Instant::now() + timeout;
                 let mut wait = super::native::WindowWait::default();
@@ -339,13 +341,15 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 };
                 // The app's main page through the session strobe attached at its start (where an
                 // attribution launch's profiler runs).
+                let load = load.take().map(super::LoadStart::stop);
                 let WebBrowser::Chromium(b) = &browser else { return Err(Error::msg("internal: a window launch of a page")) };
                 let main = electron::main_page(b)?;
                 let page: Page = watch.page(&main.target).unwrap_or(main).into();
-                (ready.at, page, ready.cycles + ready.ended.unwrap_or(0), ready.ended)
+                (ready.at, page, ready.cycles + ready.ended.unwrap_or(0), ready.ended, load)
             }
             None => match watch.ready(timeout) {
                 Ok((at, received, page)) => {
+                    let load = load.take().map(super::LoadStart::stop);
                     let (cycles, ended) = match &at0 {
                         Some((a, e0)) => {
                             let procs = browser.processes();
@@ -378,7 +382,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                     if !(now >= c0 - CLOCK_SLACK_MS && now <= c1 + CLOCK_SLACK_MS) {
                         return Err(clock(format!("the page's clock read {} from the host's wall clock in a read that took {}", crate::fmt::time_signed(now - c0), crate::fmt::time(c1 - c0))));
                     }
-                    (at, page, cycles, ended)
+                    (at, page, cycles, ended, load)
                 }
                 Err(e) => {
                     let shot = watch.any_page().map(|p| snapshot(&p, &ctx.exp, "launch")).unwrap_or_default();
@@ -411,6 +415,9 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             && cpu_ms.is_finite()
         {
             super::note_ended_launch(&mut ctx.warnings, s, c as f64 / r);
+        }
+        if let Some(l) = load {
+            l.launch((!launch_lost).then_some(cpu_ms))
         }
         lap("ready", &mut steps);
         if watch.late() {

@@ -298,8 +298,6 @@ pub(super) struct Hooks<'a> {
     fixture_untimed: Cell<f64>,
     /// No input call since the last stretch ended (`ended_untimed`).
     ended: Cell<bool>,
-    /// The run's open readings for `Background` (`RunLoads`, while `slotted` has a timed block).
-    load_at: RefCell<Option<(Option<validity::CpuBusy>, validity::Steal)>>,
 }
 
 /// The block's fixture, and how to list the target's processes now.
@@ -335,20 +333,11 @@ impl<'a> Hooks<'a> {
             self.fixture_at.set(Some((f.cpu(), Instant::now())));
             self.fixture_lost.set(f.lost());
         }
-        // Last, so the readings above are outside the run's window.
-        if let Some(l) = super::RUN_LOADS.with_borrow(|l| l.clone()) {
-            *self.load_at.borrow_mut() = Some((l.all.and_then(|_| validity::CpuBusy::start()), validity::Steal::start()));
-        }
     }
 
     /// The run ended: from here nothing counts. A stretch still open (its end never came: the run
     /// threw) ends here.
     pub(super) fn end(&self) {
-        // First, so the window is the run's.
-        if let (Some(l), Some((busy, steal))) = (super::RUN_LOADS.with_borrow(|l| l.clone()), self.load_at.borrow_mut().take()) {
-            let busy = busy.zip(l.all).and_then(|(b, cpus)| b.stop(cpus)).map(|b| b.pct());
-            l.runs.borrow_mut().push(super::RunLoad { busy, steal: steal.pct(l.pin) });
-        }
         if let Some((from, _)) = self.open.take() {
             self.untimed.borrow_mut().push((from, host::now_ns()));
         }

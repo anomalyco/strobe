@@ -85,6 +85,10 @@ const CANVAS_SCRIPT: &str = r#"(() => {
 /// A run with this much other work on the target's CPUs (% of one core) flags its block `Background`.
 const BACKGROUND_PCT: f64 = 25.0;
 
+#[cfg(feature = "dev-background")]
+#[path = "../../scripts/dev/background/cases.rs"]
+pub mod background_dev;
+
 /// Shown with intervals but never tested: context, not claims.
 const DESCRIPTIVE: &[&str] = &[
     "input.rate",
@@ -1619,14 +1623,13 @@ fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
     let rate = flagged.iter().copied().max_by(|a, b| a.values["cpu.foreign.max"].total_cmp(&b.values["cpu.foreign.max"])).map(|top| {
         let foreign: Vec<f64> = flagged.iter().map(|b| b.values["cpu.foreign.max"]).collect();
         format!(
-            "other work of a quarter core or more ran on the measured CPUs in {} of {} blocks ({:.0}%; median {:.0}%, peak {:.0}% of a core in pair {} {})",
+            "other work of a quarter core or more ran on the measured CPUs in {} of {} blocks ({:.0}%; median {:.0}%, peak {:.0}% of a core in {})",
             flagged.len(),
             measured.len(),
             100.0 * flagged.len() as f64 / measured.len().max(1) as f64,
             metrics::median(&foreign),
             top.values["cpu.foreign.max"],
-            top.pair + 1,
-            side(&top.variant)
+            if at.primary.is_none() { format!("block {}", top.pair + 1) } else { format!("pair {} {}", top.pair + 1, side(&top.variant)) }
         )
     });
     if let Some(why) = at.lopsided {
@@ -1634,7 +1637,11 @@ fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
         return Some(validity::warn("Background", format!("{lead}{}: nothing it moves is decided; {}", why.summary, why.fix.as_deref().unwrap_or("rerun once that work is done"))));
     }
     let Some(rate) = rate else {
+        if blocks.iter().any(|b| b.values.contains_key("background.unread")) {
+            return Some(validity::warn("Background", "other work could not be separated from the target in every measured run; rerun with readable CPU accounting"));
+        }
         return (!at.discarded.is_empty()).then(|| {
+            if at.primary.is_none_or(|p| !p.kind.decided()) {return validity::warn("Background", format!("a pair was retried for one-sided load and the primary is undecided; {fix}"))}
             validity::info(
                 "Background",
                 format!(
@@ -1647,6 +1654,9 @@ fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
     };
     let head = format!("{rate}{set_aside}");
     let warn = |why: &str| Some(validity::warn("Background", format!("{head}; {why}; {fix}")));
+    if blocks.iter().any(|b| b.values.contains_key("background.unread")) {
+        return warn("other work could not be separated from the target in every measured run");
+    }
     let Some(p) = at.primary else { return warn("the blocks' values include it") };
     if p.kind == VerdictKind::Refused {
         return warn("the primary was refused, so nothing shows the other work changed nothing");
@@ -1677,10 +1687,16 @@ fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
         })
         .unwrap_or_default();
     // (b) Light work on the CPU alone, which a real difference survives.
-    let own = |b: &Block| ["cpu.app.total", "cpu.process.total"].iter().find_map(|m| b.values.get(*m).copied().filter(|v| v.is_finite()));
+    let own = |b: &Block| {
+        ["background.own.max", "cpu.app.total", "cpu.process.total"]
+            .iter()
+            .find_map(|m| b.values.get(*m).copied().filter(|v| v.is_finite()))
+            .or_else(|| b.values.contains_key("launch.ready").then_some(100.0 * b.values.get("cpu.work")? / b.run_ms.first().filter(|ms| **ms > 0.0)?))
+    };
     let busiest = flagged.iter().map(|b| own(b).map(|o| o + b.values["cpu.foreign.max"])).collect::<Option<Vec<f64>>>().map(|v| v.into_iter().fold(0.0, f64::max));
     let peak = flagged.iter().map(|b| b.values["cpu.foreign.max"]).fold(0.0, f64::max);
-    let steady = metrics::median(&measured) >= BACKGROUND_PCT;
+    let steady = flagged.len() * 2 >= measured.len();
+    let ceiling = burst_pct(at.cores);
     let light = || -> std::result::Result<(usize, f64), String> {
         let cores = match at.cores {
             Some(c) if c >= 2 => c,
@@ -1701,12 +1717,18 @@ fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
             let half = (c.hi - c.lo) / 2.0;
             let unit = model::metric(&c.metric).map_or("", |d| d.unit);
             if matches!(c.kind, VerdictKind::Same | VerdictKind::NoWorse) {
-                if steady || peak >= 100.0 {
-                    let how = if steady { "in most blocks".to_string() } else { format!("up to {peak:.0}% of a core") };
-                    return Err(format!("it ran {how}, and load on both sides shrinks a real difference toward 0: this machine was too busy to call {} {}", c.metric, c.verdict));
+                if steady || peak >= ceiling {
+                    let how = if steady { "in at least half the blocks".to_string() } else { format!("up to {peak:.0}% of a core") };
+                    return Err(format!("it ran {how} (contention on both sides can mask a real difference near the bound): too busy to call {} {}", c.metric, c.verdict));
                 }
-            } else if half > c.bound && !((c.lo > c.bound || c.hi < -c.bound) && (half <= 2.5 * c.bound || peak < 100.0)) {
-                return Err(format!("{}'s interval (half-width ±{}) is wider than its bound", c.metric, fmt::bound(half, c.relative, half, unit)));
+            } else if half > c.bound && !((c.lo > c.bound || c.hi < -c.bound) && (half <= 2.5 * c.bound || peak < ceiling)) {
+                return Err(format!(
+                    "{}'s interval (half-width {}) is wider than its {} {}",
+                    c.metric,
+                    fmt::bound(half, c.relative, half, unit),
+                    if c.noworse.is_some() { "margin" } else { "bound" },
+                    fmt::bound(c.bound, c.relative, c.bound, unit)
+                ));
             }
         }
         Ok((cores, busiest))
@@ -1728,8 +1750,34 @@ fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
 fn target_cores(pin: Option<u64>) -> Option<usize> {
     let topo = host::topology();
     let cpus = pin.unwrap_or_else(|| topo.all());
-    let n = topo.cores.iter().filter(|c| c.mask & cpus != 0).count();
-    (n > 0).then_some(n)
+    fastest_cores(&topo.cores, cpus)
+}
+
+struct LoadSet<'a> {
+    blocks: &'a [Block],
+    pairs: &'a [(usize, usize)],
+    discarded: &'a [Burst],
+}
+impl LoadSet<'_> {
+    fn refusal(&self, names: [&str; 2]) -> Option<Refusal> {
+        lopsided_background(self.blocks, self.pairs, names, self.discarded).or_else(|| lopsided_steal(self.blocks, self.pairs, names, self.discarded))
+    }
+}
+fn load_sets<'a>(blocks: &'a [Block], pairs: &'a [(usize, usize)], discarded: &'a [Burst], pass: Option<&'a Pass>) -> Vec<LoadSet<'a>> {
+    let mut sets = vec![LoadSet { blocks, pairs, discarded }];
+    if let Some((blocks, pairs)) = pass {
+        sets.push(LoadSet { blocks, pairs, discarded: &[] });
+    }
+    sets
+}
+fn judged_secondary(c: &Comparison) -> bool {
+    load_metric(&c.metric) && c.decided && c.kind.decided()
+}
+
+fn fastest_cores(cores: &[host::Core], cpus: u64) -> Option<usize> {
+    let matched = cores.iter().filter(|c| c.mask & cpus != 0);
+    let fastest = matched.clone().map(|c| c.class).max()?;
+    Some(matched.filter(|c| c.class == fastest).count())
 }
 
 /// Whether one of the target's physical cores has a CPU outside its pinned ones: a sibling thread
@@ -2170,11 +2218,22 @@ struct SelfCost {
     /// The run so far, over its stretches before a pause.
     sum: Cell<Option<RunCost>>,
     runs: RefCell<Vec<RunCost>>,
+    load: Option<RunLoads>,
+    load_at: RefCell<Option<LoadStart>>,
+    timed_load: Cell<RunLoad>,
 }
 
 impl SelfCost {
     fn new(runner: u32) -> SelfCost {
-        SelfCost { runner, open: Cell::new(None), sum: Cell::new(None), runs: RefCell::new(Vec::new()) }
+        SelfCost {
+            runner,
+            open: Cell::new(None),
+            sum: Cell::new(None),
+            runs: RefCell::new(Vec::new()),
+            load: RUN_LOADS.with_borrow(Clone::clone),
+            load_at: Default::default(),
+            timed_load: Default::default(),
+        }
     }
 
     /// A run begins now.
@@ -2187,11 +2246,13 @@ impl SelfCost {
     fn begin(&self) {
         self.open.set(None);
         self.sum.set(Some((0, Some(0), Some(0))));
+        self.timed_load.set(RunLoad::default());
     }
 
     /// A run's untimed stretch ends now: the run counts again. strobe's own process is read last here
     /// and first in `pause`, so reading the runner is not in its count.
     fn resume(&self) {
+        *self.load_at.borrow_mut() = self.load.as_ref().map(LoadStart::new);
         let runner = host::process_cycles(self.runner);
         let tsc = host::tsc();
         let strobe = host::process_cycles(std::process::id());
@@ -2201,6 +2262,11 @@ impl SelfCost {
     /// A run's untimed stretch begins now: what the run used so far is kept, and nothing until `resume`.
     /// Paused already (or no cycle clock, so nothing opened): nothing to add.
     fn pause(&self) {
+        if let Some(at) = self.load_at.take() {
+            let mut sum = self.timed_load.get();
+            sum.add(at.stop());
+            self.timed_load.set(sum);
+        }
         let (Some(sum), Some((t0, s0, r0))) = (self.sum.get(), self.open.take()) else { return };
         let strobe = host::process_cycles(std::process::id());
         let tsc = host::tsc();
@@ -2216,6 +2282,23 @@ impl SelfCost {
         self.pause();
         let run = self.sum.take().map_or((0, None, None), |s| if s.0 == 0 { (0, Some(0), Some(0)) } else { s });
         self.runs.borrow_mut().push(run);
+        if let Some(load) = &self.load {
+            let mut timed = self.timed_load.take();
+            if load.pin.is_none() && run.0 > 0 {
+                // Samplers and terminal reader are threads of strobe; do not subtract them twice.
+                timed.observer_ms = timed.ms * (run.1.unwrap_or(0) as f64 + run.2.unwrap_or(0) as f64) / run.0 as f64;
+            }
+            load.runs.borrow_mut().push(timed);
+        }
+    }
+
+    /// Supply this run's timed CPU, including exited processes, before any display or probe filtering.
+    fn target_ms(&self, ms: f64) {
+        if let Some(load) = &self.load
+            && let Some(run) = load.runs.borrow_mut().last_mut()
+        {
+            run.own_ms = ms.is_finite().then_some(ms);
+        }
     }
 
     /// strobe's and the runner's share of one core over the measured runs.
@@ -2653,7 +2736,7 @@ pub fn run(args: &Args) -> Result<Output> {
     // launch series runs: a launch's blocks read no other work, so nothing else would say it.
     if busy > 0.10 {
         let text = format!("{:.0}% of all CPUs were busy before the run; close heavy apps for tighter intervals", busy * 100.0);
-        let unread = cfg!(target_os = "macos") || series.iter().any(|s| s.refused.is_none() && s.gap.is_none() && s.launch.is_object());
+        let unread = cfg!(target_os = "macos");
         ctx.warnings.push(if unread { validity::warn("Background", text) } else { validity::info("Background", text) });
     }
     if env.on_battery {
@@ -4708,7 +4791,17 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     analyse(s, def, &blocks, &[], false, ["base", "head"], &mut warnings);
     warnings.extend(background_note(
         &blocks,
-        &LoadImpact { moves: moved_by_load(s, &[]), primary: None, judged: Vec::new(), min_clean: 0, cores: None, split_core: false, discarded: &[], lopsided: None, names: ["base", "head"] },
+        &LoadImpact {
+            moves: moved_by_load(s, &[]) || blocks.iter().any(|b| b.values.keys().any(|m| load_metric(m))),
+            primary: None,
+            judged: Vec::new(),
+            min_clean: 0,
+            cores: None,
+            split_core: false,
+            discarded: &[],
+            lopsided: None,
+            names: ["base", "head"],
+        },
     ));
     warnings.extend(observer_reads(&blocks, "head", "head", is_native(&target)));
     warnings.extend(observer_pixels(&blocks, "head", "head"));
@@ -4898,6 +4991,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 discarded.push(Burst { pair, base: foreign(bb), head: foreign(hb), apart, base_steal: steal(bb), head_steal: steal(hb) });
                 let who = busiest_during(&blocks[start..]);
                 discard(&mut blocks);
+                checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded }));
                 progress(format!(
                     "  pair {}: other work during {}'s block only, {:.0}% of a core more than the other's{}: pair set aside and run again ({} of {BURST_RETRIES} for the series; the paired test still counts it)",
                     pair + 1,
@@ -5283,63 +5377,21 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // what it moves decides nothing. Refused before the gate and Holm, so no such row takes a share of
     // the family, and the per-block flags no longer say the blocks were kept.
     // The hypervisor's steal, tested the same way (a virtual machine's host loaded during one side).
-    let lopsided = [lopsided_background(tb, tp, names, &discarded), lopsided_steal(tb, tp, names, &discarded)];
-    for why in lopsided.iter().flatten() {
-        if load_metric(&s.primary) && primary.kind != VerdictKind::Refused {
+    let sets = load_sets(&blocks, &pairs, &discarded, pass.as_ref());
+    let refusals: Vec<_> = sets.iter().map(|set| set.refusal(names)).collect();
+    for (i, why) in refusals.iter().enumerate().filter_map(|(i, r)| Some((i, r.as_ref()?))) {
+        let here = |m: &str| load_metric(m) && usize::from(apart(m)) == i;
+        if here(&s.primary) && primary.kind != VerdictKind::Refused {
             if primary_decided {
                 progress(format!("  {}: the verdict at the last look is withdrawn: {}", s.primary, why.summary));
             }
             primary.refuse(why.clone());
             primary_decided = false;
         }
-        for c in secondaries.iter_mut().chain(descriptive.iter_mut()).filter(|c| load_metric(&c.metric) && c.kind != VerdictKind::Refused) {
+        for c in secondaries.iter_mut().chain(descriptive.iter_mut()).filter(|c| here(&c.metric) && c.kind != VerdictKind::Refused) {
             c.refuse(why.clone());
         }
     }
-    // What the other work did to the rest (SPEC §10.2): one note, judged on what load moves, each
-    // metric on the blocks it was measured in (a pass's for what the paired loop's kind does not give).
-    let min_clean = min_pairs.max(stats::min_pairs(0.95));
-    let without = |name: &str, upto: usize| -> Option<(usize, Vec<(f64, f64)>)> {
-        let (bs, ps) = source(name);
-        let quiet = |i: usize| bs[i].values.get("cpu.foreign.max").is_none_or(|f| *f < BACKGROUND_PCT);
-        let pp: Vec<(f64, f64)> = ps[..upto.min(ps.len())].iter().filter(|&&(a, b)| quiet(a) && quiet(b)).map(|&(a, b)| (val(&bs[a], name), val(&bs[b], name))).collect();
-        (pp.len() >= min_clean).then_some((pp.len(), pp))
-    };
-    let mut judged: Vec<(&Comparison, Option<(usize, Comparison)>)> = Vec::new();
-    if load_metric(&s.primary) && primary.kind.decided() {
-        // The pairs the primary was decided over (a series that ran on for its secondaries kept its look's).
-        judged.push((&primary, without(&s.primary, primary.n).map(|(n, pp)| (n, compare_primary(&pp, def)))));
-    }
-    for c in secondaries.iter().filter(|c| load_metric(&c.metric) && c.kind.decided()) {
-        let again = |pp: &[(f64, f64)]| -> Option<Comparison> {
-            let d = model::metric(&c.metric)?;
-            let d = counter(def_in(&c.metric, source(&c.metric).0).ok()?.unwrap_or(d));
-            Some(match s.noworse.get(&c.metric) {
-                Some(&m) => stats::compare_noworse(&c.metric, d, pp, m, 0.95),
-                None => stats::compare(&c.metric, d, pp, bound, 0.95),
-            })
-        };
-        judged.push((c, without(&c.metric, usize::MAX).and_then(|(n, pp)| Some((n, again(&pp)?)))));
-    }
-    let impact = LoadImpact {
-        moves: moved_by_load(s, &secondaries),
-        primary: Some(&primary),
-        judged,
-        min_clean,
-        cores,
-        split_core: split_core(ctx.pin),
-        discarded: &discarded,
-        lopsided: lopsided.iter().flatten().next(),
-        names,
-    };
-    if let Some(note) = background_note(tb, &impact) {
-        let who = busiest_during(tb);
-        if !who.is_empty() {
-            progress(format!("  other work on the measured CPUs in some blocks (busiest elsewhere: {who})"));
-        }
-        warnings.push(note);
-    }
-    // A shared runner (`SharedRunner`): exact counters that held one value are all that compares.
     if let Some(why) = &shared {
         let moved = |name: &str| {
             let (b, p) = source(name);
@@ -5353,9 +5405,63 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             shared_state(why, c, m);
         }
     }
-    // Secondaries: gated on the primary and Holm-corrected once every refusal is in, so a primary
-    // refused after its blocks leaves every secondary untested.
     let tested = sequential::gate_and_holm(&mut secondaries, primary_decided);
+    // What the other work did to the rest (SPEC §10.2): judged on what load moves, each
+    // metric on the blocks it was measured in (a pass's for what the paired loop's kind does not give).
+    let min_clean = min_pairs.max(stats::min_pairs(0.95));
+    let without = |name: &str, upto: usize| -> Option<(usize, Vec<(f64, f64)>)> {
+        let (bs, ps) = source(name);
+        let quiet = |i: usize| bs[i].values.get("cpu.foreign.max").is_some_and(|f| *f < BACKGROUND_PCT);
+        let pp: Vec<(f64, f64)> = ps[..upto.min(ps.len())].iter().filter(|&&(a, b)| quiet(a) && quiet(b)).map(|&(a, b)| (val(&bs[a], name), val(&bs[b], name))).collect();
+        (pp.len() >= min_clean).then_some((pp.len(), pp))
+    };
+    let mut judged: Vec<(&Comparison, Option<(usize, Comparison)>)> = Vec::new();
+    if load_metric(&s.primary) && primary.kind.decided() {
+        // The pairs the primary was decided over (a series that ran on for its secondaries kept its look's).
+        judged.push((&primary, without(&s.primary, primary.n).map(|(n, pp)| (n, compare_primary(&pp, def)))));
+    }
+    for c in secondaries.iter().filter(|c| judged_secondary(c)) {
+        let again = |pp: &[(f64, f64)]| -> Option<Comparison> {
+            let d = model::metric(&c.metric)?;
+            let d = counter(def_in(&c.metric, source(&c.metric).0).ok()?.unwrap_or(d));
+            Some(match s.noworse.get(&c.metric) {
+                Some(&m) => stats::compare_noworse(&c.metric, d, pp, m, 0.95),
+                None => stats::compare(&c.metric, d, pp, bound, 0.95),
+            })
+        };
+        judged.push((c, without(&c.metric, usize::MAX).and_then(|(n, pp)| Some((n, again(&pp)?)))));
+    }
+    for (i, set) in sets.iter().enumerate() {
+        let from_here = |m: &str| usize::from(apart(m)) == i && load_metric(m);
+        let impact = LoadImpact {
+            moves: from_here(&s.primary) || secondaries.iter().any(|c| from_here(&c.metric) && c.kind != VerdictKind::Untested),
+            primary: Some(&primary),
+            judged: judged.iter().filter(|(c, _)| from_here(&c.metric)).cloned().collect(),
+            min_clean,
+            cores,
+            split_core: split_core(ctx.pin),
+            discarded: set.discarded,
+            lopsided: refusals[i].as_ref(),
+            names,
+        };
+        if let Some(mut note) = background_note(set.blocks, &impact) {
+            if sets.len() > 1 {
+                let kind = if probe == Probing::Separate && main_http != (i == 1) {
+                    "HTTP probe"
+                } else if split == Counting::Separate && main_counters != (i == 1) {
+                    "counter"
+                } else {
+                    "timing"
+                };
+                note.text = format!("{kind} blocks: {}", note.text);
+            }
+            let who = busiest_during(set.blocks);
+            if !who.is_empty() {
+                progress(format!("  other work on the measured CPUs in some blocks (busiest elsewhere: {who})"));
+            }
+            warnings.push(note);
+        }
+    }
     // Smallest n whose exact signed-rank test can clear Holm's first step across the tested set.
     let holm = holm_pairs(tested);
     // Each pair ran in one display state; pairs in different ones still compare within themselves.
@@ -6868,51 +6974,95 @@ fn other_processes(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>
 }
 
 thread_local! {
-    /// Set by `slotted` around a timed block (on the thread that runs it): what its runs' `Hooks`
-    /// read for `Background`. Every target kind's runs pass through `Hooks`, whoever made them.
+    /// Timed block on this thread. `SelfCost` and launches sample only inside their timed windows.
     static RUN_LOADS: RefCell<Option<RunLoads>> = const { RefCell::new(None) };
 }
 
-/// What a timed block's `Hooks` read over each of its runs, for `Background` (`run_load`).
+/// Where to sample, and the readings in run order (including warmup).
 #[derive(Clone)]
-pub(super) struct RunLoads {
-    /// Unpinned: every CPU strobe may use, whose busy time each run reads.
-    pub(super) all: Option<u64>,
+struct RunLoads {
+    cpus: u64,
     /// The target's CPUs (None: all), for the steal.
-    pub(super) pin: Option<u64>,
-    pub(super) runs: std::rc::Rc<RefCell<Vec<RunLoad>>>,
+    pin: Option<u64>,
+    runs: std::rc::Rc<RefCell<Vec<RunLoad>>>,
 }
 
-/// One run's readings (`RunLoads`): every CPU's busy time as % of one core (unpinned), and the
-/// hypervisor's steal as % of the target's CPUs' time (Linux).
-pub(super) struct RunLoad {
-    pub(super) busy: Option<f64>,
-    pub(super) steal: Option<f64>,
+struct LoadStart {
+    at: Instant,
+    cpus: u64,
+    busy: Option<validity::CpuBusy>,
+    steal: validity::Steal,
 }
 
-/// A timed block's other work from its measured runs' windows (the last `run_ms.len()` runs its
-/// `Hooks` read; never set-up, warm-up or the waits before the block): `steal.pct` (their mean) and,
-/// unpinned, `cpu.foreign` and `cpu.foreign.max`, each run's busy time on every CPU less strobe's own
-/// tree there (the target's CPU over the runs, `cpu.app.total`, and strobe's own parts, `overhead`).
-/// Busy time counts what a process list cannot: processes that started and ended inside a run (a
-/// build's compilers), the kernel's own work, other containers. The target's share is its mean over
-/// the runs, so a target whose CPU swings from run to run reads some of the swing as other work. With
-/// no reading of the target's CPU, no `cpu.foreign`. A case that declares `cpu.foreign` keeps its
-/// refusal (it is other work on pinned CPUs). `named`: the busiest other processes over the block, kept
-/// for the progress when the block has other work.
-fn run_load(s: &Series, mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)>>) -> Block {
-    let runs = &loads[loads.len().saturating_sub(b.run_ms.len().max(1))..];
-    let steal: Vec<f64> = runs.iter().filter_map(|r| r.steal).filter(|x| x.is_finite()).collect();
-    if !steal.is_empty() {
-        b.values.insert("steal.pct".into(), steal.iter().sum::<f64>() / steal.len() as f64);
+impl LoadStart {
+    fn new(l: &RunLoads) -> Self {
+        Self { cpus: l.cpus, busy: validity::CpuBusy::start(), steal: validity::Steal::start(), at: Instant::now() }
     }
-    let busy: Vec<f64> = runs.iter().filter_map(|r| r.busy).filter(|x| x.is_finite()).collect();
-    let own = ["cpu.app.total", "cpu.process.total"].iter().find_map(|m| b.values.get(*m).copied().filter(|v| v.is_finite()));
-    let parts = b.overhead.as_ref().map_or(0.0, |o| [o.strobe_pct, o.runner_pct, o.sampler_pct, o.present_pct, o.terminal_pct].iter().flatten().sum());
-    if let Some(own) = own.filter(|_| !busy.is_empty() && !b.values.contains_key("cpu.foreign.max") && !declared_metrics(s).iter().any(|m| m.starts_with("cpu.foreign"))) {
-        let foreign: Vec<f64> = busy.iter().map(|x| (x - own - parts).max(0.0)).collect();
+    fn launch() -> Option<Self> {
+        RUN_LOADS.with_borrow(|l| l.as_ref().map(Self::new))
+    }
+    fn stop(self) -> RunLoad {
+        let ms = self.at.elapsed().as_secs_f64() * 1000.0;
+        RunLoad { ms, busy_ms: self.busy.and_then(|b| b.stop(self.cpus)).map(|b| b.pct() * ms / 100.0), stolen_ms: self.steal.pct(Some(self.cpus)).map(|s| s * ms / 100.0), ..Default::default() }
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct RunLoad {
+    ms: f64,
+    busy_ms: Option<f64>,
+    stolen_ms: Option<f64>,
+    own_ms: Option<f64>,
+    observer_ms: f64,
+}
+impl RunLoad {
+    /// Sum times, not percentages: an untimed stretch contributes to neither numerator nor denominator.
+    fn add(&mut self, stretch: Self) {
+        if self.ms == 0.0 {
+            *self = stretch;
+            return;
+        }
+        self.ms += stretch.ms;
+        self.busy_ms = self.busy_ms.zip(stretch.busy_ms).map(|(a, b)| a + b);
+        self.stolen_ms = self.stolen_ms.zip(stretch.stolen_ms).map(|(a, b)| a + b);
+    }
+    fn foreign(&self) -> Option<f64> {
+        (self.ms > 0.0).then_some(())?;
+        Some(100.0 * (self.busy_ms? - self.own_ms? - self.observer_ms).max(0.0) / self.ms)
+    }
+    fn launch(self, cpu_ms: Option<f64>) {
+        RUN_LOADS.with_borrow(|l| {
+            if let Some(l) = l {
+                l.runs.borrow_mut().push(Self { own_ms: cpu_ms.filter(|v| v.is_finite()), ..self })
+            }
+        });
+    }
+}
+
+/// Use the measured runs only. An unread target is not a quiet CPU and not a foreign process.
+fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)>>) -> Block {
+    if loads.is_empty() {
+        return b;
+    }
+    let runs = loads.get(b.warmup..b.warmup + b.run_ms.len()).unwrap_or_default();
+    let ms: f64 = runs.iter().map(|r| r.ms).sum();
+    if let Some(stolen) = runs.iter().map(|r| r.stolen_ms).sum::<Option<f64>>().filter(|_| ms > 0.0) {
+        b.values.insert("steal.pct".into(), 100.0 * stolen / ms);
+    }
+    b.values.remove("cpu.foreign");
+    b.values.remove("cpu.foreign.max");
+    let foreign: Vec<_> = runs.iter().filter_map(RunLoad::foreign).collect();
+    if foreign.len() != b.run_ms.len() {
+        b.values.insert("background.unread".into(), 1.0);
+    }
+    if let Some(own) = runs.iter().filter_map(|r| r.own_ms.filter(|_| r.ms > 0.0).map(|ms| 100.0 * ms / r.ms)).max_by(f64::total_cmp) {
+        b.values.insert("background.own.max".into(), own);
+    }
+    if !foreign.is_empty() {
         let most = foreign.iter().copied().fold(0.0, f64::max);
-        b.values.insert("cpu.foreign".into(), metrics::median(&foreign));
+        if !b.refused.contains_key("cpu.foreign") {
+            b.values.insert("cpu.foreign".into(), metrics::median(&foreign));
+        }
         b.values.insert("cpu.foreign.max".into(), most);
         if most >= BACKGROUND_PCT && b.background.is_empty() {
             b.background = named.unwrap_or_default();
@@ -7593,7 +7743,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         // cannot give. The processes around the block only name the busiest.
         let timed = x.measures_time() && cases.len() == 1 && ctx.phone.is_none();
         let unpinned = timed && ctx.pin.is_none() && !cfg!(target_os = "macos");
-        RUN_LOADS.set(timed.then(|| RunLoads { all: unpinned.then(|| host::topology().all()), pin: ctx.pin, runs: Default::default() }));
+        RUN_LOADS.set((timed && !cfg!(target_os = "macos")).then(|| RunLoads { cpus: ctx.pin.unwrap_or_else(|| host::topology().all()), pin: ctx.pin, runs: Default::default() }));
         let procs = unpinned.then(|| (host::now_ns(), host::all_processes()));
         let launch = any_launch(ctx, cases, v, pair, x);
         let loads = RUN_LOADS.take().map(|l| l.runs.take()).unwrap_or_default();
@@ -7622,6 +7772,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         let taken = std::mem::take(&mut launch.cases);
         for (r, s) in taken.into_iter().zip(cases) {
             let r = r
+                .map(|b| run_load(b, &loads, named.clone()))
                 .and_then(|b| priority_state(ctx, s, x, b))
                 .map(|b| headless_state(ctx, s, v, b))
                 .map(|b| software_state(ctx, s, b))
@@ -7643,7 +7794,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
                 None => r,
             };
             let kind = ctx.describe["targets"][v.target_of(s)]["kind"].as_str().unwrap_or("").to_string();
-            let r = r.map(|b| run_load(s, b, &loads, named.clone())).map(|b| self_state(ctx, s, v, x, &kind, b)).map(|b| declared_state(ctx, s, v, x, b)).inspect(|b| restate_recording(ctx, s, v, b));
+            let r = r.map(|b| self_state(ctx, s, v, x, &kind, b)).map(|b| declared_state(ctx, s, v, x, b)).inspect(|b| restate_recording(ctx, s, v, b));
             // A timed or check block that refused its primary refuses the block, as a native one does:
             // pairs of nothing would end `unclear` instead of saying why.
             let r = r.and_then(|b| match b.refused.get(&s.primary).filter(|why| x.set != Set::Attribution && x.set != Set::Memory && why.fix.as_deref() != Some(FILMED_CPU_FIX)) {
@@ -8134,6 +8285,24 @@ fn counter_state(s: &Series, x: &Exec, mut b: Block) -> Block {
     b
 }
 
+fn retain_probe_context(b: &mut Block) {
+    b.values.retain(|k, _| {
+        matches!(
+            k.as_str(),
+            "untimed.n"
+                | "untimed.ms"
+                | "warmup.unsteady"
+                | "warmup.stepped.first"
+                | "warmup.stepped.last"
+                | "cpu.foreign"
+                | "cpu.foreign.max"
+                | "steal.pct"
+                | "background.unread"
+                | "background.own.max"
+        )
+    });
+}
+
 /// The HTTP probe's part of a block (SPEC §8.9): its `http.*` values and refusals from the probes due in
 /// the measured runs' timed parts, the probe's own CPU, and its probes kept in the block's recording (one
 /// of their own when the block kept none: a script's `--check`, a probe pass's first pair). A timed probe
@@ -8146,7 +8315,7 @@ fn http_state(ctx: &mut Ctx, s: &Series, v: &Variant, x: &Exec, taken: Option<cr
     b.refused.retain(|k, _| !http_probe::metric(k));
     if x.http && !x.untimed {
         // What says whether the block is valid stays: its untimed stretches, warmup, other work on its CPUs.
-        b.values.retain(|k, _| matches!(k.as_str(), "untimed.n" | "untimed.ms" | "warmup.unsteady" | "warmup.stepped.first" | "warmup.stepped.last" | "cpu.foreign" | "cpu.foreign.max"));
+        retain_probe_context(&mut b);
         b.refused.clear();
         b.frames.clear();
         b.intervals.clear();
@@ -9620,6 +9789,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // A run whose set's CPU is short has none (runs.json, warmup), and one that left a document
             // without `goto` no main-thread counts.
             let cpu = if cpu_lost { f64::NAN } else { cpu };
+            cost.target_ms(cpu * wall / 1e8);
             let cpu_whole = if whole_lost { f64::NAN } else { cpu_whole };
             let doc_gone = doc_lost.get();
             let carry = *carried.borrow();

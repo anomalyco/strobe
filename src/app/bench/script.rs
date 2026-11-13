@@ -545,6 +545,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // Short CPU is none (warmup falls back to the run's time).
                     let ms = |cycles: u64| if c1.values().any(|c| *c > 0) { clock0.ms(&clock1, cycles) } else { f64::NAN };
                     let used = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
+                    cost.target_ms(used);
                     lost.push((timed_cpu.as_ref().map_or(0.0, |c| ms(c.ended)), timed_cpu.is_none()));
                     ended_exes.push(timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), ms(*cy), *k)).collect()).unwrap_or_default());
                     let retained = heap_now(&mut heap_refused)? - h0;

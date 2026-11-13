@@ -741,6 +741,8 @@ fn runs(
                 let timed_cpu = super::super::record::timed_cpu(&cycles_at, &ended_at);
                 let whole_cpu = super::super::record::timed_cpu(&[&c0, &c1], &[&start.2, &end.2]);
                 let (cpu_lost, whole_lost) = (timed_cpu.is_none(), timed_cpu.is_none() || whole_cpu.is_none());
+                let cpu = timed_cpu.as_ref().map_or(f64::NAN, |c| cpu_ms(c.total, &c1, &clock0, &clock1));
+                cost.target_ms(cpu);
                 runs.push(Run {
                     main,
                     cpu_lost,
@@ -749,7 +751,7 @@ fn runs(
                     ended_exes: timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), cpu_ms(*cy, &c1, &clock0, &clock1), *k)).collect()).unwrap_or_default(),
                     ms: timed.ns() as f64 / 1e6,
                     // Short CPU is none (runs.json, warmup falls back to the run's time).
-                    cpu: timed_cpu.as_ref().map_or(f64::NAN, |c| cpu_ms(c.total, &c1, &clock0, &clock1)),
+                    cpu,
                     cpu_whole: whole_cpu.as_ref().filter(|_| !whole_lost).map_or(f64::NAN, |c| cpu_ms(c.total, &c1, &clock0, &clock1)),
                     span: Span::joined(parts),
                     timed,
@@ -1792,6 +1794,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     };
     crate::target::a11y::prepare(app.wayland());
     let clock = (host::tsc(), Instant::now());
+    let load = super::LoadStart::launch();
     let (mut n, guard) = match nt::launch(&app, &prepared, &[], true, ctx.pin) {
         Ok(x) => x,
         Err(e) => {
@@ -2007,6 +2010,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             };
             (sample.at, sample.cycles, sample.root, sample.ended)
         };
+        let load = load.map(super::LoadStart::stop);
         lap("ready", &mut steps);
         // An attribution launch's threads from the spawn until ready: wakes and CPU per thread without
         // a trace, read once it is ready (threads that already exited are not in it).
@@ -2042,6 +2046,9 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             _ => None,
         };
         let cpu_ms = per_ms.map_or(f64::NAN, |r| (ready.1 + ended.unwrap_or(0)) as f64 / r);
+        if let Some(l) = load {
+            l.launch((!launch_lost).then_some(cpu_ms))
+        }
         if let (Some(r), Some(c), false, false) = (per_ms, ready.3, profile, launch_lost) {
             super::note_ended_launch(&mut ctx.warnings, s, c as f64 / r);
         }
