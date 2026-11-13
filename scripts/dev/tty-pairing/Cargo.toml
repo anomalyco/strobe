@@ -1,0 +1,14 @@
+# Dev check of the terminal latency pairing (not shipped; see pairing.rs). Its own target folder:
+#   cargo run --release --manifest-path scripts/dev/tty-pairing/Cargo.toml [-- table]
+[package]
+name = "tty-pairing-dev"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "tty-pairing-dev"
+path = "pairing.rs"
+
+[dependencies]
+strobe = { path = "../../.." }

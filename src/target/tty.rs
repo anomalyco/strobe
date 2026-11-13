@@ -586,11 +586,14 @@ impl Tty {
         let mut st = self.state();
         loop {
             let still = host::now_ns().saturating_sub(st.parser.callbacks().last_change.max(since_ns));
-            if still >= quiet_ns {
+            // A synchronized frame left open is the program drawing, whatever the grid shows yet: woken
+            // by its end's read.
+            let open = st.parser.callbacks().sync.is_some();
+            if still >= quiet_ns && !open {
                 return true;
             }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else { return false };
-            let wait = left.min(std::time::Duration::from_nanos(quiet_ns - still));
+            let wait = if open { left } else { left.min(std::time::Duration::from_nanos(quiet_ns - still)) };
             st = self.shared.changed.wait_timeout(st, wait).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0);
         }
     }

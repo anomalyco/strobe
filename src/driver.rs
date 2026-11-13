@@ -148,6 +148,19 @@ impl Typing {
     }
 }
 
+/// `type(…, { paste: true })` is a terminal's (one bracketed paste): a page or an app takes keys.
+pub(crate) fn no_paste(o: &Value) -> Result<()> {
+    if o["paste"] != true {
+        return Ok(());
+    }
+    Err(crate::model::Refusal::new(
+        crate::model::ValidatorId::NotForTarget,
+        "page.type(…, { paste: true }): a paste is a terminal target's (tty(): the text in one bracketed paste); a page or an app is typed one key event per character",
+    )
+    .fix("drop paste: true here: type sends the text key by key (burst: true for a throughput run)")
+    .into())
+}
+
 /// Installed in every document before its scripts run: the browser's own rAF, which a page may replace (a game
 /// frame pacer does) and so delay the driver's waits on its own schedule.
 /// And its timers and listener calls, which a page's fake timers (a test clock) may replace: what the
@@ -1699,6 +1712,7 @@ impl Driver {
             }
             "type" => {
                 let o = opts(2);
+                no_paste(&o)?;
                 self.focus(&sel(0), &o)?;
                 self.before_input(&o)?;
                 // One key event per character, like a person typing, so each keystroke is an interaction,
@@ -1736,6 +1750,14 @@ impl Driver {
                 let (mods, key) = keys::parse_chord(&s(0))?;
                 self.before_input(&o)?;
                 self.stroke(key, cdp_mods(mods))?;
+                // `burst: true`: a key sent before the last one showed (a chord's next key), as a burst's.
+                let burst = Typing::of(&o) == Typing::Burst;
+                if burst && let Some(s) = self.inputs.borrow_mut().last_mut() {
+                    s.burst = true;
+                }
+                if burst {
+                    unmeasured();
+                }
                 self.until(&o).map_err(|e| if no_selector(&o["selector"]) { self.unfocused(e) } else { e })
             }
             // The pointer over an element, without a click: reveals hover-only controls, or parks the pointer.
