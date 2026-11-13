@@ -1577,8 +1577,8 @@ fn background_note(s: &Series, blocks: &[Block], at: &LoadImpact) -> Option<Warn
     }
     let redone = match at.redone {
         0 => String::new(),
-        1 => "; 1 pair with it on one side only ran again".to_string(),
-        n => format!("; {n} pairs with it on one side only ran again"),
+        1 => "; 1 pair with it on one side only was discarded and run again".to_string(),
+        n => format!("; {n} pairs with it on one side only were discarded and run again"),
     };
     let measured: Vec<&Block> = blocks.iter().filter(|b| b.values.get("cpu.foreign.max").is_some_and(|f| f.is_finite())).collect();
     let flagged: Vec<&Block> = measured.iter().copied().filter(|b| b.values["cpu.foreign.max"] >= BACKGROUND_PCT).collect();
@@ -1623,10 +1623,12 @@ fn background_note(s: &Series, blocks: &[Block], at: &LoadImpact) -> Option<Warn
     let half = (p.hi - p.lo) / 2.0;
     let tight = p.kind == VerdictKind::Same || (p.kind.decided() && half <= p.bound);
     if let Some(cores) = at.cores.filter(|c| busiest <= 100.0 * *c as f64 && tight) {
-        let half = if p.relative { fmt::pct(half) } else { fmt::value(half, unit) };
+        let (half, bound) = (fmt::bound(half, p.relative, half, unit), fmt::bound(p.bound, p.relative, p.bound, unit));
         return Some(validity::info(
             "Background",
-            format!("{rate}{redone}; the target's {cores} physical cores had room for it (at most {busiest:.0}% of a core with the target's own), and the primary's interval stayed within ±{half}"),
+            format!(
+                "{rate}{redone}; the target's {cores} physical cores had room for it (at most {busiest:.0}% of a core with the target's own), and the primary's interval stayed within ±{half} (bound ±{bound})"
+            ),
         ));
     }
     let impact = match &at.clean {
