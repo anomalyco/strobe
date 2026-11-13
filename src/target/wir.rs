@@ -852,6 +852,9 @@ impl Session {
                     Some(Plist::String(s)) => s.as_bytes(),
                     _ => return Ok(()),
                 };
+                if !crate::store::shallow(raw) {
+                    return Err(Error::msg(format!("WIR JSON: nested more than {} levels deep", crate::store::MAX_JSON_DEPTH)));
+                }
                 let mut de = serde_json::Deserializer::from_slice(raw);
                 de.disable_recursion_limit();
                 let payload: Value = serde::Deserialize::deserialize(&mut de).map_err(|e| Error::msg(format!("WIR JSON: {e}")))?;
@@ -921,7 +924,7 @@ impl Session {
                 }
             }
             Some("Target.dispatchMessageFromTarget") => {
-                if let Some(msg_str) = payload["params"]["message"].as_str() {
+                if let Some(msg_str) = payload["params"]["message"].as_str().filter(|m| crate::store::shallow(m.as_bytes())) {
                     let mut de = serde_json::Deserializer::from_str(msg_str);
                     de.disable_recursion_limit();
                     if let Ok(inner) = serde::Deserialize::deserialize(&mut de) {

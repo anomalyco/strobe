@@ -854,6 +854,7 @@ impl Profiled<'_> {
             .into()
         })?;
         let bytes = std::fs::read(&raw)?;
+        crate::store::deep_enough(&bytes, &raw)?;
         let mut de = serde_json::Deserializer::from_slice(&bytes);
         de.disable_recursion_limit();
         let profile: Value = serde::Deserialize::deserialize(&mut de).map_err(|e: serde_json::Error| incomplete(format!("{}: {e}", raw.display())))?;

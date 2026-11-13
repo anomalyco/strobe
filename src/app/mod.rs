@@ -277,7 +277,8 @@ fn time_unit(args: &Args) -> Result<crate::fmt::TimeUnit> {
         return Ok(crate::fmt::TimeUnit::default());
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    let nearest = |d: &Path| d.ancestors().find(|a| a.join("strobe.json").is_file()).map(Path::to_path_buf);
+    // A strobe.json that is a regular file there (not followed through a link).
+    let nearest = |d: &Path| d.ancestors().find(|a| crate::store::regular(&a.join("strobe.json"))).map(Path::to_path_buf);
     // The user's own file is read after the root's (`config::unit`): a root without one falls to it.
     let root = project_of(args).and_then(|d| nearest(&d)).or_else(|| nearest(&cwd)).unwrap_or(cwd);
     Ok(crate::config::unit(&root)?.unwrap_or_default())
@@ -297,15 +298,18 @@ fn project_of(args: &Args) -> Option<PathBuf> {
         "record" => args.get("bench").and_then(file_dir),
         "query" | "report" => {
             let handle = args.pos.iter().find(|p| !matches!(p.as_str(), "experiment" | "recording" | "history"))?;
-            // A result or recording named by its path: the project is where that file is (what it says
-            // its bench file was is not followed, and nothing beside it is marked used). An id: the bench
-            // file its stored result ran.
+            // A result or recording named by its path: the project is above a recording's or a result's
+            // folder, never that folder (no project root, and nothing in it is read before `query::by_path`
+            // checks it); a result.json named alone, its own folder. What it says its bench file was is not
+            // followed. An id: the bench file its stored result ran.
             let p = Path::new(handle);
             if p.is_file() {
-                return std::path::absolute(p).ok()?.parent().map(Path::to_path_buf);
+                // A meta.json's folder is a recording's; a result.json named alone may lie in its project.
+                let dir = std::path::absolute(p).ok()?.parent()?.to_path_buf();
+                return if p.file_name().is_some_and(|n| n == "meta.json") { dir.parent().map(Path::to_path_buf) } else { Some(dir) };
             }
             if p.is_dir() && (p.join("result.json").is_file() || p.join("meta.json").is_file()) {
-                return std::path::absolute(p).ok();
+                return std::path::absolute(p).ok()?.parent().map(Path::to_path_buf);
             }
             let dir = crate::store::resolve(handle.split("..").next().unwrap_or(handle)).ok().filter(|d| crate::store::is_experiment(d))?;
             crate::store::read_json(&dir.join("result.json")).ok()?["file"].as_str().and_then(file_dir)

@@ -1120,7 +1120,8 @@ pub fn for_pr(r: &Value, dir: &Path) -> Result<(Value, Vec<PathBuf>)> {
     let card = drawn(r);
     let folder = dir.join("pr-card");
     std::fs::create_dir_all(&folder)?;
-    let id = card.id.clone();
+    // A file's name from the result's id only when that is a plain id: never a path the file gives.
+    let id = Some(card.id.as_str()).filter(|i| crate::store::plain_id(i)).unwrap_or("experiment").to_string();
     let mut files = Vec::new();
     let name = format!("strobe-card-{id}.svg");
     let path = folder.join(&name);

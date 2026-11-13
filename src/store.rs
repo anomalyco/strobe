@@ -149,22 +149,12 @@ pub fn kept(dir: &Path) -> bool {
 }
 
 /// The rule for a file inside a folder a person named on the command line: it is read only if it is a
-/// regular file there: not a symbolic link, a junction or any other reparse point (Windows), not a file
-/// with other hard links (Unix: another name of a file elsewhere), not a device or pipe.
+/// regular file there, as the file's own metadata says (not followed): not a symbolic link, a junction or
+/// mount point, a device, a pipe or a socket. A file a cloud-sync client keeps (a reparse point that is no
+/// link) and a hard-linked copy are regular files: a hard link names nothing the person cannot already
+/// read, and no archive makes one outside what it unpacks.
 pub fn regular(path: &Path) -> bool {
-    let Ok(m) = std::fs::symlink_metadata(path) else { return false };
-    if !m.file_type().is_file() {
-        return false;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        // FILE_ATTRIBUTE_REPARSE_POINT
-        if m.file_attributes() & 0x400 != 0 {
-            return false;
-        }
-    }
-    crate::host::disk::names(path).is_some_and(|n| n <= 1)
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// A name a folder's own files give for another of its files (a map index's `maps/0.map.gz`, a
@@ -199,17 +189,9 @@ fn folders_plain(dir: &Path, name: &str) -> bool {
     true
 }
 
-/// A folder that is a folder there, not a link, junction or other reparse point.
+/// A folder that is a folder there, as its own metadata says: not a symbolic link, junction or mount point.
 fn real_folder(p: &Path) -> bool {
-    let Ok(m) = std::fs::symlink_metadata(p) else { return false };
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if m.file_attributes() & 0x400 != 0 {
-            return false;
-        }
-    }
-    m.file_type().is_dir()
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir())
 }
 
 /// The most entries, and the deepest folders, a named folder may hold (a recording holds a few dozen
@@ -220,7 +202,7 @@ const NAMED_DEPTH: usize = 4;
 /// A folder a person named (a recording's or an experiment's, copied or from another machine), checked
 /// once before anything in it is read: every entry, to `NAMED_DEPTH` folders down, is a regular file
 /// (`regular`) or a real folder, with a plain name (no `:` stream syntax). A folder that holds a link
-/// out of it (a symbolic link, a junction, a hard link) is refused with the entry's name, so a file the
+/// out of it (a symbolic link, a junction or mount point) is refused with the entry's name, so a file the
 /// recording's readers open by its fixed name (`frames.json`, `cpu-0.cpuprofile`, …) is always the
 /// folder's own. strobe's own folders are not checked.
 pub fn named_folder(dir: &Path) -> Result<()> {
@@ -250,7 +232,7 @@ pub fn named_folder(dir: &Path) -> Result<()> {
                     todo.push((p, depth + 1));
                 }
             } else if !regular(&p) {
-                return refuse("a link, junction, hard-linked or special file");
+                return refuse("a symbolic link, junction, mount point or special file");
             }
         }
     }
@@ -507,7 +489,12 @@ pub const MAX_JSON_DEPTH: usize = 512;
 
 /// Refuses JSON nested past `MAX_JSON_DEPTH` (strings skipped, one pass over the bytes).
 pub fn deep_enough(bytes: &[u8], path: &Path) -> Result<()> {
-    let (mut depth, mut max, mut string, mut escape) = (0usize, 0usize, false, false);
+    if shallow(bytes) { Ok(()) } else { Err(Error::usage(format!("{}: JSON nested more than {MAX_JSON_DEPTH} levels deep, which no file strobe writes is: not read", path.display()))) }
+}
+
+/// Whether JSON nests at most `MAX_JSON_DEPTH` levels (strings skipped, one pass over the bytes): what`n/// every reader that turns serde_json's recursion limit off checks first (a file, or a message from a`n/// browser or a device, whose depth a page or a file decides).
+pub fn shallow(bytes: &[u8]) -> bool {
+    let (mut depth, mut string, mut escape) = (0usize, false, false);
     for &c in bytes {
         if string {
             match c {
@@ -522,16 +509,15 @@ pub fn deep_enough(bytes: &[u8], path: &Path) -> Result<()> {
             b'"' => string = true,
             b'[' | b'{' => {
                 depth += 1;
-                max = max.max(depth);
-                if max > MAX_JSON_DEPTH {
-                    return Err(Error::usage(format!("{}: JSON nested more than {MAX_JSON_DEPTH} levels deep, which no file strobe writes is: not read", path.display())));
+                if depth > MAX_JSON_DEPTH {
+                    return false;
                 }
             }
             b']' | b'}' => depth = depth.saturating_sub(1),
             _ => {}
         }
     }
-    Ok(())
+    true
 }
 
 /// The most of a result.json or meta.json strobe reads when a person names it by its path (the largest

@@ -198,5 +198,6 @@ pub fn save_schedules(s: &[Value]) -> Result<()> {
 pub fn alert_path(change: &str) -> PathBuf {
     let d = dir().join("alerts");
     let _ = std::fs::create_dir_all(&d);
-    d.join(format!("{change}.json"))
+    // A change's id as strobe writes it (`chg_` and hex); anything else from a hand-edited file: one fixed name.
+    d.join(format!("{}.json", if crate::store::plain_id(change) { change } else { "chg" }))
 }

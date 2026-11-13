@@ -61,6 +61,9 @@ pub fn run(args: &Args) -> Result<Output> {
     if variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2 {
         super::implementation_preflight(&describe, &series, &variants, &config, &projects)?;
     }
+    // Sides with and without anything on screen (two targets, or two builds or profiles of one): refused
+    // as the bench refuses them, whatever the sides name.
+    super::offscreen_sides(&describe, &series, &variants, &config, &projects, args.has("headless"))?;
     let mut plan = estimate(&series, &describe, &file, args, &config, &project, &variants, None);
     let text = text(&file, &variants, &plan, &notes);
     plan["text"] = json!(text);

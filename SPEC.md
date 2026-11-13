@@ -1189,9 +1189,11 @@ folder holding either (`./exp_x/`, a copy, another machine's). `query`, `report`
 takes its view from what it holds. A folder with neither file, any other JSON object, and a meta.json
 that is not JSON, larger than 256 MB or nested past 128 levels are refused with why (exit 2), never
 read as a blank recording. A folder a person named is read as it is, and nothing in it reaches past it:
-- every entry, four folders down, must be a regular file or a real folder of its own (no symbolic link,
-  junction or other reparse point, no file with a second name, no `:` stream), else the folder is
-  refused naming the entry; a name its files give for another of its files (a map index's
+- every entry, four folders down, must be a regular file or a real folder as its own metadata says (no
+  symbolic link, junction or mount point, device, pipe or socket, no `:` stream; a file a cloud-sync
+  client keeps and a hard-linked copy are regular files), else the folder is refused naming the entry
+  (`a symbolic link, junction, mount point or special file`); the folder's parent, not the folder, is
+  where `strobe.json`'s display unit is looked for; a name its files give for another of its files (a map index's
   `maps/0.map.gz`, `video.json`'s file, a check's actions file) is a plain relative name inside it;
 - a map's `map_dir` (where a stored recording's original sources are) is never read, nor a module it
   names (`Symbolizer::open_held`), also for `sql`'s Perfetto trace; its gzip files expand to at most

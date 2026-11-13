@@ -216,7 +216,9 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some(n) = args.get("update-pr") {
         // Only images the block names: gh appends any other attachment to the end of the body.
         let attach: Vec<std::path::PathBuf> = images.into_iter().filter(|p| p.file_name().and_then(|f| f.to_str()).is_some_and(|f| body.contains(&format!("./{f}")))).collect();
-        let id = data["id"].as_str().unwrap_or(handle);
+        // The block's own markers name its id as `pr::block` writes it (none: empty), never the handle.
+        let id = data["id"].as_str().unwrap_or("");
+        let shown = if id.is_empty() { handle.as_str() } else { id };
         let done = super::pr::update_pr(n, args.get("repo"), id, &body, args.has("force"), &attach, plain.as_deref())?;
         let path = if write { out.display().to_string() } else { "no file (--out writes one)".to_string() };
         let how = match done.images {
@@ -224,9 +226,9 @@ pub fn run(args: &Args) -> Result<Output> {
             k => format!("with {k} image{}", if k == 1 { "" } else { "s" }),
         };
         let text = if done.unchanged {
-            format!("left {} as it was: it already holds this report of {id}; the report is also in {path}\n", done.url)
+            format!("left {} as it was: it already holds this report of {shown}; the report is also in {path}\n", done.url)
         } else {
-            format!("updated {} with {id} ({how}, {}); the report is also in {path}\n", done.url, super::fmt::bytes(body.len() as f64))
+            format!("updated {} with {shown} ({how}, {}); the report is also in {path}\n", done.url, super::fmt::bytes(body.len() as f64))
         };
         return Ok(Output::new(text, json!({ "path": path, "bytes": body.len(), "pr": done.url, "images": done.images, "unchanged": done.unchanged, "seen": done.seen })));
     }

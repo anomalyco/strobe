@@ -1187,6 +1187,8 @@ fn is_inspector_edge(ename: &str) -> bool {
 /// owner-only (`0600`), excluding Web Inspector's own `InjectedScript` / `CommandLineAPI` scaffolding
 /// (rule 2: measure the app, not strobe). Returns total app/engine `self_size` in bytes.
 pub fn convert_webkit_heap(raw_json: &str, out_gz: &Path) -> Result<u64> {
+    // The device's snapshot, nested as deep as it says: refused past `MAX_JSON_DEPTH` first.
+    crate::store::deep_enough(raw_json.as_bytes(), out_gz)?;
     let mut de = serde_json::Deserializer::from_str(raw_json);
     de.disable_recursion_limit();
     let wk: Value = serde::Deserialize::deserialize(&mut de).map_err(|e| Error::msg(format!("WebKit heap snapshot JSON: {e}")))?;
