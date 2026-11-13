@@ -1621,21 +1621,28 @@ fn background_note(s: &Series, blocks: &[Block], at: &LoadImpact) -> Option<Warn
     let own = |b: &Block| ["cpu.app.total", "cpu.process.total"].iter().find_map(|m| b.values.get(*m).copied().filter(|v| v.is_finite())).unwrap_or(100.0);
     let busiest = flagged.iter().map(|b| own(b) + b.values["cpu.foreign.max"]).fold(0.0, f64::max);
     let half = (p.hi - p.lo) / 2.0;
-    let tight = p.kind == VerdictKind::Same || (p.kind.decided() && half <= p.bound);
-    if let Some(cores) = at.cores.filter(|c| busiest <= 100.0 * *c as f64 && tight) {
-        let (half, bound) = (fmt::bound(half, p.relative, half, unit), fmt::bound(p.bound, p.relative, p.bound, unit));
+    // Inside the bound's width, or (a planted A/B's +100%) wholly past the bound: a change no wider
+    // interval turns around.
+    let tight = p.kind == VerdictKind::Same || (p.kind.decided() && (half <= p.bound || p.lo > p.bound || p.hi < -p.bound));
+    let room = at.cores.filter(|c| busiest <= 100.0 * *c as f64);
+    let (half_t, bound_t) = (fmt::bound(half, p.relative, half, unit), fmt::bound(p.bound, p.relative, p.bound, unit));
+    if let Some(cores) = room.filter(|_| tight) {
+        let interval = if half <= p.bound || p.kind == VerdictKind::Same { format!("stayed within ±{half_t} (bound ±{bound_t})") } else { format!("lies wholly past the bound (±{bound_t})") };
         return Some(validity::info(
             "Background",
-            format!(
-                "{rate}{redone}; the target's {cores} physical cores had room for it (at most {busiest:.0}% of a core with the target's own), and the primary's interval stayed within ±{half} (bound ±{bound})"
-            ),
+            format!("{rate}{redone}; the target's {cores} physical cores had room for it (at most {busiest:.0}% of a core with the target's own), and the primary's interval {interval}"),
         ));
     }
-    let impact = match &at.clean {
-        Some((n, c)) if c.kind != p.kind => format!("the {n} pairs without it give another verdict ({})", c.verdict),
-        Some((n, c)) => format!("the {n} pairs without it move the estimate {}", shift(c.estimate - p.estimate)),
-        None if !p.kind.decided() => "the primary is not decided".to_string(),
-        None => format!("fewer than {} pairs ran without it, and the target's cores had no room to spare", at.min_pairs),
+    let impact = match (&at.clean, room) {
+        (Some((n, c)), _) if c.kind != p.kind => format!("the {n} pairs without it give another verdict ({})", c.verdict),
+        (Some((n, c)), _) => format!("the {n} pairs without it move the estimate {}", shift(c.estimate - p.estimate)),
+        (None, _) if !p.kind.decided() => "the primary is not decided".to_string(),
+        (None, Some(_)) => format!("fewer than {} pairs ran without it, and the primary's interval (±{half_t}) is wider than the bound (±{bound_t})", at.min_pairs),
+        (None, None) => format!(
+            "fewer than {} pairs ran without it, and with the target's own it needed {busiest:.0}% of a core, more than {}",
+            at.min_pairs,
+            at.cores.map_or("the target's cores give".to_string(), |c| format!("the target's {c} physical cores"))
+        ),
     };
     Some(validity::warn("Background", format!("{rate}{redone}; {impact}")))
 }
