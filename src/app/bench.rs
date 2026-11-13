@@ -1682,7 +1682,11 @@ fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
     let peak = flagged.iter().map(|b| b.values["cpu.foreign.max"]).fold(0.0, f64::max);
     let steady = metrics::median(&measured) >= BACKGROUND_PCT;
     let light = || -> std::result::Result<(usize, f64), String> {
-        let cores = at.cores.filter(|c| *c >= 2).ok_or("too few of the target's cores are known to say it had room")?;
+        let cores = match at.cores {
+            Some(c) if c >= 2 => c,
+            Some(c) => return Err(format!("the target runs on {c} physical core, too few for other work to have had room beside it")),
+            None => return Err("the OS names no physical cores, so nothing shows the other work had room".into()),
+        };
         if at.split_core {
             return Err("the measured CPUs share physical cores with CPUs outside them, whose work no reading includes".into());
         }
