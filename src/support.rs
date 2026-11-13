@@ -593,8 +593,6 @@ const WIN_TTY_LAUNCH: &str = "ready-0 to ready-300 read Δ 298.6 ms for 300 ms, 
 const LINUX_TTY_LAUNCH: &str =
     "ready-0 to ready-300 read Δ 303.4 ms for 300 ms, 0.4 ms outside ±1.5 ms per edge (the fixture's timer slack and a launch clock that starts early, linux-promo-6); its A/A and A/B pass";
 const LINUX_CHROMIUM_CPU: &str = "every part passed at 0.00% steal (cpu2s 2007.1 ms for 2000 ms, planted +98.39% [+96.90 … +99.70] for +98.30%), but the plant spins on wall time: it needs a fixed-work page (planted.bench.ts --filter page-work)";
-const EXITS_PENDING: &str =
-    "all four parts passed on strobe 0.31.0 (2026-11-13; its evidence is in PENDING_EXITS), and its boundary is the exits case of cleanup/promo-wl's native.bench.ts, which is not on main yet";
 const LINUX_NATIVE_COUNTERS: &str = "burst-1x to burst-2x read cpu.instructions +99.81% [+99.68 … +100.31] for +99.82% and its A/A same, but no refusal of the counter path is seen on this VM (root), and the one seen in --check is wrong (linux-promo-2)";
 const WIN_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on 0.31.0 it read Δ 200.3 ms for 200 ms";
 const LINUX_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on 0.31.0 it read Δ 202.9 ms for 200 ms";
@@ -807,14 +805,6 @@ const MAC_NATIVE_COUNTERS_RUN: Evidence = Evidence {
     reviewed_why: Some(CHANGES_MAC_NATIVE),
 };
 
-/// The windowless native cells of Windows and Linux: all four parts passed, their boundary is the `exits`
-/// case of `cleanup/promo-wl`'s native.bench.ts. Verified once that case is on main.
-pub const PENDING_EXITS: [(Os, Capability, &Evidence); 4] = [
-    (Os::Windows, Capability::ProcessCpu, &WIN_NATIVE_CPU_RUN),
-    (Os::Windows, Capability::ProcessMemory, &WIN_NATIVE_MEMORY_RUN),
-    (Os::Linux, Capability::ProcessCpu, &LINUX_NATIVE_CPU_RUN),
-    (Os::Linux, Capability::ProcessMemory, &LINUX_NATIVE_MEMORY_RUN),
-];
 const CHANGES_NATIVE: &str = "runs decides windowless by launch::app_windowless and checks that the app shows no window before and after its runs, never inside them (e0142531), and e3d0ffc1 walks Native::processes from the proven root (strobe's own child's pid), keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: for strobe's own child with window: false they are the same processes, edges and readings";
 const WIN_NATIVE_CPU_RUN: Evidence = Evidence {
     date: "2026-11-13",
@@ -824,7 +814,7 @@ const WIN_NATIVE_CPU_RUN: Evidence = Evidence {
     known: "cpu.work 399.2 ms vs 400.6 ms (tick-8) and duty 998 ms vs 1000 ms; planted 2x read +100.04% [+99.66 … +100.32] vs +99.71%",
     aa: "tick-4 against itself, 9 pairs: cpu.work −0.02% [−0.26 … +0.14], same (±2%)",
     planted: "tick-4 to tick-8: 199.53 to 399.12 ms, +100.04% [+99.66 … +100.32] for +99.71% with tick-0's 0.58 ms",
-    boundary: "exits, an app that exits before its first run, refused RunIncomplete",
+    boundary: "exits (as run then: a 200 ms spin, which exited before its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, so it exits inside its first run, refused the same way",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };
@@ -836,7 +826,7 @@ const WIN_NATIVE_MEMORY_RUN: Evidence = Evidence {
     known: "memory.app.private +50.10 MiB vs +50 MiB and 100 KiB of page tables (hold-50 to hold-100)",
     aa: "hold-100 against itself: memory.app.private 0.00% [−0.01 … +0.01], same (±2%)",
     planted: "hold-50 to hold-100: 50.96 to 101.06 MiB, +98.31% [+98.29 … +98.33] for +98.30%",
-    boundary: "exits, an app that exits before its first run, refused RunIncomplete",
+    boundary: "exits (as run then: a 200 ms spin, which exited before its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, so it exits inside its first run, refused the same way",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };
@@ -848,7 +838,7 @@ const LINUX_NATIVE_CPU_RUN: Evidence = Evidence {
     known: "cpu.work 401.2 ms vs 401.0 ms (tick-8) and duty 1000.6 ms vs 1000 ms; planted 2x read +99.31% [+98.76 … +99.72] vs +99.48%",
     aa: "tick-4 against itself, 9 pairs: cpu.work −0.20% [−0.48 … +0.10], same (±2%)",
     planted: "tick-4 to tick-8: 201.33 to 401.08 ms, +99.31% [+98.76 … +99.72] for +99.48% with tick-0's 1.04 ms",
-    boundary: "exits, an app that exits during its first run, refused RunIncomplete",
+    boundary: "exits (as run then: a 200 ms spin, which exited during its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, refused the same way",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };
@@ -860,7 +850,7 @@ const LINUX_NATIVE_MEMORY_RUN: Evidence = Evidence {
     known: "memory.app.private +50.00 MiB vs +50 MiB planted (hold-50 to hold-100); hold 150 MB vs 150 MiB + 0.12 MB idle",
     aa: "hold-100 against itself: memory.app.private 0.000% [−0.004 … +0.002], same (±2%)",
     planted: "hold-50 to hold-100: 50.125 to 100.13 MiB, +99.75% [+99.74 … +99.75] for +99.75%",
-    boundary: "exits, an app that exits during its first run, refused RunIncomplete",
+    boundary: "exits (as run then: a 200 ms spin, which exited during its first run) refused RunIncomplete; native.bench.ts's exits now spins 500 ms, refused the same way",
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_NATIVE),
 };
@@ -956,8 +946,20 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::Native, capability: Capability::LaunchSignal, windows: Preview(LAUNCH_SIGNAL), macos: Preview(LAUNCH_SIGNAL), linux: Preview(LAUNCH_SIGNAL) },
     Row { runtime: Runtime::Native, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
     Row { runtime: Runtime::NativeWindowless, capability: Capability::WallAndCounts, windows: Preview(NATIVE_WALL), macos: Preview(MAC_NATIVE_WALL), linux: Preview(NATIVE_WALL) },
-    Row { runtime: Runtime::NativeWindowless, capability: Capability::ProcessCpu, windows: Preview(EXITS_PENDING), macos: Verified(&MAC_NATIVE_CPU_RUN), linux: Preview(EXITS_PENDING) },
-    Row { runtime: Runtime::NativeWindowless, capability: Capability::ProcessMemory, windows: Preview(EXITS_PENDING), macos: Verified(&MAC_NATIVE_MEMORY_RUN), linux: Preview(EXITS_PENDING) },
+    Row {
+        runtime: Runtime::NativeWindowless,
+        capability: Capability::ProcessCpu,
+        windows: Verified(&WIN_NATIVE_CPU_RUN),
+        macos: Verified(&MAC_NATIVE_CPU_RUN),
+        linux: Verified(&LINUX_NATIVE_CPU_RUN),
+    },
+    Row {
+        runtime: Runtime::NativeWindowless,
+        capability: Capability::ProcessMemory,
+        windows: Verified(&WIN_NATIVE_MEMORY_RUN),
+        macos: Verified(&MAC_NATIVE_MEMORY_RUN),
+        linux: Verified(&LINUX_NATIVE_MEMORY_RUN),
+    },
     Row {
         runtime: Runtime::NativeWindowless,
         capability: Capability::HardwareCounters,

@@ -9261,8 +9261,8 @@ verified line exact.
 | `native` · `launch_signal` | preview | preview | preview |
 | `native` · `http_probe` | preview | preview | preview |
 | `native_windowless` · `wall_and_counts` | preview | preview | preview |
-| `native_windowless` · `process_cpu` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/native.bench.ts`, cpu.work 402 ms vs 400.9 ms (tick-8) and cpu.wakes 50.0/s vs 50/s; planted 2x read +100.3% [+98.5 … +101.3]) | preview |
-| `native_windowless` · `process_memory` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, memory.app.private +50.03 MiB vs +50 MiB planted (hold-50 to hold-100)) | preview |
+| `native_windowless` · `process_cpu` | verified (2026-11-13, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/native.bench.ts`, cpu.work 399.2 ms vs 400.6 ms (tick-8) and duty 998 ms vs 1000 ms; planted 2x read +100.04% [+99.66 … +100.32] vs +99.71%) | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/native.bench.ts`, cpu.work 402 ms vs 400.9 ms (tick-8) and cpu.wakes 50.0/s vs 50/s; planted 2x read +100.3% [+98.5 … +101.3]) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/native.bench.ts`, cpu.work 401.2 ms vs 401.0 ms (tick-8) and duty 1000.6 ms vs 1000 ms; planted 2x read +99.31% [+98.76 … +99.72] vs +99.48%) |
+| `native_windowless` · `process_memory` | verified (2026-11-13, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/planted.bench.ts`, memory.app.private +50.10 MiB vs +50 MiB and 100 KiB of page tables (hold-50 to hold-100)) | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, memory.app.private +50.03 MiB vs +50 MiB planted (hold-50 to hold-100)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, memory.app.private +50.00 MiB vs +50 MiB planted (hold-50 to hold-100); hold 150 MB vs 150 MiB + 0.12 MB idle) |
 | `native_windowless` · `hardware_counters` | — | verified (2026-11-12, e93fc36, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cpu.instructions 2x by rate +99.99% vs +100% ±0.25% and 2x by count 1015.08 M vs 1015.27 M; energy.cpu 2x +99.9% [+96.0 … +101.2]) | preview |
 | `native_windowless` · `package_idle` | — | preview | — |
 | `native_windowless` · `gpu` | preview | preview | preview |
@@ -9324,8 +9324,9 @@ what was built but not yet run on a device is in §21.
 
 **After 0.33.0**
 
-- 2026-11-13 · cleanup/support-verified · 16 cells verified from the promotion runs: Windows x64 cli
-  process CPU and memory; Linux x64 cli process CPU and memory, script wall time and CPU; macOS arm64
+- 2026-11-13 · cleanup/support-verified · 20 cells verified from the promotion runs: Windows x64 cli
+  process CPU and memory, windowless native CPU and memory; Linux x64 cli process CPU and memory,
+  script wall time and CPU, windowless native CPU and memory; macOS arm64
   cli wall time, CPU and memory, script wall time and CPU, headed Chromium frames and input latency,
   windowless native CPU, memory and counters (21.1's table, each cell's `Evidence` in
   `src/support.rs`); `Evidence.reviewed_at` and `reviewed_why`; `support-matrix.ts --check` fails
