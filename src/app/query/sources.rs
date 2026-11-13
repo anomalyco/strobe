@@ -16,6 +16,27 @@ fn stored(id: &str) -> Option<std::path::PathBuf> {
     dir.join("meta.json").is_file().then_some(dir)
 }
 
+/// A kept profile of this launch, not just another recording with the same short ID.
+pub(super) fn kept_frame_profiles(rec: &Rec) -> Option<String> {
+    let exp = rec.meta["experiment"].as_str().filter(|id| rec.stored() && store::plain_id(id))?;
+    let r = store::read_json(&crate::host::paths::experiments().join(exp).join("result.json")).ok()?;
+    if r["id"] != exp || r["kind"] != "check" {
+        return None;
+    }
+    let ids: BTreeSet<_> = r["series"]
+        .as_array()?
+        .iter()
+        .filter(|s| launches(s).any(|id| id == rec.id) && rec.meta["query_case"].as_str().is_none_or(|q| s["label"] == q))
+        .filter_map(|s| s["attribution"].as_str())
+        .filter(|id| {
+            let Some(dir) = stored(id) else { return false };
+            let p = Rec::open(&dir);
+            p.meta["id"] == *id && p.meta["experiment"] == exp && p.meta["probes"] == "attribution" && dir.join("trace.pftrace").is_file()
+        })
+        .collect();
+    (!ids.is_empty()).then(|| ids.into_iter().map(|id| format!("strobe query {id} frames")).collect::<Vec<_>>().join(" · "))
+}
+
 pub(super) fn forward(rec: Rec, label: &str, view: &str, args: &Args, top: usize) -> Result<Output> {
     let id = rec.id.clone();
     let mut out = recording(rec, view, args, top).map_err(|mut e| {
@@ -76,16 +97,9 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
         match recording_view(Rec::open(&dir), view, &args, top, true) {
             Ok(_) => commands.push(format!("strobe query {id} {tail}")),
             Err(e) => {
-                // Compare whole ID words, not substrings of a different recording's handle.
-                let canonical = |s: &str| {
-                    s.split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-                        .map(|word| {
-                            let end = word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').len();
-                            if &word[..end] == id { format!("<recording>{}", &word[end..]) } else { word.to_owned() }
-                        })
-                        .collect::<String>()
-                };
-                if distinct.insert((e.code, e.validator().map(|v| v.name()), canonical(&e.message), e.hint.as_deref().map(canonical))) {
+                // Shared refusals have recording-neutral text. Different trace paths or fixes naming
+                // different profiles are case-specific: preserve those rows rather than return the first.
+                if distinct.insert((e.code, e.validator().map(|v| v.name()), e.message.clone(), e.hint.clone())) {
                     reasons.push((label, id, e));
                 }
             }
@@ -95,8 +109,8 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
         if reasons.len() == 1 {
             return Err(reasons.remove(0).2);
         }
-        let code = if reasons.iter().any(|(_, _, e)| e.code == 1) {
-            1
+        let code = if let Some(code) = [124, 255, 1].into_iter().find(|c| reasons.iter().any(|(_, _, e)| e.code == *c)) {
+            code
         } else if reasons.iter().all(|(_, _, e)| e.code == 4) {
             4
         } else {

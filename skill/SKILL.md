@@ -680,6 +680,10 @@ export default bench({
   late (a status line), and leave a clock out of the reset check with `ignore: [[col, row, cols, rows]]`.
   A program that prints and exits is `RunIncomplete` ("the app exited (code 0)…"): time it with `cli()`.
   A tty target's `cwd` is where its program runs, under the variant's folder.
+  `tty.latency` ends at the first grid change; `tty.settle` at the last before 50 ms of stillness.
+  Neither proves the answer is finished. Pieces over 50 ms apart or output more than 1 s late can look
+  like the next input's answer. Wait for `idle` after a two-redraw click. For slow or debounced work,
+  time a phase ending at the final `text=…` or app state.
 - A directory or git variant runs strobe.json `build` and launches its `output`; `gpuCache: "warm"`
   (the default) keeps each variant's GPU shader caches across launches. A debug build is refused.
   A `--check` line ending `· cold shader cache` holds a shader compile a warm bench will not.

@@ -726,12 +726,17 @@ fn follow_installed() {
         if stamp.is_some() && stamp == same {
             continue;
         }
+        // The new copy's up probes browsers and devices. Defer the read and setup while a shell
+        // or MCP bench is registered, including the gaps between its blocks.
+        if !super::bench::slot::list().is_empty() {
+            continue;
+        }
         let Some(installed) = file_build(&daemon) else { continue };
         if installed == build_id() {
             same = stamp;
             continue;
         }
-        if super::up::daemon_benching() {
+        if !super::bench::slot::list().is_empty() {
             continue;
         }
         if super::up::spawn_detached(&dir.join(name("strobe")), &["up", "--skip", "deep,mcp,calibrate"]).is_ok() {
@@ -799,6 +804,9 @@ fn report_html(handle: &str) -> Result<String> {
     let dir = super::open::stored(handle).ok_or_else(|| Error::usage("not found"))?;
     let experiment = store::is_experiment(&dir);
     let (view, mut data) = if experiment { ("experiment", store::read_json(&dir.join("result.json"))?) } else { ("recording", store::read_json(&dir.join("meta.json"))?) };
+    if !experiment {
+        super::report::recording_display(&dir, &mut data);
+    }
     super::report::attach_videos(&mut data, (!experiment).then_some(dir.as_path()), &super::report::Videos::Daemon)?;
     let html = super::report::html(view, &data);
     // Looked at: marked used, so a report viewed every day is not pruned (only once it was found).

@@ -23,22 +23,35 @@ impl Facts {
 }
 
 pub(super) fn read(trace: &Path, meta: &Value) -> Result<Facts> {
-    let dir = trace.parent().ok_or_else(|| Error::msg("trace has no recording folder"))?;
+    let Some(dir) = trace.parent().and_then(|p| p.canonicalize().ok()) else { return compute(trace, meta) };
     let root = crate::host::paths::run().join("probe");
-    let key = Sha256::digest(std::fs::canonicalize(dir)?.as_os_str().as_encoded_bytes());
+    let key = Sha256::digest(dir.as_os_str().as_encoded_bytes());
     let file = root.join(format!("{key:x}.json"));
-    let stamp = || -> Result<String> { Ok(format!("v1:{}:{}:{}", crate::host::disk::generation(trace)?, crate::host::disk::generation(&dir.join("meta.json"))?, meta["token"])) };
-    let generation = stamp()?;
-    let cached = || std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Facts>(&b).ok()).filter(|f| f.generation == generation);
-    if let Some(facts) = cached() {
+    let stamp = || Some(format!("v2:{}:{}:{}:{}", crate::host::disk::generation(trace)?, crate::host::disk::generation(&dir.join("meta.json"))?, meta["token"], meta["probes"]));
+    let lock = || -> std::io::Result<std::fs::File> {
+        std::fs::create_dir_all(&root)?;
+        let f = std::fs::File::options().read(true).write(true).create(true).truncate(false).open(file.with_extension("lock"))?;
+        f.lock()?;
+        Ok(f)
+    };
+    let (Ok(_lock), Some(generation)) = (lock(), stamp()) else { return compute(trace, meta) };
+    if let Some(facts) = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Facts>(&b).ok()).filter(|f| f.generation == generation) {
         return Ok(facts);
     }
-    std::fs::create_dir_all(&root)?;
-    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(file.with_extension("lock"))?;
-    lock.lock()?;
-    if let Some(facts) = cached() {
-        return Ok(facts);
+    let mut facts = compute(trace, meta)?;
+    if let Some(after) = stamp() {
+        if generation != after {
+            return Err(Error::msg("the recording changed while its trace was being read; query it again"));
+        }
+        facts.generation = generation;
+        if let Ok(bytes) = serde_json::to_vec(&facts) {
+            let _ = store::write_atomic(&file, &bytes);
+        }
     }
+    Ok(facts)
+}
+
+fn compute(trace: &Path, meta: &Value) -> Result<Facts> {
     let token = meta["token"].as_str().unwrap_or("");
     let prefix = format!("strobe:{token}:");
     let tracked = if meta["probes"] == "attribution" { rec::TRACKED_RUN } else { "0" };
@@ -50,10 +63,5 @@ pub(super) fn read(trace: &Path, meta: &Value) -> Result<Facts> {
             runs.insert(k.to_owned(), row[1].as_deref() == Some("1"));
         }
     }
-    if generation != stamp()? {
-        return Err(Error::msg("the recording changed while its trace was being read; query it again"));
-    }
-    let facts = Facts { generation, runs };
-    store::write_atomic(&file, &serde_json::to_vec(&facts)?)?;
-    Ok(facts)
+    Ok(Facts { generation: String::new(), runs })
 }

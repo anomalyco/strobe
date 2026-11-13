@@ -122,7 +122,8 @@ impl Rec {
 
     /// A recording whose meta.json is read already: a folder a person named (`query::by_path`), held
     /// while it is read.
-    pub(crate) fn with_meta(dir: &Path, meta: Value, named: Option<store::Named>) -> Rec {
+    pub(crate) fn with_meta(dir: &Path, mut meta: Value, named: Option<store::Named>) -> Rec {
+        super::super::record::omit_refused_display(&mut meta);
         let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
         // Its id as the file says when that is a plain id, else its folder's: it names caches and shows
         // in text, so never a path (`store::plain_id`).

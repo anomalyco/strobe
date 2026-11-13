@@ -716,7 +716,7 @@ impl<'a, T: Terminal> Driver<'a, T> {
                 let o = opts(1);
                 let name = args.first().and_then(Value::as_str).unwrap_or("");
                 let down = call == "down";
-                if let Some(b) = keys::mouse_button(name) {
+                let t = if let Some(b) = keys::mouse_button(name) {
                     let modes = self.mouse_mode(call, false)?;
                     let at = match o.get("at").filter(|v| !v.is_null()) {
                         Some(v) => self.locate(v, timeout(&o))?,
@@ -727,11 +727,12 @@ impl<'a, T: Terminal> Driver<'a, T> {
                     // A button let go is its own call, so its own action: its answer (a drop) is owed.
                     let t = self.write(&mouse_bytes(&modes, button_code(b), at, !down, self.held.get())?, Input { sample: down, rested, action: true, ..Input::of("mouse") })?;
                     self.pressed.set(down.then_some(b));
-                    self.until(&o, t)?;
+                    t
                 } else {
                     let (m, k) = keys::parse_chord(name)?;
                     let modifier = matches!(k, Key::Named(n) if n.modifier());
-                    if modifier && m == Mods::default() {
+                    let bare = modifier && m == Mods::default();
+                    let bytes = if bare {
                         let mut held = self.held.get();
                         let on = |b: &mut bool| *b = down;
                         match k {
@@ -743,18 +744,32 @@ impl<'a, T: Terminal> Driver<'a, T> {
                         // The keys it marks carry it; only a program that asked for every key sees it alone.
                         let bytes = key_bytes(if down { held } else { self.held.get() }, k, &self.tty.modes(), !down)?;
                         self.held.set(held);
-                        if !bytes.is_empty() {
-                            self.write(&bytes, Input { action: true, ..Input::of("key") })?;
-                        }
+                        bytes
                     } else {
-                        let bytes = key_bytes(self.held.get().or(m), k, &self.tty.modes(), !down)?;
-                        if !bytes.is_empty() {
-                            let rested = down && self.settle();
-                            let t = self.write(&bytes, Input { sample: down, rested, action: true, ..Input::of("key") })?;
-                            self.until(&o, t)?;
-                        }
+                        key_bytes(self.held.get().or(m), k, &self.tty.modes(), !down)?
+                    };
+                    if bytes.is_empty() {
+                        let at = self.tty.now_ns();
+                        crate::driver::each_until(&o, timeout(&o), |opts, first| {
+                            let since = if first { at } else { self.tty.now_ns() };
+                            let u = &opts["until"];
+                            if u == "frame" || u.get("state").is_some() {
+                                let why = format!("page.{call}({name:?}): the terminal sends no bytes for this key edge without the program requesting key event or all-keys reporting");
+                                if owed_until(&self.inputs.borrow(), &self.tty.updates(0, u64::MAX)).is_none_or(|t| t <= since) {
+                                    return Err(Error::usage(why).hint("wait for the frame or state on the key that sends input"));
+                                }
+                                return self.until_one(opts, since).map_err(|e| if e.code == 124 { e.hint(why) } else { e });
+                            }
+                            self.until_one(opts, since)
+                        })?;
+                        return Ok(Value::Bool(true));
+                    } else {
+                        let sample = down && !bare;
+                        let rested = sample && self.settle();
+                        self.write(&bytes, Input { sample, rested, action: true, ..Input::of("key") })?
                     }
-                }
+                };
+                self.until(&o, t)?;
             }
             "click" => {
                 let o = opts(1);
@@ -1130,7 +1145,7 @@ pub fn pair_observing(inputs: &[Input], updates: &[Update], stretches: &[&crate:
                 out.busy += i.sample as usize;
                 continue;
             }
-            // Its window ends at the next action (a modifier going down in it is part of the next key).
+            // Its window ends at the next action, including a bare modifier if it sent bytes.
             let next = actions.get(actions.partition_point(|s| *s <= i.sent_ns)).copied().unwrap_or(u64::MAX);
             // An untimed edge ends attribution even if the next timed part contains no new input.
             let gap = gaps.iter().find(|g| g.0 > i.sent_ns).map_or(u64::MAX, |g| g.0);

@@ -139,6 +139,7 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     } else {
         // Its meta.json as read above (once).
+        recording_display(&dir, &mut data);
         let rec = Rec::with_meta(&dir, data.clone(), None);
         if let Some(a) = attribution(&rec, None) {
             data["attribution"] = a;
@@ -251,6 +252,17 @@ fn article(word: &str) -> &'static str {
     if word.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
 }
 
+/// A refused display can still have compositor reports. Metadata alone cannot prove the trace
+/// is present (especially in a copy), so make the viewer's link decision while reading the folder.
+pub(super) fn recording_display(dir: &std::path::Path, data: &mut Value) {
+    super::record::omit_refused_display(data);
+    if data["frames_refused"].is_string() {
+        data["pipeline_frames_available"] = json!(
+            data["wir"] != true && data["launch"] != true && data["traced"] != false && data["engine"].as_str().is_none_or(|e| e == "chromium") && store::held_file(dir, "trace.pftrace").is_some()
+        );
+    }
+}
+
 /// Where a report's videos play from.
 pub enum Videos<'a> {
     /// In the file itself while they add up to at most `EMBED_BYTES`, else copied beside it into
@@ -262,6 +274,13 @@ pub enum Videos<'a> {
 
 /// A recording's video: its id, its file and its `video.json`.
 type Filmed = (String, std::path::PathBuf, Value);
+
+pub(super) fn film(dir: &std::path::Path) -> Option<(std::path::PathBuf, Value)> {
+    let j = store::read_json(&store::held_file(dir, "video.json")?).ok()?;
+    let name = j["file"].as_str().filter(|n| !n.is_empty() && !n.starts_with('.') && !n.contains('/'))?;
+    let file = store::held_file(dir, name)?;
+    store::regular(&file).then_some((file, j))
+}
 
 /// A player to show: where (None: the recording's own; a series' index) and its sides by role.
 type Player = (Option<usize>, Vec<(&'static str, Filmed)>);
@@ -275,9 +294,7 @@ pub fn attach_videos(data: &mut Value, recording: Option<&std::path::Path>, src:
     // A recording's video, in its own folder: the file its video.json names by a plain name there alone,
     // and in a folder a person named a regular file of its own (`store::held_file`: no link out of it).
     let filmed = |rec: &str, dir: &std::path::Path| -> Option<Filmed> {
-        let j = store::read_json(&store::held_file(dir, "video.json")?).ok()?;
-        let name = j["file"].as_str().filter(|n| !n.is_empty() && !n.starts_with('.') && !n.contains('/'))?;
-        let file = store::held_file(dir, name)?;
+        let (file, j) = film(dir)?;
         Some((rec.to_string(), file, j))
     };
     let side = |rec: &str| -> Option<Filmed> { filmed(rec, &store::resolve(rec).ok()?) };
@@ -751,6 +768,7 @@ fn markdown(data: &Value, path: Option<&std::path::Path>, recording: bool) -> St
         super::record::summary_text(data)
     };
     let text = if let Some(p) = path { query::path_text(&text, data, p, recording) } else { text };
+    let text = if recording { text } else { query::recording_links(&text, path, &data["id"]) };
     format!("```\n{}\n```\n", text.trim_end())
 }
 

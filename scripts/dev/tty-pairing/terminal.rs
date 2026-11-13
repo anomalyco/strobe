@@ -31,9 +31,11 @@ pub struct Program {
     pub script: Vec<(u64, Response)>,
     pub wire: RefCell<Vec<Wire>>,
     pub events: RefCell<Vec<Update>>,
+    pub frame_hits: RefCell<Vec<(u64, u64)>>,
     // Work already scheduled. Bytes queued during the same job are read together.
     batch: Cell<Option<(u64, u64, Option<u64>)>>,
     pub conpty: bool,
+    pub kitty: u16,
     pub echo: bool,
     pub cursor: (u16, u16),
     cells: Vec<vt100::Cell>,
@@ -54,8 +56,10 @@ impl Program {
             script: vec![(delay, shape)],
             wire: Default::default(),
             events: Default::default(),
+            frame_hits: Default::default(),
             batch: Cell::new(None),
             conpty: false,
+            kitty: 0,
             echo: false,
             cursor: (1, 0),
             cells,
@@ -121,7 +125,7 @@ impl Terminal for Program {
         self.echo
     }
     fn modes(&self) -> Modes {
-        Modes { mouse: Mouse::Motion, sgr: true, app_cursor: false, kitty: 0, bracketed_paste: true }
+        Modes { mouse: Mouse::Motion, sgr: true, app_cursor: false, kitty: self.kitty, bracketed_paste: true }
     }
     fn write(&self, b: &[u8]) -> Result<u64> {
         Ok(self.accept(b))
@@ -152,7 +156,11 @@ impl Terminal for Program {
     fn first_change(&self, since: u64, deadline: Instant) -> Option<u64> {
         let deadline = self.deadline(deadline);
         let hit = self.events.borrow().iter().filter(|u| u.start_ns >= since && u.commit_ns <= deadline).map(|u| u.commit_ns).min();
-        self.clock.set(self.now_ns().max(hit.unwrap_or(deadline)));
+        // The reader stamps the commit before waking the writer. A later write cannot share that stamp.
+        self.clock.set(self.now_ns().max(hit.map_or(deadline, |t| t + 1)));
+        if let Some(t) = hit {
+            self.frame_hits.borrow_mut().push((since, t));
+        }
         hit
     }
     fn grid<R>(&self, f: impl FnOnce(&Grid) -> R) -> R {
