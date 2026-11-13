@@ -7155,7 +7155,10 @@ pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)
     b.values.remove("cpu.foreign");
     b.values.remove("cpu.foreign.max");
     let foreign: Vec<_> = runs.iter().filter_map(RunLoad::foreign).collect();
-    if runs.iter().any(|r| r.subtick) {
+    // For commands the parent's spawn and exit observation can outlast the child's reported
+    // lifetime. Neither that extra time nor the launch's setup improves the resolution inside it.
+    let short_reported = cfg!(target_os = "linux") && b.run_ms.iter().any(|&ms| ms > 0.0 && ms < host::IDLE_TICK_NS as f64 / 1e6);
+    if short_reported || runs.iter().any(|r| r.subtick) {
         b.values.insert("background.subtick".into(), 1.0);
     }
     if foreign.len() != b.run_ms.len() {
