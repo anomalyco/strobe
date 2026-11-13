@@ -10,7 +10,9 @@ them, so two targets that differ only in it differ by exactly that:
   ?click=<ms>  a click on #btn asks for an animation frame, which spins <ms> and then changes #btn's colour: with
                <ms> a whole number of vsyncs, interaction latency differs by exactly it (a spin in the click
                handler itself read about 7 ms less on a 60 Hz Mac)
-  known.spin(ms) busy-waits <ms> on the main thread (page.eval) -->
+  known.spin(ms) busy-waits <ms> on the main thread (page.eval)
+  known.work(n)  runs <n> iterations of one integer loop on the main thread: work by count, which preemption or a
+                 hypervisor's steal does not shorten (a wall-time spin does less CPU then) -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -28,7 +30,12 @@ them, so two targets that differ only in it differ by exactly that:
 const q = new URLSearchParams(location.search)
 const num = (k) => Number(q.get(k) ?? 0)
 function spin(ms) { const end = performance.now() + ms; while (performance.now() < end) {} }
-window.known = { spin }
+// A 32-bit linear congruential step (Math.imul keeps it in int32): the same work every iteration, nothing allocated,
+// and its result is returned so the loop cannot be dropped. With ?work, called 20 times at load (about 16 ms), so
+// V8 has optimized it before any run (its first calls run slower code: a 60 M call took 65 ms, then 46, in node).
+function work(n) { let x = 1; for (let i = 0; i < n; i++) x = (Math.imul(x, 1664525) + 1013904223) | 0; return x }
+if (q.has("work")) for (let i = 0; i < 20; i++) work(1e6)
+window.known = { spin, work }
 setTimeout(() => {
   spin(num("delay"))
   const main = document.createElement("main")

@@ -18,10 +18,7 @@ use std::path::Path;
 pub(super) fn presents(dir: &Path) -> Result<Presents> {
     let path = dir.join("presents.json.gz");
     let mut text = String::new();
-    std::io::Read::read_to_string(
-        &mut flate2::read::GzDecoder::new(std::fs::File::open(&path).map_err(|_| Error::usage("this recording has no OS present events (no access, or a block without a window)"))?),
-        &mut text,
-    )?;
+    std::io::Read::read_to_string(&mut crate::store::gunzip(&path).map_err(|_| Error::usage("this recording has no OS present events (no access, or a block without a window)"))?, &mut text)?;
     Ok(serde_json::from_str(&text)?)
 }
 

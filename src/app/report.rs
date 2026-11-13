@@ -8,61 +8,76 @@ use crate::store;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// The report view a handle names when the command line names none (`report exp_…`): a tracked series
-/// or a bench file's history, an experiment, or a recording; a JSON file by what it holds.
-pub fn view_of(handle: &str) -> &'static str {
-    if handle.starts_with("ser_") || handle.ends_with(".bench.ts") {
-        return "history";
+/// What a report is of, read once: an experiment's result or a recording's meta.json, from the store by
+/// its handle, or from a path exactly as `query` reads one (`query::by_path`, the one resolver).
+struct Source {
+    /// The folder that holds it.
+    dir: std::path::PathBuf,
+    data: Value,
+    experiment: bool,
+    /// The file it was read from, when named by its path: nothing is written beside it.
+    file: Option<std::path::PathBuf>,
+    /// A folder a person named, held while it is read (`store::Named`).
+    _named: Option<store::Named>,
+}
+
+impl Source {
+    fn of(handle: &str) -> Result<Source> {
+        Ok(match query::by_path(handle)? {
+            Some(query::ByPath::Experiment(file, data, named)) => {
+                Source { dir: file.parent().map(std::path::Path::to_path_buf).unwrap_or_default(), data, experiment: true, file: Some(file), _named: named }
+            }
+            Some(query::ByPath::Recording(dir, data, named)) => Source { file: Some(dir.join("meta.json")), dir, data, experiment: false, _named: named },
+            None => {
+                let dir = store::resolve(handle)?;
+                let experiment = store::is_experiment(&dir);
+                let data = store::read_json(&dir.join(if experiment { "result.json" } else { "meta.json" }))?;
+                Source { dir, data, experiment, file: None, _named: None }
+            }
+        })
     }
-    let path = std::path::Path::new(handle);
-    if path.is_file() {
-        return if store::read_json(path).is_ok_and(|v| v["series"].is_array()) { "experiment" } else { "recording" };
-    }
-    if store::resolve(handle).is_ok_and(|d| store::is_experiment(&d)) { "experiment" } else { "recording" }
 }
 
 pub fn run(args: &Args) -> Result<Output> {
     let first = args.pos.first().ok_or_else(|| {
         Error::usage("report [experiment|recording|history] <handle>: an experiment (exp_…), a recording (rec_…), a tracked series (ser_…), or the path of a result.json or meta.json")
     })?;
-    // `report exp_…`: the view follows from the handle, as MCP's does.
-    if !matches!(first.as_str(), "experiment" | "recording" | "history") {
+    let named_view = matches!(first.as_str(), "experiment" | "recording" | "history");
+    // `report ser_…` or `report <file>.bench.ts`: a tracked series' history.
+    if first == "history" || !named_view && (first.starts_with("ser_") || first.ends_with(".bench.ts")) {
+        if named_view {
+            return super::history::report(args);
+        }
         let mut a = args.clone();
-        a.pos.insert(0, view_of(first).to_string());
-        return run(&a);
-    }
-    let view = first;
-    if view == "history" {
-        return super::history::report(args);
+        a.pos.insert(0, "history".into());
+        return super::history::report(&a);
     }
     // A format no report writes is refused before anything is read or written (an HTML once took its place).
     const FORMATS: [&str; 6] = ["html", "md", "pr", "summary", "card", "badge"];
     if let Some(f) = args.get("format").filter(|f| !FORMATS.contains(f)) {
         return Err(Error::usage(format!("--format {f}: an experiment's report writes html (default), md, pr, summary, card or badge; a recording's html or md")));
     }
-    let handle = args.pos.get(1).ok_or_else(|| Error::usage(format!("report {view} needs a handle: strobe report {view} <exp_…|rec_…|path/to/result.json>")))?;
-    // A result.json or meta.json named by its path (an edited copy, a hand-written fixture) is read as it
-    // is: nothing is written beside it, and what a report writes goes to strobe's own run folder.
-    let file = std::path::Path::new(handle).is_file().then(|| std::path::PathBuf::from(handle));
-    let (dir, mut data, experiment) = match &file {
-        Some(f) => {
-            let data = store::read_json(f)?;
-            let experiment = data["series"].is_array();
-            (f.parent().map(std::path::Path::to_path_buf).unwrap_or_default(), data, experiment)
-        }
-        None => {
-            let dir = store::resolve(handle)?;
-            let experiment = store::is_experiment(&dir);
-            let data = store::read_json(&dir.join(if experiment { "result.json" } else { "meta.json" }))?;
-            (dir, data, experiment)
-        }
-    };
+    let handle =
+        if named_view { args.pos.get(1) } else { Some(first) }.ok_or_else(|| Error::usage(format!("report {first} needs a handle: strobe report {first} <exp_…|rec_…|path/to/result.json>")))?;
+    // A result.json or meta.json named by its path (an edited copy, a hand-written fixture), or the folder
+    // of either, is read as `query` reads it: nothing is written beside it, and what a report writes goes
+    // to strobe's own run folder. `report <handle>` takes its view from what it holds.
+    let source = Source::of(handle)?;
+    let held = if source.experiment { "experiment" } else { "recording" };
+    let view = if named_view { first.as_str() } else { held };
+    if view != held {
+        let word = query::path_word(std::path::Path::new(handle));
+        return Err(Error::usage(format!("{handle} is {} {held}, not {} {view}: strobe report {held} {word} (or strobe report {word})", article(held), article(view))));
+    }
+    let Source { dir, mut data, experiment, file, _named } = source;
     if let Some(f) = args.get("format").filter(|f| !experiment && !matches!(*f, "html" | "md")) {
         return Err(Error::usage(format!("--format {f} writes an experiment's result: give an exp_… handle (a recording's report is html or md)")));
     }
     let scratch = match &file {
         Some(_) => {
-            let d = crate::host::paths::run().join("reports").join(data["id"].as_str().filter(|i| !i.is_empty()).unwrap_or("file"));
+            // Its id only when that is a plain id; else a hash of where it is: never a path the file says.
+            let name = data["id"].as_str().filter(|i| store::plain_id(i)).map_or_else(|| format!("file-{}", super::query::folder_key(&dir)), str::to_string);
+            let d = crate::host::paths::run().join("reports").join(name);
             std::fs::create_dir_all(&d)?;
             d
         }
@@ -72,8 +87,10 @@ pub fn run(args: &Args) -> Result<Output> {
     // their median with an interval; a PR block, card and badge state a comparison, so none is drawn.
     let compares = data["series"].as_array().is_none_or(|a| a.iter().any(|s| s["kind"] != "blocks"));
     if let (true, false, Some(format @ ("pr" | "card" | "badge"))) = (experiment, compares, args.get("format")) {
-        return Err(Error::usage(format!("{handle} measured one build (bench --blocks): it compares nothing, so there is no --format {format} of it"))
-            .hint(format!("strobe report experiment {handle} (HTML) or --format md shows its blocks and their median with an interval; a tracked point shows in strobe history")));
+        return Err(Error::usage(format!("{handle} measured one build (bench --blocks): it compares nothing, so there is no --format {format} of it")).hint(format!(
+            "strobe report experiment {} (HTML) or --format md shows its blocks and their median with an interval; a tracked point shows in strobe history",
+            query::path_word(std::path::Path::new(handle))
+        )));
     }
     // A check or a pixels run compares no timed pairs: a PR block, card or badge would state a verdict
     // it does not have (rule 1). Its HTML report shows what it did.
@@ -81,7 +98,7 @@ pub fn run(args: &Args) -> Result<Output> {
         && let Some(kind @ ("check" | "pixels")) = data["kind"].as_str()
     {
         return Err(Error::usage(format!("{handle} is a --{} run: it decides nothing, so there is no --format {format} of it", if kind == "check" { "check" } else { "pixels-only" }))
-            .hint(format!("strobe report experiment {handle} (HTML) shows it; a verdict comes from a comparison (--base, --aa)")));
+            .hint(format!("strobe report experiment {} (HTML) shows it; a verdict comes from a comparison (--base, --aa)", query::path_word(std::path::Path::new(handle)))));
     }
     // What the PR block and card call the sides (`pr::side_names`): the names given, else by whether
     // head is the pull request's own head commit.
@@ -121,7 +138,8 @@ pub fn run(args: &Args) -> Result<Output> {
             }
         }
     } else {
-        let rec = Rec::open(&dir);
+        // Its meta.json as read above (once).
+        let rec = Rec::with_meta(&dir, data.clone(), None);
         if let Some(a) = attribution(&rec, None) {
             data["attribution"] = a;
             if let Ok(i) = query::insights(&rec) {
@@ -198,7 +216,9 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some(n) = args.get("update-pr") {
         // Only images the block names: gh appends any other attachment to the end of the body.
         let attach: Vec<std::path::PathBuf> = images.into_iter().filter(|p| p.file_name().and_then(|f| f.to_str()).is_some_and(|f| body.contains(&format!("./{f}")))).collect();
-        let id = data["id"].as_str().unwrap_or(handle);
+        // The block's own markers name its id as `pr::block` writes it (none: empty), never the handle.
+        let id = data["id"].as_str().unwrap_or("");
+        let shown = if id.is_empty() { handle.as_str() } else { id };
         let done = super::pr::update_pr(n, args.get("repo"), id, &body, args.has("force"), &attach, plain.as_deref())?;
         let path = if write { out.display().to_string() } else { "no file (--out writes one)".to_string() };
         let how = match done.images {
@@ -206,9 +226,9 @@ pub fn run(args: &Args) -> Result<Output> {
             k => format!("with {k} image{}", if k == 1 { "" } else { "s" }),
         };
         let text = if done.unchanged {
-            format!("left {} as it was: it already holds this report of {id}; the report is also in {path}\n", done.url)
+            format!("left {} as it was: it already holds this report of {shown}; the report is also in {path}\n", done.url)
         } else {
-            format!("updated {} with {id} ({how}, {}); the report is also in {path}\n", done.url, super::fmt::bytes(body.len() as f64))
+            format!("updated {} with {shown} ({how}, {}); the report is also in {path}\n", done.url, super::fmt::bytes(body.len() as f64))
         };
         return Ok(Output::new(text, json!({ "path": path, "bytes": body.len(), "pr": done.url, "images": done.images, "unchanged": done.unchanged, "seen": done.seen })));
     }
@@ -225,6 +245,10 @@ pub fn run(args: &Args) -> Result<Output> {
         return Ok(Output::new(body.clone(), json!({ "path": write.then_some(path), "bytes": body.len(), "markdown": body })));
     }
     Ok(Output::new(format!("{path} · {size}\n"), json!({ "path": path, "bytes": body.len() })))
+}
+
+fn article(word: &str) -> &'static str {
+    if word.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
 }
 
 /// Where a report's videos play from.
@@ -248,19 +272,20 @@ const EMBED_BYTES: u64 = 16 << 20;
 /// Each video the report shows (SPEC §11.2): a recording's own, or each series' base and head (their
 /// `video` recordings), as `video_player` beside it: every side's `video.json` and where it plays from.
 pub fn attach_videos(data: &mut Value, recording: Option<&std::path::Path>, src: &Videos) -> Result<()> {
-    let side = |rec: &str| -> Option<Filmed> {
-        let dir = store::resolve(rec).ok()?;
-        let j = store::read_json(&dir.join("video.json")).ok()?;
-        let file = dir.join(j["file"].as_str()?);
-        file.is_file().then(|| (rec.to_string(), file, j))
+    // A recording's video, in its own folder: the file its video.json names by a plain name there alone,
+    // and in a folder a person named a regular file of its own (`store::held_file`: no link out of it).
+    let filmed = |rec: &str, dir: &std::path::Path| -> Option<Filmed> {
+        let j = store::read_json(&store::held_file(dir, "video.json")?).ok()?;
+        let name = j["file"].as_str().filter(|n| !n.is_empty() && !n.starts_with('.') && !n.contains('/'))?;
+        let file = store::held_file(dir, name)?;
+        Some((rec.to_string(), file, j))
     };
+    let side = |rec: &str| -> Option<Filmed> { filmed(rec, &store::resolve(rec).ok()?) };
     // (where to put it, its sides by role)
     let mut players: Vec<Player> = Vec::new();
     if let Some(dir) = recording {
-        let id = data["id"].as_str().unwrap_or("").to_string();
-        if dir.join("video.json").is_file()
-            && let Some(s) = side(&id)
-        {
+        let id = data["id"].as_str().filter(|i| store::plain_id(i)).unwrap_or("recording").to_string();
+        if let Some(s) = filmed(&id, dir) {
             players.push((None, vec![("recording", s)]));
         }
     }

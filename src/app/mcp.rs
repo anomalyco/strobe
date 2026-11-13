@@ -429,9 +429,11 @@ fn to_args(name: &str, input: &Value) -> Result<(Vec<String>, u64, Option<String
         }
         "report" => {
             let h = get("handle").ok_or_else(|| Error::usage("report needs handle"))?;
-            // A tracked series or a bench file's history, an experiment, a recording, or a result's file.
-            let view = get("view").unwrap_or_else(|| super::report::view_of(&h).into());
-            a.push(view);
+            // A tracked series or a bench file's history, an experiment, a recording, or a result's file:
+            // without a view, `report <handle>` takes it from what the handle holds (read once).
+            if let Some(view) = get("view") {
+                a.push(view);
+            }
             a.push(h);
         }
         "look" => {
@@ -789,7 +791,10 @@ fn report_html(handle: &str) -> Result<String> {
     let experiment = store::is_experiment(&dir);
     let (view, mut data) = if experiment { ("experiment", store::read_json(&dir.join("result.json"))?) } else { ("recording", store::read_json(&dir.join("meta.json"))?) };
     super::report::attach_videos(&mut data, (!experiment).then_some(dir.as_path()), &super::report::Videos::Daemon)?;
-    Ok(super::report::html(view, &data))
+    let html = super::report::html(view, &data);
+    // Looked at: marked used, so a report viewed every day is not pruned (only once it was found).
+    store::used(&dir);
+    Ok(html)
 }
 
 /// `GET /video/<rec>`: a recording's video, with byte ranges (a player seeks through them).
@@ -800,6 +805,9 @@ fn video(req: &http::Request, rec: &str) -> http::Response {
         Some(d.join(name))
     });
     let Some((file, len)) = file.and_then(|f| Some((f.clone(), std::fs::metadata(&f).ok().filter(|m| m.is_file())?.len()))) else { return http::Response::text(404, "not found") };
+    if let Some(d) = file.parent() {
+        store::used(d);
+    }
     let kind = if file.extension().is_some_and(|e| e == "webm") { "video/webm" } else { "video/mp4" };
     // The bytes are read from the file as they are sent (`Response::file`), never held whole.
     let body = |status: u16, a: u64, n: u64| http::Response { file: Some((file.clone(), a, n)), ..http::Response::new(status, kind, Vec::new()) };

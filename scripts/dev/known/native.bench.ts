@@ -15,7 +15,11 @@
 //   map       150 MiB of a file mapped read-only and read: file-backed, not private
 //   idle      the program sleeping: the base the memory cases are above
 //   spawner   a child of 100 ms CPU every 200 ms, each ending inside the run: cpu.work about 500 ms (or refused)
-//   ready-0 / ready-300  launch until it prints READY: the two launch.ready differ by 300 ms
+//   exits     the program spins 500 ms of CPU and exits, inside its first run (a 200 ms spin ended before run 1 on
+//             Windows, in strobe's speed check): refused RunIncomplete (the app's processes are gone before the
+//             run ends), never a cpu.work or memory read of what is left
+//   ready-0 / ready-300  launch until it prints READY after a busy-wait of 0 or 300 ms (no timer slack): the two
+//             launch.ready differ by 300 ms, and ready-300's cpu.work holds the 300 ms busy-wait
 //   tick-0 / tick-4 / tick-8  planted work: one thread waking 50 times a second, spinning 0, 4 or 8 ms of its CPU
 //             each wake: cpu.work o, 200 + o and 400 + o ms, where o is the wakes' own cost (tick-0 reads it), and
 //             cpu.wakes about 50/s on all three. tick-8 over tick-4 is a planted 2x: exactly (400 + o) / (200 + o)
@@ -36,6 +40,7 @@ export default bench({
     map: run(["mapfile", "150", "600000"]),
     idle: run(["sleep", "600000"]),
     spawner: run(["spawner", "100", "100", "600"]),
+    exits: run(["spin", "500"]),
     "ready-0": run(["ready", "0", "READY"]),
     "ready-300": run(["ready", "300", "READY"]),
     "tick-0": run(["tick", "50", "0", "600"]),
@@ -46,6 +51,7 @@ export default bench({
     duty: { targets: ["duty"], ...wait("cpu.work") },
     wake: { targets: ["wake"], ...wait("cpu.wakes") },
     spawner: { targets: ["spawner"], ...wait("cpu.work") },
+    exits: { targets: ["exits"], ...wait("cpu.work") },
     tick: { targets: ["tick-0", "tick-4", "tick-8"], ...wait("cpu.work") },
     memory: { targets: ["hold", "shm", "map", "idle"], ...wait("memory.app.private") },
     ready: {

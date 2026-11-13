@@ -219,6 +219,9 @@ impl Frame {
 pub struct Symbolizer {
     dir: PathBuf,
     index: Value,
+    /// Whether a map's original sources may be read from disk where the recording says they are
+    /// (`map_dir`): only for a recording strobe keeps. One named by its path reads only what it holds.
+    disk: bool,
     maps: RefCell<BTreeMap<String, Option<SourceMap>>>,
     texts: RefCell<BTreeMap<PathBuf, Vec<String>>>,
     scopes: RefCell<BTreeMap<String, Option<Scopes>>>,
@@ -233,7 +236,21 @@ struct Scopes {
 impl Symbolizer {
     pub fn open(dir: &Path) -> Symbolizer {
         let index = crate::store::read_json(&dir.join("maps").join("index.json")).unwrap_or(Value::Null);
-        Symbolizer { dir: dir.to_path_buf(), index, maps: RefCell::new(BTreeMap::new()), texts: RefCell::new(BTreeMap::new()), scopes: RefCell::new(BTreeMap::new()) }
+        Symbolizer { dir: dir.to_path_buf(), index, disk: true, maps: RefCell::new(BTreeMap::new()), texts: RefCell::new(BTreeMap::new()), scopes: RefCell::new(BTreeMap::new()) }
+    }
+
+    /// `open` of a recording strobe does not keep (named by its path): its maps and their own sources,
+    /// never a file on disk its index names.
+    pub fn open_held(dir: &Path) -> Symbolizer {
+        Symbolizer { disk: false, ..Symbolizer::open(dir) }
+    }
+
+    /// A file of the recording's `maps/` folder an index entry names (`maps/<n>.map.gz`): only a plain
+    /// file name there, never a path elsewhere, and in a folder a person named a regular file of its own
+    /// (`store::held_file`: no link or junction out of it).
+    fn held(&self, entry: &Value) -> Option<PathBuf> {
+        let name = entry.as_str()?.strip_prefix("maps/")?;
+        (!name.is_empty() && !name.starts_with('.') && !name.contains('/')).then(|| crate::store::held_file(&self.dir, &format!("maps/{name}"))).flatten()
     }
 
     /// A call site from a trace stack (`url`, 0-based line and column, the minified function name): the
@@ -258,13 +275,13 @@ impl Symbolizer {
 
     /// The start (0-based line and column) and minified name of the innermost function around a position.
     fn enclosing(&self, url: &str, line0: i64, col0: i64) -> Option<(i64, i64, String)> {
-        let file = self.index[url]["scopes"].as_str()?;
+        let file = self.held(&self.index[url]["scopes"])?;
         let mut cache = self.scopes.borrow_mut();
         let scopes = cache
             .entry(url.to_string())
             .or_insert_with(|| {
                 let mut text = String::new();
-                flate2::read::GzDecoder::new(std::fs::File::open(self.dir.join(file)).ok()?).read_to_string(&mut text).ok()?;
+                crate::store::gunzip(&file).ok()?.read_to_string(&mut text).ok()?;
                 let v: Value = serde_json::from_str(&text).ok()?;
                 let lines = v["lines"].as_array()?.iter().filter_map(Value::as_i64).collect();
                 let functions = v["functions"].as_array()?.iter().filter_map(|f| Some((f[0].as_i64()?, f[1].as_i64()?, f[2].as_str()?.to_string()))).collect();
@@ -300,12 +317,11 @@ impl Symbolizer {
         let mut maps = self.maps.borrow_mut();
         let map = maps.entry(url.to_string()).or_insert_with(|| {
             let mut text = String::new();
-            let f = std::fs::File::open(self.dir.join(entry["map"].as_str().unwrap_or(""))).ok()?;
-            flate2::read::GzDecoder::new(f).read_to_string(&mut text).ok()?;
+            crate::store::gunzip(&self.held(&entry["map"])?).ok()?.read_to_string(&mut text).ok()?;
             SourceMap::parse(&text)
         });
         let Some(o) = map.as_ref().and_then(|m| m.lookup(line0 as usize, col0, if minified.starts_with('(') { "" } else { minified })) else { return plain };
-        let file = entry["map_dir"].as_str().map(|d| normalize(&Path::new(d).join(strip_scheme(&o.source)))).filter(|p| p.is_file());
+        let file = entry["map_dir"].as_str().filter(|_| self.disk).map(|d| normalize(&Path::new(d).join(strip_scheme(&o.source)))).filter(|p| p.is_file());
         // The original declaration decides when strobe can read it (on disk, else the source the map
         // carries): at an arrow function's position the map's name is often its first parameter
         // (`(event) =>` minified to `e=>`), and some bundlers write no names at all.

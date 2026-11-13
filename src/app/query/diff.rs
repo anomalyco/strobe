@@ -25,12 +25,12 @@ pub fn run(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize) -> Result<Outp
             Some(m) => format!("{} on iOS Web Inspector ({m})", r.id),
             None => format!("{} on {}", r.id, r.meta["engine"].as_str().unwrap_or("desktop")),
         };
-        return Err(not_comparable(&format!("{} and {}", desc(a), desc(b)), view, &[&a.id, &b.id]));
+        return Err(not_comparable(&format!("{} and {}", desc(a), desc(b)), view, &[&a.handle(), &b.handle()]));
     }
     if let (Some(x), Some(y)) = (implementation(a), implementation(b))
         && x.0 != y.0
     {
-        return Err(not_comparable(&format!("{} ran {} and {} ran {}", a.id, x.1, b.id, y.1), view, &[&a.id, &b.id]));
+        return Err(not_comparable(&format!("{} ran {} and {} ran {}", a.id, x.1, b.id, y.1), view, &[&a.handle(), &b.handle()]));
     }
     run_with(a, b, view, args, top, None)
 }
@@ -38,6 +38,11 @@ pub fn run(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize) -> Result<Outp
 /// The side of an implementation comparison a recording ran (SPEC §9.10): its target and the name
 /// texts call it. None for any other recording.
 fn implementation(rec: &Rec) -> Option<(String, String)> {
+    // A recording named by its path is read as it is: an experiment its meta.json names is not this
+    // machine's to look up (or mark used).
+    if !rec.stored() {
+        return None;
+    }
     let exp = crate::store::resolve(rec.meta["experiment"].as_str()?).ok()?;
     let r = crate::store::read_json(&exp.join("result.json")).ok()?;
     if r["comparison"] != "implementations" {
@@ -111,12 +116,12 @@ fn run_with(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize, plan_runs: Op
             Ok(d.output(a, b, top))
         }
         "style" => style(a, b, top),
-        "threads" if a.meta["wir"] == true || b.meta["wir"] == true => {
-            Err(Refusal::new(ValidatorId::NotOnThisOs, "iOS gives an unprivileged USB client no per-thread CPU or wake counters").fix(format!("strobe query {}..{} hotspots", a.id, b.id)).into())
-        }
+        "threads" if a.meta["wir"] == true || b.meta["wir"] == true => Err(Refusal::new(ValidatorId::NotOnThisOs, "iOS gives an unprivileged USB client no per-thread CPU or wake counters")
+            .fix(format!("strobe query {} hotspots", super::pair_word(a, b)))
+            .into()),
         "frames" if a.meta["wir"] == true || b.meta["wir"] == true => {
             Err(Refusal::new(ValidatorId::EngineUnsupported, "WebKit's Web Inspector reports main-thread RenderingFrame records, not screen presentation times or dropped refreshes")
-                .fix(format!("strobe query {}..{} layout · strobe query {}..{} hotspots", a.id, b.id, a.id, b.id))
+                .fix(format!("strobe query {} layout · strobe query {} hotspots", super::pair_word(a, b), super::pair_word(a, b)))
                 .into())
         }
         "threads" => threads(a, b, top),
@@ -129,17 +134,14 @@ fn run_with(a: &Rec, b: &Rec, view: &str, args: &Args, top: usize, plan_runs: Op
 }
 
 /// `query <exp> <view>`: the view of each series' base and head attribution recordings.
-pub fn experiment(result: &Value, view: &str, args: &Args, top: usize) -> Result<Output> {
+pub fn experiment(result: &Value, exp: &str, view: &str, args: &Args, top: usize) -> Result<Output> {
     if result["comparison"] == "implementations" {
         let recs: Vec<&str> = result["series"].as_array().into_iter().flatten().flat_map(|s| ["base", "head"].map(|r| s["attribution"][r].as_str())).flatten().collect();
         let name = |i: usize| result["variants"][i]["name"].as_str().unwrap_or(if i == 0 { "base" } else { "head" }).to_string();
         let what = format!("{} compares {} with {}", result["id"].as_str().unwrap_or("this experiment"), name(1), name(0));
         let mut e = not_comparable(&what, view, &recs);
         if recs.is_empty() {
-            e = e.hint(format!(
-                "this experiment kept no attribution recordings (bench --why always keeps one per side); its per-side numbers: strobe query {} summary",
-                result["id"].as_str().unwrap_or("")
-            ));
+            e = e.hint(format!("this experiment kept no attribution recordings (bench --why always keeps one per side); its per-side numbers: strobe query {exp} summary"));
         }
         return Err(e);
     }
@@ -391,7 +393,11 @@ impl Checkout {
         if let Some(r) = self.roots.get(&dir) {
             return r.clone();
         }
-        let found = std::path::Path::new(&dir).ancestors().find(|a| !a.as_os_str().is_empty() && a.join(".git").exists()).map(|a| normal_path(&a.display().to_string()));
+        // Looked for on this disk only for a recording's own frames: never another machine's path, never
+        // while a folder a person named is read (`store::may_look`).
+        let found = crate::store::may_look(&dir)
+            .then(|| std::path::Path::new(&dir).ancestors().find(|a| !a.as_os_str().is_empty() && a.join(".git").exists()).map(|a| normal_path(&a.display().to_string())))
+            .flatten();
         self.roots.insert(dir, found.clone());
         found
     }
@@ -740,7 +746,7 @@ pub fn series_insights(base: &Rec, head: &Rec, plan_runs: Option<u64>) -> Result
             movers.push(json!({
                 "kind": kind.what(), "function": format!("{} {at}", row.name), "base_per_run": row.v[0], "head_per_run": row.v[1], "unit": kind.unit(), "title": line,
                 "ci95": d.ci(row),
-                "handles": [format!("strobe query {}..{} {}", base.id, head.id, kind.view()), format!("strobe query {} {}", head.id, kind.view())],
+                "handles": [format!("strobe query {} {}", super::pair_word(base, head), kind.view()), format!("strobe query {} {}", head.handle(), kind.view())],
             }));
         }
     }

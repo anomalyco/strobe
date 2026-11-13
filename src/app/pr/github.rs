@@ -119,7 +119,8 @@ pub fn update_pr(n: &str, repo: Option<&str>, id: &str, block: &str, force: bool
         }
         // gh finds `./name` beside the body file.
         let dir = files.first().and_then(|p| p.parent()).map(std::path::Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
-        let tmp = dir.join(format!("strobe-pr-{id}-{}.md", std::process::id()));
+        // Its name from the id only when that is a plain id (the id is the result's word): never a path.
+        let tmp = dir.join(format!("strobe-pr-{}-{}.md", Some(id).filter(|i| crate::store::plain_id(i)).unwrap_or("experiment"), std::process::id()));
         std::fs::write(&tmp, &body)?;
         let path = tmp.display().to_string();
         let mut args = vec!["edit".to_string(), n.to_string(), "--body-file".to_string(), path];
