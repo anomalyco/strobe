@@ -1642,6 +1642,12 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
         if blocks.iter().any(unread_load) {
             return Some(validity::warn("Background", "other work could not be separated from the target in every measured run; rerun with readable CPU accounting"));
         }
+        if blocks.iter().any(|b| b.values.contains_key("background.subtick")) {
+            return Some(validity::warn(
+                "Background",
+                "the measured CPU window was shorter than a guest idle-accounting tick; the foreign CPU reading is a lower bound, not evidence the CPUs were quiet; measure a longer unit of work",
+            ));
+        }
         return (!at.discarded.is_empty()).then(|| {
             if at.primary.is_none_or(|p| !p.kind.decided()) {
                 return validity::warn("Background", format!("a pair was retried for one-sided load and the primary is undecided; {fix}"));
@@ -1660,6 +1666,9 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
     let warn = |why: &str| Some(validity::warn("Background", format!("{head}; {why}; {fix}")));
     if blocks.iter().any(unread_load) {
         return warn("other work could not be separated from the target in every measured run");
+    }
+    if blocks.iter().any(|b| b.values.contains_key("background.subtick")) {
+        return warn("a measured window was below the guest idle counter's resolution; its foreign CPU reading is only a lower bound");
     }
     let Some(p) = at.primary else { return warn("the blocks' values include it") };
     if p.kind == VerdictKind::Refused {
@@ -7050,12 +7059,19 @@ impl LoadStart {
     }
     fn stop(self) -> RunLoad {
         let ms = self.at.elapsed().as_secs_f64() * 1000.0;
-        RunLoad { ms, busy_ms: self.busy.and_then(|b| b.stop(self.cpus)).map(|b| b.pct() * ms / 100.0), stolen_ms: self.steal.pct(Some(self.cpus)).map(|s| s * ms / 100.0), ..Default::default() }
+        RunLoad {
+            ms,
+            busy_ms: self.busy.and_then(|b| b.stop(self.cpus)).map(|b| b.pct() * ms / 100.0),
+            stolen_ms: self.steal.pct(Some(self.cpus)).map(|s| s * ms / 100.0),
+            subtick: cfg!(target_os = "linux") && ms < host::IDLE_TICK_NS as f64 / 1e6,
+            ..Default::default()
+        }
     }
 }
 
 #[derive(Default, Clone, Copy)]
 pub struct RunLoad {
+    pub subtick: bool,
     pub ms: f64,
     pub busy_ms: Option<f64>,
     pub stolen_ms: Option<f64>,
@@ -7074,6 +7090,7 @@ impl RunLoad {
             return;
         }
         self.ms += stretch.ms;
+        self.subtick |= stretch.subtick;
         self.busy_ms = self.busy_ms.zip(stretch.busy_ms).map(|(a, b)| a + b);
         self.stolen_ms = self.stolen_ms.zip(stretch.stolen_ms).map(|(a, b)| a + b);
     }
@@ -7098,6 +7115,16 @@ pub fn terminal_end(first: RunLoad, after_wait: RunLoad, answered: bool) -> RunL
     if answered { after_wait } else { first }
 }
 
+/// Checks can share a launch, but never contribute a timed observation to a performance claim.
+pub fn measures_host_load(verdict_block: bool, cases: usize, phone: bool, mac: bool) -> bool {
+    verdict_block && cases == 1 && !phone && !mac
+}
+
+/// No counters are opened for a discarded launch, so none can occupy index zero of the measured runs.
+pub fn measured_launch<T>(measured: bool, start: impl FnOnce() -> Option<T>) -> Option<T> {
+    if measured { start() } else { None }
+}
+
 /// Use the measured runs only. An unread target is not a quiet CPU and not a foreign process.
 pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)>>) -> Block {
     if loads.is_empty() {
@@ -7111,6 +7138,9 @@ pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)
     b.values.remove("cpu.foreign");
     b.values.remove("cpu.foreign.max");
     let foreign: Vec<_> = runs.iter().filter_map(RunLoad::foreign).collect();
+    if runs.iter().any(|r| r.subtick) {
+        b.values.insert("background.subtick".into(), 1.0);
+    }
     if foreign.len() != b.run_ms.len() {
         b.values.insert("background.unread".into(), 1.0);
     }
@@ -7796,18 +7826,10 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         // The HTTP probe its setup asks for (SPEC §8.9), on strobe's own CPUs; a batch's launch runs none.
         ctx.runner.http_probe(cases.len() == 1 && x.probes_http(), ctx.runner_pin.or_else(thread_pin));
         let quota = host::cgroup_throttled_ns();
-        // Other work during a timed block's runs (SPEC §10.2 `Background`), read by its `Hooks` over each
-        // run: the hypervisor's steal (Linux), and where nothing is pinned (a VM's few vCPUs, `--pin
-        // none`) every CPU's busy time, which the runs' own reading (`cpu.foreign`, on pinned CPUs)
-        // cannot give. The processes around the block only name the busiest.
-        let timed = x.measures_time() && cases.len() == 1 && ctx.phone.is_none();
-        let unpinned = timed && ctx.pin.is_none() && !cfg!(target_os = "macos");
-        RUN_LOADS.set((timed && !cfg!(target_os = "macos")).then(|| RunLoads {
-            cpus: ctx.pin.unwrap_or_else(|| host::topology().all()),
-            pin: ctx.pin,
-            runner: ctx.runner.pid(),
-            runs: Default::default(),
-        }));
+        // Read busy time and steal at the timed edges. The process snapshots only supply names.
+        let timed = measures_host_load(x.measures_time(), cases.len(), ctx.phone.is_some(), cfg!(target_os = "macos"));
+        let unpinned = timed && ctx.pin.is_none();
+        RUN_LOADS.set(timed.then(|| RunLoads { cpus: ctx.pin.unwrap_or_else(|| host::topology().all()), pin: ctx.pin, runner: ctx.runner.pid(), runs: Default::default() }));
         let procs = unpinned.then(|| (host::now_ns(), host::all_processes()));
         let launch = any_launch(ctx, cases, v, pair, x);
         let loads = RUN_LOADS.take().map(|l| l.runs.take()).unwrap_or_default();
@@ -8362,6 +8384,7 @@ pub fn retain_probe_context(b: &mut Block) {
                 | "cpu.foreign.max"
                 | "steal.pct"
                 | "background.unread"
+                | "background.subtick"
                 | "background.own.max"
         )
     });

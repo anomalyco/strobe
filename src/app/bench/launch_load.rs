@@ -29,7 +29,7 @@ impl LaunchLoad {
     /// Arm only the real launch. The target's spawn helper invokes this one-shot hook immediately
     /// before spawning, after preparing its home and command. Failures cannot leak it to another launch.
     pub(super) fn observe<T>(measured: bool, spawn: impl FnOnce() -> T) -> (T, Option<Self>) {
-        if !measured || RUN_LOADS.with_borrow(Option::is_none) {
+        if measured_launch(measured, || RUN_LOADS.with_borrow(|l| l.as_ref().map(|_| ()))).is_none() {
             return (spawn(), None);
         }
         let start = std::rc::Rc::new(RefCell::new(None));

@@ -53,7 +53,8 @@ fn read_run(timed: &[RunLoad], warmup: usize) -> Block {
 pub fn run(logs: Option<&Path>) {
     let p = cmp("run.duration");
     let a = impact(&p, 8);
-    let raw = |ms: f64, own: f64, foreign: f64| RunLoad { ms, busy_ms: Some(own + foreign * ms / 100.0), own_ms: Some(own), observer_ms: 0.0, stolen_ms: Some(0.0) };
+    let raw = |ms: f64, own: f64, foreign: f64| RunLoad { ms, busy_ms: Some(own + foreign * ms / 100.0), own_ms: Some(own), observer_ms: 0.0, stolen_ms: Some(0.0), subtick: false };
+    expect("short guest window: lower bound not proof of quiet", background_note(&[read_run(&[RunLoad { subtick: true, ..raw(2., 1., 0.) }], 0)], &a), "warn");
     for row in ["page", "attached app", "native windowed", "native windowless", "script", "terminal", "command/exec"] {
         let during = raw(2.0, 1.0, 75.0);
         let only_own = raw(2.0, 1.0, 0.0);
@@ -80,7 +81,7 @@ pub fn run(logs: Option<&Path>) {
     for (first, second) in [(0., 200.), (200., 0.)] {
         let measured = raw(2., 1., second);
         // Launch warmup is not enqueued. The measured launch is at index 0, not at the warmup offset for run blocks.
-        let launches = [(false, raw(2., 1., first)), (true, measured)].into_iter().filter_map(|(measure, r)| measure.then_some(r)).collect::<Vec<_>>();
+        let launches = [(false, raw(2., 1., first)), (true, measured)].into_iter().filter_map(|(measure, r)| strobe::app::bench::measured_launch(measure, || Some(r))).collect::<Vec<_>>();
         assert_eq!(read_run(&launches, 0).values["cpu.foreign.max"], second);
         for primary_order in [true, false] {
             let mut b = read_run(&[raw(2., 1., first)], 0);
@@ -90,6 +91,23 @@ pub fn run(logs: Option<&Path>) {
         }
     }
     println!("launch pair 0: measured only; blocks/track merge: 200% in either pass, both primary orders");
+    for (row, timed, cases, phone, mac, want) in [
+        ("comparison", true, 1, false, false, true),
+        ("implementations (per role)", true, 1, false, false, true),
+        ("blocks/track", true, 1, false, false, true),
+        ("check", false, 1, false, false, false),
+        ("repeat check", false, 1, false, false, false),
+        ("batch check", false, 3, false, false, false),
+        ("leak/attribution/pixels", false, 1, false, false, false),
+        ("phone", true, 1, true, false, false),
+        ("macOS", true, 1, false, true, false),
+    ] {
+        assert_eq!(strobe::app::bench::measures_host_load(timed, cases, phone, mac), want);
+        println!("{row}: measure host load = {want}");
+    }
+    let mut old = Block::default();
+    take_metrics(&mut old, &read_run(&[raw(2., 1., 0.)], 0), |_| true);
+    expect("missing pass plus measured zero", background_note(&[old], &a), "warn");
     expect("resume pre-load checkpoint", background_note(&[Block::default()], &a), "warn");
     expect("resume measured quiet checkpoint", background_note(&[read_run(&[raw(2., 1., 0.)], 0)], &a), "nothing");
     let phone = LoadImpact { expects_load: false, ..impact(&p, 8) };
@@ -137,7 +155,7 @@ pub fn run(logs: Option<&Path>) {
     let mut a = impact(&p, 8);
     a.judged.extend(family.iter().filter(|c| judged_secondary(c)).map(|c| (c, None)));
     expect("Holm discarded frame secondary", background_note(&blocks(16, |i| if i < 2 { 35. } else { 0. }), &a), "info");
-    let measured = RunLoad { ms: 100., busy_ms: Some(177.), observer_ms: 2., own_ms: Some(100.), stolen_ms: Some(3.) };
+    let measured = RunLoad { ms: 100., busy_ms: Some(177.), observer_ms: 2., own_ms: Some(100.), stolen_ms: Some(3.), subtick: false };
     let mut b = read_run(&[RunLoad::default(), measured], 1);
     assert_eq!(b.values["cpu.foreign.max"], 75.);
     retain_probe_context(&mut b);

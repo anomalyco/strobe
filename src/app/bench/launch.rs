@@ -311,7 +311,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             at0 = Some((super::super::record::per_process(&procs), host::ended_marks(&pids, browser.profile().as_deref())));
             cpu0 = procs.iter().map(|p| p.cycles).sum();
             // From strobe's send on the host's wall clock, the clock the page's `until` time is on.
-            load = measured.then(|| super::LaunchLoad::start(&[])).flatten();
+            load = super::measured_launch(measured, || super::LaunchLoad::start(&[]));
             let at = epoch_ms();
             page.start_navigation(&first)?;
             at

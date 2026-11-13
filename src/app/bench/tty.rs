@@ -977,7 +977,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         }
         let lapped = Instant::now();
         let clock = host::tsc();
-        let (tty, load) = Tty::spawn_observed(&tspec, ctx.pin, super::thread_pin(), |p| if timed { super::LaunchLoad::start(p) } else { None })?;
+        let (tty, load) = Tty::spawn_observed(&tspec, ctx.pin, super::thread_pin(), |p| super::measured_launch(timed, || super::LaunchLoad::start(p)))?;
         ctx.target_qos = host::background_qos(Some(tty.pid));
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         let deadline = Instant::now() + timeout;
