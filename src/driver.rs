@@ -1015,6 +1015,11 @@ fn with_mods(pointer: Vec<Value>, mods: i64) -> Result<Value> {
 }
 
 /// No selector given: `""`, or none at all.
+/// A burst press on the current focus skips even the settle inside `focus`.
+pub fn press_needs_focus(options: &Value) -> bool {
+    Typing::of(options) != Typing::Burst || !no_selector(&options["selector"])
+}
+
 fn no_selector(sel: &Value) -> bool {
     sel.is_null() || sel.as_str() == Some("")
 }
@@ -1746,12 +1751,14 @@ impl Driver {
             }
             "press" => {
                 let o = opts(1);
-                self.focus(&o["selector"], &o)?;
+                let burst = Typing::of(&o) == Typing::Burst;
+                if press_needs_focus(&o) {
+                    self.focus(&o["selector"], &o)?;
+                }
                 let (mods, key) = keys::parse_chord(&s(0))?;
                 self.before_input(&o)?;
                 self.stroke(key, cdp_mods(mods))?;
                 // `burst: true`: a key sent before the last one showed (a chord's next key), as a burst's.
-                let burst = Typing::of(&o) == Typing::Burst;
                 if burst && let Some(s) = self.inputs.borrow_mut().last_mut() {
                     s.burst = true;
                 }

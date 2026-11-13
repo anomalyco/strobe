@@ -8579,13 +8579,19 @@ so nothing needs a display: it runs on a locked session and on a server alike (`
   (`SIGWINCH`, `ResizePseudoConsole`); `"restore"` the block's start size. Selectors are text on the
   grid (`text=`, `text==` a whole row, `index=`), points cells (`[col, row]` from 0, or `norm`).
 - **Latency.** Before a measured input the grid must hold still 50 ms after its last change and the
-  last input (at most 300 ms, else the input is `busy`, no sample). `tty.latency` is from the input to
-  the first update that began after it, changed cells and began before the next input (else
-  `silent`); a click's from its press when the press changed the grid within 50 ms, else from its
-  release (both edges are inputs, so a release's redraw never counts as the press's). The click into
-  an element before keys (`type(sel)`, `press({ selector })`) is never a sample. `tty.settle` is to
-  the last such update, once the grid then held still 50 ms. Typing paces each key on its change, as
-  §7.4 does on frames. On Windows ConPTY's console host redraws its buffer at a resize before the
+  last input (at most 300 ms, else the input is `busy`, no sample). `tty.latency` is time from input
+  to the first change of cells on that grid, **not necessarily time to the finished answer**. A click
+  sends both edges in one write; use `down` and `up` for an explicit hold. A focus click before a key
+  is an input but not a sample. `tty.settle` ends at the last change before 50 ms of stillness.
+  Neither metric takes output from a reset or across an untimed edge. An open synchronized frame
+  is not still. If inputs overrun an unanswered input, strobe refuses both metrics for the block.
+  Measured input requires raw mode without local echo (checked on Unix, a contract on Windows).
+  **Wire limit:** a second part more than 50 ms after the first, or an answer more than one second
+  late, can look exactly like a subsequent key's own answer. Strobe can print a number in that
+  case. For an echo followed by debounced results, wait for the final `text=…` or app state and
+  time that phase. For a click that redraws on press and again on release, wait for `idle`, not
+  just `frame`; if the second redraw can also outlast idle, wait for its final text instead.
+  On Windows ConPTY's console host redraws its buffer at a resize before the
   program hears of it, so a resize is no latency sample there (`NotOnThisOs` when a
   case's only inputs were resizes), `until: "frame"` on a resize is refused, and `tty.settle` counts a
   resize only when a change followed the host's: one after which only the host drew refuses
@@ -8603,8 +8609,8 @@ so nothing needs a display: it runs on a locked session and on a server alike (`
   input (a `press` without `until`), before the program draws its answer: then the run's end waits
   for that answer (its first change, then the grid still 50 ms, each within 1 s), so `run.duration`,
   `cpu.work`, `io.*`, `cpu.wakes`, `count.*`, `app.*` and its output (`tty.updates`, `tty.frames`,
-  `tty.bytes`, `tty.cells`) all cover one span; no answer within 1 s, or one that never holds still,
-  keeps the run's own end. A run whose last input was answered already (`until: "frame"`) ends at
+  `tty.bytes`, `tty.cells`) all cover one span. No answer within 1 s keeps the run's own end. If an
+  answer came but kept drawing, the run includes it and the bounded wait. A run whose last input was answered already (`until: "frame"`) ends at
   once, and an untimed wait (at most 1 s) for the grid to hold still lets that input's settle be
   judged. A run that ended in an untimed stretch keeps its end. Before, ten keys each answered 20 ms
   later by one frame read 9 frames a run and a tenth sample `silent`, and one key alone was refused

@@ -12,3 +12,5 @@ path = "pairing.rs"
 
 [dependencies]
 strobe = { path = "../../.." }
+serde_json = "1" # The runner's page-call wire arguments.
+vt100 = "0.18" # Build the same cells as the real terminal for text locators.

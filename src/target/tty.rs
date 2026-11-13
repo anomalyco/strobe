@@ -941,6 +941,27 @@ mod win {
                     return Err(Error::msg(format!("CreatePseudoConsole failed (0x{hr:08x}): ConPTY needs Windows 10 1809 or later")));
                 }
                 let host_pids: Vec<u32> = hosts().into_iter().filter(|p| !before.contains(p)).collect();
+                if let Some(mask) = cpus.filter(|m| *m != 0) {
+                    // Its cycles are subtracted from busy time on these CPUs. Never pin an
+                    // unidentified process or proceed with the host running on the runner's CPUs.
+                    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION};
+                    let pinned = if let [pid] = host_pids.as_slice() {
+                        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, 0, *pid);
+                        if h.is_null() {
+                            false
+                        } else {
+                            let ok = hosts().contains(pid) && SetProcessAffinityMask(h, mask as usize) != 0;
+                            CloseHandle(h);
+                            ok
+                        }
+                    } else {
+                        false
+                    };
+                    if !pinned {
+                        ClosePseudoConsole(hpc);
+                        return Err(Error::refused("RunIncomplete", "could not identify and pin the new console host on the target's CPUs", "retry the terminal launch or use --pin none"));
+                    }
+                }
                 let mut size = 0usize;
                 InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
                 let mut list = vec![0u8; size];
