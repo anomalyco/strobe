@@ -210,17 +210,21 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         return Err(Error::msg(format!("`{line}` exited with {}{}", usage.code, if tail.is_empty() { String::new() } else { format!(":\n{tail}") })));
     }
     if !usage.left.is_empty() {
-        let names: Vec<String> = usage.left.iter().take(5).map(|(p, n)| format!("{n} (pid {p})")).collect();
+        let one = usage.left.len() == 1;
+        let names: Vec<String> = usage.left.iter().take(5).map(|(p, n)| if n.is_empty() { format!("pid {p}") } else { format!("{n} (pid {p})") }).collect();
+        let more = usage.left.len().saturating_sub(5);
         return Err(Error::refused(
             "RunIncomplete",
             format!(
-                "`{line}` exited and left {} running: {}; {} not counted whole, so strobe ended {}",
-                if usage.left.len() == 1 { "a process" } else { "processes" },
+                "`{line}` exited while {} it started {} still running: {}{}; strobe ended {}, because the time and CPU read at its exit did not cover {}",
+                if one { "a process" } else { "processes" },
+                if one { "was" } else { "were" },
                 names.join(", "),
-                if usage.left.len() == 1 { "what it did is" } else { "what they did is" },
-                if usage.left.len() == 1 { "it" } else { "them" }
+                if more > 0 { format!(" and {more} more") } else { String::new() },
+                if one { "it" } else { "them" },
+                if one { "it" } else { "them" }
             ),
-            "make the command wait for what it starts (no background jobs or daemons)",
+            "wait for background jobs before the command exits (sh -c '… & wait'), quote an `&` that belongs to a URL or string (\"http://…?a=1&b=2\"), use `start /wait` rather than `start` on Windows, or turn off a tool's persistent daemon (for example --no-daemon)",
         ));
     }
     let mut metrics: BTreeMap<String, (f64, Option<Direction>)> = BTreeMap::new();

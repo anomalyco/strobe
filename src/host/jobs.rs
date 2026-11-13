@@ -372,6 +372,20 @@ pub struct Reading {
     pub names: BTreeMap<(u32, u64), String>,
 }
 
+/// Whether process `pid` (one a job lists) has exited: its handle is signalled, or no process has the
+/// pid any more. One that cannot be opened for another reason counts as running.
+pub fn exited_pid(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if h.is_null() {
+        return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
+    }
+    let exited = unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0;
+    unsafe { CloseHandle(h) };
+    exited
+}
+
 /// A job's process counts: ever in it, and running now.
 fn counts(job: isize) -> Option<(u32, u32)> {
     let mut a: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };

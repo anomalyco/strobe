@@ -297,6 +297,22 @@ impl Launch {
         LAUNCHES.lock().unwrap_or_else(|e| e.into_inner()).push((pid, home.map(super::spawn::home_key), self.path.clone()));
         self
     }
+
+    /// The processes running in the cgroup and below it now: not a zombie or a dead task, which has
+    /// ended and only waits to be reaped. What a launch's command left there is in it whatever it did
+    /// to leave its group and stamp (`setsid` and a cleared environment): only privilege moves a process
+    /// out of a cgroup.
+    pub fn running(&self) -> Vec<u32> {
+        let state = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rfind(')').and_then(|i| s[i + 1..].split_whitespace().next().map(str::to_string)));
+        pids(&self.path).unwrap_or_default().into_iter().filter(|&p| state(p).is_some_and(|s| !matches!(s.as_str(), "Z" | "X" | "x"))).collect()
+    }
+
+    /// The CPU of everything that ran in the cgroup (ns, from `cpu.stat`'s `usage_usec`), the ended
+    /// processes' too: those the command did not wait for, which no `rusage` of it holds.
+    pub fn usage_ns(&self) -> Option<u64> {
+        let stat = std::fs::read_to_string(self.path.join("cpu.stat")).ok()?;
+        stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse::<u64>().ok()).map(|us| us * 1000)
+    }
 }
 
 impl Drop for Launch {

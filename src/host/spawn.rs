@@ -961,27 +961,22 @@ pub struct Usage {
     pub write_bytes: Option<u64>,
     /// Why there are no IO bytes, when there are none.
     pub io_refused: Option<String>,
-    /// Processes still running when the command exited (pid, name), after a short grace: strobe ended
-    /// them, and what they did is not the command's whole work.
+    /// Processes still running when the command exited (pid, name): strobe ended them, and what they
+    /// did is not the command's whole work (time stopped at the exit, and Unix's count holds only what
+    /// the command waited for).
     pub left: Vec<(u32, String)>,
 }
 
-/// How long processes of the command may take to end after it exited before they count as left.
-const GRACE: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// `left` with a grace: processes that end within it (a child finishing its exit) do not count. Each
-/// with its start time (pid, start, name), by which it is ended (`host::kill_opened`).
+/// What of the command is still running at its exit, read once, with no grace: a process it waited for
+/// has ended by then (a zombie, or on Windows a signalled handle, which the readers leave out), so one
+/// that has not is one the command did not wait for, however soon it would end (a 30 ms background job
+/// read a half-millisecond run with the 100 ms grace this replaced). Each with its start time (pid,
+/// start, name), by which it is ended (`host::kill_opened`).
 fn still_left(read: impl Fn() -> Vec<(u32, u64, String)>) -> Vec<(u32, u64, String)> {
-    let until = std::time::Instant::now() + GRACE;
-    loop {
-        let mut left = read();
-        left.sort();
-        left.dedup_by_key(|p| p.0);
-        if left.is_empty() || std::time::Instant::now() >= until {
-            return left;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let mut left = read();
+    left.sort();
+    left.dedup_by_key(|p| p.0);
+    left
 }
 
 /// Ends what a command left (`still_left`), each by its pid and the start time read with what proved it
@@ -1084,8 +1079,17 @@ impl Owned {
                         usage.peak_bytes = Some(limits.PeakProcessMemoryUsed as u64);
                     }
                     // Ended with the job (self.end), not by pid: a start time of 0 (nd_left).
-                    let pids = || job_pids(j).into_iter().map(|p| (p, 0, name_of(p))).collect::<Vec<_>>();
-                    still_left(|| pids().into_iter().chain(stamped(self.pid())).collect())
+                    // Running: a held handle not signalled (`jobs`: one held from its start), else one the
+                    // job lists whose handle has not signalled (an exited process whose handle another
+                    // holds stays listed a moment). The command itself has exited.
+                    let me = self.pid();
+                    let running: Vec<u32> = if held.complete { held.running.keys().map(|k| k.0).collect() } else { job_pids(j).into_iter().filter(|&p| !super::jobs::exited_pid(p)).collect() };
+                    let in_job: Vec<(u32, u64, String)> = running.into_iter().filter(|&p| p != me).map(|p| (p, 0, name_of(p))).collect();
+                    let left = still_left(|| in_job.iter().cloned().chain(stamped(me)).collect());
+                    // A console host is the console's (a windowless strobe's console program gets one in
+                    // its job), not the command's work: alone it is no leftover; the job's end ends it.
+                    let console = |n: &str| n.eq_ignore_ascii_case("conhost.exe") || n.eq_ignore_ascii_case("OpenConsole.exe");
+                    if left.iter().all(|(_, s, n)| *s == 0 && console(n)) { Vec::new() } else { left }
                 }
                 None => {
                     // No job (strobe's own job refused a nested one): nothing counts what the command started.
@@ -1168,7 +1172,18 @@ impl Owned {
                     usage.write_bytes = Some(ri.ri_diskio_byteswritten);
                 }
             }
-            let left = still_left(|| group_members(pid).into_iter().filter(|(p, _, _)| *p != pid).chain(stamped(pid)).collect());
+            // Linux: also what is still in the launch's cgroup (out of the group and without the stamp
+            // too), which the cgroup's end ends (`Owned::end`): a start time of 0 (`end_left`).
+            #[cfg(target_os = "linux")]
+            let in_cgroup: Vec<(u32, u64, String)> = self.cgroup.as_ref().map(|c| c.running()).unwrap_or_default().into_iter().filter(|&p| p != pid).map(|p| (p, 0, name_of(p))).collect();
+            #[cfg(not(target_os = "linux"))]
+            let in_cgroup: Vec<(u32, u64, String)> = Vec::new();
+            let left = still_left(|| {
+                let mut l: Vec<(u32, u64, String)> = group_members(pid).into_iter().filter(|(p, _, _)| *p != pid).chain(stamped(pid)).collect();
+                // A process both ways is ended by its pid and start time, not left to the cgroup.
+                l.extend(in_cgroup.iter().filter(|c| !l.iter().any(|x| x.0 == c.0)).cloned().collect::<Vec<_>>());
+                l
+            });
             if !left.is_empty() {
                 // The child's own group: it is not reaped, so the group's id is still its.
                 libc::kill(-(pid as i32), libc::SIGKILL);
@@ -1191,6 +1206,13 @@ impl Owned {
             self.group = None;
             let tv = |t: libc::timeval| t.tv_sec as u64 * 1_000_000_000 + t.tv_usec as u64 * 1_000;
             usage.cpu_ns = Some(tv(ru.ru_utime) + tv(ru.ru_stime));
+            // Linux: the launch cgroup counts what the command did not wait for, too (a background job
+            // that ended before a slower command did, reparented and reaped by another): its CPU where it
+            // covers more than the command's own count.
+            #[cfg(target_os = "linux")]
+            if let Some(c) = self.cgroup.as_ref().and_then(|c| c.usage_ns()) {
+                usage.cpu_ns = usage.cpu_ns.map(|n| n.max(c));
+            }
             usage.switches = Some(ru.ru_nvcsw as u64 + ru.ru_nivcsw as u64);
             // Linux counts kilobytes, macOS bytes.
             usage.peak_bytes = Some(if cfg!(target_os = "macos") { ru.ru_maxrss as u64 } else { ru.ru_maxrss as u64 * 1024 });
