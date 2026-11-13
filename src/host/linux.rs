@@ -415,6 +415,25 @@ pub fn online_cpus() -> Vec<usize> {
     out
 }
 
+/// Read both counters for the measured CPUs from the same `/proc/stat` snapshot. Reject an
+/// incomplete set instead of silently changing the denominator across a CPU hotplug.
+pub fn load_ticks(mask: u64) -> Option<(u64, u64)> {
+    let text = read("/proc/stat")?;
+    let (mut seen, mut idle, mut steal) = (0u64, 0, 0);
+    for line in text.lines().skip(1).take_while(|s| s.starts_with("cpu")) {
+        let mut f = line.split_whitespace();
+        let cpu = f.next()?.strip_prefix("cpu")?.parse::<u32>().ok()?;
+        if cpu >= 64 || mask & (1 << cpu) == 0 {
+            continue;
+        }
+        seen |= 1 << cpu;
+        idle += f.nth(3)?.parse::<u64>().ok()? + f.next()?.parse::<u64>().ok()?;
+        steal += f.nth(2)?.parse::<u64>().ok()?;
+    }
+    let ns = 1_000_000_000 / tck();
+    (mask != 0 && seen == mask).then_some((idle * ns, steal * ns))
+}
+
 /// Idle time so far per logical CPU in ns (`/proc/stat`: idle + iowait, in 10 ms ticks).
 pub fn idle_cycles(out: &mut Vec<u64>) -> bool {
     out.clear();

@@ -480,7 +480,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // process that differs between the two is refused, never miscounted (`dead_since`).
                     let ended0 = host::ended_marks(&host::tree_pids(pid), None);
                     let mut c0 = cycles(pid);
-                    let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
+                    let busy = ctx.pin.filter(|_| cost.load.is_none()).and_then(|_| validity::CpuBusy::start());
                     let main0 = main_read();
                     if let Some(tl) = &timeline {
                         tl.mark_edge();
@@ -526,7 +526,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // The whole tree's CPU over the run, untimed stretches too, in cycles, with what processes
                     // of it that ended used (`record::timed_cpu`): the rest of the CPUs' busy time is other
                     // work. Unknown where what ended is not known.
-                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1]).ok()).and_then(|(b, c)| b.other_cycles(c.total));
+                    let foreign = busy.and_then(|b| b.other_cycles(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1]).ok()?.total));
                     let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &host::tree_pids(pid), perf.as_ref()));
                     hooks.end();
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
@@ -548,6 +548,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // Short CPU is none (warmup falls back to the run's time).
                     let ms = |cycles: u64| if c1.values().any(|c| *c > 0) { clock0.ms(&clock1, cycles) } else { f64::NAN };
                     let used = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
+                    cost.target_ms(used);
+                    cost.tree_gap(&c0, &c1, &ended0, &ended1);
+                    let foreign = cost.last_foreign().filter(|_| ctx.pin.is_some()).or(foreign);
                     lost.push((timed_cpu.as_ref().map_or(0.0, |c| ms(c.ended)), timed_cpu.is_none()));
                     ended_exes.push(timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), ms(*cy), *k)).collect()).unwrap_or_default());
                     let retained = heap_now(&mut heap_refused)? - h0;

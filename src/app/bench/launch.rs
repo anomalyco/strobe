@@ -55,9 +55,9 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     // variant and series is discarded before any is measured. A warm profile fills its home in it.
     if !x.untimed && ctx.launched.insert(key.clone()) {
         progress(format!("  {} warm-up launch (discarded)", v.role));
-        once(ctx, s, v, pair, &key, false)?;
+        once(ctx, s, v, pair, &key, false, false)?;
     }
-    once(ctx, s, v, pair, &key, false)
+    once(ctx, s, v, pair, &key, false, x.measures_time())
 }
 
 /// An attribution launch: never timed. The main process starts paused under `--inspect-brk` with its
@@ -67,13 +67,13 @@ pub(super) fn attribution(ctx: &mut Ctx, s: &Series, v: &Variant) -> Result<Bloc
     // Its recording keeps the launch's actions (a `before` hook's).
     ctx.runner.collect_actions(true);
     if is_native(&ctx.describe["targets"][&s.target]) {
-        return super::native::launch_once(ctx, s, v, usize::MAX, true);
+        return super::native::launch_once(ctx, s, v, usize::MAX, true, false);
     }
     let key = format!("{}\n{}", s.label(), v.role);
-    once(ctx, s, v, usize::MAX, &key, true)
+    once(ctx, s, v, usize::MAX, &key, true, false)
 }
 
-fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile: bool) -> Result<Block> {
+fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile: bool, measured: bool) -> Result<Block> {
     let spec = s.launch.clone();
     let target = ctx.describe["targets"][&s.target].clone();
     let kind = target["kind"].as_str().unwrap_or("").to_string();
@@ -192,30 +192,33 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     let mut guard = None;
     // The time stamp counter's rate, from two readings around the launch: cycles to ms.
     let clock = (host::tsc(), Instant::now());
-    let (mut browser, started): (WebBrowser, Started) = match kind.as_str() {
-        "app" | "exe" | "webview" => {
-            let app = app.as_ref().ok_or_else(|| Error::msg("internal: an app target without its app"))?;
-            let extra = Extra {
-                args: inspect_port.map(|p| vec![format!("--inspect={p}")]).unwrap_or_default(),
-                output: true,
-                home: home.clone(),
-                prepared: prepared.clone(),
-                profile_main: if profile && electron { Some(free_port()?) } else { None },
-            };
-            let (b, g, st) = electron::launch_with(app, seed.as_deref(), &window, ctx.pin, &extra)?;
-            guard = Some(g);
-            (b.into(), st)
-        }
-        "command" => {
-            let root = v.root.clone().ok_or_else(|| Error::msg(format!("{}: a command target runs in a variant's folder (a directory or a git ref)", v.role)))?;
-            let (b, st) = command::launch(&command::Spec::from_target(&target, &root), home.as_deref().unwrap_or(Path::new(".")), !warm, &window, ctx.pin)?;
-            (b.into(), st)
-        }
-        // A fresh browser and profile per launch: no HTTP cache, storage, service worker or browser
-        // shader cache from an earlier visit.
-        _ if web => (web::launch_as(engine, &window, headless_of(ctx, s), ctx.pin, &emulation, reduce)?, Started { epoch_ms: 0.0, output: None, main: None }),
-        other => return Err(Error::usage(format!("{}: launch cases need an app, exe, command, web or url target, not {other}", s.case))),
-    };
+    let (launched, mut load) = super::LaunchLoad::observe(measured && !web, || -> Result<(WebBrowser, Started)> {
+        Ok(match kind.as_str() {
+            "app" | "exe" | "webview" => {
+                let app = app.as_ref().ok_or_else(|| Error::msg("internal: an app target without its app"))?;
+                let extra = Extra {
+                    args: inspect_port.map(|p| vec![format!("--inspect={p}")]).unwrap_or_default(),
+                    output: true,
+                    home: home.clone(),
+                    prepared: prepared.clone(),
+                    profile_main: if profile && electron { Some(free_port()?) } else { None },
+                };
+                let (b, g, st) = electron::launch_with(app, seed.as_deref(), &window, ctx.pin, &extra)?;
+                guard = Some(g);
+                (b.into(), st)
+            }
+            "command" => {
+                let root = v.root.clone().ok_or_else(|| Error::msg(format!("{}: a command target runs in a variant's folder (a directory or a git ref)", v.role)))?;
+                let (b, st) = command::launch(&command::Spec::from_target(&target, &root), home.as_deref().unwrap_or(Path::new(".")), !warm, &window, ctx.pin)?;
+                (b.into(), st)
+            }
+            // A fresh browser and profile per launch: no HTTP cache, storage, service worker or browser
+            // shader cache from an earlier visit.
+            _ if web => (web::launch_as(engine, &window, headless_of(ctx, s), ctx.pin, &emulation, reduce)?, Started { epoch_ms: 0.0, at_ns: 0, output: None, main: None }),
+            other => return Err(Error::usage(format!("{}: launch cases need an app, exe, command, web or url target, not {other}", s.case))),
+        })
+    });
+    let (mut browser, started) = launched?;
     // A launched target inherits strobe's priority, or sets its own (`BackgroundPriority`).
     ctx.target_qos = host::background_qos(Some(browser.pid()));
     let result = (|| -> Result<Block> {
@@ -230,12 +233,15 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // process set's cycles, as a native launch's does. An app with `window: false` has none to keep up.
         let sampler = (!web && !windowless).then(|| {
             let stop = stop.clone();
-            let timed = window_until.is_some();
-            std::thread::spawn(
-                move || {
-                    if timed && let Some(home) = &profile_dir { super::native::watch(pid, home, screen, &stop, tx) } else { sample_screen(pid, profile_dir.as_deref(), screen, &stop) }
-                },
-            )
+            let until = window_until.clone();
+            let load = load.clone();
+            std::thread::spawn(move || {
+                if let (Some(until), Some(home)) = (until, &profile_dir) {
+                    super::native::watch(pid, home, screen, &stop, until, load, tx)
+                } else {
+                    sample_screen(pid, profile_dir.as_deref(), screen, &stop)
+                }
+            })
         });
         let tails = {
             let globs: Vec<String> = milestones.iter().filter(|m| m.source != "output" && m.source != "page").map(|m| m.source.clone()).collect();
@@ -308,6 +314,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             at0 = Some((super::super::record::per_process(&procs), host::ended_marks(&pids, browser.profile().as_deref())));
             cpu0 = procs.iter().map(|p| p.cycles).sum();
             // From strobe's send on the host's wall clock, the clock the page's `until` time is on.
+            load = super::measured_launch(measured, || super::LaunchLoad::start(&[]));
             let at = epoch_ms();
             page.start_navigation(&first)?;
             at
@@ -316,14 +323,11 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         };
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         // `cpu1` holds what ended processes used where that is known (`ended`).
-        let (ready_at, page, cpu1, ended) = match &window_until {
-            Some(until) => {
+        let (ready_at, page, cpu1, ended, load) = match &window_until {
+            Some(_) => {
                 let deadline = Instant::now() + timeout;
-                let mut wait = super::native::WindowWait::default();
-                let ready = loop {
-                    if let Ok(sample) = samples.recv_timeout(Duration::from_millis(100))
-                        && let Some(ready) = wait.step(until, sample)
-                    {
+                let (ready, load) = loop {
+                    if let Ok(ready) = samples.recv_timeout(Duration::from_millis(100)) {
                         break ready;
                     }
                     if let Some(g) = &guard {
@@ -342,10 +346,11 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 let WebBrowser::Chromium(b) = &browser else { return Err(Error::msg("internal: a window launch of a page")) };
                 let main = electron::main_page(b)?;
                 let page: Page = watch.page(&main.target).unwrap_or(main).into();
-                (ready.at, page, ready.cycles + ready.ended.unwrap_or(0), ready.ended)
+                (ready.at, page, ready.cycles + ready.ended.unwrap_or(0), ready.ended, load)
             }
             None => match watch.ready(timeout) {
                 Ok((at, received, page)) => {
+                    let load = load.as_ref().map(super::LaunchLoad::stop);
                     let (cycles, ended) = match &at0 {
                         Some((a, e0)) => {
                             let procs = browser.processes();
@@ -378,7 +383,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                     if !(now >= c0 - CLOCK_SLACK_MS && now <= c1 + CLOCK_SLACK_MS) {
                         return Err(clock(format!("the page's clock read {} from the host's wall clock in a read that took {}", crate::fmt::time_signed(now - c0), crate::fmt::time(c1 - c0))));
                     }
-                    (at, page, cycles, ended)
+                    (at, page, cycles, ended, load)
                 }
                 Err(e) => {
                     let shot = watch.any_page().map(|p| snapshot(&p, &ctx.exp, "launch")).unwrap_or_default();
@@ -390,7 +395,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // `refusals` says why.
         // Cycle-clock ticks a ms.
         let per_ms = match (clock.0, host::tsc()) {
-            (Some(a), Some(b)) if b > a && cpu1 > 0 => Some((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
+            (Some(a), Some(b)) if b > a => Some((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
             _ => None,
         };
         let cpu_ms = per_ms.map_or(f64::NAN, |r| cpu1.saturating_sub(cpu0) as f64 / r);
@@ -411,6 +416,9 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             && cpu_ms.is_finite()
         {
             super::note_ended_launch(&mut ctx.warnings, s, c as f64 / r);
+        }
+        if let Some(l) = load {
+            l.launch((!launch_lost).then_some(cpu_ms))
         }
         lap("ready", &mut steps);
         if watch.late() {

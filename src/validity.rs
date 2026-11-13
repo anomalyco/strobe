@@ -425,7 +425,7 @@ pub fn wait_quiet(cpus: Option<u64>, max: std::time::Duration) -> (f64, f64) {
         let mean = b.iter().sum::<f64>() / b.len().max(1) as f64;
         let top = b.iter().copied().fold(0.0, f64::max);
         calm = if mean < 5.0 && top < 25.0 { calm + 1 } else { 0 };
-        if calm >= 2 || std::time::Instant::now() > deadline {
+        if calm >= 2 || crate::app::stop_requested() || std::time::Instant::now() >= deadline {
             return (mean, top);
         }
     }
@@ -435,6 +435,7 @@ pub fn wait_quiet(cpus: Option<u64>, max: std::time::Duration) -> (f64, f64) {
 /// (`cpu.foreign`, SPEC §10.2 `Background`) of targets measured without the OS sampler: `cli()` and
 /// `script()`, `tty()`. `stop` ends the span: the target's own CPU must be read over that same span
 /// (a process-tree snapshot after `stop`, not inside it).
+#[derive(Clone)]
 pub struct CpuBusy {
     idle: Vec<u64>,
     tsc: u64,
@@ -476,6 +477,12 @@ impl CpuBusy {
 }
 
 impl Busy {
+    /// The busy time as % of one core, less the idle ticks' error: everything that ran on the CPUs,
+    /// for a caller that takes out its own CPU itself.
+    pub fn pct(&self) -> f64 {
+        (self.pct - self.ticks).max(0.0)
+    }
+
     /// Other work as % of one core: the busy time less the target's own CPU over the span (`own_pct`)
     /// and less the idle ticks' error, so a short run never reads work that was not there.
     fn other(&self, own_pct: f64) -> Option<f64> {

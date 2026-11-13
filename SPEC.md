@@ -1342,7 +1342,7 @@ metric                        base        head      Δ  CI             verdict
 
 warnings
 ! MultimodalDistribution  main.script: 2 modes (mValue 3.4)
-! Background              other work ran on the measured CPUs during 1 block(s): pair 3 head: up to 31% of a core (busiest elsewhere: scanner.exe 31%); blocks kept, flagged
+! Background              other work of a quarter core or more ran on the measured CPUs in 1 of 16 blocks (6%; median 31%, peak 31% of a core in pair 3 head); the primary is not decided, and the other work may be why; close heavy apps or rerun when quieter
 i Attribution             separate blocks: hotspots, allocation sites, counters → rec_91c0
 ```
 
@@ -5451,11 +5451,10 @@ sequenceDiagram
 
 `--bisect <good>..<bad>` walks `git rev-list --first-parent`: each step benches the midpoint
 against `good` with the same settings. A step that moves the primary in the direction `bad`
-did moves `bad` there; otherwise `good`. Ends with the culprit commit and its bench, or
+did moves `bad` there. A series-level `Background` warning without a readable, decisive move in that direction retries the step once (up to two retries per search, waiting up to 60 s for quieter CPUs); if still inconclusive under load the bounds stay put. Otherwise a midpoint that did not move becomes `good`. Ends with the culprit commit and its bench, or
 `unclear` with the remaining range.
 
-As built: step 0 benches `bad` against `good` to learn the direction (no move: `no change`, nothing
-to bisect). The midpoint is never `bad` itself. A step that does not move the primary hands
+As built: step 0 benches `bad` against `good` to learn the direction (decided no move without a series load warning: `no change`; undecided endpoints: `unclear`). The midpoint is never `bad` itself. An accepted step that does not move the primary hands
 `good` on to its commit, so a change built up over several commits, each under what one step
 resolves (`same (±2%)` per commit, `+6%` over the range), would land on whichever commit tipped
 the sum. So the culprit must also move the primary against its own parent: when no step benched
@@ -6027,7 +6026,7 @@ emits:
 | `MaxTime` | warn | a comparison's `--max-time` ran out before these series had a pair (before they started, or in a wait of their first blocks); they are listed as not run. Also a series whose time ran out after its pairs: its attribution, video or pixel-snapshot blocks not run or not finished (§9.1 "Stop rule"; an unfinished Linux counter or HTTP probe pass is said in the series' own note of that pass) |
 | `Stopped` | warn | the bench stopped (a stop, an unlock wait that ran out, `--max-time` in a check or another run that is no comparison, a failure after some pairs): what halted it and the series not run; and on a series refused while it ran whose primary a look had already decided: the refusal, the verdict kept (§5.6 "A series refused while it runs") |
 | **Machine and environment** | | |
-| `Background` | warn | other work kept the CPUs busy: 10% or more of all CPUs before the run, or a block with a run whose `cpu.foreign` reached 25% of a core (kept and flagged, the three busiest processes named); work that leaned to one side refuses (§10.1, "`Background`" below); a `--check` block's slow speed check under other work (`<case> · <side> block: …; the check ran at once`, §10.1 `Throttled`) |
+| `Background` | warn, info | over 10% of all CPUs busy before the run (info except on macOS; skipped on `--mobile`); measured other work reached 25% of one core, accounting was unread, or Linux idle ticks could not rule out interference (below). One-sided work can refuse (§10.1); a `--check` block's slow speed check under other work runs at once (§10.1 `Throttled`). |
 | `Battery` | warn | on battery: clocks may drop mid-run |
 | `PowerPlan` | info | the user's power plan was kept: `--power keep`, on battery, or no faster plan to switch to |
 | `VirtualMachine` | warn | the firmware strings say a virtual machine: its timings move with the host's load; prefer bare metal |
@@ -6173,16 +6172,15 @@ No adapter read (no per-process GPU statistics, neither engine time nor GPU memo
 says what changes how to read the report, How it was measured lists each note, and the per-block
 foreign CPU is in the per-pair tables.
 
-`Background` (built): per measured run, the busy time of the CPUs the target is pinned to (the OS
-sampler's per-CPU idle cycles) minus the target's own cycles is `cpu.foreign` (% of one core); a block
-with a run at 25% or more is kept and flagged, naming the three busiest processes outside strobe's own
-tree between two process snapshots taken outside the runs. The one-second check before the first
-block stays. `cli()`, `script()` and `tty()` targets have no OS sampler: strobe reads the pinned CPUs'
-idle counters at each run's two ends (`validity::CpuBusy`, ended before the process snapshots that
-take milliseconds) and takes out the CPU of every command of the run (untimed ones too), or the
-cycles of the host's process tree (the program's and its console host's) over that span; on Linux it
-also takes out what 10 ms idle ticks can be off by, so a short run never reads work that was not
-there. A run in which a process of the tree ended has no `cpu.foreign` (its CPU is in no reading).
+`Background` reads idle counters at the edges of measured work on Linux and Windows. From busy CPU
+it subtracts the target tree (including recoverable exits), console-host CPU where applicable, and
+strobe and the runner on shared CPUs. `cpu.foreign` is the pinned median (% of one core); unpinned
+load is context only (`background.foreign`). Process names are for local progress, not published warnings.
+On Linux `cpu.foreign.max` uses the larger of the per-run maximum and the continuous span from first
+measured start to last measured end, including own CPU between runs. The continuous span needs two
+runs and no untimed stretch; its 10 ms idle tick error per counted CPU is deducted only once. If
+the best resolution is worse than 50% of a core, the block cannot prove quiet. With no detected load
+that is a note on an idle preflight and a warning on a busy one. Missing accounting is not a zero.
 
 Kept and flagged is right for work spread over both sides: it widens the interval. Work that ran with
 one side's blocks moves that side's numbers by itself: on adais, 16 threads spinning on the target's
@@ -6196,8 +6194,8 @@ or more apart toward that side, everything such work moves (`load_metric`: wall 
 shares, frames, latencies, the program's own `metric.*` and `app.*`, `cpu.wakes`, `ui.wakes`) is
 refused `Background` ("other work ran on the target's CPUs during head's blocks more than the other
 side's: a quarter core or more apart in 8 of 8 pairs (signed-rank p 0.008)"), decided before the
-primary's gate and Holm, so a refused secondary takes no share of Holm's level; the per-block flags
-then say the series' times are refused, and a verdict the last look had printed is withdrawn on a
+primary's gate and Holm, so a refused secondary takes no share of Holm's level; the series warning
+explains the refusal, and a verdict the last look had printed is withdrawn on a
 progress line (`lopsided_background`). Before the test, a pair's difference is moved toward 0 (never
 past it, never away) by the change in the compositor's CPU between its blocks: a side that presents
 more makes the compositor work on the target's CPUs too, which is its own doing. The level and the
