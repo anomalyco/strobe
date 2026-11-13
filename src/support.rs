@@ -742,7 +742,7 @@ const MAC_SCRIPT_CPU_RUN: Evidence = Evidence {
     reviewed_at: Some("384805d4"),
     reviewed_why: Some(CHANGES_MAC_SCRIPT),
 };
-const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals";
+const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks";
 const MAC_FRAMES_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "1244967",
@@ -752,7 +752,7 @@ const MAC_FRAMES_RUN: Evidence = Evidence {
     aa: "frame-light against itself: frames.interval.p95 0.000% [−0.002 … 0.000], frames.dropped.pct same (±0 pp)",
     planted: "frame-light to frame-heavy (a frame spun 0.1 to 1.5 vsyncs): interval.p95 +99.994% [+99.987 … +100.000] for +99.994%; dropped +33.5 pp [+33.1 … +33.8]",
     boundary: "a block too short for its p95 refused TailTooShort; frames of a headless page refused Headless",
-    reviewed_at: Some("384805d4"),
+    reviewed_at: Some("2ccc4322"),
     reviewed_why: Some(CHANGES_PAGE),
 };
 const MAC_INPUT_RUN: Evidence = Evidence {
@@ -764,7 +764,7 @@ const MAC_INPUT_RUN: Evidence = Evidence {
     aa: "click-150 against itself, 8 pairs: interaction.p50 +0.10% [−0.48 … +0.51], same (±2%)",
     planted: "click-0 to click-150 (the answer's frame spun 150 ms): 33.01 to 182.77 ms, Δ [145.4 … 158.6] ms for 150 ms",
     boundary: "interaction.* of a headless page refused Headless",
-    reviewed_at: Some("384805d4"),
+    reviewed_at: Some("2ccc4322"),
     reviewed_why: Some(CHANGES_PAGE),
 };
 const CHANGES_MAC_NATIVE: &str = "runs decides windowless by launch::app_windowless and checks that the app shows no window before and after its runs, never inside them (e0142531), and e3d0ffc1 walks Native::processes from the proven root (strobe's own child's pid), keeps each process's start time in process_trees, lends a zombie no children in tree_of and joins a responsible process by pid and start time in responsible_pids: for strobe's own child with window: false they are the same processes, edges and readings";
