@@ -298,6 +298,9 @@ pub(super) struct Hooks<'a> {
     fixture_untimed: Cell<f64>,
     /// No input call since the last stretch ended (`ended_untimed`).
     ended: Cell<bool>,
+    /// A timed block's readings over each run, for `Background` (`RunLoads`), and the run's open ones.
+    load: Option<super::RunLoads>,
+    load_at: RefCell<Option<(Option<validity::CpuBusy>, validity::Steal)>>,
 }
 
 /// The block's fixture, and how to list the target's processes now.
@@ -309,7 +312,7 @@ type CpuAt = ((u64, Option<u64>), Instant);
 impl<'a> Hooks<'a> {
     /// A block's hooks; `pids` lists the target's processes for the fixture's connection check.
     pub(super) fn new(ctx: &Ctx, pids: impl Fn() -> Vec<u32> + 'a) -> Hooks<'a> {
-        Hooks { fixture: ctx.fixture_running.clone().map(|f| (f, Box::new(pids) as Box<dyn Fn() -> Vec<u32> + 'a>)), ..Hooks::default() }
+        Hooks { fixture: ctx.fixture_running.clone().map(|f| (f, Box::new(pids) as Box<dyn Fn() -> Vec<u32> + 'a>)), load: ctx.run_loads.clone(), ..Hooks::default() }
     }
 
     /// Reads whether the target holds a connection to the block's fixture (after setup).
@@ -333,11 +336,20 @@ impl<'a> Hooks<'a> {
             self.fixture_at.set(Some((f.cpu(), Instant::now())));
             self.fixture_lost.set(f.lost());
         }
+        // Last, so the readings above are outside the run's window.
+        if let Some(l) = &self.load {
+            *self.load_at.borrow_mut() = Some((l.all.and_then(|_| validity::CpuBusy::start()), validity::Steal::start()));
+        }
     }
 
     /// The run ended: from here nothing counts. A stretch still open (its end never came: the run
     /// threw) ends here.
     pub(super) fn end(&self) {
+        // First, so the window is the run's.
+        if let (Some(l), Some((busy, steal))) = (&self.load, self.load_at.borrow_mut().take()) {
+            let busy = busy.zip(l.all).and_then(|(b, cpus)| b.stop(cpus)).map(|b| b.pct());
+            l.runs.borrow_mut().push(super::RunLoad { busy, steal: steal.pct(l.pin) });
+        }
         if let Some((from, _)) = self.open.take() {
             self.untimed.borrow_mut().push((from, host::now_ns()));
         }

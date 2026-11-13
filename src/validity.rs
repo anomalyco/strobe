@@ -476,6 +476,12 @@ impl CpuBusy {
 }
 
 impl Busy {
+    /// The busy time as % of one core, less the idle ticks' error: everything that ran on the CPUs,
+    /// for a caller that takes out its own CPU itself.
+    pub fn pct(&self) -> f64 {
+        (self.pct - self.ticks).max(0.0)
+    }
+
     /// Other work as % of one core: the busy time less the target's own CPU over the span (`own_pct`)
     /// and less the idle ticks' error, so a short run never reads work that was not there.
     fn other(&self, own_pct: f64) -> Option<f64> {
