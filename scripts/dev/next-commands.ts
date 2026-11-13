@@ -45,7 +45,7 @@
 //   bun scripts/dev/next-commands.ts [--strobe <exe>] [--make] [--show] [exp_… …]
 //
 // Exit 1 when a command fails.
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs"
 import { homedir, platform, tmpdir } from "os"
 import { join } from "path"
 import { fileURLToPath } from "url"
@@ -642,26 +642,38 @@ let followed = 0
   gz(p2, "deep.json.gz", {...stacks,interval_us:1000,t0_ns:0,t1_ns:1000000,samples:[],pids:[],waits:{...stacks,waits:[]}})
   const seen = new Set<string>()
   let cells = 0
+  const stamp = (p:string) => existsSync(p) ? String(statSync(p,{bigint:true}).mtimeNs) : "absent"
+  const snapshot = (ids:string[]) => JSON.stringify([...ids.map(id=>[id,...readdirSync(folder(id),{recursive:true}).sort().map(n=>[n,stamp(join(folder(id),String(n)))])]),stamp(join(folder(exp),".used")),stamp(join(fakeState,"run"))])
   const matrix = (name: string, series: J[], launches: string[], profiles: string[], shared = false) => {
     writeResult({kind:"check",series})
     for (const q of [...profileViews,...launchViews,"unknown","sql select 1","threads --timeline"]) {
       const [view, ...rest] = q.split(" "), args = view === "sql" && rest.length ? [view,rest.join(" ")] : [view,...rest]
-      const ids = [...(profileViews.includes(view) ? profiles : launches)].sort()
+      const ids = profileViews.includes(view) ? profiles : launches
       const opts = args.map(a => a.includes(" ") ? `'${a}'` : a).join(" ")
+      const before = snapshot(ids)
+      const p = run("query",exp,...args), text = (p.stderr.toString() + p.stdout.toString()).trim()
+      const listing = series.length > 1 || ids.length > 1 || shared
+      // Every engine query creates/removes a unique q-*.sql file in run/. A changed directory
+      // stamp catches even transient SQL files that would disappear from a subsequent listing.
+      if (listing && snapshot(ids) !== before) fail(`${name} ${q}: listing wrote a recording, a used stamp or an engine query file`)
       const direct = ids.map(id => run("query",id,...args))
       const want = ids.filter((_,i) => direct[i].exitCode === 0)
-      const p = run("query",exp,...args), text = (p.stderr.toString() + p.stdout.toString()).trim()
       const tag = `${name}: ${opts}`
       if (!ids.length) {
         if (p.exitCode !== 2 || !text.includes(profileViews.includes(view) ? "--why always" : "no kept recording")) fail(`${tag}: ${text}`)
       } else if (!want.length) {
         // Forwarding a single case prefixes the source to the same refusal.
-        const why = direct[0].stderr.toString().trim().replace(/^strobe: /, "")
-        if (!why || p.exitCode !== direct[0].exitCode || !text.includes(why) || text.includes("choose a recording")) fail(`${tag}: not the direct refusal (${why}): ${text}`)
+        const why = direct.map(r=>r.stderr.toString().trim().replace(/^strobe: /, ""))
+        const distinct = [...new Set(why)]
+        if (distinct.length === 1) {
+          if (!why[0] || p.exitCode !== direct[0].exitCode || !text.includes(why[0])) fail(`${tag}: not the direct refusal (${why[0]}): ${text}`)
+        } else if (p.exitCode !== (direct.every(r=>r.exitCode===4)?4:2) || !text.startsWith("strobe: no recording of this check answers") || !distinct.every(w=>text.includes(w.split("\n")[0]))) fail(`${tag}: missing mixed reasons: ${text}`)
       } else if (series.length === 1 && ids.length === 1 && !shared) {
         if (p.exitCode !== 0 || !text.includes(`${series[0].label} · ${ids[0]}`)) fail(`${tag}: not forwarded from ${ids[0]}`)
       } else {
-        const got = text.split(/\r?\n/).filter(l => l.startsWith("  ")).map(l => l.trim())
+        const [header,...lines] = text.split(/\r?\n/)
+        if(p.stdout.length || header !== "strobe: choose a recording of this check:") fail(`${tag}: unexpected preamble: ${text}`)
+        const got = lines.map(l => l.trim())
         const expected = want.map(id => `strobe query ${id} ${opts}`)
         if (p.exitCode !== 2 || JSON.stringify(got) !== JSON.stringify(expected)) fail(`${tag}: ${text}, expected ${expected}`)
         else for (const cmd of got) {
@@ -686,6 +698,7 @@ let followed = 0
       [lean,native,terminal,device,...(kept?[hostOnly]:[])],[...both,...(kept?[hostOnly]:[])])
     put(folder(lean),"meta.json",leanMeta(lean,batch))
     matrix("shared",[one,c("second",lean,b)],[lean],both,true)
+    if(kept && !go(["query",exp,"gc","--case","second"],0).startsWith(`second · ${p2}`)) fail("--case did not read the second profile")
   }
   // The actual page trace made by --make alongside an untraced launch. No new app is launched.
   for (const id of made) {
@@ -696,6 +709,20 @@ let followed = 0
   }
   for (const v of [...profileViews,...launchViews]) if (!seen.has(v)) fail(`no executable listing for ${v}`)
   console.log(`${cells} recording-selection cells (forward, choose, or refuse)`)
+  // Descending IDs, duplicate reasons, and two different types of refusal. Assert text order,
+  // status and the complete JSON for each reason against a direct query.
+  for(const [view,first,second,code] of [["frames",{wir:true},{native:true},2],["alloc",{engine:"firefox"},{script:true,runtime:{name:"bun"}},4]] as const){
+    const pairs=[["page","rec_syn_z",first],["another page","rec_syn_y",first],["other","rec_syn_a",second]] as const
+    for(const [,id,m] of pairs) put(folder(id),"meta.json",{id,probes:"attribution",...m})
+    writeResult({kind:"check",series:pairs.map(([name,id])=>c(name,id,id))})
+    const text=go(["query",exp,view],code),j=JSON.parse(go(["query",exp,view,"--json"],code))
+    if(text.trim()!==`strobe: ${j.error}` || !j.error.startsWith(`no recording of this check answers ${view}:`) || j.recording_errors?.length!==2) fail(`mixed ${view}: ${text}`)
+    for(const [i,[series,id]] of [pairs[0],pairs[2]].entries()) {
+      const r=JSON.parse(run("query",id,view,"--json").stdout.toString()),row=j.recording_errors?.[i]
+      if(!row || row.series!==series || row.recording!==id || !["code","validator","error","hint"].every(k=>row[k]===r[k])) fail(`mixed ${view}: ${JSON.stringify(j)}`)
+    }
+    console.log(`mixed ${view} (exit ${code}): ${text.trim()}\n${JSON.stringify(j)}`)
+  }
   // Same failure, four shapes: base refusal alone, both sides failing independently, head-only failure,
   // and a passing check. Keep the base reason exactly once and keep useful detail after its first line.
   for(const [name,extra,want] of [
@@ -752,6 +779,20 @@ let followed = 0
   put(folder(prof),"meta.json",{id:prof,probes:"attribution",launch:true,values:{}})
   checkText(prof,prof,"strobe query HANDLE hotspots",go(["query",prof,"summary"],0))
   for(const a of [["query",folder(prof),"summary"],["report",folder(prof),"--format","md"]]) checkText(prof,prof,"strobe query HANDLE hotspots",go(a,0))
+  const paths=[...byPath,filmed]
+  for (const kind of ["implementations","video","blocks"]) {
+    const dir=join(copy,kind),id=`exp_copy_${kind}`
+    const s=kind==="blocks" ? synthetic.find(([n])=>n==="exp_syn_blocks")![1].series[0] : series("first","page",worse,{attribution:{base:prof,head:p2},video:kind==="video"?{base:prof,head:p2}:null})
+    put(dir,"result.json",{id,...comparison([s],{}, {comparison:kind==="implementations"?kind:"builds"})}); paths.push(join(dir,"result.json"))
+  }
+  for(const path of paths){
+    const id=JSON.parse(readFileSync(path.endsWith("result.json")?path:join(path,"meta.json"),"utf8")).id
+    if(!id) continue
+    const stale=new RegExp(`(?:\\bstrobe (?:query|report(?: recording| experiment)?|open|bench --resume)|· query) ${id.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}(?:\\s|\\)|$)`)
+    for(const a of [["query",path,"summary"],["report",path,"--format","md"]]) {
+      for(const l of go(a,0).split(/\r?\n/)) if(!/^      (log  |fix: )|^[!i] /.test(l) && stale.test(l)) fail(`stale command in ${a[0]} of ${path}: ${l}`)
+    }
+  }
   // A real settings file in cwd is for cwd, never for another named artifact. The user's settings
   // supply the fallback. No link or real user configuration is involved.
   const here=join(work,"unpacked"), other=join(work,"another project","rec")

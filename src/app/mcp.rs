@@ -544,8 +544,11 @@ fn result(out: Output) -> Value {
 /// An error's structured content with what strobe left alone in the call (`left_alone`), absent when
 /// there was nothing (never null: `schema/result.v1.json`).
 fn with_left(mut v: Value, e: &Error) -> Value {
+    if let Some(rows) = &e.recording_errors {
+        v["recording_errors"] = (**rows).clone();
+    }
     if let Some(l) = &e.left_alone {
-        v["left_alone"] = l.clone();
+        v["left_alone"] = (**l).clone();
     }
     v
 }

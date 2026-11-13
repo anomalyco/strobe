@@ -16,10 +16,22 @@ use std::path::Path;
 
 /// The OS's presents a recording kept (`presents.json.gz`).
 pub(super) fn presents(dir: &Path) -> Result<Presents> {
-    let path = dir.join("presents.json.gz");
+    let path = presents_path(dir)?;
     let mut text = String::new();
     std::io::Read::read_to_string(&mut crate::store::gunzip(&path).map_err(|_| Error::usage("this recording has no OS present events (no access, or a block without a window)"))?, &mut text)?;
     Ok(serde_json::from_str(&text)?)
+}
+
+pub(super) fn presents_path(dir: &Path) -> Result<std::path::PathBuf> {
+    let path = dir.join("presents.json.gz");
+    if !path.is_file() {
+        return Err(Error::usage("this recording has no OS present events (no access, or a block without a window)"));
+    }
+    Ok(path)
+}
+
+pub(super) fn frame_runs(dir: &Path) -> Result<Value> {
+    store::read_json(&dir.join("frames.json")).map_err(|_| Error::usage("this native recording has no frames: they come from bench blocks of a native target (--keep, or attribution)"))
 }
 
 /// The refresh period (ms) `frames.json` was measured at: the block's own display rate when it kept
@@ -70,14 +82,20 @@ pub(super) fn run_of(r: &Value) -> (Timed, Vec<Sent>, Vec<Change>) {
 const SHOWN: usize = 100;
 
 /// `top`: the lines to show (`--top`; all of them are in `--json`), `SHOWN` when not asked.
-pub fn inputs(dir: &Path, meta: &Value, top: Option<usize>, only: Option<&[String]>) -> Result<Output> {
+pub fn inputs(dir: &Path, meta: &Value, top: Option<usize>, only: Option<&[String]>, probe: bool) -> Result<Output> {
     let top = top.unwrap_or(SHOWN);
     if dir.join("frames.json").is_file() && dir.join("presents.json.gz").is_file() {
+        if probe {
+            if !frame_runs(dir)?["runs"].as_object().is_some_and(|runs| runs.keys().any(|k| only.is_none_or(|o| o.contains(k)))) {
+                return Err(no_os_runs());
+            }
+            return super::available();
+        }
         return from_presents(dir, top, only);
     }
     let trace = dir.join("trace.pftrace");
     if trace.is_file() && meta["engine"].as_str().is_none_or(|e| e == "chromium") {
-        return from_trace(&trace, meta, top, only);
+        return from_trace(&trace, meta, top, only, probe);
     }
     // Firefox keeps no Chrome trace: its inputs are timed only against the OS's presents of a headed page.
     if meta["engine"] == "firefox" {
@@ -263,7 +281,7 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
     let fw = parts.iter().map(|p| p.1.chars().count()).max().unwrap_or(0).max(28);
     let lines: Vec<String> = parts.iter().map(|(head, frames, said)| format!("{head}{frames:<fw$} {said}\n")).collect();
     if runs == 0 {
-        return Err(Error::usage("no measured run of this recording matched (--case picks one case's runs)"));
+        return Err(no_os_runs());
     }
     let total = rows.len();
     let mut text = format!(
@@ -296,12 +314,28 @@ fn from_presents(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
 /// A Chromium page's inputs as its trace saw them: each input event's latency (`EventLatency`, from
 /// the event to the frame that presented it, as Chromium measures `interaction.*`) and the frames the
 /// page presented around it (`PipelineReporter`), per measured run, on the trace's clock.
-fn from_trace(trace: &Path, meta: &Value, top: usize, only: Option<&[String]>) -> Result<Output> {
+fn no_os_runs() -> Error {
+    Error::usage("no measured run of this recording matched (--case picks one case's runs)")
+}
+fn no_trace_runs() -> Error {
+    Error::usage("no measured run window in this recording's trace (--case picks one case's runs)")
+}
+
+fn from_trace(trace: &Path, meta: &Value, top: usize, only: Option<&[String]>, probe: bool) -> Result<Output> {
     let token = meta["token"].as_str().unwrap_or("");
     if token.is_empty() {
         return Err(Error::usage("this recording's trace has no run marks of strobe's, so no run is known in it"));
     }
     let measured: Option<Vec<String>> = only.map(<[String]>::to_vec).or_else(|| super::rec::measured_keys(meta));
+    if probe {
+        let Some(runs) = meta["trace_runs"].as_array() else {
+            return Err(Error::usage("measured run windows are not indexed; read the recording directly to inspect its trace"));
+        };
+        if !runs.iter().any(|r| measured.as_ref().is_none_or(|m| m.iter().any(|k| r == k.as_str()))) {
+            return Err(no_trace_runs());
+        }
+        return super::available();
+    }
     let sql = format!(
         "{}
 select 'win' as kind, k, t0 as a, t1 as b, null as c from _w
@@ -335,7 +369,7 @@ select 'frame', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'frame_reporter.stat
         }
     }
     if wins.is_empty() {
-        return Err(Error::usage("no measured run window in this recording's trace (--case picks one case's runs)"));
+        return Err(no_trace_runs());
     }
     for v in presented.values_mut() {
         v.sort_by(f64::total_cmp);

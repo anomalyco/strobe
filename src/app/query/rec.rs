@@ -300,7 +300,7 @@ impl Rec {
         }
     }
 
-    pub(super) fn part(&self, p: Part) -> Result<Arc<Rows>> {
+    pub(super) fn require_part(&self, p: Part) -> Result<()> {
         if !self.has(p) {
             // A page block that took no trace (`traced: false`): nothing it measured needed one.
             if self.meta["traced"] == false && !self.dir.join("trace.pftrace").is_file() {
@@ -308,6 +308,11 @@ impl Rec {
             }
             return Err(Error::usage("this recording has no trace with strobe's run marks"));
         }
+        Ok(())
+    }
+
+    pub(super) fn part(&self, p: Part) -> Result<Arc<Rows>> {
+        self.require_part(p)?;
         self.prefetch(&[p]);
         let cache = self.trace.lock().unwrap_or_else(|e| e.into_inner());
         cache.get(&p).map(|r| r.as_ref().map(Arc::clone).map_err(Error::clone)).unwrap_or_else(|| Err(Error::msg("trace part missing")))
@@ -340,7 +345,7 @@ impl Rec {
     }
 
     /// The whole host profile's bytes (`whole-host.json.gz`), uncompressed.
-    fn host_bytes(&self) -> Result<Vec<u8>> {
+    pub(super) fn host_file(&self) -> Result<PathBuf> {
         let path = self.dir.join(crate::probe::cpu::WHOLE_HOST);
         if !path.is_file() {
             return Err(Error::usage(format!(
@@ -349,6 +354,11 @@ impl Rec {
                 self.handle()
             )));
         }
+        Ok(path)
+    }
+
+    fn host_bytes(&self) -> Result<Vec<u8>> {
+        let path = self.host_file()?;
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut store::gunzip(&path)?, &mut bytes)?;
         Ok(bytes)
@@ -372,15 +382,17 @@ impl Rec {
         Ok(out)
     }
 
-    fn load_cpu(&self) -> Result<Stacks> {
+    pub(super) fn cpu_files(&self) -> Result<Vec<PathBuf>> {
         let profiles = files(&self.dir, "cpuprofile")?;
         // A script recording whose measured runs held no sample: none (the whole host has them).
-        if profiles.is_empty() && self.dir.join(crate::probe::cpu::WHOLE_HOST).is_file() {
-            return Ok(Stacks::default());
-        }
-        if profiles.is_empty() {
+        if profiles.is_empty() && !self.dir.join(crate::probe::cpu::WHOLE_HOST).is_file() {
             return Err(super::no_profile(self, "CPU profile", "hotspots"));
         }
+        Ok(profiles)
+    }
+
+    fn load_cpu(&self) -> Result<Stacks> {
+        let profiles = self.cpu_files()?;
         let mut out = Stacks::default();
         for p in profiles {
             let bytes = std::fs::read(&p)?;
@@ -446,12 +458,17 @@ impl Rec {
         }
     }
 
-    fn load_alloc(&self) -> Result<Stacks> {
+    pub(super) fn alloc_files(&self) -> Result<Vec<PathBuf>> {
         super::firefox_gap(self, super::Gap::Alloc)?;
         let profiles = files(&self.dir, "heapprofile")?;
         if profiles.is_empty() {
             return Err(super::no_profile(self, "allocation profile", "alloc"));
         }
+        Ok(profiles)
+    }
+
+    fn load_alloc(&self) -> Result<Stacks> {
+        let profiles = self.alloc_files()?;
         let mut out = Stacks::default();
         for p in profiles {
             let bytes = std::fs::read(&p)?;
@@ -862,6 +879,9 @@ fn cell_cmp(x: &[Option<String>], y: &[Option<String>], i: usize) -> std::cmp::O
 /// A slice in a run window, as each part joins it; and in a run window outside its untimed stretches.
 const IN_WINDOW: &str = "s.ts >= w.t0 and s.ts < w.t1";
 const IN_RUN: &str = "s.ts >= w.t0 and s.ts < w.t1 and not exists (select 1 from _u u where s.ts >= u.t0 and s.ts < u.t1)";
+
+/// The existence check for Part::Style's non-recalc rows, without extracting their arguments.
+pub(super) const TRACKED_RUN: &str = "exists (select 1 from slice s join thread_track tt on s.track_id=tt.id join thread t using(utid) join _wp w on t.upid=w.upid and s.ts>=w.t0 and s.ts<w.t1 where w.k=_w.k and s.name glob '*InvalidationTracking' and not exists (select 1 from _u u where s.ts>=u.t0 and s.ts<u.t1))";
 
 /// `_w`: the trace's measured run windows between `strobe:<token>:…:start|end` marks (`measured`, else
 /// every run), and `_wp` each with the renderers the page was in (`metrics::windows_sql`); `_u`: the

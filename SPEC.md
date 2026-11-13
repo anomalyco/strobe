@@ -939,7 +939,12 @@ on a check of one case answers from that recording, except that profile views su
 `layout` and `gc` use the case's attribution recording when the check kept one. A forwarded view names
 its case and recording. With several active cases, a shared batch, or several candidate launches, query
 lists only distinct recordings that answer the requested view, with its arguments, instead of choosing a case.
-When none answer, it gives the recording reader's reason. Without a kept profile it explains how to collect one.
+Listing checks sources in series order, without marking a recording used, building a trace or starting the trace engine.
+It does not execute the SQL being offered. Without a kept profile it explains how to collect one. For a profile view,
+`--case` on the check selects the case's own attribution recording. If all candidates fail identically, query returns
+that error unchanged. Otherwise it names each distinct reason with its first series and recording (`recording_errors`
+in JSON), exit 4 only when every candidate was refused with 4, else 2. A trace whose measured runs or style tracking
+were not indexed can be inspected directly; listing does not guess from the trace file's presence.
 Local summaries and Markdown of a copy name its path in follow-up commands and never offer to resume it.
 An untraced check does not recommend `frames` in its summary. Before anything
 runs, every bench prints the builds it runs with their commits (`head app@f2a281b501 (dirty)`, or

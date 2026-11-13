@@ -420,6 +420,13 @@ pub fn plain_id(s: &str) -> bool {
 /// plain id (`plain_id`): a path never resolves here (`query` and `report` read paths themselves), so
 /// nothing outside the store is ever marked used.
 pub fn resolve(handle: &str) -> Result<PathBuf> {
+    let dir = find(handle)?;
+    touch(&dir);
+    Ok(dir)
+}
+
+/// Look up a handle without treating a listing or a project-settings lookup as a use.
+pub fn find(handle: &str) -> Result<PathBuf> {
     if !plain_id(handle) {
         return Err(Error::usage(format!("no recording or experiment {handle}: a handle is an id (rec_…, exp_…) or its first letters")));
     }
@@ -431,7 +438,6 @@ pub fn resolve(handle: &str) -> Result<PathBuf> {
         vec![paths::recordings(), paths::experiments()]
     };
     if let Some(exact) = roots.iter().map(|root| root.join(handle)).find(|p| p.is_dir()) {
-        touch(&exact);
         return Ok(exact);
     }
     let matches: Vec<PathBuf> = roots
@@ -443,10 +449,7 @@ pub fn resolve(handle: &str) -> Result<PathBuf> {
         .filter(|p| p.is_dir())
         .collect();
     match matches.len() {
-        1 => {
-            touch(&matches[0]);
-            Ok(matches[0].clone())
-        }
+        1 => Ok(matches[0].clone()),
         0 => Err(Error::usage(format!("no recording or experiment {handle}"))),
         _ => Err(Error::usage(format!("{handle} is ambiguous ({} matches)", matches.len()))),
     }

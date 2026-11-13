@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> {
+pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize, probe: bool) -> Result<Output> {
     let source = args.get("source");
     if let Some(s) = source
         && !matches!(s, "console" | "device" | "crash")
@@ -22,6 +22,9 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
         return Err(Error::usage("this recording kept no logs (strobe record wir: captures console, Safari/WebKit device logs and crash reports)"));
     }
 
+    if probe {
+        return super::available();
+    }
     let reveal = args.has("reveal");
     let id = meta["id"].as_str().unwrap_or("");
     let want_crash = source.is_none() || source == Some("crash");
@@ -191,10 +194,13 @@ pub fn log(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> 
     Ok(Output::new(text, out_json))
 }
 
-pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize) -> Result<Output> {
+pub fn network(dir: &Path, meta: &Value, args: &Args, top: usize, probe: bool) -> Result<Output> {
     let path = dir.join(wki::NETWORK_FILE);
     if !path.is_file() {
         return Err(Error::usage("this recording has no network waterfall (strobe record wir: records WebKit's Network waterfall)"));
+    }
+    if probe {
+        return super::available();
     }
     let wf: NetworkWaterfall = serde_json::from_value(wki::read_gz_json(&path)?)?;
     let reveal = args.has("reveal");

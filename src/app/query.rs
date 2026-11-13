@@ -150,7 +150,7 @@ pub fn run(args: &Args) -> Result<Output> {
         other => other,
     };
     // (`store::resolve` marks what it resolves used: never a folder named by its path.)
-    if let Some(dir) = path.is_none().then(|| store::resolve(handle).ok()).flatten().filter(|d| store::is_experiment(d)) {
+    if let Some(dir) = path.is_none().then(|| store::find(handle).ok()).flatten().filter(|d| store::is_experiment(d)) {
         if !dir.join("result.json").exists() {
             let log = std::fs::read_to_string(dir.join("progress.log")).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
@@ -166,7 +166,11 @@ pub fn run(args: &Args) -> Result<Output> {
             let text = format!("{handle} is running\n{}\n", tail.join("\n"));
             return Ok(Output::new(text, json!({ "id": handle, "state": "running", "progress": tail })));
         }
-        return experiment(store::read_json(&dir.join("result.json"))?, None, args, view, top);
+        let answer = experiment(store::read_json(&dir.join("result.json"))?, None, args, view, top);
+        if answer.is_ok() {
+            store::used(&dir);
+        }
+        return answer;
     }
     // `a..b`: one view of two recordings, side by side and per run.
     if let Some((a, b)) = handle.split_once("..").filter(|_| path.is_none()) {
@@ -184,7 +188,7 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
     // The folder that holds the result: what it keeps beside itself (a check's actions) is read there.
     let home = match source {
         Some(f) => f.parent().map(Path::to_path_buf),
-        None => result["id"].as_str().and_then(|id| store::resolve(id).ok()),
+        None => result["id"].as_str().and_then(|id| store::find(id).ok()),
     };
     match view {
         "summary" | "progress" => {
@@ -288,7 +292,15 @@ pub(super) fn folder_key(dir: &Path) -> String {
 }
 
 /// A recording's view.
-fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output> {
+fn recording(rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output> {
+    recording_view(rec, view, args, top, false)
+}
+
+fn available() -> Result<Output> {
+    Ok(Output::new(String::new(), Value::Null))
+}
+
+fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool) -> Result<Output> {
     let dir = rec.dir.clone();
     let case = args.get("case").map(|c| one_case(&mut rec, c, view)).transpose()?;
     let meta = &rec.meta;
@@ -313,10 +325,34 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
             }
             Ok(Output::new(text, json))
         }
+        "style" if probe => {
+            firefox_gap(&rec, Gap::Style)?;
+            attribution_meta(&rec, "style")?;
+            rec.require_part(Part::Style)?;
+            if trace.is_file() {
+                // Old traces do not index which measured runs have invalidations. Never start
+                // trace_processor merely to list choices, nor infer tracking from recalcs.
+                let measured = rec::measured_keys(meta);
+                match meta["style_runs"].as_array().map(|runs| runs.iter().any(|r| measured.as_ref().is_none_or(|m| m.iter().any(|k| r == k.as_str())))) {
+                    Some(true) => available(),
+                    Some(false) => Err(no_tracking()),
+                    None => Err(Error::usage(format!("{}: tracking in its measured runs is not indexed; read the recording directly to inspect its trace", rec.id))),
+                }
+            } else {
+                if !tracked(&rec, rec.part(Part::Style)?.as_slice()) {
+                    return Err(no_tracking());
+                }
+                available()
+            }
+        }
         "style" => style(&rec, top),
+        "runs" if probe => runs_read(&rec, true),
         "runs" => runs_view(&rec),
         "sql" => {
             let sql = args.pos.get(2).ok_or_else(|| Error::usage("query <h> sql \"select …\""))?;
+            if probe {
+                return available();
+            } // Every recording can build a trace. Do not execute the person's SQL.
             // Without a Chrome trace (a script recording, a native one, a page in another engine): the
             // Perfetto trace `strobe open` builds from what the recording holds, built now when it is not yet.
             let file = if trace.is_file() {
@@ -356,16 +392,24 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
         "gpu" if meta["wir"] == true => {
             Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", format!("strobe query {} memory --by layer", rec.handle())))
         }
-        "frames" if dir.join("frames.json").exists() || meta["native"] == true => native_frames(&dir, top, case.as_ref().map(|c| c.runs.as_slice())),
-        "inputs" => inputs::inputs(&dir, meta, args.num("top")?.map(|t| t as usize), case.as_ref().map(|c| c.runs.as_slice())),
+        "frames" if dir.join("frames.json").exists() || meta["native"] == true => {
+            if probe {
+                inputs::frame_runs(&dir)?;
+                inputs::presents_path(&dir)?;
+                return available();
+            }
+            native_frames(&dir, top, case.as_ref().map(|c| c.runs.as_slice()))
+        }
+        "inputs" => inputs::inputs(&dir, meta, args.num("top")?.map(|t| t as usize), case.as_ref().map(|c| c.runs.as_slice()), probe),
         "threads" if case.is_some() && (args.has("timeline") || dir.join("threads.json").exists()) => {
             Err(Error::usage("--case: a native recording's threads count every case of its launch together (threads.json has no per-run rows); its frames take --case"))
         }
-        "threads" if args.has("timeline") => thread_timeline(&dir, top),
+        "threads" if args.has("timeline") => thread_timeline(&dir, top, probe),
+        "threads" if probe && dir.join("threads.json").is_file() => available(),
         "threads" if dir.join("threads.json").exists() => native_threads(&dir, top),
         // A page in another engine has no trace: threads from Firefox's profile (attribution), frames
         // from the OS's presents (headed).
-        "threads" if !trace.exists() && dir.join(crate::probe::gecko::READ).is_file() => gecko_threads(&rec, top),
+        "threads" if !trace.exists() && dir.join(crate::probe::gecko::READ).is_file() => gecko_threads(&rec, top, probe),
         "frames" | "threads" if !trace.exists() && other_engine => Err(Error::usage(format!(
             "this {} recording has no {view}: {}",
             meta["engine"].as_str().unwrap_or(""),
@@ -382,6 +426,7 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
             None if meta["traced"] == false => Error::usage("this block took no trace: nothing it measured needs one; record or bench with --trace full, or headed, to keep one"),
             None => Error::usage("this recording kept no trace, so it has no frames: bench --trace full, or a headed run (no --headless), keeps one"),
         }),
+        "frames" if probe => available(),
         "frames" => frames(&trace, meta, top),
         "threads" if !trace.exists() => Err(Error::usage(format!(
             "this recording kept no thread counters (no trace, no threads.json){}",
@@ -393,23 +438,46 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
                 String::new()
             }
         ))),
-        "threads" => threads(&trace, meta, top),
-        "gpu" if !trace.exists() => native_gpu(&dir, meta),
+        "threads" => threads(&trace, meta, top, probe),
+        "gpu" if !trace.exists() => native_gpu(&dir, meta, probe),
+        "gpu" if probe => available(),
         "gpu" => gpu(&trace, meta, top),
         "hotspots" | "alloc" => {
             let by = by_arg(args)?;
             let (pick, sort) = (Pick::of(args), Sort::of(args)?);
             if view == "alloc" {
+                if probe {
+                    rec.alloc_files()?;
+                    return available();
+                }
                 alloc(&rec, by, top)
             } else if let Some(scope) = Scope::of(&rec, args)? {
+                if probe {
+                    return probe_cpu(&rec, scope);
+                }
                 hotspots_scoped(&rec, by, top, sort, scope)
             } else if args.has("native") || pick.any() {
+                if probe {
+                    pick.phase.map(|p| phase_spans(&dir, p)).transpose()?;
+                    if !dir.join("deep.json.gz").is_file() {
+                        return Err(no_native_samples(&rec));
+                    }
+                    return available();
+                }
                 native_hotspots_of(&rec, by, top, pick, sort)
             } else {
+                if probe {
+                    return probe_cpu(&rec, Scope::Measured);
+                }
                 hotspots_sorted(&rec, by, top, sort)
             }
         }
-        "waits" => waits::waits(&dir, by_arg(args)?, top, args.get("thread"), args.get("phase")),
+        "waits" => waits::waits(&rec, by_arg(args)?, top, args.get("thread"), args.get("phase"), probe),
+        "layout" | "gc" if probe => {
+            attribution_meta(&rec, view)?;
+            rec.require_part(if view == "gc" { Part::Gc } else { Part::Layout })?;
+            available()
+        }
         "layout" => layout(&rec, top),
         "shifts" => {
             let v =
@@ -417,7 +485,16 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
             Ok(Output::new(crate::probe::shifts::text(&v), v))
         }
         "gc" => gc(&rec),
+        "heap" if probe => {
+            firefox_gap(&rec, Gap::Heap)?;
+            heap_file(&dir)?;
+            available()
+        }
         "heap" => heap(&rec, top, args.has("reveal")),
+        "leaks" if probe => {
+            leak_files(&rec)?;
+            available()
+        }
         "leaks" => leaks(&rec, top, args.has("reveal")),
         "insights" => {
             exp_insights::quoting_reset();
@@ -429,14 +506,18 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
             Ok(out)
         }
         "actions" => actions::recording(&dir, args, top, case.as_ref().map(|c| (c.name.as_str(), c.seq == 1))),
-        "log" => wir::log(&dir, meta, args, top),
-        "network" => wir::network(&dir, meta, args, top),
+        "log" => wir::log(&dir, meta, args, top, probe),
+        "network" => wir::network(&dir, meta, args, top, probe),
         "memory" => {
             let by = args.get("by").unwrap_or("process");
             if !matches!(by, "process" | "layer" | "allocator") {
                 return Err(Error::usage(format!("--by: process, layer or allocator, not {by}")));
             }
             if dir.join("memory.json").exists() {
+                if probe {
+                    reading_at(&dir, args.get("at"))?;
+                    return available();
+                }
                 return native_memory(&dir, meta, by, top, args.get("at"));
             }
             if meta["native"] == true || (meta["pid"].is_u64() && meta["script"] != true) {
@@ -446,6 +527,10 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
                 return Err(Error::usage(
                     "a script recording keeps no memory census: the host's memory at the last measured run's end is the block's memory.app.private, and what each run kept js.heap.retained",
                 ));
+            }
+            if probe {
+                census_at(&dir, args.get("at"))?;
+                return available();
             }
             memory(&dir, by, top, args.get("at"))
         }
@@ -1612,14 +1697,18 @@ fn census_at(dir: &Path, at: Option<&str>) -> Result<(Value, String)> {
 
 /// Leak suspects of a memory recording: objects allocated between its first and middle snapshots that
 /// are still alive in the last, by class, with retainer paths (SPEC §8.6).
-pub fn leaks(rec: &Rec, top: usize, reveal: bool) -> Result<Output> {
+fn leak_files(rec: &Rec) -> Result<[std::path::PathBuf; 2]> {
     firefox_gap(rec, Gap::Heap)?;
     let s = |name: &str| rec.dir.join(format!("{name}.heapsnapshot.gz"));
     if !s("heap-s0").exists() || !s("heap-s1").exists() || !s("heap-0").exists() {
         return Err(Error::usage("this recording has no leak snapshots; record with --probes memory"));
     }
-    // The last snapshot is the recording's own (`heap-0`), shared with `heap`.
-    let v = crate::heapsnap::leaks(&crate::heapsnap::ids(&s("heap-s0"))?, &crate::heapsnap::ids(&s("heap-s1"))?, rec.snapshot()?, top, reveal);
+    Ok([s("heap-s0"), s("heap-s1")])
+}
+
+pub fn leaks(rec: &Rec, top: usize, reveal: bool) -> Result<Output> {
+    let [a, b] = leak_files(rec)?;
+    let v = crate::heapsnap::leaks(&crate::heapsnap::ids(&a)?, &crate::heapsnap::ids(&b)?, rec.snapshot()?, top, reveal);
     Ok(Output::new(crate::heapsnap::leaks_text(&v, top), v))
 }
 
@@ -1877,10 +1966,13 @@ fn gpu(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
 /// A recording without a trace (a native app, a process from outside): per adapter the target's
 /// engine use and GPU memory from the OS's GPU statistics, the device's own counters, and what
 /// reached the screen.
-fn native_gpu(dir: &Path, meta: &Value) -> Result<Output> {
+fn native_gpu(dir: &Path, meta: &Value, probe: bool) -> Result<Output> {
     let os = if meta["os"].is_object() { &meta["os"] } else { &meta["gpu"] };
     if !os.is_object() {
         return Err(Error::usage("this recording has no GPU readings: they come from timing recordings (record, bench blocks kept with --keep or attribution)"));
+    }
+    if probe {
+        return available();
     }
     let mut text = String::from("gpu      the target's processes, from the OS's per-process GPU statistics, over the recording\n");
     if let Some(line) = super::bench::gpu_line(&meta["screen"]["gpu"]) {
@@ -2051,9 +2143,12 @@ fn read_timeline(dir: &Path) -> Result<Option<crate::probe::wakes::TimelineData>
 /// `query <rec> threads --timeline`: each thread's CPU per second (or coarser for long recordings)
 /// from the launch, threads that exited included, with the runs marked, so work that starts late
 /// and stops shows when it ran.
-fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
+fn thread_timeline(dir: &Path, top: usize, probe: bool) -> Result<Output> {
     let t = read_timeline(dir)?
         .ok_or_else(|| Error::usage("this recording has no thread timeline: native recordings, kept native bench blocks and script attribution recordings have one (from this strobe on)"))?;
+    if probe {
+        return available();
+    }
     let meta = store::read_json(&dir.join("meta.json")).unwrap_or(Value::Null);
     let end = t.ticks.last().copied().unwrap_or(t.t0_ns);
     let span_s = end.saturating_sub(t.t0_ns) as f64 / 1e9;
@@ -2171,7 +2266,7 @@ fn thread_timeline(dir: &Path, top: usize) -> Result<Output> {
 /// A native recording's frames: per measured run, what reached the screen (OS present events), the
 /// inputs strobe gave the app, and each input's latency to the frame that showed it (SPEC §7.4).
 fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Output> {
-    let f = store::read_json(&dir.join("frames.json")).map_err(|_| Error::usage("this native recording has no frames: they come from bench blocks of a native target (--keep, or attribution)"))?;
+    let f = inputs::frame_runs(dir)?;
     let presents = inputs::presents(dir)?;
     let pids: Vec<u32> = f["pids"].as_array().into_iter().flatten().filter_map(|p| p.as_u64().map(|p| p as u32)).collect();
     let refresh = inputs::refresh_ms(&f, &presents);
@@ -2253,7 +2348,7 @@ fn native_frames(dir: &Path, top: usize, only: Option<&[String]>) -> Result<Outp
 /// "busy" time for one renderer thread in a 14 s trace. Tasks on several tracks of one thread can
 /// still overlap (one thread read 33.8 s of tasks in a shorter trace), so busy time is the union of
 /// its tasks' spans, per thread (its tid), never more than the time they cover.
-fn threads(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
+fn threads(trace: &Path, meta: &Value, top: usize, probe: bool) -> Result<Output> {
     // A lean trace holds no task loop's slices (`toplevel` is not in it): its threads' top-level slices
     // are the few its categories carry (a 50 ms click task read 0.2 ms, the renderer's main thread
     // missing), so it has no busy time by thread.
@@ -2261,6 +2356,9 @@ fn threads(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
         return Err(Error::usage(
             "this recording's trace is lean (a timed block's default): it holds no task loop's slices, so it has no busy time by thread; its main-thread time is main.work (strobe query <id> summary), and a block with --trace full, or an attribution block (bench --why always), has threads",
         ));
+    }
+    if probe {
+        return available();
     }
     let tasks = " and s.name in ('RunTask', 'ThreadControllerImpl::RunTask', 'ThreadPool_RunTask')";
     let (pre, runs, said) = in_measured_runs(meta);
@@ -2306,11 +2404,14 @@ fn in_measured_runs(meta: &Value) -> (String, &'static str, String) {
 
 /// A Firefox attribution recording's threads by CPU in its measured runs, every process's, from the
 /// CPU each profile sample carries (`threadCPUDelta`).
-fn gecko_threads(rec: &Rec, top: usize) -> Result<Output> {
+fn gecko_threads(rec: &Rec, top: usize, probe: bool) -> Result<Output> {
     let g = store::read_json(&rec.dir.join(crate::probe::gecko::READ))?;
     let rows = g["thread_cpu"].as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         return Err(Error::usage("this Firefox profile carries no CPU per thread (its samples give CPU in cycles, not time)"));
+    }
+    if probe {
+        return available();
     }
     let runs = rec.meta["runs"].as_f64().unwrap_or(1.0).max(1.0);
     // A sample carries its thread's CPU since the one before: the first sample in a run brings up to one
@@ -2472,7 +2573,7 @@ pub(super) fn scoped_cpu<'r>(rec: &'r Rec, scope: Scope, owned: &'r mut Option<S
             let name = scope.life().unwrap_or("");
             let spans = life_spans(rec, name);
             if spans.is_empty() {
-                return Err(Error::usage(format!("--source {name}: {} keeps no {name} span (a script recording from before strobe kept its host's lifecycle_spans)", rec.id)));
+                return Err(no_life_span(rec, name));
             }
             Ok(owned.insert(rec.phase_cpu(&spans, &[])?))
         }
@@ -2497,6 +2598,35 @@ fn life_spans(rec: &Rec, name: &str) -> Spans {
         .filter_map(|l| Some((l["t0_ns"].as_u64()?, l["t1_ns"].as_u64()?)))
         .filter(|(a, b)| b > a)
         .collect()
+}
+
+fn probe_cpu(rec: &Rec, scope: Scope) -> Result<Output> {
+    match scope {
+        Scope::Measured => {
+            if !rec.dir.join("deep.json.gz").is_file() {
+                rec.cpu_files()?;
+            }
+        }
+        Scope::Phase(p) => {
+            script_phase(rec, p)?;
+            rec.host_file()?;
+        }
+        Scope::Startup | Scope::Setup => {
+            let name = scope.life().unwrap_or("");
+            if life_spans(rec, name).is_empty() {
+                return Err(no_life_span(rec, name));
+            }
+            rec.host_file()?;
+        }
+        Scope::Host => {
+            rec.host_file()?;
+        }
+    }
+    available()
+}
+
+fn no_life_span(rec: &Rec, name: &str) -> Error {
+    Error::usage(format!("--source {name}: {} keeps no {name} span (a script recording from before strobe kept its host's lifecycle_spans)", rec.id))
 }
 
 /// A phase's stretches in a script recording's measured runs and those runs' untimed stretches (ns on
@@ -2738,15 +2868,17 @@ pub fn native_hotspots(dir: &Path, by: &str, top: usize, thread: Option<&str>, p
     native_hotspots_of(&Rec::open(dir), by, top, Pick { thread, phase, pid: None }, Sort::Own)
 }
 
+fn no_native_samples(rec: &Rec) -> Error {
+    if rec.meta["kind"] == "block" && rec.meta["probes"] != "attribution" {
+        no_profile(rec, "native samples", "hotspots")
+    } else {
+        Error::usage("this recording has no native samples; record with --probes deep")
+    }
+}
+
 pub fn native_hotspots_of(rec: &Rec, by: &str, top: usize, pick: Pick, sort: Sort) -> Result<Output> {
     let dir = rec.dir.as_path();
-    let missing = || {
-        if rec.meta["kind"] == "block" && rec.meta["probes"] != "attribution" {
-            no_profile(rec, "native samples", "hotspots")
-        } else {
-            Error::usage("this recording has no native samples; record with --probes deep")
-        }
-    };
+    let missing = || no_native_samples(rec);
     // A thread, process or phase selects samples: symbolized for that question alone; all samples are shared.
     let filtered;
     let n: &NativeStacks = if pick.any() {
@@ -3131,12 +3263,23 @@ fn invalidation(rec: &Rec) -> Result<Invalidation> {
         }
     }
     if v.tracked == 0 {
-        return Err(Error::usage(
-            "this recording has no style invalidation tracking: attribution blocks trace it for a series that declares main.style or style.count (or with --style); record --probes attribution --style for a page",
-        ));
+        return Err(no_tracking());
     }
     Ok(v)
 }
+
+fn no_tracking() -> Error {
+    Error::usage(
+        "this recording has no style invalidation tracking: attribution blocks trace it for a series that declares main.style or style.count (or with --style); record --probes attribution --style for a page",
+    )
+}
+
+fn tracked(rec: &Rec, rows: &[Vec<Option<String>>]) -> bool {
+    let measured = measured_runs(&rec.meta, rows);
+    rows.iter().any(|r| r.get(1).and_then(Option::as_deref).is_some_and(|n| n != "UpdateLayoutTree") && r.first().and_then(Option::as_ref).is_some_and(|k| measured.contains(k)))
+}
+
+pub(super) use sources::index_check;
 
 /// What invalidated style in the measured runs, from the trace's invalidation tracking (attribution
 /// blocks of a series that declares `main.style` or `style.count`, or `--style`): the recalcs with
@@ -3248,6 +3391,10 @@ fn run_phases_cached(rec: &Rec) -> Option<(String, Value)> {
 /// a native or script block's), else the run marks in its trace (a page's runs, by its main thread's
 /// tasks). Where a block's first runs went (warmup), and which runs its values are.
 pub fn runs_view(rec: &Rec) -> Result<Output> {
+    runs_read(rec, false)
+}
+
+fn runs_read(rec: &Rec, probe: bool) -> Result<Output> {
     let measured: Option<Vec<String>> = rec::measured_keys(&rec.meta);
     let is_measured = |k: &str| measured.as_ref().is_none_or(|m| m.iter().any(|x| x == k));
     let num = |v: &Value, unit: &str| v.as_f64().filter(|x| x.is_finite()).map_or("—".to_string(), |x| fmt::value(x, unit));
@@ -3261,6 +3408,8 @@ pub fn runs_view(rec: &Rec) -> Result<Output> {
         let from =
             if rec.meta["kind"] == "record" { "runs.json (a recording of a window: its one span is the whole recording)" } else { "runs.json (measured runs only: this recording kept no warmup run)" };
         (from, rows)
+    } else if probe && rec.meta["kind"] != "record" && rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()) {
+        return Err(Error::usage(format!("{}: run marks are not indexed; read this recording directly to inspect its trace", rec.id)));
     } else if let Some(marked) = (rec.meta["kind"] != "record" && rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()))
         .then(|| trace_runs(rec))
         .transpose()?
@@ -3276,6 +3425,9 @@ pub fn runs_view(rec: &Rec) -> Result<Output> {
     } else {
         return Err(Error::usage(format!("{} keeps no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window has none", rec.id)));
     };
+    if probe {
+        return available();
+    }
     rows.sort_by_key(|r| r["run"].as_str().and_then(run_no));
     let cols: [(&str, &str, &str); 5] =
         [("ms", "run.duration", "ms"), ("marked_ms", "marked span", "ms"), ("cpu_work_ms", "cpu.work", "ms"), ("task_ms", "main tasks", "ms"), ("main_cpu_ms", "main CPU", "ms")];

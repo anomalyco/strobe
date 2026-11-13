@@ -30,15 +30,48 @@ struct Row {
     frame: Option<Frame>,
 }
 
-pub fn waits(dir: &Path, by: &str, top: usize, thread: Option<&str>, phase: Option<&str>) -> Result<Output> {
-    let deep = crate::symbol::read_deep(dir)?.ok_or_else(|| {
-        Error::usage("this recording has no native capture: waits come with native stacks (record pid:<n> --probes deep, a native app's record --probes attribution, or a bench attribution block of a native target)")
-    })?;
-    let w: Waits = match (deep.waits, deep.waits_refused) {
-        (Some(w), _) => w,
-        (None, Some(r)) => return Err(r.into()),
-        (None, None) => return Err(crate::probe::stacks::no_waits("this recording's native capture predates off-CPU waits", "record it again with this strobe").into()),
-    };
+fn no_capture() -> Error {
+    Error::usage(
+        "this recording has no native capture: waits come with native stacks (record pid:<n> --probes deep, a native app's record --probes attribution, or a bench attribution block of a native target)",
+    )
+}
+
+fn captured<T>(w: Option<T>, r: Option<crate::model::Refusal>) -> Result<T> {
+    w.ok_or_else(|| r.unwrap_or_else(|| crate::probe::stacks::no_waits("this recording's native capture predates off-CPU waits", "record it again with this strobe")).into())
+}
+
+pub(super) fn header(dir: &Path) -> Result<Value> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        waits: Option<serde::de::IgnoredAny>,
+        waits_refused: Option<crate::model::Refusal>,
+    }
+    let h: Header = serde_json::from_reader(std::io::BufReader::new(crate::store::gunzip(&dir.join("deep.json.gz"))?))?;
+    Ok(json!({"present":h.waits.is_some(),"refusal":h.waits_refused}))
+}
+
+pub fn waits(rec: &super::Rec, by: &str, top: usize, thread: Option<&str>, phase: Option<&str>, probe: bool) -> Result<Output> {
+    let dir = rec.dir.as_path();
+    if probe {
+        let path = dir.join("deep.json.gz");
+        if !path.is_file() {
+            return Err(no_capture());
+        }
+        // The refusal lives inside the capture. Stream past the payload; never allocate samples,
+        // resolve a module, or populate the waits symbol cache to choose a recording.
+        let legacy;
+        let h = if rec.meta["wait_capture"].is_object() {
+            &rec.meta["wait_capture"]
+        } else {
+            legacy = header(dir)?;
+            &legacy
+        };
+        captured((h["present"] == true).then_some(()), serde_json::from_value(h["refusal"].clone()).ok())?;
+        phase.map(|p| super::phase_spans(dir, p)).transpose()?;
+        return super::available();
+    }
+    let deep = crate::symbol::read_deep(dir)?.ok_or_else(no_capture)?;
+    let w: Waits = captured(deep.waits, deep.waits_refused)?;
     let spans = phase.map(|p| super::phase_spans(dir, p)).transpose()?;
     // Every stack a wait or a waker holds, symbolized as native samples are (cached apart).
     let mut all = Deep { modules: w.modules.clone(), stacks: w.stacks.clone(), ..Deep::default() };
