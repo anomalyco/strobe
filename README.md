@@ -13,12 +13,22 @@ bunx @hona/strobe run --base "<command on main>" --head "<command on your branch
 Each run starts the command and waits for it to exit; strobe compares their CPU time (`cpu.work`) and
 also shows wall time, peak memory and I/O. From an empty folder on a 1-core Linux VM, the first run took
 about 8 s: 0.6 s to fetch strobe, 7 s for 8 pairs. `--check --head "<command>"` runs it once to see
-that it works.
+that it works (add `--base "<command>"` to run both once).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/card-dark.png">
   <img alt="44% less CPU time, 78.0% less memory, better in 8 of 8 pairs; before 7,052 µs, this PR 3,904 µs" src="docs/card-light.png">
 </picture>
+
+The exit code says whether strobe measured, never which side won: a comparison exits 0 when head is
+worse too, so read its verdict (`faster` or `less`, `slower` or `more`, `same`, `unclear`,
+`underpowered`, `refused`), or pass `--require-verdict` to exit 5 when it cannot tell. A `--check`
+exits 1 when a case fails (also when base cannot run it), and 4 when it was asked to hold counters to
+base (`--noworse`) and compared none.
+
+Known issue: on Windows a command line starts its first program directly, so `a && b`, `a | b` or
+`a > out` measures `a` alone. Wrap such a line in `cmd /c "a && b"` on both sides, or use a script. A
+fix is designed.
 
 ## In your project
 
@@ -62,12 +72,14 @@ bunx strobe query <exp_…> insights                      # what changed, the su
 bunx strobe record --bench perf/scroll.bench.ts#scroll  # one case under the profilers
 bunx strobe query rec_3f9a..rec_7c1d hotspots           # what got slower between two recordings
 bunx strobe open rec_3f9a                               # the whole recording in Perfetto
+bunx strobe query ./result.json insights                # a result someone sent you, read by its path
 ```
 
 Times print in microseconds (`18,309,038 µs`); `--unit ms` or `"unit": "ms"` in strobe.json to change it.
 
 `bunx strobe status` says what this machine can measure, which permission is missing, and how much
-disk strobe's files take; `bunx strobe prune` frees what nothing uses. Web, Electron and native apps,
+disk strobe's files take; `bunx strobe prune` frees what nothing uses. strobe ends only processes it
+can prove it launched; any it leaves alone, a command lists at its end. Web, Electron and native apps,
 terminal programs, servers, libraries and commands, on Windows, macOS and Linux.
 
 **Agents:** read [skill/SKILL.md](skill/SKILL.md). `bunx strobe up` installs `strobe` on your PATH, the

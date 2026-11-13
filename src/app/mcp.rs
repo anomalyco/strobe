@@ -117,7 +117,7 @@ const TOOLS: &[Tool] = &[
             ("aa", "same build on both sides (checks the method)"),
             (
                 "check",
-                "validate the file: each case once on head (one launch; runs N runs in it, repeat R launches), pass or fail with a screenshot, no statistics; with base (a build) each case once on base too, and noworse holds head's exact counters to base's",
+                "validate the file: each case once on head (one launch; runs N runs in it, repeat R launches), pass or fail with a screenshot, no statistics, no verdict; with base (a build) each case once on base too (a case base cannot build or run fails, exit 1: head was checked against nothing), and noworse holds head's exact counters to base's",
             ),
             (
                 "batch",
@@ -138,7 +138,7 @@ const TOOLS: &[Tool] = &[
             ("equivalence", "equivalence bound in % (default 2)"),
             (
                 "noworse",
-                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear); \"metric=2%,metric2=5%\" per metric; with check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's. A count.* only this names is the series' once any block of either side counted it (a block that counted none then reads 0); never counted: nothing of it, and an Uncounted warning when no case of the run counted it",
+                "non-inferiority: \"2%\" asks whether head's primary is at most 2% worse (verdicts no worse, worse, unclear; a timed worse still exits 0: read verdict_kind); \"metric=2%,metric2=5%\" per metric; a bare exact counter (count.items) is 0%, a bare other metric exits 2. With check: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), held to base's; each row ends no_worse, worse, unstable, missing or not_compared, and any but no_worse fails the case (exit 1). A count.* only this names is the series' once any block of either side counted it (a block that counted none then reads 0); never counted: nothing of it, and an Uncounted warning. A check whose cases compared none of the counters it names exits 4 (nothing compared is no pass): check the name against the runs' ctx.count calls, and declare a counter a run counts only on some paths in that case's metrics, so 0 on both sides compares as no worse",
             ),
             ("plan", "do not run: estimate pairs and minutes per series from earlier experiments here, builds and the bench slot's queue"),
             ("effect", "with plan: the expected change of the primary in % (default: what the last run of the series measured, else 0)"),
@@ -186,7 +186,10 @@ const TOOLS: &[Tool] = &[
         name: "query",
         description: "Views over a recording (rec_…) or experiment (exp_…): summary, frames, threads, hotspots (CPU self time by function|file|package with full stacks), alloc (bytes allocated by function|file|package with full stacks), layout (forced layouts and style recalcs by the call that forced them), shifts (the largest layout shifts and the elements they moved), gc (collections and GC time per run), heap (live objects by class with retained sizes, detached DOM, retainer paths), leaks (memory recordings: objects from the first half still alive at the end, with retainer paths), memory (by process, layer or allocator), insights (rules with evidence: dominant-thread, off-cpu-bound, hot-function, http-stalls, forced-layout, gc-pressure, …; exp_…: insights per series: verdict or status, ranked suspects, the warnings that bear on it, the commands to run next), waits (a native capture taken with probes waits: off-CPU time by the stack each thread waited at, blocked or runnable, and who woke it); those need attribution recordings; http (a bench block's HTTP probe from ctx.httpProbe: idle control against the measured runs, p50/p95/max with timeouts censored, errors, missed sends, the probe's CPU, and stalled cohorts; exp_… lists its probe blocks; rec_a..rec_b side by side); actions (a bench block's recording, or exp_… for its kept recordings and check cases: what the hooks sent the target in order, with hook, run, phase, outcome; typed text, act values, ctx.call arguments and ctx.exec lines redacted unless reveal); inputs (each measured input of a recording from OS presents or a Chromium trace: its run and time, what proved its change, the frames around it, its latency or why it gave none, busy with why, and the delay it needed); sql (Perfetto trace_processor SQL; a recording without a Chrome trace is queried in the Perfetto trace strobe open builds, built on first use), runs (every run of a block recording, warmup and unmeasured runs too: run.duration, cpu.work, main-thread time, whether it was measured), progress (running experiments). rec_a..rec_b compares two recordings in hotspots, alloc, layout, style, threads, frames, summary, heap and memory: per-run deltas and the stacks where they concentrate; exp_… with one of those views (other than summary) compares each series' base..head attribution recordings. Tracked history (strobe track): handle history lists this device's series (or history <ser_…|bench file> one series' points with intervals), handle changes lists suspected and confirmed changes with their paired A/B and culprit; handle ser_… takes views history and changes.",
         args: &[
-            ("handle", "rec_…, exp_… (a unique prefix works) or rec_a..rec_b; history, changes or ser_… for tracked history"),
+            (
+                "handle",
+                "rec_…, exp_… (a unique prefix works) or rec_a..rec_b; history, changes or ser_… for tracked history; or the absolute path of a result.json, a meta.json or the folder of either (read as it is, nothing written beside it; a folder holding a link or junction is refused)",
+            ),
             (
                 "view",
                 "summary (default), frames, inputs (each measured input: its change, frames around it, latency or why busy), threads (a native recording: its threads' wakes, CPU, names), hotspots, waits, alloc, layout, shifts, gc, heap, leaks, memory, http, log (wir: console, Safari/WebKit device logs and crashes), network (wir: network waterfall), insights, actions, sql, runs (every run of a block recording, warmup too: time and work per run, which are measured), progress (exp_… takes summary, progress, insights, actions, http, the base..head views hotspots, alloc, layout, style, threads, frames, heap and memory, and on a --check of one case any recording view)",
@@ -223,7 +226,7 @@ const TOOLS: &[Tool] = &[
         args: &[
             (
                 "handle",
-                "rec_…, exp_… or ser_… (a tracked series); a .bench.ts file for its tracked history; or the absolute path of a result.json or meta.json (read as it is, nothing written beside it)",
+                "rec_…, exp_… or ser_… (a tracked series); a .bench.ts file for its tracked history; or the absolute path of a result.json, a meta.json or the folder of either (read as it is, nothing written beside it: HTML and cards go to strobe's run folder)",
             ),
             ("view", "experiment, recording or history (default from the handle)"),
         ],
