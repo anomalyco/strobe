@@ -42,6 +42,15 @@
 //                program: Linux 0.07 ms (30 inputs, tty.frames 0, tty.cells 10: the echoed keys)
 //   paste        has no `paste` option on 0.32.0, which takes it without a word and types the 22 characters one
 //                at a time: 22 samples a run, p50 20.8 ms (Windows) and 20.2 ms (Linux); it must be 1 sample a run
+// Acceptance for the latency fix (on a Windows desktop and a Linux VM; macOS too where it runs):
+//   refused     overrun-120 and overrun-mixed on both, overrun-60 and echo-cooked on Unix: AmbiguousInteraction for
+//               every tty.latency.* and tty.settle.*, no latency value printed, in --check and exit 4 in a timed run
+//               (`--aa --filter overrun-120 --target keys-120`, likewise each)
+//   keys        tty.latency.p50 20.0 to 23.5 ms, tty.frames 10, tty.cells 400; an 8-pair A/A same (±2%)
+//   spaced      --base keys --head keys-80: tty.latency.p50 +60 ms ± 3 ms, the interval covering
+//               (80 + b0) / (20 + b0) - 1; an 8-pair A/A on keys same (±2%)
+//   paste       1 latency sample a run, tty.latency.p50 20.0 to 24.0 ms
+//   ready       --base ready-200 --head ready-500: launch.ready +300 ms ± 3 ms; an 8-pair A/A on ready-500 same (±2%)
 import { bench, tty } from "@hona/strobe"
 import { join } from "node:path"
 

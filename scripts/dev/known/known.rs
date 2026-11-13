@@ -227,35 +227,36 @@ mod os {
     // first thing in main. Elsewhere (ARM64, where the cycle counter's units are unchecked) a spin is wall time.
     #[cfg(target_arch = "x86_64")]
     static ANCHOR: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
+    /// The anchor of the counter's rate. Without a tight bracket (`clocks`) the program refuses to plant anything
+    /// rather than plant by a skewed rate: it exits 3 and says why.
     pub fn anchor() {
         #[cfg(target_arch = "x86_64")]
-        ANCHOR.get_or_init(clocks);
+        ANCHOR.get_or_init(|| {
+            clocks().unwrap_or_else(|| {
+                eprintln!("known: no read of the wall clock and the cycle counter within 2 µs of each other in 100 tries, so no CPU can be planted by cycles: refusing to run");
+                std::process::exit(3)
+            })
+        });
     }
     /// The wall clock and the timestamp counter at one moment: the counter read between two clock reads at most 2 µs
     /// apart, the clock taken at their middle. A thread preempted between two unbracketed reads (a 15.6 ms quantum)
-    /// would pair a counter and a clock that far apart: up to 100 tries, else the tightest bracket.
+    /// would pair a counter and a clock that far apart. None when 100 tries give no bracket that tight: never a
+    /// looser pair.
     #[cfg(target_arch = "x86_64")]
-    fn clocks() -> (std::time::Instant, u64) {
-        let mut best: Option<(std::time::Duration, std::time::Instant, u64)> = None;
-        for _ in 0..100 {
+    fn clocks() -> Option<(std::time::Instant, u64)> {
+        (0..100).find_map(|_| {
             let a = std::time::Instant::now();
             let c = unsafe { core::arch::x86_64::_rdtsc() };
             let w = a.elapsed();
-            if best.is_none_or(|(bw, _, _)| w < bw) {
-                best = Some((w, a + w / 2, c));
-            }
-            if w <= std::time::Duration::from_micros(2) {
-                break;
-            }
-        }
-        let (_, t, c) = best.unwrap();
-        (t, c)
+            (w <= std::time::Duration::from_micros(2)).then(|| (a + w / 2, c))
+        })
     }
-    /// The timestamp counter's ticks a nanosecond since `anchor`; None until 1 ms has passed.
+    /// The timestamp counter's ticks a nanosecond since `anchor`; None until 1 ms has passed, or when this read
+    /// got no tight bracket (a spin then runs another turn and asks again).
     #[cfg(target_arch = "x86_64")]
     fn ticks_per_ns() -> Option<f64> {
         let (t0, c0) = ANCHOR.get()?;
-        let (t1, c1) = clocks();
+        let (t1, c1) = clocks()?;
         let ns = t1.saturating_duration_since(*t0).as_nanos() as f64;
         (ns >= 1e6).then(|| c1.wrapping_sub(*c0) as f64 / ns)
     }
@@ -288,7 +289,9 @@ mod os {
         {
             let mut c = 0u64;
             unsafe { QueryProcessCycleTime(GetCurrentProcess(), &mut c) };
-            ticks_per_ns().map(|r| (c as f64 / r) as u64).unwrap_or(0)
+            // A read without a tight bracket is asked again (up to 10 times); 0 (in the process's first 1 ms, or
+            // with none) rather than a skewed figure.
+            (0..10).find_map(|_| ticks_per_ns()).map(|r| (c as f64 / r) as u64).unwrap_or(0)
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
