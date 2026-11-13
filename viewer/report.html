@@ -6920,7 +6920,7 @@ function renderBlocksSeries(r, s) {
     (b.secondaries || []).length
       ? h("section", { class: "card-surface" },
           h("div", { class: "card-hd" }, h("div", { class: "card-hd-left" },
-            h("h2", { class: "sec-title" }, "Declared metrics over the blocks"),
+            h("h2", { class: "sec-title" }, "Metrics over the blocks"),
             h("span", { class: "sec-sub" }, `median with its interval over the blocks (95% from 6 blocks; ${n < 6 ? `${n} give a range with the coverage shown` : "fewer give a range"}), or why a block refused it · one build, nothing compared`))),
           h("div", { class: "card-bd" },
             h("div", { class: "rec-kv-cols", style: "columns:1" },

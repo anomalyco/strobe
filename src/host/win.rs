@@ -129,7 +129,20 @@ pub fn process_cycles(pid: u32, start: Option<u64>) -> Option<u64> {
 
 /// Every process: (pid, parent, creation time), from one system snapshot.
 pub fn process_list() -> Vec<(u32, u32, u64)> {
-    system_processes(false).into_iter().map(|p| (p.info.pid, p.info.parent, p.create as u64)).collect()
+    system_processes(false).into_iter().filter(|p| p.info.threads > 0).map(|p| (p.info.pid, p.info.parent, p.create as u64)).collect()
+}
+
+/// A console host installed by the OS, not the command's own executable with the same basename.
+pub fn system_console_host(pid: u32) -> bool {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let Some(path) = exe_of(pid) else { return false };
+    let mut buf = [0u16; 260];
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        return false;
+    }
+    let dir = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+    ["conhost.exe", "OpenConsole.exe"].iter().any(|name| path.as_os_str().eq_ignore_ascii_case(dir.join(name).as_os_str()))
 }
 
 /// Terminates a process and every process of its tree, children first: each only when the process

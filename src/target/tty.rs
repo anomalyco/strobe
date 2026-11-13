@@ -420,8 +420,8 @@ pub struct Tty {
     pub host_pids: Vec<u32>,
     /// When the program was started (host clock): after strobe set up its terminal (the pseudo-terminal,
     /// the console host, the reader thread), so a launch is the program's. Windows: right before the
-    /// suspended process, already in its job and on its CPUs, resumes. Unix: right before the spawn,
-    /// which still holds the launch cgroup's set-up (`host::spawn::spawn_owned_terminal`).
+    /// suspended process resumes. Unix: the owned child's release stamp (Linux: immediately before
+    /// exec, after cgroup placement and CPU affinity; macOS: immediately before spawn).
     pub started_ns: u64,
 }
 
@@ -763,8 +763,8 @@ type Opened = (Pending, std::fs::File, std::fs::File, Vec<u32>);
 #[cfg(unix)]
 fn start(p: Pending, spec: &Spec) -> Result<(Child, u32, u64)> {
     let Pending { mut cmd, master, cpus } = p;
-    let at = host::now_ns();
     let owned = host::spawn::spawn_owned_terminal(&mut cmd, cpus, spec.home.as_deref()).map_err(|e| Error::msg(format!("start {}: {e}", spec.run.text())))?;
+    let at = owned.released_ns();
     drop(cmd);
     let pid = owned.pid();
     Ok((Child { owned, master }, pid, at))

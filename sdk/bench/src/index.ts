@@ -815,8 +815,10 @@ export interface CliOptions {
    * The command line each `ctx.exec()` runs in the variant's folder, to its exit, at most the case's `timeout`.
    * Unix: `sh -c "exec <run>"` for one simple command, else `sh -c "<run>"` (assignments, pipes, `;`, `&&`,
    * redirects, builtins); Windows: the first word is the program (a `.cmd` or `.bat`, or a word that is no
-   * executable, runs under cmd). Omit it when the variants are commands (`--base "cmd:<line>"`, what
-   * `strobe run --base … --head …` does). `{fixture.url}` and the like are filled in.
+   * executable, runs under cmd). Known issue on Windows: `&&`, `||`, `|`, `<` and `>` after a real program reach it
+   * as arguments, so only its first command runs and is measured; write `cmd /c "a && b"`, or one `ctx.exec` per
+   * command. Omit it when the variants are commands (`--base "cmd:<line>"`, what `strobe run --base … --head …`
+   * does). `{fixture.url}` and the like are filled in.
    */
   run?: string
   /** Extra environment for the command (`{fixture.*}` filled in). */
@@ -859,9 +861,11 @@ export interface NativeOptions {
   /**
    * `false`: the app shows no window (a tray app). strobe neither waits for one nor places or checks it, launches end
    * on a milestone (`until: { milestone }`), and cases whose metrics are all CPU, memory, IO, counters and milestones
-   * run while the session is locked.
+   * run while the session is locked. What it draws (frames, input latency, the display, GPU use) is refused
+   * NotForTarget, and a window it shows anyway refuses the block (VariantMismatch). `true`: the app has a window,
+   * over its profile's `window: false`. Default: the profile's, else a window.
    */
-  window?: false
+  window?: boolean
   /** What every block of this target must show (a case's `expect` adds to it). */
   expect?: Expect
   /** {@link ResetPixels} for every case of this target (a case's own wins). */
@@ -998,6 +1002,9 @@ export function script<P = any>(entry: string, opts: Omit<ScriptOptions, "entry"
  * strobe's thread), `cpu.wakes`, `memory.peak`, `io.read`,
  * `io.write`, and `metric.<name>` from its `strobe:metric <name>=<value> [lower|higher]` lines (default lower is
  * better; every command of a run must print each name it prints, in one direction). Cases: `run: (ctx) => ctx.exec()`.
+ * A metric the case declares that this command does not give is refused with why (and what it gives instead); one it
+ * does not declare is left out. On Windows a line with `&&` or `|` measures its first command only: see
+ * {@link CliOptions.run}.
  */
 export function cli<P = any>(run?: string, opts: Omit<CliOptions, "run"> & Side = {}): Target<P> {
   return { kind: "cli", run, ...opts }

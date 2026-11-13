@@ -83,7 +83,7 @@ pub fn launch(spec: &Spec, home: &Path, fresh: bool, window: &Window, cpus: Opti
     }
     cmd.envs(super::isolate::launch_env(home));
     cmd.current_dir(&spec.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let epoch = epoch_ms();
+    let (epoch, at_ns) = (epoch_ms(), host::now_ns());
     // Its own group, so the dev server, the app and everything they spawn end together.
     let mut child = match host::spawn_owned(&mut cmd, cpus, 0, Some(home)) {
         Ok(c) => c,
@@ -95,6 +95,8 @@ pub fn launch(spec: &Spec, home: &Path, fresh: bool, window: &Window, cpus: Opti
             return Err(Error::msg(format!("start `{}`: {e}", spec.run)));
         }
     };
+    let from = child.released_ns().saturating_sub(child.creation_ns()).max(at_ns);
+    let epoch = epoch + (from - at_ns) as f64 / 1e6;
     let pid = child.pid();
     let output = lines(&mut child);
     // A start that fails from here ends the command's processes and what runs for its home.

@@ -345,7 +345,8 @@ pub(super) fn point(args: &Args, sides: &Sides, file: &Path, root: &Path, commit
         super::runtime_fingerprint(&runtimes, &mut fingerprint);
         super::motion_fingerprint(r, s, &mut fingerprint);
         super::seed_fingerprint(r, &mut fingerprint);
-        super::metric_fingerprint(&metric, &runtimes, &mut fingerprint);
+        let kind_names: Vec<&str> = kinds.iter().filter_map(Value::as_str).collect();
+        super::metric_fingerprint(&metric, &runtimes, &kind_names, &mut fingerprint);
         let fam = json!({ "device": statics["device"], "repo": repo, "file": file_rel, "label": label, "metric": metric, "base_target": sides.base_target, "head_target": sides.head_target });
         let id = history::series_id(&fam, &fingerprint);
         if !history::exists(&id) {

@@ -352,8 +352,8 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                             let now = super::super::record::per_process(&procs);
                             let marks = host::ended_marks(&procs.iter().map(|p| p.pid).collect::<Vec<_>>(), browser.profile().as_deref());
                             match super::super::record::timed_cpu(&[a, &now], &[e0, &marks]) {
-                                Some(c) => (cpu0 + c.total, Some(c.ended)),
-                                None => (cpu0 + super::super::record::cycles_used(a, &now), None),
+                                Ok(c) => (cpu0 + c.total, Some(c.ended)),
+                                Err(_) => (cpu0 + super::super::record::cycles_used(a, &now), None),
                             }
                         }
                         None => {
