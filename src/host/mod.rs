@@ -2286,6 +2286,9 @@ pub fn start_now() -> Option<u64> {
 /// SIGINT and SIGTERM set `flag` instead of ending strobe; a second one while the flag is still set
 /// ends it as the signal would.
 #[cfg(unix)]
+pub(crate) static STOP_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
 pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
     use std::sync::atomic::{AtomicPtr, Ordering};
     static TARGET: AtomicPtr<std::sync::atomic::AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
@@ -2297,7 +2300,6 @@ pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
     // for, what is left said) and exits 130, rather than the signal ending strobe with its launches
     // still running (a browser is in a process group of its own). Only a third, 300 ms or more after the
     // second, ends strobe at once (should that end hang).
-    static NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static NOW_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     extern "C" fn handler(sig: libc::c_int) {
         let flag = TARGET.load(Ordering::SeqCst);
@@ -2316,7 +2318,7 @@ pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
         }
         match NOW_AT.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => {
-                NOW.store(true, Ordering::SeqCst);
+                STOP_NOW.store(true, Ordering::SeqCst);
                 return;
             }
             Err(second) if now.saturating_sub(second) < 300_000_000 => return,
@@ -2333,7 +2335,7 @@ pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
             libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
         }
         let _ = std::thread::Builder::new().name("strobe-stop-now".into()).spawn(|| {
-            while !NOW.load(Ordering::SeqCst) {
+            while !STOP_NOW.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             crate::target::isolate::exit_on_stop(None, None);

@@ -157,7 +157,19 @@ pub(super) fn pids_in(list: &[(u32, u32, u64)], dir: &Path) -> Vec<u32> {
 /// The processes stamped with `dir` now, but this strobe and `except`: pid, start time and name.
 fn stamped_with(dir: &Path, except: u32) -> Vec<(u32, u64, String)> {
     let k = home_key(dir);
-    stamped().into_iter().filter(|s| s.stamp.home == k && s.pid != except && super::start_time(s.pid) == Some(s.start)).map(|s| (s.pid, s.start, name_of(s.pid))).collect()
+    let owner = parse_owner(owner_stamp());
+    stamped()
+        .into_iter()
+        .filter(|s| {
+            s.stamp.home == k
+                && s.pid != except
+                && Some((s.stamp.pid, s.stamp.start)) == owner
+                && s.stamp.start != 0
+                && super::start_time(s.pid) == Some(s.start)
+                && stamp_of(s.pid).as_ref() == Some(&s.stamp)
+        })
+        .map(|s| (s.pid, s.start, name_of(s.pid)))
+        .collect()
 }
 
 /// A process's executable's file name, or nothing.
