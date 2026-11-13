@@ -536,14 +536,24 @@ pub(super) fn path_text(text: &str, data: &Value, path: &Path, recording: bool) 
         } else {
             None
         };
-        if let Some((before, cmd)) = prefix.and_then(|p| line.rsplit_once(p).map(|(b, c)| (&line[..b.len() + p.len()], c)))
+        if let Some(prefix) = prefix
+            && let Some((before, cmd)) = line.rsplit_once(prefix)
             && let Some(after) = cmd.strip_prefix(id)
             && (after.is_empty() || after.starts_with(char::is_whitespace))
         {
             if !id.is_empty() {
                 out.push_str(before);
+                out.push_str(prefix);
                 out.push_str(&word);
                 out.push_str(after);
+            } else if prefix.starts_with('·') {
+                // No operand to rewrite. Drop the unusable command, not the action count or
+                // other information on its line (the inline network note ends in a parenthesis).
+                out.push_str(before.trim_end());
+                if prefix == "· query " {
+                    out.push(')');
+                }
+                out.push('\n');
             }
         } else {
             out.push_str(line);

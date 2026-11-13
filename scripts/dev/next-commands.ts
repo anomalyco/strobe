@@ -735,7 +735,7 @@ let followed = 0
       const t = go(a,0)
       if (t.split(prose).length !== 5) fail(`${a[0]} changed a log, error, hint or warning: ${t}`)
       if (id) checkText(id,file,"strobe query HANDLE actions",t.split("\n").find(l=>l.startsWith("      actions  ")) ?? "")
-      else if (t.includes("result.json")) fail(`${a[0]} injected the path without an id`)
+      else if (t.includes("result.json") || !t.includes("      actions  1 sent before it failed\n")) fail(`${a[0]} injected a path or lost the action count without an id`)
     }
   }
   put(copy,"result.json",{kind:"experiment",series:[{kind:"runs",label:"first",primary:{metric:"cpu.work"}}],stopped:{code:130}})
