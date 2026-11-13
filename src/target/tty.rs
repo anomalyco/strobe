@@ -430,6 +430,11 @@ impl Tty {
     /// reader thread on `reader_cpus` when given (strobe's own, where the creating thread's pin is no
     /// new thread's: Windows).
     pub fn spawn(spec: &Spec, cpus: Option<u64>, reader_cpus: Option<u64>) -> Result<Tty> {
+        Self::spawn_observed(spec, cpus, reader_cpus, |_| ()).map(|(tty, ())| tty)
+    }
+
+    /// A measured launch can start observing the identified console host before the program runs.
+    pub(crate) fn spawn_observed<T>(spec: &Spec, cpus: Option<u64>, reader_cpus: Option<u64>, observe: impl FnOnce(&[u32]) -> T) -> Result<(Tty, T)> {
         if spec.cols == 0 || spec.rows == 0 {
             return Err(Error::usage("a terminal needs at least one column and one row"));
         }
@@ -477,8 +482,9 @@ impl Tty {
             }
             read_loop(read, &s, &w)
         })?;
+        let observation = observe(&host_pids);
         let (child, pid, started_ns) = start(pending, spec)?;
-        Ok(Tty { shared, writer, reader: Some(reader), child: Mutex::new(child), pid, host_pids, started_ns })
+        Ok((Tty { shared, writer, reader: Some(reader), child: Mutex::new(child), pid, host_pids, started_ns }, observation))
     }
 
     /// The terminal's line discipline echoes input itself (Unix `ECHO`, or `ECHONL` in canonical mode):

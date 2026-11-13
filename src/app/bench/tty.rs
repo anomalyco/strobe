@@ -965,8 +965,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         }
         let lapped = Instant::now();
         let clock = host::tsc();
-        let load = super::LoadStart::launch();
-        let tty = Tty::spawn(&tspec, ctx.pin, super::thread_pin())?;
+        let (tty, load) = Tty::spawn_observed(&tspec, ctx.pin, super::thread_pin(), super::LaunchLoad::start)?;
         ctx.target_qos = host::background_qos(Some(tty.pid));
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         let deadline = Instant::now() + timeout;
@@ -998,7 +997,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
                 ready.is_some()
             })
         };
-        let load = load.map(super::LoadStart::stop);
+        let load = load.map(|l| l.window(tty.started_ns, ready.unwrap_or(tty.started_ns)));
         let procs_at_ready = host::process_set(tty.pid, Some(&home.dir));
         // A process of the launch that ended before it was ready took its CPU with it (every count starts
         // at 0 at the spawn), unless its launch's cgroup kept it (`host::launch_ended_cpu`, read with the

@@ -192,7 +192,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     let mut guard = None;
     // The time stamp counter's rate, from two readings around the launch: cycles to ms.
     let clock = (host::tsc(), Instant::now());
-    let mut load = super::LoadStart::launch();
+    let mut load = if web { None } else { super::LaunchLoad::start(&[]) };
     let (mut browser, started): (WebBrowser, Started) = match kind.as_str() {
         "app" | "exe" | "webview" => {
             let app = app.as_ref().ok_or_else(|| Error::msg("internal: an app target without its app"))?;
@@ -214,7 +214,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         }
         // A fresh browser and profile per launch: no HTTP cache, storage, service worker or browser
         // shader cache from an earlier visit.
-        _ if web => (web::launch_as(engine, &window, headless_of(ctx, s), ctx.pin, &emulation, reduce)?, Started { epoch_ms: 0.0, output: None, main: None }),
+        _ if web => (web::launch_as(engine, &window, headless_of(ctx, s), ctx.pin, &emulation, reduce)?, Started { epoch_ms: 0.0, at_ns: 0, output: None, main: None }),
         other => return Err(Error::usage(format!("{}: launch cases need an app, exe, command, web or url target, not {other}", s.case))),
     };
     // A launched target inherits strobe's priority, or sets its own (`BackgroundPriority`).
@@ -259,7 +259,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // `ctx.mock` on a page whose engine gives the runner no CDP session: through strobe (`mocks`), for
         // the whole launch.
         let mocks = super::mocks::Mocks::default();
-        let started_ms = if web {
+        let (started_ms, from) = if web {
             let page = browser.page()?;
             let headless = headless_of(ctx, s);
             // The emulated device's touch and user agent before anything sizes or loads the page, its
@@ -309,13 +309,14 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             at0 = Some((super::super::record::per_process(&procs), host::ended_marks(&pids, browser.profile().as_deref())));
             cpu0 = procs.iter().map(|p| p.cycles).sum();
             // From strobe's send on the host's wall clock, the clock the page's `until` time is on.
-            let at = epoch_ms();
-            load = super::LoadStart::launch();
+            load = super::LaunchLoad::start(&[]);
+            let at = (epoch_ms(), host::now_ns());
             page.start_navigation(&first)?;
             at
         } else {
-            started.epoch_ms
+            (started.epoch_ms, started.at_ns)
         };
+        let until_ns = |at: f64| from.saturating_add(((at - started_ms).max(0.0) * 1e6) as u64);
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         // `cpu1` holds what ended processes used where that is known (`ended`).
         let (ready_at, page, cpu1, ended, load) = match &window_until {
@@ -341,7 +342,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 };
                 // The app's main page through the session strobe attached at its start (where an
                 // attribution launch's profiler runs).
-                let load = load.take().map(super::LoadStart::stop);
+                let load = load.take().map(|l| l.window(from, until_ns(ready.at)));
                 let WebBrowser::Chromium(b) = &browser else { return Err(Error::msg("internal: a window launch of a page")) };
                 let main = electron::main_page(b)?;
                 let page: Page = watch.page(&main.target).unwrap_or(main).into();
@@ -349,7 +350,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             }
             None => match watch.ready(timeout) {
                 Ok((at, received, page)) => {
-                    let load = load.take().map(super::LoadStart::stop);
+                    let load = load.take().map(|l| l.window(from, until_ns(at)));
                     let (cycles, ended) = match &at0 {
                         Some((a, e0)) => {
                             let procs = browser.processes();

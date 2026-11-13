@@ -35,6 +35,8 @@ pub struct Extra {
 /// the time each arrived.
 pub struct Started {
     pub epoch_ms: f64,
+    /// Same launch origin on the monotonic host clock, for counters sampled before ready is reported.
+    pub at_ns: u64,
     pub output: Option<std::sync::mpsc::Receiver<crate::target::isolate::OutputLine>>,
     /// The main process's inspector, profiling, with `extra.profile_main`.
     pub main: Option<Arc<Cdp>>,
@@ -148,7 +150,7 @@ pub fn launch_with(app: &App, seed: Option<&Path>, window: &Window, cpus: Option
     Ok((
         Browser { cdp, ws, child, pid, profile, fresh, exe: app.exe.clone(), version, window: window.clone(), embedded: false, as_person: false, headless: false, phone: None },
         guard,
-        Started { epoch_ms: epoch, output, main },
+        Started { epoch_ms: epoch, at_ns: spawned.at_ns, output, main },
     ))
 }
 

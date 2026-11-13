@@ -430,6 +430,9 @@ thread_local! {
     static RESUMED: RefCell<Option<Value>> = const { RefCell::new(None) };
 }
 
+mod launch_load;
+use launch_load::LaunchLoad;
+
 /// The `Rerun` warning: the ledger found earlier attempts on these variants with another setup.
 const RERUN: &str = "earlier experiments on these same variants ran another bench file, harness, case, primary, margin, seed or flags (the ledger names them): a verdict reached by changing the setup until one says what you hoped is not a verdict";
 
@@ -6985,6 +6988,7 @@ struct RunLoads {
     cpus: u64,
     /// The target's CPUs (None: all), for the steal.
     pin: Option<u64>,
+    runner: u32,
     runs: std::rc::Rc<RefCell<Vec<RunLoad>>>,
 }
 
@@ -6998,9 +7002,6 @@ struct LoadStart {
 impl LoadStart {
     fn new(l: &RunLoads) -> Self {
         Self { cpus: l.cpus, busy: validity::CpuBusy::start(), steal: validity::Steal::start(), at: Instant::now() }
-    }
-    fn launch() -> Option<Self> {
-        RUN_LOADS.with_borrow(|l| l.as_ref().map(Self::new))
     }
     fn stop(self) -> RunLoad {
         let ms = self.at.elapsed().as_secs_f64() * 1000.0;
@@ -7744,7 +7745,12 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         // cannot give. The processes around the block only name the busiest.
         let timed = x.measures_time() && cases.len() == 1 && ctx.phone.is_none();
         let unpinned = timed && ctx.pin.is_none() && !cfg!(target_os = "macos");
-        RUN_LOADS.set((timed && !cfg!(target_os = "macos")).then(|| RunLoads { cpus: ctx.pin.unwrap_or_else(|| host::topology().all()), pin: ctx.pin, runs: Default::default() }));
+        RUN_LOADS.set((timed && !cfg!(target_os = "macos")).then(|| RunLoads {
+            cpus: ctx.pin.unwrap_or_else(|| host::topology().all()),
+            pin: ctx.pin,
+            runner: ctx.runner.pid(),
+            runs: Default::default(),
+        }));
         let procs = unpinned.then(|| (host::now_ns(), host::all_processes()));
         let launch = any_launch(ctx, cases, v, pair, x);
         let loads = RUN_LOADS.take().map(|l| l.runs.take()).unwrap_or_default();

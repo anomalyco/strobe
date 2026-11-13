@@ -36,6 +36,7 @@ fn read_run(timed: &[RunLoad], warmup: usize) -> Block {
     run_load(Block { warmup, run_ms: vec![100.], ..Default::default() }, timed, None)
 }
 pub fn run(logs: Option<&Path>) {
+    launch_load::known_window();
     let p = cmp("run.duration");
     let a = impact(&p, 8);
     expect("light CPU noise", background_note(&blocks(16, |i| if i < 3 { 35. } else { 0. }), &a), "info");

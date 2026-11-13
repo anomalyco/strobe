@@ -1798,7 +1798,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     };
     crate::target::a11y::prepare(app.wayland());
     let clock = (host::tsc(), Instant::now());
-    let load = super::LoadStart::launch();
+    let load = super::LaunchLoad::start(&[]);
     let (mut n, guard) = match nt::launch(&app, &prepared, &[], true, ctx.pin) {
         Ok(x) => x,
         Err(e) => {
@@ -2014,7 +2014,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             };
             (sample.at, sample.cycles, sample.root, sample.ended)
         };
-        let load = load.map(super::LoadStart::stop);
+        let load = load.map(|l| l.window(n.at_ns, n.at_ns.saturating_add(((ready.0 - n.epoch_ms).max(0.0) * 1e6) as u64)));
         lap("ready", &mut steps);
         // An attribution launch's threads from the spawn until ready: wakes and CPU per thread without
         // a trace, read once it is ready (threads that already exited are not in it).
