@@ -156,7 +156,7 @@ pub fn run(args: &Args) -> Result<Output> {
     if let Some(dir) = path.is_none().then(|| store::find(handle).ok()).flatten().filter(|d| store::is_experiment(d)) {
         if !dir.join("result.json").exists() {
             let log = std::fs::read_to_string(dir.join("progress.log")).unwrap_or_default();
-            let tail: Vec<&str> = log.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: Vec<String> = log.lines().rev().take(12).map(super::pr::scrub_public).collect::<Vec<_>>().into_iter().rev().collect();
             // Running only while a bench on this device has it (itself, or a bisect's step of it):
             // one that died or was refused before it wrote a result has ended.
             let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -306,6 +306,7 @@ fn available() -> Result<Output> {
 }
 
 fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool) -> Result<Output> {
+    super::pr::safe_diagnostics(&mut rec.meta);
     let dir = rec.dir.clone();
     let case = args.get("case").map(|c| one_case(&mut rec, c, view)).transpose()?;
     let meta = &rec.meta;

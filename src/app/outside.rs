@@ -107,7 +107,10 @@ pub fn resolve(target: &str) -> Result<u32> {
     match roots.as_slice() {
         [one] => Ok(one.pid),
         [] => Err(Error::usage(format!("no process named {name}"))),
-        many => Err(Error::usage(format!("{} processes named {name}: {}", many.len(), many.iter().map(|p| format!("pid:{}", p.pid)).collect::<Vec<_>>().join(", ")))),
+        many => {
+            crate::app::live_progress(format!("  matching processes: {}", many.iter().map(|p| format!("pid:{}", p.pid)).collect::<Vec<_>>().join(", ")));
+            Err(Error::usage(format!("{} processes named {name}: choose one with pid:<n>", many.len())))
+        }
     }
 }
 

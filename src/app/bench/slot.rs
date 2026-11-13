@@ -234,6 +234,9 @@ impl Registration {
                 _ => format!("{what}: waiting for the bench slot"),
             };
             if why != shown {
+                if let Some(pid) = old.or_else(|| running.and_then(|r| r["pid"].as_u64()).map(|p| p as u32)) {
+                    crate::app::live_progress(format!("  bench slot holder: pid {pid}"));
+                }
                 super::progress(format!("  {why}"));
                 let mut e = self.0.entry.lock().unwrap();
                 e["why"] = json!(why.clone());
@@ -245,6 +248,7 @@ impl Registration {
                 // A wait has no deadline: say how long it has been and what ends it, once a minute.
                 let holder = old.or_else(|| running.and_then(|r| r["pid"].as_u64()).map(|p| p as u32));
                 let ends = match holder {
+                    Some(_) if old.is_some() => "it ends when the older strobe finishes or exits".to_string(),
                     Some(_) => "it ends when the running bench releases the slot or exits; strobe status lists it".to_string(),
                     None => "it ends when the benches ahead finish; strobe status lists them".to_string(),
                 };
@@ -338,7 +342,8 @@ pub fn machine_busy() -> Option<String> {
 /// Read-only: no lock file is made.
 pub fn busy() -> Option<String> {
     if let Some(b) = list().first() {
-        return Some(format!("a bench runs ({} pid {}, {})", b["exp"].as_str().unwrap_or(""), b["pid"], b["state"].as_str().unwrap_or("")));
+        crate::app::live_progress(format!("  bench slot holder: pid {}", b["pid"]));
+        return Some(format!("a bench runs ({}, {})", b["exp"].as_str().unwrap_or(""), b["state"].as_str().unwrap_or("")));
     }
     let held = |path: PathBuf| {
         let f = File::open(&path).or_else(|_| File::options().write(true).open(&path)).ok()?;

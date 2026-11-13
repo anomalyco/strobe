@@ -106,11 +106,8 @@ pub fn fit(browser: &Browser, page: &super::chromium::Page, place: Option<&Windo
     #[cfg(target_os = "macos")]
     if size && !crate::host::macos::accessibility_trusted() {
         let (app, pane) = (crate::host::macos::responsible_app(), crate::host::macos::accessibility_pane());
-        return Err(Error::usage(format!(
-            "sizing {}'s window to the target's viewport needs the accessibility permission, which {app} (the app strobe runs under) does not have",
-            browser.exe.display()
-        ))
-        .hint(format!("{pane}: turn on {app}, or drop viewport from the target")));
+        return Err(Error::usage(format!("sizing {}'s window to the target's viewport needs the accessibility permission, which {app} does not have", browser.exe.display()))
+            .hint(format!("{pane}: turn on {app}, or drop viewport from the target")));
     }
     let want = (at.width as f64, at.height as f64);
     let fits = |p: (f64, f64, f64)| (p.0 - want.0).abs() < 1.0 && (p.1 - want.1).abs() < 1.0;
@@ -295,9 +292,12 @@ fn webview2(app: &App, seed: Option<&Path>, window: &Window, cpus: Option<u64>, 
     let browser_pid = info["processInfo"].as_array().into_iter().flatten().find(|p| p["type"] == "browser").and_then(|p| p["id"].as_u64()).map(|p| p as u32);
     let set: Vec<u32> = crate::host::process_set(pid, Some(&prepared.dir)).iter().map(|p| p.pid).collect();
     if !browser_pid.is_some_and(|b| set.contains(&b)) {
+        if let Some(p) = browser_pid {
+            crate::app::live_progress(format!("  browser outside this launch: pid {p}"));
+        }
         return Err(Error::refused(
             "LiveChannel",
-            format!("the debugging port in {} belongs to a browser (pid {}) outside this launch of {}", data.display(), browser_pid.map_or("?".into(), |p| p.to_string()), app.exe.display()),
+            format!("the debugging port in {} belongs to a browser outside this launch of {}", data.display(), app.exe.display()),
             "end what else uses that folder, and launch again",
         ));
     }

@@ -275,10 +275,10 @@ impl Compositor {
     }
 
     /// The topmost showing window at a layout point: (window, pid, title).
-    pub fn window_at(&self, x: i32, y: i32) -> Option<(isize, u32, String)> {
+    pub fn window_at(&self, x: i32, y: i32) -> Option<(isize, u32, crate::text::Private<String>)> {
         let all = self.windows();
         let hit = all.iter().rev().find(|w| w.visible && x >= w.rect[0] && y >= w.rect[1] && x < w.rect[0] + w.rect[2] && y < w.rect[1] + w.rect[3])?;
-        Some((self.id(hit), hit.pid, hit.title.clone()))
+        Some((self.id(hit), hit.pid, crate::text::Private::new(hit.title.clone(), crate::text::PrivKind::WindowTitle)))
     }
 
     /// Waits until the compositor handled every input sent so far.
@@ -438,7 +438,8 @@ pub fn shown_region(hwnd: isize, rect: [i32; 4]) -> std::result::Result<crate::p
     }
     let r = [w.content[0] + rect[0], w.content[1] + rect[1], rect[2], rect[3]];
     let overlaps = |o: &Win| o.rect[0] < r[0] + r[2] && r[0] < o.rect[0] + o.rect[2] && o.rect[1] < r[1] + r[3] && r[1] < o.rect[1] + o.rect[3];
-    if all.iter().skip_while(|o| o.id != id).skip(1).any(|o| o.visible && overlaps(o)) {
+    if let Some(o) = all.iter().skip_while(|o| o.id != id).skip(1).find(|o| o.visible && overlaps(o)) {
+        crate::app::obstruction::window(&crate::text::Private::new(o.title.clone(), crate::text::PrivKind::WindowTitle), o.pid);
         return Err("another window covers the region".into());
     }
     region_image(hwnd, rect).ok_or_else(|| "the compositor gave no copy of the region".into())

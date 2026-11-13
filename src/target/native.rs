@@ -215,7 +215,12 @@ impl Native {
             .filter(|_| why == Some(COVERED))
             .map(|s| host::macos::covering(s.hwnd))
             .filter(|c| !c.is_empty())
-            .map(|c| format!("; {} other app(s) in front", c.len()))
+            .map(|c| {
+                for (pid, owner) in &c {
+                    crate::app::obstruction::window(owner, *pid);
+                }
+                format!("; {} other app(s) in front", c.len())
+            })
             .unwrap_or_default();
         #[cfg(not(target_os = "macos"))]
         let by = String::new();

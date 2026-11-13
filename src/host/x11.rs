@@ -343,11 +343,11 @@ pub fn client_origin(win: isize) -> Option<(i32, i32)> {
 }
 
 /// The topmost viewable managed window at a root point: (window, pid, title).
-pub fn window_at(px: i32, py: i32) -> Option<(isize, u32, String)> {
+pub fn window_at(px: i32, py: i32) -> Option<(isize, u32, crate::text::Private<String>)> {
     with(|x| {
         let stack = clients(x);
         let hit = stack.iter().rev().filter_map(|&w| info(x, w)).find(|i| i.viewable && px >= i.rect.0 && py >= i.rect.1 && px < i.rect.0 + i.rect.2 && py < i.rect.1 + i.rect.3)?;
-        Some((hit.win as isize, hit.pid, title(x, hit.win)))
+        Some((hit.win as isize, hit.pid, crate::text::Private::new(title(x, hit.win), crate::text::PrivKind::WindowTitle)))
     })
 }
 
@@ -374,7 +374,11 @@ pub fn window_image(win: isize) -> Option<crate::png::Image> {
 pub fn window_region(win: isize, [x, y, w, h]: [i32; 4]) -> Result<crate::png::Image, String> {
     let at = client_origin(win).ok_or("the window is gone or there is no display")?;
     let (cx, cy) = (at.0 + x + w / 2, at.1 + y + h / 2);
-    if window_at(cx, cy).is_none_or(|t| t.0 != win) {
+    let hit = window_at(cx, cy);
+    if hit.as_ref().is_none_or(|t| t.0 != win) {
+        if let Some((_, pid, title)) = hit {
+            crate::app::obstruction::window(&title, pid);
+        }
         return Err(format!("the window is not on top at ({cx}, {cy}), and the X server copies what covers a window"));
     }
     with(|xc| {

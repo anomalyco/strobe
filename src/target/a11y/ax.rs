@@ -160,10 +160,8 @@ fn untrusted() -> Error {
     let app = crate::host::macos::responsible_app();
     // The fix goes in the message too: a page call's error reaches the bench output without its hint.
     let pane = crate::host::macos::accessibility_pane();
-    Error::usage(format!(
-        "macOS lets strobe read another app's accessibility tree and send it input only with the accessibility permission, which {app} (the app strobe runs under) does not have: {pane}, turn on {app}"
-    ))
-    .hint(format!("{pane}: turn on {app}, then run again (once per app)"))
+    Error::usage(format!("macOS lets strobe read another app's accessibility tree and send it input only with the accessibility permission, which {app} does not have: {pane}, turn on {app}"))
+        .hint(format!("{pane}: turn on {app}, then run again (once per app)"))
 }
 
 fn check(e: AXError, what: &str) -> Result<()> {
@@ -289,6 +287,11 @@ pub fn app_at(x: f64, y: f64) -> Result<Option<(u32, Cf)>> {
     let mut pid = 0;
     unsafe { AXUIElementGetPid(at.0, &mut pid) };
     Ok(Some((pid as u32, at)))
+}
+
+pub fn hit_description(at: &Cf) -> crate::text::Private<String> {
+    let attr = |key| copy(at.0, key).and_then(|s| cf_string(s.0)).unwrap_or_default();
+    crate::text::Private::new(format!("{} {:?}", attr("AXRole"), attr("AXTitle")), crate::text::PrivKind::ForeignElement)
 }
 
 /// Sets a window's or app's boolean attribute.
@@ -576,7 +579,12 @@ impl Worker {
         let title = copy(at.0, "AXTitle").and_then(|v| cf_string(v.0)).unwrap_or_default();
         let id = copy(at.0, "AXIdentifier").and_then(|v| cf_string(v.0)).filter(|s| !s.is_empty()).map(|s| format!(" (key {s:?})")).unwrap_or_default();
         let what = format!("{} {title:?}{id}", role.trim_start_matches("AX").to_lowercase());
-        Ok(Err(if self.pids.contains(&(pid as u32)) { format!("{what} of the app itself, such as a dialog or an overlay it shows over the element") } else { "another app's element".into() }))
+        Ok(Err(if self.pids.contains(&(pid as u32)) {
+            format!("{what} of the app itself, such as a dialog or an overlay it shows over the element")
+        } else {
+            crate::app::obstruction::window(&crate::text::Private::new(what, crate::text::PrivKind::ForeignElement), pid as u32);
+            "another app's element".into()
+        }))
     }
 
     fn act(&self, i: usize, action: &Action) -> Result<u64> {

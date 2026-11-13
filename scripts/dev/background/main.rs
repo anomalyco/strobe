@@ -4,6 +4,10 @@ mod cases;
 mod followups;
 mod surfaces;
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--diagnostic-stream") {
+        surfaces::diagnostic_stream();
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--child-mask") {
         println!("{}", strobe::host::topology().all());
         return;

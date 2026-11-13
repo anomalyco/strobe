@@ -37,11 +37,14 @@ When a design change is agreed, update this file in the same change.
 9. **Local only.** Recordings never leave the machine unless the user copies them. Traces and
    heap snapshots can hold prompts, file contents and credentials: they are written owner-only,
    reports and MCP results carry aggregates, and string contents appear only with `--reveal`.
-   What ran beside the target is the bench machine's owner's business: a published surface
-   (`report --format pr`, `--format summary`, `--format card|badge`: what the Action or a person
-   posts) names no process outside the target's own; it says how many and how busy. Local
-   diagnostics keep the names (terminal progress and stderr, result.json, meta.json, `query`,
-   `--format html`, `--format md`).
+   What ran beside the target is the bench machine's owner's business: no stored warning, note or refusal,
+   `progress.log`, `query <exp> summary`, or `report` format (`pr`, `summary`, `md`, `html`, `card`, `badge`)
+   names or gives the PID, window title or command line of a process outside the target's own; live interactive
+   terminal progress may. `result.json`, recording `meta.json` and `query --json` are owner-only local files
+   and keep local paths and the structured `plan.reserve.{moved,failed}`, `blocks[].background` and
+   `insights..busiest` lists for local diagnosis and cross-block deduplication (`--format md` and `--format html`
+   omit foreign process names too, while only `--format pr|summary|card|badge` and the GitHub Action's artifact
+   scrubber also redact local paths).
 10. **Never break user space.** strobe writes only its own files and marked managed entries, all
     removed by `strobe leave`. It never changes a target's settings, profile or data. Launched
     targets get isolated homes; attached targets are left as they were on detach.
@@ -477,11 +480,11 @@ it, and strobe's stamp (`STROBE_HOME`, `STROBE_OWNER`) wherever its environment 
 on Linux through a pidfd where the kernel has them); a process group only when strobe created it.
 What it cannot prove it leaves alone, and says so (0.33.0 and later):
 - every command (a stop's exit 130 too) ends with `strobe left alone what it could not prove its own:`
-  and a line per such process (`  pid N, <what it is>: <why it was not ended>`), on stderr under `-q`;
+  and a line per such process (`<what it is>: <why it was not ended>`), on stderr under `-q`; the PID is live only;
 - `--json` and MCP results carry `left_alone` (`[{ pid, what, why }]`, `schema/result.v1.json`; absent
-  when empty, never null), errors too;
+  when empty, never null), errors too; the PID of an unverified process is null;
 - every strobe process (CLI, daemon, `strobe mcp`) writes each note the moment it is made to
-  `log/left-alone.log` in the state folder (seconds since 1970, the pid and fixed words; rotated to
+  `log/left-alone.log` in the state folder (seconds since 1970 and fixed words; rotated to
   `left-alone.log.old` at 1 MB); a note made again in one invocation is written once;
 - `strobe status` says when the log holds notes from the last day (`i left  N process(es) strobe could
   not prove its own were left alone in the last day: <log>`; `left_alone_last_day` in its JSON).

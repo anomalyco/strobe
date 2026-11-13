@@ -375,17 +375,12 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
     // Safari's web content processes are shared by its windows: a session in a Safari a person runs
     // would run beside their tabs, in their Safari.
     let live = |running: &[u32]| -> Error {
-        let pids: Vec<String> = running.iter().map(u32::to_string).collect();
         let fix = if install.flavor == Flavor::Safari {
             "quit Safari while strobe measures, or install Safari Technology Preview (brew install --cask safari-technology-preview), which strobe uses instead"
         } else {
             "quit Safari Technology Preview while strobe measures"
         };
-        Error::refused(
-            "LiveChannel",
-            format!("{} is running (pid {}): a WebDriver session would run in that same app, beside your tabs and their web content processes", install.flavor.name(), pids.join(", ")),
-            fix,
-        )
+        Error::refused("LiveChannel", crate::app::obstruction::running_browser(install.flavor.name(), running), fix)
     };
     if cfg!(target_os = "macos") && !started.before.is_empty() {
         return Err(live(&started.before));
@@ -503,7 +498,7 @@ pub fn launch(window: &Window, headless: bool, cpus: Option<u64>, motion: super:
             let _ = session.delete(Duration::from_secs(5));
             return Err(Error::refused(
                 "LiveChannel",
-                format!("{} opened a session, but strobe could not prove process {pid} is the browser it asked for ({why}): strobe touched nothing of it", install.flavor.name()),
+                crate::app::obstruction::unverified_browser(install.flavor.name(), pid, why),
                 format!("quit any {} that runs, and run again", install.flavor.name()),
             ));
         }

@@ -20,7 +20,7 @@
         "type": "object",
         "required": ["what", "why"],
         "properties": {
-          "pid": { "type": ["integer", "null"], "description": "The process, when there is one." },
+          "pid": { "type": ["integer", "null"], "description": "Null when ownership could not be proved; older results may give the PID." },
           "what": { "type": "string" },
           "why": { "type": "string", "description": "Why strobe did not end it." }
         }

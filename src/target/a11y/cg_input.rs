@@ -213,9 +213,7 @@ impl Poster {
         if !unsafe { CGPreflightPostEventAccess() } {
             let app = crate::host::macos::responsible_app();
             let pane = crate::host::macos::accessibility_pane();
-            return Err(Error::usage(format!(
-                "macOS drops input strobe posts to another app without the accessibility permission, which {app} (the app strobe runs under) does not have: {pane}, turn on {app}"
-            )));
+            return Err(Error::usage(format!("macOS drops input strobe posts to another app without the accessibility permission, which {app} does not have: {pane}, turn on {app}")));
         }
         // A private event state: the user's own held keys do not mark strobe's events.
         let source = Cf::new(unsafe { CGEventSourceCreate(-1) }).ok_or_else(|| Error::msg("Quartz: no event source"))?;
@@ -287,12 +285,15 @@ impl Poster {
     /// frontmost window at the point, at any level, which must be the app's. Every other accessibility
     /// error stays one.
     pub fn target(&self, pids: &[u32], x: f64, y: f64) -> Result<Target> {
-        let covered = || -> Error { Error::refused("WindowHidden", format!("another app's window covers the point ({x:.0}, {y:.0})"), "keep the app's window uncovered while strobe drives it") };
+        let covered = |what, pid| -> Error {
+            crate::app::obstruction::window(&what, pid);
+            Error::refused("WindowHidden", format!("another app's window covers the point ({x:.0}, {y:.0})"), "keep the app's window uncovered while strobe drives it")
+        };
         let pid = match super::ax::app_at(x, y)? {
-            Some((pid, _)) if !pids.contains(&pid) => return Err(covered()),
+            Some((pid, at)) if !pids.contains(&pid) => return Err(covered(super::ax::hit_description(&at), pid)),
             Some((pid, _)) => pid,
             None => match crate::host::macos::front_window_at(x, y) {
-                Some((pid, _, _)) if !pids.contains(&pid) => return Err(covered()),
+                Some((pid, _, owner)) if !pids.contains(&pid) => return Err(covered(owner, pid)),
                 Some((pid, window, _)) => return Ok(Target { pid, window, x, y }),
                 None => return Err(Error::msg(format!("no window at ({x:.0}, {y:.0}), and the app there answers no accessibility hit test"))),
             },

@@ -90,7 +90,7 @@ pub fn user_sid() -> Option<String> {
 }
 
 /// The owner SID of a kernel object handle (opened with READ_CONTROL, as GENERIC_READ includes).
-fn pipe_owner(h: HANDLE) -> Option<String> {
+fn pipe_owner(h: HANDLE) -> Option<crate::text::Private<String>> {
     use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT};
     use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
     unsafe {
@@ -110,7 +110,7 @@ fn pipe_owner(h: HANDLE) -> Option<String> {
             s
         });
         LocalFree(sd as _);
-        out
+        out.map(|s| crate::text::Private::new(s, crate::text::PrivKind::UserAccount))
     }
 }
 
@@ -585,18 +585,14 @@ impl Client {
                 let exe = served.then(|| crate::host::win::exe_of(pid)).flatten();
                 let image = exe.as_ref().is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case(&helper_exe().to_string_lossy()));
                 let owner = pipe_owner(h);
-                let owned = owner.as_deref().is_some_and(|o| o == sid || o == ADMINISTRATORS || o == SYSTEM);
+                let owned = owner.as_ref().is_some_and(|o| [sid.as_str(), ADMINISTRATORS, SYSTEM].iter().any(|s| o.matches(s)));
                 if image && owned {
                     return Client(h).hello();
                 }
                 unsafe { CloseHandle(h) };
-                return Err(Error::msg(format!(
-                    "refused the helper pipe: served by {} (pid {pid}, owner {}), not the installed helper {} run by this user or an administrator",
-                    exe.map(|e| e.display().to_string()).unwrap_or_else(|| "an unreadable process".into()),
-                    owner.unwrap_or_else(|| "unreadable".into()),
-                    helper_exe().display()
-                ))
-                .hint("another account may have created the pipe first: sign it out, or run strobe up again"));
+                let exe = crate::text::Private::new(exe.map(|e| e.display().to_string()).unwrap_or_else(|| "an unreadable process".into()), crate::text::PrivKind::ForeignProc);
+                let owner = owner.unwrap_or_else(|| crate::text::Private::new("unreadable".into(), crate::text::PrivKind::UserAccount));
+                return Err(Error::msg(crate::app::obstruction::helper_pipe(&exe, pid, &owner)).hint("another account may have created the pipe first: sign it out, or run strobe up again"));
             }
             let rc = unsafe { GetLastError() };
             if rc == 231 {

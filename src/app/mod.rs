@@ -11,6 +11,7 @@ pub mod history;
 pub mod init;
 pub mod look;
 pub mod mcp;
+pub mod obstruction;
 pub mod open;
 pub mod outside;
 pub mod pr;

@@ -2224,12 +2224,7 @@ pub fn background_qos(pid: Option<u32>) -> Option<String> {
 pub fn timer_coalescing() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        os::timer_coalescing().map(|(ms, job)| {
-            format!(
-                "timers that wake about {} late: it runs in a launchd job (its oldest ancestor: {job}) whose ProcessType lets macOS coalesce the timers of everything it starts",
-                crate::fmt::time(ms)
-            )
-        })
+        os::timer_coalescing()
     }
     #[cfg(not(target_os = "macos"))]
     {

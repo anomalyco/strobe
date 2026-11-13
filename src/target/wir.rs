@@ -320,8 +320,8 @@ pub fn list_pages_for_udid_until(udid: &str, deadline: Instant) -> Result<Vec<In
     res
 }
 
-fn format_choices(pages: &[InspectablePage]) -> String {
-    pages
+fn page_hint(pages: &[InspectablePage]) -> &'static str {
+    let choices = pages
         .iter()
         .take(8)
         .map(|p| {
@@ -335,7 +335,9 @@ fn format_choices(pages: &[InspectablePage]) -> String {
             format!("{} ({what})", p.handle)
         })
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+    crate::app::live_progress(format!("  inspectable pages: {choices}"));
+    "choose one tab by its wir:<app>/<page_id> handle from strobe targets"
 }
 
 fn is_blank_url(u: &str) -> bool {
@@ -365,7 +367,7 @@ fn choose_page(pages: &[InspectablePage], apps: &[AppEntry], page_sel: &str) -> 
         return match candidates.as_slice() {
             [only] => Ok((*only).clone()),
             _ => Err(Error::usage(format!("{} inspectable tabs are open on the phone; bare wir: refuses to guess on a personal device", candidates.len()))
-                .hint(format!("name the tab to inspect: {}", format_choices(&candidates.into_iter().cloned().collect::<Vec<_>>())))),
+                .hint(page_hint(&candidates.into_iter().cloned().collect::<Vec<_>>()))),
         };
     }
 
@@ -379,7 +381,7 @@ fn choose_page(pages: &[InspectablePage], apps: &[AppEntry], page_sel: &str) -> 
             return Ok(safari_hit.clone());
         }
         if !hits.is_empty() {
-            return Err(Error::usage(format!("page {pid} exists in multiple apps")).hint(format!("choose one: {}", format_choices(pages))));
+            return Err(Error::usage(format!("page {pid} exists in multiple apps")).hint(page_hint(pages)));
         }
     }
 
@@ -412,8 +414,8 @@ fn choose_page(pages: &[InspectablePage], apps: &[AppEntry], page_sel: &str) -> 
         .collect();
     match hits.as_slice() {
         [only] => Ok(only.clone()),
-        [] => Err(Error::usage(format!("no inspectable page matches wir:{sel}")).hint(format!("open pages: {}", format_choices(pages)))),
-        _ => Err(Error::usage(format!("{} inspectable pages match wir:{sel}", hits.len())).hint(format!("narrow the selector: {}", format_choices(&hits)))),
+        [] => Err(Error::usage(format!("no inspectable page matches wir:{sel}")).hint(page_hint(pages))),
+        _ => Err(Error::usage(format!("{} inspectable pages match wir:{sel}", hits.len())).hint(page_hint(&hits))),
     }
 }
 

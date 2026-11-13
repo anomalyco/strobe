@@ -1944,9 +1944,9 @@ const fmtP = (p) => (!finite(p) ? "—" : p < 0.001 ? "<0.001" : p < 0.1 ? p.toF
 
 // A wall-clock stretch (a series' runtime, a recording's length, an estimate): `850 ms`, `12.3 s`,
 // `4 min` in every unit (fmt::ms_duration), never a measured time.
-function retryCount(s) {
+function retryCount(s, pairs = false) {
   const n = s.set_aside_launches ?? 2 * (s.discarded_bursts?.length || 0);
-  return n ? ` + ${n} launches set aside` : "";
+  return !n ? "" : pairs ? ` (${n} launches set aside)` : ` + ${n} launches set aside`;
 }
 
 function fmtDuration(ms) {
@@ -5490,7 +5490,7 @@ function renderRigFooter(r, s, imp) {
           ? h("div", {}, `${s.runs || "?"} sequential runs · ${s.censuses || "?"} post-GC censuses (S0 / S1 / S2)`)
           : s.kind === "blocks"
             ? h("div", {}, `${s.launches || "?"} blocks of one build, nothing compared · ${plan.runs_per_block || 5} measured runs/block`)
-            : h("div", {}, `${s.pairs || "?"} AB/BA kept pairs${retryCount(s)} · ${plan.runs_per_block || 5} measured runs/launch`)
+            : h("div", {}, `${s.pairs || "?"} AB/BA kept pairs${retryCount(s, true)} · ${plan.runs_per_block || 5} measured runs/launch`)
         : null,
       s && finite(s.elapsed_ms) ? h("div", {}, `Series runtime: ${fmtDuration(s.elapsed_ms)} · Strobe ${env.strobe || ""}`) : null,
       s && finite(s.untimed?.stretches) ? h("div", {}, `Untimed (ctx.untimed): ${s.untimed.stretches} stretch${s.untimed.stretches === 1 ? "" : "es"} a run, ${fmtVal(s.untimed.ms, "ms")} of each run left out`) : null,

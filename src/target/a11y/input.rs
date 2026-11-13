@@ -572,6 +572,9 @@ fn target_at(pids: &[u32], x: i32, y: i32) -> Result<Target> {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, &mut pid);
         if !pids.contains(&pid) {
+            let mut title = [0u16; 128];
+            let n = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32).max(0) as usize;
+            crate::app::obstruction::window(&crate::text::Private::new(String::from_utf16_lossy(&title[..n]), crate::text::PrivKind::WindowTitle), pid);
             return Err(Error::refused("WindowHidden", format!("another window covers the point ({x}, {y})"), "keep the app's window uncovered while strobe drives it"));
         }
         let mut c = POINT { x, y };

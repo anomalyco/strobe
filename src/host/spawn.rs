@@ -454,13 +454,18 @@ pub fn left_scope() -> LeftScope {
 /// A note made again in the same invocation (a clean-up that retries every few ms) is recorded once.
 pub fn leave(pid: Option<u32>, what: impl Into<String>, why: impl Into<String>) {
     let scope = LEFT_SCOPE.with(|s| s.get());
-    let note = LeftAlone { pid, what: what.into(), why: why.into() };
+    let mut note = LeftAlone { pid, what: what.into(), why: why.into() };
     {
         let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
         if seen.iter().any(|(s, n)| *s == scope && *n == note) {
             return;
         }
         seen.push((scope, note.clone()));
+    }
+    // A PID strobe could not prove its own may already belong to someone else.
+    if note.pid.is_some() {
+        crate::app::live_progress(format!("  {note}"));
+        note.pid = None;
     }
     let log = left_alone_log();
     if let Some(dir) = log.parent() {

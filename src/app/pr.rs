@@ -17,7 +17,7 @@ use crate::model::{self, Better, Error, Result, VerdictKind};
 use crate::stats;
 use crate::store;
 use extract::*;
-pub(crate) use extract::{judged, public, public_value};
+pub(crate) use extract::{judged, public, public_value, scrub_public};
 use github::*;
 pub use github::{Updated, head_commit, hero_level, relevel, splice, update_pr};
 pub use implementations::{claim, cpu_scope, factor_or_pct, fairness, range_x, ready_noun};
@@ -29,16 +29,40 @@ pub use summary::summary;
 /// Read older experiments without reprinting their speed-check and reservation lists. Limit
 /// this migration to prose: never rewrite benchmark data, commands or structured process maps.
 pub(crate) fn safe_diagnostics(v: &mut Value) {
+    fn clean(x: &mut Value) {
+        if let Some(s) = x.as_str() {
+            let safe = scrub_public(s);
+            if safe != s {
+                *x = Value::String(safe);
+            }
+        }
+    }
     fn walk(v: &mut Value) {
         match v {
             Value::Array(a) => a.iter_mut().for_each(walk),
             Value::Object(o) => {
+                // Older socket refusals repeated the foreign package in a separate, otherwise
+                // unrecognizable `close <holder>` hint. Match the producer before cleaning it.
+                let socket = o.values().filter_map(Value::as_str).any(|s| [" holds Chrome's DevTools socket on ", " took Chrome's DevTools socket on "].iter().any(|m| s.contains(m)));
+                if socket
+                    && let Some(h) = o.get_mut("hint")
+                    && h.as_str().is_some_and(|s| s.starts_with("close ") && s.contains(" on the phone"))
+                {
+                    *h = Value::String("close the other app on the phone, then run again".into());
+                }
                 for (k, x) in o.iter_mut() {
-                    if matches!(k.as_str(), "text" | "summary" | "detail" | "error" | "why" | "message" | "verdict" | "fix" | "hint")
-                        && let Some(s) = x.as_str()
-                        && ["busiest processes", "busiest elsewhere:", "moved per block (", "could not be moved:"].iter().any(|p| s.contains(p))
+                    if k == "refused"
+                        && let Some(map) = x.as_object_mut()
                     {
-                        *x = Value::String(scrub_public(s));
+                        for reason in map.values_mut() {
+                            if reason.is_string() {
+                                clean(reason);
+                            } else {
+                                walk(reason);
+                            }
+                        }
+                    } else if matches!(k.as_str(), "text" | "summary" | "detail" | "error" | "why" | "message" | "verdict" | "fix" | "hint" | "unattributed" | "note") && x.is_string() {
+                        clean(x);
                     } else if !matches!(k.as_str(), "background" | "moved" | "failed" | "values") {
                         walk(x);
                     }

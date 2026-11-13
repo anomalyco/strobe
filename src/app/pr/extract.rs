@@ -781,7 +781,7 @@ pub(crate) fn scrub_public(s: &str) -> String {
     let (pct, share) = (&*PCT, &*SHARE);
     let s = MOVED.replace_all(s, "moved per block$1");
     let s = UNMOVED.replace_all(&s, "$1 could not be moved$2");
-    let s = foreign_line(&s);
+    let s = legacy_obstruction(&s);
     let mut out = String::new();
     let mut rest: &str = &s;
     loop {
@@ -842,81 +842,80 @@ pub(crate) fn scrub_public(s: &str) -> String {
     }
 }
 
-/// What another program shows, out of public text: a title, element or class name strobe quoted (`"…"`)
-/// in a clause that names that program's process (`… of process 4120`, `(pid 4120)`, before the next
-/// `; `), and the app in `a window of <app> of process <pid>`. The process id stays. Covers every way
-/// strobe names what covered or overlaid the target (`another window covers the point (x, y): "<title>" of
-/// process <pid>`, `window "<title>" of process <pid>`, `pane "<name>" (key "<id>") of process <pid>`,
-/// `a "<class>" window of process <pid>`, `"<title>" (pid <pid>) is …`, `"<title>" of process <pid> covers
-/// the region`).
-/// One line (`scrub_public` gives it a line at a time: strobe's messages are one line each, a title
-/// Debug-quoted with its newlines escaped, so nothing on another line pairs with or stands near one).
-fn foreign_line(line: &str) -> String {
-    static OF_PROCESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" of process (\d+)").expect("pattern"));
-    static PID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" of process \d+|\(pid \d+\)").expect("pattern"));
-    // The app of `a window of <app> of process <pid>`: up to the first ` of process N` within its clause,
-    // which a `; `, a table cell's ` | ` or the next `a window of` ends (a name may hold `&`, `|`, `<`, or
-    // the escapes a cell made of them: `&amp;`, `\|`). What this gave (`a window of process 4122`) has
-    // no ` of process` left in its clause, so a second pass changes nothing, whatever the app was called
-    // (`process monitor`).
-    const OWNER: &str = "a window of ";
-    let mut owned = String::new();
-    let mut rest = line;
-    while let Some(at) = rest.find(OWNER) {
-        let (head, tail) = rest.split_at(at + OWNER.len());
-        owned += head;
-        rest = tail;
-        let clause = [rest.find("; "), rest.find(" | "), rest.find(OWNER)].into_iter().flatten().min().unwrap_or(rest.len());
-        if let Some(c) = OF_PROCESS.captures(&rest[..clause]) {
-            let m = c.get(0).expect("match");
-            owned += &format!("process {}", &c[1]);
-            rest = &rest[m.end()..];
+/// Match old producer sentences, not PID syntax by itself: leftover children and busy threads
+/// of the target have legitimate `of process N` and `(pid N)` lines too.
+fn legacy_obstruction(line: &str) -> String {
+    if (line.contains(" of process ") || line.contains("(pid "))
+        && (line.contains("WindowHidden") || line.contains("covers the point (") || line.contains(" is under ") || line.contains(" covers the region") || line.contains("the window is not on top at"))
+    {
+        if let Some((head, tail)) = line.split_once("covers the point (")
+            && let Some((point, _)) = tail.split_once("): ")
+            && point.chars().all(|c| c.is_ascii_digit() || "-., ".contains(c))
+        {
+            return format!("{head}covers the point ({point}); keep the app uncovered");
         }
+        return "WindowHidden: another window or element covers the target; keep the app uncovered".into();
     }
-    let line = owned + rest;
-    let pid = &*PID;
-    let b = line.as_bytes();
-    // A `"` a backslash escapes is inside a string, not one of its ends.
-    let escaped = |i: usize| b[..i].iter().rev().take_while(|c| **c == b'\\').count() % 2 == 1;
-    // From each process named, back through its clause: the quoted strings that lead to it (a title, an
-    // element and its key, a class), each close to the next, never across `; ` outside quotes.
-    let mut blank: Vec<(usize, usize)> = Vec::new();
-    for m in pid.find_iter(&line) {
-        let mut i = m.start();
-        let mut gap = 0;
-        while i > 0 && gap <= 40 {
-            i -= 1;
-            if b[i] == b'"' && !escaped(i) {
-                let Some(open) = (0..i).rev().find(|&j| b[j] == b'"' && !escaped(j)) else { break };
-                blank.push((open, i));
-                (i, gap) = (open, 0);
-            } else if b[i] == b' ' && i > 0 && b[i - 1] == b';' {
-                break;
-            } else {
-                gap += 1;
-            }
-        }
+    if let Some((head, _)) = line.split_once("; in front of it: ") {
+        return format!("{head}; another app is in front");
     }
-    blank.sort_unstable();
-    blank.dedup();
-    let mut out = String::new();
-    let mut at = 0;
-    for (open, close) in blank {
-        if open < at {
-            continue;
-        }
-        out += &line[at..open];
-        out += "\"…\"";
-        at = close + 1;
+    if let Some((head, tail)) = line.split_once(" (its oldest ancestor: ")
+        && let Some((_, rest)) = tail.rsplit_once(") whose ProcessType")
+    {
+        return format!("{head} whose ProcessType{rest}");
     }
-    out + &line[at..]
+    if line.contains("started responsible to process ") {
+        return "Unattributed: the app did not start responsible to itself; its XPC services are not counted".into();
+    }
+    // A new message may give strobe's own binary for a split grant. Only older messages
+    // have the foreign grantee instead of its role. Keep the pane, URL and action on new reads.
+    if !line.contains("the app or daemon strobe runs under")
+        && (line.contains(" (the app strobe runs under)") || line.contains("macOS passes Device Control on from ") || (line.contains("Privacy_Accessibility") && line.contains("turn on ")))
+    {
+        return "check the app or daemon strobe runs under in System Settings › Privacy & Security; Screen Recording may need strobe's own binary".into();
+    }
+    if line.contains(" is running (pid ") && ["a WebDriver session", "that is your app", "isolated home of another strobe"].iter().any(|s| line.contains(s))
+        || line.contains("could not prove process ") && line.contains("is the browser it asked for")
+        || line.contains("belongs to a browser (pid ")
+        || line.contains("Launch Services answered the launch with process ")
+        || line.contains("your live ") && line.contains(" runs from this app (")
+    {
+        return "LiveChannel: another process is using this app or channel; close it or measure another channel".into();
+    }
+    if line.contains("refused the helper pipe: served by ") && line.contains(", owner ") {
+        return "refused the helper pipe: served by another process or account, not the installed helper".into();
+    }
+    if line.contains("another strobe (") && line.contains(" awake") || line.contains(" is in use by another strobe (") {
+        return "another strobe is using the phone; wait for it to finish".into();
+    }
+    if line.contains(" holds Chrome's DevTools socket on ") && !line.contains("another app holds Chrome's DevTools socket on the phone")
+        || line.contains(" took Chrome's DevTools socket on ")
+        || line.contains(" holds Chrome's DevTools socket, which ")
+        || line.contains("tab") && (line.contains(" a person opened (") || line.contains(" holds tabs a person opened: ") && !line.contains("on the phone holds"))
+    {
+        return "LiveChannel: the phone's browser channel is in use; close the other app or use a channel with no personal tabs".into();
+    }
+    if line.contains("on an emulator every tab is strobe's to clear") && line.contains("adb -s ") && !line.contains("adb -s <serial>") {
+        return "on the emulator, clear the browser channel's data to remove restored tabs, then run again".into();
+    }
+    if line.contains("measure another build or channel, or close it (") {
+        return "measure another build or channel, or close the running app".into();
+    }
+    if line.contains("waiting for the bench of an older strobe (pid ") || line.contains("waiting for the bench slot (pid ") || line.contains("it ends when pid ") && line.contains("releases the slot")
+    {
+        return "waiting for the running bench to finish or release the slot".into();
+    }
+    if line.contains(" run on ") && line.contains(" at once, and DevTools reaches only one of them") {
+        return "multiple browser channels run on the phone; close all but one".into();
+    }
+    line.to_string()
 }
 
 /// Text for a public surface (a PR block, a step summary, a card): other programs' names and a
 /// person's folders out (`scrub_paths`, then `scrub_public`). Everything published passes here before
 /// anything cuts it short.
 pub(crate) fn public(s: &str) -> String {
-    s.split('\n').map(|l| scrub_public(&scrub_paths(l))).collect::<Vec<_>>().join("\n")
+    s.split('\n').map(|l| scrub_paths(&scrub_public(l))).collect::<Vec<_>>().join("\n")
 }
 
 /// Every string of a result passed through `public`, before a public surface (PR block, step

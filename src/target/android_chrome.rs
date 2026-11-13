@@ -477,13 +477,15 @@ fn stop(d: &Device, package: &str) {
 /// A forward to the DevTools socket once `package` answers on it, within `wait`. None when the socket
 /// never opened (a channel still on its first-run screens) or another channel holds it.
 /// Who answers on the DevTools socket.
+use crate::text::{PrivKind, Private};
+
 enum Socket {
     /// The channel asked for, through this forward.
     Ours(Tunnel),
     /// Nobody, within the wait: a channel still on its first-run screens.
     Closed,
     /// Another app (its package, as it names itself): only one may hold the socket's name.
-    Other(String),
+    Other(Private<String>),
 }
 
 /// A forward to the DevTools socket once `package` answers on it (its `/json/version` names it as its
@@ -499,8 +501,8 @@ fn devtools(d: &Device, package: &str, wait: Duration) -> Result<Socket> {
             if let Ok(v) = chromium::http_get(&format!("127.0.0.1:{port}"), "/json/version").and_then(|b| serde_json::from_str::<Value>(&b).map_err(Error::from)) {
                 return Ok(match v["Android-Package"].as_str() {
                     Some(p) if p == package => Socket::Ours(fwd),
-                    Some(p) => Socket::Other(name(p).to_string()),
-                    None => Socket::Other(format!("an app that names no package ({})", v["Browser"].as_str().unwrap_or("a browser"))),
+                    Some(p) => Socket::Other(Private::new(name(p).to_string(), PrivKind::ForeignProc)),
+                    None => Socket::Other(Private::new(format!("an app that names no package ({})", v["Browser"].as_str().unwrap_or("a browser")), PrivKind::ForeignProc)),
                 });
             }
         }
@@ -520,7 +522,8 @@ fn blank(url: &str) -> bool {
 /// The tabs of `package` behind `fwd` (`/json/list`): the origins of those a person opened (page targets
 /// that are not blank and not strobe's), and the ids of strobe's own that are still there (`left`). A tab
 /// with no address yet is read again, for up to 3 s after a start; one that keeps none is a person's.
-fn tabs(fwd: &Tunnel, package: &str, left: Option<&Left>) -> Result<(Vec<String>, Vec<String>)> {
+type Tabs = (Vec<Private<String>>, Vec<String>);
+fn tabs(fwd: &Tunnel, package: &str, left: Option<&Left>) -> Result<Tabs> {
     let until = Instant::now() + Duration::from_secs(3);
     let list = loop {
         let body = chromium::http_get(&format!("127.0.0.1:{}", fwd.port().unwrap_or(0)), "/json/list")?;
@@ -543,9 +546,9 @@ fn tabs(fwd: &Tunnel, package: &str, left: Option<&Left>) -> Result<(Vec<String>
             unloaded = false;
             ours.push(id.to_string());
         } else if url.is_empty() {
-            theirs.push("a tab whose address Chrome gave no reader".to_string());
+            theirs.push(Private::new("a tab whose address Chrome gave no reader".to_string(), PrivKind::UrlSecret));
         } else if !blank(url) {
-            theirs.push(origin_of(url).unwrap_or_else(|| url.split(['?', '#']).next().unwrap_or(url).to_string()));
+            theirs.push(Private::new(origin_of(url).unwrap_or_else(|| url.split(['?', '#']).next().unwrap_or(url).to_string()), PrivKind::UrlSecret));
         }
     }
     Ok((theirs, ours))
@@ -554,16 +557,9 @@ fn tabs(fwd: &Tunnel, package: &str, left: Option<&Left>) -> Result<(Vec<String>
 /// Exit 3 for a channel that runs and holds the DevTools socket, which strobe will not stop: `why` says
 /// whose it is.
 fn holds_socket(d: &Device, package: &str, why: &str, wanted: &[&str]) -> Error {
-    Error::new(
-        3,
-        format!(
-            "{} runs on {} ({why}) and holds Chrome's DevTools socket, which {} answers on: strobe stops no channel it may not drive",
-            name(package),
-            d.serial,
-            wanted.iter().map(|p| name(p)).collect::<Vec<_>>().join(", ")
-        ),
-    )
-    .hint(format!("close {} on the phone (Recents, swipe it away), then run again", name(package)))
+    let held = crate::app::obstruction::socket_holder(&Private::new(name(package).into(), PrivKind::ForeignProc), &d.serial);
+    Error::new(3, format!("{held} ({why}); {} cannot answer on it. Strobe stops no channel it may not drive", wanted.iter().map(|p| name(p)).collect::<Vec<_>>().join(", ")))
+        .hint("close the other channel on the phone (Recents, swipe it away), then run again")
 }
 
 /// The channel strobe drives, of `candidates` (the installed channels it may drive), freshly started,
@@ -584,11 +580,13 @@ fn channel(
     wrote_command_line: bool,
     emulator: bool,
 ) -> Result<(String, Tunnel, Vec<String>)> {
-    let clear = |packages: &[&str]| packages.iter().map(|p| format!("`adb -s {} shell pm clear {p}`", d.serial)).collect::<Vec<_>>().join(", ");
+    let clear = |packages: &[&str]| packages.iter().map(|p| format!("`adb -s <serial> shell pm clear {p}`")).collect::<Vec<_>>().join(", ");
     let live: Vec<&str> = installed.iter().copied().filter(|p| running(d, p)).collect();
     if live.len() > 1 {
-        return Err(Error::new(3, format!("{} run on {} at once, and DevTools reaches only one of them", live.iter().map(|p| name(p)).collect::<Vec<_>>().join(" and "), d.serial))
-            .hint("close all but one of them on the phone (Recents, swipe them away)"));
+        crate::app::live_progress(format!("  running channels on {}: {}", d.serial, live.join(", ")));
+        return Err(
+            Error::new(3, format!("{} channels run on the phone at once, and DevTools reaches only one of them", live.len())).hint("close all but one of them on the phone (Recents, swipe them away)")
+        );
     }
     if let Some(l) = live.first().filter(|l| !candidates.contains(l)) {
         let why = if *l == STABLE { "a phone's own Chrome is a person's" } else { "it is not one strobe was given on this phone" };
@@ -616,8 +614,8 @@ fn channel(
                 if !was_running {
                     stop(d, package);
                 }
-                return Err(Error::new(3, format!("{holder} holds Chrome's DevTools socket on {}, so {} cannot answer on it", d.serial, name(package)))
-                    .hint(format!("close {holder} on the phone, then run again")));
+                let held = crate::app::obstruction::socket_holder(&holder, &d.serial);
+                return Err(Error::new(3, format!("{held}, so {} cannot answer on it", name(package))).hint("close the other app on the phone, then run again"));
             }
             Socket::Closed => {
                 if !was_running {
@@ -634,16 +632,14 @@ fn channel(
         let (theirs, ours) = tabs(&fwd, package, left)?;
         if !theirs.is_empty() {
             drop(fwd);
-            let held = format!("{} tab{} a person opened ({})", theirs.len(), if theirs.len() == 1 { "" } else { "s" }, theirs[0]);
+            let held = crate::app::obstruction::tab_count(&theirs, &d.serial);
             if was_running {
                 let hint = if emulator {
                     format!("on an emulator every tab is strobe's to clear: {} clears {}'s tabs and data, then run again", clear(&[package]), name(package))
                 } else {
                     format!("close {}'s tabs, or close it on the phone, then run again", name(package))
                 };
-                return Err(
-                    Error::new(3, format!("{} runs on {} with {held} and holds Chrome's DevTools socket: strobe stops no channel that holds a person's tabs", name(package), d.serial)).hint(hint)
-                );
+                return Err(Error::new(3, format!("{} runs on the phone with {held} and holds Chrome's DevTools socket: strobe stops no channel that holds a person's tabs", name(package))).hint(hint));
             }
             stop(d, package);
             people.push(format!("{} holds {held}", name(package)));
@@ -663,7 +659,8 @@ fn channel(
                 Ok((package.to_string(), fwd, ours))
             }
             Socket::Other(holder) => {
-                Err(Error::new(3, format!("{holder} took Chrome's DevTools socket on {} while strobe restarted {}", d.serial, name(package))).hint(format!("close {holder} on the phone")))
+                let held = crate::app::obstruction::socket_holder(&holder, &d.serial);
+                Err(Error::new(3, format!("{held} after strobe restarted {}", name(package))).hint("close the other app on the phone"))
             }
             Socket::Closed => Err(Error::new(3, format!("{} on {} did not open its DevTools socket after a restart", name(package), d.serial)).hint("open it on the phone once, then run again")),
         };
@@ -677,7 +674,7 @@ fn channel(
         } else {
             "strobe drives a channel no one browses: close those tabs on the phone, or give strobe a channel of its own (install Chrome Canary, open it once, then strobe up --mobile=<serial> --channel canary)".to_string()
         };
-        return Err(Refusal::new(ValidatorId::LiveChannel, format!("every Chrome channel strobe may drive on {} holds tabs a person opened: {}", d.serial, people.join("; "))).fix(fix).into());
+        return Err(Refusal::new(ValidatorId::LiveChannel, format!("every Chrome channel strobe may drive on the phone holds tabs a person opened: {}", people.join("; "))).fix(fix).into());
     }
     let kept = if kept_command_line { format!(" (a {} is kept as it was)", adb::CHROME_COMMAND_LINE) } else { String::new() };
     Err(Error::new(3, format!("{} on {} never opened its DevTools socket: still on its first-run screens{kept}", first_run.join(", "), d.serial))

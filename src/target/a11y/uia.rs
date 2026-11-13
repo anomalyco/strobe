@@ -308,7 +308,12 @@ impl Worker {
             let kind = at.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default();
             let theirs = at.CurrentProcessId().unwrap_or(0);
             // An element of the app's own process read like another app's when named by its pid.
-            Ok(Err(if theirs == pid { format!("{kind} {name:?} of the app itself, such as a dialog or an overlay it shows over the element") } else { "another app's element".into() }))
+            Ok(Err(if theirs == pid {
+                format!("{kind} {name:?} of the app itself, such as a dialog or an overlay it shows over the element")
+            } else {
+                crate::app::obstruction::window(&crate::text::Private::new(format!("{kind} {name:?}"), crate::text::PrivKind::ForeignElement), theirs as u32);
+                "another app's element".into()
+            }))
         }
     }
 

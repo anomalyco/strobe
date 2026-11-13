@@ -135,8 +135,9 @@ impl Poster {
     /// The window of `pids` at root point (x, y), or why a click there would reach something else.
     pub fn target(&self, pids: &[u32], x: f64, y: f64) -> Result<Target> {
         let (x, y) = (x.round() as i32, y.round() as i32);
-        let (win, pid, _) = crate::host::x11::window_at(x, y).ok_or_else(|| Error::msg(format!("no window at ({x}, {y})")))?;
+        let (win, pid, title) = crate::host::x11::window_at(x, y).ok_or_else(|| Error::msg(format!("no window at ({x}, {y})")))?;
         if !pids.contains(&pid) {
+            crate::app::obstruction::window(&title, pid);
             return Err(Error::refused("WindowHidden", format!("another window covers the point ({x}, {y})"), "keep the app's window uncovered while strobe drives it"));
         }
         Ok(Target { win, x, y })

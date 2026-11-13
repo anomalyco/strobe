@@ -1647,7 +1647,7 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
         if let Some(ticks) = blocks.iter().filter_map(|b| b.values.get("background.subtick")).copied().reduce(f64::max) {
             let k = at.counted_cpus;
             let span = if ticks >= 100. * f64::from(k) {
-                format!("Linux cannot judge other work in a block this short; at least {} ms of measured span is needed on {k} counted CPUs", 20 * k)
+                format!("Linux cannot judge other work in a block this short; at least {} ms of measured span is needed on {k} counted CPU{}", 20 * k, if k == 1 { "" } else { "s" })
             } else {
                 format!("the measured block span was too short for Linux's 10 ms idle ticks to rule out foreign work below ~{ticks:.0}% of a core")
             };
@@ -14101,8 +14101,9 @@ pub(crate) fn retry_launches(s: &Value) -> u64 {
 /// their series (track and bisect consume them); never bridge the gaps between launches.
 pub fn roll_up_resolution(result: &mut Value) {
     let mut notes = Vec::new();
-    let mut affected = 0;
-    for s in result["series"].as_array_mut().into_iter().flatten() {
+    let mut labels = Vec::new();
+    let total = result["series"].as_array().map_or(0, Vec::len);
+    for (i, s) in result["series"].as_array_mut().into_iter().flatten().enumerate() {
         if let Some(w) = s["warnings"].as_array_mut() {
             let before = w.len();
             w.retain(|v| {
@@ -14113,14 +14114,20 @@ pub fn roll_up_resolution(result: &mut Value) {
                     true
                 }
             });
-            affected += usize::from(before != w.len());
+            if before != w.len() {
+                labels.push(s["label"].as_str().map(str::to_string).unwrap_or_else(|| format!("series {}", i + 1)));
+            }
         }
     }
     if let Some(mut w) = notes.into_iter().next() {
+        let affected = labels.len();
         if affected > 1 {
             w["text"] = json!(format!(
                 "{affected} series had blocks too short for Linux's idle ticks to rule out other work; allow at least 20 ms of measured span per counted CPU by looping more work per run or passing a larger --runs"
             ));
+        }
+        if affected < total {
+            w["text"] = json!(format!("{}: {}", labels.join(", "), w["text"].as_str().unwrap_or_default()));
         }
         if let Some(all) = result["warnings"].as_array_mut() {
             all.push(w);

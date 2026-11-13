@@ -1156,7 +1156,8 @@ pub fn reap_dead_owners() -> Vec<String> {
             if s.pid == std::process::id() {
                 format!("ended {exe} (pid {pid}): this strobe launched it for a folder it already released")
             } else {
-                format!("ended {exe} (pid {pid}): the strobe that launched it (pid {}) is gone and left it running", s.pid)
+                crate::app::live_progress(format!("  ended {exe} (pid {pid}), launched by strobe pid {}", s.pid));
+                "ended a process left running by a strobe that is gone".into()
             }
         })
         .collect();
@@ -1211,7 +1212,13 @@ pub fn folder_gone(dir: &Path) -> Option<bool> {
 /// Before a gone strobe's launch folder is removed: ends what still runs from it, restores the URL
 /// schemes saved in it and unlinks its shared seed files. A line per process ended.
 pub fn release_gone(dir: &Path) -> Vec<String> {
-    let lines = end_roots(&stamped_home(dir)).into_iter().map(|(pid, exe, _)| format!("ended {exe} (pid {pid}): it ran from {}, a folder of a strobe that is gone", dir.display())).collect();
+    let lines = end_roots(&stamped_home(dir))
+        .into_iter()
+        .map(|(pid, exe, _)| {
+            crate::app::live_progress(format!("  ended {exe} (pid {pid}) from {}", dir.display()));
+            "ended a process from the launch folder of a strobe that is gone".into()
+        })
+        .collect();
     restore_protocols(dir);
     unshare(dir);
     lines
@@ -1908,11 +1915,9 @@ fn open(app: &App, home: &Home, args: &[String], env: &[(String, String)], outpu
                 OpenFailed::Refused { domain, code, .. } => Error::msg(format!("Launch Services refused to launch the app ({domain} error {code})")),
                 OpenFailed::NoProcess => Error::unreachable("Launch Services reported no running process of the app within 30 s (or the app exited before checking in)"),
                 OpenFailed::Stopped => Error::new(130, "stopped while Launch Services launched the app"),
-                OpenFailed::Foreign { pid, why } => {
-                    Refusal::new(ValidatorId::LiveChannel, format!("Launch Services answered the launch with process {pid}, which is not this launch's ({why}): strobe touched nothing of it"))
-                        .fix("quit the app (a copy of it may already run, or it hands a launch to a running copy), then run again")
-                        .into()
-                }
+                OpenFailed::Foreign { pid, why } => Refusal::new(ValidatorId::LiveChannel, crate::app::obstruction::foreign_launch(pid, why))
+                    .fix("quit the app (a copy of it may already run, or it hands a launch to a running copy), then run again")
+                    .into(),
             });
         }
     };
@@ -2015,6 +2020,7 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
                     "a launch did not close: end that process",
                 )
             } else {
+                crate::app::live_progress(format!("  running app pid {pid}, owned by strobe pid {}", s.pid));
                 Error::refused(
                     "LiveChannel",
                     format!("{} is running in the isolated home of another strobe that is measuring it", app.exe.display()),
@@ -2023,6 +2029,7 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
             });
         }
         if !running.is_empty() {
+            crate::app::live_progress(format!("  running app PIDs: {running:?}"));
             return Err(Error::refused(
                 "LiveChannel",
                 format!("{} is running: that is your app (no strobe launched it)", app.exe.display()),
@@ -2039,6 +2046,7 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
         let Some(exe) = host::exe_of(pid) else { continue };
         let path = exe.to_string_lossy().to_lowercase();
         if (!folder.is_empty() && path.contains(&format!("{sep}{folder}{sep}"))) || (!dir.is_empty() && path.starts_with(&dir)) {
+            crate::app::live_progress(format!("  guarded helper: {} (pid {pid})", exe.display()));
             return Err(Error::refused("LiveChannel", format!("a guarded process of your live {} runs from this app", app.id), "measure another build or channel"));
         }
     }

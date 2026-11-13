@@ -111,13 +111,18 @@ impl<T> Private<T> {
     /// The value itself, for what never becomes text: an OS call, a wire protocol, a comparison with
     /// another of this machine's names. Every use is listed in `scripts/privacy-check.ts`. The canary
     /// never touches it.
-    #[expect(dead_code, reason = "no entry point hands out a Private yet")]
+    #[expect(dead_code, reason = "no reader needs to expose its private value")]
     pub(crate) fn expose_local(&self) -> &T {
         &self.0
     }
 }
 
 impl<T: AsRef<str>> Private<T> {
+    /// Compare an OS identifier without handing out the private string.
+    pub fn matches(&self, other: &str) -> bool {
+        self.0.as_ref() == other
+    }
+
     /// The value as it is locally; `public` on a public surface (`the phone`, `another service`).
     pub fn redacted(&self, public: impl Into<String>) -> Text {
         Text::marked(self.0.as_ref(), self.1, public)

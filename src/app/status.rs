@@ -342,7 +342,7 @@ fn native_drive() -> (bool, String) {
         if !rec {
             grant.push(format!("Screen Recording to {}: {}", host::macos::screen_recording_grantee(), host::macos::screen_recording_pane()));
         }
-        let split = host::macos::tcc_split().is_some();
+        let split = app != own && ax && !rec;
         let text = format!(
             "accessibility API, Quartz events to the app · accessibility {} ({whose}: {app}) · frames: ScreenCaptureKit, Screen Recording {}{}{}",
             if ax { "granted" } else { "missing" },

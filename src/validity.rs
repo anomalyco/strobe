@@ -369,7 +369,7 @@ pub fn speed_context(who: &[(String, f64)], steal: Option<f64>, machine: bool, l
     let lead = if machine { "busiest processes on the machine (% of a core): " } else { "busiest processes (% of a core): " };
     let text = Text::busiest_processes(lead, machine, &names, steal);
     if !names.is_empty() {
-        live(text.local());
+        live(&format!("  {}", text.local()));
     }
     text.public().into_owned()
 }

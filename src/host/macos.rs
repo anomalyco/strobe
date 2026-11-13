@@ -542,7 +542,7 @@ pub fn unattributed(pid: u32) -> Option<String> {
     match unsafe { f(pid as libc::pid_t) } {
         r if r as u32 == pid => None,
         r if r < 0 => Some(format!("macOS did not say which process process {pid} is responsible to, so the app's XPC services are not counted")),
-        r => Some(format!("the app started responsible to process {r} (what strobe runs under), not to itself, so its XPC services (web content, GPU and network helpers) are not counted")),
+        r => Some(crate::app::obstruction::unattributed(r as u32)),
     }
 }
 
@@ -1277,17 +1277,16 @@ fn covered(w: &Win) -> f64 {
 
 /// The apps whose normal windows in front of window `id` overlap it, front first (kCGWindowOwnerName
 /// needs no permission): what keeps a covered window covered.
-pub fn covering(id: isize) -> Vec<String> {
+pub fn covering(id: isize) -> Vec<(u32, crate::text::Private<String>)> {
     let all = windows(LIST_ON_SCREEN | EXCLUDE_DESKTOP, 0);
     let Some(w) = all.iter().find(|w| w.id == id as u32) else { return Vec::new() };
     let b = w.bounds;
-    let mut out: Vec<String> = Vec::new();
+    let mut out = Vec::new();
     for o in all.iter().take_while(|o| o.id != w.id).filter(|o| o.layer == 0 && o.alpha > 0.0 && o.pid != w.pid) {
         let ob = o.bounds;
         let overlaps = ob.origin.x < b.origin.x + b.size.width && b.origin.x < ob.origin.x + ob.size.width && ob.origin.y < b.origin.y + b.size.height && b.origin.y < ob.origin.y + ob.size.height;
-        let name = if o.owner.is_empty() { format!("process {}", o.pid) } else { o.owner.clone() };
-        if overlaps && !out.contains(&name) {
-            out.push(name);
+        if overlaps && !out.iter().any(|(pid, _)| *pid == o.pid) {
+            out.push((o.pid, crate::text::Private::new(o.owner.clone(), crate::text::PrivKind::ForeignProc)));
         }
     }
     out
@@ -1372,7 +1371,7 @@ pub fn accessibility_trusted() -> bool {
 /// The app macOS asks permissions of for strobe: the ancestor launchd started (Terminal, an agent's
 /// app, a remote shell's daemon), as its bundle when it is in one. macOS attributes a process's
 /// Accessibility and Screen Recording to that responsible process, not to strobe itself.
-pub fn responsible_app() -> String {
+fn ancestor() -> (u32, crate::text::Private<String>) {
     let all = all_bsd();
     let mut pid = std::process::id();
     for _ in 0..64 {
@@ -1382,11 +1381,13 @@ pub fn responsible_app() -> String {
         }
         pid = p.ppid;
     }
-    let exe = exe_of(pid).map(|p| p.display().to_string()).unwrap_or_else(|| format!("process {pid}"));
-    match exe.find(".app/") {
-        Some(i) => exe[..i + 4].to_string(),
-        None => exe,
-    }
+    let exe = exe_of(pid).map(|p| p.display().to_string()).unwrap_or_default();
+    (pid, crate::text::Private::new(format!("launchd ancestor: {exe:?} (pid {pid})"), crate::text::PrivKind::HostAncestor))
+}
+
+pub fn responsible_app() -> String {
+    let (pid, name) = ancestor();
+    if pid == std::process::id() { own_exe() } else { crate::app::obstruction::ancestor(&name) }
 }
 
 /// Why a process (0: strobe itself) runs at background priority, if it does (`taskpolicy -b`, or a
@@ -1403,11 +1404,11 @@ pub fn background_qos(pid: u32) -> Option<String> {
 /// remote shell's or an agent's daemon, when its plist sets no ProcessType) and everything it starts
 /// wake from a 16 ms sleep 20 to 60 ms late (air, macOS 27; ProcessType Interactive: 1 to 4 ms), with
 /// no thread QoS, role or activity that strobe may set changing it. What strobe launches inherits
-/// it. Returns the median wake delay (ms) of a few short sleeps and the job's program, when late.
+/// it. Returns the median wake delay (ms) of a few short sleeps when late; the job is live only.
 /// Measured once per process (35 ms of sleeps, 0.4 s when late): a process's launchd job does not
 /// change while it runs.
-pub fn timer_coalescing() -> Option<(f64, String)> {
-    static LATE: std::sync::OnceLock<Option<(f64, String)>> = std::sync::OnceLock::new();
+pub fn timer_coalescing() -> Option<String> {
+    static LATE: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     LATE.get_or_init(|| {
         let mut late: Vec<f64> = (0..7)
             .map(|_| {
@@ -1418,9 +1419,9 @@ pub fn timer_coalescing() -> Option<(f64, String)> {
             .collect();
         late.sort_by(f64::total_cmp);
         let median = late[late.len() / 2];
-        (median > 5.0).then(|| (median, responsible_app()))
+        (median > 5.0).then_some(median)
     })
-    .clone()
+    .map(|ms| crate::app::obstruction::timer(ms, &ancestor().1))
 }
 
 fn major_version() -> u32 {
@@ -1445,25 +1446,16 @@ pub fn screen_recording_pane() -> &'static str {
 pub fn screen_recording_grantee() -> String {
     let app = responsible_app();
     let own = own_exe();
-    match tcc_split() {
-        Some(_) => format!("strobe itself at {own} (macOS passes Device Control on from {app} to what it starts, but checks Screen Recording against strobe's own binary)"),
-        None if own.is_empty() || app == own => app,
-        None => format!("{app} (the app strobe runs under), or strobe itself at {own} if granting that app does not help"),
+    match app != own && accessibility_trusted() && !screen_capture_allowed() {
+        true => format!("strobe itself at {own} (macOS passes Device Control on from {app} to what it starts, but checks Screen Recording against strobe's own binary)"),
+        false if own.is_empty() || app == own => app,
+        false => format!("{app}, or strobe itself at {own} if granting that app does not help"),
     }
 }
 
 /// strobe's own executable, as System Settings lists it (symlinks resolved).
 pub fn own_exe() -> String {
     std::env::current_exe().ok().map(|p| std::fs::canonicalize(&p).unwrap_or(p).display().to_string()).unwrap_or_default()
-}
-
-/// The inherited-versus-own split: strobe runs under another process (a daemon such as a remote
-/// shell's, an agent's app), Device Control came with it, and Screen Recording did not. On macOS 27 a
-/// launchd daemon's child is AX-trusted through its parent, while ScreenCaptureKit answers -3801
-/// ("user declined TCCs") until strobe's own binary is granted. Returns the parent it inherits from.
-pub fn tcc_split() -> Option<String> {
-    let app = responsible_app();
-    (app != own_exe() && accessibility_trusted() && !screen_capture_allowed()).then_some(app)
 }
 
 /// Screen Recording permission: needed to read another app's pixels.
@@ -1507,9 +1499,7 @@ pub fn window_placement(id: isize) -> Option<super::Placement> {
 pub fn set_window_frame(id: isize, frame: [f64; 4]) -> crate::model::Result<()> {
     if !accessibility_trusted() {
         let (who, pane) = (responsible_app(), accessibility_pane());
-        return Err(crate::model::Error::usage(format!(
-            "page.window() sizes another app's window through the accessibility permission, which {who} (the app strobe runs under) does not have: {pane}"
-        )));
+        return Err(crate::model::Error::usage(format!("page.window() sizes another app's window through the accessibility permission, which {who} does not have: {pane}")));
     }
     let w = window_state(id).ok_or_else(|| crate::model::Error::msg("page.window(): the window closed"))?;
     let set = |win: CFTypeRef, name: &str, kind: u32, v: *const c_void| {
@@ -1627,11 +1617,11 @@ pub fn unshared_windows(pids: &[u32]) -> Vec<(u32, u32)> {
 /// The frontmost on-screen window of any app holding a point (points, global display space), at any
 /// level (a screen saver or a system alert over it covers it): its owner's pid, its id and the owner's
 /// name. The window server's own order, which counts a window that lets clicks through as covering.
-pub fn front_window_at(x: f64, y: f64) -> Option<(u32, u32, String)> {
+pub fn front_window_at(x: f64, y: f64) -> Option<(u32, u32, crate::text::Private<String>)> {
     windows(LIST_ON_SCREEN | EXCLUDE_DESKTOP, 0)
         .into_iter()
         .find(|w| w.alpha > 0.0 && x >= w.bounds.origin.x && y >= w.bounds.origin.y && x < w.bounds.origin.x + w.bounds.size.width && y < w.bounds.origin.y + w.bounds.size.height)
-        .map(|w| (w.pid, w.id, if w.owner.is_empty() { format!("process {}", w.pid) } else { w.owner }))
+        .map(|w| (w.pid, w.id, crate::text::Private::new(w.owner, crate::text::PrivKind::ForeignProc)))
 }
 
 /// The frontmost on-screen window of `pids` holding a point (points, global display space).

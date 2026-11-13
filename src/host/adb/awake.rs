@@ -110,7 +110,7 @@ impl StayAwake {
         let path = journal(&phone_key(d, hw.as_deref()));
         let left = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
         if let Some(owner) = left.as_ref().and_then(|v| v["owner"].as_str()).filter(|o| owner_alive(o)) {
-            return Err(Error::msg(format!("another strobe ({owner}) keeps {} awake", d.serial)).hint("one strobe runs on a phone at a time"));
+            return Err(Error::msg(crate::app::obstruction::stay_awake(owner, &d.serial)).hint("one strobe runs on a phone at a time"));
         }
         // A journal a killed strobe left that could not be put back yet: the user's setting is in it,
         // not on the phone (which holds what that strobe set).
@@ -351,9 +351,9 @@ impl PhoneSlot {
             }
             if Instant::now() >= until {
                 if let Some(what) = last["what"].as_str() {
-                    crate::app::live_progress(format!("  phone slot held by: {what}"));
+                    crate::app::live_progress(format!("  phone {} slot held by: {what}", d.serial));
                 }
-                return Err(Error::refused("ConcurrentBench", format!("{} is in use by another strobe", d.serial), "wait for it to finish; one strobe runs on a phone at a time"));
+                return Err(Error::refused("ConcurrentBench", "the phone is in use by another strobe", "wait for it to finish; one strobe runs on a phone at a time"));
             }
             std::thread::sleep(Duration::from_millis(200));
         }
