@@ -376,6 +376,7 @@ if (argv.includes("--make")) {
     ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "regress,waits"]],
     // A page whose time is restyling, headless: a lean check recording and an attribution one.
     ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "restyle", "--headless"]],
+    ["bench", ["insights.bench.ts", "--head", "c1", "--check", "--why", "always", "--filter", "restyle", "--headless", "--style"]],
     // A failed case.
     ["bench", ["fails.bench.ts", "--head", ".", "--check"]],
     // `strobe run --check`: one command, and two.
@@ -656,6 +657,11 @@ let followed = 0
       // Every engine query creates/removes a unique q-*.sql file in run/. A changed directory
       // stamp catches even transient SQL files that would disappear from a subsequent listing.
       if (listing && snapshot(ids) !== before) fail(`${name} ${q}: listing wrote a recording, a used stamp or an engine query file`)
+      if (listing && view === "sql" && rest.length) {
+        const stdout = run("query",exp,...args,"--progress","stdout")
+        if (stdout.stdout.length || stdout.exitCode !== p.exitCode || !stdout.stderr.toString().startsWith("strobe: choose a recording")) fail(`${name}: SQL choice leaked stdout progress`)
+        if(snapshot(ids)!==before) fail(`${name}: SQL choice wrote to the store or started the engine`)
+      }
       const direct = ids.map(id => run("query",id,...args))
       const want = ids.filter((_,i) => direct[i].exitCode === 0)
       const tag = `${name}: ${opts}`
@@ -711,7 +717,7 @@ let followed = 0
   console.log(`${cells} recording-selection cells (forward, choose, or refuse)`)
   // Descending IDs, duplicate reasons, and two different types of refusal. Assert text order,
   // status and the complete JSON for each reason against a direct query.
-  for(const [view,first,second,code] of [["frames",{wir:true},{native:true},2],["alloc",{engine:"firefox"},{script:true,runtime:{name:"bun"}},4]] as const){
+  for(const [view,first,second,code] of [["frames",{traced:false,frames_refused:"Headless: no display"},{native:true},2],["alloc",{engine:"firefox"},{script:true,runtime:{name:"bun"}},4]] as const){
     const pairs=[["page","rec_syn_z",first],["another page","rec_syn_y",first],["other","rec_syn_a",second]] as const
     for(const [,id,m] of pairs) put(folder(id),"meta.json",{id,probes:"attribution",...m})
     writeResult({kind:"check",series:pairs.map(([name,id])=>c(name,id,id))})
