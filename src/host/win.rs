@@ -1934,7 +1934,9 @@ pub fn tree_pids(root: u32) -> Vec<u32> {
 /// Idle cycles per logical CPU of processor group 0 (SystemProcessorIdleCycleTimeInformation).
 pub fn idle_cycles(out: &mut Vec<u64>) -> bool {
     use windows_sys::Wdk::System::SystemInformation::NtQuerySystemInformation;
-    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(64);
+    // This is a system query, not a query on strobe's reduced affinity. A group has at most
+    // 64 logical CPUs. The returned length tells which slots were filled.
+    let n = 64;
     out.resize(n, 0);
     let mut len = 0u32;
     let rc = unsafe { NtQuerySystemInformation(83, out.as_mut_ptr() as *mut _, (n * 8) as u32, &mut len) };

@@ -2235,6 +2235,19 @@ const FILMED_CPU_FIX: &str = "run --check without --video to check cpu.*";
 /// One run: its span (TSC units, or ns), strobe's and the runner's CPU in it (the same units).
 type RunCost = (u64, Option<u64>, Option<u64>);
 
+/// Fence a timed segment's observer counter inside the load reads. On systems with coarse
+/// process accounting even one extra system read on the inside matters for a short run.
+pub fn observer_edge<T>(opening: bool, load: impl FnOnce(), observer: impl FnOnce() -> T) -> T {
+    if opening {
+        load();
+        observer()
+    } else {
+        let sample = observer();
+        load();
+        sample
+    }
+}
+
 /// strobe's own process and the runner's CPU inside the runs only (rule 2): read just before each
 /// run begins and just after it ends, so the work strobe does between runs (reading the target's
 /// processes, snapshots, resets) is never counted, and the share is over the measured runs' time;
@@ -2289,8 +2302,7 @@ impl SelfCost {
     /// A run's untimed stretch ends now: the run counts again. strobe's own process is read last here
     /// and first in `pause`, so reading the runner is not in its count.
     fn resume(&self) {
-        *self.load_at.borrow_mut() = self.load.as_ref().map(LoadStart::new);
-        self.resume_observer();
+        observer_edge(true, || *self.load_at.borrow_mut() = self.load.as_ref().map(LoadStart::new), || self.resume_observer());
     }
     fn resume_observer(&self) {
         self.observer_at.set(Some(Instant::now()));
@@ -2303,12 +2315,17 @@ impl SelfCost {
     /// A run's untimed stretch begins now: what the run used so far is kept, and nothing until `resume`.
     /// Paused already (or no cycle clock, so nothing opened): nothing to add.
     fn pause(&self) {
-        self.pause_observer();
-        if let Some(at) = self.load_at.take() {
-            let mut sum = self.timed_load.get();
-            sum.add(at.stop());
-            self.timed_load.set(sum);
-        }
+        observer_edge(
+            false,
+            || {
+                if let Some(at) = self.load_at.take() {
+                    let mut sum = self.timed_load.get();
+                    sum.add(at.stop());
+                    self.timed_load.set(sum);
+                }
+            },
+            || self.pause_observer(),
+        );
     }
     fn pause_observer(&self) {
         let (Some(sum), Some((t0, s0, r0))) = (self.sum.get(), self.open.take()) else { return };

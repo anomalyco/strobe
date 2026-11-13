@@ -53,6 +53,17 @@ fn read_run(timed: &[RunLoad], warmup: usize) -> Block {
 pub fn run(logs: Option<&Path>) {
     let p = cmp("run.duration");
     let a = impact(&p, 8);
+    // A costly read uses the observer's CPU (60 us), not the target's. Main brackets the
+    // 40 us of actual relay work. Both new load reads must land outside those same two edges.
+    for us in [1000, 2000, 3000] {
+        let ticks = std::cell::Cell::new(0);
+        let load = || ticks.set(ticks.get() + 60);
+        let a = strobe::app::bench::observer_edge(true, load, || ticks.get());
+        ticks.set(ticks.get() + 40);
+        let b = strobe::app::bench::observer_edge(false, load, || ticks.get());
+        assert_eq!(b - a, 40);
+        println!("{us} us script, 40 us relay: {:.3}% as on main; neither 60 us load read charged", 100. * f64::from(b - a) / f64::from(us));
+    }
     let raw = |ms: f64, own: f64, foreign: f64| RunLoad { ms, busy_ms: Some(own + foreign * ms / 100.0), own_ms: Some(own), observer_ms: 0.0, stolen_ms: Some(0.0), subtick: false };
     expect("short guest window: lower bound not proof of quiet", background_note(&[read_run(&[RunLoad { subtick: true, ..raw(2., 1., 0.) }], 0)], &a), "warn");
     for row in ["page", "attached app", "native windowed", "native windowless", "script", "terminal", "command/exec"] {
@@ -66,6 +77,8 @@ pub fn run(logs: Option<&Path>) {
         assert_eq!(read_run(&[raw(ms, ms / 2.0, 100.0)], 0).values["cpu.foreign.max"], 100.0);
     }
     assert_eq!(read_run(&[RunLoad::empty_launch()], 0).values["cpu.foreign.max"], 0.0);
+    let console = RunLoad { ms: 100., busy_ms: Some(100.), own_ms: Some(20.), observer_ms: 5., ..RunLoad::default() };
+    assert_eq!(read_run(&[console], 0).values["cpu.foreign.max"], 75.);
     println!("direct launch edges (1 ms, 2 ms, 20 ms); blank grid: read zero");
     let first = raw(20., 10., 100.);
     let mut late = first;
