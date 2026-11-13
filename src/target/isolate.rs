@@ -1767,8 +1767,9 @@ pub fn prepare_home(app: &App, seed: Option<&Path>, home: Option<PathBuf>) -> Re
     })
 }
 
-/// A spawned app: the child with its group, when it was spawned (epoch ms and the host clock, read
-/// just before the launch request), its output lines when asked for, how it was started, and its OS
+/// A spawned app: the child with its group, when it was spawned (epoch ms and the host clock: its
+/// release, `Owned::released_ns`, or just before a Launch Services request), its output lines when
+/// asked for, how it was started, and its OS
 /// launch-feedback watch when the app asked for one (`App::with_feedback`).
 pub struct Spawned {
     pub child: Owned,
@@ -1819,6 +1820,10 @@ pub fn spawn(app: &App, home: &Home, args: &[String], env: &[(String, String)], 
     }
     let (epoch, at_ns) = (epoch_ms(), host::now_ns());
     let mut child = host::spawn_owned(&mut cmd, cpus, 0, Some(&home.dir)).map_err(|e| Error::msg(format!("launch {}: {e}", app.exe.display())))?;
+    // The launch's time from the child's release (`Owned::released_ns`), with the OS creating the
+    // process (Windows), as a person's launch: strobe's job, cgroup and CPU mask are before it.
+    let from = child.released_ns().saturating_sub(child.creation_ns()).max(at_ns);
+    let (epoch, at_ns) = (epoch + (from - at_ns) as f64 / 1e6, from);
     let feedback = app.feedback.map(|within| watch_feedback(&child, notice, within));
     let output = output.then(|| lines(&mut child));
     Ok(Spawned { pid: child.pid(), child, epoch_ms: epoch, at_ns, output, path: LaunchPath::Spawn, feedback })

@@ -193,8 +193,9 @@ pub struct Owned {
     released_ns: u64,
     #[cfg(windows)]
     started: Started,
-    /// Windows: the OS creating the process (`CreateProcessW`), apart from strobe's setup of it.
-    #[cfg(windows)]
+    /// The OS creating the process (Windows `CreateProcessW`, Linux the fork to the exec), apart from
+    /// strobe's setup of it.
+    #[cfg(any(windows, target_os = "linux"))]
     spawned: Spawned,
     /// Linux: the most of strobe's resident set the child can carry into its `ru_maxrss` (read just
     /// before the spawn, `peak_floor`).
@@ -275,10 +276,11 @@ fn peak_floor(forks: bool) -> Option<u64> {
 #[cfg(windows)]
 type Started = (Option<u64>, std::time::Instant, u64);
 
-/// The OS creating a child (Windows' `CreateProcessW`, the `spawn` call alone): the calling thread's
-/// cycles and the cycle clock just before and just after it, and its wall time. What a person's
-/// launch of the command costs too, unlike strobe's job, completion port and CPU mask around it.
-#[cfg(windows)]
+/// The OS creating a child (the `spawn` call alone: Windows' `CreateProcessW`, Linux's fork to the
+/// exec): the calling thread's cycles and the cycle clock just before and just after it, and its wall
+/// time. What a person's launch of the command costs too, unlike strobe's job, completion port, cgroup
+/// and CPU mask made before it.
+#[cfg(any(windows, target_os = "linux"))]
 #[derive(Clone, Copy, Debug)]
 struct Spawned {
     before: (u64, Option<u64>),
@@ -286,7 +288,7 @@ struct Spawned {
     wall: std::time::Duration,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Spawned {
     fn around<T>(f: impl FnOnce() -> T) -> (T, Spawned) {
         let before = (super::thread_cycles(), super::tsc());
@@ -657,10 +659,27 @@ impl Owned {
     /// time counts from (a command's `run.duration`, an app's and a terminal program's `launch.*`), so
     /// strobe's set-up of the launch is before it. Windows: right before the suspended child resumes,
     /// already in its job and on its CPUs (a child neither needs starts at once: right after its
-    /// creation). Unix: right before the spawn. macOS, an app Launch Services started: right before the
+    /// creation). Linux: the child's own clock read right before its exec, after its move into the
+    /// launch's cgroup and its CPU mask (`Release`); a child with neither, started without a fork, right
+    /// before the spawn. macOS: right before the spawn; an app Launch Services started, right before the
     /// request (`macos::Opened::at_ns`).
     pub fn released_ns(&self) -> u64 {
         self.released_ns
+    }
+
+    /// Windows: how long the OS took to create the process (`CreateProcessW`, before strobe's set-up of
+    /// the suspended child), in ns: a person's launch waits for it too, so a command's run and an app's
+    /// launch count from `released_ns` less it. 0 elsewhere, where the creation is in `released_ns`'s
+    /// span (a spawn without a fork) or strobe's (Linux's fork of strobe before the child's exec).
+    pub fn creation_ns(&self) -> u64 {
+        #[cfg(windows)]
+        {
+            self.spawned.wall.as_nanos() as u64
+        }
+        #[cfg(not(windows))]
+        {
+            0
+        }
     }
 
     /// Windows: when the child first goes input idle (`win::input_idle`): the moment the shell's "app
@@ -680,19 +699,18 @@ impl Owned {
         }
     }
 
-    /// Windows: the command's spawn as a person's launch of it would take it, without strobe's job,
-    /// completion port and CPU mask set while it was suspended: when its run began (the moment it
-    /// first ran, less the OS's creation of it, `Spawned`), the calling thread's cycles and the cycle
-    /// clock before and after that creation, and its wall time (ms). None elsewhere, where the spawn
-    /// call is the spawn.
+    /// The spawn call alone, as a person's launch of the command would take it (Windows
+    /// `CreateProcessW`, Linux the fork to the exec), without strobe's job, completion port, cgroup and
+    /// CPU mask made around it: the calling thread's cycles and the cycle clock before and after it, and
+    /// its wall time (ms). None on macOS, where the spawn call is the spawn.
     #[allow(clippy::type_complexity)]
-    pub fn spawn_span(&self) -> Option<(std::time::Instant, (u64, Option<u64>), (u64, Option<u64>), f64)> {
-        #[cfg(windows)]
+    pub fn spawn_span(&self) -> Option<((u64, Option<u64>), (u64, Option<u64>), f64)> {
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let s = self.spawned;
-            Some((self.started.1.checked_sub(s.wall).unwrap_or(self.started.1), s.before, s.after, s.wall.as_secs_f64() * 1e3))
+            Some((s.before, s.after, s.wall.as_secs_f64() * 1e3))
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             None
         }
@@ -867,6 +885,8 @@ pub struct Usage {
     pub code: i32,
     /// When strobe saw it exit, before anything was read.
     pub exited: Option<std::time::Instant>,
+    /// The same on `host::now_ns`'s clock: less `Owned::released_ns`, the command's run.
+    pub exited_ns: Option<u64>,
     /// It ran past its deadline: strobe ended it (and everything it started), and nothing else is read.
     pub timed_out: bool,
     /// CPU time (user and kernel) of the command and what it started (ns): Unix the kernel's per-task
@@ -957,7 +977,7 @@ impl Owned {
             let ms = deadline.as_millis().min(u32::MAX as u128 - 1) as u32;
             let waited = unsafe { WaitForSingleObject(h as _, ms) };
             // Both clocks together, before anything else runs: the rate below divides one by the other.
-            let (exited, t1) = (std::time::Instant::now(), super::tsc());
+            let (exited, t1, exited_ns) = (std::time::Instant::now(), super::tsc(), super::now_ns());
             on_exit();
             if waited != 0 {
                 self.end();
@@ -967,7 +987,7 @@ impl Owned {
             let mut code = 0u32;
             unsafe { GetExitCodeProcess(h as _, &mut code) };
             let job = self.group.as_ref().and_then(|g| g.job);
-            let mut usage = Usage { code: code as i32, exited: Some(exited), ..Usage::default() };
+            let mut usage = Usage { code: code as i32, exited: Some(exited), exited_ns: Some(exited_ns), ..Usage::default() };
             // The child's own CPU from its cycle counter (exact); what it started from the cycles of
             // the job's processes strobe held from their start (`jobs`), or where one was not held from
             // the job's clock-tick accounting.
@@ -1067,7 +1087,7 @@ impl Owned {
                     return Err(e);
                 }
             }
-            let exited = std::time::Instant::now();
+            let (exited, exited_ns) = (std::time::Instant::now(), super::now_ns());
             on_exit();
             let _ = stop.send(());
             let _ = watchdog.join();
@@ -1076,7 +1096,7 @@ impl Owned {
                 self.end();
                 return Ok(Usage { timed_out: true, ..Usage::default() });
             }
-            let mut usage = Usage { code: if info.si_code == libc::CLD_EXITED { info.si_status() } else { -1 }, exited: Some(exited), ..Usage::default() };
+            let mut usage = Usage { code: if info.si_code == libc::CLD_EXITED { info.si_status() } else { -1 }, exited: Some(exited), exited_ns: Some(exited_ns), ..Usage::default() };
             #[cfg(target_os = "linux")]
             {
                 // The zombie's IO: its own and what its children (reaped by it) did.
@@ -1301,19 +1321,28 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         use std::os::unix::process::CommandExt;
         let _ = flags;
         cmd.process_group(0);
-        let _forks = pin(cmd, cpus);
         // A target (a launch for a home) whose program is an app bundle's starts as its own
         // responsible process, as a person starts an app, so its XPC services join its process set.
         #[cfg(target_os = "macos")]
-        let bundle = home.is_some() && super::macos::own_responsibility(cmd);
+        let bundle = {
+            let _ = pin(cmd, cpus);
+            home.is_some() && super::macos::own_responsibility(cmd)
+        };
         #[cfg(target_os = "linux")]
-        let cgroup = into_cgroup(cmd);
-        // Read just before the spawn: strobe's reader threads' buffers grow after it. The cgroup's move
-        // is a `pre_exec` closure too: Rust forks then.
+        let release = Release::prepare(cmd, cpus, false);
+        // Read just before the spawn: strobe's reader threads' buffers grow after it.
         #[cfg(target_os = "linux")]
-        let floor = peak_floor(_forks || cgroup.is_some());
-        let released_ns = super::now_ns();
-        let child = cmd.spawn()?;
+        let floor = peak_floor(release.forks);
+        let before_ns = super::now_ns();
+        #[cfg(target_os = "linux")]
+        let (child, spawned) = Spawned::around(|| cmd.spawn());
+        #[cfg(not(target_os = "linux"))]
+        let child = cmd.spawn();
+        let child = child?;
+        #[cfg(target_os = "linux")]
+        let released_ns = release.released(before_ns);
+        #[cfg(not(target_os = "linux"))]
+        let released_ns = before_ns;
         let pgid = child.id();
         // `spawn` returns once the exec is done: whether the disclaim took is known now.
         #[cfg(target_os = "macos")]
@@ -1328,10 +1357,67 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
             main: super::MainThread::attach(pgid),
             released_ns,
             #[cfg(target_os = "linux")]
+            spawned,
+            #[cfg(target_os = "linux")]
             floor,
             #[cfg(target_os = "linux")]
-            cgroup: cgroup.map(|(c, _)| c.adopt(pgid, home)),
+            cgroup: release.cgroup.map(|(c, _)| c.adopt(pgid, home)),
         })
+    }
+}
+
+/// Linux: what strobe sets up for a child between its fork and its exec, in this order: its move into
+/// the launch's cgroup (while it still runs on strobe's CPUs, so the migration never runs on the
+/// measured ones), its CPU mask, and last its own clock written to a close-on-exec pipe right before
+/// the exec (`Owned::released_ns`). The cgroup, the mask and the pipe are made before the fork, so
+/// none of it is in the launch's time.
+#[cfg(target_os = "linux")]
+struct Release {
+    cgroup: Option<(super::cgroup::Launch, std::fs::File)>,
+    /// The pipe's read and write ends.
+    stamp: Option<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)>,
+    /// Whether the child is forked (a `pre_exec` closure: Rust then forks rather than `posix_spawn`s).
+    forks: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Release {
+    /// `forks`: the caller added a `pre_exec` closure of its own (before these).
+    fn prepare(cmd: &mut Command, cpus: Option<u64>, forks: bool) -> Release {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt;
+        let cgroup = into_cgroup(cmd);
+        let forks = pin(cmd, cpus) | cgroup.is_some() | forks;
+        // A child started without a fork (`posix_spawn`) runs its program from the spawn call: the
+        // clock read before the call is its release, its exec counted as a person's launch counts it.
+        if !forks {
+            return Release { cgroup, stamp: None, forks };
+        }
+        let mut fds = [0i32; 2];
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+            return Release { cgroup, stamp: None, forks };
+        }
+        let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let fd = w.as_raw_fd();
+        // Between fork and exec only async-signal-safe calls: `clock_gettime` and `write`.
+        unsafe {
+            cmd.pre_exec(move || {
+                let ns = super::os::now_ns();
+                libc::write(fd, &ns as *const u64 as *const libc::c_void, 8);
+                Ok(())
+            });
+        }
+        Release { cgroup, stamp: Some((r, w)), forks }
+    }
+
+    /// When the child was released, once the spawn returned (its exec is done then): its own stamp; a
+    /// child started without a fork, `before` (read right before the spawn); one whose stamp is
+    /// missing, now.
+    fn released(&self, before: u64) -> u64 {
+        use std::os::fd::AsRawFd;
+        let Some((r, _)) = &self.stamp else { return before };
+        let mut b = [0u8; 8];
+        if unsafe { libc::read(r.as_raw_fd(), b.as_mut_ptr() as *mut libc::c_void, 8) } == 8 { u64::from_ne_bytes(b) } else { super::now_ns() }
     }
 }
 
@@ -1365,7 +1451,6 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
     use std::os::unix::process::CommandExt;
     // Held from before the spawn until the launch is listed: a stop in between ends it too.
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = pin(cmd, cpus);
     // Between fork and exec only async-signal-safe calls.
     unsafe {
         cmd.pre_exec(|| {
@@ -1376,13 +1461,21 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
         });
     }
     #[cfg(target_os = "linux")]
-    let cgroup = into_cgroup(cmd);
+    let release = Release::prepare(cmd, cpus, true);
     #[cfg(not(target_os = "linux"))]
-    let _ = home;
+    let _ = (home, pin(cmd, cpus));
     #[cfg(target_os = "linux")]
     let floor = peak_floor(true);
-    let released_ns = super::now_ns();
-    let child = cmd.spawn()?;
+    let before_ns = super::now_ns();
+    #[cfg(target_os = "linux")]
+    let (child, spawned) = Spawned::around(|| cmd.spawn());
+    #[cfg(not(target_os = "linux"))]
+    let child = cmd.spawn();
+    let child = child?;
+    #[cfg(target_os = "linux")]
+    let released_ns = release.released(before_ns);
+    #[cfg(not(target_os = "linux"))]
+    let released_ns = before_ns;
     let pgid = child.id();
     let start = super::start_time(pgid);
     live.push(Live { pid: pgid, start, child: true });
@@ -1394,9 +1487,11 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
         main: super::MainThread::attach(pgid),
         released_ns,
         #[cfg(target_os = "linux")]
+        spawned,
+        #[cfg(target_os = "linux")]
         floor,
         #[cfg(target_os = "linux")]
-        cgroup: cgroup.map(|(c, _)| c.adopt(pgid, home)),
+        cgroup: release.cgroup.map(|(c, _)| c.adopt(pgid, home)),
     })
 }
 
