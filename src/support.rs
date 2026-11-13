@@ -768,10 +768,10 @@ const MAC_INPUT_RUN: Evidence = Evidence {
     aa: "click-150 against itself, 8 pairs: interaction.p50 +0.10% [−0.48 … +0.51], same (±2%)",
     planted: "click-0 to click-150 (the answer's frame spun 150 ms): 33.01 to 182.77 ms, Δ [145.4 … 158.6] ms for 150 ms",
     boundary: "interaction.* of a headless page refused Headless",
-    reviewed_at: Some("fb490d96"),
+    reviewed_at: Some("31ba7709"),
     reviewed_why: Some(CHANGES_MAC_INPUT),
 };
-const CHANGES_MAC_INPUT: &str = "Driver::dispatch refuses type with paste and marks burst press (c41ff0f8); a burst press without a selector skips focus and its settle (fb490d96). The measured click fixture uses neither type nor press: its CDP events and timestamps did not change. run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks";
+const CHANGES_MAC_INPUT: &str = "Driver::dispatch refuses type with paste and marks burst press (c41ff0f8); a burst press without a selector skips focus and settle (fb490d96). The click fixture uses neither type nor press: its CDP events and timestamps did not change. run_chunk's trace choice, marks and windowless checks, headless_state, side_windowless, windowless_as, windowless_target and launch::app_windowless leave this headed url() with the same trace, marks and windows (ebc9eeaf, 8c60bc69, 08d14fc4, 28ca96aa, e0142531); read still accepts its plain recording id (ad15195c). run_chunk now carries a CPU refusal reason beside its run (8fcc3d0), not a change to input sampling or reduction.";
 const MAC_NATIVE_CPU_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "964e825",
