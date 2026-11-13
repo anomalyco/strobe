@@ -917,6 +917,13 @@ pub struct EndedMarks {
     /// ones used.
     #[cfg(windows)]
     pub held: Option<jobs::Reading>,
+    /// Windows: the pids the marks were read against (the set's listing just before them).
+    #[cfg(windows)]
+    pub listed: std::collections::BTreeSet<u32>,
+    /// Windows: processes running in those jobs, not in `listed`, that carry the launch's stamp: of the
+    /// set, started after its listing.
+    #[cfg(windows)]
+    pub unlisted: std::collections::BTreeSet<(u32, u64)>,
     /// Linux: the CPU of the set's launch cgroups (`cgroup`), where its launches have them.
     #[cfg(target_os = "linux")]
     pub cgroup: Option<cgroup::Reading>,
@@ -970,53 +977,88 @@ impl EndedMarks {
     /// while the set counts none of it, or on Windows counted from 0 where it ran before), or one that
     /// ended between the listing and the cgroups' reading (`skewed`: counted in both).
     pub fn dead_since(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Option<u64> {
+        self.dead_or_why(earlier, set_a, set_b).ok()
+    }
+
+    /// Why `dead_since` is None: which of its conditions did not hold, in words a refusal can carry.
+    pub fn dead_why(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Option<&'static str> {
+        self.dead_or_why(earlier, set_a, set_b).err()
+    }
+
+    fn dead_or_why(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Result<u64, &'static str> {
         #[cfg(windows)]
         {
-            let (a, b) = (earlier.held.as_ref()?, self.held.as_ref()?);
-            if !a.complete || !b.complete || !a.jobs.is_subset(&b.jobs) {
-                return None;
+            let (Some(a), Some(b)) = (earlier.held.as_ref(), self.held.as_ref()) else { return Err("no job of strobe's held the set's processes at both readings") };
+            if !a.complete || !b.complete {
+                return Err("a process of the launch's job ended before strobe could open it");
             }
-            if a.running.keys().any(|k| !set_a.contains_key(k)) || b.running.keys().any(|k| !set_b.contains_key(k)) {
-                return None;
+            if !a.jobs.is_subset(&b.jobs) {
+                return Err("a job of the set's launches was closed between the readings");
+            }
+            // The marks and the set's listings are read a moment apart. A process the marks saw that
+            // the set did not list is one that ended or started in between, which is known exactly:
+            // - in the listing the first marks were read against but not in the set's own, a later one
+            //   (a run's start): it ended between the two, before the part, so none of its CPU is in it;
+            // - started after the first listing with the launch's stamp and running at the last reading
+            //   (in `set_b`, counted from 0 by `cycles_used`): all of it is in the part;
+            // - started after the last listing with the launch's stamp: none of it is in the part.
+            // Any other is outside the set while it ran in the jobs (no stamp: a process that dropped
+            // it, or one the listing missed), and what it used there is no count's.
+            let outside = "a process ran in the launch's job that was not in the set's listing (outside the tree the set follows and without the launch's stamp, or one that started and ended between a listing and the jobs' reading)";
+            let mut before = std::collections::BTreeSet::new();
+            for k in a.running.keys().filter(|k| !set_a.contains_key(*k)) {
+                if earlier.listed.contains(&k.0) && !set_b.contains_key(k) && !b.running.contains_key(k) {
+                    before.insert(*k);
+                } else if !(earlier.unlisted.contains(k) && set_b.contains_key(k)) {
+                    return Err(outside);
+                }
+            }
+            if b.running.keys().any(|k| !set_b.contains_key(k) && !(self.unlisted.contains(k) && !a.running.contains_key(k) && !set_a.contains_key(k))) {
+                return Err(outside);
             }
             // In the set at the first reading and gone at the last: ended in a job, from its reading on
             // (else it left the set running, or ran outside the jobs). One the last reading still
             // read (its handle held) is in `cycles_used` already.
             let mut dead = 0u64;
             for (k, c) in set_a.iter().filter(|(k, _)| !set_b.contains_key(*k)) {
-                dead += b.ended.get(k)?.saturating_sub(*c);
+                dead += b.ended.get(k).ok_or("a process of the set ended outside the launch's jobs")?.saturating_sub(*c);
             }
             // Born after the first reading (it ran in no reading of it) and ended before the last.
-            dead += b.ended.iter().filter(|(k, _)| !a.ended.contains_key(*k) && !set_a.contains_key(*k) && !set_b.contains_key(*k)).map(|(_, c)| c).sum::<u64>();
-            Some(dead)
+            dead += b.ended.iter().filter(|(k, _)| !a.ended.contains_key(*k) && !set_a.contains_key(*k) && !set_b.contains_key(*k) && !before.contains(*k)).map(|(_, c)| c).sum::<u64>();
+            Ok(dead)
         }
         #[cfg(target_os = "linux")]
         {
-            let (a, b) = (earlier.cgroup.as_ref()?, self.cgroup.as_ref()?);
-            if !a.launches.is_subset(&b.launches) || earlier.skewed || self.skewed {
-                return None;
+            let (Some(a), Some(b)) = (earlier.cgroup.as_ref(), self.cgroup.as_ref()) else { return Err("no launch cgroup counted the set at both readings") };
+            if !a.launches.is_subset(&b.launches) {
+                return Err("a launch cgroup of the set was removed between the readings");
+            }
+            if earlier.skewed || self.skewed {
+                return Err("a process of the set ended between its listing and the cgroups' reading, so its CPU would be counted twice");
             }
             if a.members.keys().any(|k| !set_a.contains_key(k)) || b.members.keys().any(|k| !set_b.contains_key(k)) {
-                return None;
+                return Err("a process in the launch cgroups was not in the set's listing (outside the tree the set follows, and without the launch's stamp)");
             }
-            // Left the cgroups still running (still in the set), or ended outside them.
-            if a.members.keys().any(|k| !b.members.contains_key(k) && set_b.contains_key(k)) || set_a.keys().any(|k| !set_b.contains_key(k) && !a.members.contains_key(k)) {
-                return None;
+            if a.members.keys().any(|k| !b.members.contains_key(k) && set_b.contains_key(k)) {
+                return Err("a process of the set left the launch cgroups still running");
+            }
+            if set_a.keys().any(|k| !set_b.contains_key(k) && !a.members.contains_key(k)) {
+                return Err("a process of the set ended outside the launch cgroups");
             }
             let inside = |pid: u32| a.members.keys().chain(b.members.keys()).any(|k| k.0 == pid);
             if self.reaped.iter().any(|(k, v)| *v > earlier.reaped.get(k).copied().unwrap_or(0) && !inside(k.0)) {
-                return None;
+                return Err("a process outside the launch cgroups reaped a child of the set");
             }
             if self.zombies.iter().any(|(k, parent)| !earlier.zombies.contains_key(k) && !inside(*parent)) {
-                return None;
+                return Err("a child of a process outside the launch cgroups ended and waits to be reaped");
             }
             let running: u64 = b.members.iter().map(|(k, c)| c.saturating_sub(a.members.get(k).copied().unwrap_or(0))).sum();
-            Some(b.usage_ns.saturating_sub(a.usage_ns).saturating_sub(running))
+            Ok(b.usage_ns.saturating_sub(a.usage_ns).saturating_sub(running))
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = (earlier, set_a, set_b);
-            None
+            Err("macOS keeps no count of what an ended process used that strobe can read")
         }
     }
 
@@ -1038,7 +1080,9 @@ impl EndedMarks {
                         add(k, e.saturating_sub(*c));
                     }
                 }
-                for (k, c) in b.ended.iter().filter(|(k, _)| !a.ended.contains_key(*k) && !set_a.contains_key(*k) && !set_b.contains_key(*k)) {
+                // Not one that ended before the part (`dead_since`).
+                let before = |k: &(u32, u64)| a.running.contains_key(k) && earlier.listed.contains(&k.0);
+                for (k, c) in b.ended.iter().filter(|(k, _)| !a.ended.contains_key(*k) && !set_a.contains_key(*k) && !set_b.contains_key(*k) && !before(k)) {
                     add(k, *c);
                 }
             }
@@ -1061,6 +1105,13 @@ pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> EndedMarks {
         // reading then lacks it, which `dead_since` refuses rather than miss it.
         out.held = spawn::jobs_cpu(pids, home);
         out.jobs = spawn::jobs_ended(pids, home);
+        out.listed = pids.iter().copied().collect();
+        // A process of the jobs the listing lacks: of the set if it carries the launch's stamp (its pid
+        // is the job's process's while the job holds it, so the stamp read is its own).
+        if let (Some(h), Some(home)) = (&out.held, home) {
+            let key = spawn::home_key(home);
+            out.unlisted = h.running.keys().filter(|k| !pids.contains(&k.0) && spawn::stamp_of(k.0).is_some_and(|s| s.home == key)).copied().collect();
+        }
     }
     #[cfg(target_os = "linux")]
     {

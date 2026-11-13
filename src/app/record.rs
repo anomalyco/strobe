@@ -1283,7 +1283,20 @@ pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> Option<SetC
         if gone.is_empty() && !y.ended_since(x) {
             continue;
         }
-        let dead = y.dead_since(x, a, b)?;
+        let dead = match y.dead_since(x, a, b) {
+            Some(d) => d,
+            None => {
+                let why = y.dead_why(x, a, b).unwrap_or("not known");
+                LOST.with(|l| {
+                    let mut l = l.borrow_mut();
+                    if std::mem::take(&mut l.0) {
+                        l.1.clear();
+                    }
+                    l.1.insert(why);
+                });
+                return None;
+            }
+        };
         out.total += dead;
         out.ended += dead;
         out.gone.extend(gone);
@@ -1296,15 +1309,32 @@ pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> Option<SetC
     Some(out)
 }
 
+thread_local! {
+    /// Why `timed_cpu` gave no CPU on this thread since a refusal last said it (`cpu_lost`), each once;
+    /// the first flag: said already, so the next run's reason starts a new list.
+    static LOST: std::cell::RefCell<(bool, std::collections::BTreeSet<&'static str>)> = const { std::cell::RefCell::new((false, std::collections::BTreeSet::new())) };
+}
+
 /// `RunIncomplete` for a CPU metric over a span some process of the set ended in, where what it used
-/// there is not known (`timed_cpu`): its CPU left with it, so the set's CPU is short.
+/// there is not known (`timed_cpu`): its CPU left with it, so the set's CPU is short. It says which
+/// condition of the count failed (`host::EndedMarks::dead_why`) in the runs this thread read since the
+/// last such refusal.
 pub fn cpu_lost(metric: &str, runs: usize, of: usize, what: &str) -> crate::model::Refusal {
+    let why = LOST.with(|l| {
+        let mut l = l.borrow_mut();
+        l.0 = true;
+        l.1.iter().copied().collect::<Vec<_>>().join("; ")
+    });
     // Windows reads what an ended process used from strobe's handle to it, held from its start in its
-    // launch's job: one it did not hold is what is lost.
-    let how = if cfg!(windows) { " (one strobe held no handle to: it ran outside its launch's job, it ended before strobe could open it, or strobe did not launch the target)" } else { "" };
+    // launch's job: without a reason read, one it did not hold is what is lost.
+    let how = match why.is_empty() {
+        false => format!(" ({why})"),
+        true if cfg!(windows) => " (one strobe held no handle to: it ran outside its launch's job, it ended before strobe could open it, or strobe did not launch the target)".into(),
+        true => String::new(),
+    };
     crate::model::Refusal::new(
         crate::model::ValidatorId::RunIncomplete,
-        format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run{how}, and the CPU it used there ended with it, so the CPU of the process set is short"),
+        format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run, and the CPU it used there ended with it{how}, so the CPU of the process set is short"),
     )
     .fix(if cfg!(target_os = "linux") {
         "let strobe launch the target (its launches' cgroups count what ended: under systemd strobe asks for a scope, so run it in a user session or as root), wrap processes the run starts but does not measure in ctx.untimed, keep the processes running until the run's end, or compare run.duration"
