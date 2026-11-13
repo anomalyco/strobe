@@ -19,13 +19,24 @@
 // Input faster than the answers has no latency to give: every case below must be refused AmbiguousInteraction (no
 // tty.latency.* or tty.settle.* value, exit 4 in a timed comparison). strobe through 0.32.0 measures them instead,
 // and wrongly: a key's late answer is taken for the next key's, or the terminal's own echo for the program's answer.
-// What 0.32.0 reads (`--check --runs 3`, a Windows desktop and a Linux VM):
-//   overrun-50   10 keys back to back on keys-50 (each answered 50 ms later, strobe's 50 ms rest before a key):
-//                Windows 50.8 ms (28 inputs, 2 silent), Linux 0.17 ms (--check and a timed A/B)
-//   overrun-80   10 keys back to back on keys-80: Windows 22.2 to 24.7 ms (27 inputs, 3 silent), Linux 30.0 ms
-//   overrun-mixed  10 keys 60 ms apart on keys-mixed, answered 20 and 120 ms later in turn: the 20 ms answers come
-//                before the next key, the 120 ms ones after it, so no key is safely paired (reading the fast ones
-//                alone would hide the slow ones): Windows 59.8 ms (17 inputs, 13 silent), Linux 59.5 ms (18, 12)
+// Each must overrun in every run, by more than a timer tick either way: checked from known.rs's own log of when each
+// key arrived and each answer was written (`log=<file>`; 10 runs of 10 keys, 0.32.0, a Windows desktop and a Linux VM).
+// "Margin" is how long before the last answer was written the next key arrived (or, negative, how long after).
+//   overrun-60   (Unix) 10 keys back to back on keys-60 (each answered 60 ms later): strobe sends the next key once
+//                the grid has been still 50 ms, so it arrives 10 ms before the owed answer: 90 of 90 gaps, margin
+//                9.8 to 10.4 ms on Linux, whose timers are exact. Not on Windows, where strobe's 50 ms wait runs to
+//                about 58 ms (its timer's tick) and the margin would be 2 ms. A 50 ms answer is no case on either:
+//                it overran 45 of 90 gaps on Linux (margin 0.0 to 0.8 ms) and 3 of 90 on Windows
+//   overrun-120  10 keys back to back on keys-120: 54 of 54 gaps, margin 67 ms or more on Windows and 70 ms or more
+//                on Linux (answers queue up, so later keys overrun by more). keys-80 back to back overran every gap
+//                too, but by 13.9 to 30 ms on Windows: under a 15.6 ms tick at its low end
+//   overrun-mixed  10 keys 60 ms apart on keys-mixed, answered 20 and 120 ms later in turn: each 120 ms answer comes
+//                59 to 60 ms after the next key, each 20 ms answer 50 to 78 ms before it, in every run on both: no key
+//                is safely paired (reading the fast ones alone would hide the slow ones)
+// What 0.32.0 reads (`--check`):
+//   overrun-60   Linux 10.0 ms (90 inputs, 10 silent); a 50 ms answer read 0.17 to 0.20 ms there
+//   overrun-120  Windows 6.7 ms (57 inputs, 43 silent) and 55.8 ms (19, 11) in two checks, Linux 20.0 ms (59, 41)
+//   overrun-mixed  Windows 59.8 ms (17 inputs, 13 silent), Linux 59.5 ms (18, 12)
 //   echo-cooked  (Unix) 10 keys 100 ms apart to a line-mode program: the terminal echoes each key at once, and the
 //                program answers only a whole line, so what changes the grid is the kernel's echo, not the
 //                program: Linux 0.07 ms (30 inputs, tty.frames 0, tty.cells 10: the echoed keys)
@@ -49,8 +60,9 @@ const unix = process.platform !== "win32"
 export default bench({
   targets: {
     keys: term(["tty", "40", "20"]),
-    "keys-50": term(["tty", "40", "50"]),
+    ...(unix ? { "keys-60": term(["tty", "40", "60"]) } : {}),
     "keys-80": term(["tty", "40", "80"]),
+    "keys-120": term(["tty", "40", "120"]),
     "keys-mixed": term(["tty", "40", "20,120"]),
     paste: term(["tty", "40", "20", "paste"]),
     ...(unix ? { cooked: term(["cooked", "40", "20"]) } : {}),
@@ -76,8 +88,8 @@ export default bench({
       resetCheck: false,
       run: ({ page }: any) => page.type("", "first line\nsecond line", { paste: true }),
     },
-    "overrun-50": { targets: ["keys-50"], primary: "tty.latency.p50", metrics: latency, resetCheck: false, run: keys(10) },
-    "overrun-80": { targets: ["keys-80"], primary: "tty.latency.p50", metrics: latency, resetCheck: false, run: keys(10) },
+    ...(unix ? { "overrun-60": { targets: ["keys-60"], primary: "tty.latency.p50", metrics: latency, resetCheck: false, run: keys(10) } } : {}),
+    "overrun-120": { targets: ["keys-120"], primary: "tty.latency.p50", metrics: latency, resetCheck: false, run: keys(10) },
     "overrun-mixed": { targets: ["keys-mixed"], primary: "tty.latency.p50", metrics: latency, resetCheck: false, run: keys(10, 60) },
     ...(unix ? { "echo-cooked": { targets: ["cooked"], primary: "tty.latency.p50", metrics: latency, resetCheck: false, run: keys(10, 100) } } : {}),
     // One key, answered by one 62-byte frame of 40 cells 20 ms later: tty.updates 1, tty.bytes 62, tty.cells 40.

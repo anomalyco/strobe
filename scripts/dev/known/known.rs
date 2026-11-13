@@ -52,7 +52,8 @@
 //                               taken in turn: `20` or `20,120`), one synchronized frame that rewrites row 1
 //                               with <bytes> cells (alternating A and B); `q` quits. Prints `ready` on row 0
 //                               first. With `paste`, turns on bracketed paste (ESC [?2004h) and answers a whole
-//                               paste (ESC [200~ … ESC [201~) once, at its end
+//                               paste (ESC [200~ … ESC [201~) once, at its end. With `log=<file>`, appends when
+//                               each input arrived and each answer was written (`k <ns>`, `f <ns>`)
 //   cooked <bytes> <delay_ms>   terminal app in line mode (Unix: the terminal echoes each key itself); on each
 //                               line, after <delay_ms>, one frame as `tty` draws; `q` in a line quits
 //   frames <n> <bytes> <gap_ms> terminal app: <n> synchronized frames of <bytes> cells, <gap_ms> apart, then
@@ -228,13 +229,34 @@ mod os {
     static ANCHOR: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
     pub fn anchor() {
         #[cfg(target_arch = "x86_64")]
-        ANCHOR.get_or_init(|| (std::time::Instant::now(), unsafe { core::arch::x86_64::_rdtsc() }));
+        ANCHOR.get_or_init(clocks);
+    }
+    /// The wall clock and the timestamp counter at one moment: the counter read between two clock reads at most 2 µs
+    /// apart, the clock taken at their middle. A thread preempted between two unbracketed reads (a 15.6 ms quantum)
+    /// would pair a counter and a clock that far apart: up to 100 tries, else the tightest bracket.
+    #[cfg(target_arch = "x86_64")]
+    fn clocks() -> (std::time::Instant, u64) {
+        let mut best: Option<(std::time::Duration, std::time::Instant, u64)> = None;
+        for _ in 0..100 {
+            let a = std::time::Instant::now();
+            let c = unsafe { core::arch::x86_64::_rdtsc() };
+            let w = a.elapsed();
+            if best.is_none_or(|(bw, _, _)| w < bw) {
+                best = Some((w, a + w / 2, c));
+            }
+            if w <= std::time::Duration::from_micros(2) {
+                break;
+            }
+        }
+        let (_, t, c) = best.unwrap();
+        (t, c)
     }
     /// The timestamp counter's ticks a nanosecond since `anchor`; None until 1 ms has passed.
     #[cfg(target_arch = "x86_64")]
     fn ticks_per_ns() -> Option<f64> {
         let (t0, c0) = ANCHOR.get()?;
-        let (c1, ns) = (unsafe { core::arch::x86_64::_rdtsc() }, t0.elapsed().as_nanos() as f64);
+        let (t1, c1) = clocks();
+        let ns = t1.saturating_duration_since(*t0).as_nanos() as f64;
         (ns >= 1e6).then(|| c1.wrapping_sub(*c0) as f64 / ns)
     }
     /// This thread's cycle count (x64); None elsewhere.
@@ -669,26 +691,49 @@ fn main() {
                 out.write_all(b"\x1b[?2004h").unwrap();
                 out.flush().unwrap();
             }
+            // `log=<file>`: when each input arrived and each answer was written (`k <ns>`, `f <ns>` from the
+            // start), so a run's timing can be read from the program's side: an input that arrived before the
+            // last answer was written came while one was owed.
+            let log = std::cell::RefCell::new(args.iter().find_map(|a| a.strip_prefix("log=")).and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()));
+            let t0 = Instant::now();
+            let note = |what: &str, at: Instant| {
+                if let Some(f) = log.borrow_mut().as_mut() {
+                    let _ = writeln!(f, "{what} {}", at.duration_since(t0).as_nanos());
+                }
+            };
             let mut n = 0;
             let mut answer = |out: &mut std::io::Stdout| {
                 thread::sleep(ms(delays[n % delays.len()]));
                 frame(out, n, cells);
+                note("f", Instant::now());
                 n += 1;
             };
-            let (mut buf, mut pending, mut in_paste) = ([0u8; 4096], Vec::<u8>::new(), false);
-            loop {
-                let got = std::io::stdin().read(&mut buf).unwrap_or(0);
-                if got == 0 {
+            // Input is read on a thread of its own, so each input's arrival is known while an answer is owed;
+            // they are answered in turn, one at a time, as before.
+            let (tx, rx) = std::sync::mpsc::channel::<(Instant, Vec<u8>)>();
+            thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                loop {
+                    let got = std::io::stdin().read(&mut buf).unwrap_or(0);
+                    if tx.send((Instant::now(), buf[..got].to_vec())).is_err() || got == 0 {
+                        break;
+                    }
+                }
+            });
+            let (mut pending, mut in_paste) = (Vec::<u8>::new(), false);
+            while let Ok((at, bytes)) = rx.recv() {
+                if bytes.is_empty() {
                     break;
                 }
+                note("k", at);
                 if mode != "tty" {
-                    if buf[..got].contains(&b'q') {
+                    if bytes.contains(&b'q') {
                         break;
                     }
                     continue;
                 }
                 if !paste {
-                    if buf[..got].contains(&b'q') {
+                    if bytes.contains(&b'q') {
                         break;
                     }
                     answer(&mut out);
@@ -696,7 +741,7 @@ fn main() {
                 }
                 // Bracketed paste: what comes between ESC [200~ and ESC [201~ is one paste, answered once at its
                 // end; a key outside one is answered as a key; `q` quits only outside a paste.
-                pending.extend_from_slice(&buf[..got]);
+                pending.extend_from_slice(&bytes);
                 loop {
                     if in_paste {
                         match find(&pending, b"\x1b[201~") {
