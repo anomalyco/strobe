@@ -540,7 +540,7 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
 fn live_ledger(result: &mut Value, source: Option<&Path>) -> String {
     let mut text = result["text"].as_str().unwrap_or("").to_string();
     if let Some(source) = source {
-        let rendered = super::bench::rendered(result).unwrap_or(text);
+        let rendered = super::bench::rendered_at(result, Some(source)).unwrap_or(text);
         text = path_text(&rendered, result, source, false);
         result["text"] = json!(text);
         return text;

@@ -852,7 +852,7 @@ mod win {
     use windows_sys::Win32::System::Threading::{
         CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetProcessAffinityMask,
         InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-        SetProcessAffinityMask, UpdateProcThreadAttribute,
+        SetProcessAffinityMask, TerminateProcess, UpdateProcThreadAttribute,
     };
 
     pub struct Proc {
@@ -956,7 +956,8 @@ mod win {
                         if h.is_null() {
                             false
                         } else {
-                            let ok = hosts().contains(pid) && SetProcessAffinityMask(h, mask as usize) != 0;
+                            let (mut proc_mask, mut sys_mask) = (0, 0);
+                            let ok = hosts().contains(pid) && GetProcessAffinityMask(h, &mut proc_mask, &mut sys_mask) != 0 && SetProcessAffinityMask(h, mask as usize & sys_mask) != 0;
                             CloseHandle(h);
                             ok
                         }
@@ -1048,17 +1049,20 @@ mod win {
                     }
                     None => None,
                 };
+                if let Some(mask) = cpus
+                    && let Err(e) = host::spawn::pin_child(pi.hProcess, mask)
+                {
+                    TerminateProcess(pi.hProcess, 1);
+                    if let Some(j) = job {
+                        host::spawn::close_job(j as isize);
+                    }
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    ClosePseudoConsole(hpc);
+                    return Err(Error::msg(format!("pin terminal program to the requested CPUs: {e}")));
+                }
                 // A stop of strobe ends it with the launches it owns (`spawn::end_launches`).
                 host::spawn::list_launch(pi.dwProcessId, job.map(|j| j as isize), spec.home.as_deref());
-                if let Some(mask) = cpus {
-                    let (mut proc_mask, mut sys_mask) = (0usize, 0usize);
-                    if GetProcessAffinityMask(pi.hProcess, &mut proc_mask, &mut sys_mask) != 0 {
-                        let target = if mask == 0 { sys_mask } else { mask as usize & sys_mask };
-                        if target != 0 {
-                            SetProcessAffinityMask(pi.hProcess, target);
-                        }
-                    }
-                }
                 Ok((Proc { pid: pi.dwProcessId, process: pi.hProcess, thread: pi.hThread, job, hpc: Some(hpc) }, read, write, host_pids))
             }
         }

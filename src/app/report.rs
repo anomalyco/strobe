@@ -739,7 +739,7 @@ fn markdown(data: &Value, path: Option<&std::path::Path>, recording: bool) -> St
     // A comparison's or a check's text is drawn again from its result, as its PR block and HTML are:
     // today's digits, rendering and unit, and the rerun ledger as of now (`run` refreshed it). A
     // recording's from its meta.json; other results keep the text they printed (a pixels run).
-    let text = if let Some(mut t) = super::bench::rendered(data) {
+    let text = if let Some(mut t) = super::bench::rendered_at(data, path) {
         // Another strobe measured it: its numbers are that strobe's, the words this one's.
         if let Some(v) = data["env"]["strobe"].as_str().filter(|v| *v != env!("CARGO_PKG_VERSION") && data["kind"] == "experiment") {
             t += &format!("\nmeasured by strobe {v}; this text drawn again by strobe {}\n", env!("CARGO_PKG_VERSION"));

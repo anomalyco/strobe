@@ -4243,7 +4243,23 @@ fn check_counts(series: &[Value]) -> (usize, usize, usize, usize) {
 /// A check's text from its result.json: what `bench --check` printed, drawn again (in the unit times
 /// print in now).
 pub(crate) fn check_text(r: &Value) -> String {
+    check_text_at(r, None)
+}
+
+fn check_text_at(r: &Value, source: Option<&Path>) -> String {
     let exp = r["id"].as_str().unwrap_or("");
+    let meta = |id: &str| -> Option<Value> {
+        if exp.is_empty() || !id.starts_with("rec_") || !store::plain_id(id) {
+            return None;
+        }
+        let matching = |m: &Value| m["id"] == id && m["experiment"] == exp;
+        source
+            .and_then(Path::parent)
+            .and_then(|d| store::held_file(d, &format!("{id}/meta.json")))
+            .and_then(|p| store::read_named_json(&p).ok())
+            .filter(matching)
+            .or_else(|| store::read_json(&host::paths::state_path().join("recordings").join(id).join("meta.json")).ok().filter(matching))
+    };
     let series: Vec<Value> = r["series"].as_array().cloned().unwrap_or_default();
     let (gaps, before, refused, failed) = check_counts(&series);
     let typed_run = run_heading(r) == "strobe run";
@@ -4387,16 +4403,17 @@ pub(crate) fn check_text(r: &Value) -> String {
                 text += &format!("      actions  {n} sent · strobe query {exp} actions\n");
             }
             if let Some(rec) = s["video"]["head"].as_str() {
-                let meta = store::resolve(rec).ok().and_then(|d| store::read_json(&d.join("meta.json")).ok()).unwrap_or(Value::Null);
-                text += &format!("      {}", super::video::line(rec, &meta["video"]));
+                if let Some(m) = meta(rec).filter(|m| ["width", "height", "frames", "duration_s"].iter().all(|k| m["video"][k].is_number())) {
+                    text += &format!("      {}", super::video::line(rec, &m["video"]));
+                } else {
+                    text += &format!("      video    {rec} · recording details unavailable\n");
+                }
             }
             if let Some(line) = screen_line(&s["screen"]) {
                 text += &format!("      screen  {line}\n");
             }
             // `--mobile`: the phone the case ran on, as its recording keeps it.
-            if let Some(line) =
-                s["recording"].as_str().and_then(|r| store::resolve(r).ok()).and_then(|d| store::read_json(&d.join("meta.json")).ok()).and_then(|m| super::record::phone_line(&m["phone"]))
-            {
+            if let Some(line) = s["recording"].as_str().and_then(meta).and_then(|m| super::record::phone_line(&m["phone"])) {
                 text += &format!("      phone  {line}\n");
             }
             if let Some(o) = serde_json::from_value::<Overhead>(s["overhead"].clone()).ok().map(|o| o.text()).filter(|t| !t.is_empty()) {
@@ -7259,6 +7276,11 @@ pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)
         let last = runs.last()?;
         let (open, _, k) = first.edges?;
         let mut span = open.until(last.edges?.1, k)?;
+        // Do not infer either contention or finer resolution from a long unmeasured gap
+        // (a silent-key timeout or a slow reset). Ordinary spawn and relay gaps are short.
+        if span.ms > 10.0 * ms + 200.0 {
+            return None;
+        }
         span.observer_ms = last.observers?.1.checked_sub(first.observers?.0)? as f64 / 1e6 + first.creation_ms;
         span.own_ms = Some(runs.iter().map(|r| r.own_ms).sum::<Option<f64>>()? + runs[1..].iter().map(|r| r.gap_ms).sum::<Option<f64>>()?);
         Some(span)
@@ -13802,9 +13824,12 @@ fn http_ok(url: &str) -> bool {
     head.starts_with("HTTP/1.1 2") || head.starts_with("HTTP/1.1 3") || head.starts_with("HTTP/1.0 2")
 }
 
-pub(crate) fn pinning(spec: &str, topo: &host::Topology) -> Result<(Option<u64>, Option<u64>, String)> {
+pub fn pinning(spec: &str, topo: &host::Topology) -> Result<(Option<u64>, Option<u64>, String)> {
     let all = topo.all();
-    let pick = |g: &host::CacheGroup, i: usize| (Some(g.mask), Some(all & !g.mask), format!("CCD{i} ({} MB L3, {} CPUs) · runner on the other CPUs", g.l3_mb, g.cpus));
+    let runner = |mask: u64| {
+        let rest = all & !mask;
+        (rest != 0).then_some(rest)
+    };
     match spec {
         "none" => Ok((None, None, "unpinned".into())),
         // SPEC §9.4 `--pin auto`: within the CPUs strobe may use, by the machine's caches and cores.
@@ -13815,18 +13840,26 @@ pub(crate) fn pinning(spec: &str, topo: &host::Topology) -> Result<(Option<u64>,
         s if s.starts_with("ccd") => {
             let i: usize = s[3..].parse().map_err(|_| Error::usage("--pin ccd0|ccd1|…"))?;
             let g = topo.groups.get(i).ok_or_else(|| Error::usage(format!("no {s}: this CPU has {} L3 groups", topo.groups.len())))?;
-            Ok(pick(g, i))
+            let rest = runner(g.mask);
+            let where_ = if rest.is_some() { "runner on the other CPUs" } else { "runner shares these CPUs" };
+            Ok((Some(g.mask), rest, format!("CCD{i} ({} MB L3, {} CPUs) · {where_}", g.l3_mb, g.cpus)))
         }
         s => {
             let mut mask = 0u64;
             for part in s.split(',') {
                 let (a, b) = part.split_once('-').unwrap_or((part, part));
                 let (a, b): (u32, u32) = (a.trim().parse().map_err(|_| Error::usage("--pin: auto, none, ccdN or a CPU list like 0-7"))?, b.trim().parse().map_err(|_| Error::usage("--pin list"))?);
-                for c in a..=b.min(63) {
+                if a > b || b >= 64 {
+                    return Err(Error::usage(format!("--pin: {part} is not a CPU or an increasing range within 0-63")));
+                }
+                for c in a..=b {
                     mask |= 1 << c;
                 }
             }
-            Ok((Some(mask), Some(all & !mask), format!("CPUs {s}")))
+            if mask & !all != 0 {
+                return Err(Error::usage(format!("--pin: CPUs {s} are not all allowed; choose from {}", cpu_list(all))));
+            }
+            Ok((Some(mask), runner(mask), format!("CPUs {s}")))
         }
     }
 }
@@ -14039,9 +14072,13 @@ fn aa_text(s: &Value) -> String {
 /// comparison's (`render`), a check's (`check_text`) or a bisect's (`bisect::text`). None for one whose
 /// stored text stands (a pixels run).
 pub(crate) fn rendered(r: &Value) -> Option<String> {
+    rendered_at(r, None)
+}
+
+pub(crate) fn rendered_at(r: &Value, source: Option<&Path>) -> Option<String> {
     match r["kind"].as_str() {
         Some("experiment") if r["series"].is_array() => Some(render(r)),
-        Some("check") if r["series"].is_array() => Some(check_text(r)),
+        Some("check") if r["series"].is_array() => Some(check_text_at(r, source)),
         Some("bisect") if r["steps"].is_array() => Some(super::bisect::text(r)),
         _ => None,
     }

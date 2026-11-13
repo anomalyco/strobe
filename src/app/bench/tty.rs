@@ -256,7 +256,7 @@ fn host_cycles(tty: &Tty) -> u64 {
 }
 
 /// What a terminal block measures beyond CPU and memory, said when a declared metric has no value.
-const MEASURES: &str = "run.duration, cpu.work, cpu.app.total, cpu.pty_host, cpu.wakes, memory.app.private, io.*, tty.latency.*, tty.settle.*, tty.updates, tty.frames, tty.frame.*, tty.bytes, tty.cells, count.*, phase.*, app.*";
+const MEASURES: &str = "run.duration, cpu.work, cpu.app.total, cpu.pty_host, cpu.wakes, memory.app.private, io.*, tty.latency.*, tty.settle.*, tty.updates, tty.frames, tty.frame.*, tty.bytes, tty.cells, count.*, phase.*, app.*, and cpu.foreign when pinned";
 
 /// One measured run.
 struct Run {

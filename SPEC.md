@@ -6163,7 +6163,7 @@ strobe and the runner on shared CPUs. `cpu.foreign` is the pinned median (% of o
 load is context only (`background.foreign`). Process names are for local progress, not published warnings.
 On Linux `cpu.foreign.max` uses the larger of the per-run maximum and the continuous span from first
 measured start to last measured end, including own CPU between runs. The continuous span needs two
-runs and no untimed stretch; its 10 ms idle tick error per counted CPU is deducted only once. If
+runs and no untimed stretch; a span longer than ten times the measured time plus 200 ms is skipped, so long resets and silent-key waits cannot flag a quiet run or improve its resolution. Its 10 ms idle tick error per counted CPU is deducted only once. If
 the best resolution is worse than 50% of a core, the block cannot prove quiet. With no detected load
 that is a note on an idle preflight and a warning on a busy one. Missing accounting is not a zero.
 
@@ -10105,7 +10105,7 @@ launch session of the machine: blocks of one day share its background load, ther
 caches, and two points compare two days, not two builds. A difference between points is evidence
 for where to look; it is never a verdict. The paired A/B alternates the two builds block by block in
 one session, so drift hits both sides equally, and its interval is the one §9.3 defends. A change the
-A/B calls `same` or moves the other way is `rejected`; one without a verdict is `unclear`. Neither
+A/B calls `same` or moves the other way is `rejected` unless a series-level `Background` warning makes the confirmation inconclusive (§25.4); one without a verdict is `unclear`. Neither
 alerts, and neither is retried by itself (`strobe track --confirm <chg_…>` runs one again).
 
 ### 25.2 Tracking
@@ -10189,7 +10189,7 @@ performance tooling runs it, with Otava's deterministic significance step:
 The confirmation is `bench --base git:<good> --head git:<bad>` narrowed to the series (`--filter`,
 `--target`, `--params`, `--primary`), `--pairs auto`, `--why never`, queued on the device's bench
 slot like any bench. `confirmed` needs the primary decided (§9.1) with its interval on the side the
-history moved. Then the culprit: the one commit when `good..bad` holds one, else `bench --bisect
+history moved. With a series-level `Background` warning, anything short of readable accounting and a decisive move in that direction is `unclear`, never `rejected`. Then the culprit: the one commit when `good..bad` holds one, else `bench --bisect
 good..bad` (§9.7) whose step 0 is the confirmation itself (not run again). A stop (exit 130) or a
 failed confirmation leaves the change `suspected` for the next run.
 

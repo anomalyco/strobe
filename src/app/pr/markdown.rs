@@ -1150,12 +1150,8 @@ impl<'a> Doc<'a> {
         // as the card has it.
         let sides = side_words(r);
         let mut seen: Vec<(String, String, Vec<String>)> = Vec::new();
-        for (series, w) in r["warnings"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|w| (String::new(), w))
-            .chain(self.series.iter().flat_map(|s| s["warnings"].as_array().into_iter().flatten().map(move |w| (self.title(s), w))))
+        for (series, w) in
+            r["warnings"].as_array().into_iter().flatten().map(|w| (None, w)).chain(self.series.iter().flat_map(|s| s["warnings"].as_array().into_iter().flatten().map(move |w| (Some(*s), w))))
         {
             let id = w["id"].as_str().unwrap_or("");
             // `UserFolders` leads the block as a caution (`folder_caution`). A `HarnessOverlay` that only placed
@@ -1165,12 +1161,18 @@ impl<'a> Doc<'a> {
                 continue;
             }
             let raw = w["text"].as_str().unwrap_or("");
-            let (id, text) = if id == "Background" && !series.is_empty() {
-                let (k, n) = self.busy_blocks();
+            // Only summarise this series' kept timing pairs. Do not replace an accounting,
+            // refusal, separate-pass or retried-burst explanation with unrelated block counts.
+            let counts = series
+                .filter(|s| id == "Background" && w["level"] == "warn" && raw.starts_with("other work of a quarter core") && s["primary"]["verdict_kind"] != "refused" && !s["pass"].is_object())
+                .map(|s| pairs(s).iter().flat_map(|p| [p.base, p.head]).map(|b| bv(b, "cpu.foreign.max")).filter(|v| v.is_finite()).fold((0, 0), |(k, n), v| (k + usize::from(v >= 25.), n + 1)));
+            let series = series.map(|s| self.title(s)).unwrap_or_default();
+            let (id, text) = if let Some((k, n)) = counts.filter(|(k, _)| *k > 0) {
                 ("OtherLoad", format!("other processes used 25% of a core or more in {k} of {n} timed blocks (kept; see Pairs)"))
             } else if let (true, Some((_, said))) = (id == "NoPresentSource", permission(raw)) {
                 ("NoPresentSource", said.to_string())
             } else {
+                let id = if id == "Background" && w["level"] == "info" { "Background load" } else { id };
                 (id, plain_note(&first_clause(&scrub_public(&scrub_paths(raw)), 150), (&sides.0, &sides.1)))
             };
             match seen.iter_mut().find(|(i, t, _)| i == id && *t == text) {

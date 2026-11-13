@@ -618,6 +618,10 @@ fn confirm_pending(args: &Args, which: Option<&str>) -> Result<Output> {
     Ok(Output::new(if text.is_empty() { "nothing waits for a confirmation\n".into() } else { text }, json!({ "confirmed": confirmed })))
 }
 
+pub fn background_reason(series: &Value) -> &'static str {
+    if super::bisect::unread(series) { "could not separate the target's CPU from other work" } else { "ran under heavy background work" }
+}
+
 fn confirm_all(args: &Args, file: Option<&Path>) -> Result<(String, Vec<Value>)> {
     confirm_all_in(args, |s| file.is_none_or(|f| Path::new(s.meta["abs_file"].as_str().unwrap_or("")) == f))
 }
@@ -734,7 +738,8 @@ fn confirm(args: &Args, s: &history::Series, c: &Value) -> Result<(String, Value
     let verdict = crate::stats::verdict_text(p);
     let (state, why) = match (decided, moved) {
         _ if super::bisect::inconclusive_confirmation(&out.json["series"][0], detected as i8) => {
-            ("unclear", format!("the paired A/B ran under heavy background work ({verdict}); nothing alerts (strobe track --confirm {cid} runs it again)"))
+            let why = background_reason(&out.json["series"][0]);
+            ("unclear", format!("the paired A/B {why} ({verdict}); nothing alerts (strobe track --confirm {cid} runs it again)"))
         }
         (true, m) if m == detected => ("confirmed", format!("the paired A/B moved the same way: {verdict}")),
         (true, 0.0) => ("rejected", format!("the paired A/B says {verdict}")),

@@ -302,7 +302,7 @@ pub fn contaminated(s: &Value) -> bool {
     s["warnings"].as_array().into_iter().flatten().any(|w| w["id"] == "Background" && w["level"] == "warn")
 }
 
-fn unread(series: &Value) -> bool {
+pub(super) fn unread(series: &Value) -> bool {
     [&series["blocks"], &series["pass"]["blocks"]]
         .into_iter()
         .flat_map(|b| b.as_array().into_iter().flatten())

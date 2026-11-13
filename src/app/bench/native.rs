@@ -1558,7 +1558,7 @@ fn missing(metric: &str, have: &Have) -> Refusal {
             "cpu.fixture" => refuse(ValidatorId::NotForTarget, " is a fixture's CPU, and the bench file starts no fixture()".into()),
             "cpu.main" | "cpu.main.busy" => refuse(ValidatorId::RunIncomplete, ": the launched process's main thread could not be read in every run".into()),
             "memory.app.pss" => refuse(ValidatorId::RunIncomplete, ": a process's smaps_rollup could not be read".into()),
-            "cpu.foreign" | "cpu.foreign.max" if !have.pinned => refuse(ValidatorId::NotForTarget, " is other work on the CPUs the target is pinned to, and this bench pins it to none (--pin none)".into()),
+            "cpu.foreign" | "cpu.foreign.max" if !have.pinned => refuse(ValidatorId::NotForTarget, " is other work on the CPUs the target is pinned to, and it is pinned to none".into()),
             "cpu.work" | "cpu.app.total" | "cpu.process.total" | "cpu.wakes" | "io.read" | "io.write" | "memory.app.private" | "memory.app.host" | "gpu.process.3d" | "gpu.vram" | "gpu.shared"
             | "cpu.foreign" | "cpu.foreign.max" => refuse(ValidatorId::RunIncomplete, ": the app's processes could not be read in every run (they exited, or strobe may not open them)".into()),
             _ => refuse(ValidatorId::NotForTarget, " is not measured for a native app".into()),

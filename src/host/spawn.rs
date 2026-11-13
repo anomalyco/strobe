@@ -1658,30 +1658,40 @@ fn pin(cmd: &mut Command, cpus: Option<u64>) -> bool {
     #[cfg(target_os = "linux")]
     if let Some(mask) = cpus {
         use std::os::unix::process::CommandExt;
-        // Every CPU the machine has, not strobe's own set: strobe may sit on the other CPUs (a
-        // bench keeps it on the runner's), and a count from available_parallelism names the
-        // lowest CPUs whatever strobe's set is.
-        let configured = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) }.clamp(1, 64) as u32;
-        let all = if configured >= 64 { u64::MAX } else { (1u64 << configured) - 1 };
-        let target = if mask == 0 { all } else { mask & all };
-        if target != 0 {
-            let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-            for c in (0..64).filter(|c| target >> c & 1 == 1) {
-                unsafe { libc::CPU_SET(c, &mut set) };
-            }
-            // Between fork and exec only async-signal-safe calls: the set is built before.
-            unsafe {
-                cmd.pre_exec(move || {
-                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-                    Ok(())
-                });
-            }
-            return true;
+        // Zero on internal callers restores the original allowed mask, not the machine's.
+        let target = if mask == 0 { super::allowed().mask } else { mask };
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        for c in (0..64).filter(|c| target >> c & 1 == 1) {
+            unsafe { libc::CPU_SET(c, &mut set) };
         }
+        // A cpuset change may narrow a successful call. Check the actual mask before release;
+        // between fork and exec use only syscalls and stack storage.
+        unsafe {
+            cmd.pre_exec(move || {
+                let bytes = std::mem::size_of::<libc::cpu_set_t>();
+                let mut actual: libc::cpu_set_t = std::mem::zeroed();
+                if libc::sched_setaffinity(0, bytes, &set) != 0 || libc::sched_getaffinity(0, bytes, &mut actual) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if !libc::CPU_EQUAL(&set, &actual) {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                Ok(())
+            });
+        }
+        return true;
     }
     #[cfg(target_os = "macos")]
     let _ = (cmd, cpus);
     false
+}
+
+/// Apply exactly the selected CPUs to a suspended child, before any of its code can run.
+#[cfg(windows)]
+pub(crate) fn pin_child(h: windows_sys::Win32::Foundation::HANDLE, mask: u64) -> std::io::Result<()> {
+    use windows_sys::Win32::System::Threading::SetProcessAffinityMask;
+    let target = if mask == 0 { super::allowed().mask } else { mask };
+    if unsafe { SetProcessAffinityMask(h, target as usize) } == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
 }
 
 /// The processes in a job now (`JobObjectBasicProcessIdList`).
@@ -1730,7 +1740,7 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next};
-    use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, GetProcessAffinityMask, OpenThread, ResumeThread, SetProcessAffinityMask, THREAD_SUSPEND_RESUME};
+    use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
     let clocks = || (super::tsc(), std::time::Instant::now(), super::now_ns());
     if cpus.is_none() && job.is_none() {
         release_edge();
@@ -1749,14 +1759,12 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
             }
             a => a.is_some_and(|a| a.unwrap_or(false)),
         };
-        if let Some(mask) = cpus {
-            let (mut proc_mask, mut sys_mask) = (0usize, 0usize);
-            if GetProcessAffinityMask(h, &mut proc_mask, &mut sys_mask) != 0 {
-                let target = if mask == 0 { sys_mask } else { mask as usize & sys_mask };
-                if target != 0 {
-                    SetProcessAffinityMask(h, target);
-                }
-            }
+        if let Some(mask) = cpus
+            && let Err(e) = pin_child(h, mask)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
         }
         // Its one thread, the main thread, held before it runs: no thread of its own can be mistaken
         // for it.
