@@ -200,8 +200,13 @@ fn populated(dir: &Path) -> bool {
 
 /// Kills what runs in a cgroup and below it, waits (2 s at most) for it to end, and removes the
 /// cgroups, deepest first. Before Linux 5.14 (no `cgroup.kill`) each process listed is sent SIGKILL
-/// until none is left (one forked meanwhile is listed in the next round).
+/// until none is left (one forked meanwhile is listed in the next round). What is still in it after
+/// the wait is said (`spawn::leave`): strobe ended it, and it did not go. A cgroup already removed
+/// (ended by a stop, `end_all`) is nothing to end.
 fn end(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
     let killed = std::fs::write(dir.join("cgroup.kill"), "1").is_ok();
     let until = Instant::now() + Duration::from_secs(2);
     while populated(dir) && Instant::now() < until {
@@ -214,7 +219,26 @@ fn end(dir: &Path) {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    if populated(dir) {
+        for pid in pids(dir).unwrap_or_default() {
+            super::spawn::leave(Some(pid), "a process in the cgroup of a launch strobe ended", "it was still running 2 s after strobe ended the cgroup's processes");
+        }
+    }
     remove(dir);
+}
+
+/// Ends every launch cgroup this strobe still has (`end`), for a stop that exits at once: a process
+/// that left its launch's tree and group (a crash reporter's handler, a daemon) is still in it, and
+/// the cgroup strobe made is the proof that it is the launch's. All are killed first, then each waited
+/// for.
+pub fn end_all() {
+    let all: Vec<PathBuf> = std::mem::take(&mut *LAUNCHES.lock().unwrap_or_else(|e| e.into_inner())).into_iter().map(|(_, _, p)| p).collect();
+    for dir in &all {
+        let _ = std::fs::write(dir.join("cgroup.kill"), "1");
+    }
+    for dir in &all {
+        end(dir);
+    }
 }
 
 /// Whether process `pid` is in cgroup `dir` or one below it now (`/proc/<pid>/cgroup`'s v2 line).
@@ -272,6 +296,22 @@ impl Launch {
     pub fn adopt(self, pid: u32, home: Option<&Path>) -> Launch {
         LAUNCHES.lock().unwrap_or_else(|e| e.into_inner()).push((pid, home.map(super::spawn::home_key), self.path.clone()));
         self
+    }
+
+    /// The processes running in the cgroup and below it now: not a zombie or a dead task, which has
+    /// ended and only waits to be reaped. What a launch's command left there is in it whatever it did
+    /// to leave its group and stamp (`setsid` and a cleared environment): only privilege moves a process
+    /// out of a cgroup.
+    pub fn running(&self) -> Vec<u32> {
+        let state = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rfind(')').and_then(|i| s[i + 1..].split_whitespace().next().map(str::to_string)));
+        pids(&self.path).unwrap_or_default().into_iter().filter(|&p| state(p).is_some_and(|s| !matches!(s.as_str(), "Z" | "X" | "x"))).collect()
+    }
+
+    /// The CPU of everything that ran in the cgroup (ns, from `cpu.stat`'s `usage_usec`), the ended
+    /// processes' too: those the command did not wait for, which no `rusage` of it holds.
+    pub fn usage_ns(&self) -> Option<u64> {
+        let stat = std::fs::read_to_string(self.path.join("cpu.stat")).ok()?;
+        stat.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse::<u64>().ok()).map(|us| us * 1000)
     }
 }
 

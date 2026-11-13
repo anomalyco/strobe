@@ -36,6 +36,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Linux runs support-matrix.ts --check, whose no-rot rule reads each verified cell's code at its
+          # evidence commit and checks that commit is in this commit's history: the whole history, there only.
+          fetch-depth: ${{ matrix.os == 'ubuntu-24.04' && '0' || '1' }}
       - name: Rust
         shell: bash
         run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy && rustup default ${{ matrix.toolchain }}
@@ -85,6 +88,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # support-matrix.ts --check below reads each verified cell's code at its evidence commit (the no-rot rule).
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Generic
         run: bun scripts/generic.ts

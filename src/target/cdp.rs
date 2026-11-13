@@ -146,6 +146,11 @@ fn read_loop(mut ws: WebSocket<TcpStream>, pending: Pending, subscribers: Subscr
 /// two levels per stack frame, and stacks run deeper than 64 frames.
 pub fn parse(text: &str) -> serde_json::Result<Value> {
     use serde::Deserialize;
+    // A page decides how deep a value it hands back nests: past `MAX_JSON_DEPTH`, an error, never a
+    // stack overflow.
+    if !crate::store::shallow(text.as_bytes()) {
+        return Err(serde::de::Error::custom(format!("a message nested more than {} levels deep", crate::store::MAX_JSON_DEPTH)));
+    }
     let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
     Value::deserialize(&mut de)

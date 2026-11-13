@@ -148,7 +148,7 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
         let d = cap.stop()?;
         let (c1, w1) = (set(), host::now_ns());
         let set_cpu_ms = match (super::record::set_used(&c0, &c1), c0.2, c1.2) {
-            (Some(used), Some(a), Some(b)) if b > a => Some(used as f64 / (b - a) as f64 * (w1 - w0) as f64 / 1e6),
+            (Ok(used), Some(a), Some(b)) if b > a => Some(used as f64 / (b - a) as f64 * (w1 - w0) as f64 / 1e6),
             _ => None,
         };
         let after = {
@@ -239,8 +239,8 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let mut values: BTreeMap<String, f64> = BTreeMap::new();
     // A process of the tree that ended in the window took its CPU there with it: none then.
     let used = super::record::set_used(&c0, &c1);
-    let lost = used.is_none();
-    if let (Some(rate), Some(used)) = (clock0.per_ms(&clock1), used) {
+    let lost = used.is_err();
+    if let (Some(rate), Ok(used)) = (clock0.per_ms(&clock1), used) {
         let cpu = used as f64 / rate;
         values.insert("cpu.app.total".into(), 100.0 * cpu / ms);
         values.insert("cpu.work".into(), cpu);
@@ -339,7 +339,7 @@ pub fn record(args: &Args, target: &str) -> Result<Output> {
     let mut os_refused = os_refusals(&|m| values.contains_key(m), gpu_missing.as_deref());
     if lost {
         for m in ["cpu.work", "cpu.app.total"] {
-            os_refused.insert(m.into(), json!(super::record::cpu_lost(m, 1, 1, "the process tree").message()));
+            os_refused.insert(m.into(), json!(super::record::cpu_lost_with(m, 1, 1, "the process tree", used.err()).message()));
         }
     }
     wakes_refused(&span, &mut os_refused);

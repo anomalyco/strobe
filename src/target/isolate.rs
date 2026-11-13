@@ -1240,10 +1240,12 @@ pub fn release_home(home: &Path) {
 
 /// While alive, a stop of strobe (Ctrl-C, SIGINT, SIGTERM) waits for a Launch Services launch under
 /// way to end what it started (macOS, `macos::opening`, 2.5 s at most), ends every launch it owns (each one's tree
-/// and group or job: `spawn::end_launches`), then what still runs from `home` (stamped with it),
+/// and group, its Linux cgroup or Windows job: `spawn::end_launches`) and what carries a launch's stamp
+/// (a browser's crash reporter on a session of its own), waits up to 2 s for those to go and says what
+/// did not (`spawn::leave`), then what still runs from `home` (stamped with it),
 /// removes that home when `prepare_home` made it now, and exits 130: for a command with no stop
 /// points of its own (`look`), which leaves nothing running for the next strobe to reap. A browser's
-/// profile goes with the next strobe's `reap_dead_owners`. Dropped (before the command closes what
+/// profile folder goes with the next strobe's `reap_dead_owners`. Dropped (before the command closes what
 /// it launched), the watcher has ended: a stop that came first finished its work and exited.
 pub struct EndOnStop {
     done: std::sync::Arc<std::sync::Mutex<bool>>,
@@ -1265,32 +1267,10 @@ pub fn end_on_stop(home: Option<&Home>) -> EndOnStop {
                 }
                 // Under the lock: the command cannot start closing meanwhile.
                 if flag.load(Ordering::SeqCst) {
-                    // macOS: a launch through Launch Services under way ends what it started once that
-                    // surfaces (`macos::open_app`, 2 s at most): strobe must not exit before.
-                    #[cfg(target_os = "macos")]
-                    {
-                        let until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
-                        while host::macos::opening() && std::time::Instant::now() < until {
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                    }
-                    host::spawn::end_launches();
-                    if let Some((dir, fresh)) = &home {
-                        release_home(dir);
-                        if *fresh {
-                            remove_home(dir);
-                        }
-                    }
-                    if let Some(dir) = &display {
-                        release_home(dir);
-                        remove_home(dir);
-                    }
-                    // What strobe left alone is said before it exits, as at the end of any run.
-                    let left = host::spawn::left_alone();
-                    if !left.is_empty() {
-                        eprint!("{}", host::spawn::left_alone_text(&left));
-                    }
-                    std::process::exit(130);
+                    // Each launch's tree and group, its cgroup or job, then what left them with its
+                    // stamp (a browser's crash reporter, on its own session), waited for: what is still
+                    // there 2 s on is said below, never left unsaid for speed.
+                    exit_on_stop(home.as_ref(), display.as_deref());
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1306,6 +1286,38 @@ impl Drop for EndOnStop {
             let _ = w.join();
         }
     }
+}
+
+/// A watcher and an escalated stop may coincide. Only exit after the one doing cleanup has reported.
+pub(crate) fn exit_on_stop(home: Option<&(PathBuf, bool)>, display: Option<&Path>) -> ! {
+    static EXIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _exit = EXIT.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(target_os = "linux")]
+    super::a11y::atspi::restore_on_stop();
+    host::spawn::stop_launches();
+    host::reserve::restore_on_stop();
+    host::power::restore_on_stop();
+    if let Some((dir, fresh)) = home {
+        release_home(dir);
+        if *fresh {
+            remove_home(dir);
+        }
+    }
+    if let Some(dir) = display {
+        release_home(dir);
+        remove_home(dir);
+    }
+    // Also cover a launch already unlisted but whose home has not finished closing.
+    for dir in launch_folders() {
+        if held(&key(&dir)) && std::fs::read_to_string(dir.join(OWNER_FILE)).is_ok_and(|s| s == owner_stamp()) {
+            restore_protocols(&dir);
+        }
+    }
+    let left = host::spawn::left_alone();
+    if !left.is_empty() {
+        eprint!("{}", host::spawn::left_alone_text(&left));
+    }
+    std::process::exit(130);
 }
 
 /// Ends what a launch started, whatever state it is in: the child, its tree and its group
@@ -1767,8 +1779,9 @@ pub fn prepare_home(app: &App, seed: Option<&Path>, home: Option<PathBuf>) -> Re
     })
 }
 
-/// A spawned app: the child with its group, when it was spawned (epoch ms and the host clock, read
-/// just before the launch request), its output lines when asked for, how it was started, and its OS
+/// A spawned app: the child with its group, when it was spawned (epoch ms and the host clock: its
+/// release, `Owned::released_ns`, or just before a Launch Services request), its output lines when
+/// asked for, how it was started, and its OS
 /// launch-feedback watch when the app asked for one (`App::with_feedback`).
 pub struct Spawned {
     pub child: Owned,
@@ -1819,6 +1832,10 @@ pub fn spawn(app: &App, home: &Home, args: &[String], env: &[(String, String)], 
     }
     let (epoch, at_ns) = (epoch_ms(), host::now_ns());
     let mut child = host::spawn_owned(&mut cmd, cpus, 0, Some(&home.dir)).map_err(|e| Error::msg(format!("launch {}: {e}", app.exe.display())))?;
+    // The launch's time from the child's release (`Owned::released_ns`), with the OS creating the
+    // process (Windows), as a person's launch: strobe's job, cgroup and CPU mask are before it.
+    let from = child.released_ns().saturating_sub(child.creation_ns()).max(at_ns);
+    let (epoch, at_ns) = (epoch + (from - at_ns) as f64 / 1e6, from);
     let feedback = app.feedback.map(|within| watch_feedback(&child, notice, within));
     let output = output.then(|| lines(&mut child));
     Ok(Spawned { pid: child.pid(), child, epoch_ms: epoch, at_ns, output, path: LaunchPath::Spawn, feedback })
@@ -2109,6 +2126,11 @@ fn reg_text(b: &[u8]) -> String {
 
 /// Puts every saved scheme back as it was before the launch (deleting one that did not exist).
 pub fn restore_protocols(home: &Path) {
+    // Normal teardown can already be restoring this home when the second-stop worker starts.
+    #[cfg(any(windows, target_os = "macos"))]
+    static RESTORING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(any(windows, target_os = "macos"))]
+    let _restoring = RESTORING.lock().unwrap_or_else(|e| e.into_inner());
     #[cfg(target_os = "macos")]
     {
         macos_library::restore(home);

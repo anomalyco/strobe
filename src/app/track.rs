@@ -84,12 +84,21 @@ fn seed_fingerprint(r: &Value, fingerprint: &mut Value) {
 /// so its points from before are another series: Linux `memory.app.private` became anonymous + swapped
 /// pages (it was private clean + dirty, which counted a file's page cache); a Node host's
 /// `js.heap.retained` became the heap plus ArrayBuffer contents (it was the heap alone, which leaves
-/// them out: a kept 100 MiB buffer read 0, now 100 MiB; Bun's reading did not change). Only such a
-/// metric, so every other series keeps its history. `runtimes`: what `script_runtimes` read.
-fn metric_fingerprint(metric: &str, runtimes: &[String], fingerprint: &mut Value) {
+/// them out: a kept 100 MiB buffer read 0, now 100 MiB; Bun's reading did not change). A launch's
+/// clock now starts at its child's release (`Owned::released_ns`), after strobe's set-up of it: on Linux
+/// a command's run lost the launch cgroup's creation and the child's move into it (15–18 ms), and so
+/// did the rates over it and `cli.launch`; a launch of an app, a native program or a terminal program
+/// lost that set-up on Linux and its job and CPU mask on Windows (and a terminal its console's set-up).
+/// Only such a metric, so every other series keeps its history. `runtimes`: what `script_runtimes`
+/// read; `kinds`: the series' target kinds.
+fn metric_fingerprint(metric: &str, runtimes: &[String], kinds: &[&str], fingerprint: &mut Value) {
+    let linux = cfg!(target_os = "linux");
+    let launched = |k: &&str| matches!(*k, "tty" | "native" | "exe" | "webview" | "app" | "command");
     let revision = match metric {
-        "memory.app.private" if cfg!(target_os = "linux") => Some(2),
+        "memory.app.private" if linux => Some(2),
         "js.heap.retained" if runtimes.iter().any(|r| r == "node") => Some(2),
+        "run.duration" | "cpu.app.total" | "cpu.wakes" | "cli.launch" if linux && kinds.contains(&"cli") => Some(2),
+        m if m.starts_with("launch.") && (linux || cfg!(windows)) && kinds.iter().any(launched) => Some(2),
         _ => None,
     };
     if let Some(r) = revision {
@@ -451,7 +460,7 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         runtime_fingerprint(&runtimes, &mut fingerprint);
         motion_fingerprint(r, s, &mut fingerprint);
         seed_fingerprint(r, &mut fingerprint);
-        metric_fingerprint(&metric, &runtimes, &mut fingerprint);
+        metric_fingerprint(&metric, &runtimes, &[s["target_kind"].as_str().unwrap_or("")], &mut fingerprint);
         let family = json!({ "device": statics["device"], "repo": repo, "file": file_rel, "label": label, "metric": metric });
         let id = history::series_id(&family, &fingerprint);
         if !history::exists(&id) {

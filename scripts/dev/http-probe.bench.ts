@@ -33,6 +33,10 @@
 //   mixed             cpu.work from clean timing pairs, http.* from a probe pass after them (timed runs only).
 //   page              a Chromium page beside a server in the bench file's own process: its attribution block
 //                     (record --bench --headless) takes no heap snapshot, since the probe carries a credential.
+//   planted           a server in the bench file's own process that answers every probe 20 ms (probe-fast) or 60 ms
+//                     (probe-slow) after it came in, with its loop free: http.latency.p50 just over 20 and 60 ms, a
+//                     planted +40 ms (--base probe-fast --head probe-slow --filter planted), no timeouts at 1000 ms,
+//                     about 15 probes a 1.5 s run. b0 is the loopback request's own time (read it from probe-fast).
 import { bench, script, url } from "@hona/strobe"
 
 const all = ["http.latency.p50", "http.latency.p95", "http.latency.max", "http.timeouts", "http.errors", "http.missed_sends", "http.probes", "http.idle.p50"]
@@ -109,15 +113,46 @@ const held = (spans: [number, number][], gap: boolean, edge: boolean) => async (
     windows = []
   }
 }
+// The planted case's servers, in this process: each answers `delay` ms after the request came in.
+const delayed = new Map<number, ReturnType<typeof Bun.serve>>()
+const serveDelayed = (delay: number) => {
+  const expected = process.env.HTTP_PROBE_TOKEN_SHA256 ?? ""
+  let server = delayed.get(delay)
+  if (!server) {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        if (new Bun.CryptoHasher("sha256").update(req.headers.get("authorization") ?? "").digest("hex") !== expected) return new Response("unauthorized", { status: 401 })
+        await Bun.sleep(delay)
+        return Response.json({ status: "ok" })
+      },
+    })
+    delayed.set(delay, server)
+  }
+  return `http://127.0.0.1:${server.port}/health`
+}
 const twoWindows: [number, number][] = [
   [300, 850],
   [1000, 1550],
 ]
 
 export default bench({
-  targets: { server: script("./http-probe-server.ts"), page: url(new URL("pages/click.html", import.meta.url).href) },
+  targets: {
+    server: script("./http-probe-server.ts"),
+    page: url(new URL("pages/click.html", import.meta.url).href),
+    "probe-fast": script("./http-probe-server.ts"),
+    "probe-slow": script("./http-probe-server.ts"),
+  },
   async setup(ctx) {
-    const url = ctx.target === "page" ? serveHere() : ctx.case?.startsWith("held-") ? serveHeld() : await ctx.call<string>("start")
+    const url =
+      ctx.target === "page"
+        ? serveHere()
+        : ctx.case === "planted"
+          ? serveDelayed(ctx.target === "probe-slow" ? 60 : 20)
+          : ctx.case?.startsWith("held-")
+            ? serveHeld()
+            : await ctx.call<string>("start")
     // The bench file reads the token; the server knows only its hash. It goes in the URL's query too, which strobe
     // sends and must never write, and this hook prints it, which the experiment's runner.log must not keep.
     const token = (await Bun.file(process.env.HTTP_PROBE_TOKEN_FILE ?? "").text()).trim()
@@ -126,7 +161,7 @@ export default bench({
       url: `${url}?key=${token}`,
       authorization: `Bearer ${token}`,
       cadenceMs: 100,
-      timeoutMs: { "stall-750ms-long": 1500, "stalls-100ms-apart": 1000, "stalls-back-to-back": 1000, "held-gap-carried": 1000, "held-edge-carried": 700, "held-hung": 100 }[ctx.case ?? ""] ?? 400,
+      timeoutMs: { planted: 1000, "stall-750ms-long": 1500, "stalls-100ms-apart": 1000, "stalls-back-to-back": 1000, "held-gap-carried": 1000, "held-edge-carried": 700, "held-hung": 100 }[ctx.case ?? ""] ?? 400,
       expect: ctx.case === "wrong-json" ? { jsonPath: { path: "$.status", equals: "ok" } } : undefined,
     })
   },
@@ -146,5 +181,11 @@ export default bench({
     // http.* (`pass.http`, `i HttpProbe`); stall-750ms-long alone pairs probe blocks only.
     mixed: { targets: ["server"], primary: "cpu.work", metrics: ["http.latency.p50", "http.timeouts"], run: stall },
     page: { targets: ["page"], primary: "http.latency.p50", metrics: ["http.errors"], run: ({ page }: any) => page.wait(1500), reset: async () => {} },
+    planted: {
+      targets: ["probe-fast", "probe-slow"],
+      primary: "http.latency.p50",
+      metrics: ["http.latency.p95", "http.probes", "http.timeouts"],
+      run: ({ call }: any) => call("idle", 1500),
+    },
   },
 })

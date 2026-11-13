@@ -9,10 +9,13 @@
 //   (d) the runner's key lists (`KEYS`, `TARGET_KEYS` in sdk/bench/src/runner.ts) are the SDK's option types
 //       (sdk/bench/src/index.ts)
 //   (e) the skill's lines are at most 110 columns (its frontmatter's one-line description aside)
+//   (f) SPEC 21.1's support table is `SUPPORT_MATRIX` (src/support.rs, read by scripts/dev/support-matrix.ts):
+//       its rows in order and the two modifiers, each verified cell's evidence line exact
 //
 //   bun scripts/doc-check.ts
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
+import { type Cell, EVIDENCE_LINE, evidenceLine, parseSupport } from "./dev/support-matrix.ts"
 
 const root = join(import.meta.dir, "..")
 const read = (p: string) => readFileSync(join(root, p), "utf8").replace(/\r\n/g, "\n")
@@ -187,11 +190,43 @@ read("skill/SKILL.md")
     if ([...l].length > 110 && !l.startsWith("description: ")) fail(`skill/SKILL.md:${i + 1} is ${[...l].length} columns (at most 110)`)
   })
 
+// (f) SPEC 21.1's table is the support matrix: one row per row in its order, then the two modifiers; a verified
+// cell its evidence line exact, a preview `preview`, a refusal `—`.
+const support = parseSupport(read("src/support.rs"))
+for (const p of support.evidenceProblems) fail(`support: ${p}`)
+for (const r of support.rows)
+  for (const os of ["windows", "macos", "linux"] as const) {
+    const c = r[os]
+    if (c.kind === "verified" && !statSync(join(root, c.evidence.fixture), { throwIfNoEntry: false })?.isFile())
+      fail(`support: ${r.runtime} · ${r.capability} on ${os} cites ${c.evidence.fixture}, which is no file`)
+  }
+const supportText = (c: Cell) => (c.kind === "verified" ? evidenceLine(c.evidence) : c.kind === "preview" ? "preview" : "—")
+const wantRows = [
+  ...support.rows.map((r) => [`\`${r.runtime}\` · \`${r.capability}\``, r.windows, r.macos, r.linux] as const),
+  ["OS input (`OS_INPUT`)", support.osInput.windows, support.osInput.macos, support.osInput.linux] as const,
+  ["a page measured from outside (`OUTSIDE_PAGE`)", support.outsidePage.windows, support.outsidePage.macos, support.outsidePage.linux] as const,
+]
+const s211 = section("21.1")
+  .split("\n")
+  .filter((l) => l.startsWith("| ") && !l.startsWith("| Runtime · capability |"))
+  .map((l) => l.split("|").slice(1, -1).map((c) => c.trim()))
+if (s211.length !== wantRows.length) fail(`support: SPEC 21.1 has ${s211.length} rows, src/support.rs ${wantRows.length} (SUPPORT_MATRIX's ${support.rows.length} and the 2 modifiers)`)
+wantRows.forEach(([label, ...cells], i) => {
+  const got = s211[i]
+  if (!got) return
+  if (got[0] !== label) return fail(`support: SPEC 21.1 row ${i + 1} is ${got[0]}, src/support.rs has ${label} there`)
+  ;(["Windows x64", "macOS arm64", "Linux x64"] as const).forEach((os, j) => {
+    const want = supportText(cells[j])
+    if (got[j + 1] !== want) fail(`support: SPEC 21.1 ${label} on ${os} reads "${got[j + 1]}", src/support.rs "${want}"`)
+    if (cells[j].kind === "verified" && !EVIDENCE_LINE.test(want)) fail(`support: ${label} on ${os}: ${want} is no evidence line`)
+  })
+})
+
 if (problems.length) {
   console.error(problems.join("\n"))
   console.error(`doc-check: ${problems.length} problem${problems.length === 1 ? "" : "s"}`)
   process.exit(1)
 }
 console.log(
-  `doc-check: ${validators.size} validators, ${levels.size} warnings, ${flagCount} flags, ${tools.length} MCP tools, ${kinds.length} target kinds and the skill agree with the docs`,
+  `doc-check: ${validators.size} validators, ${levels.size} warnings, ${flagCount} flags, ${tools.length} MCP tools, ${kinds.length} target kinds, ${support.rows.length} support rows and the skill agree with the docs`,
 )

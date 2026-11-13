@@ -16,8 +16,9 @@
 //   strobe bench scripts/dev/known/planted.bench.ts --base cli-a --head cli-b --filter cli-alloc   (or cli-io)
 //   strobe bench scripts/dev/known/planted.bench.ts --base script-a --head script-b --filter spin
 //   strobe bench scripts/dev/known/planted.bench.ts --base page-a --head page-b --filter page --headless
-//   strobe bench scripts/dev/known/planted.bench.ts --head . --aa --filter launch --target launch-200 --headless
-//   strobe bench scripts/dev/known/planted.bench.ts --base launch-0 --head launch-200 --filter launch --headless
+//   strobe bench scripts/dev/known/planted.bench.ts --base work-1x --head work-2x --filter page-work --headless
+//   strobe bench scripts/dev/known/planted.bench.ts --head . --aa --filter launch --target launch-400 --headless
+//   strobe bench scripts/dev/known/planted.bench.ts --base launch-200 --head launch-400 --filter launch --headless
 //   strobe bench scripts/dev/known/planted.bench.ts --base pulse-100 --head pulse-200 --filter pulse
 //   strobe bench scripts/dev/known/planted.bench.ts --base hold-50 --head hold-100 --filter memory
 // Headed (a display, the window in front):
@@ -42,10 +43,20 @@
 //             the `ctx.call`, about 0.7 ms of run.duration)
 //   page      page-a spins 100 ms of the page's main thread, page-b 200 ms: main.work and cpu.work +100 ms (b0:
 //             strobe's evaluate, about 0.2 ms of main.work and 0.6 ms of run.duration; the page's clock is
-//             coarsened to 0.1 ms)
-//   launch    #ready appears after a task that busy-waits 0 ms (launch-0) or 200 ms (launch-200): launch.ready
-//             +200 ms (a 200 ms timer instead read +205.5 ms on a Mac: a browser's timer fires late by its slack).
-//             An A/A of launch-0 (about 12 ms) cannot decide ±2%: run it on launch-200
+//             coarsened to 0.1 ms). A wall-time spin: what the renderer is off its CPU (preempted, hypervisor
+//             steal) is CPU it does not do, so page-work is the process-CPU plant
+//   page-work the page runs a fixed count of iterations of one int32 loop (`known.work`, optimized at load): none
+//             (work-0), 125 million (work-1x) or 250 million (work-2x), about 100 and 200 ms on a desktop (0.8 ns
+//             an iteration); its CPU does not move with preemption or steal, only with the clock speed. cpu.work: work-2x over work-1x is (2c + o) / (c + o), c = work-1x less
+//             work-0, o = work-0 (strobe's evaluate and the run's edges); main.work moves the same way
+//   launch    #ready appears after a task that busy-waits 0, 200 or 400 ms (launch-0, launch-200, launch-400), and
+//             strobe sees it on the frame after: launch.ready is the later of that task's end and the page's first
+//             frame. The first frame came at about 11 ms on a Mac but 85-140 ms on a Windows desktop (headless),
+//             where launch-0 over launch-200 read +120 ms: only plants past the first frame add up, so launch-200
+//             to launch-400 is +200 ms (a 200 ms timer instead read +205.5 ms on a Mac: a browser's timer fires
+//             late by its slack). Run the A/A on launch-400 (about 420 ms, so ±2% is ±8 ms): launch-200's was
+//             unclear after 40 pairs on Windows and underpowered at 12 on Linux, launch-0's (about 12 ms on a Mac)
+//             cannot decide ±2%
 //   frames    the page times the display's vsync V, then every animation frame spins 0.1 V (frame-light) or 1.5 V
 //             (frame-heavy), headed only: frame-light presents every vsync (frames.interval.p50 V,
 //             frames.dropped.pct 0); Chromium starts a late main frame at once rather than at the next vsync, so
@@ -68,9 +79,13 @@
 //             ±1 / (hz × 2 s), 0.25% at 200 Hz and 0.13% at 400 Hz. cpu.instructions: burst-2x over burst-1x is
 //             (2c + o) / (c + o), c = burst-1x less burst-0; burst-rate over burst-1x is 2x within those bounds,
 //             and so is energy.cpu within the clock's own drift (a count by time is no answer for instructions or
-//             energy: a short burst runs at a lower clock)
+//             energy: a short burst runs at a lower clock). Per iteration the count is the compiler's: rustc -O
+//             folds 8 iterations into 8 instructions on x86-64 (burst-1x 100.9 M a run on Linux), about 5 a
+//             iteration on Apple silicon (511 M); the ratios hold on both
 //   memory    a windowless program holding 50 MiB (hold-50) or 100 MiB (hold-100) written once: memory.app.private
-//             +50 MiB (b0: the idle program, about 1.2 MiB; the page tables of 50 MiB more add about 30 KiB)
+//             +50 MiB (b0: the idle program, about 1.2 MiB on a Mac, 0.86 MiB on Windows, 0.12 MiB on Linux; the
+//             page tables of 50 MiB more add about 30 KiB on a Mac and 100 KiB on Windows, where the private commit
+//             holds them: +50.10 MiB; Linux's Anonymous count holds none: +50.00 MiB)
 //   pulse     a windowless program that prints BEGIN, busy-waits 100 ms (pulse-100) or 200 ms (pulse-200) of wall
 //             time, prints END and sleeps 300 ms; a run waits for BEGIN and END: count.busy_us, the time between
 //             when strobe read the two lines (`waitForLine`'s `at`, its host clock), 100,000 and 200,000 µs
@@ -104,8 +119,12 @@ export default bench({
     "script-b": script("./harness.ts"),
     "page-a": page("p=a"),
     "page-b": page("p=b"),
+    "work-0": page("work=0"),
+    "work-1x": page("work=1x"),
+    "work-2x": page("work=2x"),
     "launch-0": page("delay=0"),
     "launch-200": page("delay=200"),
+    "launch-400": page("delay=400"),
     "frame-light": shown("vsyncs=0.1"),
     "frame-heavy": shown("vsyncs=1.5"),
     "click-0": click(0),
@@ -142,8 +161,14 @@ export default bench({
       metrics: ["main.work", "main.script", "run.duration", "cpu.renderer"],
       run: ({ page, target }: any) => page.eval((ms: number) => (window as any).known.spin(ms), target === "page-b" ? 200 : 100),
     },
+    "page-work": {
+      targets: ["work-0", "work-1x", "work-2x"],
+      primary: "cpu.work",
+      metrics: ["main.work", "run.duration", "cpu.renderer"],
+      run: ({ page, target }: any) => page.eval((n: number) => (window as any).known.work(n), { "work-1x": 1.25e8, "work-2x": 2.5e8 }[target as string] ?? 0),
+    },
     launch: {
-      targets: ["launch-0", "launch-200"],
+      targets: ["launch-0", "launch-200", "launch-400"],
       primary: "launch.ready",
       launch: { until: "#ready" },
     },

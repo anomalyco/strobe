@@ -225,7 +225,7 @@ fn all_stats() -> Vec<Stat> {
 }
 
 pub fn process_list() -> Vec<(u32, u32, u64)> {
-    all_stats().into_iter().map(|s| (s.pid, s.ppid, s.start)).collect()
+    all_stats().into_iter().filter(|s| !s.gone).map(|s| (s.pid, s.ppid, s.start)).collect()
 }
 
 pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {

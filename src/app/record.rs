@@ -468,11 +468,11 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let mut refused = serde_json::Map::new();
     match (tsc0, tsc1) {
         (Some(a), Some(b)) if !attach && b > a && cpu1.0.values().any(|c| *c > 0) => match set_used(&cpu0, &cpu1) {
-            Some(used) => {
+            Ok(used) => {
                 extra.entry("cpu.app.total".into()).or_default().insert("run:0".into(), 100.0 * used as f64 / (b - a) as f64);
             }
-            None => {
-                refused.insert("cpu.app.total".into(), json!(cpu_lost("cpu.app.total", 1, 1, "the browser").message()));
+            Err(why) => {
+                refused.insert("cpu.app.total".into(), json!(cpu_lost_with("cpu.app.total", 1, 1, "the browser", [why]).message()));
             }
         },
         _ if attach => {}
@@ -775,14 +775,14 @@ fn engine_page(args: &Args, engine: WebEngine, target: &str, set: Set, for_ms: u
     // Where cycles are not time on this machine (`outside::not_on_this_os`), both CPU metrics are refused.
     match (clock0.per_ms(&clock1), super::outside::not_on_this_os("cpu.app.total")) {
         (Some(rate), None) if cpu1.0.values().any(|c| *c > 0) => match set_used(&cpu0, &cpu1) {
-            Some(used) => {
+            Ok(used) => {
                 let cpu = used as f64 / rate;
                 values.insert("cpu.app.total".into(), 100.0 * cpu / ((t1 - t0) as f64 / 1e6));
                 values.insert("cpu.work".into(), cpu);
             }
-            None => {
+            Err(why) => {
                 for m in ["cpu.app.total", "cpu.work"] {
-                    refused.insert(m.into(), json!(cpu_lost(m, 1, 1, "the browser").message()));
+                    refused.insert(m.into(), json!(cpu_lost_with(m, 1, 1, "the browser", [why]).message()));
                 }
             }
         },
@@ -1068,7 +1068,8 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         values.insert("run.duration", ms);
         // A process of the app that ended in the window took its CPU there with it.
         let set_cpu = timed_cpu(&[&c0.0, &c1.0], &[&c0.1, &c1.1]);
-        let used = set_cpu.as_ref().map(|c| c.total);
+        let reason = set_cpu.as_ref().err().copied();
+        let used = set_cpu.as_ref().ok().map(|c| c.total);
         let lost = used.is_none();
         // What ended processes used in the window, by executable (`ended_runs`, as a bench block's).
         let ended = clock0.per_ms(&clock1).filter(|_| c1.0.values().any(|c| *c > 0)).map_or((f64::NAN, Vec::new()), |rate| {
@@ -1126,7 +1127,7 @@ fn native(args: &Args, app: &isolate::App, target: &str, set: Set, for_ms: u64) 
         let mut refused = super::outside::os_refusals(&|m| values.contains_key(m), gpu_missing.as_deref());
         if lost {
             for m in ["cpu.work", "cpu.app.total"] {
-                refused.insert(m.into(), json!(cpu_lost(m, 1, 1, "the app").message()));
+                refused.insert(m.into(), json!(cpu_lost_with(m, 1, 1, "the app", reason).message()));
             }
         }
         super::outside::wakes_refused(&span, &mut refused);
@@ -1242,7 +1243,7 @@ pub fn read_set(procs: &[host::ProcTimes], home: Option<&std::path::Path>) -> Se
 
 /// Cycles the set used between two readings, each process against its own, with what the processes
 /// that ended in between used there (`timed_cpu`); None when that is not known.
-pub fn set_used(a: &SetReading, b: &SetReading) -> Option<u64> {
+pub fn set_used(a: &SetReading, b: &SetReading) -> std::result::Result<u64, &'static str> {
     timed_cpu(&[&a.0, &b.0], &[&a.1, &b.1]).map(|c| c.total)
 }
 
@@ -1275,7 +1276,7 @@ pub struct SetCpu {
 /// moved) is `cycles_used` of its readings; one in which some did adds what they used there
 /// (`host::EndedMarks::dead_since`), and is None (the set's CPU is short by an unknown amount) where
 /// that is not known. One that ended inside a stretch took nothing of the timed parts.
-pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> Option<SetCpu> {
+pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> std::result::Result<SetCpu, &'static str> {
     let mut out = SetCpu::default();
     for ([a, b], [x, y]) in cycles.as_chunks::<2>().0.iter().zip(ended.as_chunks::<2>().0) {
         let gone: Vec<u32> = a.keys().filter(|k| !b.contains_key(k)).map(|k| k.0).collect();
@@ -1293,18 +1294,27 @@ pub fn timed_cpu(cycles: &[&Cycles], ended: &[&host::EndedMarks]) -> Option<SetC
             e.1 += n;
         }
     }
-    Some(out)
+    Ok(out)
 }
 
 /// `RunIncomplete` for a CPU metric over a span some process of the set ended in, where what it used
-/// there is not known (`timed_cpu`): its CPU left with it, so the set's CPU is short.
+/// there is not known. A caller without a reading has no specific reason to attach.
 pub fn cpu_lost(metric: &str, runs: usize, of: usize, what: &str) -> crate::model::Refusal {
+    cpu_lost_with(metric, runs, of, what, [])
+}
+
+pub fn cpu_lost_with(metric: &str, runs: usize, of: usize, what: &str, reasons: impl IntoIterator<Item = &'static str>) -> crate::model::Refusal {
+    let why = reasons.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>().join("; ");
     // Windows reads what an ended process used from strobe's handle to it, held from its start in its
-    // launch's job: one it did not hold is what is lost.
-    let how = if cfg!(windows) { " (one strobe held no handle to: it ran outside its launch's job, it ended before strobe could open it, or strobe did not launch the target)" } else { "" };
+    // launch's job: without a reason read, one it did not hold is what is lost.
+    let how = match why.is_empty() {
+        false => format!(" ({why})"),
+        true if cfg!(windows) => " (one strobe held no handle to: it ran outside its launch's job, it ended before strobe could open it, or strobe did not launch the target)".into(),
+        true => String::new(),
+    };
     crate::model::Refusal::new(
         crate::model::ValidatorId::RunIncomplete,
-        format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run{how}, and the CPU it used there ended with it, so the CPU of the process set is short"),
+        format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run, and the CPU it used there ended with it{how}, so the CPU of the process set is short"),
     )
     .fix(if cfg!(target_os = "linux") {
         "let strobe launch the target (its launches' cgroups count what ended: under systemd strobe asks for a scope, so run it in a user session or as root), wrap processes the run starts but does not measure in ctx.untimed, keep the processes running until the run's end, or compare run.duration"

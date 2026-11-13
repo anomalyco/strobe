@@ -443,6 +443,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // Per run: what processes of the host's tree that ended in a timed part used there (ms), and
                 // whether that is not known (their CPU there gone with them).
                 let mut lost: Vec<(f64, bool)> = Vec::new();
+                let mut cpu_reasons = Vec::new();
                 // And by executable (ms, processes), where the OS names them.
                 let mut ended_exes: Vec<Vec<(String, f64, u32)>> = Vec::new();
                 // Per run: the share of the timed parts the host's main thread was on a CPU (`cpu.main`), or why none.
@@ -525,7 +526,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // The whole tree's CPU over the run, untimed stretches too, in cycles, with what processes
                     // of it that ended used (`record::timed_cpu`): the rest of the CPUs' busy time is other
                     // work. Unknown where what ended is not known.
-                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total));
+                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1]).ok()).and_then(|(b, c)| b.other_cycles(c.total));
                     let counted = probe::wakes::counted(&k0, &probe::wakes::Counters::take(probe::wakes::wall_us(), &host::tree_pids(pid), perf.as_ref()));
                     hooks.end();
                     let timed = metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() };
@@ -542,6 +543,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     ended_at.extend(e.iter().map(|x| &x.1));
                     ended_at.push(&ended1);
                     let timed_cpu = super::super::record::timed_cpu(&at, &ended_at);
+                    cpu_reasons.push(timed_cpu.as_ref().err().copied());
+                    let timed_cpu = timed_cpu.ok();
                     // Short CPU is none (warmup falls back to the run's time).
                     let ms = |cycles: u64| if c1.values().any(|c| *c > 0) { clock0.ms(&clock1, cycles) } else { f64::NAN };
                     let used = timed_cpu.as_ref().map_or(f64::NAN, |c| ms(c.total));
@@ -638,7 +641,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     for m in ["cpu.work", "cpu.app.total", "cpu.process.total"] {
                         values.remove(m);
                         if declared_metrics(s).iter().any(|d| *d == m) {
-                            refused.insert(m.to_string(), super::super::record::cpu_lost(m, gone, measured.len(), "the script host's tree"));
+                            refused.insert(m.to_string(), super::super::record::cpu_lost_with(m, gone, measured.len(), "the script host's tree", cpu_reasons[local.clone()].iter().copied().flatten()));
                         }
                     }
                 }
@@ -855,6 +858,7 @@ impl Profiled<'_> {
             .into()
         })?;
         let bytes = std::fs::read(&raw)?;
+        crate::store::deep_enough(&bytes, &raw)?;
         let mut de = serde_json::Deserializer::from_slice(&bytes);
         de.disable_recursion_limit();
         let profile: Value = serde::Deserialize::deserialize(&mut de).map_err(|e: serde_json::Error| incomplete(format!("{}: {e}", raw.display())))?;

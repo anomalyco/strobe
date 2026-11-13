@@ -383,7 +383,9 @@ fn threads(profile: &Value) -> Result<Vec<Thread<'_>>> {
     Ok(out)
 }
 
-fn read_profile(raw: &[u8]) -> Result<Value> {
+fn read_profile(raw: &[u8], path: &Path) -> Result<Value> {
+    // Nested as deep as the file says: refused past `MAX_JSON_DEPTH` before the limit is turned off.
+    crate::store::deep_enough(raw, path)?;
     let mut de = serde_json::Deserializer::from_slice(raw);
     de.disable_recursion_limit();
     let v: Value = serde::Deserialize::deserialize(&mut de).map_err(|e| Error::msg(format!("Firefox's profile: {e}")))?;
@@ -546,7 +548,7 @@ fn sample_node(t: &Thread, stack: Option<usize>, idle: Option<u64>, p: &mut CpuP
 /// Refuses a profile that lost a run's samples.
 pub fn convert(raw: &Path, token: &str, runs: &[(String, u64, u64)], untimed: &[(u64, u64)], dir: &Path) -> Result<Converted> {
     let bytes = std::fs::read(raw).map_err(|e| Error::msg(format!("Firefox's profile {}: {e}", raw.display())))?;
-    let profile = read_profile(&bytes)?;
+    let profile = read_profile(&bytes, raw)?;
     let all = threads(&profile)?;
     let idle = profile["meta"]["categories"].as_array().and_then(|c| c.iter().position(|c| c["name"] == "Idle")).map(|i| i as u64);
     let prefix = format!("strobe:{token}:");
@@ -860,8 +862,8 @@ const NOISE: [&str; 9] = [
 
 pub fn timeline(dir: &Path) -> Option<Timeline> {
     let mut raw = Vec::new();
-    flate2::read::GzDecoder::new(std::fs::File::open(dir.join(PROFILE)).ok()?).read_to_end(&mut raw).ok()?;
-    let profile = read_profile(&raw).ok()?;
+    crate::store::gunzip(&dir.join(PROFILE)).ok()?.read_to_end(&mut raw).ok()?;
+    let profile = read_profile(&raw, &dir.join(PROFILE)).ok()?;
     let all = threads(&profile).ok()?;
     let idle = profile["meta"]["categories"].as_array().and_then(|c| c.iter().position(|c| c["name"] == "Idle")).map(|i| i as u64);
     // A thread's last sample weighs the gap its sampler kept (what `convert` read), else the one asked.

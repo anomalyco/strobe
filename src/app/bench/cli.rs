@@ -22,8 +22,8 @@ impl Direction {
     }
 }
 
-/// One command run: wall ms (spawn to exit; on Windows the process's creation plus its first
-/// instruction to its exit, `Owned::spawn_span`), what the OS counted, the metrics it printed with
+/// One command run: wall ms (its release to its exit, `Owned::released_ns`; on Windows with the
+/// process's creation, `creation_ns`), what the OS counted, the metrics it printed with
 /// their directions (a name printed in both directions is `None`), and its launch's CPU on strobe's
 /// thread (ms, NaN where thread cycles are not time).
 struct Ran {
@@ -150,7 +150,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         .unzip();
     // The launch's CPU on this thread (`cli.launch`): the OS creating the process, which Windows does
     // in the launcher. NaN where thread cycles are not time.
-    let start = |shell: bool| -> std::io::Result<(host::spawn::Owned, Instant, f64)> {
+    let start = |shell: bool| -> std::io::Result<(host::spawn::Owned, f64)> {
         let mut cmd = command(line, shell, at.root);
         for (k, val) in at.target["env"].as_object().into_iter().flatten() {
             cmd.env(k, val.as_str().unwrap_or(""));
@@ -160,21 +160,20 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         let (c0, k0, t0) = (host::thread_cycles(), host::tsc(), Instant::now());
         let child = host::spawn_owned(&mut cmd, at.cpus, 0, None)?;
         let (t1, k1, c1) = (Instant::now(), host::tsc(), host::thread_cycles());
-        Ok((child, t0, super::script::cpu_ms((c0, k0), (c1, k1), t1.duration_since(t0).as_secs_f64() * 1e3)))
+        Ok((child, super::script::cpu_ms((c0, k0), (c1, k1), t1.duration_since(t0).as_secs_f64() * 1e3)))
     };
     // Windows: a word that is no executable (NotFound), or a script `raw_arg` cannot pass (InvalidInput).
-    let (mut child, t0, launch) = match start(false) {
+    let (mut child, launch) = match start(false) {
         Err(e) if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) => start(true),
         r => r,
     }
     .map_err(|e| Error::msg(format!("start `{line}`: {e}")))?;
-    // Windows: the OS creating the process and the command's run from its first instruction, as a
-    // person's launch of it; its job, the completion port's registration and its CPUs are strobe's
-    // setup while it was suspended, in neither `run.duration` nor `cli.launch`.
-    let (t0, launch) = match child.spawn_span() {
-        Some((from, before, after, ms)) => (from, super::script::cpu_ms(before, after, ms)),
-        None => (t0, launch),
-    };
+    // The command's run from its release (`Owned::released_ns`), with the OS creating the process
+    // (Windows `creation_ns`), as a person's launch of it; strobe's setup of it (Windows its job, the
+    // completion port's registration and its CPUs while it was suspended, Linux its cgroup and CPUs) is
+    // in neither `run.duration` nor `cli.launch` (the spawn call alone, `spawn_span`).
+    let t0 = child.released_ns().saturating_sub(child.creation_ns());
+    let launch = child.spawn_span().map_or(launch, |(before, after, ms)| super::script::cpu_ms(before, after, ms));
     let (out, err) = child.output();
     for (tx, pipe) in pipes.into_iter().zip([out.map(|o| Box::new(o) as Pipe), err.map(|e| Box::new(e) as Pipe)]) {
         if let Some(p) = pipe {
@@ -190,7 +189,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         }
     };
     let usage = child.run_to_exit(at.timeout, Some(at.stamp), exited).map_err(|e| Error::msg(format!("`{line}`: {e}")))?;
-    let wall = usage.exited.unwrap_or_else(Instant::now).duration_since(t0).as_secs_f64() * 1e3;
+    let wall = usage.exited_ns.unwrap_or_else(host::now_ns).saturating_sub(t0) as f64 / 1e6;
     // What it left running was ended with it, so its pipes are closed.
     for r in readers {
         let _ = r.join();
@@ -211,17 +210,21 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         return Err(Error::msg(format!("`{line}` exited with {}{}", usage.code, if tail.is_empty() { String::new() } else { format!(":\n{tail}") })));
     }
     if !usage.left.is_empty() {
-        let names: Vec<String> = usage.left.iter().take(5).map(|(p, n)| format!("{n} (pid {p})")).collect();
+        let one = usage.left.len() == 1;
+        let names: Vec<String> = usage.left.iter().take(5).map(|(p, n)| if n.is_empty() { format!("pid {p}") } else { format!("{n} (pid {p})") }).collect();
+        let more = usage.left.len().saturating_sub(5);
         return Err(Error::refused(
             "RunIncomplete",
             format!(
-                "`{line}` exited and left {} running: {}; {} not counted whole, so strobe ended {}",
-                if usage.left.len() == 1 { "a process" } else { "processes" },
+                "`{line}` exited while {} it started {} still running: {}{}; strobe ended {}, because the time and CPU read at its exit did not cover {}",
+                if one { "a process" } else { "processes" },
+                if one { "was" } else { "were" },
                 names.join(", "),
-                if usage.left.len() == 1 { "what it did is" } else { "what they did is" },
-                if usage.left.len() == 1 { "it" } else { "them" }
+                if more > 0 { format!(" and {more} more") } else { String::new() },
+                if one { "it" } else { "them" },
+                if one { "it" } else { "them" }
             ),
-            "make the command wait for what it starts (no background jobs or daemons)",
+            "wait for background jobs (sh -c '… & wait', or start /wait on Windows); quote `&` in URLs and strings. Disable the tool's daemon (--no-daemon), update checks (NO_UPDATE_NOTIFIER=1) or telemetry (the tool's opt-out or CI=1 where supported). Start shared servers in fixture(), outside the measured command",
         ));
     }
     let mut metrics: BTreeMap<String, (f64, Option<Direction>)> = BTreeMap::new();

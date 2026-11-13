@@ -33,6 +33,22 @@ fn journal() -> std::path::PathBuf {
     super::paths::state_dir().join("power.json")
 }
 
+// Serialize the switch and its undo. At immediate exit use only the plan this process changed,
+// never the contents of a journal another strobe might own.
+#[cfg(any(windows, target_os = "linux"))]
+static ACTIVE: std::sync::Mutex<(bool, Option<Saved>)> = std::sync::Mutex::new((false, None));
+pub fn restore_on_stop() {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        active.0 = true;
+        if let Some(s) = active.1.take() {
+            imp::restore(&s);
+            let _ = std::fs::remove_file(journal());
+        }
+    }
+}
+
 impl Power {
     /// Switches to the fastest plan this device offers unless `keep` (`--power keep`) or on battery:
     /// a High performance scheme (the active vendor's, else Windows', else Ultimate performance), or
@@ -48,7 +64,13 @@ impl Power {
         }
         #[cfg(any(windows, target_os = "linux"))]
         {
-            imp::switch(&plan)
+            let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+            if active.0 || active.1.is_some() {
+                return kept(format!("{plan} (kept)"));
+            }
+            let power = imp::switch(&plan);
+            active.1.clone_from(&power.saved);
+            power
         }
         #[cfg(target_os = "macos")]
         {
@@ -68,8 +90,13 @@ impl Drop for Power {
     fn drop(&mut self) {
         if let Some(s) = self.saved.take() {
             #[cfg(any(windows, target_os = "linux"))]
-            imp::restore(&s);
-            let _ = std::fs::remove_file(journal());
+            {
+                let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+                if active.1.take().is_some() {
+                    imp::restore(&s);
+                    let _ = std::fs::remove_file(journal());
+                }
+            }
             let _ = s;
         }
     }

@@ -617,6 +617,7 @@ struct Run {
     /// A process of the target's set ended in a timed part of the run and what it used there is not
     /// known (`record::timed_cpu`), so the set's CPU is short.
     cpu_lost: bool,
+    cpu_reason: Option<&'static str>,
     /// So anywhere in the run's span, untimed stretches too: `cpu_whole` is short.
     whole_lost: bool,
     /// A headless page: the style and layout time (ms) and layouts its frame after the run's end did,
@@ -9701,7 +9702,9 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             ended_at.extend(e.iter().map(|x| &x.3));
             ended_at.push(&ended1);
             let timed_cpu = super::record::timed_cpu(&cycles_at, &ended_at);
-            let whole_cpu = super::record::timed_cpu(&[&at0, &at1], &[&ended0, &ended1]);
+            let cpu_reason = timed_cpu.as_ref().err().copied();
+            let timed_cpu = timed_cpu.ok();
+            let whole_cpu = super::record::timed_cpu(&[&at0, &at1], &[&ended0, &ended1]).ok();
             let (cpu_lost, whole_lost) = (timed_cpu.is_none(), timed_cpu.is_none() || whole_cpu.is_none());
             if counting {
                 hooks.add(&page_counts());
@@ -9845,6 +9848,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 end,
                 doc_lost: doc_lost.get(),
                 cpu_lost,
+                cpu_reason,
                 whole_lost,
                 deferred: left,
                 counted_ms,
@@ -10614,7 +10618,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                     for m in names {
                         values.remove(&m);
                         if declared_metrics(s).iter().any(|d| **d == m) {
-                            let mut r = super::record::cpu_lost(&m, gone, measured.len(), "the browser");
+                            let mut r = super::record::cpu_lost_with(&m, gone, measured.len(), "the browser", measured.iter().filter_map(|r| r.cpu_reason));
                             // Filmed: the screencast itself starts and ends processes of the browser in the run.
                             if x.video {
                                 r.summary += " (the block was filmed: Chromium's screencast starts and ends processes in the run)";

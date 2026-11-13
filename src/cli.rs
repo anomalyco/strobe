@@ -427,224 +427,317 @@ Usage: strobe <command> [flags]
 
 Use
   status [--fast] [--calibrate] [--disk]
-                                  environment, validity preflight, recent recordings and experiments, the disk strobe's
-                                  files take and what strobe prune frees (--disk: by category)
-  record <target> [--for 10s] [--probes timing|attribution|memory] [--headless] [--emulate mobile|touch] [--served <dir>] [--style]
-                                  record a target; prints a handle (rec_…); exe:<path> --native for a native app
-                                  (--engine firefox|webkit: a page in that engine, from outside; --wayland: a native app
-                                  on strobe's headless Wayland compositor, Linux)
-                                  (a native app: --gpu-cache warm|cold, its GPU shader caches from earlier recordings of it;
-                                  --windowless: it shows no window (a tray app, a service), as native(…, { window: false }))
-                                  (--video: also film it, timing perturbed: the window's screen, or a headless page's renderer)
-                                  (--mobile[=<serial>]: the page in Chrome on an Android phone over adb, its own screen
-                                  and touch; timed: no emulator, no adb over Wi-Fi, no hot, saving or low phone)
+                                  environment, validity preflight, recent recordings and experiments, the disk
+                                  strobe's files take and what strobe prune frees (--disk: by category)
+  record <target> [--for 10s] [--probes timing|attribution|memory] [--headless] [--emulate mobile|touch]
+         [--served <dir>] [--style]
+                                  record a target; prints a handle (rec_…); exe:<path> --native: a native app
+                                  (--engine firefox|webkit: a page in that engine, from outside; --wayland: a
+                                  native app on strobe's headless Wayland compositor, Linux)
+                                  (a native app: --gpu-cache warm|cold, its GPU shader caches from earlier
+                                  recordings of it; --windowless: it shows no window (a tray app, a service),
+                                  as native(…, { window: false }))
+                                  (--video: also film it, timing perturbed: the window's screen, or a headless
+                                  page's renderer)
+                                  (--mobile[=<serial>]: the page in Chrome on an Android phone over adb, its
+                                  own screen and touch; timed: no emulator, no adb over Wi-Fi, no hot, saving
+                                  or low phone)
                                   (--max-time 5m: a timed recording caps its wait for the bench slot, exit 124
                                   ConcurrentBench)
   record wir:[<selector>] [--for 10s] [--probes attribution|memory] [--served <dir>]
-                                  an open Safari tab (or WKWebView) on a USB-cabled iPhone over Web Inspector: Timeline,
-                                  ScriptProfiler, Heap, Network, Safari/WebKit device logs and crashes (read-only)
+                                  an open Safari tab (or WKWebView) on a USB-cabled iPhone over Web Inspector:
+                                  Timeline, ScriptProfiler, Heap, Network, Safari/WebKit device logs and
+                                  crashes (read-only)
   record --bench <file.bench.ts>#<case> [--head <variant>] [--target <name>] [--video]
-                                  record one bench case (it drives the page: clicks, keys) with the attribution probes
-                                  (its block ends with a heap snapshot; --probes waits adds off-CPU waits to a native
-                                  case; --probes memory exits 2: a case's leak run is bench --probes memory)
+                                  record one bench case (it drives the page: clicks, keys), attribution probes
+                                  (its block ends with a heap snapshot; --probes waits adds off-CPU waits to a
+                                  native case; --probes memory exits 2: a case's leak run is bench --probes
+                                  memory)
   record pid:<n>|proc:<name> [--probes timing|deep|waits|stacks-unprivileged] [--for 10s]
-                                  any process from outside: OS present events (frames), CPU, GPU; deep: native stacks
-                                  (--os-frames on a Chromium record adds the OS present events beside its trace)
-  bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check | --blocks N] [--filter <cases>] [--pairs auto|N]
-        [--why auto|always|never] [--trace lean|full] [--power high|keep]
+                                  any process from outside: OS present events (frames), CPU, GPU; deep: stacks
+                                  (--os-frames on Chromium keeps OS present events beside its trace)
+  bench <file.bench.ts> --head <variant> [--base <variant> | --aa | --check | --blocks N] [--filter <cases>]
+        [--pairs auto|N] [--why auto|always|never] [--trace lean|full] [--power high|keep]
+                                  run an experiment: a verdict per series (case × target × params); --check
+                                  runs each case once to see that it works (no verdict)
         [--params k=v,…|all]           (all: every parameter's `more` values too)
-        [--probes memory --repeat N]   (a leak run per variant instead of pairs; not with --check, which takes no
-                                        heap snapshot: exit 2)
-        [--pixels | --pixels-only]     (compare base and head at the case's page.snapshot()s, after or instead of timing)
-        [--video]                      (film untimed: the check run, or one warmed run per side after the timed pairs)
-        [--check --batch N]            (up to N run cases per launch, each held to the launch's start after its reset)
-        [--check --runs N]             (N runs in each case's one launch, no warmup: values their median, [lowest … highest run];
-                                        runs that stepped down warn NotSteady)
-        [--check --repeat R]           (R fresh cold launches per case, from 2: the median over them and each launch's value;
-                                        not with --batch or --video)
-        [--check --base <variant>]     (each case once on base and on head, each line base's under head's; nothing compared but
-                                        --noworse's exact counters)
-        [--check --noworse count.x=0%,…]  (with --base: exact counters only (count.*, net.requests, net.bytes, tty.frames,
-                                        dom.nodes); each must hold one value per side (2 runs with a reset, else 2 launches)
-                                        and head stay within its margin of base, or the case fails; a count.* only
-                                        --noworse names reads 0 in a block that counted none once any block of
-                                        either side counted it, and nothing at all when none did: Uncounted
-                                        warns when no case counted it)
-        [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a comparison keeps
-                                        the pairs it has, anything else stops, exit 124)
-        [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over adb instead
-                                        of emulated; timed blocks refuse an emulator: --check and leak runs
-                                        run there)
-        [--pin auto|none|ccdN|<cpus>]  (auto: the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its fastest cores;
-                                        otherwise all but the last 1-2 whole cores, which strobe and the runner get;
-                                        fewer than 4 cores, more than 64 CPUs, or macOS: unpinned)
-        [--reserve-cpus auto|on|off]   (keep this user's other processes off the target's CPUs: timed blocks, every
-                                        block, or never)
+        [--probes memory --repeat N]   (a leak run per variant instead of pairs; not with --check, which takes
+                                        no heap snapshot: exit 2)
+        [--pixels | --pixels-only]     (compare base and head at the case's page.snapshot()s, after or instead
+                                        of timing)
+        [--video]                      (film untimed: the check run, or one warmed run per side after the
+                                        timed pairs)
+        [--check --batch N]            (up to N run cases per launch, each held to the launch's start after
+                                        its reset)
+        [--check --runs N]             (N runs in each case's one launch, no warmup: values their median,
+                                        [lowest … highest run]; runs that stepped down warn NotSteady)
+        [--check --repeat R]           (R fresh cold launches per case, from 2: the median over them and each
+                                        launch's value; not with --batch or --video)
+        [--check --base <variant>]     (each case once on base and on head, each line base's under head's;
+                                        nothing compared but --noworse's exact counters; a base build error
+                                        stops the check; a base run error fails the case, exit 1)
+        [--check --noworse count.x=0%,…]
+                                       (with a base build: exact counters only (count.*, net.requests,
+                                        net.bytes, tty.frames, dom.nodes); a bare counter means 0%.
+                                        Each counter must hold one value per side: at least two runs with a
+                                        reset and --runs 2 or more, otherwise at least two fresh launches.
+                                        For count.* named only by the flag, once either side counts it,
+                                        a block of that case that did not count or refuse it reads 0.
+                                        If both sides refused it, read the refused lines. For Uncounted,
+                                        check its spelling; for a conditional count, add metrics: [\"count.x\"])
+        [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a
+                                        comparison keeps the pairs it has, anything else stops, exit 124)
+        [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over
+                                        adb instead of emulated; timed blocks refuse an emulator: --check and
+                                        leak runs run there)
+        [--pin auto|none|ccdN|<cpus>]  (auto: the V-Cache CCD; equal CCDs: the first; a hybrid CPU: its
+                                        fastest cores; otherwise all but the last 1-2 whole cores, which
+                                        strobe and the runner get; fewer than 4 cores, more than 64 CPUs, or
+                                        macOS: unpinned)
+        [--reserve-cpus auto|on|off]   (keep this user's other processes off the target's CPUs: timed blocks,
+                                        every block, or never)
         [--bisect good..bad]           (the commit that moved the primary; one series)
-        [--style]                      (attribution blocks also trace what invalidated style: query <rec> style)
-        [--noworse 2% | metric=2%,…]   (non-inferiority: is head at most 2% worse? verdicts no worse, worse, unclear)
-        [--unlock-wait 2h]             (a series that needs a presenting window waits at most that long for an unlock, or on macOS for nobody to use the Mac)
-        [--seed <n>]                   (ctx.seed and ctx.random(): replay a seeded workload; without it strobe draws one
-                                        and prints it)
-        a server: host it in a script() target and probe it in setup, ctx.httpProbe({ url, authorization, expect });
-                                       declare http.latency.p95 or http.timeouts, cpu.main for its main thread (the
-                                       runnable example: node_modules/@hona/strobe/README.md)
+        [--style]                      (attribution blocks also trace what invalidated style: query <rec>
+                                        style)
+        [--noworse 2% | metric=2%,…]   (non-inferiority: is head at most 2% worse? verdicts no worse, worse,
+                                        unclear; a bare exact counter is 0%, a bare other metric exits 2; with
+                                        --check: exact counters only, as --check --noworse above)
+        [--unlock-wait 2h]             (a series that needs a presenting window waits at most that long for an
+                                        unlock, or on macOS for nobody to use the Mac)
+        [--seed <n>]                   (ctx.seed and ctx.random(): replay a seeded workload; without it strobe
+                                        draws one and prints it)
+        a server: host it in a script() target and probe it in setup, ctx.httpProbe({ url, authorization,
+                                       expect }); declare http.latency.p95 or http.timeouts, cpu.main for its
+                                       main thread (the runnable example: node_modules/@hona/strobe/README.md)
         --filter: case names, comma-separated (or --filter given again); exact unless a name holds * (a glob)
         --base <target>[=<variant>] --head <target>[=<variant>]: two targets of the file compared (two
-                                  implementations of one app; with --check: bare target names); target:<name> when a
-                                  folder or ref has that name
-        a shared CI runner (GitHub-hosted) refuses timing (SharedRunner): --check (with --base and --noworse on exact
-                                  counters), leak runs and record --probes attribution run there
-                                  run an experiment; a verdict per series
+                                  implementations of one app; with --check: bare target names); target:<name>
+                                  when a folder or ref has that name
+        a shared CI runner (GitHub-hosted) refuses timing (SharedRunner): --check (with --base and --noworse
+                                  on exact counters), leak runs and record --probes attribution run there
+        exit: timed comparisons   0 even on worse (read primary.verdict_kind); 4 if all primaries refused.
+                                  --require-verdict: 5 undecided, 4 for a refused primary or parity gap.
+              checks              0 pass; 1 case failure, including a block refusal or a --noworse row that
+                                  was worse, unstable, missing or not_compared. All non-gap cases refused: 4.
+                                  If cases ran but no counter compared, exit 4 unless a case failed (1).
+                                  Read the exit code, not passed alone. Gaps alone: 0, or 4 with
+                                  --require-parity. Known issue in 0.34.0: this includes all-gap --noworse
+                                  checks. Add --require-parity to guard counters in files with target gaps.
+              other modes         --blocks: 0 on completion, 4 if all refused. Leak run: 0 even for a leak;
+                                  --require-verdict: 5 if undecided, 4 if any primary refused. Pixels-only:
+                                  0 if all snapshots match, 1 for a difference or a one-sided snapshot.
+              stops               130 stopped; 124 on timeout (including an exhausted --unlock-wait).
+                                  A timed comparison hitting --max-time during timing keeps its pairs.
   plan <file.bench.ts> [--base <variant>] [--head <variant>] [--filter …] [--effect <pct>] [--pilot]
-                                  before a bench: pairs and minutes per series from earlier runs here, builds, the slot's
-                                  queue (= bench --plan; --pilot runs 4 pairs first to learn the spread)
+                                  before a bench: pairs and minutes per series from earlier runs here, builds,
+                                  the slot's queue (= bench --plan; --pilot runs 4 pairs first to learn the
+                                  spread); a series no block of which ran here says its time is unknown, never
+                                  a guess (a --check or --pilot measures one)
   bench --stop <exp> | --resume <exp>
-                                  stop a running bench after its block (at once while it waits; it keeps what finished),
-                                  or go on with one (a unique prefix of the id works)
-  config [<dir>]                  check the project's strobe.json (and your own) without a bench: where it is, each
-                                  app profile resolved for this OS (its executable, guards, window), build and serve
-  query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package] [--source console|device|crash|host|startup|setup] [--reveal] [--native] [--thread <name>]
-                                  views: summary frames inputs threads gpu hotspots waits alloc layout style shifts gc heap leaks memory http log
-                                  network insights actions sql runs
-                                  (runs: every run of a block recording, warmup too: time and work per run, which are
-                                  measured)
-                                  (inputs [--case <c>] [--top N]: each measured input: its run and time, what proved its
-                                  change, the frames around it, its latency or why it gave none (and how much later it had
-                                  to come); the first 100 by default, --json lists every one)
-                                  (sql: a recording without a Chrome trace: the Perfetto trace strobe open builds, built on
-                                  first use)
-                                  (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe>; --phase <name>:
-                                  native samples, or a script recording's profile; --source host: a script target's whole
-                                  host process (its measured runs by default), by lifecycle part at the end; --source
-                                  startup|setup: the host's startup (the runtime's boot, the target's static imports) or
-                                  the bench file's setup alone (a server's dynamic imports); not with --native, --thread,
-                                  --pid or --phase;
-                                  --case <name>: one case of a --batch recording)
-                                  (http: a bench block's HTTP probe (ctx.httpProbe): idle against the runs, timeouts,
-                                  errors, missed sends, stalled cohorts (one stall, or stalls back to back that held
-                                  probes across a drain); --phase <name>; exp_… its probe blocks, a..b too)
-                                  (actions: what a bench block's hooks sent the target, in order; --phase; --reveal shows
-                                  typed text, act values, ctx.call arguments and ctx.exec lines)
-                                  (waits: where threads were off their CPUs and who woke them, from a native capture;
-                                  --thread <name> --phase <name> --by function|file|package)
-                                  (a..b: hotspots alloc layout style threads frames summary heap memory, per-run deltas;
-                                  exp_…: summary progress insights http, and those views as each series' base..head;
-                                  memory: --by process|layer|allocator --at <i>; a phone's page lists its processes from
-                                  Chromium's dump, with no OS memory;
-                                  threads --timeline: each thread's CPU per second from the launch, exited ones too)
-                                  (insights: rule hits with their evidence: dominant-thread (one thread off the UI thread
-                                  doing most of the CPU), off-cpu-bound (runs that mostly waited), style-layout-dominant,
-                                  wakes-while-idle (idle recordings and idle native blocks), hot-function, http-stalls,
-                                  forced-layout, gc-pressure, …; exp_…: insights per series: verdict or status, ranked
-                                  suspects, the warnings that bear on it, the commands to run next)
+                                  stop a running bench after its block (at once while it waits; it keeps what
+                                  finished), or go on with one (a unique prefix of the id works)
+  config [<dir>]                  check the project's strobe.json (and your own) without a bench: where it is,
+                                  each app profile resolved for this OS (its executable, guards, window),
+                                  build and serve
+  query <rec_…|exp_…|rec_a..rec_b> <view> [--top N] [--by function|file|package]
+        [--source console|device|crash|host|startup|setup] [--reveal] [--native] [--thread <name>]
+                                  views: summary frames inputs threads gpu hotspots waits alloc layout style
+                                  shifts gc heap leaks memory http log network insights actions sql runs
+                                  (runs: every run of a block recording, warmup too: time and work per run,
+                                  which are measured)
+                                  (inputs [--case <c>] [--top N]: each measured input: its run and time, what
+                                  proved its change, the frames around it, its latency or why it gave none
+                                  (and how much later it had to come); the first 100 by default, --json lists
+                                  every one)
+                                  (sql: a recording without a Chrome trace: the Perfetto trace strobe open
+                                  builds, built on first use)
+                                  (hotspots: --sort self|total; native: --thread <name> --pid <pid|exe>;
+                                  --phase <name>: native samples, or a script recording's profile; --source
+                                  host: a script target's whole host process (its measured runs by default),
+                                  by lifecycle part at the end; --source startup|setup: the host's startup
+                                  (the runtime's boot, the target's static imports) or the bench file's setup
+                                  alone (a server's dynamic imports); not with --native, --thread, --pid or
+                                  --phase; --case <name>: one case of a --batch recording)
+                                  (http: a bench block's HTTP probe (ctx.httpProbe): idle against the runs,
+                                  timeouts, errors, missed sends, stalled cohorts (one stall, or stalls back
+                                  to back that held probes across a drain); --phase <name>; exp_… its probe
+                                  blocks, a..b too)
+                                  (actions: what a bench block's hooks sent the target, in order; --phase;
+                                  --reveal shows typed text, act values, ctx.call arguments and ctx.exec
+                                  lines)
+                                  (waits: where threads were off their CPUs and who woke them, from a native
+                                  capture; --thread <name> --phase <name> --by function|file|package)
+                                  (a..b: hotspots alloc layout style threads frames summary heap memory,
+                                  per-run deltas; exp_…: summary progress insights http, and those views as
+                                  each series' base..head; memory: --by process|layer|allocator --at <i>; a
+                                  phone's page lists its processes from Chromium's dump, with no OS memory;
+                                  threads --timeline: each thread's CPU per second from the launch, exited
+                                  ones too)
+                                  (a handle may be a path: a result.json, a meta.json or the folder of either,
+                                  read as it is, as report reads it; a named folder holding a link out of it
+                                  is refused, and nothing it says makes strobe look elsewhere on the disk or
+                                  the network)
+                                  (insights: rule hits with their evidence: dominant-thread (one thread off
+                                  the UI thread doing most of the CPU), off-cpu-bound (runs that mostly
+                                  waited), style-layout-dominant, wakes-while-idle (idle recordings and idle
+                                  native blocks), hot-function, http-stalls, forced-layout, gc-pressure, …;
+                                  exp_…: insights per series: verdict or status, ranked suspects, the warnings
+                                  that bear on it, the commands to run next)
   report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
-                                  write a self-contained HTML (or markdown) report; pr: an experiment's tables for a PR body
-                                  (md and pr print the markdown; the file's path goes to stderr; the view follows from the
-                                  handle; a path to a result.json or meta.json is read as it is, nothing written beside it;
-                                  a bench --blocks run: HTML and md, its blocks' median and interval, no verdict; a format
-                                  the handle has none of exits 2 before anything is written)
+                                  write a self-contained HTML (or markdown) report; pr: an experiment's tables
+                                  for a PR body
+                                  The view follows from the handle. With a stored id, reports default to the
+                                  recording or experiment folder. md, pr and summary also print Markdown on
+                                  stdout and the written path on stderr.
+                                  With a path to result.json, meta.json or their folder, Markdown goes to
+                                  stdout without a report file unless --out is given. HTML, cards and badges
+                                  default to strobe's run/reports folder. --out selects another destination.
+                                  A --blocks run has HTML and md with its median and interval, no verdict.
+                                  An unsupported format exits 2 before any report file is written.
   report experiment <exp> --format summary [--out <file.md>]
-                                  the result as short GitHub Markdown for a CI job's summary page ($GITHUB_STEP_SUMMARY):
-                                  a check, pixels run, leak run or --blocks as one table (a check shows only exact
-                                  counters, base -> head with --noworse when it ran both; never a time), a comparison as
-                                  its PR block without images
-  report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card] [--labels <base>,<head>]
-                                  put the block in PR n's body, with the result card and badges attached through gh;
-                                  the sides read Before and This PR only when head is the working tree or HEAD, and
-                                  with --update-pr at the PR's head commit; else each side's commit (A/A: Base (A/A),
-                                  Head (A/A)); --labels names them (pr and card); pr, summary, card and badge are public:
-                                  every string of the result is scrubbed first (no other program's name or window title,
-                                  no person's folder; a plain folder variant reads <base folder> or <head folder>)
-  report experiment <exp> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto] [--badge-url]
-                                  [--scoreboard] [--labels <base>,<head>]
-                                  the result as an image: card 1200×630 (decided wins large, else what happened), badge one
-                                  line; SVG follows the reader's colour scheme (auto); --badge-url prints a shields.io URL;
-                                  --scoreboard: an implementation comparison's journeys (vs <base> | better in 4/5 · 1 gap)
+                                  the result as short GitHub Markdown for a CI job's summary page
+                                  ($GITHUB_STEP_SUMMARY): a check, pixels run, leak run or --blocks as one
+                                  table (a check shows only exact counters, base -> head with --noworse when
+                                  it ran both; never a time), a comparison as its PR block without images
+  report experiment <exp> --format pr --update-pr <n> [-R owner/repo] [--force] [--no-card]
+         [--labels <base>,<head>]
+                                  put the block in PR n's body, with the result card and badges attached
+                                  through gh; the sides read Before and This PR only when head is the working
+                                  tree or HEAD, and with --update-pr at the PR's head commit; else each side's
+                                  commit (A/A: Base (A/A), Head (A/A)); --labels names them (pr and card); pr,
+                                  summary, card and badge are public: every string of the result is scrubbed
+                                  first (no other program's name or window title, no person's folder; a plain
+                                  folder variant reads <base folder> or <head folder>)
+  report experiment <exp> --format card|badge [--out <file.png|file.svg>] [--theme light|dark|auto]
+         [--badge-url] [--scoreboard] [--labels <base>,<head>]
+                                  the result as an image: card 1200×630 (decided wins large, else what
+                                  happened), badge one line; SVG follows the reader's colour scheme (auto);
+                                  --badge-url prints a shields.io URL; --scoreboard: an implementation
+                                  comparison's journeys (vs <base> | better in 4/5 · 1 gap)
   open <rec_…|exp_…[/head|base|<block>|<case>]> [--no-browser | --no-server]
-                                  the recording in the Perfetto UI (local): one trace with the Chrome trace, CPU profiles
-                                  and native stacks as flame graphs, runs, phases, inputs, presents, threads, memory
-                                  (--no-browser: print the URL instead of opening it; --no-server: build and check the
-                                  trace and print what it holds, no UI and no server)
+                                  the recording in the Perfetto UI (local): one trace with the Chrome trace,
+                                  CPU profiles and native stacks as flame graphs, runs, phases, inputs,
+                                  presents, threads, memory
+                                  (--no-browser: print the URL instead of opening it; --no-server: build and
+                                  check the trace and print what it holds, no UI and no server)
   track <file.bench.ts> [--ref <rev> | --range a..b [--every N]] [--filter …] [--blocks 6] [--no-confirm]
         [--alert-command '<cmd>'] [--alert-webhook <url>] [--alert regressions|all]
-                                  a point per series per commit in this device's history; change points are confirmed
-                                  by a paired A/B of the commits around them, then bisected; only confirmed ones alert
-  track <file> --ref <branch> --schedule commits|nightly|6h    the daemon tracks the branch (--schedules, --unschedule <id>)
+                                  a point per series per commit in this device's history; change points are
+                                  confirmed by a paired A/B of the commits around them, then bisected; only
+                                  confirmed ones alert
+  track <file> --ref <branch> --schedule commits|nightly|6h
+                                  the daemon tracks the branch (--schedules, --unschedule <id>)
   track <file> --base <target>[=<variant>] --head <target>=git:<ref> [--range a..b] [--pairs 3] [--schedule …]
-                                  a port: per head commit, a few alternating pairs of both implementations, ln(head/base)
-                                  per journey; a move is confirmed by an A/B of the head alone and bisected; a comparator
-                                  that changed is an epoch, never an alert; journeys going gap -> compared are marked
+                                  a port: per head commit, a few alternating pairs of both implementations,
+                                  ln(head/base) per journey; a move is confirmed by an A/B of the head alone
+                                  and bisected; a comparator that changed is an epoch, never an alert;
+                                  journeys going gap -> compared are marked
   track --confirm [<ser_…|chg_…>] confirm suspected changes (or one again)
-  history [<ser_…|file>]          tracked series: points with intervals, a sparkline, changes and culprits; a port's
-                                  journeys x commits (query history|changes, query <ser_…> history|changes;
-                                  report history <ser_…|file> [--format card | --format badge [--scoreboard]])
-  look <url|file> [--until <css>] [--wait 1s] [--size 1280x800] [--out <png>] [--chars 4000] [--full | --element <css>] [--headed]
-       [--mobile[=<serial>]]       (the page in Chrome on an Android phone or emulator, at the phone's own screen)
-  look wir:[<selector>] [--until <selector>] [--wait 200ms] [--out <png>] [--chars 4000] [--full | --element <selector>]
-                                   (read-only snapshot of an open Safari tab on a USB-cabled iPhone; never navigates)
-  look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>] [-- <args…>]
-                                   (after --: the app's own arguments, after its profile's; the window waited for 30 s,
-                                   --timeout for longer)
+  history [<ser_…|file>]          tracked series: points with intervals, a sparkline, changes and culprits; a
+                                  port's journeys x commits (query history|changes, query <ser_…>
+                                  history|changes; report history <ser_…|file> [--format card | --format badge
+                                  [--scoreboard]])
+  look <url|file> [--until <css>] [--wait 1s] [--size 1280x800] [--out <png>] [--chars 4000]
+       [--full | --element <css>] [--headed]
+       [--mobile[=<serial>]]       (the page in Chrome on an Android phone or emulator, at the phone's own
+                                   screen)
+  look wir:[<selector>] [--until <selector>] [--wait 200ms] [--out <png>] [--chars 4000]
+       [--full | --element <selector>]
+                                   (read-only snapshot of an open Safari tab on a USB-cabled iPhone; never
+                                   navigates)
+  look app:<id> | exe:<path> [--app <id>] [--build] [--until <selector>] [--wait 2s] [--keys 40] [--out <png>]
+       [-- <args…>]
+                                   (after --: the app's own arguments, after its profile's; the window waited
+                                   for 30 s, --timeout for longer)
        [--windowless]              (an app that shows no window, as a profile's window: false: whether it kept
                                    running over --wait, how it ended, and the last lines it printed)
-  look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s] [--home <seed>]
-                                  a page in a headless browser, nothing measured: title, address, headings, visible text,
-                                  console messages and uncaught errors, and a screenshot (exit 124 when it never loads);
-                                  tty: the program on strobe's own terminal in an isolated home: its grid, the modes it set
+  look tty:<command> [--size 120x40] [--until text=<text>] [--press <key>] [--type <text>] [--wait 1s]
+       [--home <seed>]
+                                  a page in a headless browser, nothing measured: title, address, headings,
+                                  visible text, console messages and uncaught errors, and a screenshot (exit
+                                  124 when it never loads); tty: the program on strobe's own terminal in an
+                                  isolated home: its grid, the modes it set
   top [--target <pid>] [--once] [--interval 1s] [--limit N] [--sort cpu|gpu|vram|mem]
                                   live per-core load by CCD, processes with CPU, GPU, VRAM
-  run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] [--max-time 5m] -- <command> [args…]
-                                  run your own harness as a bench block runs: the bench slot, the fastest power plan,
-                                  pinned to the target's CPUs with other processes kept off them (--pin as for bench);
-                                  it prints its own numbers (--max-time caps the wait for the bench slot, not the command)
-  run --base \"<command>\" --head \"<command>\" [--aa] [--check] [--primary cpu.work] [--metrics metric.<name>,…] [--pairs auto|N]
-      [--runs 5] [--noworse 2%] [--pin …] [--reserve-cpus auto|on|off] [--power high|keep] [--require-verdict]
-                                  a paired A/B of two commands, as a bench (verdicts, report, PR block): each run starts the
-                                  command in the folder strobe runs in (a bench's cli() target: the variant's root) and waits
-                                  for its exit; cpu.work, run.duration, cli.launch, cpu.wakes, memory.peak, io.*, and
-                                  metric.<name> from `strobe:metric <name>=<value>` lines it prints (--aa --head: an A/A)
+  run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] [--max-time 5m] -- <command>
+      [args…]
+                                  run your own harness as a bench block runs: the bench slot, the fastest
+                                  power plan, pinned to the target's CPUs with other processes kept off them
+                                  (--pin as for bench); it prints its own numbers (--max-time caps the wait
+                                  for the bench slot, not the command)
+  run --base \"<command>\" --head \"<command>\" [--aa] [--check] [--primary cpu.work] [--metrics metric.<name>,…]
+      [--pairs auto|N] [--runs 5] [--noworse 2%] [--pin …] [--reserve-cpus auto|on|off] [--power high|keep]
+      [--require-verdict]
+                                  a paired A/B of two commands, as a bench (verdicts, report, PR block): each
+                                  run starts the command in the folder strobe runs in (a bench's cli() target:
+                                  the variant's root) and waits for its exit; cpu.work, run.duration,
+                                  cli.launch, cpu.wakes, memory.peak, io.*, and metric.<name> from
+                                  `strobe:metric <name>=<value>` lines it prints (--aa --head: an A/A)
+                                  (--check: each command once, --head alone or --base too: cpu.work,
+                                  run.duration and peak memory when measured. Exit 0 if the commands ran,
+                                  1 if one failed. Nothing compared; --check --noworse is a usage error (2).)
+                                  Timed: 0 even on worse; read series[].primary.verdict_kind in --json.
+                                  Refused: 4. Undecided: 0, or 5 with --require-verdict.
+                                  (Windows, a known issue: a line is started directly, its first word the
+                                  program, so after a real program &&, ||, |, < and > go to it as arguments
+                                  and only its first command runs and is measured: wrap the line in cmd /c \"…\"
+                                  on both sides, or use a script)
 
 Setup
   init [<dir>] [--target web|lib|server|native|electron|tty|cli] [--force]
-                                  a project's first bench from its package.json, Cargo.toml or index.html: strobe.json
-                                  (its schema linked) and a runnable perf/smoke.bench.ts; never replaces a file
-                                  without --force; prints the commands that check them
-  up [--skip deep,daemon,mcp,calibrate]  install, download the engine, deep mode (one UAC prompt), start the daemon,
-                                  register MCP and the skill (--check: only what it finds, cpu to bun; nothing changes)
-                                  (--skip self,skill: install nothing into this user's profile (no binary, PATH or
-                                  skill; with daemon): a CI job's own copy, which only fetches the engine)
+                                  a project's first bench from its package.json, Cargo.toml or index.html:
+                                  strobe.json (its schema linked) and a runnable perf/smoke.bench.ts; never
+                                  replaces a file without --force; prints the commands that check them
+  up [--skip deep,daemon,mcp,calibrate]  install, download the engine, deep mode (one UAC prompt), start the
+                                  daemon, register MCP and the skill (--check: only what it finds, cpu to bun;
+                                  nothing changes)
+                                  (--skip self,skill: install nothing into this user's profile (no binary,
+                                  PATH or skill; with daemon): a CI job's own copy, which only fetches the
+                                  engine)
   up --mobile[=<serial>] --channel canary|dev|beta
-                                  give strobe that Chrome channel on the phone, once: --mobile runs may force-stop it and
-                                  clear the origins they load (strobe never drives a phone's own Chrome)
+                                  give strobe that Chrome channel on the phone, once: --mobile runs may
+                                  force-stop it and clear the origins they load (strobe never drives a phone's
+                                  own Chrome)
   update [<version>] [--from <path>] [--check] [--force]
-                                  install the latest npm release (or that version, or a local build) over the installed
-                                  copy; refreshes the skill, MCP, the helper where installed, and restarts the daemon;
-                                  keeps a newer or local build unless --force
+                                  install the latest npm release (or that version, or a local build) over the
+                                  installed copy; refreshes the skill, MCP, the helper where installed, and
+                                  restarts the daemon; keeps a newer or local build unless --force
   leave [--yes]                   undo up (--yes also deletes recordings and experiments)
-  prune [builds|seeds|gpu-cache|symbols|sdk|engine|run|recordings|experiments …] [--all] [--older-than 7d] [--dry-run] [-f]
-                                  remove what strobe keeps and no process uses: with no category every cache (builds,
-                                  seeds, GPU caches, symbols, other builds' SDKs and engines, finished processes' files);
-                                  recordings and experiments only when named or with --all, older than 30d (--older-than)
-                                  and never one an experiment that stays names; prints the plan first, asks on a terminal,
-                                  removes nothing without one unless -f (--force: exit 3 otherwise); --dry-run: the plan only
-                                  (caches unused for 14d also go on their own, once a day after a bench and in the daemon,
-                                  never beside a bench: \"prune\": { \"unused\": \"30d\" | \"off\" } in <state>/strobe.json)
+  prune [builds|seeds|gpu-cache|symbols|sdk|engine|run|recordings|experiments …] [--all] [--older-than 7d]
+        [--dry-run] [-f]
+                                  remove what strobe keeps and no process uses: with no category every cache
+                                  (builds, seeds, GPU caches, symbols, other builds' SDKs and engines,
+                                  finished processes' files); recordings and experiments only when named or
+                                  with --all, older than 30d (--older-than) and never one an experiment that
+                                  stays names; prints the plan first, asks on a terminal, removes nothing
+                                  without one unless -f (--force: exit 3 otherwise); --dry-run: the plan only
+                                  (caches unused for 14d also go on their own, once a day after a bench and in
+                                  the daemon, never beside a bench: \"prune\": { \"unused\": \"30d\" | \"off\" } in
+                                  <state>/strobe.json)
 
-Targets   https://… · a local page.html (or file:page.html) · app:<id> (a strobe.json profile, Electron or native) · exe:<path> [--app <id> | --native]
+Targets   https://… · a local page.html (or file:page.html) · app:<id> (a strobe.json profile, Electron or
+          native) · exe:<path> [--app <id> | --native]
           · cdp:<port> · cdp:ws://… · file:<trace> (import) · pid:<n> · proc:<name> · tty:<command> (look)
           · wir:[<selector>] (an open Safari tab on a USB-cabled iPhone: look, record)
-Variants  a directory · a git ref (git:<ref>) · app:<id> · exe:<path> · url:<href> · cmd:<line> (a cli() target's command)
-Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells that count stderr lines as a failure)
+Variants  a directory · a git ref (git:<ref>) · app:<id> · exe:<path> · url:<href> · cmd:<line> (a cli()
+          target's command)
+Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells that count stderr lines as
+          a failure)
           (-q: no progress lines and no text report; a command that makes a recording or experiment prints its
           handle; report --format md|pr|summary still prints its markdown)
           (--filter, --target, --params, --metrics, --noworse, --skip given twice add up; any other flag
           given twice with another value is a usage error; so is a flag the command does not take: strobe
           <command> --help lists its flags)
+Handles   plain ids: ASCII letters, digits, _ and -; a unique prefix works. Experiment --id: 1–96 characters.
+          Recording --id: rec_ plus 1–64 such characters. query and report also take a path (above).
+Clean-up  strobe ends what it launched; a process it cannot prove it launched it leaves alone, and the
+          command ends with a line per such process (its pid and why; --json: left_alone; the state
+          folder's log/left-alone.log; strobe status says when there were any in the last day)
 Schema    result.json and --json: schema/result.v1.json (node_modules/@hona/strobe/schema/); strobe.json:
           schema/strobe.v1.json
 Units     times print in microseconds, digits grouped (1,234 µs); --unit ms|s (or \"unit\": \"ms\" in strobe.json)
           prints them in milliseconds or seconds; stored and --json numbers keep their metric's unit (ms)
           KB, MB and GB are binary: 2^10, 2^20 and 2^30 bytes
-Exit codes: 0 ok · 1 error · 2 usage · 3 needs a human · 4 refused (invalid) · 5 inconclusive · 124 timeout · 130 stopped · 255 unreachable
+Exit codes: 0 ok · 1 error · 2 usage · 3 needs a human · 4 refused (invalid) · 5 inconclusive · 124 timeout ·
+            130 stopped · 255 unreachable
 ";

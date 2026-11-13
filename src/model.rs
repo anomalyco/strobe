@@ -1094,7 +1094,7 @@ pub const METRICS: &[MetricDef] = &[
         words: TIME,
         min_n: 1,
         across: Across::Compared,
-        about: "terminal targets: an input written to the terminal (a key, a click, a wheel notch, a resize) to the first change of the grid the program drew after it, median",
+        about: "terminal at rest: input to first changed grid, median, not necessarily the finished answer. Output in pieces over 50 ms apart or over 1 s late can look like the next input's answer. Wait for final text or app state; for a click that redraws twice, wait for idle",
     },
     MetricDef {
         name: "tty.latency.p95",
@@ -1105,7 +1105,7 @@ pub const METRICS: &[MetricDef] = &[
         words: TIME,
         min_n: 20,
         across: Across::Compared,
-        about: "terminal targets: input to the first grid change it caused, 95th percentile",
+        about: "terminal at rest: input to first changed grid, 95th percentile, not necessarily the finished answer. Output in pieces over 50 ms apart or over 1 s late can look like the next input's answer. Wait for final text or app state; for a click that redraws twice, wait for idle",
     },
     MetricDef {
         name: "tty.settle.p50",

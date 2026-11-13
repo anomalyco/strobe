@@ -1,0 +1,3 @@
+#!/bin/sh
+# A script on PATH that starts its work in the background and exits: the line that runs it shows no `&`.
+bun "$(dirname "$0")/../child.mjs" >/dev/null 2>&1 &

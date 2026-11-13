@@ -77,6 +77,19 @@ for (const c of ["status-500", "wrong-json"]) {
   for (const m of ["http.latency.p50", "http.latency.p95", "http.latency.max"]) check(/^RunIncomplete: .*no response that counts/.test(refusal(s, m)), `${c}: ${m} refused, never a fast answer (${refusal(s, m) || val(s, m)})`)
 }
 
+// The planted latency: answers 20 and 60 ms after the request, the loop free.
+const planted = run(["bench", bench, "--head", ".", "--check", "--runs", "3", "--filter", "planted"])
+const at = (t: string) => planted.series.find((s: any) => s.case === "planted" && s.target === t)
+const [fast, slow] = [at("probe-fast"), at("probe-slow")]
+for (const [s, ms] of [[fast, 20], [slow, 60]] as const) {
+  check(s?.state === "pass", `planted ${s?.target ?? ms}: passed (${s?.error ?? ""})`)
+  const p50 = val(s, "http.latency.p50") ?? 0
+  check(p50 >= ms && p50 <= ms + 5, `planted: ${ms} ms answers read p50 ${p50} ms (${ms} to ${ms + 5})`)
+  check(val(s, "http.timeouts") === 0, `planted: no timeout at 1000 ms (${val(s, "http.timeouts")})`)
+}
+const delta = (val(slow, "http.latency.p50") ?? 0) - (val(fast, "http.latency.p50") ?? 0)
+check(delta >= 37 && delta <= 43, `planted: +40 ms between them (${delta.toFixed(1)} ms)`)
+
 // strobe's own scheduler held 400 ms, 400 ms into the run (after 100 ms of settling and the 500 ms idle control).
 const late = run(["bench", bench, "--head", ".", "--check", "--filter", "driver-delayed"], { STROBE_PROBE_PAUSE: "1000,400" })
 const d = series(late, "driver-delayed")
@@ -104,7 +117,7 @@ if (pageRec) {
   check(!existsSync(join(stateDir, "recordings", pageRec, "heap-0.heapsnapshot.gz")), `page: no heap snapshot beside the probe's credential`)
   check(existsSync(join(stateDir, "recordings", pageRec, "trace.pftrace")), `page: its trace is kept`)
 }
-for (const r of exp.series.map((s: any) => s.recording).concat(late.series.map((s: any) => s.recording))) if (r) recs.push(r)
+for (const r of exp.series.map((s: any) => s.recording).concat(late.series.map((s: any) => s.recording), planted.series.map((s: any) => s.recording))) if (r) recs.push(r)
 check(recs.length >= 6, `recordings kept: ${recs.join(" ")}`)
 for (const r of recs) {
   const o = run(["open", r, "--no-server"])
@@ -113,7 +126,7 @@ for (const r of recs) {
 
 // Every file strobe wrote for these, and every answer it printed.
 const out = mkdtempSync(join(tmpdir(), "http-probe-check-"))
-for (const e of [exp.id, late.id, mixed.id]) run(["report", e, "--out", join(out, `${e}.html`)])
+for (const e of [exp.id, late.id, planted.id, mixed.id]) run(["report", e, "--out", join(out, `${e}.html`)])
 const state = stateDir
 // Every recording and experiment written since this check began (record --bench's experiment and check block
 // too), the reports, and the run folder strobe's runner and hosts use.
