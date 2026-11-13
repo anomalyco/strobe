@@ -204,7 +204,7 @@ pub fn run(args: &Args) -> Result<Output> {
         attach_videos(&mut data, (!experiment).then_some(dir.as_path()), &Videos::Embed(&out))?;
     }
     let body = match format {
-        "md" => markdown(&data, file.as_deref().map(|f| if experiment { f } else { dir.as_path() }), !experiment),
+        "md" => markdown(&data, if experiment { file.as_deref() } else { _named.as_ref().map(|_| dir.as_path()) }, !experiment),
         "pr" => super::pr::block(&data),
         "summary" => super::pr::summary(&data),
         _ => html(view, &data),

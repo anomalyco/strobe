@@ -509,36 +509,45 @@ fn live_ledger(result: &mut Value, source: Option<&Path>) -> String {
 pub(super) fn path_text(text: &str, data: &Value, path: &Path, recording: bool) -> String {
     let word = path_word(path);
     let id = data["id"].as_str().unwrap_or("");
-    let resume = format!("resume  strobe bench --resume {id}");
+    let closing = format!("{id} · ");
     let mut out = String::with_capacity(text.len());
-    let verbs = regex_lite::Regex::new(r"\b(query |strobe report (?:recording |experiment )?|strobe open )").expect("command prefixes");
     for line in text.split_inclusive('\n') {
-        if !recording && line.trim_end() == resume {
+        if !recording && line.trim_end().strip_prefix("resume  strobe bench --resume").is_some_and(|arg| arg.trim() == id) {
             continue;
         }
-        if recording && line.starts_with("next     ") {
-            out += &format!("next     strobe report recording {word} --open\n");
+        if recording && line.starts_with("next     strobe ") {
+            if !id.is_empty() {
+                out += &format!("next     strobe report recording {word} --open\n");
+            }
             continue;
         }
-        let mut at = 0;
-        for m in verbs.find_iter(line) {
-            if m.start() < at {
-                continue;
+        // Only these fields contain commands about this artifact. A log, warning or fix can
+        // quote an entire command verbatim. A check's rec/why/video fields name *other* artifacts.
+        let prefix = if recording && line.starts_with("network  ") && line.trim_end().ends_with(&format!("· query {id} network)")) {
+            Some("· query ")
+        } else if recording && line.starts_with("video    ") {
+            Some("· strobe report recording ")
+        } else if !recording && line.starts_with("      actions  ") {
+            Some("· strobe query ")
+        } else if !recording && line.starts_with("       strobe report experiment ") {
+            Some("       strobe report experiment ")
+        } else if !recording && let Some(cmd) = line.strip_prefix(&closing) {
+            ["strobe query ", "strobe report experiment "].into_iter().find(|v| cmd.starts_with(v))
+        } else {
+            None
+        };
+        if let Some((before, cmd)) = prefix.and_then(|p| line.rsplit_once(p).map(|(b, c)| (&line[..b.len() + p.len()], c)))
+            && let Some(after) = cmd.strip_prefix(id)
+            && (after.is_empty() || after.starts_with(char::is_whitespace))
+        {
+            if !id.is_empty() {
+                out.push_str(before);
+                out.push_str(&word);
+                out.push_str(after);
             }
-            if let Some(tail) = line[m.end()..].strip_prefix(id)
-                && (tail.is_empty() || tail.starts_with(char::is_whitespace) || tail.starts_with(')'))
-            {
-                out.push_str(&line[at..m.start()]);
-                if m.as_str() == "strobe open " {
-                    out += &format!("strobe report recording {word} --open");
-                } else {
-                    out.push_str(m.as_str());
-                    out.push_str(&word);
-                }
-                at = m.end() + id.len();
-            }
+        } else {
+            out.push_str(line);
         }
-        out.push_str(&line[at..]);
     }
     out
 }

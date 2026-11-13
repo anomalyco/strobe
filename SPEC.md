@@ -935,7 +935,8 @@ block's recording and prints it (`rec  rec_… · strobe query rec_… threads`)
 on a check of one case answers from that recording, except that profile views such as `hotspots`,
 `layout` and `gc` use the case's attribution recording when the check kept one. A forwarded view names
 its case and recording. With several active cases, a shared batch, or several candidate launches, query
-lists distinct recordings instead of choosing a case. Without a kept profile it explains how to collect one.
+lists only distinct recordings that answer the requested view, with its arguments, instead of choosing a case.
+When none answer, it gives the recording reader's reason. Without a kept profile it explains how to collect one.
 Local summaries and Markdown of a copy name its path in follow-up commands and never offer to resume it.
 An untraced check does not recommend `frames` in its summary. Before anything
 runs, every bench prints the builds it runs with their commits (`head app@f2a281b501 (dirty)`, or

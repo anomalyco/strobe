@@ -51,15 +51,40 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
     if ids.is_empty() {
         return Err(Error::usage(if profile { "this check has no kept attribution recording here; run the check with --why always to keep one" } else { "this check has no kept recording here" }));
     }
-    let commands = ids
-        .into_iter()
-        .map(|id| {
-            let next = if matches!(view, "hotspots" | "alloc" | "layout" | "gc" | "style") && !answers(id, view) { "summary" } else { view };
-            format!("strobe query {id} {next}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n  ");
-    Err(Error::usage(format!("choose a recording of this check:\n  {commands}")))
+    // A file alone does not establish that a view works: its runs, engine, optional probes and
+    // query arguments matter. Use the same reader as a direct query and keep its typed refusal.
+    let mut commands = Vec::new();
+    let mut refusal = None;
+    let tail = query_tail(args);
+    for id in ids {
+        match Rec::resolve(id).and_then(|rec| recording(rec, view, args, top)) {
+            Ok(_) => commands.push(format!("strobe query {id} {tail}")),
+            Err(e) => {
+                refusal.get_or_insert(e);
+            }
+        }
+    }
+    if commands.is_empty()
+        && let Some(e) = refusal
+    {
+        return Err(e);
+    }
+    Err(Error::usage(format!("choose a recording of this check:\n  {}", commands.join("\n  "))))
+}
+
+/// Keep the question intact, including a SQL statement or `threads --timeline`.
+fn query_tail(args: &Args) -> String {
+    use crate::cli::{FLAGS, Kind};
+    let mut words: Vec<_> = args.pos.iter().skip(1).map(|w| exp_insights::quote(w)).collect();
+    for &(name, kind, _) in FLAGS {
+        if let Some(value) = args.get(name) {
+            words.push(format!("--{name}"));
+            if !matches!(kind, Kind::Switch) {
+                words.push(exp_insights::quote(value));
+            }
+        }
+    }
+    words.join(" ")
 }
 
 /// Only offer a profile query when its source exists. Invalidation tracking is optional even in
@@ -95,7 +120,7 @@ pub(super) fn hint(result: &Value, exp: &str, rec: &Rec, view: &str) -> Option<S
         })
         .collect();
     if matches.len() > 1 {
-        return Some(format!("this launch covers several cases: strobe query {exp} summary"));
+        return matches.iter().any(|s| s["attribution"].as_str().is_some_and(|id| stored(id).is_some())).then(|| format!("this launch covers several cases: strobe query {exp} summary"));
     }
     let s = *matches.first()?;
     let a = &s["attribution"];
