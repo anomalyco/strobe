@@ -1915,7 +1915,7 @@ fn summary_body(meta: &Value) -> String {
         s += "timing   full trace (--trace full): the browser traced every task of every thread, which costs the page main-thread time; compare it only with full-trace runs\n";
     }
     let id = meta["id"].as_str().unwrap_or("");
-    let view = if meta["frames_refused"].is_string() || meta["traced"] == false { (meta["probes"] == "attribution").then_some("hotspots") } else { Some("frames") };
+    let view = if meta["frames_refused"].is_string() || meta["traced"] == false || meta["launch"] == true { (meta["probes"] == "attribution").then_some("hotspots") } else { Some("frames") };
     let query = view.map(|v| format!("strobe query {id} {v} · ")).unwrap_or_default();
     s += &format!("next     {query}strobe report recording {id} --open\n");
     s

@@ -6,6 +6,7 @@ mod exp_insights;
 pub(super) mod http;
 mod inputs;
 mod rec;
+mod sources;
 pub(crate) use rec::windows_sql;
 mod waits;
 mod wir;
@@ -194,21 +195,10 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
         "insights" => exp_insights::run(&result, source),
         "actions" => actions::experiment(&result, home.as_deref(), args, top),
         other => {
-            // A check of one case has one recording: its views answer for the experiment. A recording a
-            // result names is one strobe keeps, by its plain id, never a path.
-            let profile = matches!(view, "hotspots" | "alloc" | "gc" | "layout" | "style" | "heap" | "shifts" | "waits");
-            let mut recs: Vec<String> = result["series"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|s| {
-                    let check_profile = (result["kind"] == "check" && profile).then(|| s["attribution"].as_str()).flatten();
-                    check_profile.or_else(|| s["recording"].as_str()).map(str::to_string)
-                })
-                .collect();
-            if result["kind"] == "check" && recs.len() == 1 {
-                return recording(Rec::resolve(&recs.remove(0))?, view, args, top);
+            if result["kind"] == "check" {
+                return sources::check(&result, view, args, top);
             }
+            let mut recs: Vec<String> = result["series"].as_array().into_iter().flatten().filter_map(|s| s["recording"].as_str().map(str::to_string)).collect();
             // `--blocks N` compares nothing: its attribution recordings are head's alone (`--why
             // always`), one per series, and one answers for the experiment.
             let series = result["series"].as_array().cloned().unwrap_or_default();
@@ -218,10 +208,16 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
                 let heads: Vec<String> = series.iter().filter_map(|s| s["attribution"]["head"].as_str().map(str::to_string)).collect();
                 let id = result["id"].as_str().unwrap_or("this experiment");
                 return match heads.as_slice() {
-                    [one] => recording(Rec::resolve(one)?, view, args, top),
+                    [one] => sources::forward(
+                        Rec::resolve(one)?,
+                        series.iter().find(|s| s["attribution"]["head"].as_str() == Some(one)).and_then(|s| s["label"].as_str()).unwrap_or("head"),
+                        view,
+                        args,
+                        top,
+                    ),
                     [] => {
                         let timed: Vec<&str> = series.iter().flat_map(|s| s["timing_recordings"].as_array().into_iter().flatten()).filter_map(|t| t["recording"].as_str()).collect();
-                        let others = if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): strobe query <rec> {other} with one of {}", timed.join(", ")) };
+                        let others = if timed.is_empty() { String::new() } else { format!("; its timed blocks' recordings (no profile): {}", timed.join(", ")) };
                         Err(Error::usage(format!(
                             "{id} kept no attribution recording: a timed block runs no profiler (it would weigh on its times), and bench --blocks N --why always adds one attribution block of head per series{others}"
                         )))
@@ -305,7 +301,7 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
             // A copied recording's stored id may name something else here. Its report is always a
             // useful next step; unlike `open`, `report` accepts the actual folder.
             if !rec.stored() {
-                text = text.lines().map(|line| if line.starts_with("next     ") { format!("next     strobe report recording {} --open\n", rec.handle()) } else { format!("{line}\n") }).collect();
+                text = path_text(&text, meta, &dir, true);
             }
             if let Some(c) = &case {
                 text += &format!("case     {}: the values are its runs' ({}); a duration above is the whole launch's\n", meta["label"].as_str().unwrap_or(&c.name), c.runs.join(" "));
@@ -465,24 +461,8 @@ fn recording(mut rec: Rec, view: &str, args: &Args, top: usize) -> Result<Output
 fn live_ledger(result: &mut Value, source: Option<&Path>) -> String {
     let mut text = result["text"].as_str().unwrap_or("").to_string();
     if let Some(source) = source {
-        let id = result["id"].as_str().unwrap_or("");
-        let word = path_word(source);
         let rendered = super::bench::rendered(result).unwrap_or(text);
-        // Change command operands only: labels, descriptions, and recording ids remain as measured.
-        let resume = format!("resume  strobe bench --resume {id}");
-        text = String::with_capacity(rendered.len());
-        for line in rendered.split_inclusive('\n').filter(|l| l.trim_end() != resume) {
-            if line.trim_start().starts_with("actions  ") || line.trim_start().starts_with("strobe report experiment ") || line.starts_with(&format!("{id} · strobe ")) {
-                let (prefix, cmd) = line.rsplit_once("strobe ").unwrap_or((line, ""));
-                if let Some((verb, tail)) = ["report experiment", "query"].iter().find_map(|v| cmd.strip_prefix(&format!("{v} {id}")).map(|tail| (v, tail)))
-                    && (tail.is_empty() || tail.starts_with(char::is_whitespace))
-                {
-                    text += &format!("{prefix}strobe {verb} {word}{tail}");
-                    continue;
-                }
-            }
-            text += line;
-        }
+        text = path_text(&rendered, result, source, false);
         result["text"] = json!(text);
         return text;
     }
@@ -522,6 +502,45 @@ fn live_ledger(result: &mut Value, source: Option<&Path>) -> String {
     // The JSON (`--json`, MCP) carries the same text.
     result["text"] = json!(text);
     text
+}
+
+/// Local text about a copy: rewrite command operands, not its name in prose or the IDs of other
+/// recordings. Used after rendering both the terminal summary and Markdown (including saved text).
+pub(super) fn path_text(text: &str, data: &Value, path: &Path, recording: bool) -> String {
+    let word = path_word(path);
+    let id = data["id"].as_str().unwrap_or("");
+    let resume = format!("resume  strobe bench --resume {id}");
+    let mut out = String::with_capacity(text.len());
+    let verbs = regex_lite::Regex::new(r"\b(query |strobe report (?:recording |experiment )?|strobe open )").expect("command prefixes");
+    for line in text.split_inclusive('\n') {
+        if !recording && line.trim_end() == resume {
+            continue;
+        }
+        if recording && line.starts_with("next     ") {
+            out += &format!("next     strobe report recording {word} --open\n");
+            continue;
+        }
+        let mut at = 0;
+        for m in verbs.find_iter(line) {
+            if m.start() < at {
+                continue;
+            }
+            if let Some(tail) = line[m.end()..].strip_prefix(id)
+                && (tail.is_empty() || tail.starts_with(char::is_whitespace) || tail.starts_with(')'))
+            {
+                out.push_str(&line[at..m.start()]);
+                if m.as_str() == "strobe open " {
+                    out += &format!("strobe report recording {word} --open");
+                } else {
+                    out.push_str(m.as_str());
+                    out.push_str(&word);
+                }
+                at = m.end() + id.len();
+            }
+        }
+        out.push_str(&line[at..]);
+    }
+    out
 }
 
 /// One case of a `--batch` recording (`--case`): its name, its place in the launch and its runs.
@@ -3463,13 +3482,6 @@ pub(crate) fn no_profile(rec: &Rec, what: &str, view: &str) -> Error {
             // read the exact parent, not a prefix, and match its own series (not another case's profile).
             let result = (rec.stored() && store::plain_id(exp)).then(|| store::read_json(&crate::host::paths::experiments().join(exp).join("result.json")).ok()).flatten();
             let check = result.as_ref().is_some_and(|r| r["kind"] == "check") || meta["check"] == true;
-            let profile = result
-                .as_ref()
-                .filter(|_| check)
-                .and_then(|r| r["series"].as_array())
-                .and_then(|s| s.iter().find(|s| s["recording"] == rec.id))
-                .and_then(|s| s["attribution"].as_str())
-                .filter(|id| *id != rec.id && store::plain_id(id) && crate::host::paths::recordings().join(id).join("meta.json").is_file());
             let kind = if check {
                 "check"
             } else if result.is_some() {
@@ -3477,22 +3489,7 @@ pub(crate) fn no_profile(rec: &Rec, what: &str, view: &str) -> Error {
             } else {
                 "bench"
             };
-            let hint = profile.map_or_else(
-                || "run the bench again with --why always to keep an attribution recording".to_string(),
-                |id| {
-                    let dir = crate::host::paths::recordings().join(id);
-                    // A kept profile need not have every probe. Don't send a person from one refusal to
-                    // another (for instance, invalidation tracking is optional even with --why always).
-                    let ext = match view {
-                        "hotspots" => "cpuprofile",
-                        "alloc" => "heapprofile",
-                        _ => "",
-                    };
-                    let has_profile = !ext.is_empty() && std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|f| f.path().extension().is_some_and(|e| e == ext));
-                    let next = if has_profile || view == "hotspots" && dir.join("deep.json.gz").is_file() { view } else { "summary" };
-                    format!("its attribution recording is {id}: strobe query {id} {next}")
-                },
-            );
+            let hint = result.as_ref().and_then(|r| sources::hint(r, exp, rec, view)).unwrap_or_else(|| "run the bench again with --why always to keep an attribution recording".into());
             Error::usage(format!("this recording has no {what}: it is a {kind} block of {exp}, recorded without the profiler; {hint}"))
         }
         // It ran under the profilers already: recording it again the same way adds nothing (a Bun

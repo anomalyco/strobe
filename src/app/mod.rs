@@ -280,7 +280,7 @@ fn time_unit(args: &Args) -> Result<crate::fmt::TimeUnit> {
     // A strobe.json that is a regular file there (not followed through a link).
     let nearest = |d: &Path| d.ancestors().find(|a| crate::store::regular(&a.join("strobe.json"))).map(Path::to_path_buf);
     // The user's own file is read after the root's (`config::unit`): a root without one falls to it.
-    let root = project_of(args).and_then(|d| nearest(&d)).or_else(|| nearest(&cwd));
+    let root = nearest(project_of(args).as_deref().unwrap_or(&cwd));
     Ok(crate::config::unit(root.as_deref())?.unwrap_or_default())
 }
 

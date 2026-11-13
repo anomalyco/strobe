@@ -559,6 +559,112 @@ let followed = 0
     }
     if (run("query", exp, "hotspots").exitCode !== (attribution ? 0 : 2)) fail("the check's hotspots did not use its profile")
   }
+  // Exercise source selection, not just the printed argv. The same result is read through its ID and a copy.
+  const second = "rec_syn_second", p2 = "rec_syn_attr2"
+  const put = (d: string, f: string, value: J) => { mkdirSync(d, { recursive: true }); writeFileSync(join(d, f), JSON.stringify(value)) }
+  const copy = join(work, "someone's copy"), file = join(copy, "result.json")
+  const writeResult = (value: J) => { for (const d of [copy, folder(exp)]) put(d, "result.json", { id: exp, ...value }) }
+  const c = (name: string, recording?: string, attribution?: string) => ({ kind: "check", case: name, label: name, target: "page", passed: true, recording, attribution, primary: {metric: "cpu.work"} })
+  const leanMeta = (id: string, batch?: J) => ({ id, experiment: exp, kind: "block", probes: "lean", traced: false, values: {}, runs: 1, batch })
+  for (const id of [lean, second]) { put(folder(id), "meta.json", leanMeta(id)); put(folder(id), "threads.json", []) }
+  for (const id of [prof, p2]) {
+    put(folder(id), "meta.json", { id, kind: "block", probes: "attribution", token: "tok", runs: 1, values: {} })
+    cpSync(join(handmade,"cpu-0.cpuprofile"),join(folder(id),"cpu-0.cpuprofile"))
+    put(folder(id), "gecko.json", { parts: { Layout: [["run:0",null]], Gc: [["run:0",null]], Style: [["run:0",null],["run:0","StyleInvalidationTracking"]] } })
+  }
+  const batch = [c("first", lean, prof), c("second", lean, p2)].map((s,i) => ({...s,seq:i+1,runs:[`run:${i}`]}))
+  const go = (a: string[], code: number) => { const p=run(...a), t=p.stdout.toString()+p.stderr.toString(); if(p.exitCode!==code) fail(`${a.join(" ")}: ${p.exitCode}, wanted ${code}: ${t}`); return t }
+  // Execute only reads of this run's own fixtures. Assert the exact set (including multiplicity)
+  // before following, so a duplicated ID, a wrong case or circular advice cannot pass.
+  const advice = (a: string[], expected: string[]) => {
+    const t=go(a,2), got=Array.from(t.matchAll(/strobe query ((?:exp_|rec_)\w+ \w+)/g),m=>m[1])
+    if(JSON.stringify(got.sort())!==JSON.stringify([...expected].sort())) fail(`${a.join(" ")}: ${JSON.stringify(got)}, wanted ${JSON.stringify(expected)}`)
+    else for(const cmd of got) {go(["query",...cmd.split(" ")],0); followed++}
+  }
+  // For an actual Chromium trace made above, compare the hint with the view on the attribution
+  // recording itself. Optional probes may be absent even though the recording is present.
+  for (const id of made) {
+    const result = JSON.parse(readFileSync(join(folder(id), "result.json"), "utf8"))
+    for (const s of result.series ?? []) {
+      if (!s.recording || typeof s.attribution !== "string" || !existsSync(join(folder(s.attribution), "trace.pftrace"))) continue
+      for (const view of ["layout", "gc", "style"]) {
+        const available = run("query", s.attribution, view).exitCode === 0
+        advice(["query", s.recording, view], [`${s.attribution} ${available ? view : "summary"}`])
+      }
+    }
+  }
+  for (const shape of ["single", "no profile", "several", "batch", "batch without profile", "repeat", "mixed", "refused sibling", "comparison", "blocks"]) {
+    const shared=shape.startsWith("batch"), timed=shape==="comparison"||shape==="blocks", none=shape==="no profile"||shape==="batch without profile"
+    put(folder(lean),"meta.json",leanMeta(lean,shared?batch:undefined))
+    const s=c("first",lean,none?undefined:prof)
+    const series: J[]=shared?[s,c("second",lean,none?undefined:p2)] : shape==="several"?[s,c("second",second,p2)] : shape==="mixed"?[s,{...c("failed"),passed:false}] : shape==="refused sibling"?[s,{...c("skipped"),kind:"refused"}] : shape==="repeat"?[{...s,repeat:{recordings:[lean,second]}}] : timed?[{...s,kind:shape==="blocks"?"blocks":"runs",timing_recordings:[{recording:lean}],attribution:{head:prof,base:shape==="comparison"?p2:undefined}}]:[s]
+    writeResult({kind:timed?"experiment":"check",series})
+    advice(["query",shape==="repeat"?second:lean,"hotspots"],shared?[`${exp} summary`]:none?[]:[`${timed?exp:prof} hotspots`])
+    if(shared && !none) advice(["query",lean,"layout","--case","second"],[`${p2} layout`])
+    if(shape==="single") for(const view of ["layout","gc","style"]) advice(["query",lean,view],[`${prof} ${view}`])
+    for (const h of [exp,file]) {
+      if(none) advice(["query",h,"gc"],[])
+      else if (["several","batch","mixed"].includes(shape)) advice(["query",h,"gc"],(shape==="mixed"?[prof]:[prof,p2]).map(id=>`${id} gc`))
+      else { const t=go(["query",h,"hotspots"],0); if(!t.includes(prof) || !t.includes("first")) fail(`${shape}: missing case/recording provenance`) }
+      if(shared||shape==="repeat") advice(["query",h,"threads"],(shared?[lean]:[lean,second]).map(id=>`${id} threads`))
+      if(shape==="mixed") advice(["query",h,"threads"],[`${lean} threads`])
+    }
+    console.log(`source selection: ${shape} (id and copy)`)
+  }
+  // Script capture whose sampler saw no measured-run sample: the whole-host profile is still
+  // there. Opening hotspots is valid (zero samples), so do not send it to summary.
+  const hostOnly = "rec_syn_hostonly"
+  put(folder(hostOnly), "meta.json", { id: hostOnly, kind: "block", probes: "attribution", script: true, runs: 1, values: {} })
+  writeFileSync(join(folder(hostOnly), "whole-host.json.gz"), gzipSync(readFileSync(join(handmade, "cpu-0.cpuprofile"))))
+  writeResult({kind:"check", series:[c("host",lean,hostOnly)]})
+  advice(["query",lean,"hotspots"],[`${hostOnly} hotspots`])
+  // Same failure, four shapes: base refusal alone, both sides failing independently, head-only failure,
+  // and a passing check. Keep the base reason exactly once and keep useful detail after its first line.
+  for(const [name,extra,want] of [
+    ["refused base",{error:"base failed (NoPhase: no samples), so head was checked against nothing",refusal:{validator:"NoPhase",summary:"no samples"},base:{passed:false,error:"NoPhase: no samples"}},["base failed","no samples"]],
+    ["both failed",{error:"head stopped",base:{passed:false,error:"could not load:\nmissing module"}},["head stopped","missing module"]],
+    ["head failed",{error:"head stopped",base:{passed:true}},["head stopped"]], ["pass",{passed:true},[]],
+  ] as const){
+    writeResult({kind:"check",series:[{...c("first",lean),state: name==="pass"?"pass":"fail",passed:false,...extra}]})
+    for(const h of [exp,file]) {
+      const row = go(["report",h,"--format","summary"],0).split("\n").find(l=>l.startsWith("| first |"))
+      const note = row?.split("|").at(-2) ?? ""
+      for(const w of want) if(note.split(w).length!==2) fail(`${name}: expected ${w} exactly once in Notes: ${note}`)
+    }
+  }
+  for(const d of [copy,folder(exp)])writeFileSync(join(d,"first.actions.json.gz"),gzipSync(JSON.stringify({actions:[]})))
+  writeResult({kind:"check",series:[{...c("first"),actions:{count:1,path:"first.actions.json.gz"}}]})
+  const checkText=(id:string,handle:string,cmd:string,t:string) => {
+    const [prefix,suffix]=cmd.split("HANDLE")
+    const start=t.indexOf(prefix), end=t.indexOf(suffix,start+prefix.length)
+    if(start<0 || end<0) {fail(`missing ${cmd}`);return}
+    const rest=t.slice(start+"strobe ".length,end+suffix.length)
+    const expected=cmd.slice(7).split(" ").map(w=>w==="HANDLE"?handle.replace(/\\/g,"/"):w)
+    for (const shell of (["sh","pwsh"] as const).filter(s=>s==="sh"?sh:pwsh)) {
+      const a=argvVia(shell,rest)
+      if(typeof a==="string" || JSON.stringify(a)!==JSON.stringify(expected)) {fail(`${shell}: ${rest} did not name the artifact read`);continue}
+      go(a.filter(w=>w!=="--open"),0);followed++
+    }
+    if(handle!==id && (t.includes(`query ${id} `)||t.includes(`report experiment ${id} `)||t.includes(`--resume ${id}`)))fail(`command still names stored ${id}`)
+  }
+  for(const h of [exp,file]) for (const a of [["query",h,"summary"],["report",h,"--format","md"]])checkText(exp,h,"strobe query HANDLE actions",go(a,0))
+  writeResult({kind:"experiment",series:[{kind:"runs",label:"first",primary:{metric:"cpu.work"}}],stopped:{code:130}})
+  for(const a of [["query",file,"summary"],["report",file,"--format","md"]])checkText(exp,file,"strobe report experiment HANDLE --open",go(a,0))
+  const filmed=join(work,"filmed 'copy'");put(filmed,"meta.json",{id:lean,kind:"record",wir:true,video:{kind:"screen"},network:{pre_attach_resources:1},values:{}})
+  writeFileSync(join(filmed,"network.json.gz"),gzipSync(JSON.stringify({navigation:{},paint:[],spans:[],requests:[]})))
+  for(const a of [["query",filmed,"summary"],["report",filmed,"--format","md"]]){
+    const text=go(a,0),v=text.split("\n").find(l=>l.startsWith("video    "))??"",n=text.split("\n").find(l=>l.startsWith("network  "))??""
+    checkText(lean,filmed,"strobe report recording HANDLE --open",v);checkText(lean,filmed,"strobe query HANDLE network","strobe "+n.slice(n.indexOf("query ")))
+  }
+  put(folder(prof),"meta.json",{id:prof,probes:"attribution",launch:true,values:{}})
+  checkText(prof,prof,"strobe query HANDLE hotspots",go(["query",prof,"summary"],0))
+  // A real settings file in cwd is for cwd, never for another named artifact. The user's settings
+  // supply the fallback. No link or real user configuration is involved.
+  const here=join(work,"unpacked"), other=join(work,"another project","rec")
+  for (const d of [here,other])put(d,"meta.json",{id:lean,values:{"frames.interval.p50":20}})
+  put(here,"strobe.json",{unit:"s"});put(fakeState,"strobe.json",{unit:"ms"})
+  const unit=(h:string, want:string, flag:string[]=[])=>{const p=Bun.spawnSync([STROBE,"query",h,"summary",...flag],{cwd:here,env:{...process.env,...fakeEnv},timeout:15000});if(p.exitCode!==0||!p.stdout.toString().includes(`interval p50 ${want}`))fail(`unit for ${h}: expected ${want}`)}
+  unit(".","20.0 ms");unit(other,"20.0 ms");put(join(work,"another project"),"strobe.json",{unit:"us"});unit(other,"20,000 µs");unit(other,"0.0200 s",["--unit","s"])
 }
 console.log(`${followed} follow-up views executed`)
 rmSync(work, { recursive: true, force: true })

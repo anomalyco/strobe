@@ -204,7 +204,7 @@ pub fn run(args: &Args) -> Result<Output> {
         attach_videos(&mut data, (!experiment).then_some(dir.as_path()), &Videos::Embed(&out))?;
     }
     let body = match format {
-        "md" => markdown(&data),
+        "md" => markdown(&data, file.as_deref().map(|f| if experiment { f } else { dir.as_path() }), !experiment),
         "pr" => super::pr::block(&data),
         "summary" => super::pr::summary(&data),
         _ => html(view, &data),
@@ -735,7 +735,7 @@ pub fn html(view: &str, data: &Value) -> String {
     TEMPLATE.replace("/*STROBE_DATA*/null", &payload)
 }
 
-pub fn markdown(data: &Value) -> String {
+fn markdown(data: &Value, path: Option<&std::path::Path>, recording: bool) -> String {
     // A comparison's or a check's text is drawn again from its result, as its PR block and HTML are:
     // today's digits, rendering and unit, and the rerun ledger as of now (`run` refreshed it). A
     // recording's from its meta.json; other results keep the text they printed (a pixels run).
@@ -750,6 +750,7 @@ pub fn markdown(data: &Value) -> String {
     } else {
         super::record::summary_text(data)
     };
+    let text = if let Some(p) = path { query::path_text(&text, data, p, recording) } else { text };
     format!("```\n{}\n```\n", text.trim_end())
 }
 
