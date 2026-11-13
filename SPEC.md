@@ -530,7 +530,7 @@ An up-front refusal of the whole file can exit 4 without writing `result.json` a
 |---|---|---|---|
 | `--check` (one build) | every case passes | `pass <case>  <values>`; `N of N cases passed (…; nothing compared)` | 0 |
 | | a case fails: a run threw or timed out, its primary or `until` gave nothing, a refused primary in its block | `FAIL <case>  <why>`, `fix: …`; `M of N cases passed` | 1 |
-| | a known preflight refusal (e.g. headless frame primary, windowless launch waiting for a window, unsupported engine, display too small, two builds that run the same fixed target) | `refused <case>  <validator>: <why>` beside other cases; the first refusal if all were ruled out up front | 0 beside passing cases; 4 if every non-gap case was refused |
+| | a known preflight refusal (e.g. headless frame primary, windowless launch waiting for a window, unsupported engine or display too small) | `refused <case>  <validator>: <why>` beside other cases; the first refusal if all were ruled out up front | 0 beside passing cases; 4 if every non-gap case was refused |
 | `--check --runs N` or `--check --repeat R` | N runs in one launch, or R fresh launches; still no timing verdict | median and `[lowest … highest run]`, or median and each launch's value | as `--check`; use `--repeat` to repeat a launch case. With `--why always`, `--runs` applies to attribution instead |
 | `--check --base <build>` | both sides run every case | head's line, `base  <values> · rec <id>` under it; `…; base and head each checked; nothing compared: the same command without --check times head against base` | 0 |
 | | base cannot build | build error; the check stops before the case runs on either side | 1 |
@@ -554,7 +554,9 @@ An up-front refusal of the whole file can exit 4 without writing `result.json` a
 | `bench --resume <exp>` | resume the saved command with its original flags and completed work | `finished before the resume: kept` for reused series; then that mode's result | same exit rules as the saved mode; no saved state or still running: 2 |
 
 On a check, case failures (1) take precedence over missing counter comparisons or parity gaps (4).
-If every entry is a gap, no counter check ran: gaps alone exit 0 unless `--require-parity` is set.
+**Known issue in 0.34.0:** if every entry is a parity gap, `--check --noworse` exits 0
+(`0 of 0 cases passed, N parity gaps`) despite comparing nothing. Add `--require-parity` to make
+gaps exit 4 when gating on counters. A fix is designed.
 When `Uncounted` says a check compared nothing (exit 4), check each name against the runs' `ctx.count("…")` calls
 first: the `Uncounted` note offers a name the bench file counts one typo away. When a run case counts
 the counter only on some paths, declare it in that case's metrics (`metrics: ["count.fallbacks"]`): a
@@ -1000,7 +1002,8 @@ family's bare name (`--noworse: count is a family of metrics: name one of it, co
 count.items)`; also `phase`, `span`, `metric`, `app`, `launch.milestone`), any other metric with a
 margin (`--check --noworse main.work: a check compares exact counters only …`), and `--check
 --noworse` without `--base <build>`. Each side then
-runs 2 runs of a case with a reset and `--runs 2`, else 2 fresh launches (`--repeat` at least 2), and
+runs at least twice: when the case resets and the check measures two or more runs per launch, those
+runs establish stability; otherwise it uses at least two fresh launches. On both sides,
 each counter must hold one value per side (every launch's value, and with `--runs N` its lowest and
 highest run). Each counter of each case ends in one row (`noworse_state`):
 - `no_worse` (passes): each side held one value and head is at most its margin over base (an exact
@@ -1028,8 +1031,9 @@ count.items 3 → 5 · worse (>0.5) (exact)` (`!` when it fails). The summary en
   sides, so nothing was compared (exit 4): only launch cases ran, and a count.<name> counter is a run
   case's`; `…; every --noworse counter was refused on both sides (the refused lines say why), so
   nothing was compared (exit 4)`; and, when a declared counter's row failed, `…; no --noworse counter
-  was compared, and a case that declares one failed for it (its line says why)` (exit 1). If every
-  entry was a parity gap, no case ran; the gap rule applies instead (§5.2).
+  was compared, and a case that declares one failed for it (its line says why)` (exit 1).
+  Known issue in 0.34.0: when every entry is a parity gap, no case runs and this counter check exits
+  0 instead of 4 (§5.2). Pass `--require-parity` when gating `--noworse` on a file with target gaps.
 `--noworse` adds its margins to every series
 (in every mode). A `count.<name>` only the flag names (not the case's primary, `metrics` or own
 `noworse`: `Series::flagged`) is decided per series, across both sides and every block or launch
@@ -2589,17 +2593,20 @@ adais `main.work` +0.8% on a click and +35% on an idle page, `cpu.work` +3.5%; o
 A lean Chromium page block with nothing on screen (a headless page, or an app with `window: false`)
 takes no trace at all, from 0.34.0, unless a case of the series declares a metric read from the trace
 (`phase.*`, `span.*`, `layout.shift`, `main.gc`, `gpu.compile`, `main.paint`): nothing it draws reaches
-a display, and tracing costs the browser and strobe CPU in every run. `--trace full`, attribution
+a display, and tracing costs the browser and strobe CPU in every run. Timed blocks with `--trace full`, attribution
 blocks and a page on screen trace as before; counter and memory blocks trace nothing. Its `main.work`
 and parts, counts, CPU, memory and network come from where they always did (the Performance domain,
 the OS). Its recording's `meta.json` says `"traced": false` (true for a block that traced; absent on
 older recordings) and has no `trace.pftrace`; no trace_processor runs for it. `query <rec> summary`
-works. `query <rec> frames` gives the recorded refusal: `Headless` for a headless page or `NotForTarget`
-for an app with `window: false` (exit 4). A full trace does not put frames on a display.
+works. Without a trace, `query <rec> frames` gives the recorded refusal: `Headless` for a headless
+page or `NotForTarget` for an app with `window: false` (exit 4). With `trace.pftrace`, the view
+reads Chromium's frame pipeline. Those rows are not evidence of presentation on a display: the
+bench still refuses off-screen frame metrics.
 `layout`, `style` and `gc` need an attribution recording; `threads` says it kept no thread counters
 when there is neither a trace nor `threads.json` (exit 2). `query <a>..<b> threads`, or `frames`
-without a recorded `frames_refused` reason, says `this block took no trace` (exit 2). Select
-`bench --trace full` for trace data or `--why always` for an attribution recording.
+without a recorded `frames_refused` reason, says `this block took no trace` (exit 2). Use a timed
+`bench --trace full` or a headed run for trace data. A plain `--check` still uses lean probes even
+with `--trace full`; `--check --why always` keeps a separate attribution recording to query.
 Checked with 0.34.0 on adais (`url()` page, `--check
 --headless`). An undeclared `main.paint` (a descriptive row) is absent from
 such a comparison. A Chromium run's `goto` places no mark of strobe's in the page (each new document
@@ -10350,8 +10357,9 @@ a timing verdict on a shared runner.
   screenshot on a failure. With `noworse` (exact counters, `count.ctx=0,net.requests=0,dom.nodes=0`)
   and a base commit, `--base <sha> --noworse <list>`: both commits run each case (§5.6 "A check against
   base") and a counter over base's by more than its margin, or one that varies between runs, fails the
-  case; so does a case base cannot run. A check whose cases compared none of the counters `noworse`
-  names exits 4, which fails the step (`fail-on: never` aside): declare each counter in the metrics of
+  case; so does a case base cannot run. If cases ran without failure but compared none of the counters
+  `noworse` names, exit 4 fails the step (`fail-on: never` aside; for the 0.34.0 all-gap issue see §5.2).
+  Declare each conditional counter in the metrics of
   the cases that count it. With `leak` it adds a leak run per bench file (`--probes memory --headless --repeat
   <leak-repeat>`, default 6), judged by its slopes (§8.6). The step summary gets `strobe report
   experiment <exp> --format summary` for each experiment (§11.2): case, target, status, the exact

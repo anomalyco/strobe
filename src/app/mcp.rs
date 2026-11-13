@@ -103,7 +103,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "bench",
-        description: "Run a .bench.ts file: a timed comparison pairs fresh launches (A B, B A …) for each series (case × target × params). A worse verdict is not an error: read series[].primary.verdict_kind. If every non-gap primary is refused, the run exits 4. A server hosted in a script() target is probed from strobe's own threads when setup calls ctx.httpProbe({ url, authorization, expect }): declare http.latency.p95 or http.timeouts, and cpu.main for its main thread alone (the runnable example: node_modules/@hona/strobe/README.md). On a shared CI runner (GitHub-hosted) timing is refused (SharedRunner): check (with base and noworse on exact counters) and leak runs work there. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
+        description: "Run a .bench.ts file: a timed comparison pairs fresh launches (A B, B A …) for each series (case × target × params). A worse verdict is not an error: read series[].primary.verdict_kind. In comparisons, single-build block runs and leak runs, a refusal specific to one series ends only that series; the rest of the file runs. If every non-gap primary is refused, the run exits 4. A server hosted in a script() target is probed from strobe's own threads when setup calls ctx.httpProbe({ url, authorization, expect }): declare http.latency.p95 or http.timeouts, and cpu.main for its main thread alone (the runnable example: node_modules/@hona/strobe/README.md). On a shared CI runner (GitHub-hosted) timing is refused (SharedRunner): check (with base and noworse on exact counters) and leak runs work there. Long runs continue in the daemon: then query the returned exp_… with view progress. stop asks a running experiment to stop (at once while it waits, else after its block); resume goes on with a stopped one.",
         args: &[("file", "absolute path to the .bench.ts file (not with stop or resume)")],
         flags: &[
             (
@@ -138,9 +138,12 @@ const TOOLS: &[Tool] = &[
             ("equivalence", "equivalence bound in % (default 2)"),
             (
                 "noworse",
-                "non-inferiority: 2% asks whether head's primary is at most 2% worse; metric=2% sets a metric's margin. Only exact counters default to 0%. With check and a base build: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes). no_worse passes; worse, unstable, missing or not_compared fails (1). If cases ran without failure but no counter compared, exit 4 even if passed is true. If both sides refused every counter, read the refused lines. For Uncounted, check the spelling against ctx.count; declare a conditional counter in its case's metrics to compare 0 with 0.",
+                "non-inferiority: 2% asks whether head's primary is at most 2% worse; metric=2%,metric2=5% sets margins per metric. Timed verdicts: no worse, worse or unclear; worse is not an error. Only exact counters default to 0%; a bare other metric is a usage error (2). With check and a base build: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes). no_worse passes; worse, unstable, missing or not_compared fails (1). For a count.* named only by the flag, once a block of either side counted it, blocks in that series that neither counted nor refused it read 0. If neither side counted it, it gets no row there. If cases ran without failure but no counter compared, exit 4 even if passed is true. If both sides refused every counter, read the refused lines. For Uncounted, check the spelling against ctx.count; declare a conditional counter in its case's metrics to compare 0 with 0. Known issue in 0.34.0: an all-gap check exits 0 despite comparing nothing. Set require-parity when gating counters on a file with target gaps.",
             ),
-            ("plan", "estimate pairs and minutes before running: a series with no measured block time here reports unknown (null), not a guess"),
+            (
+                "plan",
+                "do not run the bench: estimate pairs and minutes from earlier runs and checks here; include builds and the bench slot's queue. A series with no measured block time here reports unknown (null). With pilot, run four pairs first",
+            ),
             ("effect", "with plan: the expected change of the primary in % (default: what the last run of the series measured, else 0)"),
             ("pilot", "with plan: run 4 pairs first to learn the spread"),
             ("pairs", "auto (default) or a number"),
@@ -173,7 +176,7 @@ const TOOLS: &[Tool] = &[
                 "the run's deadline, e.g. 30m: no series, pair or wait (the bench slot, busy CPUs, a locked session, a launch that runs again) starts or runs past it; a comparison keeps its verdicts, a check stops (exit 124, resumable)",
             ),
             ("unlock-wait", "a series that needs a presenting window waits at most this long for an unlock, or on macOS for nobody to use the Mac (default: no limit), e.g. 2h"),
-            ("require-verdict", "timed comparison: exit 5 if undecided, 4 if any primary is refused or a journey is a parity gap"),
+            ("require-verdict", "comparison or leak run: exit 5 if undecided, 4 if any primary is refused or a journey is a parity gap. Bisect: exit 5 if its outcome is unclear"),
             ("require-parity", "implementation comparisons: exit 4 when a journey is a parity gap (one side cannot run it)"),
             ("stop", "exp_… (a unique prefix works): ask that running experiment to stop; it keeps what finished"),
             ("resume", "exp_…: go on with a stopped experiment from its finished pairs"),

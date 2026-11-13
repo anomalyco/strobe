@@ -476,12 +476,15 @@ Use
         [--check --base <variant>]     (each case once on base and on head, each line base's under head's;
                                         nothing compared but --noworse's exact counters; a base build error
                                         stops the check; a base run error fails the case, exit 1)
-        [--check --noworse count.x]    With a base build, hold exact counters to base (count.*, net.requests,
-                                      net.bytes, tty.frames, dom.nodes). A bare counter means 0%.
-                                      A worse, unstable, missing or not_compared row fails the case (1).
-                                      With no failed cases but no counter compared in any case that ran: 4.
-                                      If both sides refused it, read the refused lines. For Uncounted,
-                                      check its spelling; declare a conditional count in the case's metrics.
+        [--check --noworse count.x=0%,…]
+                                       (with a base build: exact counters only (count.*, net.requests,
+                                        net.bytes, tty.frames, dom.nodes); a bare counter means 0%.
+                                        Each counter must hold one value per side: at least two runs with a
+                                        reset and --runs 2 or more, otherwise at least two fresh launches.
+                                        For count.* named only by the flag, once either side counts it,
+                                        a block of that case that did not count or refuse it reads 0.
+                                        If both sides refused it, read the refused lines. For Uncounted,
+                                        check its spelling; for a conditional count, add metrics: [\"count.x\"])
         [--max-time 30m]               (the bench's time cap, its waits included (the bench slot too): a
                                         comparison keeps the pairs it has, anything else stops, exit 124)
         [--mobile[=<serial>]]          (phone targets, emulate: \"mobile\", in Chrome on an Android phone over
@@ -514,9 +517,17 @@ Use
                                   on exact counters), leak runs and record --probes attribution run there
         exit: timed comparisons   0 even on worse (read primary.verdict_kind); 4 if all primaries refused.
                                   --require-verdict: 5 undecided, 4 for a refused primary or parity gap.
-              checks              1 if a case fails (including a block refusal); gaps alone: 0, or 4 with
-                                  --require-parity. All non-gap cases refused up front: 4. For --noworse,
-                                  check the exit code too: passed can be true when no counter compared (4).
+              checks              0 pass; 1 case failure, including a block refusal or a --noworse row that
+                                  was worse, unstable, missing or not_compared. All non-gap cases refused: 4.
+                                  If cases ran but no counter compared, exit 4 unless a case failed (1).
+                                  Read the exit code, not passed alone. Gaps alone: 0, or 4 with
+                                  --require-parity. Known issue in 0.34.0: this includes all-gap --noworse
+                                  checks. Add --require-parity to guard counters in files with target gaps.
+              other modes         --blocks: 0 on completion, 4 if all refused. Leak run: 0 even for a leak;
+                                  --require-verdict: 5 if undecided, 4 if any primary refused. Pixels-only:
+                                  0 if all snapshots match, 1 for a difference or a one-sided snapshot.
+              stops               130 stopped; 124 on timeout (including an exhausted --unlock-wait).
+                                  A timed comparison hitting --max-time during timing keeps its pairs.
   plan <file.bench.ts> [--base <variant>] [--head <variant>] [--filter …] [--effect <pct>] [--pilot]
                                   before a bench: pairs and minutes per series from earlier runs here, builds,
                                   the slot's queue (= bench --plan; --pilot runs 4 pairs first to learn the
@@ -575,11 +586,14 @@ Use
   report [experiment|recording] <handle> [--format html|md|pr] [--out <path>] [--open]
                                   write a self-contained HTML (or markdown) report; pr: an experiment's tables
                                   for a PR body
-                                  (a path to result.json, meta.json or their folder: as query reads it.
-                                  md, pr and summary print to stdout; no Markdown file unless --out is given.
-                                  HTML, cards and badges default to strobe's run/reports folder; a bench
-                                  --blocks run: HTML and md, its blocks' median and interval, no verdict; a
-                                  format the handle has none of exits 2 before anything is written)
+                                  The view follows from the handle. With a stored id, reports default to the
+                                  recording or experiment folder. md, pr and summary also print Markdown on
+                                  stdout and the written path on stderr.
+                                  With a path to result.json, meta.json or their folder, Markdown goes to
+                                  stdout without a report file unless --out is given. HTML, cards and badges
+                                  default to strobe's run/reports folder. --out selects another destination.
+                                  A --blocks run has HTML and md with its median and interval, no verdict.
+                                  An unsupported format exits 2 before any report file is written.
   report experiment <exp> --format summary [--out <file.md>]
                                   the result as short GitHub Markdown for a CI job's summary page
                                   ($GITHUB_STEP_SUMMARY): a check, pixels run, leak run or --blocks as one

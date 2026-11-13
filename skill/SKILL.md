@@ -80,6 +80,8 @@ The design and every rule behind this file: SPEC.md.
     but no counter compared, exit **4**, even with `passed: true` in JSON. If both sides refused every
     counter, read the refused lines. For `Uncounted`, check the spelling against `ctx.count`; if the run
     counts it only on some paths, add `metrics: ["count.x"]` on that case so 0 → 0 compares.
+    Known issue in 0.34.0: if every case is a parity gap, the counter check exits 0 without comparing
+    anything. Add `--require-parity` when gating on counters in a file with target gaps.
   - `--check --base <target> --head <target>`: shared journeys get a parity matrix, not a counter
     comparison. Gaps alone exit 0 (even if no case ran), or 4 with `--require-parity`; a mismatch or
     case failure exits 1. With two bare targets, `--noworse` exits 2: it needs two builds.
@@ -219,8 +221,10 @@ The design and every rule behind this file: SPEC.md.
   `phase.*`, `span.*`, `layout.shift`, `main.gc`, `gpu.compile` or `main.paint`: its `meta.json` says
   `"traced": false`. `summary` works. `frames` refuses `Headless` for the page or `NotForTarget` for
   the windowless app (4). `layout`, `style` and `gc` need attribution; `threads` lacks thread counters;
-  `query a..b threads` says `this block took no trace` (2). For trace data use `bench --trace full`;
-  for attribution use `--why always`.
+  `query a..b threads` says `this block took no trace` (2). With a trace, `frames` reads Chromium's
+  pipeline, but the bench still refuses off-screen frame metrics. For trace data use a timed
+  `bench --trace full` or a headed run. For a headless check, query the `--why always` attribution
+  recording: `--trace full` alone does not change the check block's lean probes.
 - A locked session runs what needs no presenting window: scripts, `cli()`, `tty()`, leak runs,
   headless pages, `window: false` native cases measuring `cpu.*`, `memory.*`, `gpu.vram`, `io.*`,
   `count.*`, `phase.*`, and any native case under `--check`. Compare them only with locked runs.

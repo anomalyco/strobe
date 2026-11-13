@@ -89,7 +89,9 @@ skill as the `strobe` skill, and registers strobe's MCP server.
 exact counters to base: a worse counter fails the job, as does a check that ran but compared none.
 A leak found with `leak` or a regression in dedicated-runner `mode: compare` also fails the job.
 In your own script, check the exit code of `bench --check --base <ref> --noworse count.items` (1 for
-failure, 4 if cases ran but compared no counter). For timed comparisons, read the verdict, not the exit code.
+failure, 4 if cases ran but compared no counter). Known issue in 0.34.0: an all-gap counter check
+exits 0 without comparing anything. Add `--require-parity` when the file has target gaps.
+For timed comparisons, read the verdict, not the exit code.
 Inputs: [action.yml](action.yml); design: [SPEC.md §26](SPEC.md#26-ci-the-github-action-actionyml).
 
 **Changes:** each release's notes are on [GitHub Releases](https://github.com/anomalyco/strobe/releases).
