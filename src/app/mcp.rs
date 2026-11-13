@@ -805,7 +805,7 @@ fn report_html(handle: &str) -> Result<String> {
     let experiment = store::is_experiment(&dir);
     let (view, mut data) = if experiment { ("experiment", store::read_json(&dir.join("result.json"))?) } else { ("recording", store::read_json(&dir.join("meta.json"))?) };
     if !experiment {
-        super::record::omit_refused_display(&mut data);
+        super::report::recording_display(&dir, &mut data);
     }
     super::report::attach_videos(&mut data, (!experiment).then_some(dir.as_path()), &super::report::Videos::Daemon)?;
     let html = super::report::html(view, &data);

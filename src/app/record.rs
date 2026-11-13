@@ -1560,8 +1560,14 @@ pub(super) fn omit_refused_display(meta: &mut Value) {
     if let Some(why) = frames_refused(meta) {
         let why = why.to_string();
         meta["frames_refused"] = json!(why);
-        if let Some(v) = meta["values"].as_object_mut() {
-            v.retain(|k, _| !validity::display_metric(k));
+        let strip = |m: &mut Value| {
+            if let Some(v) = m.get_mut("values").and_then(Value::as_object_mut) {
+                v.retain(|k, _| !validity::display_metric(k));
+            }
+        };
+        strip(meta);
+        if let Some(cases) = meta.get_mut("batch").and_then(Value::as_array_mut) {
+            cases.iter_mut().for_each(strip);
         }
         if meta["os_frames"]["values"].is_object() {
             meta["os_frames"] = json!({"refused":why});

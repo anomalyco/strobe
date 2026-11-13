@@ -18,23 +18,13 @@ fn handle(id: &str, source: Option<&Path>, exp: &Value, verb: &str, args: &str) 
         if verb == "report recording" {
             return super::super::report::film(folder).is_some();
         }
-        // Renderers separate commands with a middle dot; a native profile also lists short view names.
-        args.split(" · ").all(|q| {
-            let mut words = q.split_ascii_whitespace();
-            let mut view = words.next();
-            if view == Some("strobe") {
-                if words.next() != Some("query") || words.next() != Some(id) {
-                    return false;
-                }
-                view = words.next();
-            }
-            let Some(view) = view else { return false };
-            if view == "http" {
-                return crate::probe::http_probe::read(folder).is_some();
-            }
-            let Ok(a) = Args::parse(["query", id, view].into_iter().chain(words).map(str::to_string).collect()) else { return false };
-            a.check_command().is_ok() && recording_view(Rec::with_meta(folder, meta.clone(), None), view, &a, 15, true).is_ok()
-        })
+        let mut words = args.split_ascii_whitespace();
+        let Some(view) = words.next() else { return false };
+        if view == "http" {
+            return crate::probe::http_probe::read(folder).is_some();
+        }
+        let Ok(a) = Args::parse(["query", id, view].into_iter().chain(words).map(str::to_string).collect()) else { return false };
+        a.check_command().is_ok() && recording_view(Rec::with_meta(folder, meta, None), view, &a, 15, true).is_ok()
     };
     if let Some(dir) = source.and_then(Path::parent)
         && let Some(meta) = store::held_file(dir, &format!("{id}/meta.json"))
@@ -77,14 +67,30 @@ pub(in crate::app) fn recording_links(text: &str, source: Option<&Path>, exp: &V
             out.push_str(line);
             continue;
         };
-        let h = handles.entry((id, verb, args)).or_insert_with(|| handle(id, source, exp, verb, args));
         out += prefix;
         out += separator;
-        if let Ok(h) = h {
-            // A leak line gives two queries of this same recording.
-            let args = args.replace(&format!(" · strobe query {id} "), &format!(" · strobe query {h} "));
-            out += &format!("strobe {verb} {h} {args}");
-        } else if let Err(note) = h {
+        let mut previous = None;
+        let mut note = "";
+        let repeated = format!("strobe {verb} {id} ");
+        for segment in args.split(" · ") {
+            let tail = segment.strip_prefix(&repeated).unwrap_or(segment);
+            match handles.entry((id, verb, tail)).or_insert_with(|| handle(id, source, exp, verb, tail)) {
+                Ok(h) => {
+                    if previous.is_some() {
+                        out += " · ";
+                    }
+                    // Native views share an operand; leak queries repeat it. A promoted first view
+                    // and a view from a different folder always need the full command.
+                    if previous.as_ref() != Some(h) || tail != segment {
+                        out += &format!("strobe {verb} {h} ");
+                    }
+                    out += tail;
+                    previous = Some(h.clone());
+                }
+                Err(why) => note = why,
+            }
+        }
+        if previous.is_none() {
             if !prefix.split_whitespace().any(|w| w == id) && store::plain_id(id) {
                 out += id;
                 out += ": ";

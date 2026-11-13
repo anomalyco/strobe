@@ -892,6 +892,65 @@ let followed = 0
   checkText(prof,prof,"strobe query HANDLE hotspots",go(["query",prof,"summary"],0))
   for(const a of [["query",folder(prof),"summary"],["report",folder(prof),"--format","md"]]) checkText(prof,prof,"strobe query HANDLE hotspots",go(a,0))
   const paths=[...byPath,filmed]
+  // Stored results are the common case. With STROBE_REFERENCE set, compare whole stdout bytes to
+  // that release on exactly the same state. The only allowed edits remove verified failed views.
+  const reference=process.env.STROBE_REFERENCE
+  let compared=0, identical=0
+  const compareStored=(name:string,id:string,changes:[string,string][] = [])=>{
+    if(!reference)return
+    for(const a of [["query",id,"summary"],["report",id,"--format","md"]]) {
+      const old=Bun.spawnSync([reference,...a],{env:{...process.env,...fakeEnv},timeout:60000}), now=run(...a)
+      if(old.exitCode || now.exitCode) { fail(`stored ${name} ${a[0]}: ${old.exitCode}/${now.exitCode}`);continue }
+      let expected=old.stdout.toString()
+      for(const [before,after] of changes) {
+        if(!expected.includes(before))fail(`stored ${name} ${a[0]}: missing baseline line ${before}`)
+        expected=expected.replaceAll(before,after)
+      }
+      if(!Buffer.from(expected).equals(now.stdout)) {
+        const lines=expected.split("\n"), got=now.stdout.toString().split("\n"), i=lines.findIndex((l,i)=>l!==got[i]);fail(`stored ${name} ${a[0]}: expected ${lines[i]}, got ${got[i]}`)
+      }
+      compared++; if(old.stdout.equals(now.stdout))identical++
+    }
+  }
+  for(const id of made)compareStored(id,id)
+  const raw="rec_stored", q=`strobe query ${raw} `, nativeViews=["hotspots --by package","threads","frames"]
+  for(const shape of ["page","script","command","terminal","phone","native-windowed","native-windowless","native-launch","native-no-stacks","http","leak-memory","leak-snapshots","leak-no-snapshots"]) {
+    const d=folder(raw), nat=shape.startsWith("native"), leak=shape.startsWith("leak"), windowed=shape==="native-windowed"||shape==="native-no-stacks"
+    rmSync(d,{recursive:true,force:true})
+    const kind=nat?"native":shape==="terminal"?"tty":shape==="command"?"cli":shape==="script"||shape==="http"?"script":"web"
+    put(d,"meta.json",{...leanMeta(raw),native:nat,script:kind==="script",cli:kind==="cli",tty:kind==="tty",launch:shape==="native-launch",phone:shape==="phone"?{serial:"fixture"}:null,probes:"attribution",frames_refused:shape==="native-windowless"?"NotForTarget: no window":null})
+    if(nat) {
+      put(d,"threads.json",[])
+      if(shape!=="native-no-stacks")cpSync(join(folder(p2),"deep.json.gz"),join(d,"deep.json.gz"))
+      if(windowed)for(const f of ["frames.json","presents.json.gz"])cpSync(join(folder(native),f),join(d,f))
+    } else if(["page","phone","script","http"].includes(shape))cpSync(join(handmade,"cpu-0.cpuprofile"),join(d,"cpu-0.cpuprofile"))
+    if(shape==="http")gz(raw,"http_probe.json.gz",{config:{method:"GET",url:"http://127.0.0.1/",cadence_ms:10,timeout_ms:100,idle_ms:0,connection:"new",max_in_flight:1,headers:[],has_authorization:false,predicate:{status:[200,299]}},start_ns:1,end_ns:10,samples:[]})
+    if(leak) {
+      put(d,"memory.json",{readings:[{processes:[]}]})
+      if(shape==="leak-snapshots")for(const n of ["heap-s0","heap-s1","heap-0"])gz(raw,`${n}.heapsnapshot.gz`,snap)
+    }
+    const wantWhy=!["command","terminal"].includes(shape)
+    const s={...c(shape,raw,wantWhy?raw:undefined),target_kind:kind,state:"pass",values:shape==="http"?{"http.probes":1}:{}}
+    const all=leak?(shape==="leak-memory"?["memory --at 0","memory"]:["leaks","memory"]):nat?nativeViews:["hotspots --by package"]
+    const kept=all.filter(v=>!(v==="frames"&&!windowed || v.startsWith("hotspots")&&shape==="native-no-stacks" || v==="leaks"&&shape==="leak-no-snapshots"))
+    const line=(views:string[])=>views.map((v,i)=>i===0||leak?q+v:v).join(" · ")
+    const changes:[string,string][]=kept.length===all.length?[]:[[line(all),line(kept)]]
+    for(const v of all.filter(v=>!kept.includes(v)))if(run("query",raw,...v.split(" ")).exitCode===0)fail(`stored ${shape}: removed a working ${v}`)
+    const formats=leak?["leak"]:nat?["check","blocks","comparison","implementations"]:["check"]
+    for(const format of formats) {
+      if(format==="check")writeResult({kind:"check",series:[s]})
+      else if(leak)writeResult(comparison([{kind:"leak",case:shape,label:shape,leak:{head:{recording:raw,...(shape==="leak-memory"?{native_host:{}}:{})}}}],{}, {variants:[{role:"head",label:"head"}]}))
+      else if(format==="blocks")writeResult(comparison([{...synthetic.find(([n])=>n==="exp_syn_blocks")![1].series[0],target_kind:kind,attribution:{head:raw},timing_recordings:[{recording:raw}]}],{blocks:"2"}))
+      else writeResult(comparison([series(shape,kind,worse,{target_kind:kind,target_kinds:{base:kind,head:kind},attribution:{base:raw,head:raw}})],{}, {comparison:format==="implementations"?format:"builds"}))
+      compareStored(`${shape}/${format}`,exp,changes)
+      for(const a of [["query",exp,"summary"],["report",exp,"--format","md"]]) {
+        const text=go(a,0), lines=text.split(/\r?\n/).filter(l=>l.includes(q))
+        if(!lines.length || (wantWhy&&!lines.some(l=>l.endsWith(line(kept)))))fail(`stored ${shape}/${format}: missing ${line(kept)}: ${text}`)
+        for(const l of lines)for(const v of l.slice(l.indexOf(q)+q.length).split(" · ")){go(["query",raw,...v.replace(q,"").split(" ")],0);followed++}
+      }
+      if(changes.length)console.log(`stored ${shape}/${format}: ${line(all)} -> ${line(kept)}`)
+    }
+  }
   // Two views of the same result: the command is local to its reader, not its producer.
   // Use new IDs so no fixture left in this run's store can satisfy a missing recording.
   const carry = ["rec_carry_launch","rec_carry_profile","rec_carry_video"]
@@ -923,6 +982,8 @@ let followed = 0
   }
   verifyCarried(file,"missing"); writeCarried(join(fakeState,"recordings"),"exp_other"); writeCarried(copy,"exp_other")
   verifyCarried(file,"missing"); verifyCarried(exp,"missing"); writeCarried(join(fakeState,"recordings")); verifyCarried(file,"store")
+  compareStored("filmed check",exp)
+  if(reference)console.log(`stored byte comparison: ${compared} outputs, ${identical} identical, ${compared-identical} with refused segments removed`)
   writeCarried(copy); verifyCarried(file,"copy")
   for(const id of carry) rmSync(folder(id),{recursive:true}); verifyCarried(exp,"missing"); verifyCarried(file,"copy")
   for(const dir of [copy,join(fakeState,"recordings")]) {
@@ -942,13 +1003,20 @@ let followed = 0
   // Old metadata can still carry display readings next to a refusal. Neither a renderer nor
   // its backing JSON may resurrect them. Keep the independent main-thread reading.
   const offscreen=join(work,"offscreen"), staleValues={"frames.n":600,"frames.dropped.pct":10,"interaction.p95":1,"display.hz":60,"main.busy":55}
-  put(offscreen,"meta.json",{id:"rec_offscreen",kind:"record",headless:true,timing:"perturbed",duration_ms:1000,values:staleValues})
+  put(offscreen,"meta.json",{id:"rec_offscreen",kind:"record",headless:true,timing:"perturbed",duration_ms:1000,values:staleValues,batch:batch.map(c=>({...c,values:staleValues}))})
   const summary=JSON.parse(go(["query",offscreen,"summary","--json"],0))
   const md=JSON.parse(go(["report",offscreen,"--format","md","--json"],0)).markdown
   const idle=go(["query",offscreen,"insights"],0)
   const report=JSON.parse(go(["report",offscreen,"--format","html","--json"],0))
   const html=readFileSync(report.path,"utf8"), payload=JSON.parse(html.match(/const STROBE = (.+?);\r?\n/)?.[1] ?? "null")
   for(const m of [summary,payload?.data]) if(!m?.frames_refused || m.values["main.busy"]!==55 || Object.keys(m.values).some(k=>/^(frames|interaction|display)\./.test(k)))fail(`display values escaped in a recording payload: ${JSON.stringify(m?.values)}`)
+  for(const m of [summary,payload?.data,JSON.parse(go(["query",offscreen,"summary","--case","first","--json"],0))])for(const c of m.batch)if(JSON.stringify(c.values)!==JSON.stringify({"main.busy":55}))fail(`batch display values escaped: ${JSON.stringify(c)}`)
+  if(payload.data.pipeline_frames_available!==false)fail("report offers compositor reports without a trace")
+  for(const [label,fields,available] of [["page",{},true],["other engine",{engine:"firefox"},false],["inspector",{wir:true},false],["launch",{launch:true},false],["untraced",{traced:false},false]] as const){
+    const dir=join(work,"frame link",label);put(dir,"meta.json",{id:"rec_frame_link",headless:true,...fields});cpSync(join(old,"trace.pftrace"),join(dir,"trace.pftrace"))
+    const report=JSON.parse(go(["report",dir,"--format","html","--json"],0)), html=readFileSync(report.path,"utf8")
+    if(JSON.parse(html.match(/const STROBE = (.+?);\r?\n/)![1]).data.pipeline_frames_available!==available)fail(`wrong frames link: ${label}`)
+  }
   if(!md.includes("refused (Headless") || /\bpresented\b|vsyncs dropped|input → presentation/.test(md) || !idle.includes("55.0% busy") || idle.includes("frames per second")) fail(`headless summary/insights: ${md} ${idle}`)
   for (const kind of ["implementations","video","blocks"]) {
     const dir=join(copy,kind),id=`exp_copy_${kind}`

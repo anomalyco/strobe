@@ -953,6 +953,8 @@ There is no portable export of an experiment with its recordings. A separately c
 queried or reported by its own path. The summary and Markdown keep missing recordings' IDs as
 provenance without commands. These two renderers can link a validated adjacent recording by path;
 that lookup does not make the copy a bundle that other experiment commands can open.
+On a line with several recording views, each offered view must answer separately. Missing frame
+capture, for example, removes `frames` without hiding available stacks or threads.
 An untraced check does not recommend `frames` in its summary. A lean headless page check has no
 presented frames, even with `--trace full`. `--why always` keeps a separate attribution recording:
 its `frames` view reports compositor slices and their durations, not a display rate, dropped refreshes

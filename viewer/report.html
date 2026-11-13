@@ -6519,7 +6519,7 @@ function renderRecording(m) {
   const otherEngine = !!m.engine && m.engine !== "chromium";
   const cmds = [
     ["Open in Perfetto: one timeline with flame graphs, runs, threads and presents", `strobe open ${recId}`],
-    m.frames_refused && m.traced === false ? null : [m.frames_refused ? "Compositor pipeline reports (not screen measurements)" : "Worst frames in this recording", `strobe query ${recId} frames`],
+    m.frames_refused && !m.pipeline_frames_available ? null : [m.frames_refused ? "Compositor pipeline reports (not screen measurements)" : "Worst frames in this recording", `strobe query ${recId} frames`],
     ["Busy share by thread", `strobe query ${recId} threads`],
     /attribution|cpu/.test(String(m.probes || "")) ? ["CPU hotspots by package", `strobe query ${recId} hotspots --by package`] : null,
     /attribution/.test(String(m.probes || "")) ? ["Forced layout & style call sites", `strobe query ${recId} layout`] : null,
