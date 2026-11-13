@@ -2297,9 +2297,30 @@ pub fn start_now() -> Option<u64> {
 pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
     use std::sync::atomic::{AtomicPtr, Ordering};
     static TARGET: AtomicPtr<std::sync::atomic::AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
+    // When the first stop came (`now_ns`): the same stop can arrive twice at once, once to strobe's
+    // process group (a terminal's Ctrl-C, `timeout`) and once passed on by a wrapper that got it too
+    // (the npm package's `bin/strobe.js`). A repeat within 300 ms is that stop; a later one ends strobe.
+    static FIRST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // A second stop asks for one now: the `strobe-stop-now` thread ends what strobe launched (by proof, waited
+    // for, what is left said) and exits 130, rather than the signal ending strobe with its launches
+    // still running (a browser is in a process group of its own). Only a third, 300 ms or more after the
+    // second, ends strobe at once (should that end hang).
+    static NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static NOW_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     extern "C" fn handler(sig: libc::c_int) {
         let flag = TARGET.load(Ordering::SeqCst);
         if !flag.is_null() && !unsafe { (*flag).swap(true, Ordering::SeqCst) } {
+            FIRST.store(now_ns(), Ordering::SeqCst);
+            return;
+        }
+        if now_ns().saturating_sub(FIRST.load(Ordering::SeqCst)) < 300_000_000 {
+            return;
+        }
+        if !flag.is_null() && !NOW.swap(true, Ordering::SeqCst) {
+            NOW_AT.store(now_ns(), Ordering::SeqCst);
+            return;
+        }
+        if now_ns().saturating_sub(NOW_AT.load(Ordering::SeqCst)) < 300_000_000 {
             return;
         }
         unsafe {
@@ -2312,6 +2333,17 @@ pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
             libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
             libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
         }
+        let _ = std::thread::Builder::new().name("strobe-stop-now".into()).spawn(|| {
+            while !NOW.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            spawn::stop_launches();
+            let left = spawn::left_alone();
+            if !left.is_empty() {
+                eprint!("{}", spawn::left_alone_text(&left));
+            }
+            std::process::exit(130);
+        });
     }
 }
 

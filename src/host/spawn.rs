@@ -5,7 +5,7 @@
 //! launched for, which whatever it starts inherits: what left the group (a detached service, a
 //! double-forked daemon) still carries the stamp.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 /// Every process strobe launches (an isolated app, a browser, a command target) carries the folder it
@@ -310,11 +310,13 @@ struct Group {
 /// One launch `end_launches` would end: its root's pid and start time, and whether the root is
 /// strobe's own child (never reaped before its end, so its pid and its process group stay its own) or
 /// an app launchd started for strobe (`open_owned`), reaped by launchd as it exits.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Live {
     pid: u32,
     start: Option<u64>,
     child: bool,
+    /// The folder the launch was for (its stamp): what left its tree and group still carries it.
+    home: Option<PathBuf>,
 }
 
 /// Every `Owned` launch not yet ended: what `end_launches` ends on a stop. A child launch registers
@@ -491,13 +493,19 @@ pub fn left_alone_text(left: &[LeftAlone]) -> String {
     s
 }
 
-/// Ends every launch this strobe still owns (each one's tree, then a child's group; Windows ends the
-/// jobs itself when strobe exits): for a stop of a command that then exits (`isolate::end_on_stop`).
-/// An app launchd started for strobe is ended only as far as `kill_opened` proves it the launch's,
-/// and never by a process group: strobe made none. The launches stay ended: their `end` only reaps them.
-pub fn end_launches() {
+/// Ends every launch this strobe still owns (each one's tree, then a child's group), and then what
+/// left them that is still the launches' by proof: on Linux everything in the launch cgroups strobe
+/// made (`cgroup::end_all`, which says what did not go), on Windows everything in their jobs (which
+/// the OS would end only once strobe has exited): for a stop of a command that then exits
+/// (`isolate::end_on_stop`), where no launch's own end runs. An app launchd started for strobe is
+/// ended only as far as `kill_opened` proves it the launch's, and never by a process group: strobe
+/// made none. Returns the folders the launches were for, whose stamped processes the caller ends and
+/// waits for. The launches stay ended: their `end` only reaps them.
+pub fn end_launches() -> Vec<PathBuf> {
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut homes = Vec::new();
     for l in live.drain(..) {
+        homes.extend(l.home.clone());
         if !l.child {
             if let Some(start) = l.start {
                 super::kill_opened(l.pid, start);
@@ -512,6 +520,43 @@ pub fn end_launches() {
         unsafe {
             libc::kill(-(l.pid as i32), libc::SIGKILL);
         }
+    }
+    drop(live);
+    #[cfg(target_os = "linux")]
+    super::cgroup::end_all();
+    #[cfg(windows)]
+    for (_, _, job) in std::mem::take(&mut *JOBS.lock().unwrap_or_else(|e| e.into_inner())) {
+        unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(job as _, 1) };
+    }
+    homes.sort();
+    homes.dedup();
+    homes
+}
+
+/// A stop's end of everything strobe launched, for a stop that exits at once (`isolate::end_on_stop`,
+/// a second Ctrl-C): every launch (`end_launches`), then what carries a launch's stamp and is still
+/// that process (its stamp and start time read again right before; a browser's crash reporter on a
+/// session of its own), then up to 2 s for those to go. What is still there then is said (`leave`):
+/// a stop ends sooner, never by leaving that unsaid.
+pub fn stop_launches() {
+    let homes = end_launches();
+    let ours = |h: &Path| {
+        let k = home_key(h);
+        stamped().into_iter().filter(move |s| s.stamp.home == k && super::start_time(s.pid) == Some(s.start) && stamp_of(s.pid).as_ref() == Some(&s.stamp))
+    };
+    for h in &homes {
+        for s in ours(h) {
+            super::kill_opened(s.pid, s.start);
+        }
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut left: Vec<Stamped> = homes.iter().flat_map(|h| ours(h)).collect();
+    while !left.is_empty() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        left = homes.iter().flat_map(|h| ours(h)).collect();
+    }
+    for s in left {
+        leave(Some(s.pid), "a process launched for a launch strobe ended at a stop (it carries the launch's stamp)", "it was still running 2 s after strobe ended it");
     }
 }
 
@@ -589,7 +634,7 @@ pub fn close_job(job: isize) {
 /// found by `group_pids` for `home`. Taken back by `unlist_launch` before it is ended.
 #[cfg(windows)]
 pub fn list_launch(pid: u32, job: Option<isize>, home: Option<&Path>) {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: None, child: true });
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: None, child: true, home: home.map(Path::to_path_buf) });
     if let Some(j) = job {
         JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((pid, home.map(home_key), j));
     }
@@ -1282,7 +1327,7 @@ pub fn spawn_owned(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Optio
     // Held from before the spawn until the launch is listed: a stop in between ends it too.
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     let owned = spawn_group(cmd, cpus, flags, home)?;
-    live.push(Live { pid: owned.pid(), start: owned.start, child: true });
+    live.push(Live { pid: owned.pid(), start: owned.start, child: true, home: home.map(Path::to_path_buf) });
     Ok(owned)
 }
 
@@ -1478,7 +1523,7 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
     let released_ns = before_ns;
     let pgid = child.id();
     let start = super::start_time(pgid);
-    live.push(Live { pid: pgid, start, child: true });
+    live.push(Live { pid: pgid, start, child: true, home: home.map(Path::to_path_buf) });
     Ok(Owned {
         process: Proc::Child(child),
         group: Some(Group { pgid }),
@@ -1514,7 +1559,7 @@ pub fn open_owned(bundle: &super::macos::Bundle, args: &[String], env: &[(String
     let start = opened.start;
     let pid = if start.is_some() { opened.pid } else { 0 };
     match start {
-        Some(start) => LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: Some(start), child: false }),
+        Some(start) => LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: Some(start), child: false, home: Some(home.to_path_buf()) }),
         None => leave(
             Some(opened.pid),
             "the process Launch Services answered strobe's launch with",

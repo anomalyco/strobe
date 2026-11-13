@@ -1240,10 +1240,12 @@ pub fn release_home(home: &Path) {
 
 /// While alive, a stop of strobe (Ctrl-C, SIGINT, SIGTERM) waits for a Launch Services launch under
 /// way to end what it started (macOS, `macos::opening`, 2.5 s at most), ends every launch it owns (each one's tree
-/// and group or job: `spawn::end_launches`), then what still runs from `home` (stamped with it),
+/// and group, its Linux cgroup or Windows job: `spawn::end_launches`) and what carries a launch's stamp
+/// (a browser's crash reporter on a session of its own), waits up to 2 s for those to go and says what
+/// did not (`spawn::leave`), then what still runs from `home` (stamped with it),
 /// removes that home when `prepare_home` made it now, and exits 130: for a command with no stop
 /// points of its own (`look`), which leaves nothing running for the next strobe to reap. A browser's
-/// profile goes with the next strobe's `reap_dead_owners`. Dropped (before the command closes what
+/// profile folder goes with the next strobe's `reap_dead_owners`. Dropped (before the command closes what
 /// it launched), the watcher has ended: a stop that came first finished its work and exited.
 pub struct EndOnStop {
     done: std::sync::Arc<std::sync::Mutex<bool>>,
@@ -1274,7 +1276,10 @@ pub fn end_on_stop(home: Option<&Home>) -> EndOnStop {
                             std::thread::sleep(std::time::Duration::from_millis(10));
                         }
                     }
-                    host::spawn::end_launches();
+                    // Each launch's tree and group, its cgroup or job, then what left them with its
+                    // stamp (a browser's crash reporter, on its own session), waited for: what is still
+                    // there 2 s on is said below, never left unsaid for speed.
+                    host::spawn::stop_launches();
                     if let Some((dir, fresh)) = &home {
                         release_home(dir);
                         if *fresh {
