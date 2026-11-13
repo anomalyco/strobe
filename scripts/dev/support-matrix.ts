@@ -1,7 +1,7 @@
 // The verified/preview matrix (`SUPPORT_MATRIX` in src/support.rs, SPEC 21.1), printed for one host or checked.
 //
 //   bun scripts/dev/support-matrix.ts [--host windows-x64|windows-arm64|macos-arm64|macos-x64|linux-x64|linux-arm64] [--json]
-//   bun scripts/dev/support-matrix.ts --check [--no-rust]
+//   bun scripts/dev/support-matrix.ts --check [--no-rust] [--rot]
 //
 // Printing: every runtime × capability on the host, its label there and the evidence or what is missing, and
 // which combinations strobe refuses (on that OS, or for that kind of target). It reads the source, so it needs no
@@ -12,7 +12,9 @@
 // this is a dev check run by hand). From the source alone: one row per runtime and capability, every cell's text a
 // table cell (no `|`), every evidence record complete (8 fields; date, version and machine one field each; its
 // fixture a file under scripts/dev/), every name a round trip of its variant, the schema's enums the code's, every
-// metric's capability a capability, the parser on wrapped and escaped Rust. Then (without --no-rust) a small program
+// metric's capability a capability, the parser on wrapped and escaped Rust. The no-rot rule (`WATCH`, below): no
+// verified cell's measuring code changed since its evidence or its review (git; a shallow clone fetches what it
+// lacks); --rot prints each cell's spans, held or changed. Then (without --no-rust) a small program
 // against the strobe library (cargo, offline, in the temp folder; CARGO_TARGET_DIR is reused when set) prints what
 // the real `support` functions answer: every cell on every host, the lookups, refusals, modifiers and phrases, each
 // held to what this file expects. `parseSupport` and `onHost` are what doc-check can import.
@@ -36,6 +38,9 @@ export type Support = {
 }
 
 export const EVIDENCE_KEYS = ["date", "version", "machine", "fixture", "known", "aa", "planted", "boundary"]
+// A later commit at which a person read every change to the cell's watched code since `version` and found that
+// none can move its numbers, and the one sentence why (the no-rot rule, `rotProblems`).
+export const REVIEW_KEYS = ["reviewed_at", "reviewed_why"]
 
 // A Rust string literal's value: its escapes, and a `\` at a line's end that drops the newline and the next
 // line's leading whitespace.
@@ -104,9 +109,20 @@ export function parseSupport(text: string): Support {
   const evidenceProblems: string[] = []
   for (const m of code.matchAll(/const (\w+)\s*:\s*Evidence\s*=\s*Evidence\s*\{([^{}]*)\}\s*;/g)) {
     const fields: Record<string, string> = {}
-    for (const f of m[2].matchAll(new RegExp(`(\\w+)\\s*:\\s*${STR}`, "g"))) fields[f[1]] = str(f[2])
+    const written: string[] = []
+    // A field is a literal, Some(a literal or a &str const) or None.
+    for (const f of m[2].matchAll(new RegExp(`(\\w+)\\s*:\\s*(?:${STR}|Some\\(\\s*(?:${STR}|([A-Z_][A-Z0-9_]*))\\s*,?\\s*\\)|(None))`, "g"))) {
+      written.push(f[1])
+      if (f[5] !== undefined) continue
+      const v = f[4] !== undefined ? consts.get(f[4]) : str(f[2] ?? f[3])
+      if (v === undefined) evidenceProblems.push(`Evidence ${m[1]}: ${f[1]} names no &str const ${f[4]}`)
+      else fields[f[1]] = v
+    }
     for (const k of EVIDENCE_KEYS) if (!fields[k]?.trim()) evidenceProblems.push(`Evidence ${m[1]}: no ${k}`)
-    for (const k of Object.keys(fields)) if (!EVIDENCE_KEYS.includes(k)) evidenceProblems.push(`Evidence ${m[1]}: unknown field ${k}`)
+    for (const k of written) if (!EVIDENCE_KEYS.includes(k) && !REVIEW_KEYS.includes(k)) evidenceProblems.push(`Evidence ${m[1]}: unknown field ${k}`)
+    for (const k of REVIEW_KEYS) if (!written.includes(k)) evidenceProblems.push(`Evidence ${m[1]}: no ${k} (None until a person reviews a later change)`)
+    if (("reviewed_at" in fields) !== ("reviewed_why" in fields)) evidenceProblems.push(`Evidence ${m[1]}: reviewed_at and reviewed_why go together (a review says why the numbers cannot have moved)`)
+    if (fields.reviewed_at !== undefined && !/^[0-9a-f]{7,40}$|^v\d+\.\d+\.\d+$/.test(fields.reviewed_at)) evidenceProblems.push(`Evidence ${m[1]}: reviewed_at ${fields.reviewed_at} is no commit or tag`)
     evidence.set(m[1], fields)
   }
   const cell = (src: string, where: string): Cell => {
@@ -271,6 +287,10 @@ const MAC_CLI_WALL_AND_COUNTS_WITH_A_LONG_NAME: Evidence =
         planted: "+97.10% \\
             [+96.95 … +97.33]",
         boundary: "cmd: { exit 1 }; refused RunIncomplete",
+        reviewed_at: Some(
+            "0123abc",
+        ),
+        reviewed_why: Some("a rename; { braces } and \\"quotes\\""),
     };
 pub const SUPPORT_MATRIX: &[Row] = &[
     Row {
@@ -298,7 +318,15 @@ pub const OUTSIDE_PAGE: Modifier = Modifier { windows: Preview("a"), macos: Prev
     want("boundary", r.windows.evidence.boundary, "cmd: { exit 1 }; refused RunIncomplete")
     want("planted", r.windows.evidence.planted, "+97.10% [+96.95 … +97.33]")
     want("date", r.windows.evidence.date, "2026-11-12")
+    want("reviewed_at", r.windows.evidence.reviewed_at, "0123abc")
+    want("reviewed_why", r.windows.evidence.reviewed_why, `a rename; { braces } and "quotes"`)
   }
+  const unreviewed = parseSupport(text.replace(/reviewed_at: Some\([^)]*\)/, "reviewed_at: None").replace(/reviewed_why: Some\([^)]*\)/, "reviewed_why: None"))
+  const ur = unreviewed.rows[0]?.windows
+  want("unreviewed problems", unreviewed.evidenceProblems.length, 0)
+  want("unreviewed reviewed_at", ur?.kind === "verified" ? ur.evidence.reviewed_at : "?", undefined)
+  const half = parseSupport(text.replace(/reviewed_why: Some\([^)]*\)/, "reviewed_why: None"))
+  want("a review without its why", half.evidenceProblems.length, 1)
   want("wrapped reason", r?.macos.kind === "preview" ? r.macos.why : null, `a reason with } and }; and "quotes" and it's fine`)
   want("inline reason", r?.linux.kind === "refused" ? r.linux.why : null, "inline, with a } brace")
   want("evidence problems", s.evidenceProblems.length, 0)
@@ -334,9 +362,9 @@ const CASES: Case[] = [
   ["tty vs native, head read pixels", p(`resolve(${two("Tty", "Native")}, Capability::ProcessCpu, Host::WindowsX64, ${th({ head_pixels: true })})`), `${PRE}capability,pixels`],
   ["windowless side cannot read pixels", p(`resolve(${two("NativeWindowless", "Native")}, Capability::ProcessCpu, Host::WindowsX64, ${th({ base_pixels: true })})`), "none"],
   ["phone page with pixels", p(rm(one("AndroidChrome"), "main.work", "MacosArm64", th({ base_pixels: true }))), `${PRE}capability,pixels`],
-  ["page from outside, frames", p(rm(one("ChromiumPage"), "frames.dropped.pct", "MacosArm64", th({ outside_page: true }))), `${PRE}capability,outside_page`],
+  ["page from outside, frames", p(rm(one("ChromiumPage"), "frames.dropped.pct", "MacosArm64", th({ outside_page: true }))), `${PRE}outside_page`],
   ["page from outside, page engine untouched", p(rm(one("ChromiumPage"), "main.work", "MacosArm64", th({ outside_page: true }))), `${PRE}capability`],
-  ["outside applies to pages only", p(rm(one("NativeWindowless"), "cpu.work", "MacosArm64", th({ outside_page: true }))), `${PRE}capability`],
+  ["outside applies to pages only", p(rm(one("NativeWindowless"), "cpu.work", "MacosArm64", th({ outside_page: true }))), "verified|"],
   ["os input", p(rm(one("Native"), "interaction.p95", "WindowsX64", th({ os_input: true }))), `${PRE}capability,os_input`],
   // Finding 3: a phone measures nothing of this computer's processes; of_target is strict.
   ["phone process memory row", `support(Runtime::AndroidChrome, Capability::ProcessMemory, Host::MacosArm64).map(Support::name).unwrap_or("none").to_string()`, "none"],
@@ -361,7 +389,7 @@ const CASES: Case[] = [
   ["script main.work", p(rm(one("Script"), "main.work", "MacosArm64")), "none"],
   ["script js.heap.retained", p(rm(one("Script"), "js.heap.retained", "LinuxX64")), `${PRE}capability`],
   ["page js.heap.retained", p(rm(one("ChromiumPage"), "js.heap.retained", "LinuxX64")), "none"],
-  ["cli memory.peak", p(rm(one("Cli"), "memory.peak", "WindowsX64")), `${PRE}capability`],
+  ["cli memory.peak", p(rm(one("Cli"), "memory.peak", "WindowsX64")), "verified|"],
   ["native memory.peak", p(rm(one("NativeWindowless"), "memory.peak", "WindowsX64")), "none"],
   ["cli metric.loop_ms", p(rm(one("Cli"), "metric.loop_ms", "LinuxX64")), `${PRE}capability`],
   ["script metric.x", p(rm(one("Script"), "metric.x", "LinuxX64")), "none"],
@@ -369,7 +397,7 @@ const CASES: Case[] = [
   ["native app.x", p(rm(one("Native"), "app.x", "LinuxX64")), "none"],
   ["tty cpu.pty_host windows", p(rm(one("Tty"), "cpu.pty_host", "WindowsX64")), `${PRE}capability`],
   ["tty cpu.pty_host linux", p(rm(one("Tty"), "cpu.pty_host", "LinuxX64")), "none"],
-  ["cli cli.launch", p(rm(one("Cli"), "cli.launch", "WindowsX64")), `${PRE}capability`],
+  ["cli cli.launch", p(rm(one("Cli"), "cli.launch", "WindowsX64")), "verified|"],
   ["script cli.launch", p(rm(one("Script"), "cli.launch", "WindowsX64")), "none"],
   ["page cpu.main", p(rm(one("ChromiumPage"), "cpu.main", "WindowsX64")), "none"],
   ["windowless ui.cpu", p(rm(one("NativeWindowless"), "ui.cpu", "WindowsX64")), "none"],
@@ -418,11 +446,12 @@ const CASES: Case[] = [
   ["overall none", `overall(Vec::new()).map(Support::name).unwrap_or("none").to_string()`, "none"],
   ["overall mixed", `overall([Support::Verified, Support::Preview]).map(Support::name).unwrap_or("none").to_string()`, "preview"],
   ["comparison refused", `resolve_comparison(${one("Cli")}, "cpu.work", Host::WindowsX64, ${T}, true).map(Support::name).unwrap_or("none").to_string()`, "none"],
-  ["comparison", `resolve_comparison(${one("Cli")}, "cpu.work", Host::WindowsX64, ${T}, false).map(Support::name).unwrap_or("none").to_string()`, "preview"],
+  ["comparison", `resolve_comparison(${one("Cli")}, "cpu.work", Host::WindowsX64, ${T}, false).map(Support::name).unwrap_or("none").to_string()`, "verified"],
   ["target_support cli windows", `target_support(Runtime::Cli, Host::WindowsX64).map(Support::name).unwrap_or("none").to_string()`, "preview"],
   ["target_support webview macos", `target_support(Runtime::WebviewApp, Host::MacosArm64).map(Support::name).unwrap_or("none").to_string()`, "none"],
   // Phrases, as the surfaces will print them.
-  ["phrase windowless cpu", phrase(`resolve(${one("NativeWindowless")}, Capability::ProcessCpu, Host::MacosArm64, ${T})`), "preview (windowless native · process CPU on macOS arm64: runtime checks held; not yet checked against a known-answer fixture)"],
+  ["phrase windowless wall", phrase(`resolve(${one("NativeWindowless")}, Capability::WallAndCounts, Host::MacosArm64, ${T})`), "preview (windowless native · wall time and counts on macOS arm64: runtime checks held; not yet checked against a known-answer fixture)"],
+  ["phrase windowless cpu", phrase(`resolve(${one("NativeWindowless")}, Capability::ProcessCpu, Host::MacosArm64, ${T})`), "verified (windowless native · process CPU on macOS arm64)"],
   ["phrase script heap", phrase(rm(one("Script"), "js.heap.retained", "LinuxX64")), "preview (script · JS heap on Linux x64: runtime checks held; not yet checked against a known-answer fixture)"],
   ["phrase phone", phrase(rm(one("AndroidChrome"), "main.work", "MacosArm64")), "preview (chrome on a phone · page engine (from macOS arm64): runtime checks held; not yet checked against a known-answer fixture)"],
   [
@@ -433,7 +462,12 @@ const CASES: Case[] = [
   [
     "phrase outside page with OS input",
     phrase(rm(one("ChromiumPage"), "frames.dropped.pct", "MacosArm64", th({ outside_page: true, os_input: true }))),
-    "preview (chromium page · frames (page measured from outside, OS input) on macOS arm64: runtime checks held; not yet checked against a known-answer fixture; a page measured from outside (the host's clock, the OS's frames) is not yet checked against a known answer; input through the OS is not yet checked against a known answer)",
+    "preview (chromium page · frames (page measured from outside, OS input) on macOS arm64: runtime checks held; a page measured from outside (the host's clock, the OS's frames) is not yet checked against a known answer; input through the OS is not yet checked against a known answer)",
+  ],
+  [
+    "phrase outside page with OS input, preview frames",
+    phrase(rm(one("ChromiumPage"), "frames.dropped.pct", "WindowsX64", th({ outside_page: true, os_input: true }))),
+    "preview (chromium page · frames (page measured from outside, OS input) on Windows x64: runtime checks held; not yet checked against a known-answer fixture; a page measured from outside (the host's clock, the OS's frames) is not yet checked against a known answer; input through the OS is not yet checked against a known answer)",
   ],
   ["phrase verified", built(`tier: Support::Verified, runtime: Runtime::Cli, capability: Capability::ProcessCpu, host: Host::WindowsX64, preview_by: vec![]`), "verified (cli · process CPU on Windows x64)"],
   [
@@ -441,7 +475,7 @@ const CASES: Case[] = [
     built(`tier: Support::Preview, runtime: Runtime::Cli, capability: Capability::ProcessCpu, host: Host::WindowsArm64, preview_by: vec![Cause::Architecture]`),
     "preview (cli · process CPU on Windows arm64: runtime checks held; verified on Windows x64 only)",
   ],
-  ["status windows", `status_summary(Host::WindowsX64).line()`, "every path is preview on Windows x64: none is checked against a known answer here yet"],
+  ["status windows", `status_summary(Host::WindowsX64).line()`, "verified on Windows x64: cli (process CPU, process memory) · 84 more paths preview"],
   ["status linux arm64", `status_summary(Host::LinuxArm64).line()`, "every path is preview on Linux arm64: known answers are checked on Linux x64 only"],
 ]
 
@@ -628,6 +662,562 @@ ${CASES.map(([k, e]) => `    println!("case\\t{}\\t{}", ${JSON.stringify(k)}, ${
   console.log(`rust: ${cells} cells, ${CASES.length} cases, ${reads} runtime_reads`)
 }
 
+// ---------- the no-rot rule (SPEC 21.1) ----------
+//
+// A verified cell's evidence holds for the code that produced it. `WATCH` names, for each cell, the spans of code
+// that compute its numbers; `--check` compares each span at the evidence's revision (`Evidence.version`, or
+// `reviewed_at` when a person has read a later change and found it structural) with the working tree, after
+// dropping comments, whitespace and a trailing comma before a closing bracket (what rustfmt changes), and fails on
+// any other difference. Spans are functions (`file#name`, every fn of that name: one per OS under cfg;
+// `file#Type::name`, `file#impl Type`, `file#mod name`, `file#const NAME`), a JavaScript block opened at an
+// anchor's first `{` (`file#@anchor text`), or a whole small file (`file`).
+
+type Os = "windows" | "macos" | "linux"
+const OSES: Os[] = ["windows", "macos", "linux"]
+
+// The text's tokens: comments and whitespace gone, a string or char literal one token (its quotes and escapes as
+// written), every other punctuation character its own token. `js`: JavaScript quotes and template literals.
+export function tokens(text: string, js = false): string[] {
+  const out: string[] = []
+  const n = text.length
+  let i = 0
+  const quoted = (q: string) => {
+    let j = i + 1
+    while (j < n && text[j] !== q) j += text[j] === "\\" ? 2 : 1
+    out.push(text.slice(i, j + 1))
+    i = j + 1
+  }
+  while (i < n) {
+    const c = text[i]
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      i++
+    } else if (c === "/" && text[i + 1] === "/") {
+      const e = text.indexOf("\n", i)
+      i = e < 0 ? n : e
+    } else if (c === "/" && text[i + 1] === "*") {
+      // Rust's block comments nest.
+      let depth = 1
+      i += 2
+      while (i < n && depth > 0) {
+        if (!js && text.startsWith("/*", i)) (depth++, (i += 2))
+        else if (text.startsWith("*/", i)) (depth--, (i += 2))
+        else i++
+      }
+    } else if (!js && /^b?r#*"/.test(text.slice(i, i + 12)) && !/\w/.test(text[i - 1] ?? "")) {
+      const m = text.slice(i).match(/^b?r(#*)"/)!
+      const end = text.indexOf(`"${m[1]}`, i + m[0].length)
+      const stop = end < 0 ? n : end + 1 + m[1].length
+      out.push(text.slice(i, stop))
+      i = stop
+    } else if (c === '"' || (js && c === "'")) {
+      quoted(c)
+    } else if (js && c === "`") {
+      // A template literal, `${…}` parts and all, as one token.
+      let j = i + 1
+      let depth = 0
+      while (j < n && (depth > 0 || text[j] !== "`")) {
+        if (text[j] === "\\") j++
+        else if (text[j] === "$" && text[j + 1] === "{") (depth++, j++)
+        else if (text[j] === "}" && depth > 0) depth--
+        j++
+      }
+      out.push(text.slice(i, j + 1))
+      i = j + 1
+    } else if (!js && c === "'" && /^'(\\(u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'])'/.test(text.slice(i, i + 12))) {
+      quoted("'")
+    } else if (/\w/.test(c)) {
+      let j = i + 1
+      while (j < n && /\w/.test(text[j])) j++
+      out.push(text.slice(i, j))
+      i = j
+    } else {
+      out.push(c)
+      i++
+    }
+  }
+  return out
+}
+
+// One canonical text for a token run: rustfmt adds and drops a trailing comma before a closing bracket.
+const canon = (t: string[]) => t.filter((x, k) => !(x === "," && [")", "]", "}"].includes(t[k + 1] ?? ""))).join(" ")
+
+type Item = { key: string; from: number; to: number }
+
+// The index of the bracket that closes the one at `at`.
+function closing(t: string[], at: number): number {
+  const open = t[at]
+  const close = ({ "{": "}", "(": ")", "[": "]" } as Record<string, string>)[open]
+  let depth = 0
+  for (let k = at; k < t.length; k++) {
+    if (t[k] === open) depth++
+    else if (t[k] === close && --depth === 0) return k
+  }
+  return t.length - 1
+}
+
+// The items of a Rust token stream: fns (`name`, and `Type::name` inside `impl Type`), `impl Type`, `mod name`,
+// `const NAME` and `static NAME`, each with its token range.
+export function items(t: string[]): Item[] {
+  const out: Item[] = []
+  const walk = (from: number, to: number, ty: string | null) => {
+    let i = from
+    while (i < to) {
+      const w = t[i]
+      if (w === "fn" && /^\w+$/.test(t[i + 1] ?? "")) {
+        let j = i + 2
+        let depth = 0
+        while (j < to && !(depth === 0 && (t[j] === "{" || t[j] === ";"))) {
+          if (t[j] === "(" || t[j] === "[") depth++
+          else if (t[j] === ")" || t[j] === "]") depth--
+          j++
+        }
+        if (t[j] !== "{") {
+          i = j + 1
+          continue
+        }
+        const end = closing(t, j)
+        out.push({ key: ty ? `${ty}::${t[i + 1]}` : t[i + 1], from: i, to: end })
+        i = end + 1
+      } else if (w === "impl" && (i === 0 || ["}", ";", "]"].includes(t[i - 1]) || /^(pub|unsafe)$/.test(t[i - 1]))) {
+        let j = i + 1
+        while (j < to && t[j] !== "{" && t[j] !== ";") j++
+        if (t[j] !== "{") {
+          i = j + 1
+          continue
+        }
+        // The type: after `for` when there is one, generics left out, the last name of its path.
+        let head = t.slice(i + 1, j)
+        const angle: string[] = []
+        let d = 0
+        for (const x of head) {
+          if (x === "<") d++
+          else if (x === ">" && d > 0) d--
+          else if (d === 0) angle.push(x)
+        }
+        head = angle
+        const where = head.indexOf("where")
+        if (where >= 0) head = head.slice(0, where)
+        const f = head.lastIndexOf("for")
+        const name = [...(f >= 0 ? head.slice(f + 1) : head)].reverse().find((x) => /^[A-Za-z_]\w*$/.test(x) && x !== "dyn" && x !== "mut") ?? "?"
+        const end = closing(t, j)
+        out.push({ key: `impl ${name}`, from: i, to: end })
+        walk(j + 1, end, name)
+        i = end + 1
+      } else if (w === "mod" && /^\w+$/.test(t[i + 1] ?? "") && t[i + 2] === "{") {
+        const end = closing(t, i + 2)
+        out.push({ key: `mod ${t[i + 1]}`, from: i, to: end })
+        walk(i + 3, end, null)
+        i = end + 1
+      } else if ((w === "const" || w === "static") && /^[A-Z_][A-Z0-9_]*$/.test(t[i + 1] ?? "")) {
+        let j = i + 2
+        while (j < to && t[j] !== ";") j = ["{", "(", "["].includes(t[j]) ? closing(t, j) + 1 : j + 1
+        out.push({ key: `${w} ${t[i + 1]}`, from: i, to: j })
+        i = j + 1
+      } else if (w === "{" || w === "(" || w === "[") {
+        // A struct, an enum, an extern block or a macro's body: nothing watched is inside.
+        i = closing(t, i) + 1
+      } else {
+        i++
+      }
+    }
+  }
+  walk(0, t.length, null)
+  return out
+}
+
+// The canonical texts of a span in a file's text, one per item it names (several: a fn per OS under cfg); null
+// when it names none.
+export function spanTexts(text: string, sel: string | null, js: boolean): string[] | null {
+  const t = tokens(text.replace(/\r\n/g, "\n"), js)
+  if (sel === null) return [canon(t)]
+  if (sel.startsWith("@")) {
+    const anchor = tokens(sel.slice(1), js)
+    for (let k = 0; k + anchor.length <= t.length; k++) {
+      if (anchor.every((a, j) => t[k + j] === a)) {
+        // The block that opens at the anchor's first `{` (or the first after it).
+        let b = k
+        while (b < t.length && t[b] !== "{") b++
+        return [canon(t.slice(k, closing(t, b) + 1))]
+      }
+    }
+    return null
+  }
+  const found = items(t).filter((it) => it.key === sel || (!sel.includes("::") && !sel.includes(" ") && it.key.endsWith(`::${sel}`)))
+  return found.length ? found.map((it) => canon(t.slice(it.from, it.to + 1))) : null
+}
+
+// Where two canonical texts first differ, a few tokens of each around it.
+function near(a: string, b: string): string {
+  const x = a.split(" ")
+  const y = b.split(" ")
+  const limit = Math.min(x.length, y.length)
+  let k = 0
+  for (; k < limit; k++) if (x[k] !== y[k]) break
+  const ctx = (v: string[]) => v.slice(Math.max(0, k - 6), k + 8).join(" ")
+  return `then: …${ctx(x)}… now: …${ctx(y)}…`
+}
+
+export type Watch = { cells: string[]; os?: Os[]; spans: string[]; why: string }
+
+// What computes each verified cell's numbers. A cell is `runtime · capability` (`runtime · *`: each of the
+// runtime's; `*`: every verified cell, which alone maps none). Each group says why those spans are the ones: what
+// in them makes the number, and why the rest of their files does not.
+export const WATCH: Watch[] = [
+  {
+    cells: ["*"],
+    spans: [
+      "src/stats.rs#compare",
+      "src/stats.rs#diffs",
+      "src/stats.rs#hodges_lehmann",
+      "src/stats.rs#wilcoxon_p",
+      "src/stats.rs#signed_rank_counts",
+      "src/stats.rs#normal_quantile",
+      "src/stats.rs#erfc",
+      "src/stats.rs#two_tail",
+      "src/metrics.rs#median",
+    ],
+    why: "every quoted A/B and A/A is compare's estimate and interval: the per-pair log ratio or difference (diffs), its Hodges-Lehmann shift and signed-rank bounds; the verdict words, Holm, the noworse and planning code beside them move no number",
+  },
+  {
+    cells: ["cli · *", "script · *", "native_windowless · *"],
+    spans: ["src/app/bench/block.rs#impl Warmup", "src/app/bench/block.rs#steady"],
+    why: "which runs of a block are measured (warmup ends once two runs cost the same): a change moves every per-block value; the startup-spill and untimed checks beside them refuse a block, they do not change its numbers",
+  },
+  {
+    cells: ["cli · *"],
+    spans: [
+      "src/app/bench/cli.rs#command",
+      "src/app/bench/cli.rs#exec",
+      "src/app/bench/cli.rs#block",
+      "src/app/bench/cli.rs#metric_line",
+      "src/app/bench/cli.rs#sum_of",
+      "src/app/bench/script.rs#cpu_ms",
+      "src/host/spawn.rs#spawn_group",
+      "src/host/spawn.rs#Owned::spawn_span",
+      "src/host/spawn.rs#Owned::run_to_exit",
+      "src/host/mod.rs#tsc",
+      "src/host/mod.rs#thread_cycles",
+      "src/host/mod.rs#cycles_refused",
+    ],
+    why: "a command's run: the line as spawned (command), its two edges and launch CPU (exec, spawn_span, cpu_ms on the cycle clock), its job or group and what it counts (spawn_group, run_to_exit: job cycles and PeakProcessMemoryUsed on Windows, wait4's rusage on Unix), and the block's values from them (block, metric_line, sum_of); the stamps, leftover listing and ending elsewhere in spawn.rs run after the reads",
+  },
+  {
+    cells: ["cli · process_memory"],
+    os: ["linux"],
+    spans: ["src/host/spawn.rs#peak_floor"],
+    why: "Linux: the resident set a child inherits from strobe before its exec, under which run_to_exit masks a peak as not the command's",
+  },
+  {
+    cells: ["cli · wall_and_counts", "script · wall_and_counts"],
+    spans: ["src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks"],
+    why: "the counts and metric lines a run reports and the untimed stretches its wall leaves out: the hooks' bookkeeping; the hooks' callers are watched with their runtime",
+  },
+  {
+    cells: ["cli · process_cpu", "script · process_cpu", "native_windowless · process_cpu"],
+    os: ["windows"],
+    spans: ["src/host/jobs.rs"],
+    why: "Windows: the job objects whose accounting holds the CPU of processes that ended inside a run; the whole file is that accounting",
+  },
+  {
+    cells: ["script · *"],
+    spans: ["src/app/bench/script.rs#chunk", "src/app/bench/script.rs#Host::request", "sdk/bench/src/host.mjs#@try { const fn"],
+    why: "a script run: chunk holds its edges (the request's send and reply), its CPU windows and the block's values; request is the round trip timed; host.mjs's call block is what runs inside it; the heap, clock and exit ops beside it are no part of a run's wall or CPU",
+  },
+  {
+    cells: ["script · process_cpu", "native_windowless · process_cpu", "native_windowless · process_memory", "native_windowless · hardware_counters"],
+    spans: [
+      "src/app/record.rs#per_process",
+      "src/app/record.rs#read_known",
+      "src/app/record.rs#read_at",
+      "src/app/record.rs#impl Clock",
+      "src/app/record.rs#cycles_used",
+      "src/app/record.rs#cycles_timed",
+      "src/app/record.rs#read_set",
+      "src/app/record.rs#set_used",
+      "src/app/record.rs#gone",
+      "src/app/record.rs#timed_cpu",
+      "src/app/record.rs#cpu_lost",
+      "src/app/bench/script.rs#cycles",
+      "src/host/mod.rs#process_cycles",
+      "src/host/mod.rs#process_cycles_at",
+      "src/host/mod.rs#process_tree",
+      "src/host/mod.rs#process_trees",
+      "src/host/mod.rs#process_set",
+      "src/host/mod.rs#tree_pids",
+      "src/host/mod.rs#ended_marks",
+      "src/host/mod.rs#impl EndedMarks",
+    ],
+    why: "which processes a run's CPU, memory and counters are of (the tree and set from the root, those that ended inside the run) and the CPU of each between the run's edges, on the cycle clock (Clock, timed_cpu); the rest of record.rs writes recordings",
+  },
+  {
+    cells: ["script · process_cpu", "native_windowless · *"],
+    os: ["windows"],
+    spans: [
+      "src/host/win.rs#process_trees",
+      "src/host/win.rs#tree_of",
+      "src/host/win.rs#process_cycles",
+      "src/host/win.rs#proc_times",
+      "src/host/win.rs#each_process",
+      "src/host/win.rs#system_processes",
+      "src/host/win.rs#procs",
+    ],
+    why: "Windows' readers: the process list, the tree walked from the root, each process's cycles and private bytes (pagefile commit)",
+  },
+  {
+    cells: ["script · process_cpu", "native_windowless · *"],
+    os: ["linux"],
+    spans: [
+      "src/host/linux.rs#process_trees",
+      "src/host/linux.rs#tree_of",
+      "src/host/linux.rs#process_cycles",
+      "src/host/linux.rs#process_cpu_ns",
+      "src/host/linux.rs#read",
+      "src/host/linux.rs#tck",
+      "src/host/linux.rs#stat",
+      "src/host/linux.rs#all_stats",
+      "src/host/linux.rs#start_time",
+      "src/host/linux.rs#private_bytes",
+      "src/host/linux.rs#anonymous_kb",
+      "src/host/cgroup.rs#read",
+      "src/host/cgroup.rs#impl Reading",
+      "src/host/spawn.rs#spawn_group",
+      "src/host/spawn.rs#into_cgroup",
+    ],
+    why: "Linux's readers: /proc's stat (tree, start times), each process's CPU ns from schedstat, private bytes from its anonymous memory, and the launch cgroup a launch moves into (spawn_group, into_cgroup), whose CPU counts the processes that ended",
+  },
+  {
+    cells: ["script · process_cpu", "native_windowless · *"],
+    os: ["macos"],
+    spans: [
+      "src/host/macos.rs#process_trees",
+      "src/host/macos.rs#tree_of",
+      "src/host/macos.rs#responsible_pids",
+      "src/host/macos.rs#all_bsd",
+      "src/host/macos.rs#bsd",
+      "src/host/macos.rs#process_cycles",
+      "src/host/macos.rs#rusage",
+      "src/host/macos.rs#start_time",
+      "src/host/macos.rs#timebase",
+      "src/host/macos.rs#mach_ns",
+    ],
+    why: "macOS's readers: the process list and tree (with the processes an app is responsible for), each process's CPU and phys_footprint from proc_pid_rusage, and the mach clock they are timed on",
+  },
+  {
+    cells: ["native_windowless · *"],
+    spans: ["src/app/bench/native.rs#runs", "src/app/bench/native.rs#cpu_ms", "src/target/native.rs#Native::processes", "src/target/native.rs#Native::pids"],
+    why: "a native block: runs holds each run's edges, CPU, counters and end-of-run memory, cpu_ms turns cycles into ms, and the app's processes come from Native; the launch and window code elsewhere in native.rs is for launch cells and windowed apps",
+  },
+  {
+    cells: ["native_windowless · process_memory"],
+    spans: ["src/probe/memory.rs#impl Reading"],
+    why: "the memory reading taken at a run's end, summed over the app's processes",
+  },
+  {
+    cells: ["native_windowless · process_cpu", "native_windowless · hardware_counters"],
+    spans: [
+      "src/probe/wakes.rs#Snapshot::take",
+      "src/probe/wakes.rs#span",
+      "src/probe/wakes.rs#impl Span",
+      "src/probe/wakes.rs#wall_us",
+      "src/probe/wakes.rs#impl Counters",
+      "src/probe/wakes.rs#counted",
+      "src/probe/wakes.rs#counter_values",
+      "src/probe/wakes.rs#counter_metrics",
+    ],
+    why: "wakes and the OS's per-process counters between a run's edges (instructions, cycles, energy) and the metrics named from them; the timeline and thread views in wakes.rs are for recordings",
+  },
+  {
+    cells: ["native_windowless · hardware_counters"],
+    os: ["macos"],
+    spans: ["src/host/macos.rs#counts", "src/host/macos.rs#energy_counters"],
+    why: "macOS: instructions, cycles and energy from proc_pid_rusage's v6 record",
+  },
+  {
+    cells: ["chromium_page · frames", "chromium_page · input_latency"],
+    spans: [
+      "src/app/bench.rs#run_chunk",
+      "src/probe/trace.rs",
+      "src/metrics.rs#read",
+      "src/metrics.rs#vsyncs",
+      "src/metrics.rs#intervals",
+      "src/metrics.rs#vsync_ms",
+      "src/metrics.rs#run_frames",
+      "src/metrics.rs#run_intervals",
+      "src/metrics.rs#phase_frames",
+      "src/metrics.rs#windows_sql",
+      "src/metrics.rs#doc_mark_script",
+      "src/metrics.rs#mark_windows",
+      "src/metrics.rs#discrete_samples",
+      "src/metrics.rs#block_values",
+      "src/metrics.rs#percentile",
+      "src/metrics.rs#impl Timed",
+      "src/metrics.rs#impl BlockData",
+    ],
+    why: "a headed page block: run_chunk sets up the trace and the run's marks and reads the block's values; trace.rs is the trace's categories; metrics.rs reads frames (vsyncs, intervals) and EventLatency from the trace within each run's windows and reduces them to a block's p50/p95; the series, report and launch code in bench.rs and the recording views in metrics.rs move none of it",
+  },
+  {
+    cells: ["chromium_page · input_latency"],
+    spans: [
+      "src/driver.rs#Driver::dispatch",
+      "src/driver.rs#Driver::mouse",
+      "src/driver.rs#Driver::input_at",
+      "src/driver.rs#Driver::pointer_move",
+      "src/driver.rs#Driver::pointer_button",
+      "src/driver.rs#sent",
+      "src/driver.rs#input_pacing",
+      "src/driver.rs#impl Pacer",
+    ],
+    why: "how a click reaches the page and when it was sent: the input whose latency the trace times; the driver's waits, queries and screenshots are no part of it",
+  },
+]
+
+// The groups a cell on an OS is held to.
+export function watchFor(runtime: string, capability: string, os: Os): Watch[] {
+  const cell = `${runtime} · ${capability}`
+  return WATCH.filter((w) => (w.cells.includes("*") || w.cells.includes(cell) || w.cells.includes(`${runtime} · *`)) && (!w.os || w.os.includes(os)))
+}
+
+const git = (args: string[]) => {
+  const r = Bun.spawnSync(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe", timeout: 120_000 })
+  return r.exitCode === 0 ? r.stdout.toString() : null
+}
+let unshallowed = false
+const shown = new Map<string, string | null>()
+// A file at a revision; a shallow clone (CI's) fetches its history once when the revision is not in it.
+function fileAt(rev: string, path: string): string | null {
+  const key = `${rev}:${path}`
+  if (!shown.has(key)) {
+    if (git(["rev-parse", "--verify", "-q", `${rev}^{commit}`]) === null && !unshallowed) {
+      unshallowed = true
+      if (git(["rev-parse", "--is-shallow-repository"])?.trim() === "true") git(["fetch", "-q", "--unshallow", "--tags", "origin"])
+      else git(["fetch", "-q", "--tags", "origin"])
+    }
+    shown.set(key, git(["show", key]))
+  }
+  return shown.get(key)!
+}
+const revKnown = (rev: string) => git(["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== null || (fileAt(rev, "Cargo.toml") !== null)
+
+// What a watched span reads now, and what it read at `rev`: null when the file or item is not there.
+function spanAt(rev: string | null, spec: string): string[] | null {
+  const [path, sel] = spec.includes("#") ? [spec.slice(0, spec.indexOf("#")), spec.slice(spec.indexOf("#") + 1)] : [spec, null]
+  const text = rev === null ? (existsSync(join(root, path)) ? readFileSync(join(root, path), "utf8") : null) : fileAt(rev, path)
+  return text === null ? null : spanTexts(text, sel, /\.(m?js|ts)$/.test(path))
+}
+
+const OS_LABEL: Record<Os, string> = { windows: "Windows x64", macos: "macOS arm64", linux: "Linux x64" }
+
+// Every verified cell whose watched spans changed since its evidence (or its review): what changed and the three
+// ways out. `report` gets one line per cell and span, held or not.
+export function rotProblems(s: Support, fail: (m: string) => void, report?: (m: string) => void) {
+  const head = git(["rev-parse", "--short=10", "HEAD"])?.trim() ?? "HEAD"
+  for (const r of s.rows) {
+    for (const os of OSES) {
+      const c = r[os]
+      if (c.kind !== "verified") continue
+      const e = c.evidence
+      const cell = `${r.runtime} · ${r.capability}`
+      const rev = e.reviewed_at || e.version
+      const groups = watchFor(r.runtime, r.capability, os)
+      if (!groups.some((g) => !g.cells.includes("*"))) {
+        fail(`${cell} on ${OS_LABEL[os]} is verified, and WATCH (scripts/dev/support-matrix.ts) names no code that computes it: map its spans`)
+        continue
+      }
+      if (!revKnown(rev)) {
+        fail(`${cell} on ${OS_LABEL[os]}: its evidence revision ${rev} is no commit of this repository (fetch its history: git fetch --unshallow --tags)`)
+        continue
+      }
+      const changed: string[] = []
+      for (const g of groups) {
+        for (const spec of g.spans) {
+          const then = spanAt(rev, spec)
+          const now = spanAt(null, spec)
+          if (now === null) {
+            changed.push(`${spec}: not in the working tree (renamed or moved? map the code that computes it now) [${g.why}]`)
+          } else if (then === null) {
+            changed.push(`${spec}: not at ${rev} (new since the evidence, or renamed) [${g.why}]`)
+          } else if (then.join(" ¦ ") !== now.join(" ¦ ")) {
+            changed.push(`${spec} changed [${g.why}]\n      ${near(then.join(" ¦ "), now.join(" ¦ "))}`)
+          } else report?.(`held    ${cell} on ${OS_LABEL[os]} since ${rev}: ${spec}`)
+        }
+      }
+      if (!changed.length) continue
+      for (const x of changed) report?.(`CHANGED ${cell} on ${OS_LABEL[os]} since ${rev}: ${x.split("\n")[0]}`)
+      const since = e.reviewed_at ? `${e.version}'s runs, reviewed at ${e.reviewed_at}` : `${e.version}'s runs`
+      fail(
+        `${cell} on ${OS_LABEL[os]} is verified from ${since} (\`${e.fixture}\`), and the code that computes it changed since:\n    ${changed.join("\n    ")}\n` +
+          `  Three ways out, in the cell's Evidence in src/support.rs (and its line in SPEC 21.1):\n` +
+          `    1. run ${e.fixture} again on the evidence's machine (${e.machine}): its known answer, A/A, planted A/B and boundary case; write the new numbers, date and version;\n` +
+          `    2. or flip the cell to Preview("re-verify ${e.fixture} after <the commit>: <what changed>");\n` +
+          `    3. or, when the change moves no timestamp, attribution or arithmetic (a rename, a moved block, a refusal beside the reading), commit it, then set reviewed_at: Some("<that commit>") and reviewed_why: Some("<one sentence: why the numbers cannot have moved>"). It must be a commit main keeps (merged, not squashed); now HEAD is ${head}.`,
+      )
+    }
+  }
+}
+
+// WATCH itself: every cell it names is a row (or a runtime's), every span names code in the working tree, a
+// group gives its why.
+function watchChecks(s: Support, fail: (m: string) => void) {
+  for (const g of WATCH) {
+    if (!g.why.trim()) fail(`WATCH ${g.spans[0]}: a group says why its spans are the ones`)
+    for (const c of g.cells) {
+      const [rt, cap] = c.split(" · ")
+      if (c !== "*" && !(s.runtimes.includes(rt) && (cap === "*" || s.rows.some((r) => r.runtime === rt && r.capability === cap)))) fail(`WATCH names ${c}, which is no row of SUPPORT_MATRIX`)
+    }
+    for (const spec of g.spans) if (spanAt(null, spec) === null) fail(`WATCH: ${spec} names no code in the working tree (renamed or moved? map the code that computes it now)`)
+  }
+}
+
+// The span machinery on text it must judge: a harmless reformat of a watched fn holds, a changed constant inside
+// it fails and names it, a change outside every span holds.
+function rotSelfChecks(fail: (m: string) => void) {
+  const before = `
+impl Owned {
+    /// Reads the cycles.
+    pub fn read(&self) -> u64 {
+        let rate = 10; // per tick
+        self.cycles(rate, Some(2),)
+    }
+}
+fn other() -> u32 { 1 }
+#[cfg(windows)]
+fn per_os() -> u32 { 1 }
+#[cfg(unix)]
+fn per_os() -> u32 { 2 }
+`
+  const reformatted = `
+impl Owned {
+    pub fn read(&self) -> u64 {
+        // a new comment, and rustfmt's own layout
+        let rate = 10;
+        self.cycles(
+            rate,
+            Some(2),
+        )
+    }
+}
+fn other() -> u32 {
+    1
+}
+#[cfg(windows)]
+fn per_os() -> u32 { 1 }
+#[cfg(unix)]
+fn per_os() -> u32 { 2 }
+`
+  const constant = before.replace("let rate = 10;", "let rate = 11;")
+  const outside = before.replace("fn other() -> u32 { 1 }", "fn other() -> u32 { 7 }")
+  const per = before.replace("fn per_os() -> u32 { 2 }", "fn per_os() -> u32 { 3 }")
+  const same = (a: string, b: string, sel: string) => (spanTexts(a, sel, false) ?? ["missing"]).join(" ¦ ") === (spanTexts(b, sel, false) ?? ["missing a"]).join(" ¦ ")
+  if (!same(before, reformatted, "Owned::read")) fail("rot: a reformat of a watched fn (comments, line breaks, a trailing comma) reads as a change")
+  if (same(before, constant, "Owned::read")) fail("rot: a changed constant inside a watched fn reads as no change")
+  if (!same(before, outside, "Owned::read")) fail("rot: a change outside every watched span reads as a change")
+  if (same(before, per, "per_os")) fail("rot: a change to one OS's copy of a watched fn reads as no change")
+  if (spanTexts(before, "nothing", false) !== null) fail("rot: a span naming no item found one")
+  const js = "const a = 1\ntry {\n  const v = await fn(...args) // the call\n  write({ id, ok: v })\n} catch (e) {}\n"
+  const jsLater = "const a = 2\ntry {\n  const v = await fn(\n    ...args,\n  )\n  write({ id, ok: v })\n} catch (e) {}\n"
+  if ((spanTexts(js, "@try {", true) ?? []).join() !== (spanTexts(jsLater, "@try {", true) ?? ["x"]).join()) fail("rot: a JavaScript block reformatted reads as a change")
+}
+
 // ---------- main ----------
 
 if (import.meta.main) {
@@ -642,8 +1232,11 @@ if (import.meta.main) {
       fail(`parse: ${(e as Error).message}`)
     }
     parserChecks(fail)
+    rotSelfChecks(fail)
     if (s) {
       staticChecks(s, fail)
+      watchChecks(s, fail)
+      rotProblems(s, fail, args.includes("--rot") ? (m) => console.log(m) : undefined)
       if (!args.includes("--no-rust")) rustChecks(s, fail)
     }
     for (const m of problems) console.error(`FAIL ${m}`)
