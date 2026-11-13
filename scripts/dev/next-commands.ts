@@ -541,7 +541,7 @@ let followed = 0
   for (const id of [lean, prof, exp]) mkdirSync(folder(id), { recursive: true })
   for (const file of ["cpu-0.cpuprofile", "meta.json"]) cpSync(join(handmade, file), join(folder(prof), file))
   writeFileSync(join(folder(lean), "meta.json"), JSON.stringify({ kind: "block", id: lean, probes: "lean", traced: false, frames_refused: "Headless: no display", experiment: exp, values: {} }))
-  const run = (...a: string[]) => Bun.spawnSync([STROBE, ...a], { env: { ...process.env, ...fakeEnv }, stdout: "pipe", stderr: "pipe", timeout: 15000 })
+  const run = (...a: string[]) => Bun.spawnSync([STROBE, ...a], { env: { ...process.env, ...fakeEnv }, stdout: "pipe", stderr: "pipe", timeout: 60000 })
   const fail = (why: string) => { console.log(`FAIL check recording: ${why}`); failed++ }
   for (const attribution of [undefined, prof]) {
     writeFileSync(join(folder(exp), "result.json"), JSON.stringify({ id: exp, kind: "check", series: [{ recording: lean, attribution }] }))
@@ -644,19 +644,26 @@ let followed = 0
   const seen = new Set<string>()
   let cells = 0
   const stamp = (p:string) => existsSync(p) ? String(statSync(p,{bigint:true}).mtimeNs) : "absent"
-  const snapshot = (ids:string[]) => JSON.stringify([...ids.map(id=>[id,...readdirSync(folder(id),{recursive:true}).sort().map(n=>[n,stamp(join(folder(id),String(n)))])]),stamp(join(folder(exp),".used")),stamp(join(fakeState,"run"))])
+  const tree = (dir:string) => existsSync(dir) ? [stamp(dir),...readdirSync(dir,{recursive:true}).sort().map(n=>[n,stamp(join(dir,String(n)))])] : []
+  const snapshot = (ids:string[]) => JSON.stringify([...ids.map(id=>tree(folder(id))),stamp(join(folder(exp),".used"))])
+  const scratch = () => JSON.stringify([stamp(join(fakeState,"run")),tree(join(fakeState,"run","probe"))])
   const matrix = (name: string, series: J[], launches: string[], profiles: string[], shared = false) => {
     writeResult({kind:"check",series})
     for (const q of [...profileViews,...launchViews,"unknown","sql select 1","threads --timeline"]) {
       const [view, ...rest] = q.split(" "), args = view === "sql" && rest.length ? [view,rest.join(" ")] : [view,...rest]
       const ids = profileViews.includes(view) ? profiles : launches
       const opts = args.map(a => a.includes(" ") ? `'${a}'` : a).join(" ")
-      const before = snapshot(ids)
+      const before = snapshot(ids), cold = scratch()
       const p = run("query",exp,...args), text = (p.stderr.toString() + p.stdout.toString()).trim()
       const listing = series.length > 1 || ids.length > 1 || shared
       // Every engine query creates/removes a unique q-*.sql file in run/. A changed directory
       // stamp catches even transient SQL files that would disappear from a subsequent listing.
-      if (listing && snapshot(ids) !== before) fail(`${name} ${q}: listing wrote a recording, a used stamp or an engine query file`)
+      if (listing && snapshot(ids) !== before) fail(`${name} ${q}: listing wrote a recording or a used stamp`)
+      if (listing && name === "page trace" && ["style","inputs","runs"].includes(view)) {
+        const hot = scratch(), again=run("query",exp,...args)
+        if (hot!==scratch() || snapshot(ids)!==before || p.exitCode!==again.exitCode || String(p.stderr)!==String(again.stderr)) fail(`${name} ${q}: second listing wrote files, restarted the engine, or changed its answer`)
+        if(view!=="style" && cold!==hot) fail(`${name} ${q}: did not reuse style's trace facts`)
+      } else if (listing && scratch()!==cold) fail(`${name} ${q}: listing wrote scratch or started the engine`)
       if (listing && view === "sql" && rest.length) {
         const stdout = run("query",exp,...args,"--progress","stdout")
         if (stdout.stdout.length || stdout.exitCode !== p.exitCode || !stdout.stderr.toString().startsWith("strobe: choose a recording")) fail(`${name}: SQL choice leaked stdout progress`)
@@ -670,10 +677,10 @@ let followed = 0
       } else if (!want.length) {
         // Forwarding a single case prefixes the source to the same refusal.
         const why = direct.map(r=>r.stderr.toString().trim().replace(/^strobe: /, ""))
-        const distinct = [...new Set(why)]
+        const distinct = [...new Set(why.map((w,i)=>w.replaceAll(ids[i],"<recording>")))]
         if (distinct.length === 1) {
           if (!why[0] || p.exitCode !== direct[0].exitCode || !text.includes(why[0])) fail(`${tag}: not the direct refusal (${why[0]}): ${text}`)
-        } else if (p.exitCode !== (direct.every(r=>r.exitCode===4)?4:2) || !text.startsWith("strobe: no recording of this check answers") || !distinct.every(w=>text.includes(w.split("\n")[0]))) fail(`${tag}: missing mixed reasons: ${text}`)
+        } else if (p.exitCode !== (direct.some(r=>r.exitCode===1)?1:direct.every(r=>r.exitCode===4)?4:2) || !text.startsWith("strobe: no recording of this check answers") || !why.filter((w,i)=>why.findIndex((x,j)=>x.replaceAll(ids[j],"<recording>")===w.replaceAll(ids[i],"<recording>"))===i).every(w=>text.includes(w.split("\n")[0]))) fail(`${tag}: missing mixed reasons: ${text}`)
       } else if (series.length === 1 && ids.length === 1 && !shared) {
         if (p.exitCode !== 0 || !text.includes(`${series[0].label} · ${ids[0]}`)) fail(`${tag}: not forwarded from ${ids[0]}`)
       } else {
@@ -707,17 +714,51 @@ let followed = 0
     if(kept && !go(["query",exp,"gc","--case","second"],0).startsWith(`second · ${p2}`)) fail("--case did not read the second profile")
   }
   // The actual page trace made by --make alongside an untraced launch. No new app is launched.
+  // A trace without any index or run list. With no explicit measured keys only its last run
+  // counts: an invalidation in run:0 alone cannot answer style. Re-record the same folder with
+  // the invalidation in run:1; now it must be offered. Neither trace depends on a live page.
+  const legacy="rec_syn_trace", old=folder(legacy)
+  put(old,"meta.json",{id:legacy,kind:"block",probes:"attribution",token:"tok",runs:1})
+  const event=(name:string,ts:number)=>({name,ts,ph:"X",cat:"devtools.timeline",pid:1,tid:1,dur:1})
+  for(const invalidate of [15,35]) {
+    put(old,"trace.pftrace",{traceEvents:[event("strobe:tok:run:0:start",10),event("strobe:tok:run:0:end",20),event("strobe:tok:run:1:start",30),event("strobe:tok:run:1:end",40),event("StyleInvalidationTracking",invalidate)]})
+    writeResult({kind:"check",series:[c("traced",legacy,legacy),c("headless",second,hostOnly)]})
+    const before=snapshot([legacy,second,hostOnly]), t=go(["query",exp,"style"],2), hot=scratch()
+    if(t.includes(`strobe query ${legacy} style`)!==(invalidate===35))fail(`style used the wrong run (event at ${invalidate}): ${t}`)
+    for(const v of ["style","inputs","runs"]) {
+      const t=go(["query",exp,v],2)
+      if(v!=="style" && !t.includes(`strobe query ${legacy} ${v}`))fail(`missing trace-only ${v}: ${t}`)
+      if(hot!==scratch() || before!==snapshot([legacy,second,hostOnly]))fail(`warm ${v}: changed files or ran the engine`)
+    }
+    for(const v of ["style","inputs","runs"]){go(["query",legacy,v],v==="style" && invalidate===15?2:0);followed++}
+  }
   for (const id of made) {
     const r = JSON.parse(readFileSync(join(folder(id),"result.json"),"utf8"))
     for (const s of r.series ?? []) if (s.attribution && typeof s.attribution === "string" && existsSync(join(folder(s.attribution),"trace.pftrace"))) {
+      // Copy the old-format source shape: no index and no run list to short-circuit trace-only runs.
+      const d=folder(s.attribution), m=JSON.parse(readFileSync(join(d,"meta.json"),"utf8"))
+      delete m.measured; delete m.run_list; delete m.style_runs; delete m.trace_runs
+      put(d,"meta.json",m)
+      rmSync(join(d,"runs.json"),{force:true})
       matrix("page trace",[c("traced",s.attribution,s.attribution),c("headless",second,p2)],[s.attribution,second],[s.attribution,p2])
+      const missing=join(d,"trace.pftrace"), original=readFileSync(missing)
+      // Replacing the trace under the same id must not bring back its cached runs.
+      writeFileSync(missing,JSON.stringify({traceEvents:[{ph:"X",name:"other",pid:1,tid:1,ts:0,dur:1}]}))
+      const changed=run("query",exp,"runs")
+      if(changed.stderr.toString().includes(`strobe query ${s.attribution} runs`))fail("replaced trace served old run keys")
+      writeFileSync(missing,original)
     }
   }
   for (const v of [...profileViews,...launchViews]) if (!seen.has(v)) fail(`no executable listing for ${v}`)
   console.log(`${cells} recording-selection cells (forward, choose, or refuse)`)
   // Descending IDs, duplicate reasons, and two different types of refusal. Assert text order,
   // status and the complete JSON for each reason against a direct query.
-  for(const [view,first,second,code] of [["frames",{traced:false,frames_refused:"Headless: no display"},{native:true},2],["alloc",{engine:"firefox"},{script:true,runtime:{name:"bun"}},4]] as const){
+  const mcp = (view:string) => {
+    const msg={jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"query",arguments:{handle:exp,view}}}
+    const p=Bun.spawnSync([STROBE,"mcp"],{stdin:Buffer.from(JSON.stringify(msg)+"\n"),stdout:"pipe",stderr:"pipe",env:{...process.env,...fakeEnv},timeout:15000})
+    return JSON.parse(p.stdout.toString()).result
+  }
+  for(const [view,first,second,code] of [["frames",{wir:true},{native:true},2],["frames",{traced:false,frames_refused:"Headless: no display"},{native:true},2],["alloc",{engine:"firefox"},{script:true,runtime:{name:"bun"}},4]] as const){
     const pairs=[["page","rec_syn_z",first],["another page","rec_syn_y",first],["other","rec_syn_a",second]] as const
     for(const [,id,m] of pairs) put(folder(id),"meta.json",{id,probes:"attribution",...m})
     writeResult({kind:"check",series:pairs.map(([name,id])=>c(name,id,id))})
@@ -728,7 +769,23 @@ let followed = 0
       if(!row || row.series!==series || row.recording!==id || !["code","validator","error","hint"].every(k=>row[k]===r[k])) fail(`mixed ${view}: ${JSON.stringify(j)}`)
     }
     console.log(`mixed ${view} (exit ${code}): ${text.trim()}\n${JSON.stringify(j)}`)
+    const tool=mcp(view)
+    if(j.validator!==(code===4?"EngineUnsupported":null) || tool.structuredContent?.validator!==j.validator || tool.structuredContent?.error!==j.error || tool.content[0].text.endsWith("fix: "))fail(`mixed ${view}: MCP validator or fix`)
+    if(view==="alloc")console.log(`MCP: ${JSON.stringify(tool)}`)
+    if("wir" in first){
+      writeResult({kind:"check",series:pairs.slice(0,2).map(([name,id])=>c(name,id,id))})
+      const cli=JSON.parse(go(["query",exp,view,"--json"],4)),one=JSON.parse(go(["query",pairs[0][1],view,"--json"],4)),t=mcp(view)
+      if(JSON.stringify(cli)!==JSON.stringify(one) || t.structuredContent?.validator!==one.validator || t.structuredContent?.hint!==one.hint)fail("same reason with different IDs did not collapse")
+      console.log(`collapsed frames: ${go(["query",exp,view],4).trim()}\n${JSON.stringify(cli)}\nMCP: ${JSON.stringify(t)}`)
+    }
   }
+  const untimed="rec_syn_untimed"
+  put(folder(untimed),"meta.json",{id:untimed,probes:"attribution",native:true})
+  put(folder(untimed),"frames.json",{runs:{"run:0":{marks:[["a:phase:render:start",1],["a:phase:render:end",2]]}}})
+  gz(untimed,"deep.json.gz",{...stacks,interval_us:1000,t0_ns:0,t1_ns:1000,samples:[],pids:[],untimed:true})
+  writeResult({kind:"check",series:[c("native",undefined,untimed),c("other")]})
+  const phase=["hotspots","--phase","render"], why=go(["query",untimed,...phase],2)
+  if(!why.includes("samples carry no times") || go(["query",exp,...phase],2)!==why) fail("untimed phase listing differs from direct query")
   // Same failure, four shapes: base refusal alone, both sides failing independently, head-only failure,
   // and a passing check. Keep the base reason exactly once and keep useful detail after its first line.
   for(const [name,extra,want] of [

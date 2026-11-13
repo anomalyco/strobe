@@ -2760,7 +2760,6 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     if check {
         let mut series_out = series_out;
-        super::query::index_check(&series_out);
         // Cases run with the display asleep (a locked session's): a page's frames and timers slow down then,
         // so their values are not a lit display's, as in a timed run.
         let ran = series_out.iter().filter(|s| s["screen"].is_object()).count();

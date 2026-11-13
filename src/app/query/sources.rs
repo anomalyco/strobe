@@ -16,48 +16,6 @@ fn stored(id: &str) -> Option<std::path::PathBuf> {
     dir.join("meta.json").is_file().then_some(dir)
 }
 
-/// After the check (never in a measured block or a listing), index precisely the run windows a
-/// trace has, and whether a measured run has a style invalidation. The trace by itself proves
-/// neither. One small result per run, no stacks, symbols or event payloads.
-pub(in crate::app) fn index_check(series: &[Value]) {
-    let ids: BTreeSet<_> = series.iter().flat_map(|s| launches(s).chain(s["attribution"].as_str())).collect();
-    for id in ids {
-        let Some(dir) = stored(id) else { continue };
-        let file = dir.join("meta.json");
-        let Ok(mut meta) = store::read_json(&file) else { continue };
-        if dir.join("deep.json.gz").is_file() {
-            if let Ok(status) = waits::header(&dir) {
-                meta["wait_capture"] = status;
-            }
-        } else if dir.join("trace.pftrace").is_file()
-            && let Some(token) = meta["token"].as_str().filter(|s| store::plain_id(s))
-        {
-            let sql = rec::windows_sql(token, None);
-            let tracked = if meta["probes"] == "attribution" { rec::TRACKED_RUN } else { "0" };
-            let Ok(table) = engine::query(&dir.join("trace.pftrace"), &format!("{sql}select k, {tracked} from _w")) else { continue };
-            let prefix = format!("strobe:{token}:");
-            let mut runs = Vec::new();
-            let mut tracking = Vec::new();
-            for row in &table.rows {
-                if let Some(k) = row[0].as_deref().and_then(|k| k.strip_prefix(&prefix)) {
-                    runs.push(k);
-                    if row[1].as_deref() == Some("1") {
-                        tracking.push(k);
-                    }
-                }
-            }
-            meta["trace_runs"] = json!(runs);
-            if meta["probes"] == "attribution" {
-                meta["style_runs"] = json!(tracking);
-            }
-        } else {
-            continue;
-        }
-        // An index is optional. Its absence never invalidates the check or its direct views.
-        let _ = store::write_json(&file, &meta);
-    }
-}
-
 pub(super) fn forward(rec: Rec, label: &str, view: &str, args: &Args, top: usize) -> Result<Output> {
     let id = rec.id.clone();
     let mut out = recording(rec, view, args, top).map_err(|mut e| {
@@ -112,12 +70,22 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
     // query arguments matter. Use the same reader as a direct query and keep its typed refusal.
     let mut commands = Vec::new();
     let mut reasons: Vec<(&str, &str, Error)> = Vec::new();
+    let mut distinct = BTreeSet::new();
     let tail = query_tail(&args);
     for (id, label, dir) in candidates {
         match recording_view(Rec::open(&dir), view, &args, top, true) {
             Ok(_) => commands.push(format!("strobe query {id} {tail}")),
             Err(e) => {
-                if !reasons.iter().any(|(_, _, r)| (r.code, r.validator(), &r.message, &r.hint) == (e.code, e.validator(), &e.message, &e.hint)) {
+                // Compare whole ID words, not substrings of a different recording's handle.
+                let canonical = |s: &str| {
+                    s.split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                        .map(|word| {
+                            let end = word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').len();
+                            if &word[..end] == id { format!("<recording>{}", &word[end..]) } else { word.to_owned() }
+                        })
+                        .collect::<String>()
+                };
+                if distinct.insert((e.code, e.validator().map(|v| v.name()), canonical(&e.message), e.hint.as_deref().map(canonical))) {
                     reasons.push((label, id, e));
                 }
             }
@@ -127,7 +95,14 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
         if reasons.len() == 1 {
             return Err(reasons.remove(0).2);
         }
-        let code = if reasons.iter().all(|(_, _, e)| e.code == 4) { 4 } else { 2 };
+        let code = if reasons.iter().any(|(_, _, e)| e.code == 1) {
+            1
+        } else if reasons.iter().all(|(_, _, e)| e.code == 4) {
+            4
+        } else {
+            2
+        };
+        let validator = reasons.first().and_then(|(_, _, e)| e.validator()).filter(|v| reasons.iter().all(|(_, _, e)| e.validator() == Some(*v)));
         let mut text = format!("no recording of this check answers {view}:");
         let mut rows = Vec::new();
         for (label, id, e) in reasons {
@@ -138,6 +113,7 @@ pub(super) fn check(r: &Value, view: &str, args: &Args, top: usize) -> Result<Ou
             rows.push(json!({"series":label,"recording":id,"code":e.code,"validator":e.validator(),"error":e.message,"hint":e.hint}));
         }
         let mut e = Error::new(code, text);
+        e.refusal = validator.map(|v| Box::new(crate::model::Refusal::new(v, e.message.clone())));
         e.recording_errors = Some(Box::new(json!(rows)));
         return Err(e);
     }

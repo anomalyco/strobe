@@ -894,6 +894,16 @@ pub(crate) fn windows_sql(token: &str, measured: Option<&[String]>) -> String {
         Some(keys) => format!("k in ({})", keys.iter().filter(|k| run_key(k)).map(|k| format!("'strobe:{token}:{k}'")).collect::<Vec<_>>().join(",")),
         None => "k glob '*:run:*' and k not glob '*:phase:*'".to_string(),
     };
+    windows_for(token, &keep)
+}
+
+/// All run keys a reader could select, including explicitly measured warm:<i> keys. Selection
+/// by case or last measured run count happens after reading the reusable facts.
+pub(super) fn all_run_windows_sql(token: &str) -> String {
+    windows_for(if store::plain_id(token) { token } else { "" }, "(k glob '*:run:*' or k glob '*:warm:*') and k not glob '*:phase:*'")
+}
+
+fn windows_for(token: &str, keep: &str) -> String {
     format!(
         "create perfetto table _m as
   select s.name, s.ts, t.upid, s.id from slice s join thread_track tt on s.track_id = tt.id join thread t using(utid)
@@ -902,6 +912,6 @@ pub(crate) fn windows_sql(token: &str, measured: Option<&[String]>) -> String {
 create perfetto table _u as
   select a.ts as t0, b.ts as t1 from _m a join _m b on b.name = substr(a.name, 1, length(a.name) - 6) || ':end'
   where a.name glob '*:untimed:*:start';",
-        crate::metrics::windows_sql(&keep)
+        crate::metrics::windows_sql(keep)
     )
 }

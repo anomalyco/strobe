@@ -195,7 +195,7 @@ const TOOLS: &[Tool] = &[
             ),
             (
                 "view",
-                "summary (default), frames, inputs (each measured input: its change, frames around it, latency or why busy), threads (a native recording: its threads' wakes, CPU, names), hotspots, waits, alloc, layout, shifts, gc, heap, leaks, memory, http, log (wir: console, Safari/WebKit device logs and crashes), network (wir: network waterfall), insights, actions, sql, runs (every run of a block recording, warmup too: time and work per run, which are measured), progress (exp_… takes summary, progress, insights, actions, http, the base..head views hotspots, alloc, layout, style, threads, frames, heap and memory, and on a --check of one case any recording view)",
+                "summary (default), frames, inputs (each measured input: its change, frames around it, latency or why busy), threads (a native recording: its threads' wakes, CPU, names), hotspots, waits, alloc, layout, style, shifts, gc, heap, leaks, memory, http, log (wir: console, device logs and crashes), network (wir: network waterfall), insights, actions, sql, runs (every run, including warmup), progress. Experiments take summary, progress, insights, actions, http and the base..head views. A check forwards a single source; with several cases or launches it lists only recordings that answer. Distinct failures are in recording_errors.",
             ),
             ("sql", "SQL for the sql view"),
         ],
@@ -215,7 +215,7 @@ const TOOLS: &[Tool] = &[
             ("thread", "hotspots and waits of a native recording: one thread by name"),
             ("pid", "hotspots of a native recording: one process by pid or executable name"),
             ("sort", "hotspots: self (default) or total"),
-            ("case", "a --batch recording: one case's runs (by case name or label); inputs too"),
+            ("case", "one case's runs in a --batch recording; for a check's profile view, select that case's kept profile (name or label)"),
             ("phase", "hotspots (a native recording, or a script's measured runs), waits, actions and http: one phase"),
             ("timeline", "threads: each thread's CPU per second from the launch"),
             ("unit", "how the text prints times: us (default: microseconds, digits grouped), ms or s; structuredContent keeps each metric's unit (ms)"),
@@ -566,7 +566,7 @@ fn call_tool(name: &str, input: &Value) -> Value {
     match rx.recv_timeout(Duration::from_secs(timeout)) {
         Ok(Ok(out)) => result(out),
         Ok(Err(e)) if e.code == 4 => {
-            let text = format!("refused: {}\nfix: {}", e.message, e.hint.clone().unwrap_or_default());
+            let text = format!("refused: {}{}", e.message, e.hint.as_ref().map(|h| format!("\nfix: {h}")).unwrap_or_default());
             json!({ "content": [{ "type": "text", "text": text }], "structuredContent": with_left(json!({ "refused": true, "error": e.message, "hint": e.hint, "code": 4, "validator": e.validator() }), &e), "isError": false })
         }
         Ok(Err(e)) => {

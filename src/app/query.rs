@@ -7,6 +7,7 @@ pub(super) mod http;
 mod inputs;
 mod rec;
 mod sources;
+mod trace_facts;
 pub(crate) use rec::windows_sql;
 mod waits;
 mod wir;
@@ -329,21 +330,11 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
             firefox_gap(&rec, Gap::Style)?;
             attribution_meta(&rec, "style")?;
             rec.require_part(Part::Style)?;
-            if trace.is_file() {
-                // Old traces do not index which measured runs have invalidations. Never start
-                // trace_processor merely to list choices, nor infer tracking from recalcs.
-                let measured = rec::measured_keys(meta);
-                match meta["style_runs"].as_array().map(|runs| runs.iter().any(|r| measured.as_ref().is_none_or(|m| m.iter().any(|k| r == k.as_str())))) {
-                    Some(true) => available(),
-                    Some(false) => Err(no_tracking()),
-                    None => Err(Error::usage(format!("{}: tracking in its measured runs is not indexed; read the recording directly to inspect its trace", rec.id))),
-                }
-            } else {
-                if !tracked(&rec, rec.part(Part::Style)?.as_slice()) {
-                    return Err(no_tracking());
-                }
-                available()
+            let has = if trace.is_file() { trace_facts::read(&trace, meta)?.measured(meta, true) } else { tracked(&rec, rec.part(Part::Style)?.as_slice()) };
+            if !has {
+                return Err(no_tracking());
             }
+            available()
         }
         "style" => style(&rec, top),
         "runs" if probe => runs_read(&rec, true),
@@ -461,6 +452,9 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
                     pick.phase.map(|p| phase_spans(&dir, p)).transpose()?;
                     if !dir.join("deep.json.gz").is_file() {
                         return Err(no_native_samples(&rec));
+                    }
+                    if pick.phase.is_some() {
+                        crate::symbol::require_sample_times(waits::header(&dir)?.untimed)?;
                     }
                     return available();
                 }
@@ -3279,8 +3273,6 @@ fn tracked(rec: &Rec, rows: &[Vec<Option<String>>]) -> bool {
     rows.iter().any(|r| r.get(1).and_then(Option::as_deref).is_some_and(|n| n != "UpdateLayoutTree") && r.first().and_then(Option::as_ref).is_some_and(|k| measured.contains(k)))
 }
 
-pub(super) use sources::index_check;
-
 /// What invalidated style in the measured runs, from the trace's invalidation tracking (attribution
 /// blocks of a series that declares `main.style` or `style.count`, or `--style`): the recalcs with
 /// the elements each restyled, and the invalidations by what changed (a class, an id, an attribute,
@@ -3408,13 +3400,11 @@ fn runs_read(rec: &Rec, probe: bool) -> Result<Output> {
         let from =
             if rec.meta["kind"] == "record" { "runs.json (a recording of a window: its one span is the whole recording)" } else { "runs.json (measured runs only: this recording kept no warmup run)" };
         (from, rows)
-    } else if probe && rec.meta["kind"] != "record" && rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()) {
-        return Err(Error::usage(format!("{}: run marks are not indexed; read this recording directly to inspect its trace", rec.id)));
-    } else if let Some(marked) = (rec.meta["kind"] != "record" && rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()))
-        .then(|| trace_runs(rec))
-        .transpose()?
-        .filter(|r| !r.is_empty())
-    {
+    } else if rec.meta["kind"] != "record" && rec.dir.join("trace.pftrace").is_file() && rec.meta["token"].as_str().is_some_and(|t| !t.is_empty()) {
+        if probe && trace_facts::read(&rec.dir.join("trace.pftrace"), &rec.meta)?.runs() {
+            return available();
+        }
+        let marked = if probe { Vec::new() } else { trace_runs(rec)? };
         // Not run.duration (the driver's wall time of the run) nor main.work: the page's own marks around
         // each run and the main thread's top-level tasks between them, read alike for every run. A
         // recording of a page (`record <url>`) marks its window, no runs: none here.
@@ -3423,8 +3413,11 @@ fn runs_read(rec: &Rec, probe: bool) -> Result<Output> {
             marked.into_iter().map(|(k, ms, task)| json!({ "run": k, "measured": is_measured(&k), "marked_ms": ms, "task_ms": task })).collect(),
         )
     } else {
-        return Err(Error::usage(format!("{} keeps no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window has none", rec.id)));
+        ("", Vec::new())
     };
+    if rows.is_empty() {
+        return Err(Error::usage(format!("{} keeps no runs to list: a block recording keeps its runs (its run list, runs.json, or run marks in its trace); a recording of a window has none", rec.id)));
+    }
     if probe {
         return available();
     }
@@ -3674,7 +3667,11 @@ pub(crate) fn no_profile(rec: &Rec, what: &str, view: &str) -> Error {
 /// set: the last `runs` of the run windows (a block warms up first; its attribution profilers start
 /// at the steady point).
 fn measured_runs(meta: &Value, rows: &[Vec<Option<String>>]) -> Vec<String> {
-    let mut keys = run_keys(rows);
+    select_runs(meta, rows.iter().filter(|r| r.get(1).is_none_or(Option::is_none)).filter_map(|r| r.first().cloned().flatten()))
+}
+
+fn select_runs(meta: &Value, keys: impl Iterator<Item = String>) -> Vec<String> {
+    let mut keys = ordered_runs(keys);
     // A bench block says which they are (`measured`; a Firefox recording's windows from its profile hold
     // its warmup runs and a check's run after its reset too).
     if let Some(m) = rec::measured_keys(meta) {
@@ -3685,8 +3682,11 @@ fn measured_runs(meta: &Value, rows: &[Vec<Option<String>>]) -> Vec<String> {
 }
 
 fn run_keys(rows: &[Vec<Option<String>>]) -> Vec<(usize, String)> {
-    let mut keys: Vec<(usize, String)> =
-        rows.iter().filter(|r| r.get(1).is_none_or(Option::is_none)).filter_map(|r| r.first().cloned().flatten()).filter_map(|k| Some((k.rsplit(':').next()?.parse().ok()?, k))).collect();
+    ordered_runs(rows.iter().filter(|r| r.get(1).is_none_or(Option::is_none)).filter_map(|r| r.first().cloned().flatten()))
+}
+
+fn ordered_runs(keys: impl Iterator<Item = String>) -> Vec<(usize, String)> {
+    let mut keys: Vec<_> = keys.filter_map(|k| Some((k.rsplit(':').next()?.parse().ok()?, k))).collect();
     keys.sort();
     keys.dedup();
     keys

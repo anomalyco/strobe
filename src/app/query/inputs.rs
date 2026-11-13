@@ -328,10 +328,7 @@ fn from_trace(trace: &Path, meta: &Value, top: usize, only: Option<&[String]>, p
     }
     let measured: Option<Vec<String>> = only.map(<[String]>::to_vec).or_else(|| super::rec::measured_keys(meta));
     if probe {
-        let Some(runs) = meta["trace_runs"].as_array() else {
-            return Err(Error::usage("measured run windows are not indexed; read the recording directly to inspect its trace"));
-        };
-        if !runs.iter().any(|r| measured.as_ref().is_none_or(|m| m.iter().any(|k| r == k.as_str()))) {
+        if !super::trace_facts::read(trace, meta)?.measured(meta, false) {
             return Err(no_trace_runs());
         }
         return super::available();
@@ -368,6 +365,9 @@ select 'frame', w.k, s.ts, s.dur, extract_arg(s.arg_set_id, 'frame_reporter.stat
             _ => {}
         }
     }
+    let selected = super::select_runs(meta, wins.keys().cloned());
+    wins.retain(|k, _| selected.contains(k));
+    lats.retain(|(k, ..)| wins.contains_key(k));
     if wins.is_empty() {
         return Err(no_trace_runs());
     }
