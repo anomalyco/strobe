@@ -419,8 +419,9 @@ impl<'a> Doc<'a> {
         let (mut conf_main, mut conf_rest) = (String::new(), String::new());
         let mut mains: Vec<&Value> = Vec::new();
         for (si, s) in self.series.iter().enumerate() {
-            if family::not_compared(s) || s["not_run"] == true {
-                let why = if family::not_compared(s) { format!("not compared <sub>{}</sub>", gap_text(self, s)) } else { "not run".into() };
+            // A refusal during a run still has metric rows, including its untested secondaries.
+            if family::not_compared(s) && !family::refused_at_run(s) {
+                let why = format!("not compared <sub>{}</sub>", gap_text(self, s));
                 t += &format!("{}| {} | | | | | {why} |\n", self.series_cell(s, 0), cell(&noun(s["primary"]["metric"].as_str().unwrap_or(""))));
                 continue;
             }

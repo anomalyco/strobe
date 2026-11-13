@@ -48,6 +48,11 @@ pub fn stat(path: &Path) -> std::io::Result<Item> {
     os::stat(path)
 }
 
+/// Identity and change time of a file, including replacements that preserve length and mtime.
+pub fn generation(path: &Path) -> std::io::Result<String> {
+    os::generation(path)
+}
+
 /// Windows lists no file's names: a walk asks each file of at least this size (a query by name, about
 /// 40 µs each: asking all 2.1 M files of a 116 GB state folder made its walk 104 s instead of 14 s)
 /// and counts a smaller one as having one name. Measured there: the walk's total moved by 0.02% and
@@ -604,6 +609,11 @@ mod os {
         std::fs::symlink_metadata(path).ok().map(|m| m.nlink() as u32)
     }
 
+    pub fn generation(path: &Path) -> std::io::Result<String> {
+        let m = std::fs::metadata(path)?;
+        Ok(format!("{}:{}:{}:{}:{}:{}:{}", m.dev(), m.ino(), m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec(), m.len()))
+    }
+
     pub fn same_file(f: &std::fs::File, path: &Path) -> Option<bool> {
         let (a, b) = (f.metadata().ok()?, std::fs::symlink_metadata(path).ok()?);
         Some((a.dev(), a.ino()) == (b.dev(), b.ino()))
@@ -912,6 +922,18 @@ mod os {
         use std::os::windows::io::AsRawHandle;
         let at = open(path, 0).ok()?;
         Some(handle_id(f.as_raw_handle())? == handle_id(at.0)?)
+    }
+
+    pub fn generation(path: &Path) -> std::io::Result<String> {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo};
+        let f = open(path, FILE_READ_ATTRIBUTES)?;
+        let (volume, id) = handle_id(f.0).ok_or_else(std::io::Error::last_os_error)?;
+        let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle is open and info is a writable FILE_BASIC_INFO.
+        if unsafe { GetFileInformationByHandleEx(f.0, FileBasicInfo, (&mut info as *mut FILE_BASIC_INFO).cast(), std::mem::size_of_val(&info) as u32) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(format!("{volume}:{id:?}:{}:{}:{}", info.CreationTime, info.ChangeTime, info.LastWriteTime))
     }
 
     /// Of the volume a path ends on: through a junction (a state folder linked elsewhere) to its target's.

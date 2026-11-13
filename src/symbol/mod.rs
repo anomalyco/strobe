@@ -102,11 +102,18 @@ pub fn native(dir: &Path, thread: Option<&str>, spans: Option<&[(u64, u64)]>) ->
     native_of(dir, &Select { thread, spans, process: None })
 }
 
+pub fn require_sample_times(untimed: bool) -> Result<()> {
+    if untimed {
+        return Err(Error::usage("these native samples carry no times (macOS sample): a phase cannot select them; drop --phase"));
+    }
+    Ok(())
+}
+
 /// `native` of the samples `select` picks.
 pub fn native_of(dir: &Path, select: &Select) -> Result<Option<Native>> {
     let Some(deep) = read_deep(dir)? else { return Ok(None) };
-    if deep.untimed && select.spans.is_some() {
-        return Err(Error::usage("these native samples carry no times (macOS sample): a phase cannot select them; drop --phase"));
+    if select.spans.is_some() {
+        require_sample_times(deep.untimed)?;
     }
     let resolved = resolve_all(dir, &deep)?;
     let names: HashMap<u32, String> = deep.samples.iter().map(|s| s.1).collect::<std::collections::BTreeSet<u32>>().into_iter().map(|p| (p, process_name(&deep, p))).collect();

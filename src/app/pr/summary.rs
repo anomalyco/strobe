@@ -47,7 +47,11 @@ fn case_target(s: &Value) -> (String, String) {
 /// Why a series did not pass, in a table cell: its refusal (`Validator: summary`), else its error.
 fn why(s: &Value) -> String {
     let refusal = |r: &Value| Some(format!("{}: {}", r["validator"].as_str()?, r["summary"].as_str()?));
-    let text = refusal(&s["refusal"])
+    let text = s["error"]
+        .as_str()
+        .filter(|e| e.starts_with("base failed ("))
+        .map(str::to_string)
+        .or_else(|| refusal(&s["refusal"]))
         .or_else(|| s["error"].as_str().map(str::to_string))
         .or_else(|| s["gap"]["reason"].as_str().map(str::to_string))
         .or_else(|| refusal(&s["primary"]["refusal"]))
@@ -140,9 +144,10 @@ fn check(r: &Value, series: &[&Value]) -> String {
         if state != "pass" {
             notes.push(why(s));
         }
-        // A base that failed fails nothing of head's: it compares no counter.
-        if s["base"]["passed"] == false {
-            notes.push(format!("base failed: {}", cell(&first_clause(&scrub_public(s["base"]["error"].as_str().unwrap_or("").lines().next().unwrap_or("")), 140))));
+        // A failed base fails the check. Keep its reason if the case's own error didn't already give it.
+        if s["base"]["passed"] == false && !s["error"].as_str().is_some_and(|e| e.starts_with("base failed (")) {
+            let reason = s["base"]["error"].as_str().unwrap_or("").replace(['\r', '\n'], " ");
+            notes.push(format!("base failed: {}", cell(&first_clause(&scrub_public(&reason), 140))));
         }
         let note = notes.into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join("<br>");
         rows.push(format!("| {} | {} | {status} | {counters} | {note} |", cell(&case), cell(&target)));
@@ -215,7 +220,7 @@ fn counters_cell(s: &Value) -> String {
             "worse" => format!(" **worse** (--noworse\u{a0}{margin})"),
             "unstable" => " **unstable**".to_string(),
             "missing" => " **missing in head**".to_string(),
-            "not_compared" => " not compared".to_string(),
+            "not_compared" => " **not compared**".to_string(),
             _ => String::new(),
         };
         parts.push(p);

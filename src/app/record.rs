@@ -1589,7 +1589,7 @@ fn engine_summary(meta: &Value) -> String {
         s += "timing   perturbed: Firefox's profiler ran during this recording (a sampler in every process walks its threads' stacks), so its CPU and times are not the page's; take them with --probes timing\n";
         s += &format!("next     strobe query {id} hotspots · strobe query {id} layout · strobe query {id} memory · strobe open {id}\n");
     } else {
-        s += &format!("next     strobe query {id} summary\n");
+        s += &format!("next     strobe report recording {id} --open\n");
     }
     s
 }
@@ -1924,7 +1924,10 @@ fn summary_body(meta: &Value) -> String {
     if meta["timing"] == "full-trace" {
         s += "timing   full trace (--trace full): the browser traced every task of every thread, which costs the page main-thread time; compare it only with full-trace runs\n";
     }
-    s += &format!("next     strobe query {} frames · strobe report recording {} --open\n", meta["id"].as_str().unwrap_or(""), meta["id"].as_str().unwrap_or(""));
+    let id = meta["id"].as_str().unwrap_or("");
+    let view = if meta["frames_refused"].is_string() || meta["traced"] == false || meta["launch"] == true { (meta["probes"] == "attribution").then_some("hotspots") } else { Some("frames") };
+    let query = view.map(|v| format!("strobe query {id} {v} · ")).unwrap_or_default();
+    s += &format!("next     {query}strobe report recording {id} --open\n");
     s
 }
 
@@ -1975,7 +1978,8 @@ fn native_summary(meta: &Value) -> String {
     s += &if meta["launch"] == true {
         format!("next     strobe query {id} threads (spawn until ready) · strobe query {id} hotspots\n")
     } else {
-        format!("next     strobe query {id} threads · strobe query {id} memory · strobe query {id} gpu · strobe query {id} frames\n")
+        let frames = if get("frames.n").is_finite() && !meta["os_frames"]["refused"].is_string() { format!(" · strobe query {id} frames") } else { String::new() };
+        format!("next     strobe query {id} threads · strobe query {id} memory · strobe query {id} gpu{frames}\n")
     };
     s
 }

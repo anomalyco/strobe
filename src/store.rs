@@ -420,6 +420,13 @@ pub fn plain_id(s: &str) -> bool {
 /// plain id (`plain_id`): a path never resolves here (`query` and `report` read paths themselves), so
 /// nothing outside the store is ever marked used.
 pub fn resolve(handle: &str) -> Result<PathBuf> {
+    let dir = find(handle)?;
+    touch(&dir);
+    Ok(dir)
+}
+
+/// Look up a handle without treating a listing or a project-settings lookup as a use.
+pub fn find(handle: &str) -> Result<PathBuf> {
     if !plain_id(handle) {
         return Err(Error::usage(format!("no recording or experiment {handle}: a handle is an id (rec_…, exp_…) or its first letters")));
     }
@@ -431,7 +438,6 @@ pub fn resolve(handle: &str) -> Result<PathBuf> {
         vec![paths::recordings(), paths::experiments()]
     };
     if let Some(exact) = roots.iter().map(|root| root.join(handle)).find(|p| p.is_dir()) {
-        touch(&exact);
         return Ok(exact);
     }
     let matches: Vec<PathBuf> = roots
@@ -443,10 +449,7 @@ pub fn resolve(handle: &str) -> Result<PathBuf> {
         .filter(|p| p.is_dir())
         .collect();
     match matches.len() {
-        1 => {
-            touch(&matches[0]);
-            Ok(matches[0].clone())
-        }
+        1 => Ok(matches[0].clone()),
         0 => Err(Error::usage(format!("no recording or experiment {handle}"))),
         _ => Err(Error::usage(format!("{handle} is ambiguous ({} matches)", matches.len()))),
     }
@@ -492,7 +495,8 @@ pub fn deep_enough(bytes: &[u8], path: &Path) -> Result<()> {
     if shallow(bytes) { Ok(()) } else { Err(Error::usage(format!("{}: JSON nested more than {MAX_JSON_DEPTH} levels deep, which no file strobe writes is: not read", path.display()))) }
 }
 
-/// Whether JSON nests at most `MAX_JSON_DEPTH` levels (strings skipped, one pass over the bytes): what`n/// every reader that turns serde_json's recursion limit off checks first (a file, or a message from a`n/// browser or a device, whose depth a page or a file decides).
+/// Whether JSON nests at most `MAX_JSON_DEPTH` levels. Readers check this before disabling serde_json's
+/// recursion limit for a file or a message from a browser or device.
 pub fn shallow(bytes: &[u8]) -> bool {
     let (mut depth, mut string, mut escape) = (0usize, false, false);
     for &c in bytes {

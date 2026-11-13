@@ -935,7 +935,20 @@ names the hook once (`setup: …`, not `setup: setup: …`). Under each case, `-
 last 10 lines the bench file's hooks wrote to the console during it (`console.log`/`error`; the
 rest stay in the experiment's `runner.log`, whose path it names). Each passing case keeps its
 block's recording and prints it (`rec  rec_… · strobe query rec_… threads`), and `query <exp> <view>`
-on a check of one case answers from that recording (with several, it lists them). Before anything
+on a check of one case answers from that recording, except that profile views such as `hotspots`,
+`layout` and `gc` use the case's attribution recording when the check kept one. A forwarded view names
+its case and recording. With several active cases, a shared batch, or several candidate launches, query
+lists only distinct recordings that answer the requested view, with its arguments, instead of choosing a case.
+Listing checks sources in series order without marking a recording used or building a trace. Only when style,
+trace inputs or trace-only runs need run marks does listing read the trace: once per recording generation,
+with the run keys and their invalidation flags cached atomically under strobe's run folder, never in the recording.
+It does not execute the SQL being offered. Without a kept profile it explains how to collect one. For a profile view,
+`--case` on the check selects the case's own attribution recording. If all candidates fail identically, query returns
+that error unchanged. Otherwise it names each distinct reason with its first series and recording (`recording_errors`
+in JSON): exit 1 if any candidate had a read error (1), else 4 if all returned 4, else 2.
+The top-level validator is the shared validator, or null when candidates disagree.
+Local summaries and Markdown of a copy name its path in follow-up commands and never offer to resume it.
+An untraced check does not recommend `frames` in its summary. Before anything
 runs, every bench prints the builds it runs with their commits (`head app@f2a281b501 (dirty)`, or
 `base … → head …`; an implementation comparison names its sides as before), and a check's text
 starts with that line. A check's
@@ -5869,7 +5882,7 @@ outside-in pages (phase 1); adapters, `expect.same`, OS input to pages, `InputMi
   (`shown.<side>.thumb_start`, `thumb_end`).
 - **result.json** (`schema/result.v1.json`): `comparison` (`builds` | `implementations`),
   `variants[].{name, target, target_kind, engine, repo, process_set {median_count, by_program}}`,
-  `fixture`, `fairness { window {client_dip, scale, display, hz}, adapter, input, frames, gpu_cache,
+  `fixture`, `fairness { window {client_dip, scale, frame, display, hz}` (null without a measured size on both sides), `adapter, input, frames, gpu_cache,
   priority, observer {base, head, reads_per_run} }`, `scoreboard { journeys, compared, better, same,
   worse, unclear, gaps, better_alone, worse_alone, family, all_no_worse }` (the journeys as one
   family, §9.3; the text output's `family` line), each primary's `p_repeated` and `holm_decided`

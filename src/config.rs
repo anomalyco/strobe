@@ -245,8 +245,8 @@ const TOP: Shape = Keys(&[
 /// user's own, else none. Read on its own, so a command that reads no other setting (`query`,
 /// `report`) is not failed by another key's problem; a `"unit"` strobe does not have is a usage error
 /// with where it is.
-pub fn unit(root: &Path) -> Result<Option<crate::fmt::TimeUnit>> {
-    for path in [root.join("strobe.json"), host::paths::state_path().join("strobe.json")] {
+pub fn unit(root: Option<&Path>) -> Result<Option<crate::fmt::TimeUnit>> {
+    for path in root.map(|r| r.join("strobe.json")).into_iter().chain([host::paths::state_path().join("strobe.json")]).filter(|p| crate::store::regular(p)) {
         let Ok((map, problems)) = read(&path) else { continue };
         if let Some(p) = problems.into_iter().find(|p| matches!(p.path.first(), Some(Seg::Key(k)) if k == "unit")) {
             return Err(p.error(""));

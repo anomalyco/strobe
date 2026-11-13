@@ -107,7 +107,7 @@
       "type": ["object", "null"],
       "description": "implementations: what both sides shared, as measured.",
       "properties": {
-        "window": { "type": ["object", "null"], "properties": { "client_dip": { "type": "array", "items": { "type": "number" } }, "scale": { "type": ["number", "null"] }, "display": { "type": ["string", "null"] }, "hz": { "type": ["number", "null"] } } },
+        "window": { "type": ["object", "null"], "properties": { "client_dip": { "type": ["array", "null"], "items": { "type": "number" } }, "frame": { "type": "array", "items": { "enum": ["base", "head"] } }, "scale": { "type": ["number", "null"] }, "display": { "type": ["string", "null"] }, "hz": { "type": ["number", "null"] } } },
         "adapter": { "type": ["string", "null"] },
         "input": { "enum": ["os", "devtools", "none"], "description": "os: the sides got OS input (a native side, or a page measured from outside); devtools: two pages driven through DevTools; none: the runs sent no input." },
         "frames": { "type": ["string", "null"], "description": "Where frames came from on both sides (the OS present source), or null without frames." },
@@ -571,17 +571,17 @@
         "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "check: the refusal behind a refused or failed case, when a validator gave one." },
         "declared": { "type": "array", "items": { "type": "string" }, "description": "check: the metrics the case declared." },
         "values": { "type": ["object", "null"], "description": "check: one run's values; with --runs N the median over the launch's N runs; with --repeat R the median over the R launches." },
-        "base": { "type": ["object", "null"], "description": "check --base <variant>: base's side of the case (SPEC 5.6 \"A check against base\"): launches, values, repeat, recording(s), passed, refused. A base that failed fails nothing: its counters are then not compared. Absent without --base." },
+        "base": { "type": ["object", "null"], "description": "check --base <variant>: base's side of the case (SPEC 5.6 \"A check against base\"): launches, values, repeat, recording(s), passed, refused. A failed base fails the case (exit 1): head was checked against nothing. Absent without --base." },
         "base_values": { "type": ["object", "null"], "description": "check --base <variant>: base's values beside head's values (the same keys). Absent without --base." },
         "counters": {
           "type": "array",
-          "description": "check --base <variant> --noworse <counters>: each exact counter held to base's. A counter must hold one value on each side (2 runs with a reset, or 2 launches) and head be at most margin above base; worse or unstable fails the case. Absent without --noworse.",
+          "description": "check --base <variant> --noworse <counters>: each exact counter held to base's. A counter must hold one value on each side (2 runs with a reset, or 2 launches) and head be at most margin above base; worse, unstable, missing or not_compared fails the case. Absent without --noworse.",
           "items": {
             "type": "object",
             "properties": {
               "metric": { "type": "string" },
               "margin": { "type": "number", "description": "The --noworse margin as given for it (0: head at most base's)." },
-              "state": { "enum": ["no_worse", "worse", "unstable", "missing", "not_compared"], "description": "missing: head measured no value where base did (fails); not_compared: base failed or measured no value of it (passes)." },
+              "state": { "enum": ["no_worse", "worse", "unstable", "missing", "not_compared"], "description": "missing: head measured no value where base did (fails); not_compared: base failed, base measured no value, or neither side measured a declared counter (fails)." },
               "passed": { "type": "boolean" },
               "stable": { "type": "boolean", "description": "Each side held one value." },
               "base": { "type": ["number", "null"], "description": "The median of base's runs." },
