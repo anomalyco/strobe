@@ -1835,8 +1835,6 @@ struct Ctx<'a> {
     headless: bool,
     /// Series and part of strobe already warned over its §19 budget (`OverheadBudget`).
     overhead_warned: std::collections::BTreeSet<String>,
-    /// Set by `slotted` around a timed block: what its runs' `Hooks` read for `Background`.
-    run_loads: Option<RunLoads>,
     /// A native target's GPU adapter and window scale per variant (`VariantMismatch`).
     native_setup: BTreeMap<String, String>,
     /// The bench's harness, overlaid on every variant's folder (`overlay_harness`).
@@ -2500,7 +2498,6 @@ pub fn run(args: &Args) -> Result<Output> {
         mode,
         headless: args.has("headless"),
         overhead_warned: Default::default(),
-        run_loads: None,
         native_setup: BTreeMap::new(),
         // Per bench: a long-lived daemon runs benches of several repositories.
         harness: harness(&file, &project, &config),
@@ -6866,8 +6863,13 @@ fn other_processes(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>
     busiest
 }
 
-/// What a timed block's `Hooks` read over each of its runs, for `Background` (`run_load`). `slotted`
-/// sets it on `Ctx` around the block and takes it after.
+thread_local! {
+    /// Set by `slotted` around a timed block (on the thread that runs it): what its runs' `Hooks`
+    /// read for `Background`. Every target kind's runs pass through `Hooks`, whoever made them.
+    static RUN_LOADS: RefCell<Option<RunLoads>> = const { RefCell::new(None) };
+}
+
+/// What a timed block's `Hooks` read over each of its runs, for `Background` (`run_load`).
 #[derive(Clone)]
 pub(super) struct RunLoads {
     /// Unpinned: every CPU strobe may use, whose busy time each run reads.
@@ -7587,10 +7589,10 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         // cannot give. The processes around the block only name the busiest.
         let timed = x.measures_time() && cases.len() == 1 && ctx.phone.is_none();
         let unpinned = timed && ctx.pin.is_none() && !cfg!(target_os = "macos");
-        ctx.run_loads = timed.then(|| RunLoads { all: unpinned.then(|| host::topology().all()), pin: ctx.pin, runs: Default::default() });
+        RUN_LOADS.set(timed.then(|| RunLoads { all: unpinned.then(|| host::topology().all()), pin: ctx.pin, runs: Default::default() }));
         let procs = unpinned.then(|| (host::now_ns(), host::all_processes()));
         let launch = any_launch(ctx, cases, v, pair, x);
-        let loads = ctx.run_loads.take().map(|l| l.runs.take()).unwrap_or_default();
+        let loads = RUN_LOADS.take().map(|l| l.runs.take()).unwrap_or_default();
         let named = procs.map(|a| other_processes(&a, &(host::now_ns(), host::all_processes())));
         let mut http = ctx.runner.take_http();
         let whole = quota.zip(host::cgroup_throttled_ns()).map(|(a, b)| b.saturating_sub(a));

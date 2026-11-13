@@ -298,8 +298,7 @@ pub(super) struct Hooks<'a> {
     fixture_untimed: Cell<f64>,
     /// No input call since the last stretch ended (`ended_untimed`).
     ended: Cell<bool>,
-    /// A timed block's readings over each run, for `Background` (`RunLoads`), and the run's open ones.
-    load: Option<super::RunLoads>,
+    /// The run's open readings for `Background` (`RunLoads`, while `slotted` has a timed block).
     load_at: RefCell<Option<(Option<validity::CpuBusy>, validity::Steal)>>,
 }
 
@@ -312,7 +311,7 @@ type CpuAt = ((u64, Option<u64>), Instant);
 impl<'a> Hooks<'a> {
     /// A block's hooks; `pids` lists the target's processes for the fixture's connection check.
     pub(super) fn new(ctx: &Ctx, pids: impl Fn() -> Vec<u32> + 'a) -> Hooks<'a> {
-        Hooks { fixture: ctx.fixture_running.clone().map(|f| (f, Box::new(pids) as Box<dyn Fn() -> Vec<u32> + 'a>)), load: ctx.run_loads.clone(), ..Hooks::default() }
+        Hooks { fixture: ctx.fixture_running.clone().map(|f| (f, Box::new(pids) as Box<dyn Fn() -> Vec<u32> + 'a>)), ..Hooks::default() }
     }
 
     /// Reads whether the target holds a connection to the block's fixture (after setup).
@@ -337,7 +336,7 @@ impl<'a> Hooks<'a> {
             self.fixture_lost.set(f.lost());
         }
         // Last, so the readings above are outside the run's window.
-        if let Some(l) = &self.load {
+        if let Some(l) = super::RUN_LOADS.with_borrow(|l| l.clone()) {
             *self.load_at.borrow_mut() = Some((l.all.and_then(|_| validity::CpuBusy::start()), validity::Steal::start()));
         }
     }
@@ -346,7 +345,7 @@ impl<'a> Hooks<'a> {
     /// threw) ends here.
     pub(super) fn end(&self) {
         // First, so the window is the run's.
-        if let (Some(l), Some((busy, steal))) = (&self.load, self.load_at.borrow_mut().take()) {
+        if let (Some(l), Some((busy, steal))) = (super::RUN_LOADS.with_borrow(|l| l.clone()), self.load_at.borrow_mut().take()) {
             let busy = busy.zip(l.all).and_then(|(b, cpus)| b.stop(cpus)).map(|b| b.pct());
             l.runs.borrow_mut().push(super::RunLoad { busy, steal: steal.pct(l.pin) });
         }
