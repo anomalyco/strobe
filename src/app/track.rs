@@ -93,7 +93,7 @@ fn seed_fingerprint(r: &Value, fingerprint: &mut Value) {
 /// read; `kinds`: the series' target kinds.
 fn metric_fingerprint(metric: &str, runtimes: &[String], kinds: &[&str], fingerprint: &mut Value) {
     let linux = cfg!(target_os = "linux");
-    let launched = |k: &&str| matches!(*k, "tty" | "native" | "exe" | "webview" | "app");
+    let launched = |k: &&str| matches!(*k, "tty" | "native" | "exe" | "webview" | "app" | "command");
     let revision = match metric {
         "memory.app.private" if linux => Some(2),
         "js.heap.retained" if runtimes.iter().any(|r| r == "node") => Some(2),

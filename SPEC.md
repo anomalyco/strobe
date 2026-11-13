@@ -768,7 +768,10 @@ comparison, after every timed pair of a series, one untimed block per variant fi
 
 **Stopping and resuming.** Ctrl-C (SIGINT), SIGTERM or `strobe bench --stop <exp>` (from any shell,
 or for a bench the daemon runs) stops a bench once its current block ends; waits (a locked session,
-the bench slot, busy CPUs) end at once. A second Ctrl-C ends strobe at once. `--stop` and `--resume`
+the bench slot, busy CPUs) end at once. On Unix a second stop at least 300 ms later ends the launches,
+sweeps helpers stamped by this strobe (even if their launch is no longer listed), restores its settings,
+reports leftovers, and exits 130. An earlier repeat is the same stop. A third stop can force exit.
+`--stop` and `--resume`
 take an id or a unique prefix. `--stop` finds the bench's registration (§10.1) and says what it was
 doing; one that was waiting stops within a second, which `--stop` waits to report as `stopped`. An
 experiment no bench runs is a usage error that says whether it finished or ended (then `--resume`

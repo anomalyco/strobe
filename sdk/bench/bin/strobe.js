@@ -3,6 +3,7 @@
 // one (an optional dependency: each machine installs only its own). STROBE_BINARY points at another build.
 import { spawn } from "node:child_process"
 import { createRequire } from "node:module"
+import { constants } from "node:os"
 import { dirname, join } from "node:path"
 
 const target = `${process.platform}-${process.arch}`
@@ -28,6 +29,7 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
     if (process.platform !== "win32") child.kill(sig)
   })
 }
+if (process.platform === "win32") process.on("SIGBREAK", () => {}) // The console delivers it to the child too.
 child.on("error", (e) => {
   console.error(`strobe: ${e.message}`)
   process.exit(1)
@@ -36,6 +38,7 @@ child.on("exit", (code, signal) => {
   if (signal) {
     process.removeAllListeners(signal)
     process.kill(process.pid, signal)
+    process.exit(128 + (constants.signals[signal] ?? 1))
   }
   process.exit(code ?? 1)
 })

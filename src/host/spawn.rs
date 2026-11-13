@@ -5,7 +5,7 @@
 //! launched for, which whatever it starts inherits: what left the group (a detached service, a
 //! double-forked daemon) still carries the stamp.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command};
 
 /// Every process strobe launches (an isolated app, a browser, a command target) carries the folder it
@@ -157,7 +157,7 @@ pub(super) fn pids_in(list: &[(u32, u32, u64)], dir: &Path) -> Vec<u32> {
 /// The processes stamped with `dir` now, but this strobe and `except`: pid, start time and name.
 fn stamped_with(dir: &Path, except: u32) -> Vec<(u32, u64, String)> {
     let k = home_key(dir);
-    stamped().into_iter().filter(|s| s.stamp.home == k && s.pid != except).map(|s| (s.pid, s.start, name_of(s.pid))).collect()
+    stamped().into_iter().filter(|s| s.stamp.home == k && s.pid != except && super::start_time(s.pid) == Some(s.start)).map(|s| (s.pid, s.start, name_of(s.pid))).collect()
 }
 
 /// A process's executable's file name, or nothing.
@@ -315,8 +315,6 @@ struct Live {
     pid: u32,
     start: Option<u64>,
     child: bool,
-    /// The folder the launch was for (its stamp): what left its tree and group still carries it.
-    home: Option<PathBuf>,
 }
 
 /// Every `Owned` launch not yet ended: what `end_launches` ends on a stop. A child launch registers
@@ -499,13 +497,10 @@ pub fn left_alone_text(left: &[LeftAlone]) -> String {
 /// the OS would end only once strobe has exited): for a stop of a command that then exits
 /// (`isolate::end_on_stop`), where no launch's own end runs. An app launchd started for strobe is
 /// ended only as far as `kill_opened` proves it the launch's, and never by a process group: strobe
-/// made none. Returns the folders the launches were for, whose stamped processes the caller ends and
-/// waits for. The launches stay ended: their `end` only reaps them.
-pub fn end_launches() -> Vec<PathBuf> {
+/// made none. Detached helpers are swept separately by owner, whether or not their launch is listed.
+pub fn end_launches() {
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut homes = Vec::new();
     for l in live.drain(..) {
-        homes.extend(l.home.clone());
         if !l.child {
             if let Some(start) = l.start {
                 super::kill_opened(l.pid, start);
@@ -525,12 +520,9 @@ pub fn end_launches() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     super::cgroup::end_all();
     #[cfg(windows)]
-    for (_, _, job) in std::mem::take(&mut *JOBS.lock().unwrap_or_else(|e| e.into_inner())) {
+    for &(_, _, job) in JOBS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(job as _, 1) };
     }
-    homes.sort();
-    homes.dedup();
-    homes
 }
 
 /// A stop's end of everything strobe launched, for a stop that exits at once (`isolate::end_on_stop`,
@@ -539,24 +531,44 @@ pub fn end_launches() -> Vec<PathBuf> {
 /// session of its own), then up to 2 s for those to go. What is still there then is said (`leave`):
 /// a stop ends sooner, never by leaving that unsaid.
 pub fn stop_launches() {
-    let homes = end_launches();
-    let ours = |h: &Path| {
-        let k = home_key(h);
-        stamped().into_iter().filter(move |s| s.stamp.home == k && super::start_time(s.pid) == Some(s.start) && stamp_of(s.pid).as_ref() == Some(&s.stamp))
-    };
-    for h in &homes {
-        for s in ours(h) {
-            super::kill_opened(s.pid, s.start);
+    #[cfg(target_os = "macos")]
+    {
+        // Both immediate exit paths must let an in-flight open prove and end its late answer.
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+        while super::macos::opening() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+    end_launches();
+    // A command has no registered home, and normal teardown may already have unlisted a launch.
+    let owner = parse_owner(owner_stamp());
+    let ours = || stamped().into_iter().filter(|s| Some((s.stamp.pid, s.stamp.start)) == owner);
     let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let mut left: Vec<Stamped> = homes.iter().flat_map(|h| ours(h)).collect();
-    while !left.is_empty() && std::time::Instant::now() < until {
+    loop {
+        let mut live = false;
+        for s in ours() {
+            if s.stamp.start == 0 {
+                leave(Some(s.pid), "a process stamped with this strobe's pid", "its owner stamp has no launch-time start; strobe cannot prove ownership");
+                continue;
+            }
+            if super::start_time(s.pid) != Some(s.start) {
+                continue;
+            }
+            if stamp_of(s.pid).as_ref() != Some(&s.stamp) {
+                if super::start_time(s.pid) == Some(s.start) {
+                    leave(Some(s.pid), "a previously stamped process", "its launch stamp could not be verified at the stop");
+                }
+            } else if std::time::Instant::now() >= until {
+                leave(Some(s.pid), "a process stamped by this strobe", "it was still running after the stop's bounded wait");
+            } else {
+                super::kill_opened(s.pid, s.start);
+                live = true;
+            }
+        }
+        if !live {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
-        left = homes.iter().flat_map(|h| ours(h)).collect();
-    }
-    for s in left {
-        leave(Some(s.pid), "a process launched for a launch strobe ended at a stop (it carries the launch's stamp)", "it was still running 2 s after strobe ended it");
     }
 }
 
@@ -634,7 +646,7 @@ pub fn close_job(job: isize) {
 /// found by `group_pids` for `home`. Taken back by `unlist_launch` before it is ended.
 #[cfg(windows)]
 pub fn list_launch(pid: u32, job: Option<isize>, home: Option<&Path>) {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: None, child: true, home: home.map(Path::to_path_buf) });
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: None, child: true });
     if let Some(j) = job {
         JOBS.lock().unwrap_or_else(|e| e.into_inner()).push((pid, home.map(home_key), j));
     }
@@ -1085,11 +1097,14 @@ impl Owned {
                     let me = self.pid();
                     let running: Vec<u32> = if held.complete { held.running.keys().map(|k| k.0).collect() } else { job_pids(j).into_iter().filter(|&p| !super::jobs::exited_pid(p)).collect() };
                     let in_job: Vec<(u32, u64, String)> = running.into_iter().filter(|&p| p != me).map(|p| (p, 0, name_of(p))).collect();
-                    let left = still_left(|| in_job.iter().cloned().chain(stamped(me)).collect());
+                    let left = still_left(|| {
+                        let mut left = stamped(me);
+                        left.extend(in_job.iter().filter(|j| !left.iter().any(|s| s.0 == j.0)).cloned().collect::<Vec<_>>());
+                        left
+                    });
                     // A console host is the console's (a windowless strobe's console program gets one in
                     // its job), not the command's work: alone it is no leftover; the job's end ends it.
-                    let console = |n: &str| n.eq_ignore_ascii_case("conhost.exe") || n.eq_ignore_ascii_case("OpenConsole.exe");
-                    if left.iter().all(|(_, s, n)| *s == 0 && console(n)) { Vec::new() } else { left }
+                    if left.iter().all(|(pid, s, _)| *s == 0 && super::win::system_console_host(*pid)) { Vec::new() } else { left }
                 }
                 None => {
                     // No job (strobe's own job refused a nested one): nothing counts what the command started.
@@ -1349,7 +1364,7 @@ pub fn spawn_owned(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Optio
     // Held from before the spawn until the launch is listed: a stop in between ends it too.
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     let owned = spawn_group(cmd, cpus, flags, home)?;
-    live.push(Live { pid: owned.pid(), start: owned.start, child: true, home: home.map(Path::to_path_buf) });
+    live.push(Live { pid: owned.pid(), start: owned.start, child: true });
     Ok(owned)
 }
 
@@ -1482,7 +1497,10 @@ impl Release {
     /// missing, now.
     fn released(&self, before: u64) -> u64 {
         use std::os::fd::AsRawFd;
-        let Some((r, _)) = &self.stamp else { return before };
+        if !self.forks {
+            return before;
+        }
+        let Some((r, _)) = &self.stamp else { return super::now_ns() };
         let mut b = [0u8; 8];
         if unsafe { libc::read(r.as_raw_fd(), b.as_mut_ptr() as *mut libc::c_void, 8) } == 8 { u64::from_ne_bytes(b) } else { super::now_ns() }
     }
@@ -1545,7 +1563,7 @@ pub fn spawn_owned_terminal(cmd: &mut Command, cpus: Option<u64>, home: Option<&
     let released_ns = before_ns;
     let pgid = child.id();
     let start = super::start_time(pgid);
-    live.push(Live { pid: pgid, start, child: true, home: home.map(Path::to_path_buf) });
+    live.push(Live { pid: pgid, start, child: true });
     Ok(Owned {
         process: Proc::Child(child),
         group: Some(Group { pgid }),
@@ -1581,7 +1599,7 @@ pub fn open_owned(bundle: &super::macos::Bundle, args: &[String], env: &[(String
     let start = opened.start;
     let pid = if start.is_some() { opened.pid } else { 0 };
     match start {
-        Some(start) => LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: Some(start), child: false, home: Some(home.to_path_buf()) }),
+        Some(start) => LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(Live { pid, start: Some(start), child: false }),
         None => leave(
             Some(opened.pid),
             "the process Launch Services answered strobe's launch with",

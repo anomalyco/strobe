@@ -1267,35 +1267,10 @@ pub fn end_on_stop(home: Option<&Home>) -> EndOnStop {
                 }
                 // Under the lock: the command cannot start closing meanwhile.
                 if flag.load(Ordering::SeqCst) {
-                    // macOS: a launch through Launch Services under way ends what it started once that
-                    // surfaces (`macos::open_app`, 2 s at most): strobe must not exit before.
-                    #[cfg(target_os = "macos")]
-                    {
-                        let until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
-                        while host::macos::opening() && std::time::Instant::now() < until {
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                    }
                     // Each launch's tree and group, its cgroup or job, then what left them with its
                     // stamp (a browser's crash reporter, on its own session), waited for: what is still
                     // there 2 s on is said below, never left unsaid for speed.
-                    host::spawn::stop_launches();
-                    if let Some((dir, fresh)) = &home {
-                        release_home(dir);
-                        if *fresh {
-                            remove_home(dir);
-                        }
-                    }
-                    if let Some(dir) = &display {
-                        release_home(dir);
-                        remove_home(dir);
-                    }
-                    // What strobe left alone is said before it exits, as at the end of any run.
-                    let left = host::spawn::left_alone();
-                    if !left.is_empty() {
-                        eprint!("{}", host::spawn::left_alone_text(&left));
-                    }
-                    std::process::exit(130);
+                    exit_on_stop(home.as_ref(), display.as_deref());
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1311,6 +1286,38 @@ impl Drop for EndOnStop {
             let _ = w.join();
         }
     }
+}
+
+/// A watcher and an escalated stop may coincide. Only exit after the one doing cleanup has reported.
+pub(crate) fn exit_on_stop(home: Option<&(PathBuf, bool)>, display: Option<&Path>) -> ! {
+    static EXIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _exit = EXIT.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(target_os = "linux")]
+    super::a11y::atspi::restore_on_stop();
+    host::spawn::stop_launches();
+    host::reserve::restore_on_stop();
+    host::power::restore_on_stop();
+    if let Some((dir, fresh)) = home {
+        release_home(dir);
+        if *fresh {
+            remove_home(dir);
+        }
+    }
+    if let Some(dir) = display {
+        release_home(dir);
+        remove_home(dir);
+    }
+    // Also cover a launch already unlisted but whose home has not finished closing.
+    for dir in launch_folders() {
+        if held(&key(&dir)) && std::fs::read_to_string(dir.join(OWNER_FILE)).is_ok_and(|s| s == owner_stamp()) {
+            restore_protocols(&dir);
+        }
+    }
+    let left = host::spawn::left_alone();
+    if !left.is_empty() {
+        eprint!("{}", host::spawn::left_alone_text(&left));
+    }
+    std::process::exit(130);
 }
 
 /// Ends what a launch started, whatever state it is in: the child, its tree and its group
@@ -2119,6 +2126,11 @@ fn reg_text(b: &[u8]) -> String {
 
 /// Puts every saved scheme back as it was before the launch (deleting one that did not exist).
 pub fn restore_protocols(home: &Path) {
+    // Normal teardown can already be restoring this home when the second-stop worker starts.
+    #[cfg(any(windows, target_os = "macos"))]
+    static RESTORING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(any(windows, target_os = "macos"))]
+    let _restoring = RESTORING.lock().unwrap_or_else(|e| e.into_inner());
     #[cfg(target_os = "macos")]
     {
         macos_library::restore(home);

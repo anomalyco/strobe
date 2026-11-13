@@ -976,16 +976,7 @@ impl EndedMarks {
     /// one that dropped the launch's stamp: what it used would be taken out of what ended as running
     /// while the set counts none of it, or on Windows counted from 0 where it ran before), or one that
     /// ended between the listing and the cgroups' reading (`skewed`: counted in both).
-    pub fn dead_since(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Option<u64> {
-        self.dead_or_why(earlier, set_a, set_b).ok()
-    }
-
-    /// Why `dead_since` is None: which of its conditions did not hold, in words a refusal can carry.
-    pub fn dead_why(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Option<&'static str> {
-        self.dead_or_why(earlier, set_a, set_b).err()
-    }
-
-    fn dead_or_why(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Result<u64, &'static str> {
+    pub fn dead_since(&self, earlier: &EndedMarks, set_a: &CpuByProcess, set_b: &CpuByProcess) -> Result<u64, &'static str> {
         #[cfg(windows)]
         {
             let (Some(a), Some(b)) = (earlier.held.as_ref(), self.held.as_ref()) else { return Err("no job of strobe's held the set's processes at both readings") };
@@ -1105,10 +1096,11 @@ pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> EndedMarks {
         // reading then lacks it, which `dead_since` refuses rather than miss it.
         out.held = spawn::jobs_cpu(pids, home);
         out.jobs = spawn::jobs_ended(pids, home);
-        out.listed = pids.iter().copied().collect();
         // A process of the jobs the listing lacks: of the set if it carries the launch's stamp (its pid
         // is the job's process's while the job holds it, so the stamp read is its own).
         if let (Some(h), Some(home)) = (&out.held, home) {
+            // Only a home-backed listing includes the job's live orphans.
+            out.listed = pids.iter().copied().collect();
             let key = spawn::home_key(home);
             out.unlisted = h.running.keys().filter(|k| !pids.contains(&k.0) && spawn::stamp_of(k.0).is_some_and(|s| s.home == key)).copied().collect();
         }
@@ -2309,19 +2301,26 @@ pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
     static NOW_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     extern "C" fn handler(sig: libc::c_int) {
         let flag = TARGET.load(Ordering::SeqCst);
-        if !flag.is_null() && !unsafe { (*flag).swap(true, Ordering::SeqCst) } {
-            FIRST.store(now_ns(), Ordering::SeqCst);
-            return;
+        // No lazy timebase, allocation or lock in the handler. Claim each stop WITH its time:
+        // SIGTERM on another thread cannot see a claimed stop with an unpublished timestamp.
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        let now = (ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64).max(1);
+        match FIRST.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => {
+                unsafe { (*flag).store(true, Ordering::SeqCst) };
+                return;
+            }
+            Err(first) if now.saturating_sub(first) < 300_000_000 => return,
+            Err(_) => {}
         }
-        if now_ns().saturating_sub(FIRST.load(Ordering::SeqCst)) < 300_000_000 {
-            return;
-        }
-        if !flag.is_null() && !NOW.swap(true, Ordering::SeqCst) {
-            NOW_AT.store(now_ns(), Ordering::SeqCst);
-            return;
-        }
-        if now_ns().saturating_sub(NOW_AT.load(Ordering::SeqCst)) < 300_000_000 {
-            return;
+        match NOW_AT.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => {
+                NOW.store(true, Ordering::SeqCst);
+                return;
+            }
+            Err(second) if now.saturating_sub(second) < 300_000_000 => return,
+            Err(_) => {}
         }
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
@@ -2337,12 +2336,7 @@ pub fn unix_ctrl_c(flag: &'static std::sync::atomic::AtomicBool) {
             while !NOW.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            spawn::stop_launches();
-            let left = spawn::left_alone();
-            if !left.is_empty() {
-                eprint!("{}", spawn::left_alone_text(&left));
-            }
-            std::process::exit(130);
+            crate::target::isolate::exit_on_stop(None, None);
         });
     }
 }

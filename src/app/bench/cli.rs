@@ -224,7 +224,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
                 if one { "it" } else { "them" },
                 if one { "it" } else { "them" }
             ),
-            "wait for background jobs before the command exits (sh -c '… & wait'), quote an `&` that belongs to a URL or string (\"http://…?a=1&b=2\"), use `start /wait` rather than `start` on Windows, or turn off a tool's persistent daemon (for example --no-daemon)",
+            "wait for background jobs (sh -c '… & wait', or start /wait on Windows); quote `&` in URLs and strings. Disable the tool's daemon (--no-daemon), update checks (NO_UPDATE_NOTIFIER=1) or telemetry (the tool's opt-out or CI=1 where supported). Start shared servers in fixture(), outside the measured command",
         ));
     }
     let mut metrics: BTreeMap<String, (f64, Option<Direction>)> = BTreeMap::new();

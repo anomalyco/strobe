@@ -69,7 +69,7 @@
 //! | 23 | `helper` (`schtasks /end`) | strobe's ETW helper task | - | the task name carries the user's RID; strobe's own |
 //! | 24 | `up` / `leave` / `update` (`launchctl kickstart -k`, `bootout`, `systemctl --user restart`), MCP `strobe/quit` | the strobe daemon | - | the daemon's own service unit; `strobe/quit` needs the token and no bench running |
 //! | 25 | protocol and window closes (CDP `Browser.close`, BiDi `browser.close`, WebDriver `DELETE /session`, the script host's `exit`, `page.window("close")`, `WM_CLOSE`) | a browser, host or app strobe launched | - | strobe's own session; a window close only on windows of a process set walked from a proven root (`Owned::root`, `process_set_of`): a foreign Launch Services answer fails the launch first |
-//! | 26 | `sdk/bench/bin/strobe.js` | the wrapper itself | - | itself |
+//! | 26 | `sdk/bench/bin/strobe.js` | Unix: forward SIGINT/SIGTERM to its child; after exit re-raise the child's signal on the wrapper | - | the wrapper's unreaped `ChildProcess`; then itself. Windows console Ctrl-C/Break reaches both directly |
 //! | 27 | `scripts/dev` (`prune-auto.ts`, `viewer-units.ts`) | their own children | - | the child's handle |
 //! | 28 | `scripts/dev/prune-check.ts` | a holder's group | - | only while the holder has no exit code or signal (not reaped) |
 //! | 29 | `scripts/dev/bounce/harness.rs` | decoys it started | from the decoy tree's snapshot while the decoy (its unreaped child) ran | `kill_opened` by pid and that start; the decoy itself through its handle |
