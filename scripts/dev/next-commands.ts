@@ -337,18 +337,18 @@ let failed = 0
 // Each made result, by id (in this run's state folder), and read again by its path from a copy strobe does not keep.
 const made: string[] = []
 const byPath: string[] = []
+// The synthetic SQL cells use the same engine as real page traces, in this run's own state.
+for (const v of existsSync(join(realState, "engine")) ? readdirSync(join(realState, "engine")) : []) {
+  for (const exe of ["trace_processor_shell", "trace_processor_shell.exe"].filter(e => existsSync(join(realState, "engine", v, e)))) {
+    mkdirSync(join(fakeState, "engine", v), { recursive: true })
+    cpSync(join(realState, "engine", v, exe), join(fakeState, "engine", v, exe))
+  }
+}
 if (argv.includes("--make")) {
   // A `'` and a space in every path: PowerShell and sh must both read the bench file's path whole.
   const repo = join(work, "O'Connor repo")
   const mk = Bun.spawnSync([bun, fileURLToPath(new URL("./insights-repo.ts", import.meta.url)), repo], { stdout: "pipe", stderr: "pipe" })
   if (mk.exitCode !== 0) throw new Error(`insights-repo.ts: ${mk.stderr.toString()}`)
-  // The trace engine the real state folder holds, copied (else each run downloads it into its own).
-  for (const v of existsSync(join(realState, "engine")) ? readdirSync(join(realState, "engine")) : []) {
-    for (const exe of ["trace_processor_shell", "trace_processor_shell.exe"].filter((e) => existsSync(join(realState, "engine", v, e)))) {
-      mkdirSync(join(fakeState, "engine", v), { recursive: true })
-      cpSync(join(realState, "engine", v, exe), join(fakeState, "engine", v, exe))
-    }
-  }
   // A case that fails (its hint and the rerun of it alone).
   writeFileSync(
     join(repo, "fails.bench.ts"),
@@ -599,7 +599,8 @@ let followed = 0
     const s=c("first",lean,none?undefined:prof)
     const series: J[]=shared?[s,c("second",lean,none?undefined:p2)] : shape==="several"?[s,c("second",second,p2)] : shape==="mixed"?[s,{...c("failed"),passed:false}] : shape==="refused sibling"?[s,{...c("skipped"),kind:"refused"}] : shape==="repeat"?[{...s,repeat:{recordings:[lean,second]}}] : timed?[{...s,kind:shape==="blocks"?"blocks":"runs",timing_recordings:[{recording:lean}],attribution:{head:prof,base:shape==="comparison"?p2:undefined}}]:[s]
     writeResult({kind:timed?"experiment":"check",series})
-    advice(["query",shape==="repeat"?second:lean,"hotspots"],shared?[`${exp} summary`]:none?[]:[`${timed?exp:prof} hotspots`])
+    advice(["query",shape==="repeat"?second:lean,"hotspots"],none?[]:shared?[`${exp} summary`]:[`${timed?exp:prof} hotspots`])
+    if(none && !go(["query", lean, "hotspots"], 2).includes("--why always")) fail(`${shape}: did not explain how to keep a profile`)
     if(shared && !none) advice(["query",lean,"layout","--case","second"],[`${p2} layout`])
     if(shape==="single") for(const view of ["layout","gc","style"]) advice(["query",lean,view],[`${prof} ${view}`])
     for (const h of [exp,file]) {
@@ -618,6 +619,83 @@ let followed = 0
   writeFileSync(join(folder(hostOnly), "whole-host.json.gz"), gzipSync(readFileSync(join(handmade, "cpu-0.cpuprofile"))))
   writeResult({kind:"check", series:[c("host",lean,hostOnly)]})
   advice(["query",lean,"hotspots"],[`${hostOnly} hotspots`])
+  // Cross the recording views with the check shapes. A direct query supplies the expected
+  // refusal (including the validator), not an approximation based on which files exist.
+  const profileViews = "hotspots alloc layout style gc heap shifts waits".split(" ")
+  const launchViews = "frames inputs threads gpu memory runs log network leaks sql".split(" ")
+  const gz = (id: string, name: string, v: J) => writeFileSync(join(folder(id), name), gzipSync(JSON.stringify(v)))
+  const snap = {snapshot: {meta: {node_fields:["type","name","id","self_size","edge_count"],edge_fields:["type","name_or_index","to_node"],node_types:[["synthetic"]],edge_types:[["property"]]}},nodes:[0,0,1,0,0],edges:[],strings:["root"]}
+  const native = "rec_syn_native", terminal = "rec_syn_terminal", device = "rec_syn_device"
+  put(folder(native), "meta.json", {...leanMeta(native), native:true, gpu:{gpu_3d_pct:0}, run_list:[{run:"run:0",ms:1}]})
+  put(folder(native), "memory.json", {readings:[{processes:[]}]})
+  put(folder(native), "frames.json", {runs:{"run:0":{t0_ns:0,t1_ns:1000000}},pids:[]})
+  gz(native, "presents.json.gz", {presents:[],vsyncs:[],events:0,events_lost:0,t0_ns:0,t1_ns:1000000})
+  put(folder(terminal), "meta.json", {...leanMeta(terminal), tty:true})
+  put(folder(device), "meta.json", {...leanMeta(device), wir:true})
+  gz(device, "console.json.gz", [])
+  gz(device, "network.json.gz", {navigation:{},paint:[],spans:[],requests:[]})
+  for (const name of ["heap-s0","heap-s1","heap-0"]) gz(device, `${name}.heapsnapshot.gz`, snap)
+  gz(prof, "heap-0.heapsnapshot.gz", snap)
+  put(folder(prof), "shifts.json", {shifts:[]})
+  put(folder(prof), "alloc-0.heapprofile", {head:null,samples:[]})
+  const stacks = {threads:{},modules:[],stacks:[],events_lost:0}
+  gz(p2, "deep.json.gz", {...stacks,interval_us:1000,t0_ns:0,t1_ns:1000000,samples:[],pids:[],waits:{...stacks,waits:[]}})
+  const seen = new Set<string>()
+  let cells = 0
+  const matrix = (name: string, series: J[], launches: string[], profiles: string[], shared = false) => {
+    writeResult({kind:"check",series})
+    for (const q of [...profileViews,...launchViews,"unknown","sql select 1","threads --timeline"]) {
+      const [view, ...rest] = q.split(" "), args = view === "sql" && rest.length ? [view,rest.join(" ")] : [view,...rest]
+      const ids = [...(profileViews.includes(view) ? profiles : launches)].sort()
+      const opts = args.map(a => a.includes(" ") ? `'${a}'` : a).join(" ")
+      const direct = ids.map(id => run("query",id,...args))
+      const want = ids.filter((_,i) => direct[i].exitCode === 0)
+      const p = run("query",exp,...args), text = (p.stderr.toString() + p.stdout.toString()).trim()
+      const tag = `${name}: ${opts}`
+      if (!ids.length) {
+        if (p.exitCode !== 2 || !text.includes(profileViews.includes(view) ? "--why always" : "no kept recording")) fail(`${tag}: ${text}`)
+      } else if (!want.length) {
+        // Forwarding a single case prefixes the source to the same refusal.
+        const why = direct[0].stderr.toString().trim().replace(/^strobe: /, "")
+        if (!why || p.exitCode !== direct[0].exitCode || !text.includes(why) || text.includes("choose a recording")) fail(`${tag}: not the direct refusal (${why}): ${text}`)
+      } else if (series.length === 1 && ids.length === 1 && !shared) {
+        if (p.exitCode !== 0 || !text.includes(`${series[0].label} · ${ids[0]}`)) fail(`${tag}: not forwarded from ${ids[0]}`)
+      } else {
+        const got = text.split(/\r?\n/).filter(l => l.startsWith("  ")).map(l => l.trim())
+        const expected = want.map(id => `strobe query ${id} ${opts}`)
+        if (p.exitCode !== 2 || JSON.stringify(got) !== JSON.stringify(expected)) fail(`${tag}: ${text}, expected ${expected}`)
+        else for (const cmd of got) {
+          // These fixture words are plain, except the SQL statement. Pass the quoted one through a shell.
+          const a = cmd.includes("'") ? argvVia(sh ? "sh" : "pwsh", cmd.slice(7)) : cmd.slice(7).split(" ")
+          if (typeof a === "string") fail(`${tag}: ${a}`)
+          else { go(a,0); followed++; seen.add(view) }
+        }
+      }
+      cells++
+    }
+  }
+  gz(lean,"timeline.json.gz",{threads:[]})
+  for (const kept of [false,true]) {
+    const p = kept ? prof : undefined, b = kept ? p2 : undefined, one = c("first",lean,p)
+    const ps = p ? [p] : [], both = p && b ? [p,b] : []
+    put(folder(lean),"meta.json",leanMeta(lean))
+    matrix("one",[one],[lean],ps)
+    matrix("repeat",[{...one,repeat:{recordings:[lean,second]}}],[lean,second],ps)
+    matrix("several untraced",[one,c("second",second,b)],[lean,second],both)
+    matrix("targets",[one,c("native",native,b),c("tty",terminal),c("device",device),c("script",undefined,kept?hostOnly:undefined)],
+      [lean,native,terminal,device,...(kept?[hostOnly]:[])],[...both,...(kept?[hostOnly]:[])])
+    put(folder(lean),"meta.json",leanMeta(lean,batch))
+    matrix("shared",[one,c("second",lean,b)],[lean],both,true)
+  }
+  // The actual page trace made by --make alongside an untraced launch. No new app is launched.
+  for (const id of made) {
+    const r = JSON.parse(readFileSync(join(folder(id),"result.json"),"utf8"))
+    for (const s of r.series ?? []) if (s.attribution && typeof s.attribution === "string" && existsSync(join(folder(s.attribution),"trace.pftrace"))) {
+      matrix("page trace",[c("traced",s.attribution,s.attribution),c("headless",second,p2)],[s.attribution,second],[s.attribution,p2])
+    }
+  }
+  for (const v of [...profileViews,...launchViews]) if (!seen.has(v)) fail(`no executable listing for ${v}`)
+  console.log(`${cells} recording-selection cells (forward, choose, or refuse)`)
   // Same failure, four shapes: base refusal alone, both sides failing independently, head-only failure,
   // and a passing check. Keep the base reason exactly once and keep useful detail after its first line.
   for(const [name,extra,want] of [
@@ -650,6 +728,21 @@ let followed = 0
   for(const h of [exp,file]) for (const a of [["query",h,"summary"],["report",h,"--format","md"]])checkText(exp,h,"strobe query HANDLE actions",go(a,0))
   writeResult({kind:"experiment",series:[{kind:"runs",label:"first",primary:{metric:"cpu.work"}}],stopped:{code:130}})
   for(const a of [["query",file,"summary"],["report",file,"--format","md"]])checkText(exp,file,"strobe report experiment HANDLE --open",go(a,0))
+  const prose = "slow query search took 40 ms; strobe query search actions; run(query )"
+  for (const id of ["search", undefined]) {
+    put(copy,"result.json",{id,kind:"check",series:[{...c("first"),passed:false,log:[prose],error:prose,hint:prose,actions:{count:1,path:"first.actions.json.gz"}}],warnings:[{id:"note",text:prose}]})
+    for (const a of [["query",file,"summary"],["report",file,"--format","md"]]) {
+      const t = go(a,0)
+      if (t.split(prose).length !== 5) fail(`${a[0]} changed a log, error, hint or warning: ${t}`)
+      if (id) checkText(id,file,"strobe query HANDLE actions",t.split("\n").find(l=>l.startsWith("      actions  ")) ?? "")
+      else if (t.includes("result.json")) fail(`${a[0]} injected the path without an id`)
+    }
+  }
+  put(copy,"result.json",{kind:"experiment",series:[{kind:"runs",label:"first",primary:{metric:"cpu.work"}}],stopped:{code:130}})
+  for (const a of [["query",file,"summary"],["report",file,"--format","md"]]) {
+    const t = go(a,0)
+    if (t.includes("--resume") || t.includes("strobe report experiment  ")) fail(`${a[0]} offered an empty handle`)
+  }
   const filmed=join(work,"filmed 'copy'");put(filmed,"meta.json",{id:lean,kind:"record",wir:true,video:{kind:"screen"},network:{pre_attach_resources:1},values:{}})
   writeFileSync(join(filmed,"network.json.gz"),gzipSync(JSON.stringify({navigation:{},paint:[],spans:[],requests:[]})))
   for(const a of [["query",filmed,"summary"],["report",filmed,"--format","md"]]){
@@ -658,6 +751,7 @@ let followed = 0
   }
   put(folder(prof),"meta.json",{id:prof,probes:"attribution",launch:true,values:{}})
   checkText(prof,prof,"strobe query HANDLE hotspots",go(["query",prof,"summary"],0))
+  for(const a of [["query",folder(prof),"summary"],["report",folder(prof),"--format","md"]]) checkText(prof,prof,"strobe query HANDLE hotspots",go(a,0))
   // A real settings file in cwd is for cwd, never for another named artifact. The user's settings
   // supply the fallback. No link or real user configuration is involved.
   const here=join(work,"unpacked"), other=join(work,"another project","rec")
