@@ -68,6 +68,10 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
             let at = (candidates.len() - 1) / 2;
             let mid = candidates[at].clone();
             let s = step(args, &id, &root, side, steps.len(), &good, &mid)?;
+            if contaminated(&s) {
+                steps.push(s);
+                break;
+            }
             if moved(&s) == Some(sign) {
                 bad = mid;
                 candidates.truncate(at + 1);
@@ -87,7 +91,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
     // culprit must move the primary against its own parent (the last `good`) too; when no step benched
     // that pair, one more does. Not moved there: no one commit did it, and the bisect is `unclear`.
     let mut not_alone: Option<Value> = None;
-    if let Some(sign) = direction {
+    if let Some(sign) = direction.filter(|_| !steps.iter().any(contaminated)) {
         let direct = steps.iter().any(|st| st["commit"] == bad.as_str() && st["good"] == good.as_str() && moved(st) == Some(sign));
         if !direct {
             progress(format!("\n{} moved it against an earlier commit: benched against its parent {} to check it did it alone", short(&bad), short(&good)));
@@ -103,7 +107,8 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
             steps.push(s);
         }
     }
-    let culprit = direction.filter(|_| not_alone.is_none()).map(|_| json!({ "commit": bad, "short": short(&bad), "subject": subject(&root, &bad) }));
+    let dirty = steps.iter().find(|s| contaminated(s));
+    let culprit = direction.filter(|_| not_alone.is_none() && dirty.is_none()).map(|_| json!({ "commit": bad, "short": short(&bad), "subject": subject(&root, &bad) }));
     // Where the move is known to be when no one commit did it: from the `good` the culprit last moved against.
     let moved_from =
         steps.iter().rev().find(|st| st["commit"] == bad.as_str() && direction.is_some_and(|d| moved(st) == Some(d))).and_then(|st| st["good"].as_str()).unwrap_or(&first_good).to_string();
@@ -116,12 +121,15 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
     };
     // What the bisect found, for code (`track`, `--require-verdict`): the words below are for people.
     let outcome = match (&culprit, undecided.is_empty()) {
+        _ if dirty.is_some() || steps[0]["decided"] != true => Outcome::Unclear,
         _ if not_alone.is_some() => Outcome::Unclear,
         (None, _) => Outcome::NoChange,
         (Some(_), true) => Outcome::Found,
         (Some(_), false) => Outcome::Unclear,
     };
     let verdict = match (&culprit, undecided.is_empty()) {
+        _ if let Some(s) = dirty => format!("unclear: Background at step {}; the step did not narrow {}..{}; rerun when quieter", s["step"], short(&good), short(&bad)),
+        _ if steps[0]["decided"] != true => "unclear: the endpoints did not give a verdict".into(),
         // Not against its parent, but steps without a verdict: where the move is stays open.
         _ if not_alone.is_some() && !undecided.is_empty() => format!(
             "unclear: {} {} moved {} against {} but not against its parent {} ({}), and {} step(s) had no verdict ({}), so the move may be anywhere in {}..{}; more pairs (--pairs auto) settle it",
@@ -162,6 +170,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
     // Where the culprit may still be: from the first undecided step's `good` (or the last `good`) to `bad`.
     // No one commit: the range the move built up over.
     let remaining = match &not_alone {
+        _ if dirty.is_some() || steps[0]["decided"] != true => Some(json!({"good":good,"bad":bad})),
         Some(_) => Some(json!({ "good": from, "bad": bad })),
         None => culprit.as_ref().map(|_| json!({ "good": undecided.first().map_or(&good, |u| &u.1), "bad": bad })),
     };
@@ -169,6 +178,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
     // commit, is unclear.
     let verdict_kind = if outcome == Outcome::Unclear { json!(VerdictKind::Unclear) } else { steps[0]["verdict_kind"].clone() };
     let result = json!({
+        "warnings":steps.iter().flat_map(|s|s["warnings"].as_array().into_iter().flatten()).collect::<Vec<_>>(),
         "id": id, "kind": "bisect", "file": file, "range": range, "created": super::record::now_iso(),
         "metric": steps[0]["metric"], "series": steps[0]["series"], "steps": steps, "culprit": culprit, "verdict": verdict, "verdict_kind": verdict_kind,
         "outcome": outcome, "good": first_good, "commits": line, "remaining": remaining, "seed": seed,
@@ -228,7 +238,12 @@ fn step_json(out: &Output, root: &Path, k: usize, base: &str, head: &str) -> Res
         return Err(Error::usage(format!("--bisect follows one series, and the file has {} here: narrow it with --filter, --target or --params", series.len())));
     }
     let p = &series[0]["primary"];
+    let warnings = series[0]["warnings"].as_array().into_iter().flatten().chain(out.json["warnings"].as_array().into_iter().flatten()).filter(|w| w["level"] == "warn").collect::<Vec<_>>();
+    for w in &warnings {
+        progress(format!("  step {k}: ! {}  {}", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or("")));
+    }
     let s = json!({
+        "warnings":warnings,
         "step": k, "good": base, "commit": head, "short": short(head), "subject": subject(root, head),
         "experiment": out.json["id"], "series": series[0]["label"], "metric": p["metric"], "relative": p["relative"],
         "estimate": p["estimate"], "lo": p["lo"], "hi": p["hi"], "verdict": p["verdict"], "verdict_kind": p["verdict_kind"], "decided": p["decided"], "pairs": series[0]["pairs"],
@@ -241,6 +256,9 @@ fn step_json(out: &Output, root: &Path, k: usize, base: &str, head: &str) -> Res
 
 /// +1 or −1 when the step's primary moved with a verdict (its interval excludes 0), else None.
 fn moved(s: &Value) -> Option<i8> {
+    if contaminated(s) {
+        return None;
+    }
     let (lo, hi) = (s["lo"].as_f64()?, s["hi"].as_f64()?);
     (s["decided"] == true).then_some(())?;
     if lo > 0.0 {
@@ -250,6 +268,10 @@ fn moved(s: &Value) -> Option<i8> {
     } else {
         None
     }
+}
+
+pub fn contaminated(s: &Value) -> bool {
+    s["warnings"].as_array().into_iter().flatten().any(|w| w["id"] == "Background" && w["level"] == "warn")
 }
 
 fn change(s: &Value) -> String {
@@ -287,6 +309,11 @@ pub(crate) fn text(r: &Value) -> String {
         })
         .collect();
     t += &crate::app::fmt::table(&rows, &[], "", 2);
+    for s in r["steps"].as_array().into_iter().flatten() {
+        for w in s["warnings"].as_array().into_iter().flatten() {
+            t += &format!("  step {}: ! {}  {}\n", s["step"], w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or(""));
+        }
+    }
     t += &format!("\n{}\n", verdict_text(r));
     t
 }

@@ -22,7 +22,7 @@ pub(crate) const POCOCK_ALPHA: f64 = 0.0158;
 
 /// A series' design: its looks and their level, its bound or margin, and its journeys' family.
 #[derive(Clone, Debug)]
-pub(crate) struct Design {
+pub struct Design {
     pub looks: Vec<usize>,
     pub confidence: f64,
     /// `--pairs N`: one look at N, run exactly N.
@@ -235,7 +235,7 @@ pub(crate) fn closing(design: &Design, def: &MetricDef, primary: &mut Comparison
 /// joins the family (a refused row's p once sized it, so a valid secondary's verdict was wiped). A
 /// non-inferiority secondary's test is against its margin: rejected, its interval clears it. Returns
 /// how many were tested.
-pub(crate) fn gate_and_holm(secondaries: &mut [Comparison], primary_decided: bool) -> usize {
+pub fn gate_and_holm(secondaries: &mut [Comparison], primary_decided: bool) -> usize {
     let tested: Vec<usize> = (0..secondaries.len()).filter(|&i| !secondaries[i].exact && secondaries[i].kind != VerdictKind::Refused).collect();
     let ps: Vec<f64> = tested.iter().map(|&i| secondaries[i].p).collect();
     let rejected = stats::holm(&ps, 0.05);

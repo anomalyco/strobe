@@ -1,5 +1,6 @@
 // Manual calibration and optional log replay (no strobe process, CPU load or external services):
-// cargo run --release --features dev-background --example background -- [recorded-log-directory]
+// cargo run --release --manifest-path scripts/dev/background/Cargo.toml -- [recorded-log-directory]
+mod cases;
 fn main() {
-    strobe::app::bench::background_dev::run(std::env::args_os().nth(1).as_deref().map(std::path::Path::new));
+    cases::run(std::env::args_os().nth(1).as_deref().map(std::path::Path::new));
 }

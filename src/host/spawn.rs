@@ -1380,6 +1380,23 @@ pub fn spawn_owned(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Optio
     Ok(owned)
 }
 
+thread_local! { static RELEASE_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {std::cell::RefCell::new(None)}; }
+pub(crate) fn observe_release<T>(edge: impl FnOnce() + 'static, spawn: impl FnOnce() -> T) -> T {
+    struct Scope(Option<Box<dyn FnOnce()>>);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            RELEASE_OBSERVER.set(self.0.take());
+        }
+    }
+    let _scope = Scope(RELEASE_OBSERVER.replace(Some(Box::new(edge))));
+    spawn()
+}
+pub(crate) fn release_edge() {
+    if let Some(edge) = RELEASE_OBSERVER.take() {
+        edge()
+    }
+}
+
 fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&Path>) -> std::io::Result<Owned> {
     #[cfg(windows)]
     {
@@ -1427,6 +1444,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
         // Read just before the spawn: strobe's reader threads' buffers grow after it.
         #[cfg(target_os = "linux")]
         let floor = peak_floor(release.forks);
+        release_edge();
         let before_ns = super::now_ns();
         #[cfg(target_os = "linux")]
         let (child, spawned) = Spawned::around(|| cmd.spawn());
@@ -1715,6 +1733,7 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
     use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, GetProcessAffinityMask, OpenThread, ResumeThread, SetProcessAffinityMask, THREAD_SUSPEND_RESUME};
     let clocks = || (super::tsc(), std::time::Instant::now(), super::now_ns());
     if cpus.is_none() && job.is_none() {
+        release_edge();
         let (child, spawned) = Spawned::around(|| cmd.creation_flags(flags).spawn());
         return Ok((child?, false, clocks(), spawned, None));
     }
@@ -1745,6 +1764,7 @@ fn windows(cmd: &mut Command, cpus: Option<u64>, flags: u32, job: Option<isize>)
         // A process created suspended has its one thread: resume it. `NtResumeProcess` takes
         // microseconds, where a system-wide thread snapshot to find that thread took milliseconds,
         // which a launch's time would count.
+        release_edge();
         let started = clocks();
         let mut resumed = nt_resume().is_some_and(|resume| resume(h) >= 0);
         let snap = if resumed { INVALID_HANDLE_VALUE } else { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };

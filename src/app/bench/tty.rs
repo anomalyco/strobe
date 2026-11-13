@@ -455,7 +455,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let mut c0 = cycles(pid, &set_home);
                     let h0 = host_cycles(&tty);
                     let r0 = tty.reader_cycles();
-                    let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
+                    // Non-verdict blocks may explicitly request cpu.foreign. Timed blocks already
+                    // measure it with SelfCost, including the console host and untimed edges.
+                    let busy = ctx.pin.filter(|_| cost.load.is_none()).and_then(|_| validity::CpuBusy::start());
                     if let Some(tl) = &timeline {
                         tl.mark_edge();
                     }
@@ -477,12 +479,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         let (r1, h1) = (tty.reader_cycles(), host_cycles(&tty));
                         let at1 = super::super::record::read_known(c0.keys().chain(edges.borrow().iter().flat_map(|e| e.0.keys())));
                         let clock1 = super::super::record::Clock::now();
+                        cost.pause();
                         let busy = busy.as_ref().zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus));
-                        let mut c1 = cycles(pid, &set_home);
-                        super::super::record::read_at(&mut c1, &at1);
-                        // Right after the cycles, of the processes they listed (`dead_since`).
-                        let ended1 = ended(pid, Some(&c1), &set_home);
-                        (t1, busy, r1, h1, c1, clock1, ended1, probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref()))
+                        (t1, busy, r1, h1, at1, clock1)
                     };
                     // A run may return right after its last input (no until), before the program draws its
                     // answer: the run then ends once the answer came and held still, so its time, CPU,
@@ -490,12 +489,25 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // Asked before the end is read: an answer arriving while it is read is still awaited.
                     let last = (ran.is_ok() && !hooks.untimed_now() && !hooks.ended_untimed()).then(|| driver.last_input(t0, &hooks.untimed_stretches())).flatten();
                     let mut end = read_end();
-                    if let Some((sent, false)) = last
-                        && driver.await_answer(sent)
-                    {
-                        end = read_end();
+                    if let Some((sent, false)) = last {
+                        let first = (cost.sum.get(), cost.timed_load.get(), cost.observer_ms.get());
+                        cost.resume();
+                        let answered = driver.await_answer(sent);
+                        if answered {
+                            end = read_end()
+                        } else {
+                            cost.pause();
+                            cost.sum.set(first.0);
+                            cost.observer_ms.set(first.2);
+                        }
+                        cost.timed_load.set(super::terminal_end(first.1, cost.timed_load.get(), answered));
                     }
                     cost.end();
+                    let (t1, busy, r1, h1, at1, clock1) = end;
+                    let mut c1 = cycles(pid, &set_home);
+                    super::super::record::read_at(&mut c1, &at1);
+                    let ended1 = ended(pid, Some(&c1), &set_home);
+                    let k1 = probe::wakes::Snapshot::take_since(probe::wakes::wall_us(), &set_pids(&set_home), perf.as_ref());
                     if let Some(tl) = &timeline {
                         tl.mark_edge();
                     }
@@ -503,13 +515,12 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // settle can be judged (latencies read to here, inputs are still the run's).
                     let settled = match last {
                         Some((sent, true)) if driver.await_quiet(sent) => host::now_ns(),
-                        _ => end.0,
+                        _ => t1,
                     };
-                    let (t1, busy, r1, h1, c1, clock1, ended1, k1) = end;
                     // Other work on the program's CPUs (`cpu.foreign`): their busy time less the program's (with
                     // what processes of it that ended used, `record::timed_cpu`) and the console host's cycles;
                     // unknown where what ended is not known.
-                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1]).ok()).and_then(|(b, c)| b.other_cycles(c.total + h1.saturating_sub(h0)));
+                    let foreign = busy.and_then(|b| b.other_cycles(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1]).ok()?.total + h1.saturating_sub(h0)));
                     hooks.end();
                     let n = runs.len() + 1;
                     tty_gone(&tty, pid, &set_home, &format!("{} {}'s run {n}", if running { "during" } else { "before" }, s.case), !driver.inputs().is_empty())?;
@@ -562,6 +573,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let host_timed: u64 = hs.chunks(2).map(|p| p.get(1).copied().unwrap_or(p[0]).saturating_sub(p[0])).sum();
                     let pty_ms = rate.map_or(f64::NAN, |r| host_timed as f64 / r);
                     cost.target_ms(cpu + if cfg!(windows) { pty_ms } else { 0.0 });
+                    let foreign = cost.last_foreign().filter(|_| ctx.pin.is_some()).or(foreign);
                     let in_timed = |ns: u64| ns >= t0 && ns <= t1 && !timed.untimed.iter().any(|g| ns >= g.0 && ns < g.1);
                     let ups: Vec<term::Update> = tty.updates(t0, t1).into_iter().filter(|u| in_timed(u.commit_ns)).collect();
                     let bytes: u64 = tty.bytes(t0, t1).saturating_sub(timed.untimed.iter().map(|g| tty.bytes(g.0, g.1.saturating_sub(1))).sum());
@@ -965,7 +977,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         }
         let lapped = Instant::now();
         let clock = host::tsc();
-        let (tty, load) = Tty::spawn_observed(&tspec, ctx.pin, super::thread_pin(), super::LaunchLoad::start)?;
+        let (tty, load) = Tty::spawn_observed(&tspec, ctx.pin, super::thread_pin(), |p| if timed { super::LaunchLoad::start(p) } else { None })?;
         ctx.target_qos = host::background_qos(Some(tty.pid));
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         let deadline = Instant::now() + timeout;
@@ -997,7 +1009,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
                 ready.is_some()
             })
         };
-        let load = load.map(|l| l.window(tty.started_ns, ready.unwrap_or(tty.started_ns)));
+        let load = load.map(super::LaunchLoad::stop);
         let procs_at_ready = host::process_set(tty.pid, Some(&home.dir));
         // A process of the launch that ended before it was ready took its CPU with it (every count starts
         // at 0 at the spawn), unless its launch's cgroup kept it (`host::launch_ended_cpu`, read with the
@@ -1031,7 +1043,6 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         // The program's CPU from the spawn until ready, from its cycles over the cycle clock's rate.
         if let (Some(a), Some(b)) = (clock, tsc_at_ready)
             && b > a
-            && cpu_at_ready > 0
             && !launch_lost
         {
             let per_ms = (b - a) as f64 / (wall_at_ready.as_secs_f64() * 1e3);
@@ -1042,7 +1053,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         }
         let ups = tty.updates(tty.started_ns, ready_ns);
         if let Some(l) = load {
-            l.launch(values.get("cpu.work").copied())
+            if ready_ns <= tty.started_ns { super::RunLoad::empty_launch().launch(Some(0.0)) } else { l.launch(values.get("cpu.work").copied()) }
         }
         values.insert("tty.updates".into(), ups.len() as f64);
         values.insert("tty.frames".into(), ups.iter().filter(|u| u.synced).count() as f64);

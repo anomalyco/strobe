@@ -157,6 +157,9 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         }
         cmd.env(host::spawn::HOME_VAR, at.stamp).env(host::spawn::OWNER_VAR, host::spawn::owner_stamp());
         cmd.current_dir(at.root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(c) = cost {
+            *c.load_at.borrow_mut() = c.load.as_ref().map(LoadStart::new);
+        }
         let (c0, k0, t0) = (host::thread_cycles(), host::tsc(), Instant::now());
         let child = host::spawn_owned(&mut cmd, at.cpus, 0, None)?;
         let (t1, k1, c1) = (Instant::now(), host::tsc(), host::thread_cycles());
@@ -181,7 +184,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         }
     }
     if let Some(c) = cost {
-        c.resume();
+        c.resume_observer();
     }
     let exited = || {
         if let Some(c) = cost {
@@ -189,6 +192,11 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         }
     };
     let usage = child.run_to_exit(at.timeout, Some(at.stamp), exited).map_err(|e| Error::msg(format!("`{line}`: {e}")))?;
+    if let Some(c) = cost.filter(|c| c.load.as_ref().is_some_and(|l| l.pin.is_none())) {
+        let mut sum = c.timed_load.get();
+        sum.observer_ms += launch.max(0.0);
+        c.timed_load.set(sum);
+    }
     let wall = usage.exited_ns.unwrap_or_else(host::now_ns).saturating_sub(t0) as f64 / 1e6;
     // What it left running was ended with it, so its pipes are closed.
     for r in readers {
@@ -328,7 +336,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     while warmup.more(runs.len()) {
         hooks.begin(&format!("run:{}", runs.len()));
         own_ms.set(0.0);
-        let busy = ctx.pin.and_then(|_| validity::CpuBusy::start());
+        let busy = ctx.pin.filter(|_| cost.load.is_none()).and_then(|_| validity::CpuBusy::start());
         cost.begin();
         let t0 = host::now_ns();
         let r = ctx.runner.call("run", json!({ "case": s.case }), t, &serve);
@@ -339,6 +347,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         r.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw, timed out, or a command failed"))?;
         let done = std::mem::take(&mut *ran.borrow_mut());
         cost.target_ms(cpu(&done).unwrap_or(f64::NAN));
+        let foreign = cost.last_foreign().filter(|_| ctx.pin.is_some()).or(foreign);
         if done.is_empty() {
             return Err(Error::refused("RunIncomplete", format!("{} run: it ran no command outside ctx.untimed", s.case), "call ctx.exec() in the case's run"));
         }

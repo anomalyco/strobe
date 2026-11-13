@@ -1,11 +1,22 @@
 //! Manual known answers for the production validator. Not linked into shipped binaries.
-use super::*;
+use std::{collections::BTreeMap, path::Path};
+use strobe::{
+    app::bench::{
+        BACKGROUND_PCT, Block, Burst, Design, LoadImpact, RunLoad, background_note, fastest_cores, gate_and_holm, judged_secondary, load_metric, load_sets, retain_probe_context, run_load,
+        take_metrics,
+    },
+    host,
+    model::{self, VerdictKind},
+    stats::{self, Comparison},
+    validity::Warning,
+};
 
 fn cmp(m: &str) -> Comparison {
     stats::compare(m, model::metric(m).unwrap(), &[(100., 100.); 8], 0.02, 0.95)
 }
 fn impact<'a>(p: &'a Comparison, cores: usize) -> LoadImpact<'a> {
     LoadImpact {
+        expects_load: true,
         moves: load_metric(&p.metric),
         primary: Some(p),
         judged: vec![(p, None)],
@@ -19,11 +30,12 @@ fn impact<'a>(p: &'a Comparison, cores: usize) -> LoadImpact<'a> {
 }
 fn blocks(n: usize, load: impl Fn(usize) -> f64) -> Vec<Block> {
     (0..n)
-        .map(|i| Block {
-            pair: i / 2,
-            variant: if i % 2 == 0 { "base" } else { "head" }.into(),
-            values: BTreeMap::from([("cpu.foreign.max".into(), load(i)), ("cpu.app.total".into(), 100.)]),
-            ..Default::default()
+        .map(|i| {
+            let mut b = Block::default();
+            b.pair = i / 2;
+            b.variant = if i % 2 == 0 { "base" } else { "head" }.into();
+            b.values = BTreeMap::from([("cpu.foreign.max".into(), load(i)), ("cpu.app.total".into(), 100.)]);
+            b
         })
         .collect()
 }
@@ -33,12 +45,58 @@ fn expect(row: &str, note: Option<Warning>, want: &str) {
     println!("{row}: {want}");
 }
 fn read_run(timed: &[RunLoad], warmup: usize) -> Block {
-    run_load(Block { warmup, run_ms: vec![100.], ..Default::default() }, timed, None)
+    let mut b = Block::default();
+    b.warmup = warmup;
+    b.run_ms = vec![100.];
+    run_load(b, timed, None)
 }
 pub fn run(logs: Option<&Path>) {
-    launch_load::known_window();
     let p = cmp("run.duration");
     let a = impact(&p, 8);
+    let raw = |ms: f64, own: f64, foreign: f64| RunLoad { ms, busy_ms: Some(own + foreign * ms / 100.0), own_ms: Some(own), observer_ms: 0.0, stolen_ms: Some(0.0) };
+    for row in ["page", "attached app", "native windowed", "native windowless", "script", "terminal", "command/exec"] {
+        let during = raw(2.0, 1.0, 75.0);
+        let only_own = raw(2.0, 1.0, 0.0);
+        assert_eq!(read_run(&[only_own, during], 1).values["cpu.foreign.max"], 75.0);
+        assert_eq!(read_run(&[during, only_own], 1).values["cpu.foreign.max"], 0.0);
+        println!("{row}: 2 ms measured window: load in 75%, outside 0%, own alone 0%");
+    }
+    for ms in [1.0, 2.0, 20.0] {
+        assert_eq!(read_run(&[raw(ms, ms / 2.0, 100.0)], 0).values["cpu.foreign.max"], 100.0);
+    }
+    assert_eq!(read_run(&[RunLoad::empty_launch()], 0).values["cpu.foreign.max"], 0.0);
+    println!("direct launch edges (1 ms, 2 ms, 20 ms); blank grid: read zero");
+    let first = raw(20., 10., 100.);
+    let mut late = first;
+    late.add(raw(1000., 0., 0.));
+    let silent = strobe::app::bench::terminal_end(first, late, false);
+    assert_eq!(read_run(&[silent], 0).values["cpu.foreign.max"], 100.);
+    let own = raw(20., 20., 0.);
+    let mut outside = own;
+    outside.add(raw(1000., 0., 100.));
+    assert_eq!(read_run(&[strobe::app::bench::terminal_end(own, outside, false)], 0).values["cpu.foreign.max"], 0.);
+    assert_eq!(strobe::app::bench::terminal_end(first, late, true).ms, 1020.);
+    println!("terminal: 1 s silent-key timeout keeps first 20 ms; actual answer extends the span");
+    for (first, second) in [(0., 200.), (200., 0.)] {
+        let measured = raw(2., 1., second);
+        // Launch warmup is not enqueued. The measured launch is at index 0, not at the warmup offset for run blocks.
+        let launches = [(false, raw(2., 1., first)), (true, measured)].into_iter().filter_map(|(measure, r)| measure.then_some(r)).collect::<Vec<_>>();
+        assert_eq!(read_run(&launches, 0).values["cpu.foreign.max"], second);
+        for primary_order in [true, false] {
+            let mut b = read_run(&[raw(2., 1., first)], 0);
+            let pass = read_run(&[measured], 0);
+            take_metrics(&mut b, &pass, |m| m.starts_with("http.") != primary_order);
+            assert_eq!(b.values["cpu.foreign.max"], 200.);
+        }
+    }
+    println!("launch pair 0: measured only; blocks/track merge: 200% in either pass, both primary orders");
+    expect("resume pre-load checkpoint", background_note(&[Block::default()], &a), "warn");
+    expect("resume measured quiet checkpoint", background_note(&[read_run(&[raw(2., 1., 0.)], 0)], &a), "nothing");
+    let phone = LoadImpact { expects_load: false, ..impact(&p, 8) };
+    expect("phone/macOS host reading inapplicable", background_note(&blocks(16, |_| 500.), &phone), "nothing");
+    let warning = background_note(&blocks(16, |_| 600.), &a).unwrap();
+    assert!(strobe::app::bisect::contaminated(&serde_json::json!({"decided":true,"verdict":"same","warnings":[warning]})));
+    println!("bisect: warned same is not evidence for moving a bound");
     expect("light CPU noise", background_note(&blocks(16, |i| if i < 3 { 35. } else { 0. }), &a), "info");
     let single = LoadImpact { primary: None, ..impact(&p, 8) };
     let note = background_note(&blocks(1, |_| 35.), &single).unwrap();
@@ -74,7 +132,7 @@ pub fn run(logs: Option<&Path>) {
         c.hi = 0.06;
         c.p = 0.04;
     }
-    sequential::gate_and_holm(&mut family, true);
+    gate_and_holm(&mut family, true);
     assert!(family.iter().all(|c| c.kind == VerdictKind::Untested && !judged_secondary(c)));
     let mut a = impact(&p, 8);
     a.judged.extend(family.iter().filter(|c| judged_secondary(c)).map(|c| (c, None)));
@@ -187,7 +245,7 @@ fn replay(dir: &Path) {
         let quiet = pp.iter().zip(bs.as_chunks::<2>().0).filter(|(_, b)| b.iter().all(|x| x.values["cpu.foreign.max"] < BACKGROUND_PCT)).filter_map(|(v, _)| *v).collect::<Vec<_>>();
         let mut at = impact(&p, 8);
         if quiet.len() >= 8 {
-            at.judged[0].1 = Some((quiet.len(), sequential::Design::new(None, 0.02, None, None).compare(metric, model::metric(metric).unwrap(), &quiet)));
+            at.judged[0].1 = Some((quiet.len(), Design::new(None, 0.02, None, None).compare(metric, model::metric(metric).unwrap(), &quiet)));
         }
         let note = background_note(&bs, &at);
         let level = note.as_ref().map_or("nothing", |w| w.level.as_str());

@@ -1701,14 +1701,14 @@ pub(super) fn launch(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Ex
     // One launch per variant and series is discarded first, as for apps (SPEC §9.6).
     if !x.untimed && ctx.launched.insert(key) {
         progress(format!("  {} warm-up launch (discarded)", v.role));
-        launch_once(ctx, s, v, pair, false)?;
+        launch_once(ctx, s, v, pair, false, false)?;
     }
-    launch_once(ctx, s, v, pair, false)
+    launch_once(ctx, s, v, pair, false, x.measures_time())
 }
 
 /// One native launch, timed from spawn until `until`. With `profile` (an attribution launch) it is
 /// not timed and keeps a recording of its values.
-pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, profile: bool) -> Result<Block> {
+pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, profile: bool, measured: bool) -> Result<Block> {
     let spec = s.launch.clone();
     let target = ctx.describe["targets"][&s.target].clone();
     let key = format!("{}\n{}", s.label(), v.role);
@@ -1798,8 +1798,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
     };
     crate::target::a11y::prepare(app.wayland());
     let clock = (host::tsc(), Instant::now());
-    let load = super::LaunchLoad::start(&[]);
-    let (mut n, guard) = match nt::launch(&app, &prepared, &[], true, ctx.pin) {
+    let (launched, load) = super::LaunchLoad::observe(measured, || nt::launch(&app, &prepared, &[], true, ctx.pin));
+    let (mut n, guard) = match launched {
         Ok(x) => x,
         Err(e) => {
             isolate::release_home(&home);
@@ -2014,7 +2014,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             };
             (sample.at, sample.cycles, sample.root, sample.ended)
         };
-        let load = load.map(|l| l.window(n.at_ns, n.at_ns.saturating_add(((ready.0 - n.epoch_ms).max(0.0) * 1e6) as u64)));
+        let load = load.map(super::LaunchLoad::stop);
         lap("ready", &mut steps);
         // An attribution launch's threads from the spawn until ready: wakes and CPU per thread without
         // a trace, read once it is ready (threads that already exited are not in it).
@@ -2046,7 +2046,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         };
         let launch_lost = ready.3.is_none() && (others_ended || ended.is_none());
         let per_ms = match (clock.0, host::tsc()) {
-            (Some(a), Some(b)) if b > a && ready.1 + ended.unwrap_or(0) > 0 => Some((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
+            (Some(a), Some(b)) if b > a => Some((b - a) as f64 / (clock.1.elapsed().as_secs_f64() * 1e3)),
             _ => None,
         };
         let cpu_ms = per_ms.map_or(f64::NAN, |r| (ready.1 + ended.unwrap_or(0)) as f64 / r);
