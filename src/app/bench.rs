@@ -4248,18 +4248,7 @@ pub(crate) fn check_text(r: &Value) -> String {
 
 fn check_text_at(r: &Value, source: Option<&Path>) -> String {
     let exp = r["id"].as_str().unwrap_or("");
-    let meta = |id: &str| -> Option<Value> {
-        if exp.is_empty() || !id.starts_with("rec_") || !store::plain_id(id) {
-            return None;
-        }
-        let matching = |m: &Value| m["id"] == id && m["experiment"] == exp;
-        source
-            .and_then(Path::parent)
-            .and_then(|d| store::held_file(d, &format!("{id}/meta.json")))
-            .and_then(|p| store::read_named_json(&p).ok())
-            .filter(matching)
-            .or_else(|| store::read_json(&host::paths::state_path().join("recordings").join(id).join("meta.json")).ok().filter(matching))
-    };
+    let meta = |id: &str| super::query::owned_recording(id, source, exp, |_, m, _| Some(m));
     let series: Vec<Value> = r["series"].as_array().cloned().unwrap_or_default();
     let (gaps, before, refused, failed) = check_counts(&series);
     let typed_run = run_heading(r) == "strobe run";
@@ -13825,6 +13814,9 @@ fn http_ok(url: &str) -> bool {
 }
 
 pub fn pinning(spec: &str, topo: &host::Topology) -> Result<(Option<u64>, Option<u64>, String)> {
+    if cfg!(target_os = "macos") && !matches!(spec, "auto" | "none") {
+        return Err(Error::usage("macOS has no CPU affinity: use --pin auto or --pin none to leave the target unpinned"));
+    }
     let all = topo.all();
     let runner = |mask: u64| {
         let rest = all & !mask;

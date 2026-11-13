@@ -3,18 +3,30 @@
 
 use super::*;
 
-fn handle(id: &str, source: Option<&Path>, exp: &Value, verb: &str, args: &str) -> std::result::Result<String, &'static str> {
-    let missing = if source.is_some() { "recording not in this copy (query its folder directly if copied)" } else { "recording no longer stored here" };
-    if !id.starts_with("rec_") || !store::plain_id(id) {
-        return Err(missing);
+/// Try the result's own copy, then the exact store folder. A reader may decline a matching
+/// recording (e.g. a copy without the requested view). Neither lookup is a use of the recording.
+pub(in crate::app) fn owned_recording<T>(id: &str, source: Option<&Path>, exp: &str, mut read: impl FnMut(&Path, Value, bool) -> Option<T>) -> Option<T> {
+    if exp.is_empty() || !id.starts_with("rec_") || !store::plain_id(id) {
+        return None;
     }
-    let exp = exp.as_str().filter(|e| !e.is_empty()).ok_or(missing)?;
-    let mut note = missing;
-    let mut answers = |folder: &Path, meta: Value| {
-        if meta["id"] != id || meta["experiment"] != exp {
-            return false;
+    let mut take = |file: &Path, copy: bool| {
+        let folder = file.parent()?;
+        if copy {
+            store::named_folder(folder).ok()?;
         }
-        note = "recording here lacks the data for this view";
+        let meta = recording_meta(file).ok()?;
+        (meta["id"] == id && meta["experiment"] == exp).then(|| read(folder, meta, copy)).flatten()
+    };
+    source
+        .and_then(Path::parent)
+        .and_then(|d| store::held_file(d, &format!("{id}/meta.json")))
+        .and_then(|p| take(&p, true))
+        .or_else(|| take(&crate::host::paths::state_path().join("recordings").join(id).join("meta.json"), false))
+}
+
+fn handle(id: &str, source: Option<&Path>, exp: &Value, verb: &str, args: &str) -> std::result::Result<String, &'static str> {
+    let mut note = if source.is_some() { "recording not in this copy (query its folder directly if copied)" } else { "recording no longer stored here" };
+    let answers = |folder: &Path, meta: Value| {
         if verb == "report recording" {
             return super::super::report::film(folder).is_some();
         }
@@ -26,16 +38,11 @@ fn handle(id: &str, source: Option<&Path>, exp: &Value, verb: &str, args: &str) 
         let Ok(a) = Args::parse(["query", id, view].into_iter().chain(words).map(str::to_string).collect()) else { return false };
         a.check_command().is_ok() && recording_view(Rec::with_meta(folder, meta, None), view, &a, 15, true).is_ok()
     };
-    if let Some(dir) = source.and_then(Path::parent)
-        && let Some(meta) = store::held_file(dir, &format!("{id}/meta.json"))
-        && let Some(folder) = meta.parent()
-        && store::named_folder(folder).is_ok()
-        && recording_meta(&meta).is_ok_and(|m| answers(folder, m))
-    {
-        return Ok(path_word(&meta));
-    }
-    let dir = crate::host::paths::recordings().join(id);
-    store::read_json(&dir.join("meta.json")).is_ok_and(|m| answers(&dir, m)).then(|| id.to_string()).ok_or(note)
+    owned_recording(id, source, exp.as_str().unwrap_or(""), |folder, meta, copy| {
+        note = "recording here lacks the data for this view";
+        answers(folder, meta).then(|| if copy { path_word(&folder.join("meta.json")) } else { id.to_string() })
+    })
+    .ok_or(note)
 }
 
 pub(in crate::app) fn recording_links(text: &str, source: Option<&Path>, exp: &Value) -> String {

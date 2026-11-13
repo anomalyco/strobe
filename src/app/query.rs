@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub use diff::{ATTRIBUTION_PARTS, diff_tree, series_insights, side_tree};
-pub(super) use links::recording_links;
+pub(super) use links::{owned_recording, recording_links};
 pub use rec::{Part, Rec, Stacks, Weight};
 
 /// A result or a recording named by its path rather than its handle, as `report` reads them: read as it
@@ -112,7 +112,7 @@ pub(super) fn path_word(p: &Path) -> String {
 /// What a printed command names the recording in `dir` by: its id when strobe keeps it, else the path it
 /// was read from, quoted (`path_word`), as `Rec::handle` does.
 pub(super) fn handle_of(dir: &Path) -> String {
-    match dir.file_name().filter(|_| dir.parent().is_some_and(|p| p == crate::host::paths::recordings())) {
+    match dir.file_name().filter(|_| dir.parent().is_some_and(|p| p == crate::host::paths::state_path().join("recordings"))) {
         Some(id) => id.to_string_lossy().to_string(),
         None => path_word(dir),
     }

@@ -145,7 +145,8 @@ pub fn reading_named() -> bool {
 
 /// Whether `dir` is a folder strobe keeps: one directly in `recordings/` or `experiments/`.
 pub fn kept(dir: &Path) -> bool {
-    dir.parent().is_some_and(|p| p == paths::recordings() || p == paths::experiments())
+    let state = paths::state_path();
+    dir.parent().is_some_and(|p| p == state.join("recordings") || p == state.join("experiments"))
 }
 
 /// The rule for a file inside a folder a person named on the command line: it is read only if it is a
@@ -242,7 +243,8 @@ pub fn named_folder(dir: &Path) -> Result<()> {
 /// Whether `path` lies in strobe's own store (`recordings/`, `experiments/`): what strobe wrote there.
 /// Anything else (a folder named by its path) is read with the bounds below.
 pub fn in_store(path: &Path) -> bool {
-    path.starts_with(paths::recordings()) || path.starts_with(paths::experiments())
+    let state = paths::state_path();
+    path.starts_with(state.join("recordings")) || path.starts_with(state.join("experiments"))
 }
 
 /// A path that names another machine or a device rather than this disk: `//host/…`, `\\host\…`,

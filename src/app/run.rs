@@ -16,6 +16,11 @@ use serde_json::json;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// `run -- <command>` has no bench runner to place on or beside the target's CPUs.
+pub fn pin_label(label: &str) -> &str {
+    label.strip_suffix(" · runner on the other CPUs").or_else(|| label.strip_suffix(" · runner shares these CPUs")).unwrap_or(label)
+}
+
 pub fn run(args: &Args) -> Result<Output> {
     if args.get("base").is_some() || args.get("head").is_some() || args.has("aa") {
         return paired(args);
@@ -33,7 +38,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let cmd = &args.pos[at + 1..];
     let (program, rest) = cmd.split_first().ok_or_else(|| Error::usage("run: nothing after --"))?;
     let (pin, _, label) = bench::pinning(args.get("pin").unwrap_or("auto"), &host::topology())?;
-    let pin_label = label.replace(" · runner on the other CPUs", "");
+    let pin_label = pin_label(&label);
     let id = crate::store::new_id("run");
     // Takes turns with benches: a harness and a timed block never share the CPUs. `--max-time` caps the
     // wait for its turn (exit 124, `ConcurrentBench`), not the harness.

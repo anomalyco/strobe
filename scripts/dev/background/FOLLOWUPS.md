@@ -10,3 +10,5 @@
 | Track confirmation | Distinguish unread accounting from detected contention, both re-runnable | Permanent rejection on an inconclusive warned confirmation |
 | Native and terminal measurement hints | `cpu.foreign` needs a pin, explicit or automatic | Assuming every unpinned run requested `--pin none` |
 | Filmed check: CLI summary and Markdown, video and phone | Exact recording metadata from the result's source, without marking it used | Prefix match, made-up dimensions or frame counts, paths supplied by metadata |
+| Recording details and query links after merging main | Same exact recording and experiment IDs; validate the copy first, then try the store. A link also needs data for its requested view. | Creating a state directory to look up a recording, or accepting metadata that the link reader would reject |
+| macOS / standalone run / Windows terminal | `auto` and `none` remain unpinned on macOS; reject explicit placement. A standalone run has no runner. Both the identified console host and the child must accept the full mask. | Reporting a pin the OS did not apply, a nonexistent runner, or a partial mask |

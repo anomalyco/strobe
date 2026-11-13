@@ -113,7 +113,7 @@ pub(super) fn cached<T>(r: &Result<T>) -> Result<&T> {
 
 impl Rec {
     pub fn open(dir: &Path) -> Rec {
-        let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
+        let stored = dir.parent().is_some_and(|p| p == crate::host::paths::state_path().join("recordings"));
         // A meta.json strobe did not write here (a folder named by its path) is read as any named file is
         // (`query::by_path` read and checked it first, with its refusals).
         let meta = if stored { store::read_json(&dir.join("meta.json")) } else { store::read_named_json(&dir.join("meta.json")) }.unwrap_or(Value::Null);
@@ -124,7 +124,7 @@ impl Rec {
     /// while it is read.
     pub(crate) fn with_meta(dir: &Path, mut meta: Value, named: Option<store::Named>) -> Rec {
         super::super::record::omit_refused_display(&mut meta);
-        let stored = dir.parent().is_some_and(|p| p == crate::host::paths::recordings());
+        let stored = dir.parent().is_some_and(|p| p == crate::host::paths::state_path().join("recordings"));
         // Its id as the file says when that is a plain id, else its folder's: it names caches and shows
         // in text, so never a path (`store::plain_id`).
         let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| store::plain_id(n));
@@ -168,7 +168,7 @@ impl Rec {
     /// Whether the recording is one of strobe's own (`recordings/`): a folder named by its path is read
     /// as it is, and nothing is written beside it.
     pub fn stored(&self) -> bool {
-        self.dir.parent().is_some_and(|p| p == crate::host::paths::recordings())
+        self.dir.parent().is_some_and(|p| p == crate::host::paths::state_path().join("recordings"))
     }
 
     /// What a printed command names the recording by: its id, or the path it was read from.

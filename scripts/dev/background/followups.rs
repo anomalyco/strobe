@@ -14,12 +14,26 @@ pub fn run() {
         assert_eq!(pinning(spec, &topo).unwrap_err().code, 2, "{spec}");
     }
     for (spec, target, runner) in [("1", Some(2), Some(8)), ("1,3", Some(10), None), ("ccd0", Some(10), None), ("none", None, None)] {
+        if cfg!(target_os = "macos") && spec != "none" {
+            let e = pinning(spec, &topo).unwrap_err();
+            assert_eq!(e.code, 2);
+            assert!(e.message.contains("macOS has no CPU affinity"));
+            continue;
+        }
         let (a, b, _) = pinning(spec, &topo).unwrap();
         assert_eq!((a, b), (target, runner));
+    }
+    if cfg!(target_os = "macos") {
+        assert_eq!(pinning("auto", &topo).unwrap().0, None);
+    }
+    for suffix in [" · runner on the other CPUs", " · runner shares these CPUs", ""] {
+        assert_eq!(strobe::app::run::pin_label(&format!("CCD0 (8 MB L3, 2 CPUs){suffix}")), "CCD0 (8 MB L3, 2 CPUs)");
     }
     println!("pin: holes, empty selections, reversed and overwide ranges refused; explicit/CCD full mask inherits");
     #[cfg(not(target_os = "macos"))]
     child_masks();
+    #[cfg(windows)]
+    console_masks();
 
     for ms in [2u64, 20] {
         // Idle throughout each measured run. Both CPUs busy only during the intervening second.
@@ -81,10 +95,14 @@ fn copied() {
     fs::write(&result, json!({"kind":"check","id":"exp_bg_copy","series":[{"label":"copied","passed":true,"recording":"rec_bg_copy","video":{"head":"rec_bg_copy"}}]}).to_string()).unwrap();
     let args = Args::parse(vec!["query".into(), result.to_str().unwrap().into(), "summary".into()]).unwrap();
     let md = Args::parse(vec!["report".into(), result.to_str().unwrap().into(), "--format".into(), "md".into()]).unwrap();
-    for (owner, want) in [("exp_bg_copy", true), ("exp_other", false)] {
+    fs::write(dir.join("video.json"), r#"{"file":"video.mp4"}"#).unwrap();
+    fs::write(dir.join("video.mp4"), b"fixture").unwrap();
+    for (owner, id, token, want) in
+        [("exp_bg_copy", "rec_bg_copy", "ok", true), ("exp_other", "rec_bg_copy", "ok", false), ("exp_bg_copy", "rec_other", "ok", false), ("exp_bg_copy", "rec_bg_copy", "not a plain token", false)]
+    {
         fs::write(
             dir.join("meta.json"),
-            json!({"id":"rec_bg_copy","experiment":owner,"video":{"kind":"screen","width":640,"height":360,"duration_s":1.5,"frames":45},"phone":{"platform":"ios","model":"fixture phone"}})
+            json!({"id":id,"experiment":owner,"token":token,"video":{"kind":"screen","width":640,"height":360,"duration_s":1.5,"frames":45},"phone":{"platform":"ios","model":"fixture phone"}})
                 .to_string(),
         )
         .unwrap();
@@ -92,10 +110,39 @@ fn copied() {
             assert_eq!(text.contains("640×360 · 1.5 s · 45 frames"), want, "{text}");
             assert_eq!(text.contains("fixture phone"), want);
             assert!(!text.contains("null×null") && !dir.join(".used").exists());
+            assert_eq!(text.lines().find(|l| l.trim_start().starts_with("video    ")).unwrap().contains("strobe report recording"), want, "{text}");
         }
+        let empty = home.join("unused-state");
+        let o = std::process::Command::new(std::env::current_exe().unwrap()).env("LOCALAPPDATA", &empty).env("XDG_DATA_HOME", &empty).arg("--summary").arg(&result).output().unwrap();
+        assert!(o.status.success());
+        assert!(!empty.exists(), "a copied summary created its store");
     }
     fs::remove_dir_all(home).unwrap();
     println!("copied check: exact video and phone, no null dimensions, wrong experiment ignored, no .used");
+}
+
+/// Read only the two processes of this fixture's new ConPTY, while the child waits on input.
+#[cfg(windows)]
+fn console_masks() {
+    use strobe::target::tty::{Run, Spec, Tty};
+    let mask = host::topology().all().isolate_lowest_one();
+    let spec = Spec {
+        run: Run::Argv(vec![std::env::current_exe().unwrap().display().to_string(), "--hold-terminal".into()]),
+        cwd: std::env::temp_dir(),
+        env: vec![],
+        unset: vec![],
+        cols: 40,
+        rows: 6,
+        home: None,
+    };
+    let tty = Tty::spawn(&spec, Some(mask), None).unwrap();
+    let [console] = tty.host_pids[..] else { panic!("expected one console host") };
+    let cmd = format!("(Get-Process -Id {}).ProcessorAffinity.ToInt64(); (Get-Process -Id {console}).ProcessorAffinity.ToInt64()", tty.pid);
+    let o = std::process::Command::new("pwsh").args(["-NoProfile", "-Command", &cmd]).output().unwrap();
+    assert!(o.status.success());
+    let masks = String::from_utf8(o.stdout).unwrap();
+    assert_eq!(masks.lines().map(|l| l.trim().parse::<i64>().unwrap() as u64).collect::<Vec<_>>(), [mask, mask]);
+    println!("ConPTY: child and console host both report {mask:#x}");
 }
 
 #[cfg(not(target_os = "macos"))]

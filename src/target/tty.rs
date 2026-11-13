@@ -850,9 +850,8 @@ mod win {
     use windows_sys::Win32::System::JobObjects::TerminateJobObject;
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetProcessAffinityMask,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-        SetProcessAffinityMask, TerminateProcess, UpdateProcThreadAttribute,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
     };
 
     pub struct Proc {
@@ -956,8 +955,7 @@ mod win {
                         if h.is_null() {
                             false
                         } else {
-                            let (mut proc_mask, mut sys_mask) = (0, 0);
-                            let ok = hosts().contains(pid) && GetProcessAffinityMask(h, &mut proc_mask, &mut sys_mask) != 0 && SetProcessAffinityMask(h, mask as usize & sys_mask) != 0;
+                            let ok = hosts().contains(pid) && host::spawn::pin_child(h, mask).is_ok();
                             CloseHandle(h);
                             ok
                         }
