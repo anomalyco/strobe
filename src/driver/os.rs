@@ -743,6 +743,7 @@ impl Driver {
             }
             "type" => {
                 let o = opts(2);
+                super::no_paste(&o)?;
                 self.os_focus(os, &sel(0), &o)?;
                 let delay = Duration::from_millis(o["delay"].as_f64().unwrap_or(0.0).max(0.0) as u64);
                 os.rest(Duration::ZERO, os.frame())?;
@@ -782,8 +783,12 @@ impl Driver {
                 self.os_focus(os, &o["selector"], &o)?;
                 let (mods, key) = keys::parse_chord(&s(0))?;
                 menu_chord(os, &s(0), mods, key)?;
+                // `burst: true`: at once (a chord's next key), no sample: as a burst's key.
+                let burst = super::Typing::of(&o) == super::Typing::Burst;
                 // After the click into the field, if there was one: its frames settle first.
-                os.rest(Duration::ZERO, os.frame())?;
+                if !burst {
+                    os.rest(Duration::ZERO, os.frame())?;
+                }
                 self.before_input(&o)?;
                 let at = os.poster.press(os.top.get(), None, mods, key)?;
                 os.count(KEY_DOWN);
@@ -792,6 +797,12 @@ impl Driver {
                     os.count(KEY_UP);
                 }
                 os.input(at, "discrete", false);
+                if burst && let Some(i) = os.log.borrow_mut().inputs.last_mut() {
+                    i.burst = true;
+                }
+                if burst {
+                    super::unmeasured();
+                }
                 (o, at)
             }
             "down" | "up" if keys::mouse_button(&s(0)).is_some() => {

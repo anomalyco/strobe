@@ -372,6 +372,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
             "untimed" => hooks.untimed(a, |start, _| {
                 if start {
                     cost.pause();
+                } else {
+                    // What the stretch's inputs still owe comes inside it, not in the timed part after it.
+                    driver.quiesce();
                 }
                 let c = cycles(pid, &set_home);
                 let e = ended(pid, Some(&c), &set_home);
@@ -423,6 +426,9 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let procs0 = ctx.pin.map(|_| (host::now_ns(), host::all_processes()));
                 let rt = s.run_timeout() + Duration::from_secs(10);
                 while warmup.more(runs.len()) {
+                    // What setup, a reset or the last run still owes (a key that changed nothing, a burst)
+                    // comes before this run, untimed: at once when nothing is owed.
+                    driver.quiesce();
                     // Every run starts where the first did (`resetCheck`): the grid, less `ignore`.
                     let screen = fingerprint(&tty, &ignore);
                     match &first_screen {
@@ -689,24 +695,32 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 let settled: Vec<metrics::Timed> = measured.iter().map(|r| metrics::Timed { t1: r.settled, ..r.timed.clone() }).collect();
                 let lat = drv::latencies(&tty, &driver.inputs(), &settled.iter().collect::<Vec<_>>());
                 let stretches: Vec<&metrics::Timed> = measured.iter().map(|r| &r.timed).collect();
+                // Some input's latency is no input's answer for sure: none of the block's (never the
+                // inputs strobe could pair alone, which would leave out the slow answers).
+                let ambiguous = drv::ambiguous(&lat);
+                for m in declared_metrics(s).into_iter().filter(|m| m.starts_with("tty.latency.") || m.starts_with("tty.settle.")) {
+                    if let Some((summary, fix)) = &ambiguous {
+                        refused.insert(m.clone(), Refusal::new(ValidatorId::AmbiguousInteraction, format!("{m}: {summary}")).fix(*fix));
+                    }
+                }
                 let mut ms = lat.ms.clone();
                 ms.sort_by(f64::total_cmp);
-                if !ms.is_empty() {
+                if !ms.is_empty() && ambiguous.is_none() {
                     values.insert("tty.latency.n".into(), ms.len() as f64);
                     values.insert("tty.latency.p50".into(), metrics::percentile(&ms, 0.5));
                     values.insert("tty.latency.p95".into(), metrics::percentile(&ms, 0.95));
+                    // The inputs that were no sample, by why: counts, 0 included, where the block has
+                    // latency (a declared one is a value then; without latency it is refused as p50 is).
+                    values.insert("tty.latency.busy".into(), lat.busy as f64);
+                    values.insert("tty.latency.silent".into(), lat.silent as f64);
                 }
                 let mut settle = lat.settle_ms.clone();
                 settle.sort_by(f64::total_cmp);
                 // A resize after which only the host drew would leave its slowest settles out: none then.
-                if !settle.is_empty() && lat.host_only == 0 {
+                if !settle.is_empty() && lat.host_only == 0 && ambiguous.is_none() {
                     values.insert("tty.settle.n".into(), settle.len() as f64);
                     values.insert("tty.settle.p50".into(), metrics::percentile(&settle, 0.5));
                     values.insert("tty.settle.p95".into(), metrics::percentile(&settle, 0.95));
-                }
-                if lat.busy + lat.silent > 0 {
-                    values.insert("tty.latency.busy".into(), lat.busy as f64);
-                    values.insert("tty.latency.silent".into(), lat.silent as f64);
                 }
                 // Synchronized frames: how long each took from its begin to its end, pooled.
                 let mut frame_ms: Vec<f64> = stretches
@@ -742,7 +756,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 // What this machine cannot read is said as that, before what the block did not measure.
                 refuse_not_on_this_os(s, &mut values, &mut refused);
                 for m in declared_metrics(s) {
-                    if values.contains_key(m) || refused.contains_key(m) || m.starts_with("count.") || m.starts_with("phase.") {
+                    // A counter only a counter block measures here is that block's to give (none in a check).
+                    if values.contains_key(m) || refused.contains_key(m) || m.starts_with("count.") || m.starts_with("phase.") || (!x.counters && super::counted_apart(m)) {
                         continue;
                     }
                     let r = match m.as_str() {
@@ -1005,9 +1020,11 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
         let ready_ns = ready.unwrap_or(tty.started_ns);
         steps.push(("ready".into(), lapped.elapsed().as_secs_f64() * 1e3));
         let mut values = BTreeMap::new();
-        values.insert("launch.ready".to_string(), (ready_ns - tty.started_ns) as f64 / 1e6);
+        // Text the blank grid already shows (a milestone that matches an empty row) showed at the start:
+        // its time is from before the program ran (the grid's own), so 0.
+        values.insert("launch.ready".to_string(), ready_ns.saturating_sub(tty.started_ns) as f64 / 1e6);
         for (name, at) in &seen {
-            values.insert(format!("launch.{name}"), (*at - tty.started_ns) as f64 / 1e6);
+            values.insert(format!("launch.{name}"), at.saturating_sub(tty.started_ns) as f64 / 1e6);
         }
         // The program's CPU from the spawn until ready, from its cycles over the cycle clock's rate.
         if let (Some(a), Some(b)) = (clock, tsc_at_ready)
@@ -1034,7 +1051,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
             let hit =
                 super::launch::matching(&home.dir, &m.source).iter().filter_map(|p| std::fs::read_to_string(p).ok()).any(|text| text.lines().any(|l| m.pattern.is_match(&isolate::strip_ansi(l))));
             if hit {
-                values.insert(format!("launch.{}", m.name), (now - tty.started_ns) as f64 / 1e6);
+                values.insert(format!("launch.{}", m.name), now.saturating_sub(tty.started_ns) as f64 / 1e6);
             }
         }
         for m in &marks {

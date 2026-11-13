@@ -267,7 +267,7 @@ pub struct Sent {
 /// Why `interaction.*` is refused for a block whose runs typed in a burst (every engine and app).
 pub fn burst_refusal(keys: usize) -> String {
     format!(
-        "AmbiguousInteraction: interaction.*: the runs typed {keys} keys in a burst (type with burst: true), each sent before the one before it showed, so no frame is any one key's reaction; measure burst typing by cpu.work, main.work, ui.cpu, run.duration or a phase, or type without burst for each key's latency"
+        "AmbiguousInteraction: interaction.*: the runs sent {keys} keys in a burst (burst: true), so no frame is any one key's reaction; measure burst input by cpu.work, main.work, ui.cpu, run.duration or a phase, or omit burst for each key's latency"
     )
 }
 

@@ -1283,6 +1283,7 @@ mod imp {
                 }
                 "type" => {
                     let o = opts(2);
+                    crate::driver::no_paste(&o)?;
                     let delay = Duration::from_millis(o["delay"].as_f64().unwrap_or(0.0).max(0.0) as u64);
                     let (top, to) = self.key_target(&sel(0), &o, presents)?;
                     let refresh = Duration::from_millis(self.frame_ms(0.0, 0.0));
@@ -1316,11 +1317,21 @@ mod imp {
                     let (mods, key) = input::parse_chord(&s(0))?;
                     let o = opts(1);
                     let (top, to) = self.key_target(&o["selector"], &o, presents)?;
+                    // `burst: true`: at once (a chord's next key), no sample: as a burst's key.
+                    let burst = crate::driver::Typing::of(&o) == crate::driver::Typing::Burst;
                     // After the click into the field, if there was one: its frames settle first.
-                    self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(0.0, 0.0)), presents)?;
+                    if !burst {
+                        self.rest(Duration::ZERO, Duration::from_millis(self.frame_ms(0.0, 0.0)), presents)?;
+                    }
                     self.before_input(&o, presents)?;
                     let at = self.poster.press(top, to, mods, key)?;
                     self.input(at, "discrete", false);
+                    if burst && let Some(i) = self.log.borrow_mut().inputs.last_mut() {
+                        i.burst = true;
+                    }
+                    if burst {
+                        crate::driver::unmeasured();
+                    }
                     self.until(&opts(1), at, presents)?;
                 }
                 "down" | "up" if a11y::keys::mouse_button(&s(0)).is_some() => {

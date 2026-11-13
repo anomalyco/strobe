@@ -59,6 +59,8 @@ pub struct Modes {
     pub app_cursor: bool,
     /// The progressive keyboard enhancement flags the program pushed (`CSI > f u`), 0 when none.
     pub kitty: u16,
+    /// Bracketed paste (`?2004`): a paste comes between `CSI 200 ~` and `CSI 201 ~`.
+    pub bracketed_paste: bool,
 }
 
 /// The program to run.
@@ -416,7 +418,10 @@ pub struct Tty {
     /// The pseudo-console's host process (Windows: the `conhost` that ConPTY starts), whose CPU is
     /// the terminal's, never the program's. None on Unix: the kernel is the terminal there.
     pub host_pids: Vec<u32>,
-    /// When the program was started (host clock).
+    /// When the program was started (host clock): after strobe set up its terminal (the pseudo-terminal,
+    /// the console host, the reader thread), so a launch is the program's. Windows: right before the
+    /// suspended process resumes. Unix: the owned child's release stamp (Linux: immediately before
+    /// exec, after cgroup placement and CPU affinity; macOS: immediately before spawn).
     pub started_ns: u64,
 }
 
@@ -436,14 +441,14 @@ impl Tty {
             env.retain(|(e, _)| !crate::target::isolate::env_name_is(e, k));
             env.push((k.clone(), v.clone()));
         }
-        let started_ns = host::now_ns();
-        let (child, pid, read, write, host_pids) = open(spec, &env, cpus)?;
+        let (pending, read, write, host_pids) = open(spec, &env, cpus)?;
+        let set_up = host::now_ns();
         let parser = vt100::Parser::new_with_callbacks(
             std::num::NonZeroU16::new(spec.rows).unwrap_or(vt100::Parser::DEFAULT_ROWS),
             std::num::NonZeroU16::new(spec.cols).unwrap_or(vt100::Parser::DEFAULT_COLS),
             0,
             Tracker {
-                now: started_ns,
+                now: set_up,
                 rows: 0,
                 cols: 0,
                 committed: Vec::new(),
@@ -453,7 +458,7 @@ impl Tty {
                 sync: None,
                 sync_timeouts: 0,
                 updates: Vec::new(),
-                last_change: started_ns,
+                last_change: set_up,
                 replies: Vec::new(),
                 kitty: Vec::new(),
                 title: String::new(),
@@ -465,13 +470,36 @@ impl Tty {
         let shared = Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new() });
         let writer = Arc::new(Mutex::new(write));
         let (s, w) = (shared.clone(), writer.clone());
+        // The reader reads before the program runs: its first output is stamped when it comes.
         let reader = std::thread::Builder::new().name("strobe-tty".into()).spawn(move || {
             if let Some(m) = reader_cpus {
                 host::set_thread_affinity(m);
             }
             read_loop(read, &s, &w)
         })?;
+        let (child, pid, started_ns) = start(pending, spec)?;
         Ok(Tty { shared, writer, reader: Some(reader), child: Mutex::new(child), pid, host_pids, started_ns })
+    }
+
+    /// The terminal's line discipline echoes input itself (Unix `ECHO`, or `ECHONL` in canonical mode):
+    /// the grid then shows the kernel's echo before the program reads the input. False on Windows,
+    /// where no other process can read the console's input mode (SPEC §13.9: programs there are
+    /// measured in raw mode).
+    pub fn line_echo(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let c = self.child.lock().unwrap_or_else(|e| e.into_inner());
+            let mut t: libc::termios = unsafe { std::mem::zeroed() };
+            if unsafe { libc::tcgetattr(c.master.as_raw_fd(), &mut t) } != 0 {
+                return false;
+            }
+            t.c_lflag & libc::ECHO != 0 || (t.c_lflag & libc::ECHONL != 0 && t.c_lflag & libc::ICANON != 0)
+        }
+        #[cfg(windows)]
+        {
+            false
+        }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -525,6 +553,7 @@ impl Tty {
             sgr: s.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr,
             app_cursor: s.application_cursor(),
             kitty: st.parser.callbacks().kitty.last().copied().unwrap_or(0),
+            bracketed_paste: s.bracketed_paste(),
         }
     }
 
@@ -557,11 +586,14 @@ impl Tty {
         let mut st = self.state();
         loop {
             let still = host::now_ns().saturating_sub(st.parser.callbacks().last_change.max(since_ns));
-            if still >= quiet_ns {
+            // A synchronized frame left open is the program drawing, whatever the grid shows yet: woken
+            // by its end's read.
+            let open = st.parser.callbacks().sync.is_some();
+            if still >= quiet_ns && !open {
                 return true;
             }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else { return false };
-            let wait = left.min(std::time::Duration::from_nanos(quiet_ns - still));
+            let wait = if open { left } else { left.min(std::time::Duration::from_nanos(quiet_ns - still)) };
             st = self.shared.changed.wait_timeout(st, wait).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0);
         }
     }
@@ -714,7 +746,37 @@ fn read_loop(mut read: std::fs::File, shared: &Shared, writer: &Mutex<std::fs::F
     shared.changed.notify_all();
 }
 
-type Opened = (Child, u32, std::fs::File, std::fs::File, Vec<u32>);
+/// The program set up on its terminal and not running yet: `start` runs it.
+#[cfg(unix)]
+struct Pending {
+    cmd: std::process::Command,
+    master: std::os::fd::OwnedFd,
+    cpus: Option<u64>,
+}
+
+#[cfg(windows)]
+struct Pending(win::Proc);
+
+type Opened = (Pending, std::fs::File, std::fs::File, Vec<u32>);
+
+/// Runs the pending program: the host clock when it began (`Tty::started_ns`).
+#[cfg(unix)]
+fn start(p: Pending, spec: &Spec) -> Result<(Child, u32, u64)> {
+    let Pending { mut cmd, master, cpus } = p;
+    let owned = host::spawn::spawn_owned_terminal(&mut cmd, cpus, spec.home.as_deref()).map_err(|e| Error::msg(format!("start {}: {e}", spec.run.text())))?;
+    let at = owned.released_ns();
+    drop(cmd);
+    let pid = owned.pid();
+    Ok((Child { owned, master }, pid, at))
+}
+
+#[cfg(windows)]
+fn start(p: Pending, _: &Spec) -> Result<(Child, u32, u64)> {
+    let mut win = p.0;
+    let at = win.resume();
+    let pid = win.pid;
+    Ok((Child { win }, pid, at))
+}
 
 #[cfg(unix)]
 fn open(spec: &Spec, env: &[(String, String)], cpus: Option<u64>) -> Result<Opened> {
@@ -746,12 +808,9 @@ fn open(spec: &Spec, env: &[(String, String)], cpus: Option<u64>) -> Result<Open
     };
     cmd.env_clear().envs(env.iter().cloned()).current_dir(&spec.cwd);
     cmd.stdin(slave.try_clone()?).stdout(slave.try_clone()?).stderr(slave);
-    let owned = host::spawn::spawn_owned_terminal(&mut cmd, cpus, spec.home.as_deref()).map_err(|e| Error::msg(format!("start {}: {e}", spec.run.text())))?;
-    drop(cmd);
-    let pid = owned.pid();
     let read = std::fs::File::from(master.try_clone()?);
     let write = std::fs::File::from(master.try_clone()?);
-    Ok((Child { owned, master }, pid, read, write, Vec::new()))
+    Ok((Pending { cmd, master, cpus }, read, write, Vec::new()))
 }
 
 #[cfg(unix)]
@@ -768,8 +827,7 @@ fn resize(child: &Child, cols: u16, rows: u16) -> Result<()> {
 #[cfg(windows)]
 fn open(spec: &Spec, env: &[(String, String)], cpus: Option<u64>) -> Result<Opened> {
     let (win, read, write, host_pids) = win::Proc::open(spec, env, cpus)?;
-    let pid = win.pid;
-    Ok((Child { win }, pid, read, write, host_pids))
+    Ok((Pending(win), read, write, host_pids))
 }
 
 #[cfg(windows)]
@@ -794,6 +852,8 @@ mod win {
     pub struct Proc {
         pub pid: u32,
         process: HANDLE,
+        /// Its first thread, held suspended until `resume`.
+        thread: HANDLE,
         job: Option<HANDLE>,
         hpc: Option<HPCON>,
     }
@@ -881,6 +941,27 @@ mod win {
                     return Err(Error::msg(format!("CreatePseudoConsole failed (0x{hr:08x}): ConPTY needs Windows 10 1809 or later")));
                 }
                 let host_pids: Vec<u32> = hosts().into_iter().filter(|p| !before.contains(p)).collect();
+                if let Some(mask) = cpus.filter(|m| *m != 0) {
+                    // Its cycles are subtracted from busy time on these CPUs. Never pin an
+                    // unidentified process or proceed with the host running on the runner's CPUs.
+                    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION};
+                    let pinned = if let [pid] = host_pids.as_slice() {
+                        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, 0, *pid);
+                        if h.is_null() {
+                            false
+                        } else {
+                            let ok = hosts().contains(pid) && SetProcessAffinityMask(h, mask as usize) != 0;
+                            CloseHandle(h);
+                            ok
+                        }
+                    } else {
+                        false
+                    };
+                    if !pinned {
+                        ClosePseudoConsole(hpc);
+                        return Err(Error::refused("RunIncomplete", "could not identify and pin the new console host on the target's CPUs", "retry the terminal launch or use --pin none"));
+                    }
+                }
                 let mut size = 0usize;
                 InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
                 let mut list = vec![0u8; size];
@@ -972,10 +1053,19 @@ mod win {
                         }
                     }
                 }
-                ResumeThread(pi.hThread);
-                CloseHandle(pi.hThread);
-                Ok((Proc { pid: pi.dwProcessId, process: pi.hProcess, job, hpc: Some(hpc) }, read, write, host_pids))
+                Ok((Proc { pid: pi.dwProcessId, process: pi.hProcess, thread: pi.hThread, job, hpc: Some(hpc) }, read, write, host_pids))
             }
+        }
+
+        /// Lets the program run: the host clock right before.
+        pub fn resume(&mut self) -> u64 {
+            let at = host::now_ns();
+            unsafe {
+                ResumeThread(self.thread);
+                CloseHandle(self.thread);
+            }
+            self.thread = std::ptr::null_mut();
+            at
         }
 
         pub fn exited(&mut self) -> Option<i32> {
@@ -1018,6 +1108,9 @@ mod win {
     impl Drop for Proc {
         fn drop(&mut self) {
             self.end();
+            if !self.thread.is_null() {
+                unsafe { CloseHandle(self.thread) };
+            }
         }
     }
 }
