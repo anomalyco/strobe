@@ -30,7 +30,9 @@ let failed = 0
 for (const row of want) {
   const at = lines.findIndex((l) => new RegExp(`^(pass|FAIL)\\s+${row.key} `).test(l))
   const got = at < 0 ? "missing" : lines[at].startsWith("pass") ? "pass" : "FAIL"
-  const why = at < 0 ? "" : lines.slice(at + 1, at + 4).find((l) => /^\s+\S/.test(l))?.trim() ?? ""
+  // The failure's text: the lines under it up to the next case (a refusal quotes its line, new lines too).
+  const end = at < 0 ? at : lines.findIndex((l, i) => i > at && /^(pass|FAIL)\s/.test(l))
+  const why = at < 0 ? "" : lines.slice(at + 1, end < 0 ? undefined : end).join(" ").replace(/\s+/g, " ").trim()
   const ok = row.expect === "pass" ? got === "pass" : got === "FAIL" && why.includes("RunIncomplete") && why.includes("still running")
   if (!ok) failed++
   console.log(`${ok ? "ok  " : "BAD "} ${row.key.padEnd(20)} expect ${row.expect.padEnd(7)} got ${got.padEnd(7)} ${row.proves}`)
