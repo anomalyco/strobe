@@ -9127,11 +9127,16 @@ checked that way on that OS; `—`: strobe refuses it there. Off the primary arc
 arm64, macOS x64, Linux arm64) every cell is preview.
 
 A verified cell holds only for the code that produced its numbers. `support-matrix.ts --check` (CI
-runs it) compares the code that computes each verified cell (its `WATCH` spans) at the evidence's
-build, or at the commit a person reviewed (`reviewed_at`, with one sentence in `reviewed_why`), with
-the tree, comments and formatting aside. Any other change fails the check until the cell is run again,
-flipped to preview, or reviewed. `doc-check.ts` holds this table to the matrix: one row per matrix row,
-in its order, each verified line exact.
+runs it, with the whole history) compares the code that computes each verified cell (its `WATCH` spans,
+items with their attributes and modifiers) at the evidence's build, or at the commit a person reviewed
+(`reviewed_at`), with the tree, comments and formatting aside. Any other change fails the check until
+the cell is run again, flipped to preview, or reviewed. Both commits must be in the checked commit's
+history, the review after the build, and a review's `reviewed_why` names every span that changed
+between them and a commit; a review of no change fails. A branch that sets either lands by fast-forward
+or merge commit, never by squash or cherry-pick (re-stamped after a rebase); `bun
+scripts/dev/support-matrix.ts --landing <branch>` says before the landing whether its stamps hold on
+main. `doc-check.ts` holds this table to the matrix: one row per matrix row, in its order, each
+verified line exact.
 
 | Runtime · capability | Windows x64 | macOS arm64 | Linux x64 |
 |---|---|---|---|
@@ -9230,16 +9235,16 @@ in its order, each verified line exact.
 | `native_windowless` · `gpu` | preview | preview | preview |
 | `native_windowless` · `launch` | preview | preview | preview |
 | `native_windowless` · `http_probe` | preview | preview | preview |
-| `script` · `wall_and_counts` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.10 ms vs 150 ms planted; spin 300.79 ms vs 300 ms + 0.7 ms call) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.07 ms vs 150 ms planted; spin 301.7 ms vs 300 ms + 1.4 ms call) |
+| `script` · `wall_and_counts` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.10 ms vs 150 ms planted; spin 300.79 ms vs 300 ms + 0.7 ms call (its check on e93fc36)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.07 ms vs 150 ms planted; spin 301.7 ms vs 300 ms + 1.4 ms call) |
 | `script` · `page_engine` | preview | preview | preview |
-| `script` · `process_cpu` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cpu.work 300.32 ms vs 300 ms; planted 2x read +100.18% [+99.94 … +100.46]) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, cpu.work 300.65 ms vs 300 ms; planted 2x read +99.69% [+99.45 … +99.80] vs +99.65% at 0.00% steal) |
+| `script` · `process_cpu` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cpu.work 300.32 ms vs 300 ms (its check on e93fc36); planted 2x read +100.18% [+99.94 … +100.46]) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, cpu.work 300.65 ms vs 300 ms; planted 2x read +99.69% [+99.45 … +99.80] vs +99.65% at 0.00% steal) |
 | `script` · `process_memory` | preview | preview | preview |
 | `script` · `hardware_counters` | — | preview | preview |
 | `script` · `package_idle` | — | preview | — |
 | `script` · `http_probe` | preview | preview | preview |
 | `cli` · `wall_and_counts` | preview | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin run.duration Δ 150.29 ms vs 150 ms planted; metric.truth_cpu_ms 150 and 300 exact) | preview |
 | `cli` · `process_cpu` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, cpu.work 302.4 ms vs 300 ms plus a 2 ms launch and tree 1204.8 ms vs 1200 ms; planted Δ 149.97 ms and 600.01 ms vs 150 and 600 ms) |
-| `cli` · `process_memory` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50.10 MiB read +50.11 MiB) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB) |
+| `cli` · `process_memory` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB) |
 | `cli` · `http_probe` | preview | preview | preview |
 | `tty` · `wall_and_counts` | preview | preview | preview |
 | `tty` · `process_cpu` | preview | preview | preview |
@@ -9292,8 +9297,10 @@ what was built but not yet run on a device is in §21.
   windowless native CPU, memory and counters (21.1's table, each cell's `Evidence` in
   `src/support.rs`); `Evidence.reviewed_at` and `reviewed_why`; `support-matrix.ts --check` fails
   when the code that computes a verified cell changed since its evidence or review (`WATCH`, `--rot`
-  prints each span); doc-check holds 21.1 to the matrix; the preview reasons say what the runs found
-  and which run each cell still needs (21.1).
+  prints each span), and when its evidence or review commit is not in the checked history or a review
+  does not name what changed (`--landing <branch>` checks a landing first); doc-check holds 21.1 to the
+  matrix and its evidence records; the preview reasons say what the runs found and which run each cell
+  still needs (21.1).
 
 **After 0.30.0**
 

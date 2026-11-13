@@ -41,6 +41,8 @@ export const EVIDENCE_KEYS = ["date", "version", "machine", "fixture", "known", 
 // A later commit at which a person read every change to the cell's watched code since `version` and found that
 // none can move its numbers, and the one sentence why (the no-rot rule, `rotProblems`).
 export const REVIEW_KEYS = ["reviewed_at", "reviewed_why"]
+// What `version` and `reviewed_at` hold: a commit id or a release tag.
+const REVISION = /^[0-9a-f]{7,40}$|^v\d+\.\d+\.\d+$/
 
 // A Rust string literal's value: its escapes, and a `\` at a line's end that drops the newline and the next
 // line's leading whitespace.
@@ -122,7 +124,8 @@ export function parseSupport(text: string): Support {
     for (const k of written) if (!EVIDENCE_KEYS.includes(k) && !REVIEW_KEYS.includes(k)) evidenceProblems.push(`Evidence ${m[1]}: unknown field ${k}`)
     for (const k of REVIEW_KEYS) if (!written.includes(k)) evidenceProblems.push(`Evidence ${m[1]}: no ${k} (None until a person reviews a later change)`)
     if (("reviewed_at" in fields) !== ("reviewed_why" in fields)) evidenceProblems.push(`Evidence ${m[1]}: reviewed_at and reviewed_why go together (a review says why the numbers cannot have moved)`)
-    if (fields.reviewed_at !== undefined && !/^[0-9a-f]{7,40}$|^v\d+\.\d+\.\d+$/.test(fields.reviewed_at)) evidenceProblems.push(`Evidence ${m[1]}: reviewed_at ${fields.reviewed_at} is no commit or tag`)
+    for (const k of ["version", "reviewed_at"])
+      if (fields[k] !== undefined && !REVISION.test(fields[k])) evidenceProblems.push(`Evidence ${m[1]}: ${k} ${fields[k]} is no commit id (7 to 40 hex digits) or release tag (vX.Y.Z)`)
     evidence.set(m[1], fields)
   }
   const cell = (src: string, where: string): Cell => {
@@ -709,6 +712,20 @@ export function tokens(text: string, js = false): string[] {
       const stop = end < 0 ? n : end + 1 + m[1].length
       out.push(text.slice(i, stop))
       i = stop
+    } else if (js && c === "/" && /^$|^[(,=:[!&|?{};+\-*%<>~^]$|^(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else)$/.test(out[out.length - 1] ?? "")) {
+      // A regular expression literal (where an operand starts), its class brackets and flags with it.
+      let j = i + 1
+      let cls = false
+      while (j < n && (cls || text[j] !== "/") && text[j] !== "\n") {
+        if (text[j] === "\\") j++
+        else if (text[j] === "[") cls = true
+        else if (text[j] === "]") cls = false
+        j++
+      }
+      j++
+      while (j < n && /\w/.test(text[j])) j++
+      out.push(text.slice(i, j))
+      i = j
     } else if (c === '"' || (js && c === "'")) {
       quoted(c)
     } else if (js && c === "`") {
@@ -755,6 +772,31 @@ function closing(t: string[], at: number): number {
   return t.length - 1
 }
 
+// Where an item starts: back from its keyword over its outer attributes (`#[cfg(…)]`, `#[inline]`) and its
+// modifiers (`pub`, `pub(crate)`, `unsafe`, `async`, `const`, `extern "C"`, `default`), so a changed cfg or
+// visibility is a change of the item.
+const MODIFIERS = new Set(["pub", "unsafe", "async", "const", "extern", "default", "safe"])
+function lead(t: string[], at: number): number {
+  let j = at - 1
+  for (;;) {
+    if (j >= 0 && MODIFIERS.has(t[j])) j--
+    else if (j >= 1 && t[j].startsWith('"') && t[j - 1] === "extern") j -= 2
+    else if (j >= 0 && t[j] === ")") {
+      let k = j
+      for (let d = 0; k >= 0; k--) if (t[k] === ")") d++
+      else if (t[k] === "(" && --d === 0) break
+      if (t[k - 1] !== "pub") break
+      j = k - 2
+    } else if (j >= 0 && t[j] === "]") {
+      let k = j
+      for (let d = 0; k >= 0; k--) if (t[k] === "]") d++
+      else if (t[k] === "[" && --d === 0) break
+      if (t[k - 1] !== "#") break
+      j = k - 2
+    } else break
+  }
+  return j + 1
+}
 // The items of a Rust token stream: fns (`name`, and `Type::name` inside `impl Type`), `impl Type`, `mod name`,
 // `const NAME` and `static NAME`, each with its token range.
 export function items(t: string[]): Item[] {
@@ -776,7 +818,7 @@ export function items(t: string[]): Item[] {
           continue
         }
         const end = closing(t, j)
-        out.push({ key: ty ? `${ty}::${t[i + 1]}` : t[i + 1], from: i, to: end })
+        out.push({ key: ty ? `${ty}::${t[i + 1]}` : t[i + 1], from: lead(t, i), to: end })
         i = end + 1
       } else if (w === "impl" && (i === 0 || ["}", ";", "]"].includes(t[i - 1]) || /^(pub|unsafe)$/.test(t[i - 1]))) {
         let j = i + 1
@@ -800,18 +842,18 @@ export function items(t: string[]): Item[] {
         const f = head.lastIndexOf("for")
         const name = [...(f >= 0 ? head.slice(f + 1) : head)].reverse().find((x) => /^[A-Za-z_]\w*$/.test(x) && x !== "dyn" && x !== "mut") ?? "?"
         const end = closing(t, j)
-        out.push({ key: `impl ${name}`, from: i, to: end })
+        out.push({ key: `impl ${name}`, from: lead(t, i), to: end })
         walk(j + 1, end, name)
         i = end + 1
       } else if (w === "mod" && /^\w+$/.test(t[i + 1] ?? "") && t[i + 2] === "{") {
         const end = closing(t, i + 2)
-        out.push({ key: `mod ${t[i + 1]}`, from: i, to: end })
+        out.push({ key: `mod ${t[i + 1]}`, from: lead(t, i), to: end })
         walk(i + 3, end, null)
         i = end + 1
       } else if ((w === "const" || w === "static") && /^[A-Z_][A-Z0-9_]*$/.test(t[i + 1] ?? "")) {
         let j = i + 2
         while (j < to && t[j] !== ";") j = ["{", "(", "["].includes(t[j]) ? closing(t, j) + 1 : j + 1
-        out.push({ key: `${w} ${t[i + 1]}`, from: i, to: j })
+        out.push({ key: `${w} ${t[i + 1]}`, from: lead(t, i), to: j })
         i = j + 1
       } else if (w === "{" || w === "(" || w === "[") {
         // A struct, an enum, an extern block or a macro's body: nothing watched is inside.
@@ -863,6 +905,7 @@ export type Watch = { cells: string[]; os?: Os[]; spans: string[]; why: string }
 // runtime's; `*`: every verified cell, which alone maps none). Each group says why those spans are the ones: what
 // in them makes the number, and why the rest of their files does not.
 export const WATCH: Watch[] = [
+  // ----- every cell -----
   {
     cells: ["*"],
     spans: [
@@ -879,52 +922,107 @@ export const WATCH: Watch[] = [
     why: "every quoted A/B and A/A is compare's estimate and interval: the per-pair log ratio or difference (diffs), its Hodges-Lehmann shift and signed-rank bounds; the verdict words, Holm, the noworse and planning code beside them move no number",
   },
   {
-    cells: ["cli · *", "script · *", "native_windowless · *"],
-    spans: ["src/app/bench/block.rs#impl Warmup", "src/app/bench/block.rs#steady"],
-    why: "which runs of a block are measured (warmup ends once two runs cost the same): a change moves every per-block value; the startup-spill and untimed checks beside them refuse a block, they do not change its numbers",
+    cells: ["*"],
+    spans: [
+      "src/app/bench/block.rs#impl Warmup",
+      "src/app/bench/block.rs#steady",
+      "src/metrics.rs#impl Timed",
+      "src/metrics.rs#block_values",
+      "src/app/bench.rs#untimed_values",
+      "src/app/bench/block.rs#untimed_state",
+    ],
+    why: "a block's runs to its values: which runs are measured (warmup ends once two runs cost the same), a run's span less its untimed stretches (Timed), the per-run values reduced to the block's (block_values, its median) and the untimed share said and refused (untimed_values, untimed_state)",
   },
+  {
+    cells: ["*"],
+    spans: ["sdk/bench/src/runner.ts#@const request =", "sdk/bench/src/runner.ts#@const context =", 'sdk/bench/src/runner.ts#@case "run": {'],
+    why: "the SDK runner's side of a run: the run handler strobe times, and the context the case calls (ctx.exec, ctx.call, ctx.phase, ctx.untimed, ctx.count, ctx.waitForLine) and the request each is; the rest of runner.ts validates the bench file and drives Playwright",
+  },
+  {
+    cells: ["*"],
+    spans: ["src/host/mod.rs#now_ns", "src/app/bench.rs#lopsided_background", "src/validity.rs#impl CpuBusy", "src/validity.rs#impl Busy", "src/app/bench.rs#refuse_not_on_this_os", "src/app/outside.rs#not_on_this_os"],
+    why: "the host clock a run's edges, phases and Clock are read on; the other work on the target's CPUs over a run (cpu.foreign, Background); and the refusals of what this OS cannot give (NotOnThisOs), which several cells cite as their boundary",
+  },
+  { cells: ["*"], os: ["windows"], spans: ["src/host/win.rs#qpc_ns", "src/host/win.rs#qpc_ticks_ns"], why: "Windows: the host clock (QueryPerformanceCounter in ns)" },
+  { cells: ["*"], os: ["linux"], spans: ["src/host/linux.rs#clock", "src/host/linux.rs#now_ns"], why: "Linux: the host clock (CLOCK_MONOTONIC in ns)" },
+  { cells: ["*"], os: ["macos"], spans: ["src/host/macos.rs#now_ns", "src/host/macos.rs#mach_ns", "src/host/macos.rs#timebase"], why: "macOS: the host clock (mach time in ns)" },
+  // ----- a command (cli) -----
   {
     cells: ["cli · *"],
     spans: [
+      "src/app/bench/cli.rs#line_for",
+      "src/app/bench/cli.rs#simple",
       "src/app/bench/cli.rs#command",
       "src/app/bench/cli.rs#exec",
       "src/app/bench/cli.rs#block",
       "src/app/bench/cli.rs#metric_line",
       "src/app/bench/cli.rs#sum_of",
       "src/app/bench/script.rs#cpu_ms",
+      "src/host/spawn.rs#each_line",
       "src/host/spawn.rs#spawn_group",
+      "src/host/spawn.rs#windows",
+      "src/host/spawn.rs#new_job",
+      "src/host/spawn.rs#assign",
+      "src/host/spawn.rs#nt_resume",
+      "src/host/spawn.rs#impl Spawned",
       "src/host/spawn.rs#Owned::spawn_span",
       "src/host/spawn.rs#Owned::run_to_exit",
       "src/host/mod.rs#tsc",
       "src/host/mod.rs#thread_cycles",
       "src/host/mod.rs#cycles_refused",
     ],
-    why: "a command's run: the line as spawned (command), its two edges and launch CPU (exec, spawn_span, cpu_ms on the cycle clock), its job or group and what it counts (spawn_group, run_to_exit: job cycles and PeakProcessMemoryUsed on Windows, wait4's rusage on Unix), and the block's values from them (block, metric_line, sum_of); the stamps, leftover listing and ending elsewhere in spawn.rs run after the reads",
+    why: "a command's run: the line as spawned (line_for, simple, command: whether a shell stays its parent), its two edges and launch CPU (exec; Windows' CreateProcessW, its job (new_job, assign: what breaks away stays in its count) and resume in windows, nt_resume and Spawned::around, spawn_span; cpu_ms on the cycle clock), its output lines (each_line), its job or group and what the OS counted at its exit (spawn_group, run_to_exit: job cycles and PeakProcessMemoryUsed on Windows, wait4's rusage on Unix), and the block's values from them (block, metric_line, sum_of); strobe's own cost (SelfCost) and the stamps' writing are not the command's numbers",
   },
+  {
+    cells: ["cli · *"],
+    spans: [
+      "src/host/spawn.rs#still_left",
+      "src/host/spawn.rs#group_members",
+      "src/host/spawn.rs#job_pids",
+      "src/host/spawn.rs#stamped_with",
+      "src/host/spawn.rs#stamped",
+      "src/host/spawn.rs#stamped_in",
+      "src/host/spawn.rs#stamp_of",
+      "src/host/spawn.rs#stamp_in",
+      "src/host/spawn.rs#parse_owner",
+      "src/host/spawn.rs#home_key",
+      "src/host/spawn.rs#owner_stamp",
+      "src/host/mod.rs#process_list",
+    ],
+    why: "the cli cells' boundary: what a command left running is found by its group (Unix), its job (Windows) or the stamp it inherited (a process that broke away), and exec refuses the run RunIncomplete; how leftovers are then ended (end_left) refuses nothing",
+  },
+  { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["windows"], spans: ["src/host/win.rs#thread_cycles"], why: "Windows: the launching thread's cycles, cli.launch's CPU" },
+  { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["linux"], spans: ["src/host/linux.rs#thread_cycles"], why: "Linux: the launching thread's CPU, cli.launch's" },
+  { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["macos"], spans: ["src/host/macos.rs#thread_cycles"], why: "macOS: the launching thread's CPU, cli.launch's" },
   {
     cells: ["cli · process_memory"],
     os: ["linux"],
-    spans: ["src/host/spawn.rs#peak_floor"],
-    why: "Linux: the resident set a child inherits from strobe before its exec, under which run_to_exit masks a peak as not the command's",
+    spans: ["src/host/spawn.rs#peak_floor", "src/host/spawn.rs#into_cgroup"],
+    why: "Linux: the resident set a child inherits from strobe before its exec (peak_floor, larger when a pre_exec makes Rust fork, as into_cgroup's does), under which run_to_exit masks a peak as not the command's: the cell's 4 MiB boundary",
   },
+  // ----- counts, phases and metric lines (wall_and_counts) -----
   {
     cells: ["cli · wall_and_counts", "script · wall_and_counts"],
-    spans: ["src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks"],
-    why: "the counts and metric lines a run reports and the untimed stretches its wall leaves out: the hooks' bookkeeping; the hooks' callers are watched with their runtime",
+    spans: ["src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks", "src/app/bench.rs#phase_ms", "src/metrics.rs#phase_stretches"],
+    why: "the counts, phases and untimed stretches a run reports, kept per run and reduced (Hooks, per_run_hooks, phase_ms on the host clock, phase_stretches)",
   },
-  {
-    cells: ["cli · process_cpu", "script · process_cpu", "native_windowless · process_cpu"],
-    os: ["windows"],
-    spans: ["src/host/jobs.rs"],
-    why: "Windows: the job objects whose accounting holds the CPU of processes that ended inside a run; the whole file is that accounting",
-  },
+  // ----- a script (script) -----
   {
     cells: ["script · *"],
-    spans: ["src/app/bench/script.rs#chunk", "src/app/bench/script.rs#Host::request", "sdk/bench/src/host.mjs#@try { const fn"],
-    why: "a script run: chunk holds its edges (the request's send and reply), its CPU windows and the block's values; request is the round trip timed; host.mjs's call block is what runs inside it; the heap, clock and exit ops beside it are no part of a run's wall or CPU",
+    spans: [
+      "src/app/bench/script.rs#chunk",
+      "src/app/bench/script.rs#Host::spawn",
+      "src/app/bench/script.rs#Host::request",
+      "sdk/bench/src/host.mjs#@try { const fn",
+      "src/app/bench.rs#self_state",
+      "src/app/bench.rs#script_unread",
+      "src/app/bench.rs#script_unread_refusal",
+    ],
+    why: "a script run: chunk holds its edges (the request's send and reply on the host clock), its CPU windows and the block's values; Host::spawn starts the host and reads which runtime it is; request is the round trip timed; host.mjs's call block is what runs inside it; the cells' boundaries are OverheadBudget for sub-millisecond runs (self_state) and NotForTarget for cpu.wakes and io.* (script_unread_refusal); the heap, clock and exit ops beside the call are no part of a run's wall or CPU",
   },
+  // ----- the processes a run's CPU, memory and counters are of -----
   {
-    cells: ["script · process_cpu", "native_windowless · process_cpu", "native_windowless · process_memory", "native_windowless · hardware_counters"],
+    cells: ["script · process_cpu", "native_windowless · *"],
     spans: [
       "src/app/record.rs#per_process",
       "src/app/record.rs#read_known",
@@ -942,12 +1040,28 @@ export const WATCH: Watch[] = [
       "src/host/mod.rs#process_cycles_at",
       "src/host/mod.rs#process_tree",
       "src/host/mod.rs#process_trees",
+      "src/host/mod.rs#trees",
       "src/host/mod.rs#process_set",
       "src/host/mod.rs#tree_pids",
+      "src/host/mod.rs#start_time",
       "src/host/mod.rs#ended_marks",
       "src/host/mod.rs#impl EndedMarks",
+      "src/host/mod.rs#launch_ended_cpu",
     ],
-    why: "which processes a run's CPU, memory and counters are of (the tree and set from the root, those that ended inside the run) and the CPU of each between the run's edges, on the cycle clock (Clock, timed_cpu); the rest of record.rs writes recordings",
+    why: "which processes a run's CPU, memory and counters are of (the tree and set from the root, those that ended inside the run, their CPU from the launch's cgroup or job) and the CPU of each between the run's edges, on the cycle clock (Clock, timed_cpu); the rest of record.rs writes recordings",
+  },
+  {
+    cells: ["script · process_cpu", "native_windowless · *"],
+    spans: [
+      "src/host/mod.rs#impl MainThread",
+      "src/host/mod.rs#macos_lost",
+      "src/host/mod.rs#main_share",
+      "src/host/mod.rs#threads",
+      "src/host/mod.rs#thread_cycles_of",
+      "src/host/mod.rs#switches_since",
+      "src/host/spawn.rs#Owned::main_thread",
+    ],
+    why: "the main thread's CPU and share (cpu.main, cpu.main.busy) and the threads a process's wakes and switches are summed over",
   },
   {
     cells: ["script · process_cpu", "native_windowless · *"],
@@ -955,13 +1069,23 @@ export const WATCH: Watch[] = [
     spans: [
       "src/host/win.rs#process_trees",
       "src/host/win.rs#tree_of",
+      "src/host/win.rs#tree_pids_of",
+      "src/host/win.rs#tree_pids",
+      "src/host/win.rs#process_list",
       "src/host/win.rs#process_cycles",
       "src/host/win.rs#proc_times",
       "src/host/win.rs#each_process",
       "src/host/win.rs#system_processes",
       "src/host/win.rs#procs",
+      "src/host/win.rs#start_time",
+      "src/host/win.rs#tree_threads",
+      "src/host/win.rs#threads",
+      "src/host/win.rs#thread_cycles_of",
+      "src/host/win.rs#impl ThreadHandle",
+      "src/host/win.rs#memory_map",
+      "src/host/jobs.rs",
     ],
-    why: "Windows' readers: the process list, the tree walked from the root, each process's cycles and private bytes (pagefile commit)",
+    why: "Windows' readers: the process list and the tree walked from the root, each process's cycles and private bytes (pagefile commit), its threads' cycles (the main thread's by its handle), its memory map, and the job objects whose accounting holds the CPU of processes that ended inside a run",
   },
   {
     cells: ["script · process_cpu", "native_windowless · *"],
@@ -969,6 +1093,10 @@ export const WATCH: Watch[] = [
     spans: [
       "src/host/linux.rs#process_trees",
       "src/host/linux.rs#tree_of",
+      "src/host/linux.rs#tree_pids_of",
+      "src/host/linux.rs#tree_pids",
+      "src/host/linux.rs#process_list",
+      "src/host/linux.rs#zombies_of",
       "src/host/linux.rs#process_cycles",
       "src/host/linux.rs#process_cpu_ns",
       "src/host/linux.rs#read",
@@ -976,14 +1104,21 @@ export const WATCH: Watch[] = [
       "src/host/linux.rs#stat",
       "src/host/linux.rs#all_stats",
       "src/host/linux.rs#start_time",
+      "src/host/linux.rs#schedstat",
+      "src/host/linux.rs#threads",
+      "src/host/linux.rs#thread_cycles_of",
+      "src/host/linux.rs#tids",
       "src/host/linux.rs#private_bytes",
       "src/host/linux.rs#anonymous_kb",
+      "src/host/linux.rs#memory_map",
       "src/host/cgroup.rs#read",
       "src/host/cgroup.rs#impl Reading",
+      "src/host/cgroup.rs#create",
+      "src/host/cgroup.rs#impl Launch",
       "src/host/spawn.rs#spawn_group",
       "src/host/spawn.rs#into_cgroup",
     ],
-    why: "Linux's readers: /proc's stat (tree, start times), each process's CPU ns from schedstat, private bytes from its anonymous memory, and the launch cgroup a launch moves into (spawn_group, into_cgroup), whose CPU counts the processes that ended",
+    why: "Linux's readers: /proc's stat (tree, start times, zombies), each process's and thread's CPU ns from schedstat, private bytes from its anonymous memory, its memory map, and the launch cgroup a launch moves into (spawn_group, into_cgroup), whose CPU counts the processes that ended",
   },
   {
     cells: ["script · process_cpu", "native_windowless · *"],
@@ -991,31 +1126,54 @@ export const WATCH: Watch[] = [
     spans: [
       "src/host/macos.rs#process_trees",
       "src/host/macos.rs#tree_of",
+      "src/host/macos.rs#tree_pids",
+      "src/host/macos.rs#process_list",
+      "src/host/macos.rs#zombies_of",
+      "src/host/macos.rs#responsible_for",
       "src/host/macos.rs#responsible_pids",
       "src/host/macos.rs#all_bsd",
       "src/host/macos.rs#bsd",
       "src/host/macos.rs#process_cycles",
       "src/host/macos.rs#rusage",
       "src/host/macos.rs#start_time",
-      "src/host/macos.rs#timebase",
-      "src/host/macos.rs#mach_ns",
+      "src/host/macos.rs#task_info",
+      "src/host/macos.rs#thread_ids",
+      "src/host/macos.rs#thread_info",
+      "src/host/macos.rs#threads",
+      "src/host/macos.rs#thread_cpu",
+      "src/host/macos.rs#thread_cycles_of",
+      "src/host/macos.rs#first_thread_id",
+      "src/host/macos.rs#known_thread",
     ],
-    why: "macOS's readers: the process list and tree (with the processes an app is responsible for), each process's CPU and phys_footprint from proc_pid_rusage, and the mach clock they are timed on",
+    why: "macOS's readers: the process list and tree (with the processes an app is responsible for), each process's CPU and phys_footprint from proc_pid_rusage, its threads' CPU (the main thread is the first), on the mach clock",
   },
+  // ----- a windowless native app (native_windowless) -----
   {
     cells: ["native_windowless · *"],
-    spans: ["src/app/bench/native.rs#runs", "src/app/bench/native.rs#cpu_ms", "src/target/native.rs#Native::processes", "src/target/native.rs#Native::pids"],
-    why: "a native block: runs holds each run's edges, CPU, counters and end-of-run memory, cpu_ms turns cycles into ms, and the app's processes come from Native; the launch and window code elsewhere in native.rs is for launch cells and windowed apps",
+    spans: [
+      "src/app/bench/native.rs#runs",
+      "src/app/bench/native.rs#cpu_ms",
+      "src/target/native.rs#Native::processes",
+      "src/target/native.rs#Native::pids",
+      "src/target/native.rs#Native::main_thread",
+      "src/app/bench/native.rs#missing",
+      "src/app/bench/launch.rs#app_windowless",
+      "src/app/record.rs#exited",
+      "src/app/record.rs#exited_refusal",
+      "src/app/record.rs#app_gone",
+    ],
+    why: "a native block: runs holds each run's edges (and whether the app has a window to wait for, app_windowless), CPU, counters and end-of-run memory, cpu_ms turns cycles into ms, the app's processes and main thread come from Native; the cells' boundary is an app that exits before or in a run, refused RunIncomplete (exited, exited_refusal, app_gone), and missing says why a declared metric has no value (memory.app.host NotOnThisOs on macOS); the launch and window code elsewhere in native.rs is for launch cells and windowed apps",
   },
   {
     cells: ["native_windowless · process_memory"],
-    spans: ["src/probe/memory.rs#impl Reading"],
-    why: "the memory reading taken at a run's end, summed over the app's processes",
+    spans: ["src/probe/memory.rs", "src/host/mod.rs#memory_map", "src/host/mod.rs#pss_bytes"],
+    why: "the memory reading at a run's end over the app's processes (memory.rs: its parts and totals, memory.app.host from the memory map) and the proportional set size (pss_bytes)",
   },
   {
     cells: ["native_windowless · process_cpu", "native_windowless · hardware_counters"],
     spans: [
       "src/probe/wakes.rs#Snapshot::take",
+      "src/probe/wakes.rs#Snapshot::take_since",
       "src/probe/wakes.rs#span",
       "src/probe/wakes.rs#impl Span",
       "src/probe/wakes.rs#wall_us",
@@ -1023,8 +1181,9 @@ export const WATCH: Watch[] = [
       "src/probe/wakes.rs#counted",
       "src/probe/wakes.rs#counter_values",
       "src/probe/wakes.rs#counter_metrics",
+      "src/probe/wakes.rs#impl Uncounted",
     ],
-    why: "wakes and the OS's per-process counters between a run's edges (instructions, cycles, energy) and the metrics named from them; the timeline and thread views in wakes.rs are for recordings",
+    why: "wakes and the OS's per-process counters between a run's edges (instructions, cycles, energy), the metrics named from them, and NoCounter when a process the counts need is gone (Uncounted); the timeline and thread views in wakes.rs are for recordings",
   },
   {
     cells: ["native_windowless · hardware_counters"],
@@ -1032,6 +1191,7 @@ export const WATCH: Watch[] = [
     spans: ["src/host/macos.rs#counts", "src/host/macos.rs#energy_counters"],
     why: "macOS: instructions, cycles and energy from proc_pid_rusage's v6 record",
   },
+  // ----- a headed page (chromium_page frames and input latency) -----
   {
     cells: ["chromium_page · frames", "chromium_page · input_latency"],
     spans: [
@@ -1041,6 +1201,9 @@ export const WATCH: Watch[] = [
       "src/metrics.rs#vsyncs",
       "src/metrics.rs#intervals",
       "src/metrics.rs#vsync_ms",
+      "src/metrics.rs#covered",
+      "src/metrics.rs#outside",
+      "src/metrics.rs#stretches",
       "src/metrics.rs#run_frames",
       "src/metrics.rs#run_intervals",
       "src/metrics.rs#phase_frames",
@@ -1048,26 +1211,49 @@ export const WATCH: Watch[] = [
       "src/metrics.rs#doc_mark_script",
       "src/metrics.rs#mark_windows",
       "src/metrics.rs#discrete_samples",
-      "src/metrics.rs#block_values",
       "src/metrics.rs#percentile",
-      "src/metrics.rs#impl Timed",
       "src/metrics.rs#impl BlockData",
+      "src/app/bench.rs#tail_of",
+      "src/app/bench.rs#tail_refusal",
+      "src/app/bench.rs#tail_state",
+      "src/app/bench.rs#headless_state",
+      "src/app/bench.rs#headless_of",
+      "src/app/bench.rs#side_windowless",
+      "src/app/bench.rs#windowless_as",
+      "src/app/bench.rs#windowless_target",
+      "src/app/bench/launch.rs#app_windowless",
+      "src/metrics.rs#split_metric",
+      "src/metrics.rs#split_refusal",
+      "src/validity.rs#display_metric",
     ],
-    why: "a headed page block: run_chunk sets up the trace and the run's marks and reads the block's values; trace.rs is the trace's categories; metrics.rs reads frames (vsyncs, intervals) and EventLatency from the trace within each run's windows and reduces them to a block's p50/p95; the series, report and launch code in bench.rs and the recording views in metrics.rs move none of it",
+    why: "a headed page block: run_chunk sets up the trace and the run's marks and reads the block's values; trace.rs is the trace's categories; metrics.rs reads frames (vsyncs, intervals) and EventLatency from the trace within each run's windows (covered, outside, stretches) and reduces them to a block's p50/p95; the cells' boundaries are a tail too short for its percentile (tail_of, tail_refusal, tail_state: TailTooShort) and a headless page's (headless_state, display_metric: Headless); whether a page is headless or windowless decides its trace (headless_of, side_windowless) and split_metric which percentile a name reads; the series, report and launch code in bench.rs and the recording views in metrics.rs move none of it",
   },
   {
     cells: ["chromium_page · input_latency"],
     spans: [
+      "sdk/bench/src/runner.ts#@const page = {",
       "src/driver.rs#Driver::dispatch",
       "src/driver.rs#Driver::mouse",
       "src/driver.rs#Driver::input_at",
+      "src/driver.rs#Driver::spot",
+      "src/driver.rs#Driver::aim",
+      "src/driver.rs#Driver::aim_for",
+      "src/driver.rs#Driver::locate",
       "src/driver.rs#Driver::pointer_move",
       "src/driver.rs#Driver::pointer_button",
+      "src/driver.rs#Driver::stroke",
+      "src/driver.rs#Driver::key_event",
+      "src/driver.rs#Driver::key",
+      "src/driver.rs#Driver::settle",
+      "src/driver.rs#Driver::settle_key",
       "src/driver.rs#sent",
+      "src/driver.rs#take_sending",
+      "src/driver.rs#cdp_button",
+      "src/driver.rs#cdp_mods",
       "src/driver.rs#input_pacing",
       "src/driver.rs#impl Pacer",
     ],
-    why: "how a click reaches the page and when it was sent: the input whose latency the trace times; the driver's waits, queries and screenshots are no part of it",
+    why: "how an input reaches the page and when it was sent: the click (and a key's) path from the SDK's page object through dispatch, aiming and CDP's mouse and key events, its pacing and settling, whose latency the trace times; the driver's waits, queries and screenshots are no part of it",
   },
 ]
 
@@ -1081,78 +1267,165 @@ const git = (args: string[]) => {
   const r = Bun.spawnSync(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe", timeout: 120_000 })
   return r.exitCode === 0 ? r.stdout.toString() : null
 }
-let unshallowed = false
+let fetched = false
+// A revision's commit, or null when this repository has none by that name. A shallow clone fetches its history
+// once (CI checks out the whole history; this is for a local shallow clone).
+function commitOf(rev: string): string | null {
+  const id = () => git(["rev-parse", "--verify", "-q", `${rev}^{commit}`])?.trim() || null
+  if (id() === null && !fetched) {
+    fetched = true
+    if (git(["rev-parse", "--is-shallow-repository"])?.trim() === "true") git(["fetch", "-q", "--unshallow", "--tags", "origin"])
+    else git(["fetch", "-q", "--tags", "origin"])
+  }
+  return id()
+}
+// `a` is `b` or one of its ancestors: in its history, so no landing of `b` can lose it.
+const isAncestor = (a: string, b: string) => git(["merge-base", "--is-ancestor", `${a}^{commit}`, `${b}^{commit}`]) !== null
 const shown = new Map<string, string | null>()
-// A file at a revision; a shallow clone (CI's) fetches its history once when the revision is not in it.
 function fileAt(rev: string, path: string): string | null {
   const key = `${rev}:${path}`
-  if (!shown.has(key)) {
-    if (git(["rev-parse", "--verify", "-q", `${rev}^{commit}`]) === null && !unshallowed) {
-      unshallowed = true
-      if (git(["rev-parse", "--is-shallow-repository"])?.trim() === "true") git(["fetch", "-q", "--unshallow", "--tags", "origin"])
-      else git(["fetch", "-q", "--tags", "origin"])
-    }
-    shown.set(key, git(["show", key]))
-  }
+  if (!shown.has(key)) shown.set(key, commitOf(rev) === null ? null : git(["show", key]))
   return shown.get(key)!
 }
-const revKnown = (rev: string) => git(["rev-parse", "--verify", "-q", `${rev}^{commit}`]) !== null || (fileAt(rev, "Cargo.toml") !== null)
 
-// What a watched span reads now, and what it read at `rev`: null when the file or item is not there.
-function spanAt(rev: string | null, spec: string): string[] | null {
+// The code checked: the working tree (its history HEAD's), or the tree a landing would leave (`--landing`), whose
+// history is its tips'.
+export type Tree = { what: string; read: (path: string) => string | null; tips: string[] }
+export const WORKING: Tree = { what: "the working tree", read: (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : null), tips: ["HEAD"] }
+
+// What a watched span reads in a file source: null when the file or item is not there.
+function spanIn(read: (path: string) => string | null, spec: string): string[] | null {
   const [path, sel] = spec.includes("#") ? [spec.slice(0, spec.indexOf("#")), spec.slice(spec.indexOf("#") + 1)] : [spec, null]
-  const text = rev === null ? (existsSync(join(root, path)) ? readFileSync(join(root, path), "utf8") : null) : fileAt(rev, path)
+  const text = read(path)
   return text === null ? null : spanTexts(text, sel, /\.(m?js|ts)$/.test(path))
 }
+const spanAt = (rev: string, spec: string) => spanIn((p) => fileAt(rev, p), spec)
+const same = (a: string[] | null, b: string[] | null) => (a === null ? b === null : b !== null && a.join(" ¦ ") === b.join(" ¦ "))
+
+// The name a review sentence uses for a span: its item's last name (`run_to_exit`, `Hooks`), else its file's.
+export function spanName(spec: string): string {
+  const [path, sel] = spec.includes("#") ? [spec.slice(0, spec.indexOf("#")), spec.slice(spec.indexOf("#") + 1)] : [spec, ""]
+  if (!sel || sel.startsWith("@")) return path.split("/").pop()!.replace(/\.(rs|ts|mjs|js)$/, "")
+  return sel.split(/::| /).pop()!
+}
+const names = (text: string, name: string) => new RegExp(`(^|[^\\w])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\w])`).test(text)
 
 const OS_LABEL: Record<Os, string> = { windows: "Windows x64", macos: "macOS arm64", linux: "Linux x64" }
+const LANDING = "A branch that sets a stamp lands by fast-forward or a merge commit, never by squash or cherry-pick (both give its commits new ids); rebased, it re-stamps reviewed_at to the rebased code commit in its second commit. Before landing: bun scripts/dev/support-matrix.ts --landing <branch>"
 
-// Every verified cell whose watched spans changed since its evidence (or its review): what changed and the three
-// ways out. `report` gets one line per cell and span, held or not.
-export function rotProblems(s: Support, fail: (m: string) => void, report?: (m: string) => void) {
-  const head = git(["rev-parse", "--short=10", "HEAD"])?.trim() ?? "HEAD"
+// Every verified cell whose evidence or review is not in the tree's history, whose review says nothing of what it
+// reviewed, or whose watched spans changed since: what is wrong and the three ways out. `report` gets one line per
+// cell and span, held or not.
+export function rotProblems(s: Support, fail: (m: string) => void, report?: (m: string) => void, tree: Tree = WORKING) {
+  const head = git(["rev-parse", "--short=10", tree.tips[tree.tips.length - 1]])?.trim() ?? tree.tips[0]
+  const inHistory = (rev: string) => tree.tips.some((t) => isAncestor(rev, t))
   for (const r of s.rows) {
     for (const os of OSES) {
       const c = r[os]
       if (c.kind !== "verified") continue
       const e = c.evidence
-      const cell = `${r.runtime} · ${r.capability}`
-      const rev = e.reviewed_at || e.version
+      const cell = `${r.runtime} · ${r.capability} on ${OS_LABEL[os]}`
       const groups = watchFor(r.runtime, r.capability, os)
       if (!groups.some((g) => !g.cells.includes("*"))) {
-        fail(`${cell} on ${OS_LABEL[os]} is verified, and WATCH (scripts/dev/support-matrix.ts) names no code that computes it: map its spans`)
+        fail(`${cell} is verified, and WATCH (scripts/dev/support-matrix.ts) names no code that computes it: map its spans`)
         continue
       }
-      if (!revKnown(rev)) {
-        fail(`${cell} on ${OS_LABEL[os]}: its evidence revision ${rev} is no commit of this repository (fetch its history: git fetch --unshallow --tags)`)
-        continue
+      // The evidence build and the review are commits of the tree's history, the review after the build.
+      let ok = true
+      for (const [what, rev] of [["evidence version", e.version], ["reviewed_at", e.reviewed_at]] as const) {
+        if (rev === undefined) continue
+        if (commitOf(rev) === null) fail(`${cell}: its ${what} ${rev} is no commit of this repository`)
+        else if (!inHistory(rev))
+          fail(`${cell}: its ${what} ${rev} is not in the history of ${tree.what} (${tree.tips.join(", ")}): a commit of another branch, or one a squash, cherry-pick or rebase replaced. ${LANDING}`)
+        else continue
+        ok = false
       }
+      if (ok && e.reviewed_at && !isAncestor(e.version, e.reviewed_at)) {
+        fail(`${cell}: its reviewed_at ${e.reviewed_at} is not after its evidence version ${e.version} (the version must be an ancestor of the review)`)
+        ok = false
+      }
+      if (!ok) continue
+      const specs = groups.flatMap((g) => g.spans.map((spec) => ({ spec, why: g.why })))
+      // A review says what it reviewed: some watched span differs between the evidence and it, the sentence names
+      // every one that does and a commit.
+      if (e.reviewed_at) {
+        const reviewed = specs.filter(({ spec }) => !same(spanAt(e.version, spec), spanAt(e.reviewed_at!, spec))).map(({ spec }) => spec)
+        const why = e.reviewed_why ?? ""
+        if (!reviewed.length) fail(`${cell}: reviewed_at ${e.reviewed_at} reviews nothing: no watched span differs between ${e.version} and it. Drop reviewed_at and reviewed_why`)
+        const unnamed = reviewed.filter((spec) => !names(why, spanName(spec)))
+        if (unnamed.length) fail(`${cell}: reviewed_why names no ${unnamed.map((x) => `${spanName(x)} (${x})`).join(", ")}, which changed between ${e.version} and ${e.reviewed_at}: say why each cannot move the numbers`)
+        if (!/(^|[^\w])[0-9a-f]{7,40}($|[^\w])/.test(why)) fail(`${cell}: reviewed_why names no commit: name the commits whose changes it reviewed`)
+      }
+      const rev = e.reviewed_at || e.version
       const changed: string[] = []
-      for (const g of groups) {
-        for (const spec of g.spans) {
-          const then = spanAt(rev, spec)
-          const now = spanAt(null, spec)
-          if (now === null) {
-            changed.push(`${spec}: not in the working tree (renamed or moved? map the code that computes it now) [${g.why}]`)
-          } else if (then === null) {
-            changed.push(`${spec}: not at ${rev} (new since the evidence, or renamed) [${g.why}]`)
-          } else if (then.join(" ¦ ") !== now.join(" ¦ ")) {
-            changed.push(`${spec} changed [${g.why}]\n      ${near(then.join(" ¦ "), now.join(" ¦ "))}`)
-          } else report?.(`held    ${cell} on ${OS_LABEL[os]} since ${rev}: ${spec}`)
-        }
+      for (const { spec, why } of specs) {
+        const then = spanAt(rev, spec)
+        const now = spanIn(tree.read, spec)
+        if (now === null) changed.push(`${spec}: not in ${tree.what} (renamed or moved? map the code that computes it now) [${why}]`)
+        else if (then === null) changed.push(`${spec}: not at ${rev} (new since the evidence, or renamed) [${why}]`)
+        else if (!same(then, now)) changed.push(`${spec} changed [${why}]\n      ${near(then.join(" ¦ "), now.join(" ¦ "))}`)
+        else report?.(`held    ${cell} since ${rev}: ${spec}`)
       }
       if (!changed.length) continue
-      for (const x of changed) report?.(`CHANGED ${cell} on ${OS_LABEL[os]} since ${rev}: ${x.split("\n")[0]}`)
+      for (const x of changed) report?.(`CHANGED ${cell} since ${rev}: ${x.split("\n")[0]}`)
       const since = e.reviewed_at ? `${e.version}'s runs, reviewed at ${e.reviewed_at}` : `${e.version}'s runs`
       fail(
-        `${cell} on ${OS_LABEL[os]} is verified from ${since} (\`${e.fixture}\`), and the code that computes it changed since:\n    ${changed.join("\n    ")}\n` +
+        `${cell} is verified from ${since} (\`${e.fixture}\`), and the code that computes it changed since:\n    ${changed.join("\n    ")}\n` +
           `  Three ways out, in the cell's Evidence in src/support.rs (and its line in SPEC 21.1):\n` +
           `    1. run ${e.fixture} again on the evidence's machine (${e.machine}): its known answer, A/A, planted A/B and boundary case; write the new numbers, date and version;\n` +
           `    2. or flip the cell to Preview("re-verify ${e.fixture} after <the commit>: <what changed>");\n` +
-          `    3. or, when the change moves no timestamp, attribution or arithmetic (a rename, a moved block, a refusal beside the reading), commit it, then set reviewed_at: Some("<that commit>") and reviewed_why: Some("<one sentence: why the numbers cannot have moved>"). It must be a commit main keeps (merged, not squashed); now HEAD is ${head}.`,
+          `    3. or, when the change moves no timestamp, attribution or arithmetic (a rename, a moved block, a refusal beside the reading), commit it, then in a second commit set reviewed_at: Some("<that commit>") and reviewed_why: Some("<one sentence naming each changed span and the commits: why none can move the numbers>"). ${LANDING}. Now ${head}.`,
       )
     }
   }
+}
+
+// `--landing <branch> [--onto <main>]`: the check on the tree landing the branch leaves (a fast-forward when main
+// is in its history, else a merge), and each stamp that holds only if the branch lands by fast-forward or merge.
+function landing(args: string[]): number {
+  const ref = args[args.indexOf("--landing") + 1]
+  const onto = args.includes("--onto") ? args[args.indexOf("--onto") + 1] : "origin/main"
+  if (!ref || commitOf(ref) === null || commitOf(onto) === null) {
+    console.error(`--landing <branch> [--onto <main>]: ${ref ?? "no branch"} or ${onto} is no commit (git fetch first)`)
+    return 2
+  }
+  let tree: Tree
+  if (isAncestor(onto, ref)) {
+    tree = { what: `${ref} fast-forwarded onto ${onto}`, read: (p) => fileAt(commitOf(ref)!, p), tips: [ref] }
+  } else {
+    const merged = Bun.spawnSync(["git", "merge-tree", "--write-tree", onto, ref], { cwd: root, stdout: "pipe", stderr: "pipe" })
+    const id = merged.stdout.toString().split("\n")[0].trim()
+    if (merged.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(id)) {
+      console.error(`${ref} does not merge into ${onto} cleanly:\n${merged.stdout.toString()}${merged.stderr.toString()}`)
+      return 1
+    }
+    tree = { what: `${ref} merged into ${onto}`, read: (p) => git(["show", `${id}:${p}`]), tips: [onto, ref] }
+  }
+  const text = tree.read("src/support.rs")
+  if (text === null) {
+    console.error(`${tree.what} has no src/support.rs`)
+    return 1
+  }
+  const s = parseSupport(text)
+  const problems: string[] = [...s.evidenceProblems]
+  rotProblems(s, (m) => problems.push(m), undefined, tree)
+  const branchOnly = new Set<string>()
+  for (const r of s.rows) for (const os of OSES) {
+    const c = r[os]
+    if (c.kind !== "verified") continue
+    for (const rev of [c.evidence.version, c.evidence.reviewed_at]) if (rev && commitOf(rev) !== null && !isAncestor(rev, onto)) branchOnly.add(rev)
+  }
+  for (const m of problems) console.error(`FAIL ${m}`)
+  if (problems.length) {
+    console.log(`landing ${ref} onto ${onto}: ${problems.length} failures; main would fail support-matrix --check`)
+    return 1
+  }
+  console.log(
+    branchOnly.size
+      ? `landing ${ref} onto ${onto}: every stamp holds if it lands by ${isAncestor(onto, ref) ? "fast-forward" : "merge commit"}; ${[...branchOnly].join(", ")} ${branchOnly.size > 1 ? "are" : "is"} only on the branch, so a squash, cherry-pick or rebase would orphan ${branchOnly.size > 1 ? "them" : "it"}`
+      : `landing ${ref} onto ${onto}: every stamp is on ${onto} already; any landing holds`,
+  )
+  return 0
 }
 
 // WATCH itself: every cell it names is a row (or a runtime's), every span names code in the working tree, a
@@ -1164,7 +1437,7 @@ function watchChecks(s: Support, fail: (m: string) => void) {
       const [rt, cap] = c.split(" · ")
       if (c !== "*" && !(s.runtimes.includes(rt) && (cap === "*" || s.rows.some((r) => r.runtime === rt && r.capability === cap)))) fail(`WATCH names ${c}, which is no row of SUPPORT_MATRIX`)
     }
-    for (const spec of g.spans) if (spanAt(null, spec) === null) fail(`WATCH: ${spec} names no code in the working tree (renamed or moved? map the code that computes it now)`)
+    for (const spec of g.spans) if (spanIn(WORKING.read, spec) === null) fail(`WATCH: ${spec} names no code in the working tree (renamed or moved? map the code that computes it now)`)
   }
 }
 
@@ -1213,15 +1486,27 @@ fn per_os() -> u32 { 2 }
   if (!same(before, outside, "Owned::read")) fail("rot: a change outside every watched span reads as a change")
   if (same(before, per, "per_os")) fail("rot: a change to one OS's copy of a watched fn reads as no change")
   if (spanTexts(before, "nothing", false) !== null) fail("rot: a span naming no item found one")
+  for (const [spec, want] of [["src/host/spawn.rs#Owned::run_to_exit", "run_to_exit"], ["src/app/bench/block.rs#impl Hooks", "Hooks"], ["sdk/bench/src/host.mjs#@try {", "host"], ["src/host/jobs.rs", "jobs"]])
+    if (spanName(spec) !== want) fail(`rot: a review names ${spec} as ${spanName(spec)}, not ${want}`)
+  const cfg = before.replace("#[cfg(unix)]\nfn per_os", '#[cfg(target_os = "linux")]\nfn per_os')
+  const swapped = before.replace("#[cfg(windows)]\nfn per_os() -> u32 { 1 }\n#[cfg(unix)]", "#[cfg(unix)]\nfn per_os() -> u32 { 1 }\n#[cfg(windows)]")
+  const visible = before.replace("    pub fn read(", "    pub(crate) fn read(")
+  if (same(before, cfg, "per_os")) fail("rot: a changed #[cfg(…)] on a watched fn reads as no change")
+  if (same(before, swapped, "per_os")) fail("rot: two copies of a watched fn with their #[cfg(…)]s swapped read as no change")
+  if (same(before, visible, "Owned::read")) fail("rot: a watched fn's changed visibility reads as no change")
+  if (!same(before, before.replace("fn other() -> u32 { 1 }", "#[inline]\nfn other() -> u32 { 1 }"), "per_os")) fail("rot: an attribute on the item before a watched fn reads as the watched fn's")
   const js = "const a = 1\ntry {\n  const v = await fn(...args) // the call\n  write({ id, ok: v })\n} catch (e) {}\n"
   const jsLater = "const a = 2\ntry {\n  const v = await fn(\n    ...args,\n  )\n  write({ id, ok: v })\n} catch (e) {}\n"
   if ((spanTexts(js, "@try {", true) ?? []).join() !== (spanTexts(jsLater, "@try {", true) ?? ["x"]).join()) fail("rot: a JavaScript block reformatted reads as a change")
+  const re = 'const r = /["`\']\\/[}]/g\nconst run = { a() { return 1 } }\n'
+  if ((spanTexts(re, "@const run =", true) ?? []).join() !== "const run = { a ( ) { return 1 } }") fail("rot: a JavaScript regular expression with quotes and braces in it is read as code")
 }
 
 // ---------- main ----------
 
 if (import.meta.main) {
   const args = process.argv.slice(2)
+  if (args.includes("--landing")) process.exit(landing(args))
   if (args.includes("--check")) {
     const problems: string[] = []
     const fail = (m: string) => problems.push(m)

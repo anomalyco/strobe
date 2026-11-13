@@ -193,6 +193,13 @@ read("skill/SKILL.md")
 // (f) SPEC 21.1's table is the support matrix: one row per row in its order, then the two modifiers; a verified
 // cell its evidence line exact, a preview `preview`, a refusal `—`.
 const support = parseSupport(read("src/support.rs"))
+for (const p of support.evidenceProblems) fail(`support: ${p}`)
+for (const r of support.rows)
+  for (const os of ["windows", "macos", "linux"] as const) {
+    const c = r[os]
+    if (c.kind === "verified" && !statSync(join(root, c.evidence.fixture), { throwIfNoEntry: false })?.isFile())
+      fail(`support: ${r.runtime} · ${r.capability} on ${os} cites ${c.evidence.fixture}, which is no file`)
+  }
 const supportText = (c: Cell) => (c.kind === "verified" ? evidenceLine(c.evidence) : c.kind === "preview" ? "preview" : "—")
 const wantRows = [
   ...support.rows.map((r) => [`\`${r.runtime}\` · \`${r.capability}\``, r.windows, r.macos, r.linux] as const),
