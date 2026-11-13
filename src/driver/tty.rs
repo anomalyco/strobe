@@ -749,7 +749,20 @@ impl<'a, T: Terminal> Driver<'a, T> {
                         key_bytes(self.held.get().or(m), k, &self.tty.modes(), !down)?
                     };
                     if bytes.is_empty() {
-                        self.tty.now_ns()
+                        let at = self.tty.now_ns();
+                        crate::driver::each_until(&o, timeout(&o), |opts, first| {
+                            let since = if first { at } else { self.tty.now_ns() };
+                            let u = &opts["until"];
+                            if u == "frame" || u.get("state").is_some() {
+                                let why = format!("page.{call}({name:?}): the terminal sends no bytes for this key edge without the program requesting key event or all-keys reporting");
+                                if owed_until(&self.inputs.borrow(), &self.tty.updates(0, u64::MAX)).is_none_or(|t| t <= since) {
+                                    return Err(Error::usage(why).hint("wait for the frame or state on the key that sends input"));
+                                }
+                                return self.until_one(opts, since).map_err(|e| if e.code == 124 { e.hint(why) } else { e });
+                            }
+                            self.until_one(opts, since)
+                        })?;
+                        return Ok(Value::Bool(true));
                     } else {
                         let sample = down && !bare;
                         let rested = sample && self.settle();

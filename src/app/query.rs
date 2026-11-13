@@ -196,7 +196,7 @@ fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str,
     match view {
         "summary" | "progress" => {
             // A result read from its path keeps the ledger it holds: this machine's index is not its history.
-            let text = recording_links(&live_ledger(&mut result, source), source);
+            let text = recording_links(&live_ledger(&mut result, source), source, &result["id"]);
             result["text"] = json!(text);
             Ok(Output::new(text, result))
         }
@@ -312,6 +312,7 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
     // A page in Firefox or WebKit: no Chrome trace.
     let other_engine = meta["engine"].as_str().is_some_and(|e| e != "chromium");
     match view {
+        "summary" if probe => available(),
         "summary" => {
             let mut text = super::record::summary_text(meta);
             // A copied recording's stored id may name something else here. Its report is always a
@@ -386,6 +387,22 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
         "gpu" if meta["wir"] == true => {
             Err(Error::refused("NotOnThisOs", "iOS gives an unprivileged USB client no GPU utilization or VRAM counters", "use the memory view with --by layer on a recording with layer readings"))
         }
+        "frames" if super::record::frames_refused(meta).is_some() && trace.is_file() && !other_engine => {
+            if probe {
+                available()
+            } else {
+                frames(&trace, meta, top)
+            }
+        }
+        "frames" if !trace.is_file() && super::record::frames_refused(meta).is_some() => {
+            let why = super::record::frames_refused(meta).unwrap();
+            let Some(r) = crate::model::Refusal::from_line(why) else { return Err(Error::usage(why)) };
+            if r.validator == crate::model::ValidatorId::Headless && meta["kind"] == "block" && meta["probes"] == "lean" && !other_engine {
+                let next = sources::kept_frame_profiles(&rec).unwrap_or_else(|| "run the page check with --why always and query frames on its separate attribution recording".into());
+                return Err(r.fix(format!("for compositor pipeline rows only: {next}")).into());
+            }
+            Err(r.into())
+        }
         "frames" if dir.join("frames.json").exists() || meta["native"] == true => {
             if probe {
                 inputs::frame_runs(&dir)?;
@@ -415,14 +432,9 @@ fn recording_view(mut rec: Rec, view: &str, args: &Args, top: usize, probe: bool
         ))),
         // A Chromium page block that traced nothing (`traced: false`: a headless page's lean block traces
         // only for a metric read from the trace) has no frames to read: said, never a trace engine's error.
-        "frames" if !trace.exists() => Err(match meta["frames_refused"].as_str().and_then(crate::model::Refusal::from_line) {
-            Some(r) if r.validator == crate::model::ValidatorId::Headless && meta["kind"] == "block" && meta["probes"] == "lean" && !other_engine => {
-                r.fix("presented frames need a display; for pipeline rows only, run the page check with --why always and query frames on its separate attribution recording").into()
-            }
-            Some(r) => r.into(),
-            None if meta["traced"] == false => Error::usage("this block took no trace and kept no presented frames"),
-            None => Error::usage("this recording kept no trace or presented frames"),
-        }),
+        "frames" if !trace.exists() => {
+            Err(Error::usage(if meta["traced"] == false { "this block took no trace and kept no presented frames" } else { "this recording kept no trace or presented frames" }))
+        }
         "frames" if probe => available(),
         "frames" => frames(&trace, meta, top),
         "threads" if !trace.exists() => Err(Error::usage(format!(
@@ -1054,15 +1066,16 @@ pub fn insights(rec: &Rec) -> Result<Output> {
     if meta["kind"] == "record" && meta["wir"] != true && v["interaction.n"].is_null() && v["scroll.n"].is_null() {
         checked.push("work-while-idle");
         let seconds = meta["duration_ms"].as_f64().unwrap_or(0.0) / 1000.0;
-        let fps = v["frames.n"].as_f64().unwrap_or(0.0) / seconds.max(1e-9);
+        let fps = v["frames.n"].as_f64().filter(|_| super::record::frames_refused(meta).is_none() && seconds > 0.0).map(|n| n / seconds);
         let busy = v["main.busy"].as_f64().unwrap_or(0.0);
-        if fps >= 1.0 || busy >= 5.0 {
+        if fps.is_some_and(|n| n >= 1.0) || busy >= 5.0 {
+            let shown = fps.map(|n| format!("presented {n:.1} frames per second and ")).unwrap_or_default();
             hit(
                 "work-while-idle",
                 "warn",
-                format!("work while idle: with no input, the page presented {fps:.1} frames per second and kept its main thread {busy:.1}% busy: an animation, a timer or polling"),
+                format!("work while idle: with no input, the page {shown}kept its main thread {busy:.1}% busy: an animation, a timer or polling"),
                 json!({ "frames_per_second": fps, "main_busy_pct": busy }),
-                (!meta["frames_refused"].is_string() && meta["traced"] != false && (dir.join("frames.json").is_file() || dir.join("trace.pftrace").is_file()))
+                (fps.is_some() && meta["traced"] != false && (dir.join("frames.json").is_file() || dir.join("trace.pftrace").is_file()))
                     .then(|| q("frames"))
                     .into_iter()
                     .chain(rec.cpu().is_ok().then(|| q("hotspots")))
@@ -1794,6 +1807,21 @@ fn frames(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
     if let Some(keys) = rec::measured_keys(meta) {
         data.measured_where(|i| keys.iter().any(|k| *k == format!("run:{i}")));
     }
+    if let Some(why) = super::record::frames_refused(meta) {
+        // Keep actual PipelineReporter slices, not synthetic refresh outcomes (or untimed gap markers).
+        let mut reports: Vec<_> = data.frames.iter().filter(|(k, _)| k.contains(":run:") && !k.contains(":phase:")).flat_map(|(_, f)| f).filter(|f| f.id >= 0).collect();
+        reports.sort_by_key(|f| std::cmp::Reverse(f.dur));
+        let evidence = if meta["headless"] == true { "no display" } else { "no display measurement" };
+        let timing = if meta["timing"] == "perturbed" { "; perturbed" } else { "" };
+        let mut text = format!("frames    refused ({why})\npipeline  {} compositor reports ({evidence}{timing})\n", reports.len());
+        let mut rows = Vec::new();
+        for f in reports.iter().take(top.min(10)) {
+            let ms = f.dur as f64 / 1e6;
+            text += &format!("  report {} · {}\n", f.id, fmt::time(ms));
+            rows.push(json!({"slice_id":f.id,"duration_ms":ms}));
+        }
+        return Ok(Output::new(text, json!({"headless":meta["headless"] == true,"frames_refused":why,"timing":meta["timing"],"compositor_reports":reports.len(),"longest_reports":rows})));
+    }
     let values = metrics::block_values(&data, "run", &BTreeMap::new());
     let g = |k: &str| values.get(k).copied().unwrap_or(f64::NAN);
     let mut all: Vec<metrics::Vsync> = data
@@ -1888,7 +1916,7 @@ fn frames(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
     Ok(Output::new(
         text,
         json!({
-            "presented": ms.len(), "dropped_pct": dropped, "latency": { "p50": q(0.5), "p95": q(0.95), "p99": q(0.99) }, "values": values, "worst": worst, "phases": phase_json,
+            "headless": false, "frames_refused": null, "presented": ms.len(), "dropped_pct": dropped, "latency": { "p50": q(0.5), "p95": q(0.95), "p99": q(0.99) }, "values": values, "worst": worst, "phases": phase_json,
             "processes": procs.iter().map(|(name, pid, shown, all, page)| json!({ "process": name, "pid": pid, "presented": shown, "reported": all, "page": page })).collect::<Vec<_>>(),
         }),
     ))

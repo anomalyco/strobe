@@ -6519,7 +6519,7 @@ function renderRecording(m) {
   const otherEngine = !!m.engine && m.engine !== "chromium";
   const cmds = [
     ["Open in Perfetto: one timeline with flame graphs, runs, threads and presents", `strobe open ${recId}`],
-    ["Worst frames in this recording", `strobe query ${recId} frames`],
+    m.frames_refused && m.traced === false ? null : [m.frames_refused ? "Compositor pipeline reports (not screen measurements)" : "Worst frames in this recording", `strobe query ${recId} frames`],
     ["Busy share by thread", `strobe query ${recId} threads`],
     /attribution|cpu/.test(String(m.probes || "")) ? ["CPU hotspots by package", `strobe query ${recId} hotspots --by package`] : null,
     /attribution/.test(String(m.probes || "")) ? ["Forced layout & style call sites", `strobe query ${recId} layout`] : null,
@@ -6543,6 +6543,7 @@ function renderRecording(m) {
   const hasDeepDive = !!(insSec || phaseSec || cpuSec || laySec || allocSec || heapSec || procMemSec || httpSec);
 
   const valuesBody = h("div", {},
+    m.frames_refused ? h("p", {class: "meta-dim"}, `Display measurements refused: ${m.frames_refused}`) : null,
     perturbed
       ? h("div", { class: "perturbed-note", style: "margin:-20px -24px 16px;border-top:0;border-bottom:1px solid var(--hairline)" },
           h("b", {}, "Perturbed timing: "),

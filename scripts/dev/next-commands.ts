@@ -591,8 +591,15 @@ let followed = 0
       if (s.case === "restyle" && s.recording) {
         const lean = JSON.parse(readFileSync(join(folder(s.recording),"meta.json"),"utf8"))
         const why = go(["query",s.recording,"frames"],4)
-        if (lean.traced !== false || !why.includes("Headless:") || why.includes("--trace full") || !why.includes("--why always")) fail(`headless frames: ${why}`)
-        if (typeof s.attribution === "string") { go(["query",s.attribution,"frames"],0); followed++ }
+        const has = typeof s.attribution === "string", hint = has ? `strobe query ${s.attribution} frames` : "--why always"
+        if (lean.traced !== false || !why.includes("Headless:") || why.includes("--trace full") || !why.includes(hint) || has && why.includes("--why always")) fail(`headless frames: ${why}`)
+        if (has) {
+          const text = go(["query",s.attribution,"frames"],0), j = JSON.parse(go(["query",s.attribution,"frames","--json"],0))
+          if (!text.includes(`${j.compositor_reports} compositor reports (no display; perturbed)`) || /\bpresented\b|vsyncs dropped|display .*Hz/.test(text) || j.headless!==true || !j.frames_refused || j.timing!=="perturbed" || "presented" in j || "dropped_pct" in j || "values" in j) fail(`headless pipeline: ${text} ${JSON.stringify(j)}`)
+          if (JSON.parse(go(["query",s.attribution,"inputs","--json"],4)).validator!=="Headless") fail("headless inputs claimed screen latency")
+          if (!go(["query",id,"frames"],4).includes(hint)) fail("experiment missed its kept profile")
+          followed++
+        }
         console.log(`headless frames: ${s.recording} (trace ${result.args?.flags?.trace ?? "default"}): 4; attribution ${s.attribution ?? "not requested"}`)
       }
       if (!s.recording || typeof s.attribution !== "string" || !existsSync(join(folder(s.attribution), "trace.pftrace"))) continue
@@ -890,11 +897,12 @@ let followed = 0
   const carry = ["rec_carry_launch","rec_carry_profile","rec_carry_video"]
   const carried = { ...c("carried",carry[0],carry[1]), video:{head:carry[2]}, state:"pass" }
   writeResult({kind:"check",series:[carried]})
-  const writeCarried = (dir:string) => {
-    for(const id of carry) put(join(dir,id),"meta.json",{id,kind:"record",probes:"attribution",values:{}})
+  const writeCarried = (dir:string, parent = exp) => {
+    for(const id of carry) put(join(dir,id),"meta.json",{id,kind:"block",experiment:parent,probes:"attribution",values:{}})
     cpSync(join(handmade,"cpu-0.cpuprofile"),join(dir,carry[1],"cpu-0.cpuprofile"))
+    put(join(dir,carry[2]),"video.json",{file:"video.webm"}); writeFileSync(join(dir,carry[2],"video.webm"),"fixture")
   }
-  const verifyCarried = (h:string, from:"copy"|"store"|"missing") => {
+  const verifyCarried = (h:string, from:"copy"|"store"|"missing"|"incomplete") => {
     for(const a of [["query",h,"summary"],["report",h,"--format","md"]]) {
       const text = go(a,0)
       const lines = text.split(/\r?\n/).filter(l=>/^      (rec  |why  |video    )/.test(l))
@@ -902,8 +910,8 @@ let followed = 0
       for(const [i,line] of lines.entries()) {
         const id = line.trim().split(/\s+/)[1], cmd = line.split(" · strobe ").at(1)
         if(!carry.includes(id)) fail(`lost provenance: ${line}`)
-        if(from==="missing") {
-          if(cmd || !line.includes(h===exp?"no longer stored":"not in this copy")) fail(`missing note: ${line}`)
+        if(from==="missing" || from==="incomplete") {
+          if(cmd || !line.includes(from==="incomplete"?"lacks the data":h===exp?"no longer stored":"not in this copy")) fail(`missing note: ${line}`)
         } else {
           const words = cmd && argvVia(sh?"sh":"pwsh",cmd)
           const expected = from==="copy" ? join(copy,id,"meta.json").replace(/\\/g,"/") : id
@@ -913,9 +921,35 @@ let followed = 0
       }
     }
   }
-  verifyCarried(file,"missing"); writeCarried(join(fakeState,"recordings")); verifyCarried(file,"store")
+  verifyCarried(file,"missing"); writeCarried(join(fakeState,"recordings"),"exp_other"); writeCarried(copy,"exp_other")
+  verifyCarried(file,"missing"); verifyCarried(exp,"missing"); writeCarried(join(fakeState,"recordings")); verifyCarried(file,"store")
   writeCarried(copy); verifyCarried(file,"copy")
   for(const id of carry) rmSync(folder(id),{recursive:true}); verifyCarried(exp,"missing"); verifyCarried(file,"copy")
+  for(const dir of [copy,join(fakeState,"recordings")]) {
+    writeCarried(dir)
+    rmSync(join(dir,carry[1],"cpu-0.cpuprofile")); rmSync(join(dir,carry[2],"video.webm"))
+    for(const target_kind of ["native","web"]) {
+      writeResult({kind:"check",series:[{...carried,target_kind,values:target_kind==="web"?{"http.probes":5}:{}}]})
+      verifyCarried(dir===copy?file:exp,"incomplete")
+    }
+  }
+  const side="strobe old", cmp=comparison([series("first","impl",worse,{attribution:{base:carry[1],head:carry[1]}})],{},{comparison:"implementations",variants:[{name:side},{name:"new"}],side_names:[side,"new"]})
+  writeResult(cmp)
+  for(const h of [file,exp]) for(const a of [["query",h,"summary"],["report",h,"--format","md"]]) {
+    const line=go(a,0).split("\n").find(l=>l.startsWith(`       ${side}: `))
+    if(!line?.includes(carry[1]) || line.includes("strobe query")) fail(`implementation name bypassed link check: ${line}`)
+  }
+  // Old metadata can still carry display readings next to a refusal. Neither a renderer nor
+  // its backing JSON may resurrect them. Keep the independent main-thread reading.
+  const offscreen=join(work,"offscreen"), staleValues={"frames.n":600,"frames.dropped.pct":10,"interaction.p95":1,"display.hz":60,"main.busy":55}
+  put(offscreen,"meta.json",{id:"rec_offscreen",kind:"record",headless:true,timing:"perturbed",duration_ms:1000,values:staleValues})
+  const summary=JSON.parse(go(["query",offscreen,"summary","--json"],0))
+  const md=JSON.parse(go(["report",offscreen,"--format","md","--json"],0)).markdown
+  const idle=go(["query",offscreen,"insights"],0)
+  const report=JSON.parse(go(["report",offscreen,"--format","html","--json"],0))
+  const html=readFileSync(report.path,"utf8"), payload=JSON.parse(html.match(/const STROBE = (.+?);\r?\n/)?.[1] ?? "null")
+  for(const m of [summary,payload?.data]) if(!m?.frames_refused || m.values["main.busy"]!==55 || Object.keys(m.values).some(k=>/^(frames|interaction|display)\./.test(k)))fail(`display values escaped in a recording payload: ${JSON.stringify(m?.values)}`)
+  if(!md.includes("refused (Headless") || /\bpresented\b|vsyncs dropped|input → presentation/.test(md) || !idle.includes("55.0% busy") || idle.includes("frames per second")) fail(`headless summary/insights: ${md} ${idle}`)
   for (const kind of ["implementations","video","blocks"]) {
     const dir=join(copy,kind),id=`exp_copy_${kind}`
     const s=kind==="blocks" ? synthetic.find(([n])=>n==="exp_syn_blocks")![1].series[0] : series("first","page",worse,{attribution:{base:prof,head:p2},video:kind==="video"?{base:prof,head:p2}:null})

@@ -16,6 +16,27 @@ fn stored(id: &str) -> Option<std::path::PathBuf> {
     dir.join("meta.json").is_file().then_some(dir)
 }
 
+/// A kept profile of this launch, not just another recording with the same short ID.
+pub(super) fn kept_frame_profiles(rec: &Rec) -> Option<String> {
+    let exp = rec.meta["experiment"].as_str().filter(|id| rec.stored() && store::plain_id(id))?;
+    let r = store::read_json(&crate::host::paths::experiments().join(exp).join("result.json")).ok()?;
+    if r["id"] != exp || r["kind"] != "check" {
+        return None;
+    }
+    let ids: BTreeSet<_> = r["series"]
+        .as_array()?
+        .iter()
+        .filter(|s| launches(s).any(|id| id == rec.id) && rec.meta["query_case"].as_str().is_none_or(|q| s["label"] == q))
+        .filter_map(|s| s["attribution"].as_str())
+        .filter(|id| {
+            let Some(dir) = stored(id) else { return false };
+            let p = Rec::open(&dir);
+            p.meta["id"] == *id && p.meta["experiment"] == exp && p.meta["probes"] == "attribution" && dir.join("trace.pftrace").is_file()
+        })
+        .collect();
+    (!ids.is_empty()).then(|| ids.into_iter().map(|id| format!("strobe query {id} frames")).collect::<Vec<_>>().join(" · "))
+}
+
 pub(super) fn forward(rec: Rec, label: &str, view: &str, args: &Args, top: usize) -> Result<Output> {
     let id = rec.id.clone();
     let mut out = recording(rec, view, args, top).map_err(|mut e| {

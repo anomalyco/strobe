@@ -83,6 +83,9 @@ const SHOWN: usize = 100;
 
 /// `top`: the lines to show (`--top`; all of them are in `--json`), `SHOWN` when not asked.
 pub fn inputs(dir: &Path, meta: &Value, top: Option<usize>, only: Option<&[String]>, probe: bool) -> Result<Output> {
+    if let Some(why) = super::super::record::frames_refused(meta) {
+        return Err(crate::model::Refusal::from_line(why).map_or_else(|| Error::usage(why), Error::from));
+    }
     let top = top.unwrap_or(SHOWN);
     if dir.join("frames.json").is_file() && dir.join("presents.json.gz").is_file() {
         if probe {

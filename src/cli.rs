@@ -701,9 +701,10 @@ Setup
   update [<version>] [--from <path>] [--check] [--force]
                                   install the latest npm release (or that version, or a local build) over the
                                   installed copy; refreshes the skill, MCP, the helper where installed, and
-                                  restarts the daemon unless it is running a bench; keeps a newer or local build unless --force
+                                  restarts the daemon unless it is running an MCP bench; keeps a newer or local build unless --force
                                   To install without starting or stopping a daemon, run the new binary's
-                                  up --skip daemon,deep,mcp,calibrate instead. An installed daemon switches builds when idle.
+                                  up --skip daemon,deep,mcp,calibrate instead. During a shell bench, use the project's
+                                  pinned binary directly (bunx strobe); defer setup and updates until the bench ends.
   leave [--yes]                   undo up (--yes also deletes recordings and experiments)
   prune [builds|seeds|gpu-cache|symbols|sdk|engine|run|recordings|experiments …] [--all] [--older-than 7d]
         [--dry-run] [-f]

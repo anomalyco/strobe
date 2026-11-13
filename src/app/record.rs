@@ -1551,6 +1551,24 @@ fn background_line(meta: &Value) -> Option<String> {
         .map(|why| format!("frames   refused (BackgroundPriority): the target ran at {why}; frames and input latencies there describe no person's machine (CPU is kept)\n"))
 }
 
+pub(super) fn frames_refused(meta: &Value) -> Option<&str> {
+    meta["frames_refused"].as_str().or_else(|| (meta["headless"] == true).then_some("Headless: the page ran headless, so nothing it drew reached a display"))
+}
+
+/// Also protect readers of older or copied metadata. The raw trace remains available for pipeline diagnostics.
+pub(super) fn omit_refused_display(meta: &mut Value) {
+    if let Some(why) = frames_refused(meta) {
+        let why = why.to_string();
+        meta["frames_refused"] = json!(why);
+        if let Some(v) = meta["values"].as_object_mut() {
+            v.retain(|k, _| !validity::display_metric(k));
+        }
+        if meta["os_frames"]["values"].is_object() {
+            meta["os_frames"] = json!({"refused":why});
+        }
+    }
+}
+
 /// A page recorded in another engine than Chromium (`engine_page`): what it measured from outside.
 fn engine_summary(meta: &Value) -> String {
     let v = &meta["values"];
@@ -1567,7 +1585,7 @@ fn engine_summary(meta: &Value) -> String {
     );
     s += &format!("cpu      {} of one core (cpu.app.total) · {} in the window (cpu.work), all processes\n", fmt::value(get("cpu.app.total"), "%"), fmt::value(get("cpu.work"), "ms"));
     s += &format!("memory   {} private · {} DOM nodes\n", fmt::value(get("memory.app.private"), "MB"), fmt::value(get("dom.nodes"), "count"));
-    match (background_line(meta), meta["os_frames"]["refused"].as_str()) {
+    match (background_line(meta), frames_refused(meta).or(meta["os_frames"]["refused"].as_str())) {
         (Some(line), _) => s += &line,
         (None, Some(why)) => s += &format!("frames   refused: {why}\n"),
         (None, None) => {
@@ -1867,7 +1885,7 @@ fn summary_body(meta: &Value) -> String {
     );
     if let Some(line) = background_line(meta) {
         s += &line;
-    } else if let Some(why) = meta["frames_refused"].as_str() {
+    } else if let Some(why) = frames_refused(meta) {
         s += &format!("frames   refused ({why})\n");
     } else {
         s += &format!(
@@ -1898,7 +1916,7 @@ fn summary_body(meta: &Value) -> String {
     if get("cpu.app.total").is_finite() {
         s += &format!("cpu      {} of one core, all processes\n", fmt::value(get("cpu.app.total"), "%"));
     }
-    if get("interaction.p95").is_finite() {
+    if frames_refused(meta).is_none() && get("interaction.p95").is_finite() {
         s += &format!("input    p95 {} input → presentation\n", fmt::value(get("interaction.p95"), "ms"));
     }
     let of = &meta["os_frames"];

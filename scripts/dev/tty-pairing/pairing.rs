@@ -163,10 +163,20 @@ fn rows() -> Result<()> {
     for (edge,key) in [("down","Shift"),("up","Shift"),("up","x")] {
         let p = Program::new(0, Silent);
         let page = Driver::new(&p, None);
-        assert_eq!(call(&page, edge, json!([key,{"until":"frame","timeout":5}])).unwrap_err().code,124);
+        for u in [json!("frame"), json!({"state":"done"})] {
+            let e = call(&page, edge, json!([key,{"until":u}])).unwrap_err();
+            assert_eq!(e.code, 2);
+            assert!(e.message.contains("sends no bytes") && p.now_ns() == START);
+        }
+        call(&page,edge,json!([key,{"until":["text=Field","idle"]}]))?;
         assert!(p.wire.borrow().is_empty() && page.inputs().is_empty());
     }
-    println!("modifier hold: both reported edges wait; only the shifted key is sampled; no-byte edges still wait");
+    let p = Program::new(120 * MS, One);
+    let page = Driver::new(&p,None);
+    call(&page,"down",json!(["a"]))?;
+    call(&page,"up",json!(["a",{"until":"frame"}]))?;
+    assert!(p.now_ns() > START + 120 * MS && p.wire.borrow().len() == 1);
+    println!("modifier hold: reported edges wait; no-byte edges honor text, idle and pending answers, otherwise frame/state refuse at once");
     assert!(!strobe::driver::press_needs_focus(&json!({"burst":true})));
     assert!(strobe::driver::press_needs_focus(&json!({"selector":"#field","burst":true})));
     assert!(!strobe::probe::present::frames::burst_refusal(1).contains("type with burst"));
