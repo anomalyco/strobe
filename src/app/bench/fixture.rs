@@ -266,8 +266,8 @@ impl Running {
         let mut last = self.last.borrow_mut();
         match last.as_ref() {
             Some((a, e)) => match super::super::record::timed_cpu(&[a, &now], &[e, &ended]) {
-                Some(c) => self.total.set(self.total.get() + c.total),
-                None => {
+                Ok(c) => self.total.set(self.total.get() + c.total),
+                Err(_) => {
                     self.total.set(self.total.get() + super::super::record::cycles_used(a, &now));
                     self.lost.set(self.lost.get() + 1);
                 }

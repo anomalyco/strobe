@@ -646,7 +646,7 @@ pub fn process_cycles(pid: u32) -> Option<u64> {
 }
 
 pub fn process_list() -> Vec<(u32, u32, u64)> {
-    all_bsd().into_iter().map(|b| (b.pid, b.ppid, b.start)).collect()
+    all_bsd().into_iter().filter(|b| !b.zombie).map(|b| (b.pid, b.ppid, b.start)).collect()
 }
 
 pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {

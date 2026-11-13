@@ -47,6 +47,17 @@ impl Output {
 }
 
 pub fn main() -> i32 {
+    let code = cli_main();
+    // Killing the foreground command can wake the main thread before the stop worker finishes.
+    // Join the same serialized cleanup rather than exiting over its sweep or its report.
+    #[cfg(unix)]
+    if host::STOP_NOW.load(std::sync::atomic::Ordering::SeqCst) {
+        crate::target::isolate::exit_on_stop(None, None);
+    }
+    code
+}
+
+fn cli_main() -> i32 {
     if let Some(code) = crate::host::answer_query() {
         return code;
     }

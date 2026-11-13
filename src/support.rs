@@ -606,7 +606,8 @@ const MAC_HEADLESS_CPU: &str = "re-verify scripts/dev/known-web.bench.ts and pla
 // The evidence of each verified cell: what was planted and what strobe read, on the build that ran it.
 // `reviewed_at`: the commit at which every later change to the code that computes it was read and found
 // unable to move its numbers (`scripts/dev/support-matrix.ts --check` holds the code to it).
-const CHANGES_CLI: &str = "e3d0ffc1 made run_to_exit end what a command left by pid and start time only after every reading (on Unix wait4 still reads the exited zombie's frozen rusage, and anything left refuses the run RunIncomplete), keep the child as Proc::Child in spawn_group, and carry each process's start time through still_left, group_members, stamped_with, stamped, stamped_in, stamp_of and stamp_in, which keep a stamp only while the process keeps the start time it was listed with, so a process the command left running (the fixtures' orphan and breakaway-left) is still found and refused; ebc9eeaf made block refuse only a metric the case declared: no edge, count, reading or boundary moved";
+// The cli cells' review at 737544c5 (`cleanup/spawn-clock`): the changes 384805d4 reviewed, then its own.
+const CHANGES_CLI_CLOCK: &str = "e3d0ffc1 made run_to_exit end what a command left by pid and start time only after every reading, keep the child as Proc::Child in spawn_group and carry each process's start time through still_left, group_members, stamped_with, stamped, stamped_in, stamp_of and stamp_in (a stamp kept only while its process keeps the start time it was listed with), and ebc9eeaf made block refuse only a declared metric; then 41ca8772, 11ac5f29 and 737544c5 made exec time a run from Owned::released_ns less creation_ns to Usage::exited_ns on host::now_ns, which windows reads beside the Instant it already read before the suspended child resumes (the impl Spawned and Owned::spawn_span hold the same CreateProcessW span) and spawn_group reads right before the spawn on macOS, as before, while on Linux spawn_group adds a close-on-exec stamp after the cgroup move and CPU mask that already made it fork (peak_floor read as before), and made run_to_exit read what is left once at the exit (still_left without its 100 ms grace; Windows from the job's held handles, a console host alone not counted; Linux also the launch cgroup's live members) and take the launch cgroup's CPU on Linux: a run that leaves nothing has the same edges, counts and readings on Windows and macOS (adais spin 300 run.duration 322.2 to 320.9 ms and cpu.work 306.96 to 306.25 ms; air 304 to 304.5 ms, cpu.work 303 ms on both), Linux memory.peak reads the same (alloc 202 MB, alloc-small refused NotOnThisOs), and a process left running is still refused RunIncomplete, now at once. At 8fcc3d0 exec changes the refusal hint only. Owned::run_to_exit and stamped_with reject ended or wrongly stamped candidates and keep the nonzero start on Windows; the fixtures leave no live helper except the intentionally refused orphan and breakaway-left. The successful runs take the same clocks and read the same cycles, cgroup CPU and peak.";
 
 const WIN_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -617,8 +618,8 @@ const WIN_CLI_CPU_RUN: Evidence = Evidence {
     aa: "known.exe spin 300 against itself, 8 pairs: cpu.work −0.00% [−0.11 … +0.33], same (±2%)",
     planted: "spin 150 to spin 300: cpu.work 155.55 to 305.54 ms, +96.41% [+96.07 … +96.77] for +96.43% with the 5.55 ms launch",
     boundary: "a process left running (orphan, breakaway-left) refused RunIncomplete; cpu.wakes refused NotOnThisOs",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_CLI),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
 const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -629,20 +630,23 @@ const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
     aa: "known.exe alloc 100 300 against itself: memory.peak 0.00% [−0.03 … +0.03], same (±2%)",
     planted: "alloc 50 to alloc 100: 50.99 to 101.10 MiB, +98.26% [+98.23 … +98.30] for +98.25% (its blocks flagged Background, which a peak is not loaded by)",
     boundary: "a process left running refused RunIncomplete",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_CLI),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
+// Run again at 737544c5: a command's CPU now takes its launch cgroup's where that covers more.
 const LINUX_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-13",
-    version: "v0.31.0",
+    version: "737544c5",
     machine: "Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal)",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "cpu.work 302.4 ms vs 300 ms plus a 2 ms launch and tree 1204.8 ms vs 1200 ms; planted Δ 149.97 ms and 600.01 ms vs 150 and 600 ms",
-    aa: "known spin 300 against itself: cpu.work −0.03% [−0.13 … +0.06], same (±2%)",
-    planted: "spin 150 to spin 300: +98.61% [+98.43 … +98.77] for +98.55% to +98.69% with a 2.0 to 2.2 ms launch; tree 3 × 200 to 3 × 400: +99.05% [+98.97 … +99.19] for +99.04%",
-    boundary: "a process left running (orphan, breakaway-left) refused RunIncomplete",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_CLI),
+    known: "cpu.work 302.4 ms vs 300 ms plus a 2.3 ms launch and tree 1205.7 ms vs 1200 ms; planted Δ 149.98 ms and 600.21 ms vs 150 and 600 ms",
+    aa: "known spin 300 against itself, 8 pairs: cpu.work −0.02% [−0.13 … +0.08], same (±2%)",
+    planted: "spin 150 to spin 300: 152.30 to 302.28 ms, +98.5% [+98.2 … +98.6] for +98.49% with the 2.3 ms launch; tree 3 × 200 to 3 × 400: 605.84 to 1206.06 ms, +99.05% [+98.92 … +99.13] for +99.04%",
+    boundary: "a process left running at the command's exit (orphan, breakaway-left) refused RunIncomplete",
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(
+        "At 8fcc3d0 exec changes the refusal hint only. Owned::run_to_exit and stamped_with reject ended or wrongly stamped candidates and keep the nonzero start on Windows; the fixtures leave no live helper except the intentionally refused orphan and breakaway-left. The successful runs take the same clocks and read the same cycles, cgroup CPU and peak.",
+    ),
 };
 const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-13",
@@ -653,10 +657,10 @@ const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     aa: "known alloc 100 300 against itself: memory.peak +0.02% [−0.01 … +0.09], same (±2%)",
     planted: "alloc 50 to alloc 100: 51.99 to 101.99 MiB, +96.20% [+95.96 … +96.39] for +96.18%",
     boundary: "a 4 MiB peak, under strobe's own resident set the child inherits, refused NotOnThisOs; a process left running refused RunIncomplete",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_CLI),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
-const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same";
+const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge.";
 const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
     date: "2026-11-13",
     version: "v0.31.0",
@@ -666,7 +670,7 @@ const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
     aa: "script-a against itself: run.duration −0.01% [−0.12 … +0.07], same (±2%)",
     planted: "script-a to script-b (150 to 300 ms): run.duration +99.11% [+98.90 … +99.24] for +99.08% with the 1.4 ms call",
     boundary: "cpu.wakes and io.* refused NotForTarget; a sub-millisecond run's wall refused OverheadBudget",
-    reviewed_at: Some("384805d4"),
+    reviewed_at: Some("8fcc3d0"),
     reviewed_why: Some(CHANGES_LINUX_SCRIPT),
 };
 const LINUX_SCRIPT_CPU_RUN: Evidence = Evidence {
@@ -678,8 +682,8 @@ const LINUX_SCRIPT_CPU_RUN: Evidence = Evidence {
     aa: "script-a against itself: cpu.work +0.01% [−0.12 … +0.16], same (±2%)",
     planted: "script-a to script-b: cpu.work +99.69% [+99.45 … +99.80] for +99.65% with 0.53 ms of call",
     boundary: "cpu.wakes and io.* refused NotForTarget; a child ending inside a run counted from its launch cgroup (303.2 ms for 300)",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_LINUX_SCRIPT),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_LINUX_SCRIPT_ENDED),
 };
 const MAC_CLI_WALL_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -690,8 +694,8 @@ const MAC_CLI_WALL_RUN: Evidence = Evidence {
     aa: "cli-a against itself, 8 pairs: run.duration +0.07% [−0.15 … +0.14], same (±2%)",
     planted: "cli-a to cli-b (150 to 300 ms): 154.55 to 304.84 ms, +97.20% [+96.98 … +97.43] for +97.06% with the 4.55 ms launch",
     boundary: "a process left running (orphan, breakaway-left in cli.bench.ts) refused RunIncomplete",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_CLI),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
 const MAC_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -702,8 +706,8 @@ const MAC_CLI_CPU_RUN: Evidence = Evidence {
     aa: "cli-a against itself: cpu.work −0.01% [−0.08 … +0.06], same (±2%)",
     planted: "cli-a to cli-b: cpu.work 152.90 to 303.04 ms, +98.23% [+98.08 … +98.40] for +98.10% with the launch; cli-io io.write and io.read +100% [+100 … +100]",
     boundary: "a process left running refused RunIncomplete; IO of reaped children refused NotOnThisOs (cli.bench.ts)",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_CLI),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
 const MAC_CLI_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -714,10 +718,10 @@ const MAC_CLI_MEMORY_RUN: Evidence = Evidence {
     aa: "cli-a against itself: memory.peak 0.0% [0.0 … 0.0], same (±2%)",
     planted: "cli-a to cli-b (50 to 100 MiB): 51.906 to 101.906 MiB, Δ +50.000 MiB for +50 MiB",
     boundary: "a process left running refused RunIncomplete (cli.bench.ts)",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_CLI),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
-const CHANGES_MAC_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees, lends a zombie no children in tree_of (unreachable when the tree is walked without zombie roots) and joins a process to its responsible one by pid and start time in responsible_pids, which drops only processes whose pid was reused: the run's edges, CPU windows and the host's processes are the same";
+const CHANGES_MAC_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees, lends a zombie no children in tree_of (unreachable when the tree is walked without zombie roots) and joins a process to its responsible one by pid and start time in responsible_pids, which drops only processes whose pid was reused: the run's edges, CPU windows and the host's processes are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge.";
 const MAC_SCRIPT_WALL_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "964e825",
@@ -727,7 +731,7 @@ const MAC_SCRIPT_WALL_RUN: Evidence = Evidence {
     aa: "script-a against itself: run.duration −0.005% [−0.03 … +0.03], same (±2%)",
     planted: "script-a to script-b (150 to 300 ms): run.duration +99.59% [+99.52 … +99.66] for +99.54% with the 0.7 ms call",
     boundary: "a 0.5 ms run's wall refused OverheadBudget",
-    reviewed_at: Some("384805d4"),
+    reviewed_at: Some("8fcc3d0"),
     reviewed_why: Some(CHANGES_MAC_SCRIPT),
 };
 const MAC_SCRIPT_CPU_RUN: Evidence = Evidence {
@@ -739,10 +743,10 @@ const MAC_SCRIPT_CPU_RUN: Evidence = Evidence {
     aa: "script-a against itself: cpu.work +0.008% [−0.11 … +0.06], same (±2%)",
     planted: "script-a to script-b: cpu.work +100.18% [+99.94 … +100.46] for +100%",
     boundary: "a child that ends inside a run refused RunIncomplete; cpu.wakes and io.* refused NotForTarget",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_MAC_SCRIPT),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_MAC_SCRIPT_ENDED),
 };
-const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks";
+const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks. At 8fcc3d0 run_chunk carries a CPU refusal reason beside its run; it changes neither frame nor input sampling or reduction.";
 const MAC_FRAMES_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "1244967",
@@ -752,7 +756,7 @@ const MAC_FRAMES_RUN: Evidence = Evidence {
     aa: "frame-light against itself: frames.interval.p95 0.000% [−0.002 … 0.000], frames.dropped.pct same (±0 pp)",
     planted: "frame-light to frame-heavy (a frame spun 0.1 to 1.5 vsyncs): interval.p95 +99.994% [+99.987 … +100.000] for +99.994%; dropped +33.5 pp [+33.1 … +33.8]",
     boundary: "a block too short for its p95 refused TailTooShort; frames of a headless page refused Headless",
-    reviewed_at: Some("2ccc4322"),
+    reviewed_at: Some("8fcc3d0"),
     reviewed_why: Some(CHANGES_PAGE),
 };
 const MAC_INPUT_RUN: Evidence = Evidence {
@@ -764,10 +768,9 @@ const MAC_INPUT_RUN: Evidence = Evidence {
     aa: "click-150 against itself, 8 pairs: interaction.p50 +0.10% [−0.48 … +0.51], same (±2%)",
     planted: "click-0 to click-150 (the answer's frame spun 150 ms): 33.01 to 182.77 ms, Δ [145.4 … 158.6] ms for 150 ms",
     boundary: "interaction.* of a headless page refused Headless",
-    reviewed_at: Some("2ccc4322"),
+    reviewed_at: Some("8fcc3d0"),
     reviewed_why: Some(CHANGES_PAGE),
 };
-const CHANGES_MAC_NATIVE: &str = "runs decides windowless by launch::app_windowless and checks that the app shows no window before and after its runs, never inside them (e0142531), and e3d0ffc1 walks Native::processes from the proven root (strobe's own child's pid), keeps each process's start time in process_trees, lends a zombie no children in tree_of and joins a responsible process by pid and start time in responsible_pids: for strobe's own child with window: false they are the same processes, edges and readings";
 const MAC_NATIVE_CPU_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "964e825",
@@ -777,8 +780,8 @@ const MAC_NATIVE_CPU_RUN: Evidence = Evidence {
     aa: "tick-4 against itself: cpu.work +0.18% [−1.18 … +1.73], same (±2%)",
     planted: "tick-4 to tick-8: cpu.work +100.3% [+98.5 … +101.3] for +99.55%; tick50 to tick100 cpu.wakes +99.6% [+98.5 … +101.7]",
     boundary: "spawner, whose children end inside a run, refused RunIncomplete",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_MAC_NATIVE),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_MAC_NATIVE_ENDED),
 };
 const MAC_NATIVE_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -789,8 +792,8 @@ const MAC_NATIVE_MEMORY_RUN: Evidence = Evidence {
     aa: "hold-100 against itself: memory.app.private 0.000% [0.000 … +0.008], same (±2%)",
     planted: "hold-50 to hold-100: Δ +50.03 MiB for +50 MiB, one value within 2%",
     boundary: "memory.app.host refused NotOnThisOs",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_MAC_NATIVE),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_MAC_NATIVE_ENDED),
 };
 const MAC_NATIVE_COUNTERS_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -801,11 +804,17 @@ const MAC_NATIVE_COUNTERS_RUN: Evidence = Evidence {
     aa: "burst-1x against itself: cpu.instructions −0.02% [−0.4 … +0.1], energy.cpu +0.1% [−0.9 … +1.7], same (±2%)",
     planted: "burst-1x to burst-2x: cpu.instructions +98.44% [+98.12 … +98.87] for +98.63%; to burst-rate +99.99% [+99.63 … +100.24] for +100% ±0.25%; energy.cpu +99.9% [+96.0 … +101.2] for +100%",
     boundary: "a process that exits inside a run refused NoCounter",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_MAC_NATIVE),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_MAC_NATIVE_ENDED),
 };
 
-const CHANGES_NATIVE: &str = "runs decides windowless by launch::app_windowless and checks that the app shows no window before and after its runs, never inside them (e0142531), and e3d0ffc1 walks Native::processes from the proven root (strobe's own child's pid), keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: for strobe's own child with window: false they are the same processes, edges and readings";
+// The reviews at 737544c5 (`cleanup/spawn-clock`) of the cells that read what ended inside a run: each
+// family's changes before, then these.
+const CHANGES_WIN_NATIVE_ENDED: &str = "runs decides windowless by launch::app_windowless and checks for a window only before and after the runs (e0142531), and e3d0ffc1 walks Native::processes from the proven root, keeps start times in process_trees and the child as Proc::Child in spawn_group; then 97ddcc4c made impl EndedMarks's dead_since run through dead_or_why, the same count under the same conditions with the failed one named (dead_why), timed_cpu keep that reason for cpu_lost's refusal text, and ended_marks keep the pids it was read against and the stamped processes they lack, by which dead_since counts a process that ended before a run's start or started after its end as nothing instead of refusing: a run with no process of its jobs outside the set's listing at its readings, as every run of this evidence was, takes the same branch with the same numbers, and the exits refusal is the app's own exit, read before dead_since. At 8fcc3d0 set_used, timed_cpu and cpu_lost carry the error to its own measured run rather than thread-local storage; runs and chunk retain the same successful values. In impl EndedMarks and ended_marks only Windows listings backed by a home may establish a pre-run exit (the script evidence runs on Unix); process_list omits exited processes, not live members. Neither the native run edges nor counts of cycles, memory or hardware counters in these fixtures move.";
+const CHANGES_LINUX_NATIVE_ENDED: &str = "runs decides windowless by launch::app_windowless and checks for a window only before and after the runs (e0142531), and e3d0ffc1 walks Native::processes from the proven root, keeps start times in process_trees and the child as Proc::Child in spawn_group; then 97ddcc4c made impl EndedMarks's dead_since run through dead_or_why, the same count under the same conditions with the failed one named (dead_why), timed_cpu keep that reason for cpu_lost's refusal text, and ended_marks keep Windows-only fields; 11ac5f29 made spawn_group move the child into its launch cgroup before its CPU mask and write a stamp right before its exec, all before the launch's first run; and 737544c5 gave impl Launch running and usage_ns, read only at a command's exit: the same processes, edges and readings, and the exits refusal is the app's own exit. At 8fcc3d0 set_used, timed_cpu and cpu_lost carry the error to its own measured run rather than thread-local storage; runs and chunk retain the same successful values. In impl EndedMarks and ended_marks only Windows listings backed by a home may establish a pre-run exit (the script evidence runs on Unix); process_list omits exited processes, not live members. Neither the native run edges nor counts of cycles, memory or hardware counters in these fixtures move.";
+const CHANGES_MAC_NATIVE_ENDED: &str = "runs decides windowless by launch::app_windowless and checks for a window only before and after the runs (e0142531), and e3d0ffc1 walks Native::processes from the proven root, keeps start times in process_trees, lends a zombie no children in tree_of and joins a responsible process by pid and start time in responsible_pids; then 97ddcc4c made impl EndedMarks's dead_since run through dead_or_why, which on macOS refuses as before with a reason (dead_why), timed_cpu keep that reason for cpu_lost's refusal text, and ended_marks keep Windows-only fields: the same processes, edges and readings, and a process that ends inside a run is refused RunIncomplete as before. At 8fcc3d0 set_used, timed_cpu and cpu_lost carry the error to its own measured run rather than thread-local storage; runs and chunk retain the same successful values. In impl EndedMarks and ended_marks only Windows listings backed by a home may establish a pre-run exit (the script evidence runs on Unix); process_list omits exited processes, not live members. Neither the native run edges nor counts of cycles, memory or hardware counters in these fixtures move.";
+const CHANGES_MAC_SCRIPT_ENDED: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's footprint (4af04e29), Host::spawn keeps the runtime the host says it is (4afa154e), and e3d0ffc1 keeps start times in process_trees, lends a zombie no children in tree_of and joins a process to its responsible one by pid and start time in responsible_pids, which drops only processes whose pid was reused; then 97ddcc4c made impl EndedMarks's dead_since run through dead_or_why, which on macOS refuses as before with a reason (dead_why), timed_cpu keep that reason for cpu_lost's refusal text, and ended_marks keep Windows-only fields: the run's edges, CPU windows and the host's processes are the same, and a child that ends inside a run is refused as before. At 8fcc3d0 set_used, timed_cpu and cpu_lost carry the error to its own measured run rather than thread-local storage; runs and chunk retain the same successful values. In impl EndedMarks and ended_marks only Windows listings backed by a home may establish a pre-run exit (the script evidence runs on Unix); process_list omits exited processes, not live members. Neither the native run edges nor counts of cycles, memory or hardware counters in these fixtures move.";
+const CHANGES_LINUX_SCRIPT_ENDED: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), Host::spawn keeps the runtime the host says it is (4afa154e), and e3d0ffc1 keeps start times in process_trees and the child as Proc::Child in spawn_group; then 97ddcc4c made impl EndedMarks's dead_since run through dead_or_why, the same count under the same conditions with the failed one named (dead_why), timed_cpu keep that reason for cpu_lost's refusal text, and ended_marks keep Windows-only fields; 11ac5f29 made spawn_group move the host into its launch cgroup before its CPU mask and write a stamp right before its exec, before its first run; and 737544c5 gave impl Launch running and usage_ns, read only at a command's exit: the run's edges, CPU windows and the host's processes are the same, and a child that ends inside a run is counted from its launch cgroup as before. At 8fcc3d0 set_used, timed_cpu and cpu_lost carry the error to its own measured run rather than thread-local storage; runs and chunk retain the same successful values. In impl EndedMarks and ended_marks only Windows listings backed by a home may establish a pre-run exit (the script evidence runs on Unix); process_list omits exited processes, not live members. Neither the native run edges nor counts of cycles, memory or hardware counters in these fixtures move.";
 const WIN_NATIVE_CPU_RUN: Evidence = Evidence {
     date: "2026-11-13",
     version: "v0.31.0",
@@ -815,8 +824,8 @@ const WIN_NATIVE_CPU_RUN: Evidence = Evidence {
     aa: "tick-4 against itself, 9 pairs: cpu.work −0.02% [−0.26 … +0.14], same (±2%)",
     planted: "tick-4 to tick-8: 199.53 to 399.12 ms, +100.04% [+99.66 … +100.32] for +99.71% with tick-0's 0.58 ms",
     boundary: "exits refused RunIncomplete: its 200 ms form as run then exited before its first run, and the landed 500 ms form, checked on this machine with strobe 0.32.0, exited during its first run",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_NATIVE),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_WIN_NATIVE_ENDED),
 };
 const WIN_NATIVE_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-13",
@@ -827,8 +836,8 @@ const WIN_NATIVE_MEMORY_RUN: Evidence = Evidence {
     aa: "hold-100 against itself: memory.app.private 0.00% [−0.01 … +0.01], same (±2%)",
     planted: "hold-50 to hold-100: 50.96 to 101.06 MiB, +98.31% [+98.29 … +98.33] for +98.30%",
     boundary: "exits refused RunIncomplete: its 200 ms form as run then exited before its first run, and the landed 500 ms form, checked on this machine with strobe 0.32.0, exited during its first run",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_NATIVE),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_WIN_NATIVE_ENDED),
 };
 const LINUX_NATIVE_CPU_RUN: Evidence = Evidence {
     date: "2026-11-13",
@@ -839,8 +848,8 @@ const LINUX_NATIVE_CPU_RUN: Evidence = Evidence {
     aa: "tick-4 against itself, 9 pairs: cpu.work −0.20% [−0.48 … +0.10], same (±2%)",
     planted: "tick-4 to tick-8: 201.33 to 401.08 ms, +99.31% [+98.76 … +99.72] for +99.48% with tick-0's 1.04 ms",
     boundary: "exits refused RunIncomplete during its first run, both its 200 ms form as run then and the landed 500 ms form (checked with strobe 0.32.0)",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_NATIVE),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_LINUX_NATIVE_ENDED),
 };
 const LINUX_NATIVE_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-13",
@@ -851,8 +860,8 @@ const LINUX_NATIVE_MEMORY_RUN: Evidence = Evidence {
     aa: "hold-100 against itself: memory.app.private 0.000% [−0.004 … +0.002], same (±2%)",
     planted: "hold-50 to hold-100: 50.125 to 100.13 MiB, +99.75% [+99.74 … +99.75] for +99.75%",
     boundary: "exits refused RunIncomplete during its first run, both its 200 ms form as run then and the landed 500 ms form (checked with strobe 0.32.0)",
-    reviewed_at: Some("384805d4"),
-    reviewed_why: Some(CHANGES_NATIVE),
+    reviewed_at: Some("8fcc3d0"),
+    reviewed_why: Some(CHANGES_LINUX_NATIVE_ENDED),
 };
 
 /// Every path strobe can run, with its support on each OS's primary architecture. A runtime and

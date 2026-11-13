@@ -284,6 +284,7 @@ struct Run {
     /// A process of the program's set ended in a timed part and what it used there is not known
     /// (`record::timed_cpu`): its CPU there went with it.
     cpu_lost: bool,
+    cpu_reason: Option<&'static str>,
     /// What processes that ended in the run's timed parts used there (ms), in `cpu`.
     ended_ms: f64,
     /// strobe's terminal reader's CPU over the run's timed parts and the cycle clock over them (both in
@@ -502,7 +503,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     // Other work on the program's CPUs (`cpu.foreign`): their busy time less the program's (with
                     // what processes of it that ended used, `record::timed_cpu`) and the console host's cycles;
                     // unknown where what ended is not known.
-                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1])).and_then(|(b, c)| b.other_cycles(c.total + h1.saturating_sub(h0)));
+                    let foreign = busy.zip(super::super::record::timed_cpu(&[&c0, &c1], &[&ended0, &ended1]).ok()).and_then(|(b, c)| b.other_cycles(c.total + h1.saturating_sub(h0)));
                     hooks.end();
                     let n = runs.len() + 1;
                     tty_gone(&tty, pid, &set_home, &format!("{} {}'s run {n}", if running { "during" } else { "before" }, s.case), !driver.inputs().is_empty())?;
@@ -534,7 +535,8 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     ended_at.extend(e.iter().map(|x| &x.1));
                     ended_at.push(&ended1);
                     let timed_cpu = super::super::record::timed_cpu(&at, &ended_at);
-                    let cpu_lost = timed_cpu.is_none();
+                    let cpu_reason = timed_cpu.as_ref().err().copied();
+                    let cpu_lost = cpu_reason.is_some();
                     let rate = clock0.per_ms(&clock1);
                     // Short CPU is none (warmup falls back to the run's time).
                     let ms = |cycles: u64| match rate {
@@ -590,6 +592,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                         timed,
                         end_mb,
                         cpu_lost,
+                        cpu_reason,
                         ended_ms,
                         reader,
                         foreign,
@@ -678,7 +681,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                 }
                 if gone > 0 {
                     for m in declared_metrics(s).into_iter().filter(|m| matches!(m.as_str(), "cpu.work" | "cpu.app.total" | "cpu.process.total")) {
-                        refused.insert(m.clone(), super::super::record::cpu_lost(m, gone, measured.len(), "the program"));
+                        refused.insert(m.clone(), super::super::record::cpu_lost_with(m, gone, measured.len(), "the program", measured.iter().filter_map(|r| r.cpu_reason)));
                     }
                 }
                 // Input latencies, pooled over the measured runs' timed parts.

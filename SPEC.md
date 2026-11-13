@@ -838,7 +838,10 @@ comparison, after every timed pair of a series, one untimed block per variant fi
 
 **Stopping and resuming.** Ctrl-C (SIGINT), SIGTERM or `strobe bench --stop <exp>` (from any shell,
 or for a bench the daemon runs) stops a bench once its current block ends; waits (a locked session,
-the bench slot, busy CPUs) end at once. A second Ctrl-C ends strobe at once. `--stop` and `--resume`
+the bench slot, busy CPUs) end at once. On Unix a second stop at least 300 ms later ends the launches,
+sweeps helpers stamped by this strobe (even if their launch is no longer listed), restores its settings,
+reports leftovers, and exits 130. An earlier repeat is the same stop. A third stop can force exit.
+`--stop` and `--resume`
 take an id or a unique prefix. `--stop` finds the bench's registration (§10.1) and says what it was
 doing; one that was waiting stops within a second, which `--stop` waits to report as `stopped`. An
 experiment no bench runs is a usage error that says whether it finished or ended (then `--resume`
@@ -9557,7 +9560,7 @@ verified line exact.
 | `script` · `package_idle` | — | preview | — |
 | `script` · `http_probe` | preview | preview | preview |
 | `cli` · `wall_and_counts` | preview | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin run.duration Δ 150.29 ms vs 150 ms planted; metric.truth_cpu_ms 150 and 300 exact) | preview |
-| `cli` · `process_cpu` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, cpu.work 302.4 ms vs 300 ms plus a 2 ms launch and tree 1204.8 ms vs 1200 ms; planted Δ 149.97 ms and 600.01 ms vs 150 and 600 ms) |
+| `cli` · `process_cpu` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact) | verified (2026-11-13, 737544c5, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, cpu.work 302.4 ms vs 300 ms plus a 2.3 ms launch and tree 1205.7 ms vs 1200 ms; planted Δ 149.98 ms and 600.21 ms vs 150 and 600 ms) |
 | `cli` · `process_memory` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB) |
 | `cli` · `http_probe` | preview | preview | preview |
 | `tty` · `wall_and_counts` | preview | preview | preview |

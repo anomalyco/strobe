@@ -62,6 +62,20 @@ pub fn restore_stale() {
     imp::restore_stale();
 }
 
+// On immediate exit let this process's worker put back its own changes using the same held handles
+// and checked masks as a normal end. Do not replay another process's journal against a live worker.
+#[cfg(any(windows, target_os = "linux"))]
+static WORKER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(windows, target_os = "linux"))]
+static EXITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn restore_on_stop() {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(WORKER.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+}
+
 /// A reservation in force; `finish` ends it.
 pub struct Reserve {
     #[cfg(any(windows, target_os = "linux"))]
@@ -266,6 +280,7 @@ mod imp {
     }
 
     fn run(cpus: u64, stop: Arc<AtomicBool>, ready: std::sync::mpsc::Sender<()>) -> Report {
+        let _active = super::WORKER.lock().unwrap_or_else(|e| e.into_inner());
         let started = Instant::now();
         let (mut c0, mut t0) = (0, 0);
         let mut report = Report { cpus, ..Report::default() };
@@ -276,7 +291,7 @@ mod imp {
         let mut moved: Vec<Moved> = Vec::new();
         let mut first = true;
         let since = os::boot_ticks();
-        loop {
+        while !super::EXITING.load(Ordering::SeqCst) {
             let mut fresh: Vec<(u32, u32, u64, String)> = os::all_pids().into_iter().filter(|p| seen.insert(*p)).filter_map(|p| os::parent_start_name(p).map(|(pp, s, n)| (p, pp, s, n))).collect();
             if !fresh.is_empty() {
                 // Parents first, so a child knows whether its parent is strobe's or was moved.
@@ -565,6 +580,7 @@ mod imp {
     }
 
     fn run(cpus: u64, allowed: Vec<u32>, stop: Arc<AtomicBool>, ready: std::sync::mpsc::Sender<()>) -> Report {
+        let _active = super::WORKER.lock().unwrap_or_else(|e| e.into_inner());
         let started = Instant::now();
         let (mut c0, mut t0) = (0, 0);
         let mut report = Report { cpus, ..Report::default() };
@@ -575,7 +591,7 @@ mod imp {
         let mut seen: HashSet<(u32, i64)> = HashSet::new();
         let mut moved: Vec<Moved> = Vec::new();
         let mut first = true;
-        loop {
+        while !super::EXITING.load(Ordering::SeqCst) {
             let procs = super::super::win::procs();
             if !first && procs.iter().all(|p| seen.contains(&(p.0, p.2))) {
                 // Nothing started since the last sweep.

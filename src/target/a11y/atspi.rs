@@ -89,8 +89,51 @@ pub struct Atspi {
     signal: Arc<Signal>,
     stop: Arc<AtomicBool>,
     events: Option<std::thread::JoinHandle<()>>,
-    /// The session bus, when strobe turned `IsEnabled` on and must turn it off again.
-    restore: Mutex<Option<Conn>>,
+    _enabled: Enabled,
+}
+
+/// Undo only changes this process made, on the connection to the same session bus. Register the
+/// change before the rest of startup (which can fail), and serialize undo with immediate exit.
+struct Enabled(Option<u64>);
+static TOGGLES: Mutex<Vec<(u64, Conn)>> = Mutex::new(Vec::new());
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+fn set_enabled(s: &mut Conn, value: bool) -> bool {
+    s.call("org.a11y.Bus", "/org/a11y/bus", PROPS, "Set", &[Arg::Str("org.a11y.Status"), Arg::Str("IsEnabled"), Arg::Var(Box::new(Arg::Bool(value)))]).is_ok()
+}
+
+impl Enabled {
+    fn acquire(mut session: Conn) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut toggles = TOGGLES.lock().unwrap_or_else(|e| e.into_inner());
+        if !EXITING.load(Ordering::Relaxed)
+            && matches!(session.get_property("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", "IsEnabled"), Ok(Value::Bool(false)))
+            && set_enabled(&mut session, true)
+        {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            toggles.push((id, session));
+            Self(Some(id))
+        } else {
+            Self(None)
+        }
+    }
+}
+
+impl Drop for Enabled {
+    fn drop(&mut self) {
+        let mut toggles = TOGGLES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = toggles.iter().position(|(id, _)| Some(*id) == self.0) {
+            set_enabled(&mut toggles.swap_remove(i).1, false);
+        }
+    }
+}
+
+pub fn restore_on_stop() {
+    let mut toggles = TOGGLES.lock().unwrap_or_else(|e| e.into_inner());
+    EXITING.store(true, Ordering::Relaxed);
+    for (_, mut bus) in toggles.drain(..) {
+        set_enabled(&mut bus, false);
+    }
 }
 
 fn err(what: &str) -> impl Fn(std::io::Error) -> Error + '_ {
@@ -130,11 +173,7 @@ impl Atspi {
             session.call("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", &[]).ok().and_then(|v| v.first().and_then(Value::as_str).map(str::to_string)).ok_or_else(|| {
                 Error::msg("AT-SPI: the session has no accessibility bus (at-spi2-core's at-spi-bus-launcher answers org.a11y.Bus): install at-spi2-core, or the app exposes no tree")
             })?;
-        let enabled = matches!(session.get_property("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", "IsEnabled"), Ok(Value::Bool(true)));
-        let mut restore = None;
-        if !enabled && session.call("org.a11y.Bus", "/org/a11y/bus", PROPS, "Set", &[Arg::Str("org.a11y.Status"), Arg::Str("IsEnabled"), Arg::Var(Box::new(Arg::Bool(true)))]).is_ok() {
-            restore = Some(session);
-        }
+        let enabled = Enabled::acquire(session);
         let mut bus = Conn::open(&addr, false).map_err(err("connect to the accessibility bus"))?;
         bus.set_timeout(Duration::from_secs(30)).map_err(err("timeout"))?;
         for ev in EVENTS {
@@ -153,7 +192,7 @@ impl Atspi {
         let (sig, st) = (signal.clone(), stop.clone());
         let events = std::thread::Builder::new().name("strobe-a11y".into()).spawn(move || listen(ev, &sig, &st)).map_err(|e| Error::msg(format!("start the accessibility thread: {e}")))?;
         let worker = Worker { bus, pids: HashMap::new(), elements: Vec::new(), index: HashMap::new(), windows: Vec::new(), last: Tree::default() };
-        Ok(Atspi { worker: Mutex::new(worker), signal, stop, events: Some(events), restore: Mutex::new(restore) })
+        Ok(Atspi { worker: Mutex::new(worker), signal, stop, events: Some(events), _enabled: enabled })
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut Worker) -> Result<R>) -> Result<R> {
@@ -166,9 +205,6 @@ impl Drop for Atspi {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.events.take() {
             let _ = t.join();
-        }
-        if let Some(mut s) = self.restore.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = s.call("org.a11y.Bus", "/org/a11y/bus", PROPS, "Set", &[Arg::Str("org.a11y.Status"), Arg::Str("IsEnabled"), Arg::Var(Box::new(Arg::Bool(false)))]);
         }
     }
 }

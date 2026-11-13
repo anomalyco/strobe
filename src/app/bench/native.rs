@@ -103,6 +103,7 @@ struct Run {
     /// A process of the app's set ended in a timed part of the run (a launcher, a helper) and what it
     /// used there is not known (`record::timed_cpu`), so `cpu` is short.
     cpu_lost: bool,
+    cpu_reason: Option<&'static str>,
     /// So anywhere in the run's span, untimed stretches too: `cpu_whole` is short.
     whole_lost: bool,
     /// What processes that ended in the run's timed parts used there (ms), in `cpu`.
@@ -739,11 +740,14 @@ fn runs(
                 // stretch is in only the whole span's (`cpu_whole`, for cpu.foreign).
                 let ended_at: Vec<&host::EndedMarks> = edge_list.iter().map(|x| &x.2).collect();
                 let timed_cpu = super::super::record::timed_cpu(&cycles_at, &ended_at);
-                let whole_cpu = super::super::record::timed_cpu(&[&c0, &c1], &[&start.2, &end.2]);
+                let cpu_reason = timed_cpu.as_ref().err().copied();
+                let timed_cpu = timed_cpu.ok();
+                let whole_cpu = super::super::record::timed_cpu(&[&c0, &c1], &[&start.2, &end.2]).ok();
                 let (cpu_lost, whole_lost) = (timed_cpu.is_none(), timed_cpu.is_none() || whole_cpu.is_none());
                 runs.push(Run {
                     main,
                     cpu_lost,
+                    cpu_reason,
                     whole_lost,
                     ended_ms: timed_cpu.as_ref().map_or(0.0, |c| cpu_ms(c.ended, &c1, &clock0, &clock1)),
                     ended_exes: timed_cpu.as_ref().map(|c| c.ended_by.iter().map(|(n, (cy, k))| (n.clone(), cpu_ms(*cy, &c1, &clock0, &clock1), *k)).collect()).unwrap_or_default(),
@@ -1232,7 +1236,7 @@ fn runs(
                 for m in ["cpu.work", "cpu.app.total", "cpu.process.total"] {
                     values.remove(m);
                     if declared_metrics(s).iter().any(|d| *d == m) {
-                        refused.insert(m.to_string(), super::super::record::cpu_lost(m, gone, measured.len(), "the app"));
+                        refused.insert(m.to_string(), super::super::record::cpu_lost_with(m, gone, measured.len(), "the app", measured.iter().filter_map(|r| r.cpu_reason)));
                     }
                 }
             }
