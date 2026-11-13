@@ -16,6 +16,7 @@ fn cmp(m: &str) -> Comparison {
 }
 fn impact<'a>(p: &'a Comparison, cores: usize) -> LoadImpact<'a> {
     LoadImpact {
+        busy_before: 0.,
         expects_load: true,
         moves: load_metric(&p.metric),
         primary: Some(p),
@@ -48,7 +49,7 @@ fn read_run(timed: &[RunLoad], warmup: usize) -> Block {
     let mut b = Block::default();
     b.warmup = warmup;
     b.run_ms = vec![100.];
-    run_load(b, timed, None)
+    run_load(b, timed, None, false)
 }
 pub fn run(logs: Option<&Path>) {
     let p = cmp("run.duration");
@@ -64,8 +65,46 @@ pub fn run(logs: Option<&Path>) {
         assert_eq!(b - a, 40);
         println!("{us} us script, 40 us relay: {:.3}% as on main; neither 60 us load read charged", 100. * f64::from(b - a) / f64::from(us));
     }
-    let raw = |ms: f64, own: f64, foreign: f64| RunLoad { ms, busy_ms: Some(own + foreign * ms / 100.0), own_ms: Some(own), observer_ms: 0.0, stolen_ms: Some(0.0), subtick: false };
-    expect("short guest window: lower bound not proof of quiet", background_note(&[read_run(&[RunLoad { subtick: true, ..raw(2., 1., 0.) }], 0)], &a), "warn");
+    let raw = |ms: f64, own: f64, foreign: f64| RunLoad { ms, busy_ms: Some(own + foreign * ms / 100.0), own_ms: Some(own), stolen_ms: Some(0.0), ..Default::default() };
+    for (busy, want) in [(0., "info"), (0.1, "info"), (0.11, "warn")] {
+        expect("unresolved Linux block", background_note(&[read_run(&[RunLoad { ticks_pct: 100., ..raw(2., 1., 0.) }], 0)], &LoadImpact { busy_before: busy, ..impact(&p, 8) }), want);
+    }
+    // Five 4 ms runs, with 20 ms between them: W=100 ms. Of 200 ms available, reserve
+    // 10 ms for the target (including reset), 30 ms for the observer, then plant 75 ms.
+    use strobe::app::bench::{TickEdge, settled};
+    for (loaded, expected) in [(false, 0.), (true, 55.)] {
+        let edge = |ms: u64| TickEdge { ns: ms * 1_000_000, idle: ms * if loaded { 850_000 } else { 1_600_000 }, steal: 0 };
+        let runs = (0..5)
+            .map(|i| {
+                let t = i * 24;
+                RunLoad { own_ms: Some(1.2), gap_ms: Some(1.), observers: Some((t * 300_000, (t + 4) * 300_000)), ..edge(t).until(edge(t + 4), 2).unwrap() }
+            })
+            .collect::<Vec<_>>();
+        let block = |untimed: bool, pinned: bool| {
+            let mut b = Block::default();
+            b.run_ms = vec![4.; 5];
+            if untimed {
+                b.values.insert("untimed.n".into(), 1.);
+            }
+            run_load(b, &runs, None, pinned)
+        };
+        for pin in [false, true] {
+            let b = block(false, pin);
+            assert_eq!(b.values["cpu.foreign.max"], expected);
+            assert_eq!(b.values.contains_key("cpu.foreign"), pin);
+            assert!(!b.values.contains_key("background.subtick"));
+            expect("continuous span: relay and reset excluded", background_note(&[b], &LoadImpact { primary: None, ..impact(&p, 2) }), if loaded { "warn" } else { "nothing" });
+        }
+        assert_eq!(block(true, false).values["background.subtick"], 500.);
+    }
+    for foreign in [0., 200.] {
+        let mut sample = None;
+        assert!(settled(&mut sample, 0., true, || raw(1., 0., 0.)).is_none());
+        assert!(settled(&mut sample, 100., true, || raw(100., 50., foreign)).is_none());
+        let end = settled(&mut sample, 1100., false, || panic!("sampled the stillness wait")).unwrap();
+        assert_eq!(read_run(&[end], 0).values["cpu.foreign.max"], foreign);
+    }
+    println!("settled: last change keeps 0% or 200%, independent of confirmation");
     for row in ["page", "attached app", "native windowed", "native windowless", "script", "terminal", "command/exec"] {
         let during = raw(2.0, 1.0, 75.0);
         let only_own = raw(2.0, 1.0, 0.0);
@@ -128,6 +167,30 @@ pub fn run(logs: Option<&Path>) {
     let warning = background_note(&blocks(16, |_| 600.), &a).unwrap();
     assert!(strobe::app::bisect::contaminated(&serde_json::json!({"decided":true,"verdict":"same","warnings":[warning]})));
     println!("bisect: warned same is not evidence for moving a bound");
+    use strobe::app::bisect::{blocked, inconclusive_confirmation, retry_allowed};
+    for (kind, d, unread, want) in [
+        ("worse", 1, false, false),
+        ("better", -1, false, true),
+        ("same", 1, false, true),
+        ("no_worse", 1, false, true),
+        ("unclear", 1, false, true),
+        ("underpowered", 1, false, true),
+        ("refused", 1, false, true),
+        ("worse", 1, true, true),
+    ] {
+        let mut step = serde_json::json!({"series_background":true,"unread":unread,"decided":!matches!(kind,"unclear"|"underpowered"|"refused"),"verdict_kind":kind,"lo":d,"hi":d});
+        assert_eq!(blocked(&step, Some(1)), want);
+        assert_eq!(blocked(&step, None), want && kind != "better");
+        let vals = if unread { serde_json::json!({"background.unread":1}) } else { serde_json::json!({"cpu.foreign.max":600}) };
+        assert_eq!(inconclusive_confirmation(&serde_json::json!({"primary":step,"warnings":[warning],"blocks":[{"values":vals}]}), 1), want);
+        step["series_background"] = false.into();
+        assert!(!blocked(&step, Some(1)));
+    }
+    assert!(retry_allowed(true, false, 1));
+    assert!(!retry_allowed(true, true, 1));
+    assert!(!retry_allowed(true, false, 2));
+    assert!(!retry_allowed(false, false, 0));
+    println!("bisect / track: experiment-only warning, both signs, Same, NoWorse, undecided, refusal, unread and retry caps");
     expect("light CPU noise", background_note(&blocks(16, |i| if i < 3 { 35. } else { 0. }), &a), "info");
     let single = LoadImpact { primary: None, ..impact(&p, 8) };
     let note = background_note(&blocks(1, |_| 35.), &single).unwrap();
@@ -168,7 +231,7 @@ pub fn run(logs: Option<&Path>) {
     let mut a = impact(&p, 8);
     a.judged.extend(family.iter().filter(|c| judged_secondary(c)).map(|c| (c, None)));
     expect("Holm discarded frame secondary", background_note(&blocks(16, |i| if i < 2 { 35. } else { 0. }), &a), "info");
-    let measured = RunLoad { ms: 100., busy_ms: Some(177.), observer_ms: 2., own_ms: Some(100.), stolen_ms: Some(3.), subtick: false };
+    let measured = RunLoad { ms: 100., busy_ms: Some(177.), observer_ms: 2., own_ms: Some(100.), stolen_ms: Some(3.), ..Default::default() };
     let mut b = read_run(&[RunLoad::default(), measured], 1);
     assert_eq!(b.values["cpu.foreign.max"], 75.);
     retain_probe_context(&mut b);

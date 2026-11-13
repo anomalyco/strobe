@@ -170,7 +170,12 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         Err(e) if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) => start(true),
         r => r,
     }
-    .map_err(|e| Error::msg(format!("start `{line}`: {e}")))?;
+    .map_err(|e| {
+        if let Some(c) = cost {
+            c.load_at.take();
+        }
+        Error::msg(format!("start `{line}`: {e}"))
+    })?;
     // The command's run from its release (`Owned::released_ns`), with the OS creating the process
     // (Windows `creation_ns`), as a person's launch of it; strobe's setup of it (Windows its job, the
     // completion port's registration and its CPUs while it was suspended, Linux its cgroup and CPUs) is
@@ -192,9 +197,12 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         }
     };
     let usage = child.run_to_exit(at.timeout, Some(at.stamp), exited).map_err(|e| Error::msg(format!("`{line}`: {e}")))?;
-    if let Some(c) = cost.filter(|c| c.load.as_ref().is_some_and(|l| l.pin.is_none())) {
+    if let Some(c) = cost.filter(|c| c.load.as_ref().is_some_and(|l| l.shared)) {
         let mut sum = c.timed_load.get();
         sum.observer_ms += launch.max(0.0);
+        if sum.creation_ms == 0. {
+            sum.creation_ms = launch.max(0.);
+        }
         c.timed_load.set(sum);
     }
     let wall = usage.exited_ns.unwrap_or_else(host::now_ns).saturating_sub(t0) as f64 / 1e6;
@@ -277,6 +285,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     // The CPU of every command of the run, untimed ones too (NaN once one has none): what is not the
     // target's on its CPUs over the run is other work (`cpu.foreign`).
     let own_ms: Cell<f64> = Cell::new(0.0);
+    let gap_ms = Cell::new(0.0);
     let cost = SelfCost::new(ctx.runner.pid());
     // The command lines the case's `ctx.exec` calls gave (`HarnessOverlay`).
     let lines: RefCell<Vec<Value>> = RefCell::new(Vec::new());
@@ -292,13 +301,15 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
                 let line = fixture.as_ref().and_then(|f| f.fill(&json!(line)).as_str().map(str::to_string)).unwrap_or(line);
                 // Only a run's commands count; setup's and reset's prepare, as do a run's untimed ones.
                 let counted = hooks.in_run() && !hooks.untimed_now();
-                let (r, output) = exec(&line, &at, counted.then_some(&cost))?;
+                let (r, output) = exec(&line, &at, counted.then_some(&cost)).inspect_err(|_| gap_ms.set(f64::NAN))?;
                 let code = r.usage.code;
                 if hooks.in_run() {
                     own_ms.set(own_ms.get() + r.usage.cpu_ns.map_or(f64::NAN, |c| c as f64 / 1e6));
                 }
                 if counted {
                     ran.borrow_mut().push(r);
+                } else {
+                    gap_ms.set(gap_ms.get() + r.usage.cpu_ns.map_or(f64::NAN, |v| v as f64 / 1e6));
                 }
                 Ok(json!({ "code": code, "output": output }))
             }
@@ -347,6 +358,12 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         r.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw, timed out, or a command failed"))?;
         let done = std::mem::take(&mut *ran.borrow_mut());
         cost.target_ms(cpu(&done).unwrap_or(f64::NAN));
+        if let Some(l) = &cost.load
+            && let Some(run) = l.runs.borrow_mut().last_mut()
+        {
+            let gap = gap_ms.replace(0.);
+            run.gap_ms = gap.is_finite().then_some(gap);
+        }
         let foreign = cost.last_foreign().filter(|_| ctx.pin.is_some()).or(foreign);
         if done.is_empty() {
             return Err(Error::refused("RunIncomplete", format!("{} run: it ran no command outside ctx.untimed", s.case), "call ctx.exec() in the case's run"));

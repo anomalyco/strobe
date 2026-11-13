@@ -733,6 +733,9 @@ fn confirm(args: &Args, s: &history::Series, c: &Value) -> Result<(String, Value
     let detected = c["estimate"].as_f64().unwrap_or(0.0).signum();
     let verdict = crate::stats::verdict_text(p);
     let (state, why) = match (decided, moved) {
+        _ if super::bisect::inconclusive_confirmation(&out.json["series"][0], detected as i8) => {
+            ("unclear", format!("the paired A/B ran under heavy background work ({verdict}); nothing alerts (strobe track --confirm {cid} runs it again)"))
+        }
         (true, m) if m == detected => ("confirmed", format!("the paired A/B moved the same way: {verdict}")),
         (true, 0.0) => ("rejected", format!("the paired A/B says {verdict}")),
         (true, _) => ("rejected", format!("the paired A/B moved the other way: {verdict}")),

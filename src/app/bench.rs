@@ -1573,6 +1573,7 @@ fn moved_by_load(s: &Series, tested: &[Comparison]) -> bool {
 
 /// What a series' comparisons say about its blocks with other work, for `background_note`.
 pub struct LoadImpact<'a> {
+    pub busy_before: f64,
     pub expects_load: bool,
     /// Anything the series compares moves with load (`moved_by_load`).
     pub moves: bool,
@@ -1642,11 +1643,16 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
         if blocks.iter().any(unread_load) {
             return Some(validity::warn("Background", "other work could not be separated from the target in every measured run; rerun with readable CPU accounting"));
         }
-        if blocks.iter().any(|b| b.values.contains_key("background.subtick")) {
-            return Some(validity::warn(
-                "Background",
-                "the measured CPU window was shorter than a guest idle-accounting tick; the foreign CPU reading is a lower bound, not evidence the CPUs were quiet; measure a longer unit of work",
-            ));
+        if let Some(ticks) = blocks.iter().filter_map(|b| b.values.get("background.subtick")).copied().reduce(f64::max) {
+            let span = format!("the measured block span was too short for Linux's 10 ms idle ticks to rule out foreign work below ~{ticks:.0}% of a core");
+            return Some(if at.busy_before > 0.10 {
+                validity::warn(
+                    "Background",
+                    format!("{:.0}% of all CPUs were busy before the run, and {span}; close heavy apps, loop more work per run, or pass a larger --runs", 100. * at.busy_before),
+                )
+            } else {
+                validity::info("Background", format!("{span} (lower bound <25%); loop more work per run or pass a larger --runs for tighter resolution"))
+            });
         }
         return (!at.discarded.is_empty()).then(|| {
             if at.primary.is_none_or(|p| !p.kind.decided()) {
@@ -1665,10 +1671,7 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
     let head = format!("{rate}{set_aside}");
     let warn = |why: &str| Some(validity::warn("Background", format!("{head}; {why}; {fix}")));
     if blocks.iter().any(unread_load) {
-        return warn("other work could not be separated from the target in every measured run");
-    }
-    if blocks.iter().any(|b| b.values.contains_key("background.subtick")) {
-        return warn("a measured window was below the guest idle counter's resolution; its foreign CPU reading is only a lower bound");
+        return Some(validity::warn("Background", format!("{head}; other work could not be separated from the target in every measured run; rerun with readable CPU accounting")));
     }
     let Some(p) = at.primary else { return warn("the blocks' values include it") };
     if p.kind == VerdictKind::Refused {
@@ -1711,6 +1714,9 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
     let steady = flagged.len() * 2 >= measured.len();
     let ceiling = burst_pct(at.cores);
     let light = || -> std::result::Result<(usize, f64), String> {
+        if blocks.iter().any(|b| b.values.contains_key("background.subtick")) {
+            return Err("some block spans were too short to establish CPU headroom".into());
+        }
         let cores = match at.cores {
             Some(c) if c >= 2 => c,
             Some(c) => return Err(format!("the target runs on {c} physical core, too few for other work to have had room beside it")),
@@ -1882,6 +1888,7 @@ fn counted_apart(m: &str) -> bool {
 }
 
 struct Ctx<'a> {
+    busy_before: f64,
     args: &'a Args,
     exp: String,
     /// The experiment's seed (`--seed`, or drawn): every case's `ctx.seed` comes from it.
@@ -2268,6 +2275,8 @@ struct SelfCost {
     timed_load: Cell<RunLoad>,
     observer_at: Cell<Option<Instant>>,
     observer_ms: Cell<f64>,
+    observer_edges: Cell<Option<(u64, u64)>>,
+    previous_tree: RefCell<Option<(super::record::Cycles, host::EndedMarks)>>,
 }
 
 impl SelfCost {
@@ -2282,6 +2291,8 @@ impl SelfCost {
             timed_load: Default::default(),
             observer_at: Default::default(),
             observer_ms: Default::default(),
+            observer_edges: Default::default(),
+            previous_tree: Default::default(),
         }
     }
 
@@ -2320,7 +2331,9 @@ impl SelfCost {
             || {
                 if let Some(at) = self.load_at.take() {
                     let mut sum = self.timed_load.get();
-                    sum.add(at.stop());
+                    let mut stretch = at.stop();
+                    stretch.observers = self.observer_edges.take();
+                    sum.add(stretch);
                     self.timed_load.set(sum);
                 }
             },
@@ -2333,6 +2346,7 @@ impl SelfCost {
         let tsc = host::tsc();
         let runner = host::process_cycles(self.runner);
         let span = tsc.map_or(0, |t| t.saturating_sub(t0));
+        self.observer_edges.set(if self.load.as_ref().is_some_and(|l| l.shared) { s0.zip(r0).zip(strobe.zip(runner)).map(|((s, r), (ss, rr))| (s + r, ss + rr)) } else { Some((0, 0)) });
         let delta = |a: Option<u64>, b: Option<u64>, so_far: Option<u64>| a.zip(b).filter(|(a, b)| b >= a).and_then(|(a, b)| Some(so_far? + b - a));
         self.sum.set(Some((sum.0 + span, delta(s0, strobe, sum.1), delta(r0, runner, sum.2))));
         if let Some(at) = self.observer_at.take().filter(|_| span > 0) {
@@ -2351,11 +2365,14 @@ impl SelfCost {
         self.runs.borrow_mut().push(run);
         if let Some(load) = &self.load {
             let mut timed = self.timed_load.take();
-            if load.pin.is_none() && run.0 > 0 {
+            if load.shared && run.0 > 0 {
                 // Samplers and terminal reader are threads of strobe; do not subtract them twice.
                 // Convert the observer's cycles using *its* measured time, not the command's
                 // release-to-exit duration (which includes creation).
                 timed.observer_ms += self.observer_ms.get();
+                if run.1.is_none() || run.2.is_none() {
+                    timed.busy_ms = None;
+                }
             }
             load.runs.borrow_mut().push(timed);
         }
@@ -2372,6 +2389,18 @@ impl SelfCost {
 
     fn last_foreign(&self) -> Option<f64> {
         self.load.as_ref()?.runs.borrow().last()?.foreign()
+    }
+
+    /// Charge target work between calls only to the continuous Linux span. Recover exits in
+    /// reset from the same snapshots as in-run exits, without another process walk.
+    fn tree_gap(&self, a: &super::record::Cycles, b: &super::record::Cycles, x: &host::EndedMarks, y: &host::EndedMarks) {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let Some(l) = &self.load else { return };
+        if let Some(run) = l.runs.borrow_mut().last_mut() {
+            run.gap_ms = self.previous_tree.replace(Some((b.clone(), y.clone()))).and_then(|(p, m)| super::record::timed_cpu(&[&p, a], &[&m, x]).ok()).map(|v| v.total as f64 / 1e6);
+        }
     }
 
     /// strobe's and the runner's share of one core over the measured runs.
@@ -2622,6 +2651,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let started = Instant::now();
     let max_time = args.get("max-time").map(duration_ms).transpose()?.map(Duration::from_millis);
     let mut ctx = Ctx {
+        busy_before: busy,
         args,
         exp: exp.clone(),
         seed,
@@ -2805,8 +2835,7 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     // Machine-wide, before anything runs: where the blocks measure the other work on the target's CPUs
     // themselves (`cpu.foreign`, every OS with CPU affinity, over a run's window), each series' note
-    // says what reached them and whether it mattered, so this is context. Not on macOS, and not when a
-    // launch series runs: a launch's blocks read no other work, so nothing else would say it.
+    // says what reached them and whether it mattered, so this is context. macOS has no block reader.
     if ctx.phone.is_none() && busy > 0.10 {
         let text = format!("{:.0}% of all CPUs were busy before the run; close heavy apps for tighter intervals", busy * 100.0);
         let unread = cfg!(target_os = "macos");
@@ -4865,6 +4894,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     warnings.extend(background_note(
         &blocks,
         &LoadImpact {
+            busy_before: ctx.busy_before,
             expects_load: ctx.phone.is_none() && !cfg!(target_os = "macos"),
             moves: moved_by_load(s, &[]) || blocks.iter().any(|b| b.values.keys().any(|m| load_metric(m))),
             primary: None,
@@ -5485,7 +5515,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let min_clean = min_pairs.max(stats::min_pairs(0.95));
     let without = |name: &str, upto: usize| -> Option<(usize, Vec<(f64, f64)>)> {
         let (bs, ps) = source(name);
-        let quiet = |i: usize| bs[i].values.get("cpu.foreign.max").is_some_and(|f| *f < BACKGROUND_PCT);
+        let quiet = |i: usize| !unread_load(&bs[i]) && !bs[i].values.contains_key("background.subtick") && bs[i].values.get("cpu.foreign.max").is_some_and(|f| *f < BACKGROUND_PCT);
         let pp: Vec<(f64, f64)> = ps[..upto.min(ps.len())].iter().filter(|&&(a, b)| quiet(a) && quiet(b)).map(|&(a, b)| (val(&bs[a], name), val(&bs[b], name))).collect();
         (pp.len() >= min_clean).then_some((pp.len(), pp))
     };
@@ -5508,6 +5538,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     for (i, set) in sets.iter().enumerate() {
         let from_here = |m: &str| usize::from(apart(m)) == i && load_metric(m);
         let impact = LoadImpact {
+            busy_before: ctx.busy_before,
             expects_load: ctx.phone.is_none() && !cfg!(target_os = "macos"),
             moves: from_here(&s.primary) || secondaries.iter().any(|c| from_here(&c.metric) && c.kind != VerdictKind::Untested),
             primary: Some(&primary),
@@ -7022,7 +7053,7 @@ fn vm_text(vm: &str, series: &[Value], unpinned: bool) -> String {
     } else if !cfg!(target_os = "linux") {
         seen.push("host steal not reported on this OS".to_string());
     }
-    let other = read("cpu.foreign");
+    let other = read("background.foreign");
     if unpinned && !other.is_empty() {
         seen.push(format!("other work in the guest median {:.0}% of a core", metrics::median(&other)));
     }
@@ -7057,38 +7088,89 @@ thread_local! {
 #[derive(Clone)]
 struct RunLoads {
     cpus: u64,
-    /// The target's CPUs (None: all), for the steal.
-    pin: Option<u64>,
     runner: u32,
+    shared: bool,
     runs: std::rc::Rc<RefCell<Vec<RunLoad>>>,
 }
 
+#[derive(Clone)]
 struct LoadStart {
-    at: Instant,
     cpus: u64,
+    #[cfg(target_os = "linux")]
+    edge: Option<TickEdge>,
+    #[cfg(not(target_os = "linux"))]
     busy: Option<validity::CpuBusy>,
-    steal: validity::Steal,
+    #[cfg(not(target_os = "linux"))]
+    at: Instant,
+}
+
+/// Kernel counters in ns. Shared by both the per-run and continuous-block differences.
+#[derive(Clone, Copy, Default)]
+pub struct TickEdge {
+    pub ns: u64,
+    pub idle: u64,
+    pub steal: u64,
+}
+
+impl TickEdge {
+    #[cfg(target_os = "linux")]
+    fn read(mask: u64) -> Option<Self> {
+        let (idle, steal) = host::linux::load_ticks(mask)?;
+        Some(Self { ns: host::now_ns(), idle, steal })
+    }
+
+    pub fn until(self, end: Self, cpus: u32) -> Option<RunLoad> {
+        let ms = end.ns.checked_sub(self.ns)? as f64 / 1e6;
+        if ms <= 0.0 || cpus == 0 {
+            return None;
+        }
+        let k = f64::from(cpus);
+        let tick_ms = k * host::IDLE_TICK_NS as f64 / 1e6;
+        Some(RunLoad {
+            ms,
+            busy_ms: Some((k * ms - end.idle.checked_sub(self.idle)? as f64 / 1e6 - tick_ms).max(0.)),
+            stolen_ms: Some(end.steal.checked_sub(self.steal)? as f64 / 1e6 / k),
+            ticks_pct: 100. * tick_ms / ms,
+            edges: Some((self, end, cpus)),
+            ..Default::default()
+        })
+    }
 }
 
 impl LoadStart {
     fn new(l: &RunLoads) -> Self {
-        Self { cpus: l.cpus, busy: validity::CpuBusy::start(), steal: validity::Steal::start(), at: Instant::now() }
+        Self {
+            cpus: l.cpus,
+            #[cfg(target_os = "linux")]
+            edge: TickEdge::read(l.cpus),
+            #[cfg(not(target_os = "linux"))]
+            busy: validity::CpuBusy::start(),
+            #[cfg(not(target_os = "linux"))]
+            at: Instant::now(),
+        }
     }
-    fn stop(self) -> RunLoad {
-        let ms = self.at.elapsed().as_secs_f64() * 1000.0;
-        RunLoad {
-            ms,
-            busy_ms: self.busy.and_then(|b| b.stop(self.cpus)).map(|b| b.pct() * ms / 100.0),
-            stolen_ms: self.steal.pct(Some(self.cpus)).map(|s| s * ms / 100.0),
-            subtick: cfg!(target_os = "linux") && ms < host::IDLE_TICK_NS as f64 / 1e6,
-            ..Default::default()
+    fn stop(&self) -> RunLoad {
+        #[cfg(target_os = "linux")]
+        {
+            self.edge.zip(TickEdge::read(self.cpus)).and_then(|(a, b)| a.until(b, self.cpus.count_ones())).unwrap_or_default()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let ms = self.at.elapsed().as_secs_f64() * 1000.0;
+            RunLoad { ms, busy_ms: self.busy.as_ref().and_then(|b| b.stop(self.cpus)).map(|b| b.pct() * ms / 100.0), ..Default::default() }
         }
     }
 }
 
 #[derive(Default, Clone, Copy)]
 pub struct RunLoad {
-    pub subtick: bool,
+    pub ticks_pct: f64,
+    pub edges: Option<(TickEdge, TickEdge, u32)>,
+    /// Linux observer CPU at the first/last measured edge (zero when disjointly pinned).
+    pub observers: Option<(u64, u64)>,
+    /// Target CPU between the previous close and this open. Not used for the first measured run.
+    pub gap_ms: Option<f64>,
+    pub creation_ms: f64,
     pub ms: f64,
     pub busy_ms: Option<f64>,
     pub stolen_ms: Option<f64>,
@@ -7107,7 +7189,9 @@ impl RunLoad {
             return;
         }
         self.ms += stretch.ms;
-        self.subtick |= stretch.subtick;
+        self.ticks_pct = self.ticks_pct.min(stretch.ticks_pct);
+        self.edges = self.edges.zip(stretch.edges).map(|((a, _, k), (_, b, _))| (a, b, k));
+        self.observers = self.observers.zip(stretch.observers).map(|((a, _), (_, b))| (a, b));
         self.busy_ms = self.busy_ms.zip(stretch.busy_ms).map(|(a, b)| a + b);
         self.stolen_ms = self.stolen_ms.zip(stretch.stolen_ms).map(|(a, b)| a + b);
     }
@@ -7132,6 +7216,18 @@ pub fn terminal_end(first: RunLoad, after_wait: RunLoad, answered: bool) -> RunL
     if answered { after_wait } else { first }
 }
 
+/// Return the sample at the last change, not at the observation that confirms stillness.
+pub fn settled<T>(last: &mut Option<(f64, T)>, at: f64, changed: bool, snapshot: impl FnOnce() -> T) -> Option<T> {
+    if changed || last.is_none() {
+        *last = Some((at, snapshot()));
+        None
+    } else if last.as_ref().is_some_and(|(t, _)| at - t >= 1000.) {
+        last.take().map(|(_, v)| v)
+    } else {
+        None
+    }
+}
+
 /// Checks can share a launch, but never contribute a timed observation to a performance claim.
 pub fn measures_host_load(verdict_block: bool, cases: usize, phone: bool, mac: bool) -> bool {
     verdict_block && cases == 1 && !phone && !mac
@@ -7143,7 +7239,7 @@ pub fn measured_launch<T>(measured: bool, start: impl FnOnce() -> Option<T>) -> 
 }
 
 /// Use the measured runs only. An unread target is not a quiet CPU and not a foreign process.
-pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)>>) -> Block {
+pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)>>, pinned: bool) -> Block {
     if loads.is_empty() {
         return b;
     }
@@ -7155,11 +7251,21 @@ pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)
     b.values.remove("cpu.foreign");
     b.values.remove("cpu.foreign.max");
     let foreign: Vec<_> = runs.iter().filter_map(RunLoad::foreign).collect();
-    // For commands the parent's spawn and exit observation can outlast the child's reported
-    // lifetime. Neither that extra time nor the launch's setup improves the resolution inside it.
-    let short_reported = cfg!(target_os = "linux") && b.run_ms.iter().any(|&ms| ms > 0.0 && ms < host::IDLE_TICK_NS as f64 / 1e6);
-    if short_reported || runs.iter().any(|r| r.subtick) {
-        b.values.insert("background.subtick".into(), 1.0);
+    let continuous = || -> Option<RunLoad> {
+        if runs.len() < 2 || b.values.contains_key("untimed.n") {
+            return None;
+        }
+        let first = runs.first()?;
+        let last = runs.last()?;
+        let (open, _, k) = first.edges?;
+        let mut span = open.until(last.edges?.1, k)?;
+        span.observer_ms = last.observers?.1.checked_sub(first.observers?.0)? as f64 / 1e6 + first.creation_ms;
+        span.own_ms = Some(runs.iter().map(|r| r.own_ms).sum::<Option<f64>>()? + runs[1..].iter().map(|r| r.gap_ms).sum::<Option<f64>>()?);
+        Some(span)
+    };
+    let span = continuous();
+    if let Some(ticks) = runs.iter().chain(span.iter()).filter(|r| r.ms > 0.).map(|r| r.ticks_pct).reduce(f64::min).filter(|t| *t > 50.) {
+        b.values.insert("background.subtick".into(), ticks);
     }
     if foreign.len() != b.run_ms.len() {
         b.values.insert("background.unread".into(), 1.0);
@@ -7168,8 +7274,10 @@ pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)
         b.values.insert("background.own.max".into(), own);
     }
     if !foreign.is_empty() {
-        let most = foreign.iter().copied().fold(0.0, f64::max);
-        if !b.refused.contains_key("cpu.foreign") {
+        let most = foreign.iter().copied().chain(span.and_then(|r| r.foreign())).fold(0.0, f64::max);
+        if !pinned {
+            b.values.insert("background.foreign".into(), metrics::median(&foreign));
+        } else if !b.refused.contains_key("cpu.foreign") {
             b.values.insert("cpu.foreign".into(), metrics::median(&foreign));
         }
         b.values.insert("cpu.foreign.max".into(), most);
@@ -7849,7 +7957,12 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         // Read busy time and steal at the timed edges. The process snapshots only supply names.
         let timed = measures_host_load(x.measures_time(), cases.len(), ctx.phone.is_some(), cfg!(target_os = "macos"));
         let unpinned = timed && ctx.pin.is_none();
-        RUN_LOADS.set(timed.then(|| RunLoads { cpus: ctx.pin.unwrap_or_else(|| host::topology().all()), pin: ctx.pin, runner: ctx.runner.pid(), runs: Default::default() }));
+        RUN_LOADS.set(timed.then(|| RunLoads {
+            cpus: ctx.pin.unwrap_or_else(|| host::topology().all()),
+            shared: ctx.runner_pin.unwrap_or(0) == 0,
+            runner: ctx.runner.pid(),
+            runs: Default::default(),
+        }));
         let procs = unpinned.then(|| (host::now_ns(), host::all_processes()));
         let launch = any_launch(ctx, cases, v, pair, x);
         let loads = RUN_LOADS.take().map(|l| l.runs.take()).unwrap_or_default();
@@ -7878,7 +7991,7 @@ fn slotted(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec) 
         let taken = std::mem::take(&mut launch.cases);
         for (r, s) in taken.into_iter().zip(cases) {
             let r = r
-                .map(|b| run_load(b, &loads, named.clone()))
+                .map(|b| run_load(b, &loads, named.clone(), ctx.pin.is_some()))
                 .and_then(|b| priority_state(ctx, s, x, b))
                 .map(|b| headless_state(ctx, s, v, b))
                 .map(|b| software_state(ctx, s, b))
@@ -8403,6 +8516,7 @@ pub fn retain_probe_context(b: &mut Block) {
                 | "cpu.foreign"
                 | "cpu.foreign.max"
                 | "steal.pct"
+                | "background.foreign"
                 | "background.unread"
                 | "background.subtick"
                 | "background.own.max"
@@ -9899,6 +10013,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // without `goto` no main-thread counts.
             let cpu = if cpu_lost { f64::NAN } else { cpu };
             cost.target_ms(cpu * wall / 1e8);
+            cost.tree_gap(&at0, &at1, &ended0, &ended1);
             let cpu_whole = if whole_lost { f64::NAN } else { cpu_whole };
             let doc_gone = doc_lost.get();
             let carry = *carried.borrow();

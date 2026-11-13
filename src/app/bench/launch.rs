@@ -233,12 +233,15 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         // process set's cycles, as a native launch's does. An app with `window: false` has none to keep up.
         let sampler = (!web && !windowless).then(|| {
             let stop = stop.clone();
-            let timed = window_until.is_some();
-            std::thread::spawn(
-                move || {
-                    if timed && let Some(home) = &profile_dir { super::native::watch(pid, home, screen, &stop, tx) } else { sample_screen(pid, profile_dir.as_deref(), screen, &stop) }
-                },
-            )
+            let until = window_until.clone();
+            let load = load.clone();
+            std::thread::spawn(move || {
+                if let (Some(until), Some(home)) = (until, &profile_dir) {
+                    super::native::watch(pid, home, screen, &stop, until, load, tx)
+                } else {
+                    sample_screen(pid, profile_dir.as_deref(), screen, &stop)
+                }
+            })
         });
         let tails = {
             let globs: Vec<String> = milestones.iter().filter(|m| m.source != "output" && m.source != "page").map(|m| m.source.clone()).collect();
@@ -321,13 +324,10 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
         let timeout = Duration::from_millis(spec["timeout"].as_u64().unwrap_or(120_000));
         // `cpu1` holds what ended processes used where that is known (`ended`).
         let (ready_at, page, cpu1, ended, load) = match &window_until {
-            Some(until) => {
+            Some(_) => {
                 let deadline = Instant::now() + timeout;
-                let mut wait = super::native::WindowWait::default();
-                let ready = loop {
-                    if let Ok(sample) = samples.recv_timeout(Duration::from_millis(100))
-                        && let Some(ready) = wait.step(until, sample)
-                    {
+                let (ready, load) = loop {
+                    if let Ok(ready) = samples.recv_timeout(Duration::from_millis(100)) {
                         break ready;
                     }
                     if let Some(g) = &guard {
@@ -343,7 +343,6 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
                 };
                 // The app's main page through the session strobe attached at its start (where an
                 // attribution launch's profiler runs).
-                let load = load.take().map(super::LaunchLoad::stop);
                 let WebBrowser::Chromium(b) = &browser else { return Err(Error::msg("internal: a window launch of a page")) };
                 let main = electron::main_page(b)?;
                 let page: Page = watch.page(&main.target).unwrap_or(main).into();
@@ -351,7 +350,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
             }
             None => match watch.ready(timeout) {
                 Ok((at, received, page)) => {
-                    let load = load.take().map(super::LaunchLoad::stop);
+                    let load = load.as_ref().map(super::LaunchLoad::stop);
                     let (cycles, ended) = match &at0 {
                         Some((a, e0)) => {
                             let procs = browser.processes();

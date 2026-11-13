@@ -2,6 +2,7 @@
 //! navigation send), once when ready is observed next to the target CPU reading.
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct LaunchLoad {
     at: LoadStart,
     others: Vec<(u32, Option<u64>)>,
@@ -13,11 +14,11 @@ impl LaunchLoad {
         RUN_LOADS.with_borrow(|l| {
             let l = l.as_ref()?;
             let shared = [std::process::id(), l.runner];
-            let others = console.iter().chain(shared.iter().filter(|_| l.pin.is_none())).map(|p| (*p, host::process_cycles(*p))).collect();
+            let others = console.iter().chain(shared.iter().filter(|_| l.shared)).map(|p| (*p, host::process_cycles(*p))).collect();
             Some(Self { others, at: LoadStart::new(l), clock: host::tsc() })
         })
     }
-    pub(super) fn stop(self) -> RunLoad {
+    pub(super) fn stop(&self) -> RunLoad {
         let mut r = self.at.stop();
         let cycles: Option<u64> = self.others.iter().map(|(p, a)| host::process_cycles(*p)?.checked_sub((*a)?)).sum();
         match cycles.zip(self.clock.zip(host::tsc()).and_then(|(a, b)| b.checked_sub(a)).filter(|d| *d > 0)) {

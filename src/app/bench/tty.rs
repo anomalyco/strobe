@@ -573,6 +573,7 @@ pub(super) fn chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x
                     let host_timed: u64 = hs.chunks(2).map(|p| p.get(1).copied().unwrap_or(p[0]).saturating_sub(p[0])).sum();
                     let pty_ms = rate.map_or(f64::NAN, |r| host_timed as f64 / r);
                     cost.target_ms(cpu + if cfg!(windows) { pty_ms } else { 0.0 });
+                    cost.tree_gap(&c0, &c1, &ended0, &ended1);
                     let foreign = cost.last_foreign().filter(|_| ctx.pin.is_some()).or(foreign);
                     let in_timed = |ns: u64| ns >= t0 && ns <= t1 && !timed.untimed.iter().any(|g| ns >= g.0 && ns < g.1);
                     let ups: Vec<term::Update> = tty.updates(t0, t1).into_iter().filter(|u| in_timed(u.commit_ns)).collect();
@@ -1009,7 +1010,7 @@ fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, timed: bool)
                 ready.is_some()
             })
         };
-        let load = load.map(super::LaunchLoad::stop);
+        let load = load.as_ref().map(super::LaunchLoad::stop);
         let procs_at_ready = host::process_set(tty.pid, Some(&home.dir));
         // A process of the launch that ended before it was ready took its CPU with it (every count starts
         // at 0 at the spawn), unless its launch's cgroup kept it (`host::launch_ended_cpu`, read with the

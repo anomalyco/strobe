@@ -746,6 +746,7 @@ fn runs(
                 let (cpu_lost, whole_lost) = (timed_cpu.is_none(), timed_cpu.is_none() || whole_cpu.is_none());
                 let cpu = timed_cpu.as_ref().map_or(f64::NAN, |c| cpu_ms(c.total, &c1, &clock0, &clock1));
                 cost.target_ms(cpu);
+                cost.tree_gap(&c0, &c1, &start.2, &end.2);
                 runs.push(Run {
                     main,
                     cpu_lost,
@@ -1578,6 +1579,7 @@ fn present_refusal(e: Error) -> Refusal {
 }
 
 /// How a native launch ends (an app launch ends on the window conditions too).
+#[derive(Clone)]
 pub(super) enum Until {
     /// The main window is visible.
     Visible,
@@ -1629,32 +1631,25 @@ pub(super) fn window_until(s: &Series, until: &Value) -> Result<Option<Until>> {
 pub(super) struct WindowWait {
     first: Option<Vec<u8>>,
     prev: Option<Vec<u8>>,
-    change: Option<Sample>,
+    change: Option<(f64, (Sample, Option<RunLoad>))>,
 }
 
 impl WindowWait {
     /// The sample the launch is ready at, once `sample` completes `until`: the first with the window
     /// shown, the first whose pixels differ from the first's, or the last change once the pixels held
     /// for a second.
-    pub(super) fn step(&mut self, until: &Until, sample: Sample) -> Option<Sample> {
+    pub(super) fn step(&mut self, until: &Until, sample: Sample, snapshot: impl FnOnce() -> Option<RunLoad>) -> Option<(Sample, Option<RunLoad>)> {
         match until {
-            Until::Visible if sample.shown => Some(sample),
+            Until::Visible if sample.shown => Some((sample, snapshot())),
             Until::Painted | Until::Settled => {
                 let px = sample.px.clone()?;
                 let first = self.first.get_or_insert_with(|| px.clone()).clone();
                 let moved = self.prev.as_ref().is_some_and(|p| differs(p, &px));
                 self.prev = Some(px.clone());
                 if matches!(until, Until::Painted) && differs(&first, &px) {
-                    return Some(sample);
+                    return Some((sample, snapshot()));
                 }
-                if self.change.is_none() || moved {
-                    self.change = Some(sample);
-                    None
-                } else if self.change.as_ref().is_some_and(|c| sample.at - c.at >= 1000.0) {
-                    self.change.take()
-                } else {
-                    None
-                }
+                if matches!(until, Until::Settled) { settled(&mut self.change, sample.at, moved, || (sample, snapshot())) } else { None }
             }
             _ => None,
         }
@@ -1669,8 +1664,10 @@ fn differs(a: &[u8], b: &[u8]) -> bool {
 
 /// Every 30 ms until `stop`: keeps the app's windows on top without focus, and sends a sample (with
 /// pixels when `capture`). Returns the pixel samples.
-pub(super) fn watch(pid: u32, home: &Path, capture: bool, stop: &AtomicBool, tx: std::sync::mpsc::Sender<Sample>) -> Vec<(f64, Vec<u8>)> {
+pub(super) fn watch(pid: u32, home: &Path, capture: bool, stop: &AtomicBool, until: Until, load: Option<LaunchLoad>, tx: std::sync::mpsc::Sender<(Sample, Option<RunLoad>)>) -> Vec<(f64, Vec<u8>)> {
     let mut out = Vec::new();
+    let mut wait = WindowWait::default();
+    let mut ready = false;
     let mut raised = Instant::now() - Duration::from_secs(1);
     while !stop.load(Ordering::Relaxed) {
         // The app's process set (its tree, what carries its home's stamp, its job), one snapshot a
@@ -1690,7 +1687,10 @@ pub(super) fn watch(pid: u32, home: &Path, capture: bool, stop: &AtomicBool, tx:
             out.push((at, p.clone()));
         }
         let cycles = set.iter().map(|p| p.cycles).sum();
-        let _ = tx.send(Sample { at, shown, px, cycles, root: pids.contains(&pid), ended });
+        if !ready && let Some(found) = wait.step(&until, Sample { at, shown, px, cycles, root: pids.contains(&pid), ended }, || load.as_ref().map(LaunchLoad::stop)) {
+            ready = true;
+            let _ = tx.send(found);
+        }
         std::thread::sleep(Duration::from_millis(30));
     }
     out
@@ -1820,7 +1820,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         // A windowless app has no window to keep on top or sample.
         let watcher = (!windowless).then(|| {
             let (stop, pid, home) = (stop.clone(), n.pid, n.home.clone());
-            std::thread::spawn(move || watch(pid, &home, capture, &stop, tx))
+            let (until, load) = (until.clone(), load.clone());
+            std::thread::spawn(move || watch(pid, &home, capture, &stop, until, load, tx))
         });
         let mut lines: Vec<Line> = Vec::new();
         let tails = {
@@ -1836,7 +1837,8 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         let pixel_reads: Cell<Option<(u64, f64, f64)>> = Cell::new(None);
         // (epoch ms, cycles of the tree, whether the launched process was in it, what its ended processes
         // used) when the launch was ready.
-        let ready: (f64, u64, bool, Option<u64>) = if let Until::Milestone(name) = &until {
+        let snapshot = || load.as_ref().map(super::LaunchLoad::stop);
+        let ready = if let Until::Milestone(name) = &until {
             // The first line matching it, from the output as it arrives or the log files under the
             // home (read every 20 ms); its time is when strobe read it, or the line's own `at`.
             let m = milestones.iter().find(|m| &m.name == name).ok_or_else(|| Error::msg("internal: the until milestone"))?;
@@ -1853,7 +1855,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 }
                 if let Some(at) = found {
                     let (cycles, root, ended) = tree_cycles(&n);
-                    break (at, cycles, root, ended);
+                    break (at, cycles, root, ended, snapshot());
                 }
                 if let Some(code) = n.exited().filter(|_| n.processes().is_empty()) {
                     let out: Vec<String> = lines.iter().filter(|l| l.2 == "output").map(|l| l.1.clone()).collect();
@@ -1904,6 +1906,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
             }
             if let Some((lacked, had)) = pixel.map_err(|e| Error { message: format!("{} launch: {}", s.case, e.message), ..e })? {
                 let (cycles, root, ended) = tree_cycles(&n);
+                let load = snapshot();
                 let Some(lacked) = lacked else {
                     return Err(Error::refused(
                         "RunIncomplete",
@@ -1940,12 +1943,13 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                         "time the launch to an image that appears once the app stops animating, or to { window: \"settled\" }",
                     ));
                 }
-                (n.epoch_ms + at(first.next_screen_ns), cycles, root, ended)
+                (n.epoch_ms + at(first.next_screen_ns), cycles, root, ended, load)
             } else {
                 let (lo, hi) = session
                     .appeared(sel, deadline.saturating_duration_since(Instant::now()))
                     .map_err(|e| Error::refused("RunIncomplete", format!("{} launch: {}", s.case, e.message), "the until selector never showed"))?;
                 let (cycles, root, ended) = tree_cycles(&n);
+                let load = snapshot();
                 let Some(lo) = lo else {
                     return Err(Error::refused(
                         "RunIncomplete",
@@ -1963,7 +1967,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                 // the span, when every present since the span began is within a refresh of it.
                 let drawn_in_span = late.next_screen_ns == 0 && early.next_screen_ns != 0 && early.next_start_ns <= hi && late.last_start_ns.saturating_sub(early.next_start_ns) <= refresh_ns;
                 if drawn_in_span {
-                    (n.epoch_ms + (early.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles, root, ended)
+                    (n.epoch_ms + (early.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles, root, ended, load)
                 } else if late.next_screen_ns == 0 {
                     let at = |ns: u64| (ns as f64 - n.at_ns as f64) / 1e6;
                     let last = if late.last_start_ns == 0 { "it never presented".to_string() } else { format!("its last present started at {}", crate::fmt::time(at(late.last_start_ns))) };
@@ -1988,15 +1992,12 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                         "time the launch to an element that appears after the app stops animating, or to { window: \"settled\" }",
                     ));
                 } else {
-                    (n.epoch_ms + (late.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles, root, ended)
+                    (n.epoch_ms + (late.next_screen_ns as f64 - n.at_ns as f64) / 1e6, cycles, root, ended, load)
                 }
             }
         } else {
-            let mut wait = WindowWait::default();
-            let sample = loop {
-                if let Ok(sample) = rx.recv_timeout(Duration::from_millis(100))
-                    && let Some(ready) = wait.step(&until, sample)
-                {
+            let (sample, load) = loop {
+                if let Ok(ready) = rx.recv_timeout(Duration::from_millis(100)) {
                     break ready;
                 }
                 if n.exited().is_some() && n.processes().is_empty() {
@@ -2012,9 +2013,9 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
                     return Err(isolate::held_at_launch(n.pid, Some(&n.home), &n.exe, &waited).unwrap_or_else(|| Error::refused("RunIncomplete", waited, "check that the app opens a window")));
                 }
             };
-            (sample.at, sample.cycles, sample.root, sample.ended)
+            (sample.at, sample.cycles, sample.root, sample.ended, load)
         };
-        let load = load.map(super::LaunchLoad::stop);
+        let load = ready.4;
         lap("ready", &mut steps);
         // An attribution launch's threads from the spawn until ready: wakes and CPU per thread without
         // a trace, read once it is ready (threads that already exited are not in it).

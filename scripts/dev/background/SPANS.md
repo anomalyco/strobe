@@ -1,34 +1,32 @@
-# Background measurement contract (audit of 161041dc)
+# Background measurement contract
 
-Read a target row **and** a mode row. A mode does not get a second clock. `own` is CPU time (not wall time or a median CPU percentage). On shared CPUs subtract strobe and runner CPU too. A failed counter is not a zero. An exempt target has no host-load verdict.
+Read a target row and a mode row. An edge is an observation on the host, not a reconstruction from a page, log or present timestamp. Own CPU is CPU time over the same edges. A failed counter is not zero.
 
-| Target / operation | Clock of reported work | Load edges required | Own CPU for those edges | Disposition |
-|---|---|---|---|---|
-| Page run (including a page in an app/webview) | run send to last measured action/frame; timed segments only | SelfCost resume/pause, not the later headless frame or reset | renderer + other target tree, with exited CPU and untimed gaps removed | measured runs only; missing accounting warns |
-| Page launch | navigation send to observer's ready | immediately before navigation and on ready notification, not observer-clock interpolation | browser processes relative to navigation baseline | single measured launch |
-| App/webview/command-attached browser launch | process release to ready | spawn edge to ready observation; no prepare, attach grace or teardown as a separate sample | target tree from spawn | same; discarded launch must not publish |
-| Native windowed run | run send to return, timed segments | SelfCost timed segments | timed process set with exited CPU | same; window checks outside |
-| Native windowless run | same, without a presenting window | same | same | same |
-| Native launch, windowed or windowless | release to window, element or milestone | spawn edge and ready observation; no milestone grace | tree at ready, recoverable ended processes included | same |
-| Script run | request to reply minus untimed stretches | SelfCost timed segments | script host tree, not runner | same; no script launch case |
-| CLI / each counted exec | release (plus OS creation on Windows) to exit | begin around spawn, end on exit callback, not pipe drain or process inventory | that exact child's exit Usage including children; sum only counted commands | one run may contain several disjoint commands; no exec in setup/untimed counts |
-| Terminal run | write/run to initial end, extended only for an actual answer | keep first fast edge on silence; include wait only if reported end advances; do not include process walks or settle wait | program + timed console-host CPU exactly once | same |
-| Terminal launch | release to text/state/milestone, blank grid may already match | after console setup before release; directly at observation | tree at ready plus console-host delta; zero CPU is valid | zero-length grid span has no opportunity for interference |
-| Warm-up launch / measured pair 0 / subsequent launch | independent release-to-ready span per launch | only measured launch contributes | never reuse discarded launch's counters | same as single launch; order independent |
-
-| Mode (applies to every supported target above) | Report / load / own span | Later transformations | Missing or disturbed reading |
+| Target / operation | Reported span | Load edges and own CPU | Is there any wait, grace or confirmation between the reported end stamp and the load window's close? |
 |---|---|---|---|
-| Check, batch of checks, repeated check | diagnostic cold run(s); no paired performance claim | check values, case boundaries, repeat ranges; no timed Background judgement | no fabricated unread warning for a check; preserve declared supported measurements |
-| Timed comparison, including implementations | target row for each role independently, measured warmup slice | paired test includes set-aside attempts in their own set; checkpoint before retry; judge only final post-Holm metrics | warn unread; lopsided refuses only what it moves |
-| Separate probe / counter pass | each side measured afresh | retain context before stripping metrics; separate pairs never borrowed | judge each contributing set |
-| Single-build blocks, track samples | target row, no pairs | if passes combined, union validity evidence before selecting metrics; dirty either way round must survive | flag block, do not claim a paired verdict |
-| Bisect, including tracked confirmation used as step 0 | underlying paired comparison | carry warnings to step, progress, result and text; warned step cannot move either bound | end unclear with current bounds |
-| Resume new checkpoint | saved measured blocks plus fresh ones | preserve peaks, unread, identity and discarded attempts | same decision as uninterrupted run |
-| Resume old checkpoint | saved block may have no counter observation | never infer quiet from an absent key | warn when a host reading is expected |
-| Leak / attribution / pixels-only | heap, profile or image observations, not timing comparisons | not part of the load decision for timed pairs | not applicable |
-| Phone, any mode | workload on another device | no desktop preflight load, foreign readings or desktop CPU topology | not applicable |
-| macOS, any mode | host run but no supported per-CPU foreign reader | retain the preflight caution; no missing-block penalty | not applicable to per-block foreign work |
+| Page run (including embedded pages) | Send through last measured action/frame, minus untimed stretches | SelfCost resume/pause; renderer and target tree including recovered exits | No. A requested frame is timed; the extra headless frame, counts, reset and teardown are not. |
+| Page launch | Navigation send to ready | Navigation baseline to ready notification; browser tree delta | No deliberate wait. Ready delivery is observed, not interpolated; later milestones and teardown are outside. |
+| App/webview/command-attached browser launch | Release to observer or window ready | Spawn to ready observation, target tree since spawn | No. Visible/painted use the matching sample. Settled keeps load and CPU at the last change; the second of unchanged pixels only confirms it. |
+| Native windowed run | Send to return, minus untimed stretches | Timed SelfCost segments; process set plus recovered exits | No. The window checks, process inventory and reset do not extend the end. |
+| Native windowless run | As above without a window | Same process accounting | No. No present wait. |
+| Native launch | Release to window, selector, pixels or milestone | Spawn to ready observation, tree at that observation | No deliberate wait. Save the last change before stillness; sample at the selector/pixel observation before looking up the present. Its display timestamp can differ from the observation. Milestone grace and teardown follow the snapshot. |
+| Script run | Request to reply, minus untimed stretches | Timed SelfCost segments; host tree including exits | No. Heap, inventories, reset and teardown follow the edge. |
+| CLI / counted exec | Creation/release to exit; commands only | Pre-spawn to exit callback, exit Usage including descendants | No. Pipe drains, log reads and reset follow the exit. Failed spawn must disarm the edge. |
+| Terminal run | Run to initial end or actual answer | Timed SelfCost segments; program plus console-host CPU once | No. Silent-key timeout rolls back to first end; a real answer advances both. Post-run quiet wait and inventory are outside. |
+| Terminal launch | Release to matching grid, state or milestone | Spawn to ready observation, target tree plus console-host delta | No. No milestone grace or teardown. An already-matching blank grid has zero interval, not unread counters. |
+| Launch warmup / pair 0 / later launch | Independent release-to-ready spans | Discarded launches contribute no reading; one measured launch per block | No wait is carried across launches. |
 
-Audit findings: the launch poll bracket and warm-up selection, terminal tentative end, short exec, merged blocks, step roll-up and checkpoint compatibility all violate the corresponding rows above. Also check a missing pass reading paired with a present zero (not just max vs max), a warned parent-confirmation step in bisect, and failure to read the cycle clock while pausing: none may erase evidence. A short Linux measurement can be below idle tick resolution: a reported conservative floor is not proof that no work occurred.
+| Mode | Report, filtering and own CPU | Missing or disturbed readings | End-to-close wait? |
+|---|---|---|---|
+| Check / batch / repeat | Diagnostic observations only | Preserve supported requested metrics; no timed Background decision | N/A; no verdict span. |
+| Comparison / implementations | Measure each role and its warmup slice independently; judge final post-Holm metrics | Keep discarded attempts for their own pass. Unread warns; one-sided work refuses what it moves | No; target row applies. |
+| Separate probe / counter pass | New measurement; retain context when filtering | Judge each contributing set | No; never bridge passes. |
+| Single-build blocks / track samples | When combining passes, preserve worst evidence before metric selection | Either pass can flag the block; no paired claim | No; never bridge launches or blocks. |
+| Bisect / track confirmation | Underlying paired comparison; keep warnings with attempts | Accept readable decisive movement in the search direction; otherwise retry a warned bisect step within budget or stop unclear. An inconclusive warned track confirmation is unclear, not rejected | No; a quiet wait precedes a fresh experiment. |
+| Resume new checkpoint | Saved blocks and new blocks; preserve peaks, resolution, unread and discarded attempts | Same decision as uninterrupted work | No; never bridge a checkpoint. |
+| Resume old checkpoint | No reconstruction of absent evidence | Warn when host accounting was expected | N/A for an absent reading. |
+| Leak / attribution / pixels / filmed | Diagnostic observations, not timed verdicts | No timed Background judgement | N/A. |
+| Phone | Work on another device | No desktop topology or preflight | N/A. |
+| macOS | No supported per-CPU foreign reader | Preflight only | N/A. |
 
-Live resolution boundary: five short commands under a three-quarter-core interferer on a Linux VM all returned a **lower bound of zero**. A nonempty timed segment shorter than the guest idle-accounting tick now carries `background.subtick`; report the resolution warning instead of claiming quiet. This is distinct from missing counter or target CPU data (`background.unread`). It also applies on a quiet Linux host where the counter cannot distinguish the two cases. A blank grid that matched *before* release has no timed interval and is neither unread nor sub-tick.
+**Linux block context:** In addition to the per-run readings, compare the first measured opening edge with the last measured closing edge of the same block. Charge idle tick error once, and subtract target CPU across resets and inter-run gaps, not just CPU inside `run`. Exclude blocks with untimed stretches. Observer/runner work on the counted CPUs is not foreign. Never combine independent cold launches. A lower bound below 25% with tick uncertainty above 50% cannot prove a quiet pair; an idle preflight yields a note, not a warning. Windows has no tick floor.
