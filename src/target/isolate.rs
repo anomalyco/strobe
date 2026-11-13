@@ -2017,18 +2017,16 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
             } else {
                 Error::refused(
                     "LiveChannel",
-                    format!("{} is running (pid {pid}) in the isolated home of another strobe (pid {}) that is measuring it", app.exe.display(), s.pid),
+                    format!("{} is running in the isolated home of another strobe that is measuring it", app.exe.display()),
                     "wait for that strobe to finish, or stop it; strobe ends such a copy by itself once that strobe is gone",
                 )
             });
         }
         if !running.is_empty() {
-            let pids: Vec<String> = running.iter().map(u32::to_string).collect();
-            let how = if cfg!(windows) { format!("taskkill /PID {}", pids.join(" /PID ")) } else { format!("kill {}", pids.join(" ")) };
             return Err(Error::refused(
                 "LiveChannel",
-                format!("{} is running (pid {}): that is your app (no strobe launched it)", app.exe.display(), pids.join(", ")),
-                format!("measure another build or channel, or close it ({how})"),
+                format!("{} is running: that is your app (no strobe launched it)", app.exe.display()),
+                "measure another build or channel, or close the running app",
             ));
         }
     }
@@ -2041,7 +2039,7 @@ pub fn live(app: &App, guard: &Guard) -> Result<()> {
         let Some(exe) = host::exe_of(pid) else { continue };
         let path = exe.to_string_lossy().to_lowercase();
         if (!folder.is_empty() && path.contains(&format!("{sep}{folder}{sep}"))) || (!dir.is_empty() && path.starts_with(&dir)) {
-            return Err(Error::refused("LiveChannel", format!("your live {} runs from this app ({})", app.id, exe.display()), "measure another build or channel"));
+            return Err(Error::refused("LiveChannel", format!("a guarded process of your live {} runs from this app", app.id), "measure another build or channel"));
         }
     }
     #[cfg(target_os = "macos")]

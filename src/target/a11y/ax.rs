@@ -291,13 +291,6 @@ pub fn app_at(x: f64, y: f64) -> Result<Option<(u32, Cf)>> {
     Ok(Some((pid as u32, at)))
 }
 
-/// An element as a person reads it: its role and title.
-pub fn describe(el: &Cf) -> String {
-    let role = copy(el.0, "AXRole").and_then(|v| cf_string(v.0)).unwrap_or_default();
-    let title = copy(el.0, "AXTitle").and_then(|v| cf_string(v.0)).unwrap_or_default();
-    format!("{} {title:?}", role.trim_start_matches("AX").to_lowercase())
-}
-
 /// Sets a window's or app's boolean attribute.
 pub fn set_bool(el: &Cf, attr: &str, on: bool) -> Result<()> {
     check(unsafe { AXUIElementSetAttributeValue(el.0, cfstr(attr).0, if on { kCFBooleanTrue } else { kCFBooleanFalse }) }, attr)
@@ -583,7 +576,7 @@ impl Worker {
         let title = copy(at.0, "AXTitle").and_then(|v| cf_string(v.0)).unwrap_or_default();
         let id = copy(at.0, "AXIdentifier").and_then(|v| cf_string(v.0)).filter(|s| !s.is_empty()).map(|s| format!(" (key {s:?})")).unwrap_or_default();
         let what = format!("{} {title:?}{id}", role.trim_start_matches("AX").to_lowercase());
-        Ok(Err(if self.pids.contains(&(pid as u32)) { format!("{what} of the app itself, such as a dialog or an overlay it shows over the element") } else { format!("{what} of process {pid}") }))
+        Ok(Err(if self.pids.contains(&(pid as u32)) { format!("{what} of the app itself, such as a dialog or an overlay it shows over the element") } else { "another app's element".into() }))
     }
 
     fn act(&self, i: usize, action: &Action) -> Result<u64> {

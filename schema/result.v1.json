@@ -169,6 +169,7 @@
       "properties": {
         "id": { "type": "string", "description": "An analyser (SPEC 10.2) or validator id." },
         "level": { "enum": ["warn", "info"] },
+        "reason": { "type": "string", "description": "Optional machine-readable reason for the warning, e.g. idle_tick_resolution." },
         "text": { "type": "string" },
         "spans": { "$ref": "#/definitions/spans" }
       }
@@ -502,6 +503,7 @@
           "properties": { "counters": { "type": "boolean" }, "http": { "type": "boolean" }, "blocks": { "type": "array" }, "pairs": { "type": "array" } }
         },
         "launches": { "type": "integer" },
+        "set_aside_launches": { "type": "integer", "description": "Main-pass launches set aside in retried pairs, excluding warmups. launches counts kept blocks." },
         "until": {
           "type": ["object", "null"],
           "description": "A launch series: what each launch was timed until. end is visible, painted or settled (the window), milestone (with milestone, its name), state (with state: a tty() program's own state on its STROBE_EVENTS stream) or selector (with selector, the case's until). Null for other series; absent in older results (readers then infer it from the launches' values).",

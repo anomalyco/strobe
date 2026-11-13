@@ -70,6 +70,7 @@ pub fn run(args: &Args) -> Result<Output> {
         return Err(Error::usage(format!("{handle} is {} {held}, not {} {view}: strobe report {held} {word} (or strobe report {word})", article(held), article(view))));
     }
     let Source { dir, mut data, experiment, file, _named } = source;
+    super::pr::safe_diagnostics(&mut data);
     if let Some(f) = args.get("format").filter(|f| !experiment && !matches!(*f, "html" | "md")) {
         return Err(Error::usage(format!("--format {f} writes an experiment's result: give an exp_… handle (a recording's report is html or md)")));
     }
@@ -743,6 +744,39 @@ fn side_attribution(rec: &Rec, plan_runs: Option<u64>, engine: &str) -> Option<V
 const TEMPLATE: &str = include_str!("../../viewer/report.html");
 
 pub fn html(view: &str, data: &Value) -> String {
+    // The viewer does not consume the local name maps. A self-contained HTML file is a report,
+    // not a copy of result.json. The latter keeps the structured fields for local consumers.
+    let mut data = data.clone();
+    super::pr::safe_diagnostics(&mut data);
+    if let Some(r) = data.pointer_mut("/plan/reserve").and_then(Value::as_object_mut) {
+        r.remove("moved");
+        r.remove("failed");
+    }
+    if let Some(o) = data.as_object_mut() {
+        o.remove("background");
+    }
+    for s in data.get_mut("series").and_then(Value::as_array_mut).into_iter().flatten() {
+        for key in ["/blocks", "/pass/blocks"] {
+            for b in s.pointer_mut(key).and_then(Value::as_array_mut).into_iter().flatten() {
+                if let Some(o) = b.as_object_mut() {
+                    o.remove("background");
+                }
+            }
+        }
+    }
+    fn omit_busiest(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                o.remove("busiest");
+                o.values_mut().for_each(omit_busiest)
+            }
+            Value::Array(a) => a.iter_mut().for_each(omit_busiest),
+            _ => {}
+        }
+    }
+    if let Some(insights) = data.get_mut("insights") {
+        omit_busiest(insights);
+    }
     let catalog: Vec<Value> = crate::model::METRICS
         .iter()
         .map(|m| json!({ "name": m.name, "unit": m.unit, "better": m.better, "kind": m.kind, "words": [m.words.0, m.words.1], "min_n": m.min_n, "about": m.about }))

@@ -438,8 +438,8 @@ pub fn shown_region(hwnd: isize, rect: [i32; 4]) -> std::result::Result<crate::p
     }
     let r = [w.content[0] + rect[0], w.content[1] + rect[1], rect[2], rect[3]];
     let overlaps = |o: &Win| o.rect[0] < r[0] + r[2] && r[0] < o.rect[0] + o.rect[2] && o.rect[1] < r[1] + r[3] && r[1] < o.rect[1] + o.rect[3];
-    if let Some(o) = all.iter().skip_while(|o| o.id != id).skip(1).find(|o| o.visible && overlaps(o)) {
-        return Err(format!("{:?} of process {} covers the region", o.title, o.pid));
+    if all.iter().skip_while(|o| o.id != id).skip(1).any(|o| o.visible && overlaps(o)) {
+        return Err("another window covers the region".into());
     }
     region_image(hwnd, rect).ok_or_else(|| "the compositor gave no copy of the region".into())
 }

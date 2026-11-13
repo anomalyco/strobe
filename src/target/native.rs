@@ -210,8 +210,13 @@ impl Native {
         // macOS: which apps' windows still cover it (after strobe brought the app forward, a window
         // that opens or floats on top), so the refusal says what to close.
         #[cfg(target_os = "macos")]
-        let by =
-            state.as_ref().filter(|_| why == Some(COVERED)).map(|s| host::macos::covering(s.hwnd)).filter(|c| !c.is_empty()).map(|c| format!("; in front of it: {}", c.join(", "))).unwrap_or_default();
+        let by = state
+            .as_ref()
+            .filter(|_| why == Some(COVERED))
+            .map(|s| host::macos::covering(s.hwnd))
+            .filter(|c| !c.is_empty())
+            .map(|c| format!("; {} other app(s) in front", c.len()))
+            .unwrap_or_default();
         #[cfg(not(target_os = "macos"))]
         let by = String::new();
         let hidden = match why {

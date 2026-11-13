@@ -224,10 +224,9 @@ impl Registration {
                 _ if elsewhere => {
                     format!("{what}: waiting for a bench of another user or state folder (the machine-wide lock {})", machine_path().map(|p| p.display().to_string()).unwrap_or_default())
                 }
-                (Some(pid), _, _) => format!("{what}: waiting for the bench of an older strobe (pid {pid}) to finish"),
+                (Some(_), _, _) => format!("{what}: waiting for the bench of an older strobe to finish"),
                 (None, Some(r), n) => format!(
-                    "{what}: waiting for the bench slot (pid {} runs a block of {}{})",
-                    r["pid"],
+                    "{what}: waiting for the bench slot (a block of {} is running{})",
                     r["exp"].as_str().unwrap_or(""),
                     if n > 0 { format!("; {n} queued before this one") } else { String::new() }
                 ),
@@ -246,7 +245,7 @@ impl Registration {
                 // A wait has no deadline: say how long it has been and what ends it, once a minute.
                 let holder = old.or_else(|| running.and_then(|r| r["pid"].as_u64()).map(|p| p as u32));
                 let ends = match holder {
-                    Some(pid) => format!("it ends when pid {pid} releases the slot or exits; stop that process if it is stuck"),
+                    Some(_) => "it ends when the running bench releases the slot or exits; strobe status lists it".to_string(),
                     None => "it ends when the benches ahead finish; strobe status lists them".to_string(),
                 };
                 super::progress(format!("  still waiting after {} ({ends})", super::super::fmt::ms_duration(started.elapsed().as_millis() as u64)));

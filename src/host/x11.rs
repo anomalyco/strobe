@@ -375,8 +375,7 @@ pub fn window_region(win: isize, [x, y, w, h]: [i32; 4]) -> Result<crate::png::I
     let at = client_origin(win).ok_or("the window is gone or there is no display")?;
     let (cx, cy) = (at.0 + x + w / 2, at.1 + y + h / 2);
     if window_at(cx, cy).is_none_or(|t| t.0 != win) {
-        let over = window_at(cx, cy).map(|t| format!("{:?} (pid {})", t.2, t.1)).unwrap_or_else(|| "nothing of the app's".into());
-        return Err(format!("the window is not on top at ({cx}, {cy}): {over} is, and the X server copies what covers a window"));
+        return Err(format!("the window is not on top at ({cx}, {cy}), and the X server copies what covers a window"));
     }
     with(|xc| {
         let attrs = xc.conn.get_window_attributes(win as Window).ok()?.reply().ok()?;

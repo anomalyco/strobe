@@ -350,13 +350,10 @@ impl PhoneSlot {
                 last = h;
             }
             if Instant::now() >= until {
-                let h = &last;
-                let field = |k: &str| h[k].as_str().unwrap_or("?").to_string();
-                return Err(Error::refused(
-                    "ConcurrentBench",
-                    format!("{} is in use by another strobe ({} on {}: {})", d.serial, field("owner"), field("host"), field("what")),
-                    "wait for it to finish; one strobe runs on a phone at a time",
-                ));
+                if let Some(what) = last["what"].as_str() {
+                    crate::app::live_progress(format!("  phone slot held by: {what}"));
+                }
+                return Err(Error::refused("ConcurrentBench", format!("{} is in use by another strobe", d.serial), "wait for it to finish; one strobe runs on a phone at a time"));
             }
             std::thread::sleep(Duration::from_millis(200));
         }

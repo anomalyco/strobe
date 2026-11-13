@@ -26,6 +26,30 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 pub use summary::summary;
 
+/// Read older experiments without reprinting their speed-check and reservation lists. Limit
+/// this migration to prose: never rewrite benchmark data, commands or structured process maps.
+pub(crate) fn safe_diagnostics(v: &mut Value) {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            Value::Object(o) => {
+                for (k, x) in o.iter_mut() {
+                    if matches!(k.as_str(), "text" | "summary" | "detail" | "error" | "why" | "message" | "verdict" | "fix" | "hint")
+                        && let Some(s) = x.as_str()
+                        && ["busiest processes", "busiest elsewhere:", "moved per block (", "could not be moved:"].iter().any(|p| s.contains(p))
+                    {
+                        *x = Value::String(scrub_public(s));
+                    } else if !matches!(k.as_str(), "background" | "moved" | "failed" | "values") {
+                        walk(x);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(v);
+}
+
 /// The blocks that measured `metric` in series `s`: a series that counts cpu.instructions apart from
 /// its times (Linux perf events never run in a timing block, SPEC §7.5) keeps the other kind's blocks
 /// in `pass` (`counters`: whether they are the counter blocks), and so does one that probes HTTP apart

@@ -9,17 +9,19 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Warning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     pub id: String,
     pub level: String,
     pub text: String,
 }
 
 pub fn warn(id: &str, text: impl Into<String>) -> Warning {
-    Warning { id: id.into(), level: "warn".into(), text: text.into() }
+    Warning { id: id.into(), level: "warn".into(), text: text.into(), reason: None }
 }
 
 pub fn info(id: &str, text: impl Into<String>) -> Warning {
-    Warning { id: id.into(), level: "info".into(), text: text.into() }
+    Warning { id: id.into(), level: "info".into(), text: text.into(), reason: None }
 }
 
 /// What only a display shows (`Headless` refuses it of a headless page): frames, input-to-screen
@@ -360,6 +362,18 @@ pub fn named_work(who: &[(String, f64)], steal: Option<f64>) -> String {
     }
 }
 
+/// The caller can show the private diagnostic live; only the public words become result text.
+pub fn speed_context(who: &[(String, f64)], steal: Option<f64>, machine: bool, live: impl FnOnce(&str)) -> String {
+    use crate::text::{PrivKind, Private, Text};
+    let names = who.iter().map(|(n, p)| (Private::new(n.clone(), PrivKind::ForeignProc), *p)).collect::<Vec<_>>();
+    let lead = if machine { "busiest processes on the machine (% of a core): " } else { "busiest processes (% of a core): " };
+    let text = Text::busiest_processes(lead, machine, &names, steal);
+    if !names.is_empty() {
+        live(text.local());
+    }
+    text.public().into_owned()
+}
+
 /// The native speed check (`Throttled` for targets with no page to run the JS check in): a fixed
 /// integer workload on a strobe thread on `cpus` (the target's CPUs), median of 3, in ms. strobe's own
 /// mask (the runner's CPUs) is widened to them for the check and comes back after it.
@@ -580,7 +594,7 @@ pub enum SpeedWait {
 /// the median of its last 20 passing checks; the first check sets it). In a timed block a slow check
 /// is retried twice after the CPUs settle again: throttling (power, heat, a power plan) lasts, while an
 /// app that just ended (freeing a large model) or a burst of other work passes. Returns the ratio.
-pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option<f64>> {
+pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait, live: impl FnOnce(&str)) -> Result<Option<f64>> {
     let path = host::paths::state_dir().join("native-speed.json");
     let mut saved: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}));
     let key = cpus.map_or("all".to_string(), |m| format!("{m:#x}"));
@@ -634,7 +648,7 @@ pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option
                 started.elapsed().as_secs_f64()
             )));
         }
-        let who = |t: &Try| named_work(&t.others, t.steal);
+        let who = speed_context(&last.others, last.steal, false, live);
         if last.foreign_pct > FOREIGN_PCT {
             let how_long = if once { "during the check".to_string() } else { format!("for {:.0} s", started.elapsed().as_secs_f64()) };
             return Err(Refusal::new(
@@ -644,7 +658,7 @@ pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option
                     last.foreign_pct
                 ),
             )
-            .detail(format!("busiest processes (% of a core): {}", who(&last)))
+            .detail(who)
             .fix("let that work finish (an antivirus scanning new files, an update, a build), or exclude it from the bench's CPUs")
             .into());
         }
@@ -654,7 +668,7 @@ pub fn native_speed_checked(cpus: Option<u64>, wait: SpeedWait) -> Result<Option
             (false, n) => format!("best of {n} tries on quiet CPUs"),
         };
         return Err(Refusal::new(ValidatorId::Throttled, format!("the native speed check ran {ratio:.2}× slower than this device's reference on these CPUs ({vs}, {tries})"))
-            .detail(format!("other work during the last: {:.0}% of a core there; busiest processes: {}", last.foreign_pct, who(&last)))
+            .detail(format!("other work during the last: {:.0}% of a core there; {who}", last.foreign_pct))
             .fix("plug in power, leave power saving, let the machine cool down")
             .into());
     }

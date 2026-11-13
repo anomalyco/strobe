@@ -572,13 +572,7 @@ fn target_at(pids: &[u32], x: i32, y: i32) -> Result<Target> {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, &mut pid);
         if !pids.contains(&pid) {
-            let mut title = [0u16; 128];
-            let n = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32).max(0) as usize;
-            return Err(Error::refused(
-                "WindowHidden",
-                format!("another window covers the point ({x}, {y}): {:?} of process {pid}", String::from_utf16_lossy(&title[..n])),
-                "keep the app's window uncovered while strobe drives it",
-            ));
+            return Err(Error::refused("WindowHidden", format!("another window covers the point ({x}, {y})"), "keep the app's window uncovered while strobe drives it"));
         }
         let mut c = POINT { x, y };
         windows_sys::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut c);

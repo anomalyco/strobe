@@ -1146,6 +1146,12 @@ impl<'a> Doc<'a> {
     pub(super) fn notes(&self) -> String {
         let r = self.r;
         let mut t = String::new();
+        for s in &self.series {
+            let aside = crate::app::bench::retry_launches(s);
+            if aside > 0 {
+                t += &format!("- **Launches ({}):** {} kept launches + {aside} set aside; warmups excluded\n", cell(&self.title(s)), s["launches"]);
+            }
+        }
         // A note's base and head by the words the block uses for them (`side_words`): a compact name,
         // as the card has it.
         let sides = side_words(r);

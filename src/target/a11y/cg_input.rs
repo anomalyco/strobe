@@ -287,14 +287,12 @@ impl Poster {
     /// frontmost window at the point, at any level, which must be the app's. Every other accessibility
     /// error stays one.
     pub fn target(&self, pids: &[u32], x: f64, y: f64) -> Result<Target> {
-        let covered = |what: String, pid: u32| -> Error {
-            Error::refused("WindowHidden", format!("another app's window covers the point ({x:.0}, {y:.0}): {what} of process {pid}"), "keep the app's window uncovered while strobe drives it")
-        };
+        let covered = || -> Error { Error::refused("WindowHidden", format!("another app's window covers the point ({x:.0}, {y:.0})"), "keep the app's window uncovered while strobe drives it") };
         let pid = match super::ax::app_at(x, y)? {
-            Some((pid, at)) if !pids.contains(&pid) => return Err(covered(super::ax::describe(&at), pid)),
+            Some((pid, _)) if !pids.contains(&pid) => return Err(covered()),
             Some((pid, _)) => pid,
             None => match crate::host::macos::front_window_at(x, y) {
-                Some((pid, _, owner)) if !pids.contains(&pid) => return Err(covered(format!("a window of {owner}"), pid)),
+                Some((pid, _, _)) if !pids.contains(&pid) => return Err(covered()),
                 Some((pid, window, _)) => return Ok(Target { pid, window, x, y }),
                 None => return Err(Error::msg(format!("no window at ({x:.0}, {y:.0}), and the app there answers no accessibility hit test"))),
             },

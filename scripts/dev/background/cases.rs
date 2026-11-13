@@ -16,6 +16,7 @@ fn cmp(m: &str) -> Comparison {
 }
 fn impact<'a>(p: &'a Comparison, cores: usize) -> LoadImpact<'a> {
     LoadImpact {
+        counted_cpus: 2,
         busy_before: 0.,
         expects_load: true,
         moves: load_metric(&p.metric),
@@ -68,6 +69,15 @@ pub fn run(logs: Option<&Path>) {
     let raw = |ms: f64, own: f64, foreign: f64| RunLoad { ms, busy_ms: Some(own + foreign * ms / 100.0), own_ms: Some(own), stolen_ms: Some(0.0), ..Default::default() };
     for (busy, want) in [(0., "info"), (0.1, "info"), (0.11, "warn")] {
         expect("unresolved Linux block", background_note(&[read_run(&[RunLoad { ticks_pct: 100., ..raw(2., 1., 0.) }], 0)], &LoadImpact { busy_before: busy, ..impact(&p, 8) }), want);
+    }
+    for (ticks, capacity) in [(90., false), (200., true), (1580., true)] {
+        let w = background_note(&[read_run(&[RunLoad { ticks_pct: ticks, ..raw(2., 1., 0.) }], 0)], &a).unwrap();
+        assert_eq!(w.text.contains('%'), !capacity);
+        assert_eq!(w.text.contains("40 ms"), capacity);
+        let mut r = serde_json::json!({"warnings":[],"series":[{"warnings":[w]},{"warnings":[w]}]});
+        strobe::app::bench::roll_up_resolution(&mut r);
+        assert_eq!(r["warnings"].as_array().unwrap().len(), 1);
+        assert!(r["series"][1]["warnings"].as_array().unwrap().is_empty());
     }
     // Five 4 ms runs, with 20 ms between them: W=100 ms. Of 200 ms available, reserve
     // 10 ms for the target (including reset), 30 ms for the observer, then plant 75 ms.

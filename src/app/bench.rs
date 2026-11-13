@@ -1573,6 +1573,7 @@ fn moved_by_load(s: &Series, tested: &[Comparison]) -> bool {
 
 /// What a series' comparisons say about its blocks with other work, for `background_note`.
 pub struct LoadImpact<'a> {
+    pub counted_cpus: u32,
     pub busy_before: f64,
     pub expects_load: bool,
     /// Anything the series compares moves with load (`moved_by_load`).
@@ -1644,15 +1645,22 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
             return Some(validity::warn("Background", "other work could not be separated from the target in every measured run; rerun with readable CPU accounting"));
         }
         if let Some(ticks) = blocks.iter().filter_map(|b| b.values.get("background.subtick")).copied().reduce(f64::max) {
-            let span = format!("the measured block span was too short for Linux's 10 ms idle ticks to rule out foreign work below ~{ticks:.0}% of a core");
-            return Some(if at.busy_before > 0.10 {
+            let k = at.counted_cpus;
+            let span = if ticks >= 100. * f64::from(k) {
+                format!("Linux cannot judge other work in a block this short; at least {} ms of measured span is needed on {k} counted CPUs", 20 * k)
+            } else {
+                format!("the measured block span was too short for Linux's 10 ms idle ticks to rule out foreign work below ~{ticks:.0}% of a core")
+            };
+            let mut w = if at.busy_before > 0.10 {
                 validity::warn(
                     "Background",
                     format!("{:.0}% of all CPUs were busy before the run, and {span}; close heavy apps, loop more work per run, or pass a larger --runs", 100. * at.busy_before),
                 )
             } else {
-                validity::info("Background", format!("{span} (lower bound <25%); loop more work per run or pass a larger --runs for tighter resolution"))
-            });
+                validity::info("Background", format!("{span}; loop more work per run or pass a larger --runs for tighter resolution"))
+            };
+            w.reason = Some("idle_tick_resolution");
+            return Some(w);
         }
         return (!at.discarded.is_empty()).then(|| {
             if at.primary.is_none_or(|p| !p.kind.decided()) {
@@ -2018,7 +2026,7 @@ struct Ctx<'a> {
 
 /// Every block's reservation, merged for the experiment's context.
 #[derive(Clone, Debug, Default, Serialize)]
-struct ReserveTotal {
+pub struct ReserveTotal {
     cpus: u64,
     blocks: u32,
     /// Per name, the most of that executable one block moved.
@@ -2035,7 +2043,7 @@ struct ReserveTotal {
 }
 
 impl ReserveTotal {
-    fn add(&mut self, r: &host::reserve::Report) {
+    pub fn add(&mut self, r: &host::reserve::Report) {
         let n = self.blocks as f64;
         self.cpus = r.cpus;
         self.moved_per_block = (self.moved_per_block * n + r.moved_total() as f64) / (n + 1.0);
@@ -2053,18 +2061,22 @@ impl ReserveTotal {
         self.restored += r.restored;
     }
 
-    /// One line for the plan, the context note and the PR footer.
-    fn text(&self) -> String {
+    pub fn note(&self) -> Warning {
+        validity::info("ReservedCpus", self.text(false))
+    }
+
+    /// Only the terminal version contains executable names.
+    fn text(&self, names_live: bool) -> String {
         let cpus = cpu_list(self.cpus);
         let mut top: Vec<(&String, &u32)> = self.moved.iter().collect();
         top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         let names = top.iter().take(4).map(|(n, c)| if **c > 1 { format!("{n} ×{c}") } else { n.to_string() }).collect::<Vec<_>>().join(", ");
         let mut t = format!(
-            "other processes of this user kept off CPUs {cpus} during {} timed block{}: {:.0} moved per block ({names}{})",
+            "other processes of this user kept off CPUs {cpus} during {} timed block{}: {:.0} moved per block{}",
             self.blocks,
             if self.blocks == 1 { "" } else { "s" },
             self.moved_per_block,
-            if top.len() > 4 { ", …" } else { "" }
+            if names_live && !names.is_empty() { format!(" ({names}{})", if top.len() > 4 { ", …" } else { "" }) } else { String::new() }
         );
         if self.started > 0 {
             t += &format!(", {} more started during blocks and moved within 200 ms", self.started);
@@ -2079,7 +2091,10 @@ impl ReserveTotal {
                 .map(|(why, names)| format!("{} ({why})", names.iter().take(4).copied().collect::<Vec<_>>().join(", ") + if names.len() > 4 { ", …" } else { "" }))
                 .collect::<Vec<_>>()
                 .join("; ");
-            t += &format!("; {} could not be moved: {failed}", self.failed.len());
+            t += &format!("; could not move processes of {} distinct executable(s)", self.failed.len());
+            if names_live {
+                t += &format!(": {failed}");
+            }
         }
         let back = self.restored as f64 / self.moved_total.max(1) as f64;
         t += &format!(
@@ -3198,7 +3213,8 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     }
     if let Some(t) = &ctx.reserved {
-        ctx.warnings.push(validity::info("ReservedCpus", t.text()));
+        super::live_progress(t.text(true));
+        ctx.warnings.push(t.note());
     }
     if !out_of_time.is_empty() {
         all_decided = false;
@@ -3339,6 +3355,7 @@ pub fn run(args: &Args) -> Result<Output> {
         "stopped": halted.as_ref().map(|h| json!({ "code": h.code, "why": h.message, "validator": h.validator(), "not_run": not_run })),
     });
     let mut result_json = result_json;
+    roll_up_resolution(&mut result_json);
     // The journeys as one family (SPEC §9.3): `scoreboard`, and each primary's `p_repeated` and
     // `holm_decided`, as every report reads them.
     if ctx.implementations {
@@ -4395,7 +4412,7 @@ fn check_text_at(r: &Value, source: Option<&Path>) -> String {
                 if let Some(m) = meta(rec).filter(|m| ["width", "height", "frames", "duration_s"].iter().all(|k| m["video"][k].is_number())) {
                     text += &format!("      {}", super::video::line(rec, &m["video"]));
                 } else {
-                    text += &format!("      video    {rec} · recording details unavailable\n");
+                    text += &format!("      video    {rec} · recording details unavailable · strobe report recording {rec} --open\n");
                 }
             }
             if let Some(line) = screen_line(&s["screen"]) {
@@ -4900,6 +4917,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     warnings.extend(background_note(
         &blocks,
         &LoadImpact {
+            counted_cpus: ctx.pin.unwrap_or_else(|| host::topology().all()).count_ones(),
             busy_before: ctx.busy_before,
             expects_load: ctx.phone.is_none() && !cfg!(target_os = "macos"),
             moves: moved_by_load(s, &[]) || blocks.iter().any(|b| b.values.keys().any(|m| load_metric(m))),
@@ -5033,6 +5051,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let cores = ctx.phone.is_none().then(|| target_cores(ctx.pin)).flatten();
     let burst_at = burst_pct(cores);
     let mut discarded: Vec<Burst> = serde_json::from_value(ctx.saved["series"][s.label()]["discarded_bursts"].clone()).unwrap_or_default();
+    let mut aside = ctx.saved["series"][s.label()]["set_aside_launches"].as_u64().unwrap_or(2 * discarded.len() as u64);
     // Whether anything the series compares moves with load: only then is a pair worth running again.
     let load_moves = moved_by_load(s, &[]) || secondary_names(s, script, true).iter().any(|m| load_metric(m));
     'pairs: for pair in from..max_pairs {
@@ -5100,20 +5119,24 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 let steal = |b: &Block| b.values.get("steal.pct").copied();
                 discarded.push(Burst { pair, base: foreign(bb), head: foreign(hb), apart, base_steal: steal(bb), head_steal: steal(hb) });
                 let who = busiest_during(&blocks[start..]);
+                if !who.is_empty() {
+                    super::live_progress(format!("  busiest elsewhere: {who}"));
+                }
                 discard(&mut blocks);
-                checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded }));
+                aside += 2;
+                checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded,"set_aside_launches":aside }));
                 progress(format!(
-                    "  pair {}: other work during {}'s block only, {:.0}% of a core more than the other's{}: pair set aside and run again ({} of {BURST_RETRIES} for the series; the paired test still counts it)",
+                    "  pair {}: other work during {}'s block only, {:.0}% of a core more than the other's: pair set aside and run again ({} of {BURST_RETRIES} for the series; the paired test still counts it)",
                     pair + 1,
                     side_of(ctx, &variants[if apart > 0.0 { 1 } else { 0 }]),
                     apart.abs(),
-                    if who.is_empty() { String::new() } else { format!(" (busiest elsewhere: {who})") },
                     discarded.len()
                 ));
                 validity::wait_quiet(ctx.pin, Duration::from_secs(5));
                 continue;
             }
             discard(&mut blocks);
+            aside += 2;
             redone += 1;
             if redone >= 5 {
                 return Err(Error::refused(
@@ -5125,7 +5148,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             progress(format!("  pair {}: the session locked or unlocked, or the display turned off or on, between its blocks; the pair runs again", pair + 1));
         }
         pairs.push((idx[0], idx[1]));
-        checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded }));
+        checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded,"set_aside_launches":aside }));
         let primary_pairs: Vec<(f64, f64)> = pairs.iter().map(|&(a, b)| (val(&blocks[a], &s.primary), val(&blocks[b], &s.primary))).collect();
         let n = pair + 1;
         // The two sides did not do the same journey (SPEC §9.10): nothing of the series compares.
@@ -5192,7 +5215,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             sequential::Step::RunOn { need, holm, fam, now: true } => {
                 let why = if fam > holm { format!("its verdict can clear Holm across the {journeys} journeys") } else { "the secondaries can clear Holm".to_string() };
                 progress(format!("  the primary is decided; {} more pair{} so {why} ({need} pairs)", need - n, if need - n == 1 { "" } else { "s" }));
-                checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded }));
+                checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded,"set_aside_launches":aside }));
             }
             sequential::Step::RunOn { need, now: false, .. } => {
                 let eta = eta(ctx, s, &blocks, &pairs, need);
@@ -5544,6 +5567,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     for (i, set) in sets.iter().enumerate() {
         let from_here = |m: &str| usize::from(apart(m)) == i && load_metric(m);
         let impact = LoadImpact {
+            counted_cpus: ctx.pin.unwrap_or_else(|| host::topology().all()).count_ones(),
             busy_before: ctx.busy_before,
             expects_load: ctx.phone.is_none() && !cfg!(target_os = "macos"),
             moves: from_here(&s.primary) || secondaries.iter().any(|c| from_here(&c.metric) && c.kind != VerdictKind::Untested),
@@ -5569,7 +5593,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             }
             let who = busiest_during(set.blocks);
             if !who.is_empty() {
-                progress(format!("  other work on the measured CPUs in some blocks (busiest elsewhere: {who})"));
+                super::live_progress(format!("  other work on the measured CPUs in some blocks (busiest elsewhere: {who})"));
             }
             warnings.push(note);
         }
@@ -5796,6 +5820,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     out["target_cores"] = json!(cores);
     out["target_cpus"] = json!(ctx.phone.is_none().then(|| ctx.pin.unwrap_or_else(|| host::topology().all()).count_ones()));
     out["discarded_bursts"] = json!(discarded);
+    out["set_aside_launches"] = json!(aside);
     series_setup(ctx, s, window, &mut out);
     if ctx.implementations {
         implementation_series(ctx, s, variants, &mut out);
@@ -6979,14 +7004,14 @@ impl Foreign {
 /// the check's own (`Throttled`), with the other work named so a reader can tell. `again` says what
 /// earlier checks of the block saw.
 fn slow_check(e: Error, other: &OtherWork, again: &str) -> Error {
-    let named = validity::named_work(&other.busiest, other.steal);
+    let named = validity::speed_context(&other.busiest, other.steal, true, |s| super::live_progress(s));
     match other.foreign {
         Some(f) if f >= BACKGROUND_PCT => Refusal::new(ValidatorId::Background, format!("the speed check ran slow while other work kept the target's CPUs {} busy ({})", other.on_cpus(), e.message))
-            .detail(format!("busiest processes on the machine (% of a core): {named}{again}"))
+            .detail(format!("{named}{again}"))
             .fix("let that work finish (an antivirus scanning new files, an update, a build), or exclude it from the bench's CPUs")
             .into(),
         _ => match e.refusal {
-            Some(r) => (*r).detail(format!("other work on the target's CPUs meanwhile: {}; busiest processes on the machine (% of a core): {named}{again}", other.on_cpus())).into(),
+            Some(r) => (*r).detail(format!("other work on the target's CPUs meanwhile: {}; {named}{again}", other.on_cpus())).into(),
             None => e,
         },
     }
@@ -7008,13 +7033,13 @@ fn check_slow(label: &str, side: &str, e: &Error) -> Warning {
 /// `--max-time`) and refuses a slow check; a `--check` runs it once and says a slow one (`check_slow`).
 fn native_speed(ctx: &mut Ctx, s: &Series, v: &Variant) -> Result<Option<f64>> {
     if ctx.mode != Mode::Check {
-        return match validity::native_speed_checked(ctx.pin, validity::SpeedWait::Timed(ctx.deadline)) {
+        return match validity::native_speed_checked(ctx.pin, validity::SpeedWait::Timed(ctx.deadline), |s| super::live_progress(s)) {
             // `--max-time` cut its waits short while it was still slow.
             Err(e) if e.code == 124 && e.validator().is_none() => Err(out_of_time(ctx, &e.message)),
             r => r,
         };
     }
-    match validity::native_speed_checked(ctx.pin, validity::SpeedWait::Once) {
+    match validity::native_speed_checked(ctx.pin, validity::SpeedWait::Once, |s| super::live_progress(s)) {
         Err(e) if matches!(e.validator(), Some(ValidatorId::Background | ValidatorId::Throttled)) => {
             let side = side_of(ctx, v).to_string();
             ctx.warnings.push(check_slow(&s.label(), &side, &e));
@@ -9526,7 +9551,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let first = if on_phone.is_some() {
                 e.message.clone()
             } else {
-                format!("{}; other work on the target's CPUs {}; busiest processes on the machine: {}", e.message, other.on_cpus(), validity::named_work(&other.busiest, other.steal))
+                format!("{}; other work on the target's CPUs {}; {}", e.message, other.on_cpus(), validity::speed_context(&other.busiest, other.steal, true, |s| super::live_progress(s)))
             };
             progress(format!("  the {side} speed check ran slow ({}): it runs once more after the CPUs settle", e.message));
             if on_phone.is_none() {
@@ -14067,6 +14092,42 @@ pub(crate) fn rendered(r: &Value) -> Option<String> {
     rendered_at(r, None)
 }
 
+/// Older results kept the discarded one-sided pairs, but not the launch count.
+pub(crate) fn retry_launches(s: &Value) -> u64 {
+    s["set_aside_launches"].as_u64().unwrap_or_else(|| s["discarded_bursts"].as_array().map_or(0, |a| 2 * a.len() as u64))
+}
+
+/// A resolution-only note is context, not a series verdict. Keep busy/unread warnings on
+/// their series (track and bisect consume them); never bridge the gaps between launches.
+pub fn roll_up_resolution(result: &mut Value) {
+    let mut notes = Vec::new();
+    let mut affected = 0;
+    for s in result["series"].as_array_mut().into_iter().flatten() {
+        if let Some(w) = s["warnings"].as_array_mut() {
+            let before = w.len();
+            w.retain(|v| {
+                if v["level"] == "info" && v["reason"] == "idle_tick_resolution" {
+                    notes.push(v.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            affected += usize::from(before != w.len());
+        }
+    }
+    if let Some(mut w) = notes.into_iter().next() {
+        if affected > 1 {
+            w["text"] = json!(format!(
+                "{affected} series had blocks too short for Linux's idle ticks to rule out other work; allow at least 20 ms of measured span per counted CPU by looping more work per run or passing a larger --runs"
+            ));
+        }
+        if let Some(all) = result["warnings"].as_array_mut() {
+            all.push(w);
+        }
+    }
+}
+
 pub(crate) fn rendered_at(r: &Value, source: Option<&Path>) -> Option<String> {
     match r["kind"].as_str() {
         Some("experiment") if r["series"].is_array() => Some(render(r)),
@@ -14189,7 +14250,9 @@ pub(crate) fn render(r: &Value) -> String {
         };
         // A seeded workload: both sides ran the same inputs, and `--seed` replays them.
         let seeded = if r["plan"]["used_random"] == true { format!(" · seed {}", r["plan"]["seed"]) } else { String::new() };
-        out += &format!("blocks {} pairs ({} fresh launches) · {per_block}{seeded} · stopped: {}\n", s["pairs"], s["launches"], s["stopped"].as_str().unwrap_or(""));
+        let retries = retry_launches(&s);
+        let launches = if retries > 0 { format!("{} kept launches + {retries} set aside", s["launches"]) } else { format!("{} fresh launches", s["launches"]) };
+        out += &format!("blocks {} pairs ({launches}) · {per_block}{seeded} · stopped: {}\n", s["pairs"], s["stopped"].as_str().unwrap_or(""));
         if let Some(k) = s["primary_pairs"].as_u64().filter(|k| Some(*k) < s["pairs"].as_u64()) {
             out += &format!("       ★ the primary's verdict, estimate and interval are its first {k} pairs' (the look that decided it); the rest ran for the secondaries\n");
         }

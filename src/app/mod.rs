@@ -461,16 +461,32 @@ fn progress_mode(args: &Args) -> Result<()> {
 /// sets `$?` to false, and `powershell -Command` then exits 1, while strobe's own exit code,
 /// `$LASTEXITCODE`, is 0).
 pub fn progress(msg: impl AsRef<str>) {
-    match *PROGRESS.get().unwrap_or(&"stderr") {
-        "off" => {}
-        _ if QUIET.load(std::sync::atomic::Ordering::Relaxed) => {}
-        "stdout" => println!("{}", msg.as_ref()),
-        _ => eprintln!("{}", msg.as_ref()),
-    }
+    print_progress(msg.as_ref());
     if let Some(p) = SCOPE.with(|s| s.borrow().progress.clone())
         && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p)
     {
         use std::io::Write;
         let _ = writeln!(f, "{}", msg.as_ref());
+    }
+}
+
+/// Terminal only. Unlike `progress`, never copy this diagnostic to the experiment log.
+pub(crate) fn live_progress(msg: impl AsRef<str>) {
+    use std::io::IsTerminal;
+    if match *PROGRESS.get().unwrap_or(&"stderr") {
+        "stdout" => std::io::stdout().is_terminal(),
+        "off" => false,
+        _ => std::io::stderr().is_terminal(),
+    } {
+        print_progress(msg);
+    }
+}
+
+fn print_progress(msg: impl AsRef<str>) {
+    match *PROGRESS.get().unwrap_or(&"stderr") {
+        "off" => {}
+        _ if QUIET.load(std::sync::atomic::Ordering::Relaxed) => {}
+        "stdout" => println!("{}", msg.as_ref()),
+        _ => eprintln!("{}", msg.as_ref()),
     }
 }

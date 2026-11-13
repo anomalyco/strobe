@@ -12,3 +12,17 @@
 | Filmed check: CLI summary and Markdown, video and phone | Exact recording metadata from the result's source, without marking it used | Prefix match, made-up dimensions or frame counts, paths supplied by metadata |
 | Recording details and query links after merging main | Same exact recording and experiment IDs; validate the copy first, then try the store. A link also needs data for its requested view. | Creating a state directory to look up a recording, or accepting metadata that the link reader would reject |
 | macOS / standalone run / Windows terminal | `auto` and `none` remain unpinned on macOS; reject explicit placement. A standalone run has no runner. Both the identified console host and the child must accept the full mask. | Reporting a pin the OS did not apply, a nonexistent runner, or a partial mask |
+
+### 0.37 consumer audit
+
+| Source | Live diagnostic | Persisted / rendered reason |
+|---|---|---|
+| Native and page speed checks (first slow try, recovered note, final refusal, check conversion) | Busiest processes with PIDs and CPU | Count and busiest share; steal is numeric |
+| One-sided retry / kept block | Busiest elsewhere | Incidence and CPU only; do not write names to progress.log |
+| Reserve | Names of executables moved or failed | Mean moved per block; failed executable count, not a count of unique PIDs |
+| WindowHidden / locked input / slot holder | Blocker can be identified locally | Do not quote another window, its owner, PID, or another bench's command |
+| Ordinary SessionLocked, preflight Background, steal-only refusal, quota, thermal | Lock state or numeric measurement | Already contain no process list |
+| Linux unresolved window | No observed load is implied | Retain per-block evidence; never infer quiet across independent launches. Above capacity report minimum duration, not an impossible CPU percentage |
+| Main paired loop | Set-aside attempts use real wall time | Kept launches, set-aside launches and warmups are distinct; neither retries nor warmups enlarge the sample size |
+
+Local structured exception pending an owner decision: `plan.reserve.moved` (name → peak number moved per block), `failed` (name → reason), and block `background` ([name, share]) remain unchanged. Reservation filtering, pass merges and progress use the in-memory names. The PR pairs footer deduplicates names across blocks to compute a count and peak. The HTML viewer does not need names. The CI action anonymizes the maps and arrays in its upload; `surfaces.ts` uses them as leak canaries. Removing names without a replacement would lose cross-block deduplication and local attribution, and change the shape consumed by external JSON readers. Recording `query summary` also exposes its own recording-level structured busiest list, distinct from an experiment's warnings.

@@ -308,7 +308,7 @@ impl Worker {
             let kind = at.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default();
             let theirs = at.CurrentProcessId().unwrap_or(0);
             // An element of the app's own process read like another app's when named by its pid.
-            Ok(Err(if theirs == pid { format!("{kind} {name:?} of the app itself, such as a dialog or an overlay it shows over the element") } else { format!("{kind} {name:?} of process {theirs}") }))
+            Ok(Err(if theirs == pid { format!("{kind} {name:?} of the app itself, such as a dialog or an overlay it shows over the element") } else { "another app's element".into() }))
         }
     }
 

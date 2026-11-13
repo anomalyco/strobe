@@ -188,6 +188,7 @@ pub fn run(args: &Args) -> Result<Output> {
 
 /// An experiment's view, from its result (stored, or read from a path).
 fn experiment(mut result: Value, source: Option<&Path>, args: &Args, view: &str, top: usize) -> Result<Output> {
+    super::pr::safe_diagnostics(&mut result);
     // The folder that holds the result: what it keeps beside itself (a check's actions) is read there.
     let home = match source {
         Some(f) => f.parent().map(Path::to_path_buf),
