@@ -2,11 +2,20 @@
 // Run once with a lit display and once with it off; name a different supported engine as the second argument.
 import assert from "node:assert/strict"
 import { fileURLToPath } from "node:url"
+import { mkdtempSync, rmSync, copyFileSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 const [exe="strobe", engine="chromium"] = process.argv.slice(2)
-const file = fileURLToPath(new URL("./headless.bench.ts",import.meta.url))
+const cwd = mkdtempSync(join(tmpdir(),"strobe-headless-"))
+process.on("exit",()=>rmSync(cwd,{recursive:true,force:true}))
+const file = join(cwd,"headless.bench.ts")
+copyFileSync(fileURLToPath(new URL("./headless.bench.ts",import.meta.url)),file)
+writeFileSync(join(cwd,"index.html"),`<body><script>setTimeout(()=>document.body.insertAdjacentHTML('beforeend','<main>Ready</main>'),300)</script></body>`)
+writeFileSync(join(cwd,"serve.ts"), `Bun.serve({hostname:"127.0.0.1",port:Number(process.argv[2]),fetch:()=>new Response(Bun.file("index.html"))})`)
+writeFileSync(join(cwd,"strobe.json"), JSON.stringify({build:{},serve:{dir:".",command:"bun serve.ts {port}"}}))
 function check(label: string, primary: string) {
-  const p=Bun.spawnSync([exe,"bench",file,"--head",".","--check","--headless","--filter",label,"--primary",primary,"--engine",engine,"--runs","2","--why","never","--json"],{timeout:120000,stdout:"pipe",stderr:"pipe"})
-  assert.ok(p.exitCode===0 || p.exitCode===4, `${primary}: ${p.exitCode} ${p.stderr.toString().slice(-500)}`)
+  const p=Bun.spawnSync([exe,"bench",file,"--head",".","--check","--headless","--filter",label,"--primary",primary,"--engine",engine,"--runs","2","--why","never","--json"],{cwd,timeout:120000,stdout:"pipe",stderr:"pipe"})
+  assert.ok(p.exitCode===0 || p.exitCode===4, `${primary}: ${p.exitCode} ${p.stdout.toString().slice(-1000)} ${p.stderr.toString().slice(-500)}`)
   const r=JSON.parse(p.stdout.toString()); assert.equal(r.series.length,2)
   return r.series
 }

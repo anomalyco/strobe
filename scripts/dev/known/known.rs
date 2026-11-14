@@ -425,6 +425,11 @@ fn main() {
             thread::sleep(ms(arg(&args, 2, 100.0)));
             metric("cpu_ms", 0.0);
         }
+        "wall" => {
+            let duration = ms(arg(&args, 2, 150.0));
+            let start = Instant::now();
+            while start.elapsed() < duration { std::hint::spin_loop(); }
+        }
         "timer" => {
             let (hz, total) = (arg(&args, 2, 100.0), arg(&args, 3, 1000.0));
             let start = Instant::now();

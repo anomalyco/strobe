@@ -25,6 +25,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs"
 import { homedir, platform, tmpdir } from "os"
 import { join } from "path"
+import { shiftRows } from "./shift/rows"
 
 type J = any
 const argv = process.argv.slice(2)
@@ -220,7 +221,7 @@ function higher(s: J, c: J): boolean {
 }
 function blocksFor(s: J, m: string): J[] {
   const p = s.pass
-  if (p?.blocks?.length && (m === "cpu.instructions") === !!p.counters) return p.blocks
+  if (p?.blocks?.length && (typeof p.http === "boolean" ? m.startsWith("http.") === p.http : (m === "cpu.instructions") === !!p.counters)) return p.blocks
   return s.blocks ?? []
 }
 function pairs(s: J, m: string, below = Infinity): [number, number][] {
@@ -312,7 +313,19 @@ function checkResult(r: J) {
         const improved = (c.hi < 0) !== higher(s, c)
         if (improved !== (k === "better") && !(c.lo <= 0 && c.hi >= 0)) flagIt("CRIT", where, `verdict_kind ${k} but the interval [${c.lo}, ${c.hi}] says ${improved ? "better" : "worse"} for a metric better ${higher(s, c) ? "higher" : "lower"}`)
       }
-      const n = pairs(s, c.metric, role === "primary" && Number.isFinite(s.primary_pairs) ? s.primary_pairs : Infinity).length
+      const ps = pairs(s, c.metric, role === "primary" && Number.isFinite(s.primary_pairs) ? s.primary_pairs : Infinity)
+      const n = ps.length
+      if (c.shift) {
+        const d = ps.map(([b,h]) => h-b), w = d.flatMap((x,i) => d.slice(i).map(y => (x+y)/2)).sort((a,b) => a-b)
+        const est = (w[(w.length-1)>>1] + w[w.length>>1])/2
+        if (k === "refused" || !c.relative || Math.abs(c.shift.estimate-est) > 1e-12 * Math.max(1,Math.abs(est)) || !(c.shift.lo <= est && est <= c.shift.hi)) flagIt("CRIT", where, "shift is not the paired estimate inside its interval")
+        if (n >= 2 && n <= 16) {
+          let sums = [0]; for (let rank=1; rank<=n; rank++) sums = sums.concat(sums.map(x=>x+rank))
+          const alpha = role === "primary" ? r.plan?.alpha ?? 0.05 : 0.05
+          sums.sort((a,b)=>a-b); const idx=Math.max(0,sums[Math.floor(sums.length*alpha/2)]-1)
+          if (Math.abs(c.shift.lo-w[idx])+Math.abs(c.shift.hi-w[w.length-1-idx]) > 1e-11*Math.max(1,Math.abs(est))) flagIt("CRIT",where,"shift interval disagrees with enumerated sign assignments")
+        }
+      }
       if (Number.isInteger(c.n) && k !== "refused" && n && c.n !== n) flagIt("MED", where, `n ${c.n}, the blocks hold ${n} pairs with both values`)
     }
   }
@@ -392,7 +405,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
     const mdBody = md.replace(/^```\n?|\n?```\s*$/g, "")
     const texts: [string, string][] = [["text", text]]
     if (reportable && mdBody.trim() !== text.trim()) texts.push(["md", mdBody])
-    const sectionsOf = (t: string) => t.split(/^(?=strobe bench )/m)
+    const sectionsOf = (t: string) => t.split(/^(?=strobe (?:bench |run ·))/m)
     const prRows = pr.split("\n").filter((l) => l.startsWith("|")).map((l) => l.split(/(?<!\\)\|/).slice(1, -1).map(strip))
     const impl = r.comparison === "implementations"
     // An A/A: a better or worse verdict between identical builds is a false positive on every surface.
@@ -415,6 +428,27 @@ function checkSurfaces(r: J, handle: string = r.id) {
           if (!row) {
             if (sec) flagIt("HIGH", `${name} ${where}`, "no row")
           } else {
+            const next = sec.split("\n")[sec.split("\n").indexOf(row)+1] ?? ""
+            if (c.shift) {
+              const shift = next.trim()
+              if (!shift.startsWith("shift ") || next.length > 110 || (!!c.warned !== shift.includes("(warned)"))) flagIt("CRIT",`${name} ${where}`,`shift line: ${shift}`)
+              const match = /^shift (\S+) \[(\S+) … (\S+)\] (µs|ms|s|B|KB|MB|GB)\b/.exec(shift)
+              const scale: Record<string,number> = c.shift.unit === "bytes" ? { B:1, KB:1024, MB:1024**2, GB:1024**3 } : c.shift.unit === "ms" ? { [TU[UNIT].label]:1/TU[UNIT].perMs } : { MB:1 }
+              if (!match || !(match[4] in scale)) flagIt("CRIT",where,"wrong shift unit or shape")
+              else {
+                const width = (c.shift.hi-c.shift.lo)/scale[match[4]], exp = Math.floor(Math.log10(width)), zeroWidth = Math.floor(Math.log10(Math.abs(c.shift.estimate)/scale[match[4]]))-2
+                const step = 10**(width > 0 ? exp-Number(width/10**exp<3.545) : zeroWidth)
+                for (const [i,v] of [c.shift.estimate,c.shift.lo,c.shift.hi].entries()) {
+                  const token = match[i+1].replaceAll(",","").replace("−","-")
+                  const x = v / scale[match[4]], display = Number(token.replace("<","")), precision = 10**-(token.split(".")[1]?.length ?? 0)
+                  if (token.includes("<") ? Math.sign(x)!==Math.sign(display) || Math.abs(x)>=Math.abs(display) : Math.abs(x-display) > 0.500001*Math.max(step,precision)+1e-10*Math.abs(x)) flagIt("CRIT",where,`shift number ${token} does not round from ${x}`)
+                }
+              }
+              const diff = Math.sign(c.shift.estimate) !== Math.sign(c.estimate) || (c.lo>0?1:c.hi<0?-1:0) !== (c.shift.lo>0?1:c.shift.hi<0?-1:0)
+              if (diff !== shift.includes("differs on ratio scale")) flagIt("HIGH", where,"unexplained scale disagreement")
+              if (!pr.replaceAll("\u00a0"," ").replaceAll("&lt;","<").includes(shift)) flagIt("HIGH",`pr ${where}`,"missing shift")
+              if (role === "primary" && html?.text.includes(`${s.label} · Primary:`) && !html.text.includes(shift)) flagIt("HIGH",`html ${where}`,"missing shift")
+            } else if (next.trimStart().startsWith("shift ")) flagIt("CRIT",where,"unexpected shift")
             // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
             const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(vText(c))[0]
             const toks = body.match(/—|[−+-]?<?\d[\d.,]*(?:e\d+)?(?: ?(?:[GMk] instr|instr|µs|ms|pp|MB|KB|GB|B|score|s(?![a-z])|%|\/s))?/g) ?? []
@@ -446,7 +480,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
           const sameChange = (x: string) => x === ch || (/×$/.test(x) && Math.abs(parseFloat(x) - (1 + c.estimate)) < 0.06)
           // Every row with these numbers (two metrics can share them): the verdict must be on one of them.
           const hits = prRows.filter((cells) => (cells.includes(ch) && cells.includes(rg)) || (impl && c.relative && !refused && cells.length >= 6 && sameChange(cells[3]) && /×|%/.test(cells[4])))
-          const word = aa && (k === "better" || k === "worse") ? "false positive" : vText(c).replace(/ \(small\)$/, "")
+          const word = aa && (k === "better" || k === "worse") ? "false positive" : vText(c).replace(/ \(warned\)$/, "").replace(/ \(small\)$/, "")
           if (!hits.length) flagIt("HIGH", `pr ${where}`, `no Metrics row with change ${ch} and range ${rg}`)
           else if (refused && hits.every((h) => h.slice(1, 3).some((x) => /\d/.test(x)))) flagIt("CRIT", `pr ${where}`, `refused, yet the row shows ${hits[0].join(" | ")}`)
           else if ((k === "better" || k === "worse") && !hits.some((h) => h.some((x) => x.startsWith(word)))) flagIt("CRIT", `pr ${where}`, `verdict ${word} not in its row: ${hits[0].join(" | ")}`)
@@ -472,7 +506,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
             i = j
           }
           if (i >= 0) {
-            const next = lines[i + 1] ?? ""
+            const next = (lines[i + 1] ?? "").split(" shift ")[0]
             const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : c.warned && (k === "same" || k === "no_worse") ? /Needs confirmation$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested$/ : /Inconclusive|Unconfirmed/
             if (!want.test(next)) flagIt("CRIT", `html ${where}`, `outcome "${next}" for verdict_kind ${k}`)
             // A time's absolute bound, drawn again in the unit shown (`Same (±40.0 µs)`).
@@ -643,7 +677,8 @@ function checkSummary(r: J, md: string, text: string) {
   // and the busiest other processes each block saw (`blocks[].background`), where no case or target has the name.
   const own = new Set(seriesOf(r).flatMap((s: J) => [s.case, s.target, s.label]).filter(Boolean))
   const busy = seriesOf(r).flatMap((s: J) => [...(s.blocks ?? []), ...(s.pass?.blocks ?? [])].flatMap((b: J) => (Array.isArray(b.background) ? b.background.map((x: J) => x?.[0]) : [])))
-  const names = [...new Set([...Object.keys(r.plan?.reserve?.moved ?? {}), ...Object.keys(r.plan?.reserve?.failed ?? {}), ...busy])].filter((n) => typeof n === "string" && n.length > 3 && ![...own].some((o: any) => String(o).includes(n)))
+  const compositors = [r, ...seriesOf(r).flatMap((s: J) => [s, ...(s.blocks ?? []), ...(s.pass?.blocks ?? [])])].map(x => x.screen?.compositor?.name)
+  const names = [...new Set([...Object.keys(r.plan?.reserve?.moved ?? {}), ...Object.keys(r.plan?.reserve?.failed ?? {}), ...busy, ...compositors])].filter((n) => typeof n === "string" && n.length > 3 && ![...own].some((o: any) => String(o).includes(n)))
   // A side named by its executable (`exe:…/<hash>/app.exe`, `app:<id>`) is the target itself, not another process:
   // those side names alone are taken out first, so a foreign name anywhere else in the text still fails.
   // "Where it came from" lists the target's own threads and the module each started in (its own executable,
@@ -764,7 +799,9 @@ function sample(n: number): string[] {
   console.error(`sample: ${pick.length} experiments covering ${[...got].sort().map(([k, c]) => `${k} ×${c}`).join(", ")}`)
   return pick
 }
-const list = flag("scan") || flag("all") ? all() : flag("sample") ? sample(Number(opt("sample")) || 2) : ids
+const fixtures = flag("shift") ? mkdtempSync(join(tmpdir(),"strobe-shift-")) : null
+if (fixtures) process.on("exit",()=>rmSync(fixtures,{recursive:true,force:true}))
+const list = fixtures ? shiftRows(STROBE,fixtures) : flag("scan") || flag("all") ? all() : flag("sample") ? sample(Number(opt("sample")) || 2) : ids
 if (!list.length) {
   console.error("usage: bun scripts/dev/surfaces.ts <exp_…> … [--strobe <exe>] [--no-html] [--units us,ms,s] | --sample <n> | --all|--scan [--since <date>]")
   process.exit(2)
