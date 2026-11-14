@@ -4196,12 +4196,12 @@ fn check_output(
     let (env, stopped) = ran;
     // Each case's state in one field, and the refusal behind a refused or failed one at the top.
     for s in series.iter_mut() {
-        let (state, refusal) = match s["kind"].as_str() {
-            Some("gap") => ("gap", Value::Null),
-            Some("refused") => ("refused", s["primary"]["refusal"].clone()),
-            _ if s["journey_refusal"].is_object() => ("fail", s["journey_refusal"].clone()),
-            _ if s["passed"] == true => ("pass", Value::Null),
-            _ => ("fail", s["refusal"].clone()),
+        let state = check_state(s);
+        let refusal = match state {
+            "refused" => s["primary"]["refusal"].clone(),
+            "fail" if s["journey_refusal"].is_object() => s["journey_refusal"].clone(),
+            "fail" => s["refusal"].clone(),
+            _ => Value::Null,
         };
         if state != "pass" && s["error"].is_null() && refusal.is_object() {
             s["error"] = json!(format!("{}: {}", refusal["validator"].as_str().unwrap_or(""), refusal["summary"].as_str().unwrap_or("")));
@@ -4236,8 +4236,18 @@ fn noworse_compared(r: &Value) -> Option<usize> {
         .then(|| ran.iter().flat_map(|s| s["counters"].as_array().into_iter().flatten()).filter(|c| matches!(c["state"].as_str(), Some("no_worse" | "worse" | "unstable"))).count())
 }
 
-/// A check's cases by state: (parity gaps, refused before they ran, journeys whose sides differ,
-/// failed).
+/// One reading of a completed check case, including older files without `state`.
+pub(super) fn check_state(s: &Value) -> &'static str {
+    match s["kind"].as_str() {
+        Some("gap") => "gap",
+        Some("refused") => "refused",
+        _ if s["journey_refusal"].is_object() || s["passed"] == false => "fail",
+        _ if s["passed"] == true => "pass",
+        _ => "fail",
+    }
+}
+
+/// The check's completion policy, shared by the exit code, result and summaries.
 pub(super) struct CheckEnd {
     pub code: i32,
     pub lead: String,
@@ -4257,7 +4267,7 @@ impl CheckEnd {
         // gap is; the rest of the file ran.
         let before = series.iter().filter(|s| s["kind"] == "refused").count();
         let refused = series.iter().filter(|s| s["journey_refusal"].is_object()).count();
-        let failed = series.iter().filter(|s| !matches!(s["kind"].as_str(), Some("gap" | "refused")) && (s["passed"] != true || s["journey_refusal"].is_object())).count();
+        let failed = series.iter().filter(|s| check_state(s) == "fail").count();
         let ran = series.len() - gaps - before;
         let flags = &r["args"]["flags"];
         let strict = flags.get("require-verdict").is_some();
@@ -4385,7 +4395,7 @@ fn check_text_at(r: &Value, source: Option<&Path>) -> String {
         let launch = s["batch_id"].as_u64().map(|id| format!(" · launch {id}.{}", s["batch_seq"])).unwrap_or_default();
         // A check that measured a later run than its first says which, on the line its values are on.
         let later = s["measured_run"].as_u64().filter(|r| *r > 0);
-        if s["passed"] == true {
+        if check_state(s) == "pass" {
             text += &format!(
                 "pass  {}  {value}  {secs:.1} s{launch}{}{}{}{}{}{}{}{}\n",
                 s["label"].as_str().unwrap_or(""),

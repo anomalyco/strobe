@@ -10414,7 +10414,7 @@ a timing verdict on a shared runner.
   and a base commit, `--base <sha> --noworse <list>`: both commits run each case (§5.6 "A check against
   base") and a counter over base's by more than its margin, or one that varies between runs, fails the
   case; so does a case base cannot run. If cases ran without failure but compared none of the counters
-  `noworse` names, exit 4 fails the step (`fail-on: never` aside; for the 0.34.0 all-gap issue see §5.2).
+  `noworse` names, exit 4 fails the step (`fail-on: never` aside); this includes all-gap checks (§5.2).
   Declare each conditional counter in the metrics of
   the cases that count it. With `leak` it adds a leak run per bench file (`--probes memory --headless --repeat
   <leak-repeat>`, default 6), judged by its slopes (§8.6). The step summary gets `strobe report

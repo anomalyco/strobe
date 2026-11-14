@@ -101,18 +101,7 @@ fn check(r: &Value, series: &[&Value]) -> String {
     let mut rows = Vec::new();
     for s in series {
         let (case, target) = case_target(s);
-        let state = match s["state"].as_str() {
-            // A `--noworse` counter that failed fails a case that ran (`passed` false, its `error` the counter).
-            Some("pass") if s["passed"] == false => "fail",
-            Some(x) => x,
-            None => match (s["kind"].as_str(), s["passed"].as_bool()) {
-                (Some("refused"), _) => "refused",
-                (Some("gap"), _) => "gap",
-                (_, Some(true)) => "pass",
-                (_, Some(false)) => "fail",
-                _ => "",
-            },
-        };
+        let state = crate::app::bench::check_state(s);
         let status = match state {
             "pass" => {
                 passed += 1;
