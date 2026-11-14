@@ -591,7 +591,7 @@ const WIN_PAGE_ENGINE: &str = "0.41.0 read 100.44 ms for 100 ms and 25 layouts/s
 const WIN_SCRIPT_CPU: &str = "on 0.41.0 the 300 ms spin read 307.63 ms; needs a known answer within 2% and qualifying CPU pairs. A/A had only a spare-capacity note; A/B had 7 clean pairs";
 const WIN_SCRIPT_HTTP: &str = "the planted interval overlaps the warm control range [+184.36 … +185.24]%, but other work flagged 9 of 24 A/A and 11 of 24 A/B blocks. Needs quiet probe pairs";
 const WIN_PAGE_CPU_FLAGGED: &str =
-    "with untimed OS snapshots cpu2s read 2003.98 ms vs 2016 ms. Needs quiet fixed-work pairs: 17 of 24 A/A and 3 of 24 A/B blocks flagged, with no clean-pair confirmation";
+    "0.41.0 cpu2s read 2003.94 ms vs 2000 OS ms. Each fixed-work comparison had only 6 clean pairs of 12; needs qualifying A/A and A/B";
 const LINUX_CLI_WALL: &str = "a command's run.duration reads 15 to 18 ms more than the command took: strobe's clock starts before the launch cgroup's set-up and the child's move into it (linux-promo-6); its A/A and planted A/B pass";
 const TTY_LATENCY: &str = "0.41.0 recovered the answer and grid counts, refused overrun and recovered +60 ms with agreement on 8 clean pairs. Needs an unwarned keys A/A; only 5 of 12 pairs were clean";
 const WIN_TTY_LAUNCH: &str = "0.41.0 recovered +300 ms and refused painted launch, but only 6 of 10 A/A and 4 of 10 A/B pairs were clean. Needs qualifying ready-500 A/A and planted A/B";
