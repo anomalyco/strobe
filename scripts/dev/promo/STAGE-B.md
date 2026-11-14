@@ -1,13 +1,13 @@
 # Stage B: headless support evidence
 
-**Result: 27 verified cells, 21 core, on this branch.** Round three verified Windows script wall time. Round two added Linux page launch and script HTTP to the four Linux cells verified in round one. No command label or review stamp changed. Keep user-facing labels off until every cell in the headless starter set is verified on all three primary systems, not until a numerical quota is met.
+**Merged matrix: 24 labelled verified, 18 core. Seven evidence records await review.** Round three verified Windows script wall time on v0.39.0. Before the merge the count was 27/21; the command planner returned three offline Mac command cells to preview. Keep user-facing labels off until every cell in the headless starter set is verified on all three primary systems.
 
 | Host | Before (total / core¹) | Short list excluding commands | After (total / core¹) |
 |---|---:|---:|---:|
 | Windows x64 desktop | 4 / 4 | 6 | 5 / 5 |
 | Linux x64 VM, two unpinned vCPUs | 6 / 6 | 4 | 12 / 9 |
-| macOS arm64 laptop | 10 / 7 | 4 | 10 / 7 |
-| Total | 20 / 17 | 14 | 27 / 21 |
+| macOS arm64 laptop | 10 / 7 | 4 | 7 / 4 |
+| Total | 20 / 17 | 14 | 24 / 18 |
 
 ¹ `Capability::core()` counts wall and counts, page engine, process CPU, process memory and terminal grid. The short list excludes the optional terminal and probe batches. The totals include them.
 
@@ -157,6 +157,26 @@ Each initial wait was capped at about ten minutes. Only the two refusals started
 | Terminal grid A/B | 0.33 / 0.37 / 0.00 | 2/14 | Time cap after 7 pairs; +60.061 ms [59.943, 60.247], `unclear` |
 
 **Windows script wall passes** with the earlier 301.29 ms check (3 runs; peak measured foreign work 16.09% of one core, below the 25% flag). The new A/A also reported an informational machine-wide 11% busy before the run, not a flagged measured block. Script CPU and grid need unflagged A/A and A/B; terminal launch needs only the unflagged A/A. No start or flag count exists for a leg held at the gate. Page wall needs an awake-display check and pairs; page engine and CPU need quiet pairs, page launch needs the later marked check and quiet pairs, and HTTP needs quiet probe pairs. None were run in this batch.
+
+### After merging the planner and check endings
+
+No new Windows benchmark ran on v0.41.0 (`e4c1ddd8`). Across ten minutes, none of 19 three-second pre-checks had all readings below 3%; even the quietest window peaked at 10.29%. No processes were moved. The fresh eight-clean-pair rule and `warned` flag do not apply retroactively to v0.39.0 evidence.
+
+The following are **clean pairs / completed pairs** from the saved Windows v0.39.0 blocks; the preceding tables give start load and flagged-block counts. A clean pair has two unflagged blocks. These counts are not independent verdicts from v0.41.0.
+
+| Windows cell | Earlier A/A; A/B | Round-three A/A; A/B |
+|---|---|---|
+| Script wall | 7/12; 9/12 | 8/8; 8/8 |
+| Script CPU | 9/12; 4/12 | neither started |
+| Terminal launch | 11/12; 12/12 | A/A did not start; earlier A/B retained |
+| Terminal grid | 2/8; 5/8 | A/A did not start; 5/7 |
+| Page engine | 4/12; 2/12 | deferred |
+| Page CPU | 2/12; 9/12 | deferred |
+| Page launch | 4/24; 7/24 | deferred |
+| Script HTTP | 5/12; 5/12 | deferred |
+| Page wall/counts | no timed pairs | display-awake run still needed |
+
+After merging `fc7fea27`, all four command records pass the added command watches. `--check` trips **seven** v0.39.0 records on `src/stats.rs#compare` (which now initializes `warned`). Additional changed spans: `src/app/bench.rs#run_chunk` on Linux page wall/counts and engine; `src/app/bench.rs#target_refusal` on Linux page launch; `src/runner.rs#Runner::exchange` on Linux script HTTP. Windows script wall and Linux terminal grid and launch trip only `compare`. No new review stamps were written.
 
 ### When the Mac returns
 

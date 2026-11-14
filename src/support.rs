@@ -586,7 +586,7 @@ const LINUX_WEBKIT: &str = "WPE ran headless --check; WebKitGTK under a virtual 
 const WIN_FLAGGED_AA: &str =
     "its known answer and planted A/B pass, but none of its 15 or more A/As ran without a block flagged Background (other work on the measured CPUs, win-promo-2): run the A/A on a quiet machine";
 const WIN_PAGE_WALL: &str =
-    "on 0.39.0 the display-off check printed pass without the refused primary phase.b (Throttled); needs the check to report refusal and an awake-display phase check, A/A and planted A/B";
+    "0.39.0 had no display-off phase.b value (Throttled). With the corrected check endings, verify the refusal and run the phase check and paired comparisons with the display awake";
 const WIN_PAGE_ENGINE: &str = "100.43 ms for 100 ms and 25 layouts/styles; other work flagged 13 of 24 A/A and 17 of 24 A/B blocks. Needs qualifying quiet main.work pairs";
 const WIN_SCRIPT_CPU: &str = "301.06 ms for 300 ms; other work flagged 3 of 24 A/A and 14 of 24 A/B blocks. Needs qualifying quiet cpu.work pairs";
 const WIN_SCRIPT_HTTP: &str = "the planted interval overlaps the warm control range [+184.36 … +185.24]%, but other work flagged 9 of 24 A/A and 11 of 24 A/B blocks. Needs quiet probe pairs";
@@ -594,9 +594,9 @@ const WIN_PAGE_CPU_FLAGGED: &str =
     "with untimed OS snapshots cpu2s read 2003.98 ms vs 2016 ms. Needs quiet fixed-work pairs: 17 of 24 A/A and 3 of 24 A/B blocks flagged, with no clean-pair confirmation";
 const LINUX_CLI_WALL: &str = "a command's run.duration reads 15 to 18 ms more than the command took: strobe's clock starts before the launch cgroup's set-up and the child's move into it (linux-promo-6); its A/A and planted A/B pass";
 const TTY_LATENCY: &str = "the 20 ms answer, grid counts and overrun refusal passed. Needs quiet keys A/A and spaced A/B: the gated plant stopped at 7 pairs with 2 of 14 blocks flagged";
-const WIN_TTY_LAUNCH: &str = "the unflagged 12-pair shift +300.08 ms [299.55 … 300.56] covers +300 ms. Needs an unflagged ready-500 A/A";
+const WIN_TTY_LAUNCH: &str = "the unflagged 12-pair shift +300.08 ms [299.55 … 300.56] covers +300 ms. Needs a qualifying ready-500 A/A; 0.39.0 did not judge its 11 clean pairs separately";
 const LINUX_CHROMIUM_CPU: &str =
-    "cpu2s read 2006.4 ms for 2000 ms. Both fixed-work comparisons refused RunIncomplete despite a launch cgroup; needs the ended-process accounting fix at the run edges and new A/A and A/B readings";
+    "cpu2s read 2006.4 ms for 2000 ms. Both 0.39.0 fixed-work comparisons refused RunIncomplete despite a launch cgroup; rerun page-work A/A and A/B with the corrected 0.41.0 process edges";
 const LINUX_NATIVE_COUNTERS: &str = "burst-1x to burst-2x read cpu.instructions +99.81% [+99.68 … +100.31] for +99.82% and its A/A same, but no refusal of the counter path is seen on this VM (root), and the one seen in --check is wrong (linux-promo-2)";
 const WIN_PAGE_LAUNCH: &str =
     "the 200 ms plant waited longer for the ready frame during cold startup; the paired shift [195.57 … 198.93 ms] missed +200 ms. Needs the 400/600 ms marked check and quiet pairs";
