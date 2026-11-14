@@ -9870,10 +9870,16 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             // at the end, so its scan of the system's processes stays out of the cycles' span. A process it
             // saw running that the walk did not (born while strobe marked the page or read its counters)
             // is read with the walked ones.
-            let ended0 = host::ended_marks(&pids0, browser.profile().as_deref());
-            for k in ended0.running() {
-                walked.borrow_mut().entry(k).or_insert(0);
-            }
+            #[cfg(target_os = "linux")]
+            let ended0 = starting();
+            #[cfg(not(target_os = "linux"))]
+            let ended0 = {
+                let ended = host::ended_marks(&pids0, browser.profile().as_deref());
+                for k in ended.running() {
+                    walked.borrow_mut().entry(k).or_insert(0);
+                }
+                ended
+            };
             cost.start();
             let (at0, tsc0) = fast_read(false);
             let t0 = host::now_ns();

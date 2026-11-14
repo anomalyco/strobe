@@ -249,7 +249,12 @@ pub fn process_cycles_at(pid: u32, start: u64) -> Option<u64> {
     {
         win::process_cycles(pid, Some(start))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let cycles = os::process_cycles(pid)?;
+        (linux::start_time(pid) == Some(start)).then_some(cycles)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = start;
         os::process_cycles(pid)
@@ -929,19 +934,24 @@ pub struct EndedMarks {
     pub cgroup: Option<cgroup::Reading>,
     /// Linux: a process of the set (as listed with its cycles, just before) had ended when these were
     /// read: its CPU would be both in that listing and in the cgroups' count of what ended.
-    pub skewed: bool,
+    #[cfg(target_os = "linux")]
+    skewed: std::collections::BTreeSet<u32>,
 }
 
 impl EndedMarks {
     /// The processes the marks saw running in the set's launches, by pid and start time: Windows'
-    /// jobs' (`held`); none elsewhere. A set listed before them lacks one born in between, which
+    /// jobs' (`held`) or Linux's launch cgroups'. A set listed before them lacks one born in between, which
     /// `dead_since` refuses: its reader adds these to the set it reads next.
     pub fn running(&self) -> Vec<(u32, u64)> {
         #[cfg(windows)]
         {
             self.held.as_ref().map(|h| h.running.keys().copied().collect()).unwrap_or_default()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            self.cgroup.as_ref().map(|c| c.members.keys().copied().collect()).unwrap_or_default()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Vec::new()
         }
@@ -1024,7 +1034,7 @@ impl EndedMarks {
             if !a.launches.is_subset(&b.launches) {
                 return Err("a launch cgroup of the set was removed between the readings");
             }
-            if earlier.skewed || self.skewed {
+            if set_a.keys().any(|k| earlier.skewed.contains(&k.0)) || set_b.keys().any(|k| self.skewed.contains(&k.0)) {
                 return Err("a process of the set ended between its listing and the cgroups' reading, so its CPU would be counted twice");
             }
             if a.members.keys().any(|k| !set_a.contains_key(k)) || b.members.keys().any(|k| !set_b.contains_key(k)) {
@@ -1110,14 +1120,16 @@ pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> EndedMarks {
         out.cgroup = cgroup::read(pids, home);
         for &pid in pids {
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-                out.skewed = true;
+                out.skewed.insert(pid);
                 continue;
             };
             // After `(comm)`: state is field 0, ppid 1, …, minflt 7, cminflt 8, majflt 9, cmajflt 10,
             // utime 11, stime 12, cutime 13, cstime 14, …, starttime 19 (proc(5)); only the children's.
             let Some(close) = stat.rfind(')') else { continue };
             let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-            out.skewed |= matches!(rest.first(), Some(&"Z" | &"X" | &"x"));
+            if matches!(rest.first(), Some(&"Z" | &"X" | &"x")) {
+                out.skewed.insert(pid);
+            }
             let Some(start) = rest.get(19).and_then(|s| s.parse::<u64>().ok()) else { continue };
             let sum = [8, 10, 13, 14].iter().filter_map(|&i| rest.get(i)?.parse::<u64>().ok()).fold(0u64, u64::wrapping_add);
             out.reaped.insert((pid, start), sum);
