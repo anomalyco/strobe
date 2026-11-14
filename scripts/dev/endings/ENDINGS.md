@@ -108,12 +108,13 @@ block. No command changes the actual display or lock state.
 |---|---:|---:|
 | Command, 300 ms | 302.322 | 303.093 |
 | Command tree, 1,200 ms | 1,205.342 | 1,205.398 |
-| Script spin, 300 ms wall | 302.894 | 306.310 |
+| Script spin, 300 ms wall | 302.894 (cold) | 299.906 (median of three) |
 | Script child, 300 ms CPU | 303.740 | 304.214 |
 | Windowless 4 ms tick at 50 Hz | 201.143 | 201.280 |
 | Fixed-work page, two blocks, five runs each | RunIncomplete in 1/5 | 131.693; 131.505 |
 
-One run per control; these are not performance verdicts. VM load average at start:
+Except for script spin, one run per control; these are not performance verdicts.
+Warm script spin ranged from 298.769 to 305.889 ms; the VM was 97–100% idle and had no steal in the two preceding samples. VM load average at start of the original controls:
 0.01 (baseline), 1.08 (candidate, after compilation). The command's own counters
 still read 300 and 1,200. The native and script controls retain their planted work.
 
@@ -130,7 +131,7 @@ replaced by the clean subset.
 
 `stop.ts` asks the real CLI to stop its own experiment and asserts exit 130 and
 the saved and rendered ending. `resume.ts` starts a real headless timed pair,
-then exercises the finalizer through completed checkpoints: warned `same` /
+then exercises comparison, warning assignment and finalization from unfinished block checkpoints: warned `same` /
 `no_worse` (5 strict, 0 otherwise), warned directional (0), clean same (0),
 unclear (0 or 5) and all refused (4). This checks policy and rendering, not the
 ability to induce symmetric load on demand.
@@ -151,5 +152,4 @@ threshold changes the warning, not the pairs used for the estimate.
 | Windowless native: process memory | Windows, macOS, Linux | No memory reading changes. An accompanying Linux CPU reading has the edge qualification above. |
 | Windowless native: hardware counters | macOS | No. |
 | Script: wall and counts, process CPU | macOS, Linux | No change to wall or counts. Linux CPU can change for a zombie, reused PID or a helper joining or exiting at the edge. |
-| Command: wall and counts | macOS | No. |
-| Command: process CPU, process memory | Windows, macOS, Linux | No: these cells trip the comparison constructor only. |
+| Command: process CPU, process memory | Windows, Linux | No: the comparison constructor's new boolean changes no arithmetic, and the command's own clock and memory readings are unchanged. |
