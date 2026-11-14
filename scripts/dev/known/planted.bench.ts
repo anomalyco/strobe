@@ -3,11 +3,10 @@
 // and an A/A of one (`--aa --target <a>`) must read same (±2%). Build known.rs first (see cli.bench.ts).
 //
 // Judging a run (labels-design §3.1). Tolerances: CPU and instructions ≤ 2%, a wall span ±1.5 ms per edge, exact
-// counters exact, wakes ±10%, memory ≤ 2%, an energy ratio ±10%. A planted A/B passes when its interval covers the
-// truth. strobe's intervals are of the ratio head / base - 1, so a fixed cost b0 a run carries besides the plant (a
-// `ctx.call`, strobe's evaluate, a process's launch, the idle program's memory) moves the truth of a plant from A to
-// B to (B + b0) / (A + b0) - 1; read b0 from the zero side (burst-0, idle) or the check, and give the absolute
-// difference too. An interval of one value (an exact quantity) passes when it lies within the tolerance.
+// counters exact, wakes ±10%, memory ≤ 2%, an energy ratio ±10%. For an additive plant Δ, compare the paired 95%
+// signed-rank interval on head − base in the metric's unit with Δ. Alternatively propagate an independent baseline
+// interval [L, H] and compare the relative interval with [Δ/H, Δ/L] (positive Δ and baseline). Never treat a
+// sampled control as exact. State the method and any edge/timer tolerance before running; report every comparison.
 //
 // Commands, from the repo root. Every OS:
 //   strobe bench scripts/dev/known/planted.bench.ts --head . --check --headless --filter spin,page,launch,wakes,memory,pulse
@@ -49,14 +48,14 @@
 //             (work-0), 125 million (work-1x) or 250 million (work-2x), about 100 and 200 ms on a desktop (0.8 ns
 //             an iteration); its CPU does not move with preemption or steal, only with the clock speed. cpu.work: work-2x over work-1x is (2c + o) / (c + o), c = work-1x less
 //             work-0, o = work-0 (strobe's evaluate and the run's edges); main.work moves the same way
-//   launch    #ready appears after a task that busy-waits 0, 200 or 400 ms (launch-0, launch-200, launch-400), and
+//   launch    #ready appears after a task that busy-waits 0, 200, 400 or 600 ms, and
 //             strobe sees it on the frame after: launch.ready is the later of that task's end and the page's first
 //             frame. The first frame came at about 11 ms on a Mac but 85-140 ms on a Windows desktop (headless),
 //             where launch-0 over launch-200 read +120 ms: only plants past the first frame add up, so launch-200
 //             to launch-400 is +200 ms (a 200 ms timer instead read +205.5 ms on a Mac: a browser's timer fires
 //             late by its slack). Run the A/A on launch-400 (about 420 ms, so ±2% is ±8 ms): launch-200's was
 //             unclear after 40 pairs on Windows and underpowered at 12 on Linux, launch-0's (about 12 ms on a Mac)
-//             cannot decide ±2%
+//             cannot decide ±2%. Use 400 → 600 to keep both ready-frame waits past cold browser startup.
 //   frames    the page times the display's vsync V, then every animation frame spins 0.1 V (frame-light) or 1.5 V
 //             (frame-heavy), headed only: frame-light presents every vsync (frames.interval.p50 V,
 //             frames.dropped.pct 0); Chromium starts a late main frame at once rather than at the next vsync, so
@@ -125,6 +124,7 @@ export default bench({
     "launch-0": page("delay=0"),
     "launch-200": page("delay=200"),
     "launch-400": page("delay=400"),
+    "launch-600": page("delay=600"),
     "frame-light": shown("vsyncs=0.1"),
     "frame-heavy": shown("vsyncs=1.5"),
     "click-0": click(0),
@@ -168,7 +168,7 @@ export default bench({
       run: ({ page, target }: any) => page.eval((n: number) => (window as any).known.work(n), { "work-1x": 1.25e8, "work-2x": 2.5e8 }[target as string] ?? 0),
     },
     launch: {
-      targets: ["launch-0", "launch-200", "launch-400"],
+      targets: ["launch-0", "launch-200", "launch-400", "launch-600"],
       primary: "launch.ready",
       metrics: ["launch.plant_start", "launch.plant_end"],
       launch: { until: "#ready", milestones: { plant_start: { in: "page", match: /^plant_start$/ }, plant_end: { in: "page", match: /^plant_end$/ } } },

@@ -9485,6 +9485,12 @@ ran it, the machine, the fixture, and what was planted against what strobe read;
 checked that way on that OS; `—`: strobe refuses it there. Off the primary architecture (Windows
 arm64, macOS x64, Linux arm64) every cell is preview.
 
+For an additive plant, use the paired 95% signed-rank interval on `head − base` in the metric's own
+unit. Alternatively propagate the independent control's interval: for a positive increment Δ and
+baseline interval [L, H] above zero, the expected relative change spans [Δ/H, Δ/L]. Compare the
+intervals for overlap, not a sampled control value as if it were exact. State the method and any
+fixture tolerance before collecting comparisons. Report all attempts.
+
 A verified cell holds only for the code that produced its numbers. `support-matrix.ts --check` (CI
 runs it, with the whole history) compares the code that computes each verified cell (its `WATCH` spans,
 items with their attributes and modifiers) at the evidence's build, or at the commit a person reviewed
