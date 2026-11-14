@@ -138,10 +138,10 @@ ability to induce symmetric load on demand.
 
 ### Verified cells requiring review (no stamps)
 
-At the baseline, `support-matrix --check` identifies five changed spans:
+After merging 0.40.0, `support-matrix --check` identifies six changed spans:
 `src/stats.rs#compare` initializes `warned` to false; `src/app/bench.rs#run_chunk`
 refreshes the Linux launch membership; `src/host/mod.rs#process_cycles_at`,
-`#ended_marks`, and `#impl EndedMarks` change Linux edge accounting. The
+`#ended_marks`, `#impl EndedMarks`, and `src/host/cgroup.rs#read` check Linux process identities at both edges. The
 statistics change no arithmetic, clock, interval, or counter value. The clean-pair
 threshold changes the warning, not the pairs used for the estimate.
 

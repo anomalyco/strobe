@@ -30,6 +30,9 @@ for (const [kind,load,strict,margin,code] of [
   const pairs=Array.from({length:12},(_,i)=>[2*i,2*i+1])
   const blocks=pairs.flatMap((_,i)=>["base","head"].map(side=>{
     const b=structuredClone(seed.series[0].blocks.find((b:any)=>b.variant===side))
+    // This replay plants one primary. Do not accidentally plant a secondary
+    // regression by repeating the noise of one cold launch twelve times.
+    b.values=structuredClone(seed.series[0].blocks[0].values)
     b.recording=null; b.pair=i
     b.values["run.duration"]=side==="base" ? 100 : kind==="better" ? 99 : kind==="worse" ? 130 : kind==="unclear" ? (i%2?110:90) : 100
     b.values["cpu.foreign.max"]=load && (kind!=="refused" || side==="head") ? 200 : 0
