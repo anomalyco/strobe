@@ -659,6 +659,10 @@ const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     reviewed_at: Some("416db0e7"),
     reviewed_why: Some(CHANGES_CLI_PLAN),
 };
+const CHANGES_WARNED_COMPARE: &str = "At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const CHANGES_LINUX_PAGE_STAGE_B: &str = "At 439d2152 and bc8f1c70 run_chunk initializes Block::shelled to false and Block::shell_reasons to empty on page blocks; at 3fadfdc7 run_chunk refreshes Linux EndedMarks via starting before t0, outside the run's wall edges, trace marks, counts and CDP Performance counters, and leaves warmup selection unchanged on runs without a pre-t0 helper exit race; at eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const CHANGES_LINUX_PAGE_LAUNCH: &str = "At 439d2152, bc8f1c70 and 7d696e6e target_refusal validates cli command lines only; at 6626fc7b and 0be69524 target_refusal adds cross-engine frame, dark-display check and unsupported-metric guards that leave url launch.ready measurement and headless launch.painted Headless refusal unchanged; at eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const CHANGES_LINUX_SCRIPT_HTTP: &str = "At 439d2152 Runner::exchange preserves usage exit code 2 on error replies without changing HTTP probe scheduling, timestamps, untimed windows or RunIncomplete refusals; at eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
 const WIN_SCRIPT_WALL_RUN: Evidence = Evidence {
     date: "2026-11-14",
     version: "v0.39.0",
@@ -668,8 +672,8 @@ const WIN_SCRIPT_WALL_RUN: Evidence = Evidence {
     aa: "script-a, 8 pairs: −0.029% [−0.124 … +0.081], same (±2%); no kept block flagged",
     planted: "script-a to script-b, 8 pairs: paired shift +149.933 ms [149.733 … 150.442] covers +150 ms; no kept block flagged",
     boundary: "no-phase in refused-series.bench.ts refused NoPhase without a value",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_WARNED_COMPARE),
 };
 const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged. At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
 const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
@@ -850,8 +854,8 @@ const LINUX_PAGE_WALL_RUN: Evidence = Evidence {
     aa: "spin100, 12 pairs: run.duration +0.09% [−0.06 … +0.25], same (±2%)",
     planted: "planted.bench.ts page-a to page-b: paired shifts +100.08 ms [99.93 … 100.24] in 12 pairs and +100.04 ms [99.94 … 100.13] in 32 pairs both cover +100 ms; no kept block flagged",
     boundary: "phase.absent requested in phases: NoPhase; no measured run entered it",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_PAGE_STAGE_B),
 };
 const LINUX_PAGE_ENGINE_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -862,8 +866,8 @@ const LINUX_PAGE_ENGINE_RUN: Evidence = Evidence {
     aa: "spin100, 12 pairs: main.work −0.04% [−0.18 … +0.21], same (±2%)",
     planted: "planted.bench.ts page-a to page-b, 12 pairs: main.work shift +100.05 ms [99.93 … 100.18] for +100 ms; no kept block flagged",
     boundary: "main.script refused NotForTarget on spin100 because the run calls page.eval",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_PAGE_STAGE_B),
 };
 const LINUX_TTY_GRID_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -874,8 +878,8 @@ const LINUX_TTY_GRID_RUN: Evidence = Evidence {
     aa: "keys, 8 pairs: tty.latency.p50 −0.03% [−0.07 … +0.11], same (±2%)",
     planted: "spaced, keys to keys-80, 8 pairs: paired shift +60.021 ms [59.993 … 60.050] for +60 ms; no kept block flagged",
     boundary: "overrun-120 refused tty.latency.p50 with AmbiguousInteraction when a later input arrived before its predecessor's answer",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_WARNED_COMPARE),
 };
 const LINUX_PAGE_LAUNCH_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -886,8 +890,8 @@ const LINUX_PAGE_LAUNCH_RUN: Evidence = Evidence {
     aa: "launch-400, 40 pairs: launch.ready −0.10% [−0.87 … +0.92], same (±2%)",
     planted: "launch-200 to launch-400, 40 pairs: 252.29 to 451.17 ms, paired shift +198.95 ms [194.02 … 204.26] for +200 ms; +79.33% [+76.69 … +82.11], no kept block flagged",
     boundary: "launch.painted refused Headless before the headless launch, exit 4 with no value",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_PAGE_LAUNCH),
 };
 const LINUX_SCRIPT_HTTP_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -898,8 +902,8 @@ const LINUX_SCRIPT_HTTP_RUN: Evidence = Evidence {
     aa: "probe-slow, 8 pairs: +0.005% [−0.047 … +0.106], same (±2%)",
     planted: "probe-fast to probe-slow, +40 ms: the 8-block fast control [20.397 … 20.526] ms implies [+194.88 … +196.11]%; all three relative intervals overlap it: [+195.47 … +196.15]% (8 pairs), [+195.74 … +196.25]% and [+195.55 … +196.20]% (16 pairs each). Paired shifts +40.013, +40.042 and +40.045 ms; no kept block flagged",
     boundary: "status-500 refused http.latency.p50 with RunIncomplete after 3 invalid responses in 9 probes; no latency value",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_SCRIPT_HTTP),
 };
 const LINUX_TTY_LAUNCH_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -910,8 +914,8 @@ const LINUX_TTY_LAUNCH_RUN: Evidence = Evidence {
     aa: "ready-500, 12 pairs: launch.ready −0.002% [−0.021 … +0.008], same (±2%)",
     planted: "ready-200 to ready-500, 12 pairs: paired shift +299.995 ms [299.322 … 300.094] for +300 ms; one pair retried, no kept block flagged",
     boundary: "launch.painted on ready-500 refused NotForTarget: a terminal has no window of its own",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_WARNED_COMPARE),
 };
 
 /// Every path strobe can run, with its support on each OS's primary architecture. A runtime and
