@@ -433,7 +433,11 @@ pub fn wait_quiet(cpus: Option<u64>, max: std::time::Duration) -> (f64, f64) {
     let deadline = std::time::Instant::now() + max;
     let mut calm = 0;
     loop {
-        let Some(b) = busy(cpus, 100) else { return (f64::NAN, f64::NAN) };
+        let ms = deadline.saturating_duration_since(std::time::Instant::now()).as_millis().min(100) as u64;
+        if ms == 0 {
+            return (f64::NAN, f64::NAN);
+        }
+        let Some(b) = busy(cpus, ms) else { return (f64::NAN, f64::NAN) };
         let mean = b.iter().sum::<f64>() / b.len().max(1) as f64;
         let top = b.iter().copied().fold(0.0, f64::max);
         calm = if mean < 5.0 && top < 25.0 { calm + 1 } else { 0 };
