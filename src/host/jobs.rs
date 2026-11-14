@@ -241,6 +241,14 @@ fn in_job(h: isize, job: isize) -> bool {
 /// Reads a held process's cycles once it exited, and closes its handle.
 fn settle(m: &mut Member) {
     let Some(h) = m.handle.filter(|_| m.end.is_none()) else { return };
+    // The join can arrive before the image is readable. Retry on the same held handle.
+    if m.counters.is_some()
+        && m.name.is_none()
+        && let Some(path) = image_path(h)
+    {
+        m.console_host = super::win::system_console_host(&path);
+        m.name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    }
     let mut c = 0u64;
     if exited(h) && unsafe { QueryProcessCycleTime(h as _, &mut c) } != 0 {
         if m.counters.is_some() {
@@ -492,10 +500,10 @@ fn snapshot(w: &mut HashMap<isize, Watched>, jobs: &[isize]) -> Result<Reading, 
         out.jobs.insert(x.id);
         let mut ended = 0u32;
         for m in &mut x.members {
+            settle(m);
             if m.console_host {
                 out.console_hosts.insert(m.key);
             }
-            settle(m);
             match (m.end, m.handle) {
                 (Some(c), _) => {
                     ended += 1;

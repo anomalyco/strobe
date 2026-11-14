@@ -6,10 +6,7 @@ use std::time::Duration;
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_default();
-    if mode == "receipt" {
-        std::fs::write(std::env::var_os("LEFTOVER_RECEIPT").unwrap(), std::process::id().to_string()).unwrap();
-        std::thread::sleep(Duration::from_secs(10));
-    } else if mode == "sleep" {
+    if mode == "sleep" {
         std::thread::sleep(Duration::from_secs(10));
     } else if mode == "wait" {
         assert!(Command::new(std::env::current_exe().unwrap()).status().unwrap().success());
@@ -27,7 +24,8 @@ fn main() {
     } else if mode == "behind" {
         // A worker *below* the real console host. Wait until it exists, not until it exits.
         let host = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/conhost.exe");
-        let mut host = Command::new(host).arg("--headless").arg(std::env::current_exe().unwrap()).arg("receipt")
+        let worker = std::env::current_exe().unwrap();
+        let mut host = Command::new(host).arg("--headless").arg(&worker).arg("leave").arg(&worker).arg("separate")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let receipt = std::path::PathBuf::from(std::env::var_os("LEFTOVER_RECEIPT").unwrap());
         let until = std::time::Instant::now() + Duration::from_secs(4);

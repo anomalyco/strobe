@@ -1145,7 +1145,9 @@ impl Owned {
                     let in_job: Vec<(u32, u64, String)> = running.into_iter().filter(|&p| p != me).map(|p| (p, 0, name_of(p))).collect();
                     still_left(|| {
                         let mut left = stamped(me);
-                        left.retain(|(p, s, _)| !held.console_hosts.contains(&(*p, *s)) && (held.complete || !super::jobs::live_console_host(j, *p, Some(*s))));
+                        // A new console can join *after* the complete reading above. For a stamped
+                        // pid not then identified as a host, take the image and job proof together now.
+                        left.retain(|(p, s, _)| !held.console_hosts.contains(&(*p, *s)) && !super::jobs::live_console_host(j, *p, Some(*s)));
                         // End members with the job we created, never with a second signal to their pid.
                         left.retain(|s| !in_job.iter().any(|j| j.0 == s.0));
                         left.extend(in_job.iter().cloned());
