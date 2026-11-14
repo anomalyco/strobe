@@ -9611,7 +9611,7 @@ verified line exact.
 | `script` · `package_idle` | — | preview | — |
 | `script` · `http_probe` | preview | preview | preview |
 | `cli` · `wall_and_counts` | preview | preview | preview |
-| `cli` · `process_cpu` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 305.77 ms for 300 ms of CPU; +150 ms plant read +149.87 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
+| `cli` · `process_cpu` | verified (2026-11-14, 5a52552f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 304.75 ms for 300 ms of CPU; +150 ms plant read +150.02 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
 | `cli` · `process_memory` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
 | `cli` · `http_probe` | preview | preview | preview |
 | `tty` · `wall_and_counts` | preview | preview | preview |

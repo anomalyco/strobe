@@ -610,12 +610,12 @@ const MAC_HEADLESS_CPU: &str = "re-verify scripts/dev/known-web.bench.ts and pla
 
 const WIN_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-14",
-    version: "f40ec86f",
+    version: "5a52552f",
     machine: "Windows 11 x64 desktop",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "305.77 ms for 300 ms of CPU; +150 ms plant read +149.87 ms",
-    aa: "spin 300, 8 pairs: +0.021% [−0.094 … +0.084], same (±2%)",
-    planted: "spin 150 to 300: 155.31 to 305.18 ms, +96.48% [+96.26 … +96.71]",
+    known: "304.75 ms for 300 ms of CPU; +150 ms plant read +150.02 ms",
+    aa: "spin 300, 8 pairs: +0.032% [−0.048 … +0.219], same (±2%); 0 of 16 blocks flagged Background",
+    planted: "spin 150 to 300: 153.79 to 303.81 ms, +97.52% [+97.28 … +97.77], covering +97.52% after 3.81 ms launch CPU in the A/A; 0 of 16 blocks flagged Background",
     boundary: "a process left running (orphan, breakaway-left) refused RunIncomplete; cpu.wakes refused NotOnThisOs",
     reviewed_at: None,
     reviewed_why: None,
