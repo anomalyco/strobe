@@ -9609,8 +9609,8 @@ verified line exact.
 | `script` · `package_idle` | — | preview | — |
 | `script` · `http_probe` | preview | preview | preview |
 | `cli` · `wall_and_counts` | preview | preview | preview |
-| `cli` · `process_cpu` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine, `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
-| `cli` · `process_memory` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine, `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
+| `cli` · `process_cpu` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 305.77 ms for 300 ms of CPU; +150 ms plant read +149.87 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine, `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
+| `cli` · `process_memory` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine, `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
 | `cli` · `http_probe` | preview | preview | preview |
 | `tty` · `wall_and_counts` | preview | preview | preview |
 | `tty` · `process_cpu` | preview | preview | preview |

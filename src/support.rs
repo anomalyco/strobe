@@ -607,31 +607,30 @@ const MAC_HEADLESS_CPU: &str = "re-verify scripts/dev/known-web.bench.ts and pla
 // `reviewed_at`: the commit at which every later change to the code that computes it was read and found
 // unable to move its numbers (`scripts/dev/support-matrix.ts --check` holds the code to it).
 // The cli cells' review at 737544c5 (`cleanup/spawn-clock`): the changes 384805d4 reviewed, then its own.
-const CHANGES_CLI_CLOCK: &str = "e3d0ffc1 made run_to_exit end what a command left by pid and start time only after every reading, keep the child as Proc::Child in spawn_group and carry each process's start time through still_left, group_members, stamped_with, stamped, stamped_in, stamp_of and stamp_in (a stamp kept only while its process keeps the start time it was listed with), and ebc9eeaf made block refuse only a declared metric; then 41ca8772, 11ac5f29 and 737544c5 made exec time a run from Owned::released_ns less creation_ns to Usage::exited_ns on host::now_ns, which windows reads beside the Instant it already read before the suspended child resumes (the impl Spawned and Owned::spawn_span hold the same CreateProcessW span) and spawn_group reads right before the spawn on macOS, as before, while on Linux spawn_group adds a close-on-exec stamp after the cgroup move and CPU mask that already made it fork (peak_floor read as before), and made run_to_exit read what is left once at the exit (still_left without its 100 ms grace; Windows from the job's held handles, a console host alone not counted; Linux also the launch cgroup's live members) and take the launch cgroup's CPU on Linux: a run that leaves nothing has the same edges, counts and readings on Windows and macOS (adais spin 300 run.duration 322.2 to 320.9 ms and cpu.work 306.96 to 306.25 ms; air 304 to 304.5 ms, cpu.work 303 ms on both), Linux memory.peak reads the same (alloc 202 MB, alloc-small refused NotOnThisOs), and a process left running is still refused RunIncomplete, now at once. At 8fcc3d0 exec changes the refusal hint only. Owned::run_to_exit and stamped_with reject ended or wrongly stamped candidates and keep the nonzero start on Windows; the fixtures leave no live helper except the intentionally refused orphan and breakaway-left. The successful runs take the same clocks and read the same cycles, cgroup CPU and peak. At 9e35da42 exec and block record command load outside SelfCost's observer cycles, disarm failed spawns and pass usage and inter-run command CPU after exit, spawn_group and windows invoke a no-op release hook before before_ns and started when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; command timestamps, rusage/job/cgroup CPU, peak memory and leftover refusals are unchanged. At 6659e57b windows calls pin_child on the suspended child before first_of and clocks and ends the child if SetProcessAffinityMask fails; valid launches keep the same affinity, release timestamps, accounting and leftover refusals.";
 
 const WIN_CLI_CPU_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "v0.31.0",
+    date: "2026-11-14",
+    version: "f40ec86f",
     machine: "Windows 11 x64 desktop",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms",
-    aa: "known.exe spin 300 against itself, 8 pairs: cpu.work −0.00% [−0.11 … +0.33], same (±2%)",
-    planted: "spin 150 to spin 300: cpu.work 155.55 to 305.54 ms, +96.41% [+96.07 … +96.77] for +96.43% with the 5.55 ms launch",
+    known: "305.77 ms for 300 ms of CPU; +150 ms plant read +149.87 ms",
+    aa: "spin 300, 8 pairs: +0.021% [−0.094 … +0.084], same (±2%)",
+    planted: "spin 150 to 300: 155.31 to 305.18 ms, +96.48% [+96.26 … +96.71]",
     boundary: "a process left running (orphan, breakaway-left) refused RunIncomplete; cpu.wakes refused NotOnThisOs",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
+    reviewed_at: None,
+    reviewed_why: None,
 };
 const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "v0.31.0",
+    date: "2026-11-14",
+    version: "f40ec86f",
     machine: "Windows 11 x64 desktop",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB",
-    aa: "known.exe alloc 100 300 against itself: memory.peak 0.00% [−0.03 … +0.03], same (±2%)",
-    planted: "alloc 50 to alloc 100: 50.99 to 101.10 MiB, +98.26% [+98.23 … +98.30] for +98.25% (its blocks flagged Background, which a peak is not loaded by)",
+    known: "201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB",
+    aa: "alloc 100, 8 pairs: −0.006% [−0.032 … +0.013], same (±2%)",
+    planted: "alloc 50 to 100: 50.89 to 101.00 MiB, +98.46% [+98.38 … +98.50]; machine at 23% CPU before the comparison",
     boundary: "a process left running refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
+    reviewed_at: None,
+    reviewed_why: None,
 };
 const LINUX_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-14",
