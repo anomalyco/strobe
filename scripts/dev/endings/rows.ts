@@ -71,12 +71,17 @@ for (const [name, flags, code, states, summary] of rows) {
   }
 }
 if (!baseline) {
-  const id=`exp_end_${crypto.randomUUID()}`
-  const p=Bun.spawnSync([exe,"bench","scripts/dev/endings/line.bench.ts","--check","--head",".","--id",id,"--json"],{timeout:30000})
-  assert.equal(p.exitCode,2,p.stdout.toString())
-  assert.match(JSON.parse(p.stdout.toString()).error,/&/)
-  assert.doesNotMatch(p.stderr.toString(), / · exp_/)
-  assert.ok(!existsSync(join(experiments,id)))
+  const refused: [string, RegExp][] = [["line", /&/]]
+  if (process.platform !== "win32") refused.push(["expansion", /single-quote the script as a separate argument/])
+  for (const [name, reason] of refused) {
+    const id=`exp_end_${crypto.randomUUID()}`
+    const p=Bun.spawnSync([exe,"bench",`scripts/dev/endings/${name}.bench.ts`,"--check","--head",".","--id",id,"--json"],{timeout:30000})
+    assert.equal(p.exitCode,2,p.stdout.toString())
+    assert.match(JSON.parse(p.stdout.toString()).error,reason)
+    assert.doesNotMatch(p.stderr.toString(), / · exp_/)
+    assert.ok(!existsSync(join(experiments,id)))
+    console.log(`${name}: exit 2 before header or experiment folder`)
+  }
   const parity=Bun.spawnSync([exe,"bench","scripts/dev/endings/parity.bench.ts","--base","left","--head","right","--headless","--check","--json"],{timeout:90000})
   const r=JSON.parse(parity.stdout.toString()); assert.equal(parity.exitCode,1,r.error||r.text)
   assert.equal(r.series.length,2); assert.ok(r.series.every((s:any)=>s.state==="fail" && s.journey_refusal?.validator==="NotEquivalent"))

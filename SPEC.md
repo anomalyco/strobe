@@ -5316,7 +5316,7 @@ invoked script. Avoid escaped double quotes or unquoted carets in implicit cmd l
 signs (even quoted) on batch shims. Quote names whose first part cmd can take as a builtin (`"echo.cmd"`, `"path\tool.exe"`, `"ver+1"`) on implicit cmd lines.
 The shell looks up paths when each command runs: an earlier command may build the file or change folder. A bare name resolving inside the launching checkout warns when
 the variant is elsewhere, even after `cd`: use the variant's own shim to measure its build. On Unix,
-pass an explicit shell's script as a separate, single-quoted argument when it contains expansions. Known syntax
+pass an explicit shell's script as a separate, single-quoted argument when it contains expansions. A static line with outer script expansion is refused before a build or experiment folder. Known syntax
 errors exit 2 before build; dynamic lines are checked at `ctx.exec`. Catching a usage refusal or
 `RunIncomplete` in the hook cannot make the block pass. `ctx.exec` returns the code and output; a nonzero exit
 fails the run (`RunIncomplete`, with the last lines), as does a command that runs past the case's
