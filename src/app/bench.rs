@@ -7725,7 +7725,7 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 }
                 // Still off: this series is refused (the bench's loop lists it and runs the rest).
                 if let Some(p) = dark_primary(ctx).filter(|_| cases.len() == 1 && display.is_some_and(|d| d.0 == 0)) {
-                    return Err(dark_refusal(&format!("the primary {p}")).into());
+                    return Err(dark_refusal(&format!("the primary {p}"), s.launch.is_object()).into());
                 }
             }
             let r = slotted(ctx, cases, v, pair, x);
@@ -8836,12 +8836,16 @@ fn dark_metric(m: &str) -> bool {
         || m.starts_with("span.")
 }
 
-fn dark_refusal(what: &str) -> Refusal {
+fn dark_refusal(what: &str, launch: bool) -> Refusal {
     Refusal::new(
         ValidatorId::Throttled,
         format!("{what}: the console display was off, and a headless Chromium page then runs its frames and timers on a throttled clock of its own, so wall time and shares of it describe that clock"),
     )
-    .fix("measure main.work, cpu.work or a counter the case records instead; measure wall time or CPU shares with the display on")
+    .fix(if launch {
+        "measure cpu.work over the launch instead"
+    } else {
+        "measure main.work, cpu.work or a counter the case records instead; measure wall time or CPU shares with the display on"
+    })
 }
 
 /// `Throttled` for a headless Chromium page's wall times with the display off: a block about to run
@@ -8854,7 +8858,7 @@ fn dark_state(ctx: &Ctx, s: &Series, x: &Exec, display: Option<u8>, mut b: Block
     b.values.retain(|k, _| !dark_metric(k));
     b.phases.clear();
     for m in declared_metrics(s).into_iter().filter(|m| dark_metric(m)) {
-        b.refused.insert(m.clone(), dark_refusal(m));
+        b.refused.insert(m.clone(), dark_refusal(m, s.launch.is_object()));
     }
     b
 }
@@ -12663,7 +12667,7 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
                     ValidatorId::Headless,
                     format!("{on}the primary {} needs a display, and the app runs on the headless Wayland compositor strobe starts: nothing it draws reaches one", s.primary),
                 )
-                .fix("run it on an X11 session (display: \"x11\") to measure it on screen, or choose a CPU primary: cpu.work, cpu.app.total, run.duration or phase.<name>"),
+                .fix("measure cpu.work instead; to measure presentation, run it on a visible X11 display (display: \"x11\")"),
             ));
         }
         #[cfg(target_os = "linux")]
@@ -12775,7 +12779,7 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
     {
         // The display is off now: the series is listed refused and the rest of the file runs (a block
         // whose display turns off later refuses that series then, `dark_state`).
-        Some(dark_refusal(&format!("the primary {}", s.primary)))
+        Some(dark_refusal(&format!("the primary {}", s.primary), s.launch.is_object()))
     } else if (t["headless"] == true || args.has("headless")) && (display_metric(&s.primary) || gpu_use(&s.primary)) {
         Some(Refusal::new(ValidatorId::Headless, format!("{on}the primary {} needs a display, and the page runs headless: nothing it draws reaches one", s.primary)).fix(if s.launch.is_object() {
             "measure launch.ready instead"
