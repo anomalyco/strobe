@@ -588,13 +588,12 @@ const WIN_FLAGGED_AA: &str =
 const WIN_PAGE_WALL: &str =
     "on 0.39.0 the display-off check printed pass without the refused primary phase.b (Throttled); needs the check to report refusal and an awake-display phase check, A/A and planted A/B";
 const WIN_PAGE_ENGINE: &str = "100.43 ms for 100 ms and 25 layouts/styles; other work flagged 13 of 24 A/A and 17 of 24 A/B blocks. Needs qualifying quiet main.work pairs";
-const WIN_SCRIPT_WALL: &str = "301.29 ms for 300 ms plus the host call; other work flagged 5 of 24 blocks in each wall-time comparison. Needs qualifying quiet pairs";
 const WIN_SCRIPT_CPU: &str = "301.06 ms for 300 ms; other work flagged 3 of 24 A/A and 14 of 24 A/B blocks. Needs qualifying quiet cpu.work pairs";
 const WIN_SCRIPT_HTTP: &str = "the planted interval overlaps the warm control range [+184.36 … +185.24]%, but other work flagged 9 of 24 A/A and 11 of 24 A/B blocks. Needs quiet probe pairs";
 const WIN_PAGE_CPU_FLAGGED: &str =
     "with untimed OS snapshots cpu2s read 2003.98 ms vs 2016 ms. Needs quiet fixed-work pairs: 17 of 24 A/A and 3 of 24 A/B blocks flagged, with no clean-pair confirmation";
 const LINUX_CLI_WALL: &str = "a command's run.duration reads 15 to 18 ms more than the command took: strobe's clock starts before the launch cgroup's set-up and the child's move into it (linux-promo-6); its A/A and planted A/B pass";
-const TTY_LATENCY: &str = "the 20 ms answer, 10 frames, 400 cells and overrun refusal passed. Needs quiet keys A/A and spaced A/B: 10 of 16 and 3 of 16 blocks flagged";
+const TTY_LATENCY: &str = "the 20 ms answer, grid counts and overrun refusal passed. Needs quiet keys A/A and spaced A/B: the gated plant stopped at 7 pairs with 2 of 14 blocks flagged";
 const WIN_TTY_LAUNCH: &str = "the unflagged 12-pair shift +300.08 ms [299.55 … 300.56] covers +300 ms. Needs an unflagged ready-500 A/A";
 const LINUX_CHROMIUM_CPU: &str =
     "cpu2s read 2006.4 ms for 2000 ms. Both fixed-work comparisons refused RunIncomplete despite a launch cgroup; needs the ended-process accounting fix at the run edges and new A/A and A/B readings";
@@ -664,6 +663,18 @@ const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
 const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged.";
+const WIN_SCRIPT_WALL_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Windows 11 x64 desktop",
+    fixture: "scripts/dev/known/planted.bench.ts",
+    known: "script.bench.ts spin read run.duration 301.29 ms for a 300 ms spin plus the host call",
+    aa: "script-a, 8 pairs: −0.029% [−0.124 … +0.081], same (±2%); no kept block flagged",
+    planted: "script-a to script-b, 8 pairs: paired shift +149.933 ms [149.733 … 150.442] covers +150 ms; no kept block flagged",
+    boundary: "no-phase in refused-series.bench.ts refused NoPhase without a value",
+    reviewed_at: None,
+    reviewed_why: None,
+};
 const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
     date: "2026-11-13",
     version: "v0.31.0",
@@ -1057,7 +1068,7 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::NativeWindowless, capability: Capability::Gpu, windows: Preview(GPU_TRUTH), macos: Preview(GPU_TRUTH), linux: Preview(GPU_TRUTH) },
     Row { runtime: Runtime::NativeWindowless, capability: Capability::Launch, windows: Preview(LAUNCH), macos: Preview(LAUNCH), linux: Preview(LAUNCH) },
     Row { runtime: Runtime::NativeWindowless, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
-    Row { runtime: Runtime::Script, capability: Capability::WallAndCounts, windows: Preview(WIN_SCRIPT_WALL), macos: Verified(&MAC_SCRIPT_WALL_RUN), linux: Verified(&LINUX_SCRIPT_WALL_RUN) },
+    Row { runtime: Runtime::Script, capability: Capability::WallAndCounts, windows: Verified(&WIN_SCRIPT_WALL_RUN), macos: Verified(&MAC_SCRIPT_WALL_RUN), linux: Verified(&LINUX_SCRIPT_WALL_RUN) },
     Row { runtime: Runtime::Script, capability: Capability::PageEngine, windows: Preview(SCRIPT_ENGINE), macos: Preview(SCRIPT_ENGINE), linux: Preview(SCRIPT_ENGINE) },
     Row { runtime: Runtime::Script, capability: Capability::ProcessCpu, windows: Preview(WIN_SCRIPT_CPU), macos: Verified(&MAC_SCRIPT_CPU_RUN), linux: Verified(&LINUX_SCRIPT_CPU_RUN) },
     Row { runtime: Runtime::Script, capability: Capability::ProcessMemory, windows: Preview(SCRIPT_MEMORY), macos: Preview(MAC_SCRIPT_MEMORY), linux: Preview(SCRIPT_MEMORY) },

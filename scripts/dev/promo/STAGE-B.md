@@ -1,13 +1,13 @@
 # Stage B: headless support evidence
 
-**Result: 26 verified cells, 20 core, on this branch.** Round two added Linux page launch and script HTTP to the four Linux cells verified in round one. Neither new cell is core. No Windows cell passed the load rule. No command label or review stamp changed. Keep user-facing labels off until every cell in the headless starter set is verified on all three primary systems, not until a numerical quota is met.
+**Result: 27 verified cells, 21 core, on this branch.** Round three verified Windows script wall time. Round two added Linux page launch and script HTTP to the four Linux cells verified in round one. No command label or review stamp changed. Keep user-facing labels off until every cell in the headless starter set is verified on all three primary systems, not until a numerical quota is met.
 
 | Host | Before (total / core¹) | Short list excluding commands | After (total / core¹) |
 |---|---:|---:|---:|
-| Windows x64 desktop | 4 / 4 | 6 | 4 / 4 |
+| Windows x64 desktop | 4 / 4 | 6 | 5 / 5 |
 | Linux x64 VM, two unpinned vCPUs | 6 / 6 | 4 | 12 / 9 |
 | macOS arm64 laptop | 10 / 7 | 4 | 10 / 7 |
-| Total | 20 / 17 | 14 | 26 / 20 |
+| Total | 20 / 17 | 14 | 27 / 21 |
 
 ¹ `Capability::core()` counts wall and counts, page engine, process CPU, process memory and terminal grid. The short list excludes the optional terminal and probe batches. The totals include them.
 
@@ -143,6 +143,20 @@ Linux v0.39.0 passed all four parts again with **400 → 600 ms**, keeping both 
 | Known answer | A/A | Planted A/B | Boundary |
 |---|---|---|---|
 | `launch.ready` 444.54 / 648.36 ms; `plant_start` 39.04 / 44.86 ms; spans 400.20 / 600.30 ms; ready 5.30 / 3.20 ms after end | 40 pairs, −0.32% [−0.97, +0.33], same; 0/80 blocks flagged | 40 pairs, paired **+201.17 ms [195.75, 205.01]** covers +200; +44.75% [43.31, 45.76]; 0/80 blocks flagged | `launch.painted` on launch-600 refused `Headless` before launch (exit 4, no value) |
+
+### Windows: quiet-start batch
+
+Each initial wait was capped at about ten minutes. Only the two refusals started in that pass. When the desk quieted, a final three-sample check admitted three comparisons; the other legs did not start. No other process was moved. Start readings below are the three one-second whole-machine CPU percentages, not the block flag statistic.
+
+| Invocation | Start CPU % | Flagged kept blocks | Reading |
+|---|---|---|---|
+| Script wall A/A | 2.04 / 0.69 / 0.89 | 0/16 | 8 pairs, −0.029% [−0.124, +0.081], same |
+| Script wall A/B | 2.30 / 0.79 / 0.84 | 0/16 | 8 pairs, paired +149.933 ms [149.733, 150.442] covers +150 ms |
+| Script wall boundary | 1.18 / 1.01 / 0.59 | no value | `NoPhase`, exit 1 |
+| Terminal launch boundary | 2.29 / 0.31 / 2.18 | no value | `NotForTarget`, exit 1 |
+| Terminal grid A/B | 0.33 / 0.37 / 0.00 | 2/14 | Time cap after 7 pairs; +60.061 ms [59.943, 60.247], `unclear` |
+
+**Windows script wall passes** with the earlier 301.29 ms check (3 runs; peak measured foreign work 16.09% of one core, below the 25% flag). The new A/A also reported an informational machine-wide 11% busy before the run, not a flagged measured block. Script CPU and grid need unflagged A/A and A/B; terminal launch needs only the unflagged A/A. No start or flag count exists for a leg held at the gate. Page wall needs an awake-display check and pairs; page engine and CPU need quiet pairs, page launch needs the later marked check and quiet pairs, and HTTP needs quiet probe pairs. None were run in this batch.
 
 ### When the Mac returns
 
