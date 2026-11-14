@@ -2673,8 +2673,15 @@ pub fn run(args: &Args) -> Result<Output> {
         if variants.len() < 2 {
             return Err(Error::usage("--check --noworse holds head's exact counters to a base build's: add --base <ref> (a build, not a target of the file)"));
         }
-        for s in &series {
-            check_noworse(args, s)?;
+        // With only gaps validate named metrics, but never bind a bare margin to a journey that cannot run.
+        if let Some(named) = args.get("noworse") {
+            let names = named.split(',').filter(|p| p.contains('=') || model::metric(p.trim()).is_some()).collect::<Vec<_>>().join(",");
+            if !names.is_empty() {
+                check_counter_margins(&names, "")?;
+            }
+        }
+        for s in series.iter().filter(|s| s.gap.is_none()) {
+            check_noworse(args, &s.primary)?;
         }
     }
     let projects = target_projects(&describe, &series, &variants)?;
@@ -2701,6 +2708,32 @@ pub fn run(args: &Args) -> Result<Output> {
         n.parse::<usize>().map_err(|_| Error::usage("--pairs: auto or a number"))?;
     }
     let exp = args.get("id").map(str::to_string).unwrap_or_else(|| store::new_id("exp"));
+    let implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
+    let headless = args.has("headless");
+    if let Some((a, b)) = check_pair(&describe, args, &project)? {
+        let sides = [resolve_side("base", a, None, &describe, &project, &config)?, resolve_side("head", b, None, &describe, &project, &config)?];
+        implementation_preflight(&describe, &series, &sides, &config, &projects)?;
+        offscreen_sides(&describe, &series, &sides, &config, &projects, headless)?;
+    }
+    if implementations {
+        implementation_preflight(&describe, &series, &variants, &config, &projects)?;
+    }
+    offscreen_sides(&describe, &series, &variants, &config, &projects, headless)?;
+    let fixture = fixture::Spec::from(&describe)?;
+    preflight(&series, &describe, &variants, &config, &projects, headless)?;
+    if let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && probing(s) != Probing::Aside && s.launch.is_object()) {
+        return Err(Error::usage(format!("{}: http.* comes from ctx.httpProbe in setup, and a launch case runs no setup: probe the server in a case with runs", s.case)));
+    }
+    if let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && probing(s) == Probing::Separate && counting(s) == Counting::Separate) {
+        return Err(Error::usage(format!("{}: declare cpu.instructions and http.* in separate cases: each needs blocks of its own beside the timing blocks (Linux)", s.case)));
+    }
+    if describe["setupKey"] == true {
+        let active: Vec<_> = series.iter_mut().filter(|s| s.gap.is_none() && s.refused.is_none()).collect();
+        let keys = runner.setup_keys(active.iter().map(|s| json!({"case": s.case, "target":s.target,"params":s.params})).collect())?;
+        for (s, k) in active.into_iter().zip(keys) {
+            s.setup_key = Some(k);
+        }
+    }
     let dir = store::experiment_dir(&exp)?;
     runner.log = dir.join("runner.log");
     std::fs::rename(log, &runner.log)?;
@@ -2765,10 +2798,10 @@ pub fn run(args: &Args) -> Result<Output> {
         saved: RESUMED.with(|r| r.borrow_mut().take()).unwrap_or_else(|| json!({ "args": args.to_json(), "series": {} })),
         eta_after: BTreeMap::new(),
         shown_seen: BTreeMap::new(),
-        implementations: false,
+        implementations,
         journeys: 0,
         cross_engine: false,
-        fixture: None,
+        fixture,
         projects,
         fixture_running: None,
         windows: BTreeMap::new(),
@@ -2814,44 +2847,21 @@ pub fn run(args: &Args) -> Result<Output> {
     let _ = store::write_json(&dir.join("state.json"), &ctx.saved);
     ctx.awake.hold(false);
     ctx.side_profiles = variants.iter().map(|v| (v.target.clone(), app_of(v).map(str::to_string))).collect();
-    ctx.implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     // A series the display cannot show refuses before anything counts it (journeys, the Holm family). A
     // phone's page is the phone's own screen: no window of this display's to fit.
     let (describe, headless) = (ctx.describe.clone(), ctx.headless || ctx.phone.is_some());
     display_fit(Some(&mut ctx), &mut series, &describe, headless)?;
-    // A check of two targets refuses what their comparison would before anything builds.
-    if let Some((a, b)) = check_pair(&ctx.describe, args, &project)? {
-        let sides = [resolve_side("base", a, None, &ctx.describe, &project, &config)?, resolve_side("head", b, None, &ctx.describe, &project, &config)?];
-        implementation_preflight(&ctx.describe, &series, &sides, &config, &ctx.projects)?;
-        offscreen_sides(&ctx.describe, &series, &sides, &config, &ctx.projects, ctx.headless)?;
-    }
     if mode == Mode::Compare
         && let Some(why) = &ctx.shared
     {
         shared_series(&mut series, why)?;
     }
     ctx.journeys = series.iter().filter(|s| s.gap.is_none() && s.refused.is_none()).count();
-    // A file with `setupKey`: each series' key, before anything builds, so a key that is not plain JSON
-    // is the file's error in every mode, and with `--batch` cases share a launch only when their setups
-    // are the same (`batch::key`).
-    if ctx.describe["setupKey"] == true {
-        let active: Vec<usize> = (0..series.len()).filter(|i| series[*i].gap.is_none() && series[*i].refused.is_none()).collect();
-        let keys = ctx.runner.setup_keys(active.iter().map(|i| json!({ "case": series[*i].case, "target": series[*i].target, "params": series[*i].params })).collect())?;
-        for (i, k) in active.into_iter().zip(keys) {
-            series[i].setup_key = Some(k);
-        }
-    }
-    // Two builds or profiles of one target, too: --base app:tray --head app:desk.
-    if !ctx.implementations {
-        offscreen_sides(&ctx.describe, &series, &variants, &config, &ctx.projects, ctx.headless)?;
-    }
     if ctx.implementations {
         for v in &variants {
             let t = v.target.as_deref().unwrap_or("");
             progress(format!("{:<5} {}: target {t} ({}) at {}", v.role, v.name, ctx.describe["targets"][t]["kind"].as_str().unwrap_or("?"), v.label));
         }
-        implementation_preflight(&ctx.describe, &series, &variants, &config, &ctx.projects)?;
-        offscreen_sides(&ctx.describe, &series, &variants, &config, &ctx.projects, ctx.headless)?;
         ctx.cross_engine = {
             let kinds: Vec<&str> = variants.iter().filter_map(|v| v.target.as_deref()).map(|t| engine(&ctx.describe["targets"][t])).collect();
             kinds[0] != kinds[1]
@@ -2860,7 +2870,6 @@ pub fn run(args: &Args) -> Result<Output> {
         // A check prints its builds with the case lines.
         progress(variants_line(&variants));
     }
-    ctx.fixture = fixture::Spec::from(&ctx.describe)?;
     let mut engines: Vec<WebEngine> = Vec::new();
     for e in series.iter().filter(|s| s.refused.is_none()).map(|s| &ctx.describe["targets"][&s.target]).filter(|t| matches!(t["kind"].as_str(), Some("web" | "url"))).map(engine_of) {
         if !engines.contains(&e) {
@@ -2932,7 +2941,6 @@ pub fn run(args: &Args) -> Result<Output> {
     if checked {
         ctx.warnings.extend(super::up::calibration_warning(!headed));
     }
-    preflight(&series, &ctx.describe, &variants, &config, &ctx.projects, ctx.headless)?;
     // A native app's reduced motion is what its profile declares: no page to read it back from.
     let natives: Vec<String> = series
         .iter()
@@ -3036,14 +3044,6 @@ pub fn run(args: &Args) -> Result<Output> {
     let mut not_run: Vec<String> = Vec::new();
     // Series `--max-time` left no time to start.
     let mut out_of_time: Vec<String> = Vec::new();
-    // `http.*` (SPEC §8.9), said before any series runs: the probe starts at the end of a setup, which a
-    // launch case has none of; and Linux's counter blocks and the probe blocks are one pass too many.
-    if let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && probing(s) != Probing::Aside && s.launch.is_object()) {
-        return Err(Error::usage(format!("{}: http.* comes from ctx.httpProbe in setup, and a launch case runs no setup: probe the server in a case with runs", s.case)));
-    }
-    if let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && probing(s) == Probing::Separate && counting(s) == Counting::Separate) {
-        return Err(Error::usage(format!("{}: declare cpu.instructions and http.* in separate cases: each needs blocks of its own beside the timing blocks (Linux)", s.case)));
-    }
     let mut batching = batch.map(batch::Batching::new);
     for (i, s) in series.iter().enumerate() {
         if halted.is_none() && stop_requested() {
@@ -3410,7 +3410,7 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     let mut repeat = ctx.args.num("repeat")?.map_or(1, |r| r as usize).max(1);
     // `--noworse` on counters (`check_noworse`) shows each side's counter held one value: 2 runs of a case
     // with a reset, else 2 fresh launches.
-    let noworse = check_noworse(ctx.args, s)?;
+    let noworse = check_noworse(ctx.args, &s.primary)?;
     if !noworse.is_empty() && !(s.reset && ctx.runs >= 2) {
         repeat = repeat.max(2);
     }
@@ -3576,15 +3576,29 @@ fn check_halt(ctx: &Ctx, s: &Series, r: Result<Block>) -> Result<Result<Block>> 
 // incomplete runs and other workload errors still fail the case.
 fn check_refusal(ctx: &Ctx, s: &Series, e: &Error) -> Option<Refusal> {
     let r = series_refusal(ctx, s, e)?;
-    matches!(r.validator, ValidatorId::Headless | ValidatorId::EngineUnsupported | ValidatorId::Throttled | ValidatorId::NotForTarget | ValidatorId::NotOnThisOs).then_some(r)
+    matches!(
+        r.validator,
+        ValidatorId::SoftwareGpu
+            | ValidatorId::DisplayTooSmall
+            | ValidatorId::Headless
+            | ValidatorId::EngineUnsupported
+            | ValidatorId::Throttled
+            | ValidatorId::NotForTarget
+            | ValidatorId::NotOnThisOs
+    )
+    .then_some(r)
 }
 
 /// `--check --noworse`: the flag's margins (a bare one the primary's), each an exact counter
 /// (`model::is_ci_counter`): a time read once per side says nothing about head being no worse. Without
 /// `--base <variant>` it compares nothing. The case's own `noworse` is its timed comparisons'.
-fn check_noworse(args: &Args, s: &Series) -> Result<BTreeMap<String, f64>> {
+fn check_noworse(args: &Args, primary: &str) -> Result<BTreeMap<String, f64>> {
     let Some(flag) = args.get("noworse").filter(|_| args.has("check")) else { return Ok(BTreeMap::new()) };
-    let m = margins(&json!(flag), &s.primary).map_err(|e| Error::usage(format!("--noworse: {e}")))?;
+    check_counter_margins(flag, primary)
+}
+
+fn check_counter_margins(flag: &str, primary: &str) -> Result<BTreeMap<String, f64>> {
+    let m = margins(&json!(flag), primary).map_err(|e| Error::usage(format!("--noworse: {e}")))?;
     if let Some(timed) = m.keys().find(|k| !model::is_ci_counter(k)) {
         return Err(Error::usage(format!(
             "--check --noworse {timed}: a check compares exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes), each read once per side; a time needs timed pairs: bench --base <ref> --noworse {timed}=2%"
@@ -4224,6 +4238,9 @@ fn check_output(
     });
     let ending = CheckEnd::of(&result);
     result["passed"] = json!(ending.code == 0 && ending.ran > 0);
+    if result["passed"] == false {
+        result["check_ending"] = json!(if ending.lead.is_empty() { "Check failed" } else { &ending.lead });
+    }
     let text = super::query::recording_links(&check_text(&result), None, &result["id"]);
     result["text"] = json!(text);
     store::write_json(&dir.join("result.json"), &result)?;
@@ -4511,7 +4528,10 @@ fn check_text_at(r: &Value, source: Option<&Path>) -> String {
             text += &format!("      batch  {note}\n");
         }
         if let Some(r) = s["journey_refusal"].as_object() {
-            text += &format!("      refused  this journey: {}: {}\n", r.get("validator").and_then(Value::as_str).unwrap_or(""), r.get("summary").and_then(Value::as_str).unwrap_or(""));
+            let reason = format!("{}: {}", r.get("validator").and_then(Value::as_str).unwrap_or(""), r.get("summary").and_then(Value::as_str).unwrap_or(""));
+            if s["error"].as_str() != Some(&reason) {
+                text += &format!("      refused  this journey: {reason}\n");
+            }
         }
         // The case's own console output: the last 10 lines, and where the rest is.
         let log: Vec<&str> = s["log"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -6596,7 +6616,7 @@ fn refused_series(ctx: &Ctx, s: &Series, r: &Refusal) -> Value {
 /// state disturbed, a launch that kept failing and strobe's own errors are no refusal: they stop the bench.
 fn series_refusal(ctx: &Ctx, s: &Series, e: &Error) -> Option<Refusal> {
     let r = e.refusal.as_deref().filter(|_| e.code == 4 && !stop_requested() && !ctx.ran_out && phone_lost(ctx).is_none())?;
-    let dark = r.validator == ValidatorId::Throttled && dark_page(ctx, s) && dark_metric(&s.primary);
+    let dark = r.validator == ValidatorId::Throttled && r.summary.contains("console display was off") && dark_page(ctx, s) && dark_metric(&s.primary);
     (!r.validator.machine_wide() || dark).then(|| r.clone())
 }
 
@@ -7687,7 +7707,7 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
             let dark_primary = |ctx: &Ctx| cases.iter().find(|s| dark_page(ctx, s) && dark_metric(&s.primary)).map(|s| s.primary.clone());
             if display.is_some_and(|d| d.0 == 0) && !matches!(x.set, Set::Attribution | Set::Memory) && dark_primary(ctx).is_some() {
                 // An unlocked session's display went to sleep: woken once, it may stay on for the block.
-                if !host::session_locked() {
+                if cfg!(windows) && !host::session_locked() {
                     host::wake_display();
                     std::thread::sleep(Duration::from_secs(3));
                     display = host::display_state();
@@ -8810,11 +8830,11 @@ fn dark_refusal(what: &str) -> Refusal {
         ValidatorId::Throttled,
         format!("{what}: the console display was off, and a headless Chromium page then runs its frames and timers on a throttled clock of its own, so wall time and shares of it describe that clock"),
     )
-    .fix("run with the display on (unlocked, awake), or measure cpu.work or main.work, which hold")
+    .fix("run with the session unlocked and the display on, or choose a display-independent primary such as main.work or cpu.work")
 }
 
 /// `Throttled` for a headless Chromium page's wall times with the display off: a block about to run
-/// with a primary among them refuses (a `--check` refuses it per metric, as a secondary), and a block
+/// with a primary among them refuses (including a check); secondaries are refused per metric. A block
 /// that ran keeps none of them.
 fn dark_state(ctx: &Ctx, s: &Series, x: &Exec, display: Option<u8>, mut b: Block) -> Block {
     if display != Some(0) || !dark_page(ctx, s) || matches!(x.set, Set::Attribution | Set::Memory) {
@@ -12562,6 +12582,12 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
         }
     }
     let windowless = |all: bool| sides_windowless(s, name, t, config, variants, all);
+    if s.cross_engine && s.primary.starts_with("frames.") && !s.primary.starts_with("frames.interval.") && s.primary != "frames.dropped.pct" {
+        return Ok(Some(
+            Refusal::new(ValidatorId::NoPresentSource, format!("the primary {} needs the engine's frame pipeline, but this comparison measures OS presents", s.primary))
+                .fix("compare frames.interval.* or frames.dropped.pct"),
+        ));
+    }
     let page = matches!(t["kind"].as_str(), Some("web" | "url"));
     if args.get("engine").is_some() && !page {
         return Err(Error::usage(format!("{}: --engine picks a page's browser; {} is a {} target (narrow the run with --target)", s.label(), name, t["kind"].as_str().unwrap_or("?"))));
@@ -12732,7 +12758,7 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
         && engine == WebEngine::Chromium
         && s.sides.is_none()
         && dark_metric(&s.primary)
-        && (!args.has("check") || host::session_locked())
+        && (!cfg!(windows) || !args.has("check") || host::session_locked())
         && !matches!(args.get("probes"), Some("attribution" | "memory"))
         && host::display_state().is_some_and(|d| d.0 == 0)
     {

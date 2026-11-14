@@ -695,8 +695,9 @@ pub(super) fn all_rows(s: &Value) -> Vec<&Value> {
 /// A verdict in a table, in one of a few plain words.
 pub(super) fn verdict_text(c: &Value, o: Out, s: &Value, aa: bool) -> String {
     let v = verdict(c);
+    let v = v.trim_end_matches(" (warned)");
     let sub = |x: &str| if x.is_empty() { String::new() } else { format!(" <sub>{}</sub>", cell(x)) };
-    match o {
+    let text = match o {
         Out::Better | Out::Worse if !beyond_margin(c) => format!("**{}**", cell(v.trim_end_matches(" (small)"))),
         Out::AaFalse => "**false positive**".into(),
         Out::Same if aa => "same <sub>A/A passed</sub>".into(),
@@ -715,6 +716,7 @@ pub(super) fn verdict_text(c: &Value, o: Out, s: &Value, aa: bool) -> String {
             let need = s["holm_pairs"].as_u64().filter(|n| *n > s["pairs"].as_u64().unwrap_or(0));
             format!("not tested{}", sub(&need.map(|n| format!("needs {n} pairs")).unwrap_or_default()))
         }
+        Out::Unclear if crate::stats::needs_confirmation(c) => "needs confirmation".into(),
         Out::Unclear | Out::Gated => {
             // Only a count past the pairs already run: "~10 pairs" after 12 reads as a contradiction.
             let ran = c["n"].as_u64().or(s["pairs"].as_u64()).unwrap_or(0);
@@ -723,7 +725,8 @@ pub(super) fn verdict_text(c: &Value, o: Out, s: &Value, aa: bool) -> String {
         }
         Out::Desc => String::new(),
         Out::NotRun => "not run".into(),
-    }
+    };
+    if c["warned"] == true { format!("{text} <sub>warned</sub>") } else { text }
 }
 
 /// Why a metric was refused, in a few words: the same reason reads the same in every row, and the

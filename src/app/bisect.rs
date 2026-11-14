@@ -60,7 +60,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
     // Keep the first experiment (including its warnings) even when its retry settles the step.
     let mut settle = |mut s: Value, sign: Option<i8>| -> Result<Value> {
         let remaining = || deadline.map_or(Duration::MAX, |d| d.saturating_duration_since(Instant::now()));
-        if retry_allowed(blocked(&s, sign), false, retries) && !remaining().is_zero() && !super::stop_requested() {
+        if s["background_warn"] == true && retry_allowed(blocked(&s, sign), false, retries) && !remaining().is_zero() && !super::stop_requested() {
             let k = s["step"].as_u64().unwrap_or_default() as usize;
             retries += 1;
             progress(format!("step {k}: a measurement warning made the step inconclusive; waiting up to 60 s for quieter CPUs and retrying ({retries} of 2)"));
@@ -273,7 +273,7 @@ fn step_json(out: &Output, root: &Path, k: usize, base: &str, head: &str) -> Res
         progress(format!("  step {k}: ! {}  {}", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or("")));
     }
     let s = json!({
-        "warned":p["warned"] == true, "unread":unread(&series[0]),
+        "warned":p["warned"] == true, "background_warn":background_warn(&series[0]), "unread":unread(&series[0]),
         "warnings":warnings,
         "step": k, "good": base, "commit": head, "short": short(head), "subject": subject(root, head),
         "experiment": out.json["id"], "series": series[0]["label"], "metric": p["metric"], "relative": p["relative"],
@@ -298,15 +298,17 @@ fn moved(s: &Value) -> Option<i8> {
     }
 }
 
+pub(super) fn background_warn(series: &Value) -> bool {
+    series["primary"]["refusal"]["validator"] == "Background" || series["warnings"].as_array().into_iter().flatten().any(|w| w["level"] == "warn" && w["id"] == "Background")
+}
+
 pub(super) fn unread(series: &Value) -> bool {
-    [&series["blocks"], &series["pass"]["blocks"]]
-        .into_iter()
-        .flat_map(|b| b.as_array().into_iter().flatten())
-        .any(|b| b["values"]["background.unread"].is_number() || !b["values"]["cpu.foreign.max"].is_number())
+    [&series["blocks"], &series["pass"]["blocks"]].into_iter().flat_map(|b| b.as_array().into_iter().flatten()).any(|b| b["values"]["background.unread"].is_number())
 }
 
 pub fn blocked(s: &Value, sign: Option<i8>) -> bool {
-    s["warned"] == true && (s["unread"] == true || !matches!(s["verdict_kind"].as_str(), Some("better" | "worse")) || moved(s).is_none_or(|d| sign.is_some_and(|wanted| wanted != d)))
+    (s["warned"] == true || (s["background_warn"] == true && s["verdict_kind"] == "refused"))
+        && ((s["background_warn"] == true && s["unread"] == true) || !matches!(s["verdict_kind"].as_str(), Some("better" | "worse")) || moved(s).is_none_or(|d| sign.is_some_and(|wanted| wanted != d)))
 }
 
 pub fn retry_allowed(blocked: bool, retried: bool, used: usize) -> bool {
@@ -316,9 +318,10 @@ pub fn retry_allowed(blocked: bool, retried: bool, used: usize) -> bool {
 pub fn inconclusive_confirmation(series: &Value, sign: i8) -> bool {
     let mut step = series["primary"].clone();
     if !step.is_object() {
-        return true;
+        return background_warn(series);
     }
     step["unread"] = json!(unread(series));
+    step["background_warn"] = json!(background_warn(series));
     blocked(&step, Some(sign))
 }
 

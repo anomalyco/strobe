@@ -936,6 +936,8 @@ pub struct EndedMarks {
     /// read: its CPU would be both in that listing and in the cgroups' count of what ended.
     #[cfg(target_os = "linux")]
     skewed: std::collections::BTreeSet<u32>,
+    #[cfg(target_os = "linux")]
+    checked: std::collections::BTreeSet<u32>,
 }
 
 impl EndedMarks {
@@ -1034,7 +1036,8 @@ impl EndedMarks {
             if !a.launches.is_subset(&b.launches) {
                 return Err("a launch cgroup of the set was removed between the readings");
             }
-            if set_a.keys().any(|k| earlier.skewed.contains(&k.0)) || set_b.keys().any(|k| self.skewed.contains(&k.0)) {
+            let lost = |m: &EndedMarks, k: &(u32, u64)| m.skewed.contains(&k.0) || (m.checked.contains(&k.0) && !m.reaped.contains_key(k));
+            if set_a.keys().any(|k| lost(earlier, k)) || set_b.keys().any(|k| lost(self, k)) {
                 return Err("a process of the set ended between its listing and the cgroups' reading, so its CPU would be counted twice");
             }
             if a.members.keys().any(|k| !set_a.contains_key(k)) || b.members.keys().any(|k| !set_b.contains_key(k)) {
@@ -1118,6 +1121,7 @@ pub fn ended_marks(pids: &[u32], home: Option<&Path>) -> EndedMarks {
     #[cfg(target_os = "linux")]
     {
         out.cgroup = cgroup::read(pids, home);
+        out.checked.extend(pids);
         for &pid in pids {
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
                 out.skewed.insert(pid);

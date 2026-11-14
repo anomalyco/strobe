@@ -357,7 +357,7 @@ pub fn read(roots: &[u32], home: Option<&Path>) -> Option<Reading> {
         all.extend(pids(dir)?);
     }
     let running: Vec<(u32, u64)> = all.into_iter().filter_map(|p| Some((p, super::start_time(p)?))).collect();
-    let members = running.into_iter().filter_map(|k| Some((k, super::process_cycles(k.0)?))).collect();
+    let members = running.into_iter().filter_map(|k| Some((k, super::process_cycles_at(k.0, k.1)?))).collect();
     let mut usage_ns = 0u64;
     for dir in &launches {
         let stat = std::fs::read_to_string(dir.join("cpu.stat")).ok()?;

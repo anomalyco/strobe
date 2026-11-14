@@ -602,6 +602,9 @@ fn calm(series: &[&Value], aa: bool) -> (String, Option<Box<Tile>>) {
         return (format!("{} differed by {d} between two identical builds: this setup is not steady enough yet", noun(s)), with_tile(s));
     }
     if let Some(s) = find(Out::Unclear) {
+        if stats::needs_confirmation(&s["primary"]) {
+            return (format!("{}: needs confirmation", noun(s)), with_tile(s));
+        }
         let n = s["primary"]["n"].as_u64().or(s["pairs"].as_u64()).unwrap_or(0);
         return (format!("{}: no clear change in {n} pairs", noun(s)), with_tile(s));
     }

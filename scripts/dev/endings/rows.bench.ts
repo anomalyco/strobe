@@ -11,6 +11,7 @@ export default bench({
     defect: { primary: "cpu.work", run: () => { throw new Error("fixture incomplete") } },
     phase: { primary: "phase.absent", run: ({ call }) => call("idle") },
     frames: { primary: "frames.dropped.pct", run: ({ call }) => call("idle") },
+    nofixture: { primary: "cpu.fixture", run: ({ call }) => call("idle") },
     gap: { primary: "cpu.work", unsupported: { worker: "no adapter" }, run: () => {} },
   },
 })

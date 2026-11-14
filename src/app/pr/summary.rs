@@ -97,7 +97,7 @@ fn warnings(r: &Value) -> String {
 /// `--noworse` outcome), and why it did not pass. No times: one cold run measures none.
 fn check(r: &Value, series: &[&Value]) -> String {
     let both = series.iter().any(|s| s["base"].is_object() || noworse_rows(s).is_some());
-    let (mut passed, mut failed, mut refused, mut other) = (0, 0, 0, 0);
+    let (mut passed, mut failed, mut refused, mut gaps) = (0, 0, 0, 0);
     let mut rows = Vec::new();
     for s in series {
         let (case, target) = case_target(s);
@@ -115,18 +115,11 @@ fn check(r: &Value, series: &[&Value]) -> String {
                 refused += 1;
                 "refused".to_string()
             }
-            _ if s["not_run"] == true => {
-                other += 1;
-                "not run".to_string()
-            }
             "gap" => {
-                other += 1;
+                gaps += 1;
                 "gap".to_string()
             }
-            x => {
-                other += 1;
-                cell(x)
-            }
+            x => cell(x),
         };
         let counters = counters_cell(s);
         let mut notes: Vec<String> = Vec::new();
@@ -142,11 +135,12 @@ fn check(r: &Value, series: &[&Value]) -> String {
         rows.push(format!("| {} | {} | {status} | {counters} | {note} |", cell(&case), cell(&target)));
     }
     let mut out = heading(r, "check");
-    let total = series.len();
+    let not_run = r["stopped"]["not_run"].as_array().map_or(0, Vec::len);
+    let total = series.len() + not_run;
     let ending = crate::app::bench::CheckEnd::of(r);
     let tally = format!("{passed} of {total} case{} passed", if total == 1 { "" } else { "s" });
     let mut parts = if ending.lead.is_empty() { vec![format!("**{tally}**")] } else { vec![format!("**{}** (exit {})", ending.lead, ending.code), tally] };
-    for (n, what) in [(failed, "failed"), (refused, "refused"), (other, "did not run")] {
+    for (n, what) in [(failed, "failed"), (refused, "refused"), (gaps, if gaps == 1 { "gap" } else { "gaps" }), (not_run, "not run")] {
         if n > 0 {
             parts.push(format!("{n} {what}"));
         }

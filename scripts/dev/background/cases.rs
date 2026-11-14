@@ -188,15 +188,26 @@ pub fn run(logs: Option<&Path>) {
         ("refused", 1, false, true),
         ("worse", 1, true, true),
     ] {
-        let mut step = serde_json::json!({"warned":true,"unread":unread,"decided":!matches!(kind,"unclear"|"underpowered"|"refused"),"verdict_kind":kind,"lo":d,"hi":d});
+        let mut step =
+            serde_json::json!({"warned":kind!="refused","background_warn":true,"unread":unread,"decided":!matches!(kind,"unclear"|"underpowered"|"refused"),"verdict_kind":kind,"lo":d,"hi":d});
         assert_eq!(blocked(&step, Some(1)), want);
         assert_eq!(blocked(&step, None), want && kind != "better");
         let vals = if unread { serde_json::json!({"background.unread":1}) } else { serde_json::json!({"cpu.foreign.max":600}) };
         assert_eq!(inconclusive_confirmation(&serde_json::json!({"primary":step,"warnings":[warning],"blocks":[{"values":vals}]}), 1), want);
         step["warned"] = false.into();
+        step["background_warn"] = false.into();
         assert!(!blocked(&step, Some(1)));
     }
     assert!(retry_allowed(true, false, 1));
+    for (kind, want) in [("worse", false), ("same", true)] {
+        assert_eq!(
+            inconclusive_confirmation(
+                &serde_json::json!({"primary":{"warned":true,"decided":true,"lo":0.1,"hi":0.3,"verdict_kind":kind},"warnings":[{"level":"warn","id":"Drift"}],"blocks":[{"values":{}}]}),
+                1
+            ),
+            want
+        );
+    }
     assert!(!retry_allowed(true, true, 1));
     assert!(!retry_allowed(true, false, 2));
     assert!(!retry_allowed(false, false, 0));

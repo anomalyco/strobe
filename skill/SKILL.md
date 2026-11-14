@@ -381,7 +381,7 @@ noisy discovery evidence, or leave them out.
   - `SharedRunner`: a CI runner other jobs share; no timing there. `--check`, counters against base, leak
     runs and attribution work (In CI, above); timing needs a machine of its own.
 - In comparisons, single-build blocks and leak runs, a series refused while it runs (`NoPhase`, for
-  example) ends alone: `refused` in the listing. In a check its block refusal fails the case (1). Only
+  example) ends alone: `refused` in the listing. In a check a run defect fails the case (1), but a primary the target, engine or display cannot provide is refused. Only
   the machine's refusals (`SessionLocked`, `Background`, `Thermal`, …) stop the bench. Every series
   refused: exit 4.
 - `!` lines warn next to a kept number; `i` lines inform. Read them before trusting a number:

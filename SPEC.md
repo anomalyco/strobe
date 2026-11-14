@@ -530,7 +530,7 @@ Not built: `node:<port>` and `bun:<port>` (an inspector endpoint, §13.5: a Node
 `series[].primary.verdict_kind` for the outcome; slower is not an error. A check asks whether the
 workload runs, not whether it is faster. For `--check --noworse`, **check the process exit code**:
 `result.json`'s `passed` is true only when a case ran and the check completed successfully.
-An up-front refusal of the whole file can exit 4 without writing `result.json` at all.
+A whole-machine refusal before any series can exit 4 without a result. A check of refused cases writes their rows even when none ran.
 
 A metric affected by a series-level `Background`, `Drift` or `StateDrift` warning
 carries `warned: true`. An informational note does not set it. Under `--require-verdict`,
@@ -1231,8 +1231,8 @@ reasons (`unread_refusal`), first that applies:
   runs that sent no input: `NoInput`, `<m>: no measured run sent the input it times`;
 - a frame metric of a page measured from outside: `NoPresentSource`;
 - else `NoMetric`, `<m>: no measured run gave a value of it`.
-A primary refused so refuses the block as any refused primary does: a check's case fails (`FAIL
-<case>  NotForTarget: …`, exit 1); a comparison's or `--blocks` series is listed refused at block 1
+A check lists capability refusals such as `NotForTarget` separately. A missing phase or an
+incomplete run fails its case (exit 1). A comparison's or `--blocks` series is listed refused at block 1
 (exit 4 when every series is). A primary the target can never give is refused before anything runs
 where strobe knows it then (a windowless app's frame primary, an engine's, `Headless`: listed
 `refused`, exit 0 beside the rest). Not checked: attribution, memory and pixels blocks (they feed no
@@ -1255,11 +1255,11 @@ implementation comparison both sides' targets are checked (the summary names the
 journey is not compared: it counts toward neither side nor the family's Holm denominator, as a gap.
 The parity matrix shows `refused <validator>`, reports `Not run (<validator>)` with the summary and the
 fix (and no pair panels), a heading of "Not measured" only when no series decided, and `track` records
-no point for it. Gaps are not checked. When every series is refused, the run is refused (exit 4) with
-the first series' refusal, its label in front.
+no point for it. Gaps are not checked. When all non-gap cases are refused a check writes the result
+and exits 4. A timed comparison ruled out in preflight can instead return the first refusal directly.
 **A series refused while it runs** (exit 4 of its own: `OverheadBudget`, `NoPhase`, an engine that
-cannot run here, …) ends alone in comparisons, `--blocks N` and leak runs. In `--check`, a refusal
-of the block after launch fails the case (exit 1); a refused secondary alone does not. In the other modes it is
+cannot run here, …) ends alone in comparisons, `--blocks N` and leak runs. In `--check`, a run defect
+fails the case (1); a capability refusal stays refused even after launch. A refused secondary alone does not fail the case. In the other modes it is
 listed refused (kind `refused`; or, after some blocks, its kind with `stopped: refused`, its primary
 refused with the validator and its finished blocks kept) and the rest of the file runs. A primary a
 look already decided keeps its verdict; the refusal is a `Stopped` warning on the series. A series
@@ -1271,7 +1271,7 @@ the refusal whole (summary, detail, fix). Refusals of the machine stop the bench
 `WirelessTransport`), except a headless Chromium page's wall-time primary refused `Throttled` with
 the display off, which ends that series alone (§10.1), as do a stop, `--max-time`, a lost phone (exit
 255) and the user's state disturbed (no refusal). Exit 4 when every series that is not a gap is
-refused (a check: when every non-gap case was refused before launch). In a timed comparison or leak
+refused, including cases refused during a check. In a timed comparison or leak
 run, `--require-verdict` makes any refused primary exit 4. A refused series is checkpointed done:
 `--resume` can keep it. A `--blocks` run whose every series
 was refused still ends with `<exp> · strobe query <exp>`. A bench in which nothing ran (no series

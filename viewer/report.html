@@ -2227,6 +2227,7 @@ function refusalOf(c) {
 function classify(c, metric, aa) {
   const v = c?.verdict || "";
   const k = c?.verdict_kind;
+  if (c?.warned && (k === "same" || k === "no_worse")) return { kind: "inconclusive", tone: "neutral", warned: true };
   if (k === "descriptive" || v === "·") return { kind: "desc", tone: "neutral" };
   if (k === "refused" || /^refused/.test(v)) return { kind: "refused", tone: "warn" };
   if (k === "untested" || v === "—" || !v) return { kind: "unconfirmed", tone: "neutral" };
@@ -2469,6 +2470,7 @@ function renderExperiment(r) {
 
   const ledger = renderLedgerBanner(r);
   if (ledger) shell.append(ledger);
+  if (r.kind === "check" && r.passed === false) shell.append(h("section", { class: "ledger-banner warn", role: "status" }, r.check_ending || "Check did not pass"));
 
   if (!s) {
     shell.append(h("div", { class: "card-surface card-bd" }, "No series recorded in this experiment."));
@@ -2514,8 +2516,8 @@ function renderExperiment(r) {
     return;
   }
 
-  if (isUpfront(s)) {
-    appendKids(shell, [seriesList.length > 1 ? renderScorecard(seriesList, aa) : null, renderUpfrontRefusal(s)]);
+  if (isUpfront(s) || isGap(s)) {
+    appendKids(shell, [seriesList.length > 1 ? renderScorecard(seriesList, aa) : null, ...renderImplSeries(r, s, baseVar, headVar)]);
     return;
   }
 
@@ -2620,10 +2622,10 @@ function renderScorecard(seriesList, aa) {
       const m = c.metric || "";
       const u = unitOf(m);
       const cl = classify(c, m, aa);
-      if (isUpfront(sr)) {
+      if (isUpfront(sr) || isGap(sr)) {
         return h("button", { type: "button", class: "sc-item", "aria-selected": String(i === state.series), onclick: () => selectSeries(i) },
           h("div", { class: "sc-top" }, h("span", { class: "sc-name" }, capFirst(sr.case || sr.label || `Case ${i + 1}`)), h("span", { class: "sc-dot neutral" })),
-          h("div", { class: "sc-verdict neutral" }, `Not run (${c.refusal?.validator || "refused"})`),
+          h("div", { class: "sc-verdict neutral" }, isGap(sr) ? "Parity gap · not compared" : `Not run (${c.refusal?.validator || "refused"})`),
           h("div", { class: "sc-sub" }, labelOf(m))
         );
       }
@@ -2646,6 +2648,7 @@ function renderScorecard(seriesList, aa) {
 }
 
 function shortSeriesOutcome(c, m, u, cl, aa) {
+  if (cl.warned) return "Needs confirmation";
   const d = fmtDelta(c.estimate, c, u);
   if (cl.kind === "aa-fp") return `${d} false positive`;
   if (cl.kind === "same") return aa ? "Control passed (±2%)" : `Equivalent (${fmtBound(c, u)})`;
@@ -2659,6 +2662,7 @@ function shortSeriesOutcome(c, m, u, cl, aa) {
 
 /* ---------- Layer 1: Verdict Hero ---------- */
 function humanHeadline(c, m, u, cl, s, aa) {
+  if (cl.warned) return { pill: "Needs confirmation", headline: `${labelOf(m)}: a measurement warning qualifies the verdict` };
   // The change at its interval's digits without its sign, as the card's large number: a decided
   // +0.03% is not 0.0%.
   const absPct = c.relative !== false && finite(c.estimate)
@@ -2848,7 +2852,7 @@ function renderCheckSeries(r, s) {
           h("h2", { class: "sec-title" }, `${capFirst(s.case || s.label)}: check ${s.passed ? "passed" : "failed"}`),
           h("span", { class: "sec-sub" }, `One cold run, no warmup, nothing compared${finite(s.elapsed_ms) ? ` · ${fmtDuration(s.elapsed_ms)}` : ""}`)
         ),
-        h("div", { class: "card-hd-right" }, pills.map((p) => h("span", { class: "ref-pill" }, p)), h("span", { class: `status-pill ${s.passed ? "win" : "loss"}` }, s.passed ? "Passed" : "Failed"))
+        h("div", { class: "card-hd-right" }, pills.map((p) => h("span", { class: "ref-pill" }, p)), h("span", { class: `status-pill ${s.passed ? (r.passed === false ? "neutral" : "win") : "loss"}` }, s.passed ? "Case passed" : "Failed"))
       ),
       h("div", { class: "card-bd" },
         !s.passed && s.error ? h("pre", { class: "cli-pre" }, String(s.error) + (s.hint ? `\nfix: ${s.hint}` : "")) : null,
@@ -5374,6 +5378,7 @@ function forestRow(item, dom, focus, aa) {
   const outcomeStr = refusedRow
     ? `Refused (${refusalOf(c).validator || "see why"})`
     : item.role === "descriptive" ? "Context"
+    : cl.warned ? "Needs confirmation"
     : c.verdict_kind === "untested" || (!c.verdict_kind && c.verdict === "—") ? "Not tested"
     : !c.decided ? (c.lo > 0 || c.hi < 0 ? "Unconfirmed" : "Inconclusive")
     : cl.kind === "same" ? `Same (${fmtBound(c, u)})`

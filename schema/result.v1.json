@@ -27,9 +27,10 @@
       }
     },
     "result": { "type": "string", "description": "--json only: the path of result.json." },
-    "decided": { "type": "boolean", "description": "experiment: every series' primary got a verdict and nothing stopped the bench." },
+    "decided": { "type": "boolean", "description": "experiment: the completed comparisons decided, no primary needs confirmation, and nothing stopped the bench. See individual gaps and refusals for coverage." },
     "support": { "oneOf": [{ "$ref": "#/definitions/support" }, { "type": "null" }], "description": "The least support of the series that ran (SPEC 21.1); null when none ran. Absent in older results." },
-    "passed": { "type": "boolean", "description": "check: every case passed." },
+    "passed": { "type": "boolean", "description": "check: at least one case ran, none failed, and the command met its comparison and coverage requirements without stopping." },
+    "check_ending": { "type": "string", "description": "Why the whole check did not pass; individual cases can still have passed." },
     "parity": { "type": ["string", "null"], "description": "check of several targets: the parity matrix, as the text output prints it." },
     "batch": {
       "type": ["object", "null"],
@@ -571,7 +572,7 @@
           "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "validator": { "type": ["string", "null"] }, "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "The refusal that stopped it, whole (summary, detail, fix); absent in older results." }, "spans": { "$ref": "#/definitions/spans" } }
         },
         "not_run": { "type": "boolean" },
-        "passed": { "type": "boolean", "description": "check: the case ran." },
+        "passed": { "type": "boolean", "description": "check: the case passed on every required side, including its counter and parity checks." },
         "state": { "enum": ["pass", "fail", "refused", "gap"], "description": "check: the case's outcome in one field (refused: before it ran, or a refusal of its own that ended it as it ran, the rest of the file running on; fail: it ran and failed, or its journey differs)." },
         "refusal": { "oneOf": [{ "$ref": "#/definitions/refusal" }, { "type": "null" }], "description": "check: the refusal behind a refused or failed case, when a validator gave one." },
         "declared": { "type": "array", "items": { "type": "string" }, "description": "check: the metrics the case declared." },
