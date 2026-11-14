@@ -22,6 +22,9 @@ const POWER: f64 = stats::PLAN_POWER;
 const UNKNOWN_BLOCK: &str = "unknown: no earlier run or --check of this case here (a --check, a --pilot or this run's first pairs measure one)";
 
 pub fn run(args: &Args) -> Result<Output> {
+    if let Some(p) = args.get("pairs").filter(|p| *p != "auto") {
+        p.parse::<usize>().map_err(|_| Error::usage("--pairs: auto or a number"))?;
+    }
     let file = args.pos.first().ok_or_else(|| Error::usage("plan needs a bench file: strobe plan perf/x.bench.ts [--base <variant>] [--head <variant>]"))?;
     let file = std::fs::canonicalize(file).map_err(|_| Error::usage(format!("no such bench file: {file}")))?;
     // Checked as the bench would, though a plan runs no hook.
@@ -273,7 +276,7 @@ fn check_block(file_name: &str, s: &Series, runs: f64, setup: &Value, cmds: &Cmd
 pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &Args, config: &Value, project: &Path, variants: &[Variant], me: Option<&str>) -> Value {
     let file_name = file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
     let mut history = History { index: store::index(), results: HashMap::new() };
-    let fixed = args.get("pairs").filter(|p| *p != "auto").and_then(|p| p.parse::<usize>().ok());
+    let fixed = args.get("pairs").filter(|p| *p != "auto").and_then(|p| p.parse::<usize>().ok()).map(|n| n.max(2));
     let confidence = if fixed.is_some() { 0.95 } else { 1.0 - POCOCK_ALPHA };
     let runs = args.num("runs").ok().flatten().unwrap_or(5.0);
     let bound = args
@@ -438,7 +441,8 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         });
         out.push(json!({
             "label": s.label(), "case": s.case, "target": s.target, "primary": s.primary, "relative": relative,
-            "mode": if margin.is_some() { "noworse" } else { "two-sided" }, "margin": margin,
+            "mode": if margin.is_some() { "noworse" } else { "two-sided" }, "margin": margin, "bound": bound,
+            "fixed": fixed.is_some(), "launches": pairs.checked_mul(2),
             "sigma": sigma, "spread_source": spread_source, "from": pool.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             "block_ms": block_ms, "block_source": block_source, "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms,
             "effect": effect, "effect_source": effect_source, "expect": expect, "pairs_needed": need.is_finite().then_some(need.ceil()),
@@ -530,13 +534,20 @@ fn series_line(s: &Value) -> String {
         None => "time unknown until a block of it ran here".to_string(),
     };
     let what = match (s["sigma"].as_f64(), s["look"].as_u64()) {
-        (None, _) => format!("{} pairs at least; spread unknown, so no estimate of when it decides", s["pairs"]),
+        (None, _) => "spread unknown".to_string(),
         (Some(_), Some(l)) => format!("{} by pair {l} (~{} pairs needed)", s["expect"].as_str().unwrap_or(""), s["pairs_needed"].as_f64().unwrap_or(0.0)),
         (Some(_), None) => {
-            format!("underpowered at the expected effect (~{} pairs needed); stops at about {} pairs saying so", s["pairs_needed"].as_f64().map_or("many".to_string(), |n| n.to_string()), s["pairs"])
+            let pct = |x| fmt::bound(x, true, x, "");
+            let at = s["margin"].as_f64().map_or_else(|| format!("±{}", pct(s["bound"].as_f64().unwrap_or(0.02))), |m| format!("a {} margin", pct(m)));
+            let need = s["pairs_needed"].as_f64().filter(|n| *n < usize::MAX as f64).map_or_else(|| "no finite pair estimate".into(), |n| format!("try --pairs {n:.0} for an 80% chance"));
+            format!("likely underpowered at {at} for the expected effect; {need}")
         }
     };
-    format!("{}: {what}, {time}", s["label"].as_str().unwrap_or(""))
+    let floor = super::sequential::min_clean();
+    let pairs = s["pairs"].as_u64().unwrap_or(0);
+    let clean = if pairs < floor as u64 { format!("; too few for the clean-pair check (needs {floor} clean pairs; use at least --pairs {floor})") } else { String::new() };
+    let count = if s["fixed"] == true { "" } else { "estimated " };
+    format!("{}: {count}{pairs} kept pairs ({} launches before retries); {what}{clean}, {time}", s["label"].as_str().unwrap_or(""), s["launches"])
 }
 
 fn total_line(plan: &Value) -> String {

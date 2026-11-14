@@ -5179,7 +5179,12 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 // tests count it, so no pattern washes out of them.
                 let (bb, hb) = (&blocks[idx[0]], &blocks[idx[1]]);
                 let apart = match retries.decide(bb, hb, discarded.len(), load_moves, share.is_none_or(|t| Instant::now() < t)) {
-                    retry::Decision::Keep(_) => break,
+                    retry::Decision::Keep(reason) => {
+                        if let Some(why) = reason {
+                            progress(format!("  pair {} kept: {why}", pair + 1));
+                        }
+                        break;
+                    }
                     retry::Decision::Replace(apart) => apart,
                 };
                 let foreign = |b: &Block| b.values.get("cpu.foreign.max").copied().unwrap_or(f64::NAN);
@@ -5609,7 +5614,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let tested = sequential::gate_and_holm(&mut secondaries, primary_decided);
     // What the other work did to the rest (SPEC §10.2): judged on what load moves, each
     // metric on the blocks it was measured in (a pass's for what the paired loop's kind does not give).
-    let min_clean = LOOKS[0].max(stats::min_pairs(0.95));
+    let min_clean = sequential::min_clean();
     let without = |name: &str, upto: usize| -> Option<(usize, Vec<(f64, f64)>)> {
         let (bs, ps) = source(name);
         let quiet = |i: usize| !unread_load(&bs[i]) && !bs[i].values.contains_key("background.subtick") && bs[i].values.get("cpu.foreign.max").is_some_and(|f| *f < BACKGROUND_PCT);

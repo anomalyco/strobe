@@ -1636,6 +1636,10 @@ display.
 
 ### 5.13 `strobe run`
 
+`strobe run --base "<command>" --head "<command>" --plan` estimates the comparison
+without launching either command. Use `--aa --head` for one command against itself.
+`--plan` does not apply to `--check` or to a harness after `--`.
+
 ```
 strobe run [--pin auto|none|ccdN|<cpus>] [--reserve-cpus on|off] [--power high|keep] [--max-time …] -- <command> [args…]
 strobe run --base "<command>" --head "<command>" [--aa | --check] [--primary <metric>]
@@ -3562,7 +3566,8 @@ flowchart LR
   ETA aims there); every `needed_pairs` a comparison keeps or prints, the pairs an `underpowered`
   verdict names among them, is for an 80% chance from the same robust spread, as `plan`'s are, so the
   two never differ by the factor (z + z₀.₈)²/z² ≈ 1.8 they once did, and a series whose 80% figure
-  exceeds its pairs is `underpowered`, not `unclear`. `--pairs N` is one look at N at 95%. Secondaries and
+  exceeds its pairs is `underpowered`, not `unclear`. Its `--pairs N` hint is the total number of kept
+  pairs for another run, not N additional attempts. `--pairs N` is one look at N at 95%. Secondaries and
   descriptive rows use 95% intervals at the final pair. When the primary is decided at a look with
   fewer pairs than the tested secondaries need to clear Holm (2·2⁻ⁿ ≤ 0.05/tests: 9 pairs from 7
   tests), the series runs on to that many pairs for them and keeps the primary's verdict from its
@@ -3588,6 +3593,10 @@ flowchart LR
   minutes a bench needs to decide at the expected effect, before anything builds. It refuses what the
   bench would refuse before anything builds (an implementation's sides, sides with and without
   anything on screen: `VariantMismatch`, §10.1). Inputs, in order of preference:
+  - *Budget*: the plan and startup line count kept pairs and two timed launches per pair, before
+    retries. Below eight pairs they say the clean-pair check cannot run, not that a quiet run cannot
+    decide. The requested count stands. With a prior or pilot spread, an underpowered plan gives the
+    estimated `--pairs N` for an 80% chance at the expected effect, not a guarantee.
   - *Spread*: the primary's per-pair differences in earlier experiments of the same series (bench
     file name, series label, primary) on this device, each centred on its own median and pooled
     (1.4826·MAD, `stats::spread`), all in the newest experiment's scale (log ratios or differences,
@@ -6208,6 +6217,13 @@ that is one experiment note on an idle preflight and a series warning on a busy 
 the counted CPUs' entire capacity the note gives the needed span (20 ms per counted CPU), not a
 percentage. Never combine single-run blocks across launches: CPU in the gaps is not attributed.
 Missing accounting is not a zero.
+
+When a pair's blocks differ by at least one core of foreign work (a quarter of the target's physical
+cores if smaller, never below a quarter core), strobe can set the pair aside and run it again. It
+retries at most twice per series and never twice toward the same side. After two consecutive timed
+blocks reach 25% of a core, the load is sustained: keep this pair and finish without further load
+retries. Count the blocks in execution order, including set-aside attempts. Set-aside differences
+still count toward the test for one-sided load. Display-state retries are separate.
 
 Kept and flagged is right for work spread over both sides: it widens the interval. Work that ran with
 one side's blocks moves that side's numbers by itself: on adais, 16 threads spinning on the target's

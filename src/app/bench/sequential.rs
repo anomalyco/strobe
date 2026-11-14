@@ -14,6 +14,10 @@ pub(crate) const FUTILITY_FROM: usize = 12;
 /// Planned looks (pairs) for `--pairs auto`. Verdicts happen only here.
 pub(crate) const LOOKS: [usize; 5] = [8, 12, 18, 26, 40];
 
+pub(super) fn min_clean() -> usize {
+    LOOKS[0].max(stats::min_pairs(0.95))
+}
+
 /// Pocock's constant nominal level for 5 looks at 5% overall, two-sided: each look's interval is
 /// 98.4%. Looking after every pair at 95% called A/A runs different 10.9% of the time (simulated
 /// near the bound, `scripts/dev/stats-sim.ts`, and once on adais); five Pocock looks keep it at
@@ -221,7 +225,7 @@ pub(crate) fn closing(design: &Design, def: &MetricDef, primary: &mut Comparison
     };
     primary.needed_pairs = (n80 != usize::MAX).then_some(n80);
     Some(match primary.needed_pairs {
-        Some(n80) if n80 > pp.len() => (VerdictKind::Underpowered, format!("underpowered: ~{n80} pairs needed (for an 80% chance)")),
+        Some(n80) if n80 > pp.len() => (VerdictKind::Underpowered, format!("underpowered: ~{n80} kept pairs needed for an 80% chance; rerun with --pairs {n80}")),
         _ if stopped == "max pairs" && !design.fixed => (
             VerdictKind::Unclear,
             format!("unclear after {} pairs, the last planned look: the difference sits on the {}", pp.len(), if design.margin.is_some() { "margin" } else { "equivalence bound" }),

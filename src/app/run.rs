@@ -22,6 +22,9 @@ pub fn pin_label(label: &str) -> &str {
 }
 
 pub fn run(args: &Args) -> Result<Output> {
+    if args.has("plan") && (args.has("check") || args.get("head").is_none() || (!args.has("aa") && args.get("base").is_none())) {
+        return Err(Error::usage("run --plan estimates a comparison without running commands: give --base and --head (or --aa and --head), without --check"));
+    }
     if args.get("base").is_some() || args.get("head").is_some() || args.has("aa") {
         return paired(args);
     }
