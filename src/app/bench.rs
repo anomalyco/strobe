@@ -7399,7 +7399,7 @@ fn cross_adapter_note(warnings: &mut Vec<Warning>, what: &str, who: &str, gpu: &
     ));
 }
 
-/// `display on · session locked · dwm.exe 3.1% of a core · drawn on <adapter>`, from `screen_state`
+/// `display on · session locked · compositor 3.1% of a core · drawn on <adapter>`, from `screen_state`
 /// and `drawing_gpu`.
 pub(crate) fn screen_line(s: &Value) -> Option<String> {
     let mut parts = Vec::new();
@@ -7407,8 +7407,8 @@ pub(crate) fn screen_line(s: &Value) -> Option<String> {
         parts.push(format!("display {}", s["display"].as_str().unwrap_or("?")));
         parts.push(format!("session {session}"));
     }
-    if let Some(c) = s["compositor"].as_object() {
-        parts.push(format!("{} {:.1}% of a core", c["name"].as_str().unwrap_or("compositor"), c["cpu_pct"].as_f64().unwrap_or(f64::NAN)));
+    if let Some(pct) = s["compositor"]["cpu_pct"].as_f64() {
+        parts.push(format!("compositor {pct:.1}% of a core"));
     }
     if let Some(line) = gpu_line(&s["gpu"]) {
         parts.push(line);

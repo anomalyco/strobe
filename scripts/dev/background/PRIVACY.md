@@ -15,7 +15,7 @@ Read this table from left to right when changing an identity reader. A PID used 
 
 | Reader | Callers | Sink and boundary |
 | --- | --- | --- |
-| `all_processes` (`win::system_processes`, `linux::pids`, `macos::all_bsd`) | `speed_sample`, page and native preflight, `other_processes`, `busiest_others`, `busiest_during`, CLI/script/terminal blocks, record/outside `screen_state` | Speed/refusal and retry progress: live names, stored counts/share. `background` stays structured on disk; screen state uses compositor classes, not the process list. `top` is explicit inventory, not bench output. |
+| `all_processes` (`win::system_processes`, `linux::pids`, `macos::all_bsd`) | `speed_sample`, page and native preflight, `other_processes`, `busiest_others`, `busiest_during`, CLI/script/terminal blocks, record/outside `screen_state` | Speed/refusal and retry progress: live names, stored counts/share. `background` stays structured on disk. Screen state is a process-list reader too (below). `top` is explicit inventory, not bench output. |
 | `reserve::consider` / Linux reservation (`exe_of`, name, SID/uid, affinity) | `ReserveTotal::add`, `text`, `note`, PR `foreign_load` | Owner-only moved/failed maps; live named lists, stored counts/reasons. No SID in the note. |
 | `process_list`, `tree_pids`, `process_set`, start time, `stamp_of`, `running`, `exe_of`, command line/environment | target selection, guard, cleanup, probes, `outside::resolve` | Names in samples, `RunIncomplete` leftover children and busy threads are target-owned. Ambiguous attach candidates and guarded/live helpers aren't proven targets: show IDs live, keep the count/action. Reaping and leaving alone are different: an unverified/reused PID in a cleanup note must not be stored. |
 | `responsible_for`, `all_bsd` parent walk, `exe_of` | `unattributed` → owned launch → native bench/record; `timer_coalescing` → bench/status; `responsible_app`, `tcc_split`, `screen_recording_grantee` → native sizing, webview, AX/Quartz, window frame/region, present, video, `launch`, `shown`, status | Live ancestor path/bundle and PID; warning, error, grant hint, recording and status name only the role. The binary strobe itself needs permission for is not another app. |
@@ -30,3 +30,16 @@ Read this table from left to right when changing an identity reader. A PID used 
 | Old `result.json` / `meta.json` diagnostic strings and metric-keyed `refused` maps | `safe_diagnostics` → query summary/insights and report; `public` → PR/summary/card; standalone HTML payload | Recognize old producer clauses, not executable extensions or arbitrary paths/PIDs. Do not rewrite files or structured reserve/background/busiest data. HTML omits the latter. |
 
 The boundary is diagnostics **about another process**, not enumeration requested by the owner, a target's command line, or ordinary target paths. Protocol IDs, PIDs used in OS calls, paths compared for ownership, target element names, and structured process samples remain native types. Mark human-readable foreign descriptions before handing them to diagnostic code. The static check lists OS reader entry points; it is not a data-flow analysis.
+
+## Fixed-name readers
+
+An allowlist permits classification, not publication. Trace the value actually read, not whether a familiar name also occurs in the binary.
+
+| Reader or classifier | Where its answer goes |
+| --- | --- |
+| `COMPOSITORS` → `screen_state` | Sums matching processes' CPU; the first match's name is not the source of the whole sum. `pair_foreign_credit` consumes only the share. `screen_line` says **compositor**; owner JSON retains `screen.compositor.name`, HTML and uploaded results do not. Old screen lines need read-time scrubbing. |
+| `system_console_host`, `tty::hosts`, shell selection | Console hosts are checked for membership/pinning; the shell command is the requested or launched target. No inventory name in the refusal. |
+| `adb::server_pids`, `outside::resolve`, browser process-role classifiers | Transport PID filtering, explicit target selection, or roles of the target browser's processes. A foreign socket holder goes to live progress, not a role in the result. |
+| `session_locked` / display state: WTS, logind `LockedHint`, Quartz session flags | Locked/unlocked and on/off; no locker, window manager, desktop or session daemon name is read for this line. X11/Wayland advice names the display protocol, not an observed process. |
+| `gpu_macos::creator_pid`, `wakes::origin` | GPU client attribution parses the PID, discards the name and filters to target PIDs; audio and desktop library allowlists classify modules of sampled target threads, not running services. |
+| `virtual_machine`, `Steal`, throttling hints | Firmware/CPU/model and CPU counters, not a host process list. Antivirus, update and build examples in speed advice are possible causes, not observations. |

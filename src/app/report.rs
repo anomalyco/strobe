@@ -763,9 +763,17 @@ pub fn html(view: &str, data: &Value) -> String {
     if let Some(o) = data.as_object_mut() {
         o.remove("background");
     }
+    fn omit_screen_name(v: &mut Value) {
+        if let Some(c) = v.pointer_mut("/screen/compositor").and_then(Value::as_object_mut) {
+            c.remove("name");
+        }
+    }
+    omit_screen_name(&mut data);
     for s in data.get_mut("series").and_then(Value::as_array_mut).into_iter().flatten() {
+        omit_screen_name(s);
         for key in ["/blocks", "/pass/blocks"] {
             for b in s.pointer_mut(key).and_then(Value::as_array_mut).into_iter().flatten() {
+                omit_screen_name(b);
                 if let Some(o) = b.as_object_mut() {
                     o.remove("background");
                 }

@@ -779,7 +779,12 @@ pub(crate) fn scrub_public(s: &str) -> String {
     static MOVED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"moved per block \(.*?\)(, \d+ more started|; \d+ could not be moved|; \d+% put back|$)").expect("pattern"));
     static UNMOVED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+) could not be moved: .*?(; \d+% put back|$)").expect("pattern"));
     let (pct, share) = (&*PCT, &*SHARE);
-    let s = MOVED.replace_all(s, "moved per block$1");
+    static COMPOSITOR: LazyLock<Regex> = LazyLock::new(|| {
+        let names = crate::host::COMPOSITORS.iter().map(|s| regex_lite::escape(s)).collect::<Vec<_>>().join("|");
+        Regex::new(&format!(r"(?i)\b(?:{names}) (\d+(?:\.\d+)?% of a core)\b")).expect("compositor share")
+    });
+    let s = COMPOSITOR.replace_all(s, "compositor $1");
+    let s = MOVED.replace_all(&s, "moved per block$1");
     let s = UNMOVED.replace_all(&s, "$1 could not be moved$2");
     let s = legacy_obstruction(&s);
     let mut out = String::new();

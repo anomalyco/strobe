@@ -98,7 +98,11 @@ fn attempt(line: &Value, current: &Value, later: bool) -> Value {
     for t in targets {
         let show = |e: Option<&Value>| match e {
             Some(e) => {
-                format!("{}{}{}", e["browser"].as_str().unwrap_or("?"), if e["headless"] == true { " headless" } else { "" }, e["input"].as_str().map(|i| format!(" {i} input")).unwrap_or_default())
+                let browser = e["browser"].as_str().unwrap_or("?");
+                // The key in `phone <key> (<model>, <build>)` still distinguishes attempts
+                // in the comparison below. Never copy it into the change text.
+                let phone = browser.strip_prefix("phone ").and_then(|s| s.split_once(" (")).map(|(_, details)| format!("phone ({details}"));
+                format!("{}{}{}", phone.as_deref().unwrap_or(browser), if e["headless"] == true { " headless" } else { "" }, e["input"].as_str().map(|i| format!(" {i} input")).unwrap_or_default())
             }
             None => "none".into(),
         };

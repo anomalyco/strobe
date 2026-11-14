@@ -58,10 +58,11 @@ fn tokens(s: &str, ids: &BTreeSet<String>) -> String {
     while at < s.len() {
         let rest = &s[at..];
         let wir = s[..at].ends_with("wir:");
-        if (at == 0 || wir || s[..at].ends_with(sep))
+        let android = s[..at].ends_with("android:");
+        if (at == 0 || wir || android || s[..at].ends_with(sep))
             && let Some(id) = ids.iter().filter(|id| rest.starts_with(id.as_str())).find(|id| {
                 let tail = &rest[id.len()..];
-                tail.is_empty() || tail.starts_with(sep) || tail.starts_with(": ") || tail.starts_with(". ") || tail == "." || (wir && tail.starts_with('/'))
+                tail.is_empty() || tail.starts_with(sep) || tail.starts_with(": ") || tail.starts_with(". ") || tail == "." || (wir && tail.starts_with('/')) || (android && tail.starts_with(':'))
             })
         {
             out.push_str(HIDDEN);
@@ -95,7 +96,7 @@ fn display_fields(v: &mut Value, ids: &BTreeSet<String>) {
                     {
                         text(x, ids)
                     }
-                    "notes" | "handles" | "next" => {
+                    "notes" | "handles" | "next" | "changed" => {
                         if let Some(a) = x.as_array_mut() {
                             for item in a {
                                 if item.is_string() { text(item, ids) } else { display_fields(item, ids) }

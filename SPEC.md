@@ -41,8 +41,8 @@ When a design change is agreed, update this file in the same change.
    `progress.log`, `query <exp> summary`, or `report` format (`pr`, `summary`, `md`, `html`, `card`, `badge`)
    names or gives the PID, window title or command line of a process outside the target's own; live interactive
    terminal progress may. `result.json`, recording `meta.json` and `query --json` are owner-only local files
-   and keep local paths and the structured `plan.reserve.{moved,failed}`, `blocks[].background` and
-   `insights..busiest` lists for local diagnosis and cross-block deduplication (`--format md` and `--format html`
+   and keep local paths, `screen.compositor.name`, and the structured `plan.reserve.{moved,failed}`,
+   `blocks[].background` and `insights..busiest` lists for local diagnosis and cross-block deduplication (`--format md` and `--format html`
    omit foreign process names too, while only `--format pr|summary|card|badge` and the GitHub Action's artifact
    scrubber also redact local paths).
    A measured phone's transport address, serial and device ID are also private. Stored diagnostics identify
@@ -6139,7 +6139,7 @@ keep `screen` in their meta: the display (`on`, `off`, `dimmed`: `GUID_CONSOLE_D
 Windows), the session (`locked` or not) and the compositor's CPU over the block (`dwm.exe` on
 Windows, `WindowServer` on macOS, the X server or Wayland compositor on Linux, from two process
 snapshots), so a recording made with the display asleep or the session locked says so. `--check`
-prints it under each case (`screen  display on · session locked · dwm.exe 3.1% of a core`) and
+prints the combined share under each case (`screen  display on · session locked · compositor 3.1% of a core`) and
 `query <rec> summary` beside the variant's commit (`variant_git`: commit, uncommitted changes and
 their diff hash, kept in every block recording, with `root`, the folder the variant ran from: a
 local path in the owner-only state folder, read by `a..b` and insights to name files (§11.1), never

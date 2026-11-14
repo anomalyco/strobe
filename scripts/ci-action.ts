@@ -458,7 +458,9 @@ const ITEM = /^(.*?) (\d+(?:\.\d+)?)%/s
 // other processes, the titles of other apps' windows (`WindowHidden`: `"<title>" of process <pid>`), home
 // folders (`~`) and the machine's name on `strobe up`'s first line.
 function scrubText(text: string): string {
-  return scrubPaths(scrubLists(scrubWindows(text))).replace(/^strobe up · .*$/m, "strobe up")
+  return scrubPaths(scrubLists(scrubWindows(text)))
+    .replace(/\b(?:dwm\.exe|windowserver|xorg|xwayland|gnome-shell|kwin_wayland|kwin_x11|weston|sway|picom|mutter) (\d+(?:\.\d+)?% of a core)\b/gi, "compositor $1")
+    .replace(/^strobe up · .*$/m, "strobe up")
 }
 
 // Every quoted string in a clause that names `… of process <pid>`: a window's title or class, an element's
@@ -549,11 +551,22 @@ function scrub(v: any, key = ""): any {
   return v
 }
 
+export function scrubResult(v: any): any {
+  const out = scrub(v)
+  const screen = (row: any) => { if (row?.screen?.compositor) delete row.screen.compositor.name }
+  screen(out)
+  for (const series of Array.isArray(out?.series) ? out.series : []) {
+    screen(series)
+    for (const blocks of [series?.blocks, series?.pass?.blocks]) if (Array.isArray(blocks)) blocks.forEach(screen)
+  }
+  return out
+}
+
 // The artifact's result.json, scrubbed, and its HTML report drawn from that copy alone: strobe reads it in a
 // state folder that holds nothing else, so no recording (whose insights name other processes too) reaches it.
 async function scrubbedReport(d: Done, to: string, cwd: string) {
   const result = join(to, "result.json")
-  writeFileSync(result, JSON.stringify(scrub(JSON.parse(readFileSync(join(d.dir, "result.json"), "utf8"))), null, 2))
+  writeFileSync(result, JSON.stringify(scrubResult(JSON.parse(readFileSync(join(d.dir, "result.json"), "utf8"))), null, 2))
   const state = join(env("RUNNER_TEMP") || cacheRoot(), `strobe-report-state-${d.id}`)
   mkdirSync(state, { recursive: true })
   const out = join(to, "report-experiment.html")
@@ -580,7 +593,12 @@ async function artifacts(done: Done[], cwd: string): Promise<string> {
     if (recordings) {
       const recs = new Set(readFileSync(join(d.dir, "result.json"), "utf8").match(/rec_[0-9a-f]{6,}/g) ?? [])
       const from = join(dirname(dirname(d.dir)), "recordings")
-      for (const rec of recs) if (existsSync(join(from, rec))) cpSync(join(from, rec), join(to, "recordings", rec), { recursive: true })
+      for (const rec of recs) if (existsSync(join(from, rec))) {
+        const dest = join(to, "recordings", rec)
+        cpSync(join(from, rec), dest, { recursive: true })
+        const meta = join(dest, "meta.json")
+        if (existsSync(meta)) writeFileSync(meta, JSON.stringify(scrubResult(JSON.parse(readFileSync(meta, "utf8"))), null, 2))
+      }
     }
   }
   return root
@@ -729,7 +747,9 @@ async function runStep() {
   }
 }
 
-const step = process.argv[2]
-const steps: Record<string, () => Promise<void>> = { resolve: resolveStep, install: installStep, setup: setupStep, browser: browserStep, run: runStep }
-if (!steps[step]) fail(`ci-action.ts: no step ${step}; one of ${Object.keys(steps).join(", ")}`)
-await steps[step]()
+if (import.meta.main) {
+  const step = process.argv[2]
+  const steps: Record<string, () => Promise<void>> = { resolve: resolveStep, install: installStep, setup: setupStep, browser: browserStep, run: runStep }
+  if (!steps[step]) fail(`ci-action.ts: no step ${step}; one of ${Object.keys(steps).join(", ")}`)
+  await steps[step]()
+}

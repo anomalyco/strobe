@@ -11,6 +11,9 @@ use strobe::{
 };
 
 const NAME: &str = "foreign-canary-6c459.exe";
+const MOVED: &str = "moved-canary-c21";
+const FAILED: &str = "failed-canary-34a";
+const COMPOSITOR: &str = "kwin_wayland";
 const PID: u32 = 96371482;
 const TITLE: &str = "covering-title-4dc";
 const SERIAL: &str = "phone-serial-0a8";
@@ -22,6 +25,38 @@ const LEGIT: &str = "case target.exe: could not read /fixture/target.exe\nRunInc
 fn allowed(s: &str) {
     for token in [NAME, "96371482", TITLE, SERIAL, "private-tab-91d", SID, "grantee-42a"] {
         assert!(!s.contains(token), "planted identity {token} in artifact");
+    }
+}
+
+// Repeat the owner's audit with the *result* as the source of the names. Only the known
+// structured exceptions are removed to inspect saved prose, never to inspect a report.
+fn ground_truth(r: &Value) -> Vec<String> {
+    let mut names = vec!["planted-other-65c".to_string()];
+    for key in ["moved", "failed"] {
+        names.extend(r["plan"]["reserve"][key].as_object().unwrap().keys().cloned());
+    }
+    let mut row = |v: &Value| {
+        if let Some(n) = v["screen"]["compositor"]["name"].as_str() {
+            names.push(n.to_owned());
+        }
+        for p in v["background"].as_array().into_iter().flatten() {
+            names.push(p[0].as_str().unwrap().to_owned());
+        }
+    };
+    row(r);
+    for s in r["series"].as_array().unwrap() {
+        row(s);
+        for b in s["blocks"].as_array().into_iter().flatten().chain(s["pass"]["blocks"].as_array().into_iter().flatten()) {
+            row(b);
+        }
+    }
+    names
+}
+
+fn no_names(text: &str, names: &[String]) {
+    let lower = text.to_ascii_lowercase();
+    for n in names {
+        assert!(!lower.contains(&n.to_ascii_lowercase()), "found {n} outside owner-only fields");
     }
 }
 
@@ -76,8 +111,8 @@ fn streams() {
 pub fn run() {
     let mut reserve = ReserveTotal::default();
     let mut sample = host::reserve::Report::default();
-    sample.moved.insert(Private::process(NAME), 12);
-    sample.failed.insert(Private::process(NAME), "OS declined".into());
+    sample.moved.insert(Private::process(MOVED), 12);
+    sample.failed.insert(Private::process(FAILED), "OS declined".into());
     reserve.add(&sample);
     let detail = validity::speed_context(&[(Private::process(NAME).with_pid(PID, ""), 75.)], Some(2.), true, |s| assert!(s.starts_with("  ") && s.contains(NAME) && s.contains(&PID.to_string())));
     allowed(&detail);
@@ -127,12 +162,33 @@ pub fn run() {
         for line in &current {
             r["warnings"].as_array_mut().unwrap().push(json!({"level":"warn","id":"LiveChannel","text":line}));
         }
+        let screen = json!({"session":"unlocked","display":"on","compositor":{"name":COMPOSITOR,"cpu_pct":0.0}});
+        let screens = ["/screen", "/series/0/screen", "/series/0/blocks/0/screen", "/series/0/pass/blocks/0/screen"];
+        r["screen"] = screen.clone();
+        r["series"][0]["screen"] = screen.clone();
+        r["series"][0]["blocks"][0]["screen"] = screen.clone();
+        r["series"][0]["pass"] = json!({"blocks":[{"screen":screen}]});
+        let names = ground_truth(&r);
+        if kind == "check" {
+            fs::write(&file, r.to_string()).unwrap();
+            let cmd = Args::parse(["query", path, "summary"].map(str::to_string).to_vec()).unwrap();
+            let text = query::run(&cmd).unwrap().text;
+            assert!(text.contains("display on · session unlocked · compositor 0.0% of a core"));
+            r["text"] = json!(text);
+        }
         let mut prose = r.clone();
         for k in ["moved", "failed"] {
             prose["plan"]["reserve"].as_object_mut().unwrap().remove(k);
         }
         prose["series"][0]["blocks"][0].as_object_mut().unwrap().remove("background");
+        for p in screens {
+            prose.pointer_mut(p).unwrap()["compositor"].as_object_mut().unwrap().remove("name");
+        }
         allowed(&prose.to_string());
+        no_names(&prose.to_string(), &names);
+        no_names(&log, &names);
+        r["text"] = json!(format!("screen  display on · session unlocked · {COMPOSITOR} 0.0% of a core"));
+        r["warnings"].as_array_mut().unwrap().push(json!({"text":format!("legacy screen: {} 12.3% of a core", COMPOSITOR.to_uppercase()),"id":"Display","level":"info"}));
         // Older persisted prose must also render safely. The structured fields stay on disk.
         r["warnings"]
             .as_array_mut()
@@ -154,7 +210,9 @@ pub fn run() {
         r["args"]["flags"]["mobile"] = json!(SERIAL);
         r["series"][0]["params"] = json!({"mobile":"1","serial":"a","text":"on"});
         r["series"][0]["blocks"][0]["phone"] = json!({"udid":"device-id-92a","short_udid":"short-92a","handle":"wir:short-92a/app/2"});
-        r["series"][0]["pass"]["blocks"] = json!([{"phone":{"hw_serial":"alternate-physical-id"}}]);
+        r["series"][0]["pass"]["blocks"][0]["phone"] = json!({"hw_serial":"alternate-physical-id"});
+        r["ledger"] = json!({"earlier":[{"changed":[format!("page: desktop → phone {SERIAL} (model)")]}]});
+        r["warnings"].as_array_mut().unwrap().push(json!({"id":"Throttled","level":"warn","text":"slow check","fix":format!("speed reference entry \"android:{SERIAL}:org.example\"")}));
         r["warnings"]
             .as_array_mut()
             .unwrap()
@@ -169,8 +227,11 @@ pub fn run() {
             allowed(&answer.json.pointer(ptr).unwrap().to_string());
         }
         let insights = Args::parse(vec!["query".into(), path.into(), "insights".into()]).unwrap();
-        allowed(&query::run(&insights).unwrap().text);
+        let insights = query::run(&insights).unwrap();
+        allowed(&insights.text);
+        no_names(&insights.text, &names);
         allowed(&t);
+        no_names(&t, &names);
         if kind == "experiment" {
             assert!(t.contains("12 kept launches + 4 set aside"));
         }
@@ -187,10 +248,12 @@ pub fn run() {
             allowed(&result.text);
             let body = fs::read_to_string(out).unwrap();
             allowed(&body);
+            no_names(&body, &names);
             for id in ["192.0.2.42:5555", "192.0.2.42_5555", "device-id-92a", "short-92a", "alternate-physical-id"] {
                 assert!(!body.contains(id), "{format} kept {id}");
             }
             if format == "html" {
+                assert!(body.contains("compositor 0.0% of a core") && body.contains("compositor 12.3% of a core"));
                 assert!(body.contains("keep run.duration regression /folder/on/file 1a0b"));
                 assert!(body.contains(r#""params":{"mobile":"1","serial":"a","text":"on"}"#));
             }
@@ -203,7 +266,7 @@ pub fn run() {
     }
     let meta = home.join("meta.json");
     let own_path = "Privacy_Accessibility: turn on /fixture/strobe";
-    let data = json!({"id":"rec_private_rows","kind":"native","phone":{"short_udid":SERIAL,"udid":format!("full-{SERIAL}")},"background":[[NAME,75]],"insights":{"hits":[{"evidence":{"busiest":[[NAME,75]]}}]},"note":legacy[6],"unattributed":legacy[7],"frames_refused":legacy[8],"presents_refused":legacy[8],"os_frames":{"refused":legacy[8]},"care_note":legacy[8],"hint":own_path});
+    let data = json!({"id":"rec_private_rows","kind":"native","screen":{"compositor":{"name":COMPOSITOR,"cpu_pct":1.2}},"phone":{"short_udid":SERIAL,"udid":format!("full-{SERIAL}")},"background":[[NAME,75]],"insights":{"hits":[{"evidence":{"busiest":[[NAME,75]]}}]},"note":legacy[6],"unattributed":legacy[7],"frames_refused":legacy[8],"presents_refused":legacy[8],"os_frames":{"refused":legacy[8]},"care_note":legacy[8],"hint":own_path});
     fs::write(&meta, data.to_string()).unwrap();
     let summary = query::run(&Args::parse(["query", meta.to_str().unwrap(), "summary"].map(str::to_string).to_vec()).unwrap()).unwrap();
     allowed(&summary.text);
@@ -215,7 +278,9 @@ pub fn run() {
         let out = home.join("recording.txt");
         let args = Args::parse(["report", "recording", meta.to_str().unwrap(), "--format", format, "--out", out.to_str().unwrap()].map(str::to_string).to_vec()).unwrap();
         allowed(&report::run(&args).unwrap().text);
-        allowed(&fs::read_to_string(out).unwrap());
+        let body = fs::read_to_string(out).unwrap();
+        allowed(&body);
+        assert!(!body.contains(COMPOSITOR));
     }
     assert_eq!(serde_json::from_slice::<Value>(&fs::read(meta).unwrap()).unwrap(), data);
     fs::remove_dir_all(home).unwrap();
@@ -223,6 +288,13 @@ pub fn run() {
 }
 
 pub fn history() {
+    // Real producer: the previous phone's key is not in the current run's selectors.
+    let identity = |key: &str| json!({"variants":["a","b"],"engines":{"page":{"browser":format!("phone {key} (model, build)")}}});
+    strobe::store::append_index(&json!({"id":"exp_before","created":"0","identity":identity("other-phone-4ce")})).unwrap();
+    let ledger = strobe::store::ledger::for_experiment("exp_after", "1", &identity(SERIAL));
+    assert_eq!(ledger["changed"], true);
+    let text = ledger.to_string();
+    assert!(!text.contains("other-phone-4ce") && !text.contains(SERIAL));
     let id = "ser_privacyfixture";
     let legacy = format!("another window covers the point (1, 2): {TITLE:?} of process {PID}");
     strobe::history::append(id, &json!({"t":"series","id":id,"label":"fixture","metric":"run.duration","unit":"ms"})).unwrap();
