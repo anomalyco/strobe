@@ -136,6 +136,14 @@ Independent controls (start load): script-a 151.32143 wall / 153.53680 CPU ms (1
 
 **Re-reading round one:** Linux page wall's initial 12-pair shift +100.079 [99.929, 100.242] ms already covered +100; the 32-pair shift +100.036 [99.939, 100.130] did too. The Linux page-engine (+100.054 [99.927, 100.178]), terminal grid (+60.021 [59.993, 60.050]) and terminal launch (+299.995 [299.322, 300.094]) plants still pass. Both early Linux ready A/Bs cover +200 ms ([192.72, 214.26] and [194.39, 203.96]); marks supplied the missing known answer, not a different A/B verdict. No Linux label changes. On Windows the clean terminal-launch A/B changes from miss to pass. Page launch still misses: after the 200 ms spin the frame wait had median 5.95 ms vs 3.30 ms after 400 ms. The mark clock was not short. No load warning is cleared by changing the arithmetic.
 
+## Round three: later page launch
+
+Linux v0.39.0 passed all four parts again with **400 → 600 ms**, keeping both spins past early browser startup. No Windows page run was taken in this round.
+
+| Known answer | A/A | Planted A/B | Boundary |
+|---|---|---|---|
+| `launch.ready` 444.54 / 648.36 ms; `plant_start` 39.04 / 44.86 ms; spans 400.20 / 600.30 ms; ready 5.30 / 3.20 ms after end | 40 pairs, −0.32% [−0.97, +0.33], same; 0/80 blocks flagged | 40 pairs, paired **+201.17 ms [195.75, 205.01]** covers +200; +44.75% [43.31, 45.76]; 0/80 blocks flagged | `launch.painted` on launch-600 refused `Headless` before launch (exit 4, no value) |
+
 ### When the Mac returns
 
 Use the fixture checkout with the marks and a binary with a recorded release or commit. Take and release the host slot around **each** invocation. `P` and `W` below are the paths defined above; `T=scripts/dev/known/tty.bench.ts`, `H=scripts/dev/http-probe.bench.ts`. Prefix each command with `strobe bench` and expand the file abbreviation. Use `--power keep --reserve-cpus off --why never`. Compile `scripts/dev/known/known.rs` with `rustc -O` to a scratch `KNOWN_BIN` before the terminal batch. No headed or GPU work is requested.

@@ -590,7 +590,7 @@ const WIN_PAGE_WALL: &str =
 const WIN_PAGE_ENGINE: &str = "100.43 ms for 100 ms and 25 layouts/styles; other work flagged 13 of 24 A/A and 17 of 24 A/B blocks. Needs qualifying quiet main.work pairs";
 const WIN_SCRIPT_WALL: &str = "301.29 ms for 300 ms plus the host call; other work flagged 5 of 24 blocks in each wall-time comparison. Needs qualifying quiet pairs";
 const WIN_SCRIPT_CPU: &str = "301.06 ms for 300 ms; other work flagged 3 of 24 A/A and 14 of 24 A/B blocks. Needs qualifying quiet cpu.work pairs";
-const WIN_SCRIPT_HTTP: &str = "the warm fast control implies +184.55%, inside the planted interval, but other work flagged 9 of 24 A/A and 11 of 24 A/B blocks. Needs qualifying quiet probe pairs";
+const WIN_SCRIPT_HTTP: &str = "the planted interval overlaps the warm control range [+184.36 … +185.24]%, but other work flagged 9 of 24 A/A and 11 of 24 A/B blocks. Needs quiet probe pairs";
 const WIN_PAGE_CPU_FLAGGED: &str =
     "with untimed OS snapshots cpu2s read 2003.98 ms vs 2016 ms. Needs quiet fixed-work pairs: 17 of 24 A/A and 3 of 24 A/B blocks flagged, with no clean-pair confirmation";
 const LINUX_CLI_WALL: &str = "a command's run.duration reads 15 to 18 ms more than the command took: strobe's clock starts before the launch cgroup's set-up and the child's move into it (linux-promo-6); its A/A and planted A/B pass";
