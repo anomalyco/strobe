@@ -18,7 +18,17 @@ pub fn run() {
     schedule.cancel_replace();
     assert_eq!(schedule.decide(&busy, &quiet, 0, true, false), Decision::Keep(Some("time budget reached")));
 
-    // One spread, two confidence levels: fewer than 40 fixed pairs but more than 40 at an auto look.
+    closing_result();
+    println!("40 kept pairs, fixed projection 36: unclear, no rerun hint; cancelled retry: time budget reached");
+    for path in std::env::args_os().skip(2) {
+        recorded(path.as_ref());
+    }
+    regimes();
+}
+
+// A real closed primary over scripted pairs, also rendered by closing-surfaces.ts.
+pub fn closing_result() -> serde_json::Value {
+    use serde_json::json;
     let design = Design::new(None, 0.02, None, None);
     let def = metric("run.duration").unwrap();
     let log_d: Vec<_> = (0..40)
@@ -32,13 +42,19 @@ pub fn run() {
     assert!(!c.decided);
     assert!(strobe::stats::pairs_needed(&log_d, 1.02_f64.ln(), design.confidence, 0.8) > pp.len());
     let (kind, words) = strobe::app::bench::closing(&design, def, &mut c, "max pairs", &pp).unwrap();
-    assert_eq!(c.needed_pairs, Some(36));
+    assert_eq!(strobe::stats::pairs_needed(&log_d, 1.02_f64.ln(), 0.95, 0.8), 36);
+    assert_eq!(c.needed_pairs, None);
     assert_eq!(kind, VerdictKind::Unclear);
     assert!(!words.contains("--pairs"));
-    println!("40 kept pairs, fixed projection 36: unclear, no rerun hint; cancelled retry: time budget reached");
-    for path in std::env::args_os().skip(2) {
-        recorded(path.as_ref());
-    }
+    c.set_verdict(kind, words);
+    let blocks: Vec<_> =
+        pp.iter().enumerate().flat_map(|(pair, &(a, b))| [("base", a), ("head", b)].map(|(variant, ms)| json!({"pair":pair,"variant":variant,"values":{"run.duration":ms},"run_ms":[ms]}))).collect();
+    json!({"id":"exp_closing","kind":"experiment","file":"case.bench.ts", "args":{"flags":{}},
+        "variants":[{"role":"base","label":"base","spec":"base"},{"role":"head","label":"head","spec":"head"}],
+        "series":[{"label":"duration","case":"duration","target":"script","kind":"runs","pairs":40,"launches":80,"decided":false,"primary":c,"stopped":"max pairs","blocks":blocks}]})
+}
+
+fn regimes() {
     for name in ["cpu.work", "run.duration", "launch.ready"] {
         for fixed in [None, Some(6), Some(9), Some(12)] {
             let design = Design::new(fixed, 0.02, None, None);

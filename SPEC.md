@@ -3569,7 +3569,9 @@ flowchart LR
   exceeds its pairs is `underpowered`, not `unclear`. Its `--pairs N` hint is the total number of kept
   pairs for another run, not N additional attempts. Compute the suggested fixed count at 95%, not
   at a sequential look's confidence. If that fixed count is no larger than the number already run,
-  the ending is `unclear`: there is no larger budget to suggest. If more than 200 are needed, reduce block variance rather than
+  the ending is `unclear` and the closed primary's `needed_pairs` is null: there is no larger budget
+  to suggest. Reports suppress projections at or below the number of pairs run, including for older
+  results. If more than 200 are needed, reduce block variance rather than
   printing an unusable command. `--pairs N` accepts 2 through 200 and is one look at N at 95%. Secondaries and
   descriptive rows use 95% intervals at the final pair. When the primary is decided at a look with
   fewer pairs than the tested secondaries need to clear Holm (2·2⁻ⁿ ≤ 0.05/tests: 9 pairs from 7

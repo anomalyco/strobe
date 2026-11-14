@@ -224,7 +224,7 @@ pub fn closing(design: &Design, def: &MetricDef, primary: &mut Comparison, stopp
         None => stats::pairs_needed(&d, if primary.relative { (1.0 + design.bound).ln() } else { primary.bound }, 0.95, stats::PLAN_POWER),
     };
     let underpowered = n80 != usize::MAX && n80 > pp.len();
-    primary.needed_pairs = (n80 != usize::MAX).then_some(n80);
+    primary.needed_pairs = underpowered.then_some(n80);
     Some(match primary.needed_pairs {
         _ if underpowered && n80 > crate::cli::MAX_PAIRS => {
             (VerdictKind::Underpowered, format!("underpowered: even {} fixed pairs are unlikely to decide; reduce block variance", crate::cli::MAX_PAIRS))
