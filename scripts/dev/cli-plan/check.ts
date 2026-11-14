@@ -15,14 +15,15 @@ try {
     // An old start command or file association can open a window. Do not exercise those paths.
     if (before && win && ["start", "ps1"].includes(row.key)) continue
     writeFileSync(receipts, ""); writeFileSync(file, row.key === "input" ? "left\n" : "not redirected\n")
-    const r = spawnSync(bin, ["run", "--check", "--head", row.line, "--primary", "run.duration", "--metrics", "cpu.work", "--reserve-cpus", "off", "--power", "keep", "--json"], {encoding:"utf8", env, windowsHide:true, timeout:30000, maxBuffer:16<<20})
+    const r = spawnSync(bin, ["run", "--check", "--head", row.line, "--primary", "run.duration", "--metrics", "cpu.work", "--reserve-cpus", "off", "--power", "keep", "--max-time", "2m", "--json"], {encoding:"utf8", env, windowsHide:true, timeout:135000, maxBuffer:16<<20})
+    if (r.error || r.status === 124) throw new Error(`${row.key} did not finish: ${r.error?.message ?? r.stderr}`)
     let result: any; try { result = JSON.parse(r.stdout) } catch {}
     const series = result?.series?.[0], values = series?.values || {}, wall = values["run.duration"], cpu = values["cpu.work"]
     const legs = readFileSync(receipts,"utf8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l))
     const keys = legs.map(l=>l.key).sort().join(" "), expected = row.legs?.split(" ").sort().join(" "), shell = result?.warnings?.some((w:any)=>w.id === "ShellLine")
     const min = row.key === "pipe" ? 135 : legs.reduce((sum,l)=>sum+(l.key === "right" ? 135 : 35),0)
     const text = r.stderr + r.stdout
-    const ok = row.how === "refuse" ? r.status === 2 && text.includes(row.reason!) && !legs.length : row.how === "missing" ? r.status !== 0 && wall == null && (row.key !== "syntax" || /POSIX sh.*syntax error/i.test(series?.error || "")) :
+    const ok = row.how === "refuse" ? r.status === 2 && text.includes(row.reason!) && !legs.length : row.how === "missing" ? r.status === 1 && wall == null && (row.key !== "syntax" || /POSIX sh.*syntax error/i.test(series?.error || "")) :
       r.status === 0 && keys === expected && (row.how === "shell") === !!shell && typeof wall === "number" && wall + 2 >= min &&
       (legs.every(l=>l.key !== "right") || cpu >= 20 || JSON.stringify(series?.refused).includes("cpu.work")) &&
       (!row.args || JSON.stringify(legs[0]?.args) === JSON.stringify(row.args)) && (row.key !== "input" || legs[0]?.input === "left") &&
@@ -45,6 +46,12 @@ try {
     copyFileSync(process.execPath, join(local,"plan-shadow" + exe)); copyFileSync(process.execPath, join(dir,"plan-shadow" + exe))
     check("shadow", ["run","--head","plan-shadow --version"], 0, /PathShadow/, local)
     check("asymmetric", ["run","--head","bun --version","--base","echo hi"], 0, /only base's run.duration/, local)
+    if (win) {
+      writeFileSync(join(local, "script.ps1"), "Write-Output ready\n")
+      check("existing-script", ["run", "--head", ".\\script.ps1"], 2, /pwsh -NoProfile -File/, local)
+      copyFileSync(process.execPath, join(dir,"plan-tool.3.12.com"))
+      check("dotted-pathext", ["run", "--head", "plan-tool.3.12 --version"], 0, /plan-tool\.3\.12\.com/i, local)
+    }
   }
 } finally { rmSync(dir,{recursive:true,force:true}) }
 process.exitCode = bad ? 1 : 0
