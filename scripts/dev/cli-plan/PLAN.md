@@ -68,3 +68,17 @@ row. The two roots in the explicit `cmd /c` control were siblings under the same
 | newline | one worker; 55.6 / 14.8 | both; 187.1 / 46.7 |
 | trailing `&` | left; 53.0 / 13.0 | refused, no value |
 | `[[ … ]]` with fallback | not a Windows row | **fallback only; 141.6 / 35.5** |
+
+### Whole-line check
+
+| Shape | Windows wall / CPU (ms) | Linux wall / CPU (ms) | Independent evidence |
+|---|---:|---:|---|
+| `&&` | 233.2 / 76.8 | 185.3 / 46.0 | both legs completed, same parent |
+| failing left `\|\|` | 224.3 / 69.1 | 184.9 / 43.7 | left failed, right completed |
+| pipe | 172.8 / 68.6 | 143.2 / 44.5 | right completed its CPU work and sleep |
+| output redirect | 70.8 / 24.4 | 44.2 / 9.3 | file contents replaced |
+| explicit shell, same `&&` | 235.4 / 81.4 | 185.3 / 45.1 | both legs completed |
+
+The `check.ts` rows check argv and independent receipts, not an exact speed ratio. Shell startup
+and runtime startup are work in addition to the planted work. `hooks.bench.ts` checks the target
+default and a caught dynamic refusal, including a leftover hidden in an explicit shell.

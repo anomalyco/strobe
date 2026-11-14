@@ -26,9 +26,9 @@ exits 0 unless you pass `--require-verdict` (then 5). A refused comparison exits
 both commands run, add `--check`: a command that fails makes the check exit 1; timings from a check
 are not a verdict.
 
-Known issue: on Windows a command line starts its first program directly, so `a && b`, `a | b` or
-`a > out` measures `a` alone. Wrap such a line in `cmd /c "a && b"` on both sides, or use a script. A
-fix is designed.
+`a && b` times the whole line. Shell operators run through POSIX sh or Windows cmd.exe;
+`ShellLine` tells you when shell startup counts. Plain commands use PATH. To measure a program
+built in the variant's folder, write `./tool` or `.\tool.exe`.
 
 ## In your project
 

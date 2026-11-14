@@ -25,16 +25,19 @@ pub(super) struct Evidence {
     pub shadow: Option<String>,
 }
 
-pub(in super::super) fn early(line: &str) -> Result<()> {
+fn syntax(line: &str) -> Result<os::Shape> {
     if line.trim().is_empty() || line.contains('\0') {
         return Err(Error::usage("give a nonempty command line without a NUL character"));
     }
-    os::syntax(line).map(|_| ()).map_err(|why| Error::usage(format!("`{line}`: {why}")))
+    os::syntax(line).map_err(|why| Error::usage(format!("`{line}`: {why}")))
+}
+
+pub(in super::super) fn early(line: &str) -> Result<()> {
+    syntax(line).map(|_| ())
 }
 
 pub(super) fn exec(line: &str, root: &Path, env: &Value) -> Result<Planned> {
-    early(line)?;
-    os::plan(line, root, env).map_err(|e| Error { message: format!("`{line}`: {}", e.message), ..e })
+    os::plan(line, root, env, syntax(line)?).map_err(|e| Error { message: format!("`{line}`: {}", e.message), ..e })
 }
 
 fn env_var(env: &Value, name: &str) -> Option<OsString> {
@@ -64,7 +67,13 @@ fn resolve(program: &str, root: &Path, env: &Value) -> Result<Option<Evidence>> 
     match (hit, local) {
         (Some(hit), local) => {
             let shadow = local
-                .filter(|p| std::fs::canonicalize(p).ok() != std::fs::canonicalize(&hit).ok())
+                .filter(|p| {
+                    if p == &hit {
+                        return false;
+                    }
+                    let same = std::fs::canonicalize(p).ok().and_then(|local| std::fs::File::open(&hit).ok().and_then(|f| host::disk::same_file(&f, &local)));
+                    same != Some(true)
+                })
                 .map(|p| format!("bare `{program}` ran `{}` from PATH, not `{}` in the variant's folder: write `{}` to measure the variant's build", hit.display(), rel(&p), rel(&p)));
             Ok(Some(Evidence { program: hit, shadow, ..Default::default() }))
         }

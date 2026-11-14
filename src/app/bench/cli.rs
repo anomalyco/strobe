@@ -255,11 +255,9 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
                 }
                 let failed = |e: &Error| {
                     gap_ms.set(f64::NAN);
-                    if e.code == 2 || e.refusal.is_some() {
-                        let mut e = e.clone();
-                        e.message = format!("{}: {}", label(s, v), e.message);
-                        latched.borrow_mut().get_or_insert(e);
-                    }
+                    let mut e = if e.code == 2 || e.refusal.is_some() { e.clone() } else { Error::refused("RunIncomplete", e.message.clone(), "fix the command and run the whole block again") };
+                    e.message = format!("{}: {}", label(s, v), e.message);
+                    latched.borrow_mut().get_or_insert(e);
                 };
                 let line = line_for(&a["line"], v, &target).inspect_err(failed)?;
                 // `{fixture.url}` and the like, in a line the call or the variant gave (the target's

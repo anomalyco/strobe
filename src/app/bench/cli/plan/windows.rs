@@ -41,7 +41,12 @@ fn token(line: &str, start: usize) -> std::ops::Range<usize> {
     let s = &line[start..];
     let s = s.trim_start_matches([' ', '\t', '(']);
     let at = line.len() - s.len();
-    let len = if let Some(q) = s.strip_prefix('"') { q.find('"').map_or(s.len(), |end| end + 2) } else { s.find([' ', '\t', '&', '|', '<', '>', ')']).unwrap_or(s.len()) };
+    let group = s.len() != line[start..].trim_start_matches([' ', '\t']).len();
+    let len = if let Some(q) = s.strip_prefix('"') {
+        q.find('"').map_or(s.len(), |end| end + 2)
+    } else {
+        s.find(|c| matches!(c, ' ' | '\t' | '&' | '|' | '<' | '>') || group && c == ')').unwrap_or(s.len())
+    };
     at..at + len
 }
 fn name<'a>(line: &'a str, r: &std::ops::Range<usize>) -> &'a str {
@@ -122,8 +127,11 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
     let bytes = line.as_bytes();
     let mut s = Shape { heads: vec![token(line, 0)], op: line.starts_with('('), ..Default::default() };
     let first = name(line, &s.heads[0]).trim_matches('"');
+    if first.is_empty() && !line.starts_with(['(', '>', '<']) {
+        return Err("missing program name: give the executable or shell command to measure".into());
+    }
     // An explicitly named shell owns its payload, including nested quotes (cmd /c "a "x" && b").
-    let already = !s.op && explicit(first);
+    let already = !s.op && explicit(first) && Path::new(first).file_stem().is_some_and(|n| n.eq_ignore_ascii_case("cmd"));
     let (mut quoted, mut slashes, mut i) = (false, 0usize, 0);
     while i < bytes.len() {
         let b = bytes[i];
@@ -162,6 +170,9 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
     if quoted {
         return Err("unclosed double quote `\"` in command line: close the quoted argument".into());
     }
+    if s.op && !line.starts_with('(') && explicit(first) {
+        return Err("put the operators inside the explicitly named shell's command string, or run the commands in separate ctx.exec() calls".into());
+    }
     for r in &s.heads {
         let raw = name(line, r);
         let p = raw.trim_matches('"');
@@ -185,9 +196,8 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
     Ok(s)
 }
 
-pub(super) fn plan(line: &str, root: &Path, env: &Value) -> Result<Planned> {
+pub(super) fn plan(line: &str, root: &Path, env: &Value, shape: Shape) -> Result<Planned> {
     let line = line.trim_matches([' ', '\t']);
-    let shape = syntax(line).map_err(Error::usage)?;
     let mut text = line.to_string();
     let mut evidence = Evidence::default();
     let mut why = "shell operators";

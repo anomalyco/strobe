@@ -5,9 +5,11 @@ pub(super) fn find(p: &Path, _: &Value) -> Option<PathBuf> {
     p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).then(|| p.to_owned())
 }
 
+pub(super) struct Shape;
+
 /// Friendly diagnostics only. At opaque syntax stop inspecting: no guess about the quoting inside
 /// a substitution, a here document, or another language can make a direct launch safe.
-pub(super) fn syntax(line: &str) -> std::result::Result<(), String> {
+pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
     let b = line.as_bytes();
     let (mut i, mut quote, mut start, mut boundary) = (0, 0, true, true);
     while i < b.len() {
@@ -56,7 +58,7 @@ pub(super) fn syntax(line: &str) -> std::result::Result<(), String> {
         }
         i += 1;
     }
-    Ok(())
+    Ok(Shape)
 }
 
 /// Consume one allowlisted shell word, keeping its end in the original string. In particular,
@@ -104,7 +106,7 @@ fn simple(line: &str) -> Option<(String, &str)> {
     Some((name, rest))
 }
 
-pub(super) fn plan(line: &str, root: &Path, env: &Value) -> Result<Planned> {
+pub(super) fn plan(line: &str, root: &Path, env: &Value, _: Shape) -> Result<Planned> {
     let mut cmd = Command::new("/bin/sh");
     if let Some((program, rest)) = simple(line) {
         let mut how = resolve(&program, root, env)?.ok_or_else(|| Error::msg(format!("`{program}` is not on PATH: install it or give its executable path")))?;
