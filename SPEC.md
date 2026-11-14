@@ -3649,7 +3649,8 @@ flowchart LR
   unit. It uses the same finite pairs, stopping look and confidence level as the percentage. It is not
   the difference of the medians, or the result of discarding noisy pairs. A negative time shift means
   less time. Compare an additive prediction (say, 150 ms) with this interval. The verdict still tests
-  log ratios: with varying baselines, absolute and relative changes need not agree. A warned shift
+  log ratios: omit the shift when the intervals disagree on the side of zero or the two estimates
+  point opposite ways at or beyond the ratio bound. Do not print opposing signed estimates. A warned shift
   carries the row's warning. A refused comparison gives no shift. Counts and comparisons already in
   their own unit do not repeat the difference. JSON keeps `shift.{estimate,lo,hi,unit}` unrounded.
 - **Test and interval**: Wilcoxon signed-rank on `d` (zeros dropped; tied |d| share their mid-rank

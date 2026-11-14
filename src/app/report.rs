@@ -771,7 +771,7 @@ pub fn html(view: &str, data: &Value) -> String {
     omit_screen_name(&mut data);
     for s in data.get_mut("series").and_then(Value::as_array_mut).into_iter().flatten() {
         omit_screen_name(s);
-        for c in ["primary", "secondaries"] {
+        for c in ["primary", "secondaries", "descriptive"] {
             let add_labels = |row: &mut Value| {
                 if row["shift"].is_object() {
                     for unit in [crate::fmt::TimeUnit::Us, crate::fmt::TimeUnit::Ms, crate::fmt::TimeUnit::S] {

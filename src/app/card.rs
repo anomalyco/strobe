@@ -897,11 +897,11 @@ fn card_svg(card: &Card, theme: Theme) -> String {
             svg.text(PAD - 5.0, top + 196.0, (big, true), tone_ink(t.tone), "start", &t.amount);
             let ws = fit(&t.words, width, 52.0, false);
             svg.text(PAD, top + 292.0, (ws, false), Ink::Fg, "start", &t.words);
-            before_after(&mut svg, (PAD, top + 346.0, 26.0), t, width, &card.sides);
-            strip(&mut svg, PAD, top + 378.0, width * 0.62, t, 8.0, t.tone != Tone::Plain);
+            before_after(&mut svg, (PAD, top + 330.0, 26.0), t, width, &card.sides);
+            strip(&mut svg, PAD, top + 362.0, width * 0.62, t, 8.0, t.tone != Tone::Plain);
             let note = if t.tally.is_empty() { String::new() } else { format!("each dot is one pair · {}", t.tally) };
-            svg.text(W - PAD, top + 408.0, (20.0, false), Ink::Muted, "end", &note);
-            svg.text(PAD, bottom - 30.0, (20.0, false), Ink::Muted, "start", &t.shift);
+            svg.text(W - PAD, top + 392.0, (20.0, false), Ink::Muted, "end", &note);
+            svg.text(PAD, bottom - 30.0, (20.0, false), Ink::Muted, "start", &clip(&t.shift, width, 20.0, false));
         }
         Body::Tiles(tiles) => {
             let n = tiles.len() as f32;

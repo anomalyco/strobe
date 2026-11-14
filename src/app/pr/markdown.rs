@@ -535,9 +535,8 @@ impl<'a> Doc<'a> {
                     odd.push((s, c));
                 }
                 let name = if i == 0 { format!("{} <sub>main</sub>", cell(&noun(m))) } else { cell(&noun(m)) };
-                let (chg, rng) = change_cells(c, o);
+                let (chg, rng) = with_shift_cells(c, change_cells(c, o));
                 t += &format!("{}| {name} | {} | {} | {chg} | {rng} | {} |\n", self.series_cell(s, i), nb(&value(c, "base")), nb(&value(c, "head")), verdict_text(c, o, s, self.aa));
-                t += &shift_row(c);
                 if i == 0 {
                     mains.push(c);
                     if conf_main.is_empty() {

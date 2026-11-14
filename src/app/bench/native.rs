@@ -1735,7 +1735,7 @@ pub(super) fn launch_once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, p
         None => Until::Selector(spec["until"].clone()),
     };
     if windowless {
-        super::launch::windowless_refusal(s, false)?;
+        super::launch::windowless_refusal(s, false, true)?;
     }
     let app = with_gpu_cache(ctx, s, v, &target, app)?;
     let capture = spec["screen"] != false && !windowless;

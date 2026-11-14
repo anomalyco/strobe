@@ -462,7 +462,7 @@ const ITEM = /^(.*?) (\d+(?:\.\d+)?)%/s
 // folders (`~`) and the machine's name on `strobe up`'s first line.
 function scrubText(text: string): string {
   return scrubPaths(scrubLists(scrubWindows(text)))
-    .replace(/(\bdisplay (?:on|off|dimmed|\?) · session (?:locked|unlocked) · |^screen[ \t]+)(?:dwm\.exe|windowserver|xorg|xwayland|gnome-shell|kwin_wayland|kwin_x11|weston|sway|picom|mutter) (\d+(?:\.\d+)?% of a core)\b/gim, "$1compositor $2")
+    .replace(/(\bdisplay (?:on|off|dimmed|\?) · session (?:locked|unlocked) · |^[ \t]*screen[ \t]+)(?:dwm\.exe|windowserver|xorg|xwayland|gnome-shell|kwin_wayland|kwin_x11|weston|sway|picom|mutter) (\d+(?:\.\d+)?% of a core)\b/gim, "$1compositor $2")
     .replace(/^strobe up · .*$/m, "strobe up")
 }
 

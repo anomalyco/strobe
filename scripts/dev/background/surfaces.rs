@@ -190,6 +190,7 @@ pub fn run() {
         r["text"] = json!(format!("screen  display on · session unlocked · {COMPOSITOR} 0.0% of a core"));
         r["warnings"].as_array_mut().unwrap().push(json!({"text":format!("display off · session locked · {} 12.3% of a core", COMPOSITOR.to_uppercase()),"id":"Display","level":"info"}));
         r["variants"][0]["subject"] = json!("sway 12.3% of a core");
+        r["warnings"].as_array_mut().unwrap().push(json!({"text":format!("      screen  {COMPOSITOR} 1.2% of a core"),"id":"Display","level":"info"}));
         // Older persisted prose must also render safely. The structured fields stay on disk.
         r["warnings"]
             .as_array_mut()
@@ -255,6 +256,7 @@ pub fn run() {
             }
             if format == "html" {
                 assert!(body.contains("sway 12.3% of a core"));
+                assert!(body.contains("      screen  compositor 1.2% of a core"));
                 assert!(body.contains("compositor 0.0% of a core") && body.contains("compositor 12.3% of a core"));
                 assert!(body.contains("keep run.duration regression /folder/on/file 1a0b"));
                 assert!(body.contains(r#""params":{"mobile":"1","serial":"a","text":"on"}"#));

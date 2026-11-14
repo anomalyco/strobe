@@ -343,7 +343,7 @@
         "head": { "type": ["number", "null"] },
         "estimate": { "type": ["number", "null"], "description": "Relative change when relative, else head minus base in the metric's unit." },
         "shift": {
-          "description": "Descriptive paired head-minus-base shift on the original scale, at the same look and coverage as the relative change. Not a second verdict. Absent on refused rows and in older results.",
+          "description": "Descriptive paired head-minus-base shift on the original scale. Its achieved coverage equals the parent confidence. Not a second verdict. Absent when the scales disagree on zero-crossing or substantive direction, on refused rows and in older results.",
           "type": "object", "additionalProperties": false, "required": ["estimate", "lo", "hi", "unit"],
           "properties": { "estimate": { "type": "number" }, "lo": { "type": "number" }, "hi": { "type": "number" }, "unit": { "enum": ["ms", "MB", "bytes"] } }
         },

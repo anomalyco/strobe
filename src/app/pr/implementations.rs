@@ -436,11 +436,11 @@ impl<'a> Doc<'a> {
                     (if marked(c, o) { format!("**{d}**") } else { d }, range_x(c))
                 };
                 let mut verdict = verdict_text(c, o, s, false);
+                let (chg, rng) = with_shift_cells(c, (chg, rng));
                 if i == 0 && board.alone(si) {
                     verdict += " <sub>not after Holm</sub>";
                 }
                 t += &format!("{}| {name} | {} | {} | {chg} | {rng} | {verdict} |\n", self.series_cell(s, i), nb(&value(c, "base")), nb(&value(c, "head")));
-                t += &shift_row(c);
                 if i == 0 {
                     mains.push(c);
                     if conf_main.is_empty() {

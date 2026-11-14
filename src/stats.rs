@@ -471,6 +471,21 @@ pub struct Comparison {
     pub refusal: Option<Refusal>,
 }
 
+/// Intervals touching zero are on neither side. A sub-bound change in an undecided direction
+/// need not have the same sign on both scales, but a substantive change must.
+pub(crate) fn shift_agrees((e, l, h): (f64, f64, f64), (ratio, lo, hi): (f64, f64, f64), bound: f64) -> bool {
+    let side = |l: f64, h: f64| {
+        if h < 0.0 {
+            -1
+        } else if l > 0.0 {
+            1
+        } else {
+            0
+        }
+    };
+    side(l, h) == side(lo, hi) && !(e != 0.0 && ratio != 0.0 && (e > 0.0) != (ratio > 0.0) && ratio.abs() >= bound)
+}
+
 impl Comparison {
     /// Serialize the final comparison with the additive interval over the same pairs and look.
     /// This is evidence for a change expressed in time or memory, never a second verdict.
@@ -480,7 +495,7 @@ impl Comparison {
         if self.relative && self.kind != VerdictKind::Refused && matches!(def.unit, "ms" | "MB" | "bytes") && self.n >= 2 && [self.estimate, self.lo, self.hi].iter().all(|x| x.is_finite()) {
             let d: Vec<_> = pairs.filter(|(a, b)| a.is_finite() && b.is_finite()).map(|(a, b)| b - a).collect();
             let (estimate, lo, hi, _) = hodges_lehmann(&d, confidence);
-            if d.len() == self.n && [estimate, lo, hi].iter().all(|x| x.is_finite()) {
+            if d.len() == self.n && [estimate, lo, hi].iter().all(|x| x.is_finite()) && shift_agrees((estimate, lo, hi), (self.estimate, self.lo, self.hi), self.bound) {
                 row["shift"] = serde_json::json!({"estimate":estimate,"lo":lo,"hi":hi,"unit":def.unit});
             }
         }

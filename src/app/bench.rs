@@ -5883,6 +5883,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     };
     let primary = with_shift(&primary, decided_n.unwrap_or(pairs.len()), design.confidence);
     let secondaries: Vec<_> = secondaries.iter().map(|c| with_shift(c, usize::MAX, 0.95)).collect();
+    let descriptive: Vec<_> = descriptive.iter().map(|c| with_shift(c, usize::MAX, 0.95)).collect();
     let mut out = json!({
         "pixels": pixels,
         "label": s.label(), "case": s.case, "target": s.target, "target_kind": target["kind"], "params": s.params, "kind": if s.launch.is_object() { "launch" } else { "runs" },
@@ -12626,7 +12627,7 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
         let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
         if s.launch.is_object() {
             let window_until = native::window_until(s, &s.launch["until"])?.is_some();
-            if let Err(e) = launch::windowless_refusal(s, window_until) {
+            if let Err(e) = launch::windowless_refusal(s, window_until, is_native(t)) {
                 let Some(r) = e.refusal else { return Err(e) };
                 // launch.rs names the case; every listing prints the series' label beside this.
                 let summary = r.summary.strip_prefix(&format!("{}: ", s.case)).unwrap_or(&r.summary).to_string();

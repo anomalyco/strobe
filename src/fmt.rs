@@ -256,22 +256,39 @@ pub fn times(ms: &[f64], signed: bool) -> Vec<String> {
 
 /// A relative comparison's descriptive shift. Use one scale and round to the interval's precision,
 /// including tens or hundreds of whole units when a broad interval warrants them.
+pub(crate) struct ShiftText {
+    pub estimate: String,
+    pub lo: String,
+    pub hi: String,
+    pub unit: &'static str,
+    pub warning: &'static str,
+}
+
 pub fn paired_shift(c: &serde_json::Value) -> Option<String> {
+    let ShiftText { estimate, lo, hi, unit, warning } = shift_text(c)?;
+    Some(format!("shift {estimate} [{lo} … {hi}] {unit}{warning}"))
+}
+
+pub(crate) fn shift_text(c: &serde_json::Value) -> Option<ShiftText> {
     let s = &c["shift"];
     let (est, lo, hi) = (s["estimate"].as_f64()?, s["lo"].as_f64()?, s["hi"].as_f64()?);
     if c["relative"] != true || c["refusal"].is_object() || c["verdict_kind"] == "refused" || !(lo <= est && est <= hi) {
+        return None;
+    }
+    let ratio = (c["estimate"].as_f64()?, c["lo"].as_f64()?, c["hi"].as_f64()?);
+    if !crate::stats::shift_agrees((est, lo, hi), ratio, c["bound"].as_f64()?) {
         return None;
     }
     let (factor, label, finest) = match s["unit"].as_str()? {
         "ms" => (ctx().unit.per_ms(), time_label(), ctx().unit.finest() as i32),
         "MB" => (1.0, "MB", 6),
         "bytes" => {
-            let base = c["base"].as_f64()?.abs();
-            if base >= 1024f64.powi(3) {
+            let magnitude = lo.abs().max(hi.abs());
+            if magnitude >= 1024f64.powi(3) {
                 (1024f64.powi(-3), "GB", 9)
-            } else if base >= 1024f64.powi(2) {
+            } else if magnitude >= 1024f64.powi(2) {
                 (1024f64.powi(-2), "MB", 6)
-            } else if base >= 1024.0 {
+            } else if magnitude >= 1024.0 {
                 (1.0 / 1024.0, "KB", 3)
             } else {
                 (1.0, "B", 0)
@@ -294,9 +311,14 @@ pub fn paired_shift(c: &serde_json::Value) -> Option<String> {
     }
     .max(-finest);
     let number = |x: f64| {
+        if x == 0.0 {
+            return "0".to_string();
+        }
+        let a = x.abs();
+        let one_sided = lo > 0.0 || hi < 0.0;
+        let place = if one_sided { place.min(a.log10().floor() as i32).max(-finest) } else { place };
         let step = 10f64.powi(place);
         let d = (-place).max(0) as usize;
-        let a = x.abs();
         let body = if a >= EXACT {
             sci(a)
         } else if place > 0 {
@@ -304,23 +326,23 @@ pub fn paired_shift(c: &serde_json::Value) -> Option<String> {
         } else {
             group(&format!("{a:.d$}"))
         };
-        if x == 0.0 {
-            return "0".to_string();
-        }
-        let body = if body.chars().any(|c| matches!(c, '1'..='9')) { body } else { format!("<{}", group(&format!("{step:.d$}"))) };
+        let body = if body.chars().any(|c| matches!(c, '1'..='9')) {
+            body
+        } else if one_sided && a < 0.5 * 10f64.powi(-finest) {
+            format!("<{step:.d$}")
+        } else {
+            return "0".into();
+        };
         format!("{}{body}", if x < 0.0 { minus() } else { "+" })
     };
-    let side = |l: f64, h: f64| {
-        if h < 0.0 {
-            -1
-        } else if l > 0.0 {
-            1
-        } else {
-            0
+    let estimate = number(e);
+    if est != 0.0 && ratio.0 != 0.0 && (est > 0.0) != (ratio.0 > 0.0) && estimate != "0" {
+        let pct = pct_ci(ratio.0, ratio.1, ratio.2).0;
+        if pct.starts_with(['+', '−', '-']) {
+            return None;
         }
-    };
-    let differs = est.signum() != c["estimate"].as_f64()?.signum() || side(lo, hi) != side(c["lo"].as_f64()?, c["hi"].as_f64()?);
-    Some(format!("shift {} [{} … {}] {label}{}{}", number(e), number(l), number(h), if c["warned"] == true { " (warned)" } else { "" }, if differs { " (differs on ratio scale)" } else { "" }))
+    }
+    Some(ShiftText { estimate, lo: number(l), hi: number(h), unit: label, warning: if c["warned"] == true { " (warned)" } else { "" } })
 }
 
 /// A time's number alone (an axis tick under a header that names the unit): `250,000`.

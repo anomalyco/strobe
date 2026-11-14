@@ -102,7 +102,7 @@ fn once(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, key: &str, profile:
     // preparation, which a later series' launch of this side would take as its first.
     let windowless = !web && app_windowless(&target, app.as_ref());
     if windowless {
-        windowless_refusal(s, window_until.is_some())?;
+        windowless_refusal(s, window_until.is_some(), false)?;
     }
     let app = match app {
         Some(a) => Some(with_gpu_cache(ctx, s, v, &target, a)?),
@@ -710,13 +710,13 @@ pub(super) fn app_windowless(target: &Value, app: Option<&isolate::App>) -> bool
 /// What a windowless app's launch cannot be, refused for its series before anything launches: timed to
 /// a window (`window_until`), or with a primary of its pixels. A secondary of them is refused per
 /// block (`refusals`), and the primary still measured.
-pub(super) fn windowless_refusal(s: &Series, window_until: bool) -> Result<()> {
+pub(super) fn windowless_refusal(s: &Series, window_until: bool, native: bool) -> Result<()> {
     if window_until {
         return Err(Refusal::new(ValidatorId::NotForTarget, format!("{}: the app shows no window (window: false), so its launch cannot end on one", s.case))
-            .fix("time it to a selector in its page or to a milestone")
+            .fix(if native { "time it to a milestone" } else { "time it to a selector in its page or to a milestone" })
             .into());
     }
-    if matches!(s.primary.as_str(), "launch.painted" | "launch.settled") {
+    if matches!(s.primary.as_str(), "launch.painted" | "launch.settled") || display_metric(&s.primary) || gpu_use(&s.primary) {
         return Err(Refusal::new(ValidatorId::NotForTarget, format!("the primary {}: {WINDOWLESS_DRAWN}", s.primary))
             .fix("choose a primary a windowless app's launch has: launch.ready, a milestone, cpu.work or memory.app.private; or give the app a window")
             .into());

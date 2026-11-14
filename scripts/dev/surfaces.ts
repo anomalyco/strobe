@@ -338,6 +338,8 @@ function checkResult(r: J) {
       const ps = pairs(s, c.metric, role === "primary" && Number.isFinite(s.primary_pairs) ? s.primary_pairs : Infinity)
       const n = ps.length
       if (c.shift) {
+        if (flag("shift") && (side(c.shift.lo,c.shift.hi)!==side(c.lo,c.hi) || (c.shift.estimate*c.estimate < 0 && Math.abs(c.estimate)>=c.bound))) flagIt("CRIT",where,"stored shift disagrees with the decision scale")
+        if ((k === "better" || k === "worse") && ((c.shift.estimate > 0) !== (higher(s,c) === (k === "better")))) flagIt("CRIT",where,"shift points against the directional verdict")
         const d = ps.map(([b,h]) => h-b), w = d.flatMap((x,i) => d.slice(i).map(y => (x+y)/2)).sort((a,b) => a-b)
         const est = (w[(w.length-1)>>1] + w[w.length>>1])/2
         if (k === "refused" || !c.relative || Math.abs(c.shift.estimate-est) > 1e-12 * Math.max(1,Math.abs(est)) || !(c.shift.lo <= est && est <= c.shift.hi)) flagIt("CRIT", where, "shift is not the paired estimate inside its interval")
