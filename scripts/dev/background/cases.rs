@@ -16,6 +16,7 @@ fn cmp(m: &str) -> Comparison {
 }
 fn impact<'a>(p: &'a Comparison, cores: usize) -> LoadImpact<'a> {
     LoadImpact {
+        pairs: &[],
         counted_cpus: 2,
         busy_before: 0.,
         expects_load: true,
@@ -359,6 +360,8 @@ pub fn replay(dir: &Path) {
         p.decided = kind.decided();
         let quiet = pp.iter().zip(bs.as_chunks::<2>().0).filter(|(_, b)| b.iter().all(|x| x.values["cpu.foreign.max"] < BACKGROUND_PCT)).filter_map(|(v, _)| *v).collect::<Vec<_>>();
         let mut at = impact(&p, 8);
+        let ps = (0..n).map(|i| (2 * i, 2 * i + 1)).collect::<Vec<_>>();
+        at.pairs = &ps;
         if quiet.len() >= 8 {
             at.judged[0].1 = Some((quiet.len(), Design::new(None, 0.02, None, None).compare(metric, model::metric(metric).unwrap(), &quiet)));
         }
@@ -420,6 +423,7 @@ pub fn fixed(dir: &Path) {
             let mut outcomes = Vec::new();
             for (i, min) in [n.max(stats::min_pairs(0.95)), Design::new(None, 0.02, None, None).min_pairs().max(stats::min_pairs(0.95))].into_iter().enumerate() {
                 let mut at = impact(&rows[0].1, s["target_cores"].as_u64().unwrap_or(0) as usize);
+                at.pairs = &pairs;
                 at.counted_cpus = s["target_cpus"].as_u64().unwrap_or(0) as u32;
                 at.min_clean = min;
                 at.lopsided = refusal.as_ref();

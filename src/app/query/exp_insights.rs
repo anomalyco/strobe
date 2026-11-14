@@ -442,7 +442,7 @@ fn comparison(r: &Value, s: &Value, cmd: &Command, sec: &mut Section) {
         }
         VerdictKind::Underpowered | VerdictKind::Unclear => {
             let pairs = s["pairs"].as_u64().unwrap_or(0);
-            if let Some(n) = p["needed_pairs"].as_u64().filter(|n| *n > pairs) {
+            if let Some(n) = p["needed_pairs"].as_u64().filter(|n| *n > pairs && *n <= crate::cli::MAX_PAIRS as u64) {
                 sec.then(format!("~{n} pairs for an 80% chance to decide the primary (projected from these pairs' spread)"), cmd.bench(s, &[("pairs", Some(&n.to_string()))]));
             }
         }

@@ -1,0 +1,51 @@
+# Unquoted command stems on Windows 10.0.26300
+
+Measured by `builtin-stems.ts` with an empty working folder and PATH pointing there. Each measured cell runs `<stem><character>probe /?` under a fresh system cmd. B: same output and status as the bare builtin's help. D: different from help and from the missing-command control. –: same as a missing external name. The last three columns are controls. The start row is not executed: start can open a window even with /?. The planner guards it like the other stems.
+
+| Stem | `.` | `:` | `/` | `\` | `+` | `=` | `,` | `;` | `[` | `]` | `(` | `-` | `_` | `)` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| assoc | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| break | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| call | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| cd | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| chdir | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| cls | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| color | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| copy | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| date | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| del | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| dir | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| dpath | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| echo | D | D | B | D | D | D | D | D | D | D | D | – | – | – |
+| endlocal | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| erase | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| exit | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| for | – | – | – | – | – | D | D | D | – | – | D | – | – | – |
+| ftype | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| goto | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| if | – | – | – | D | – | D | D | D | – | – | D | – | – | – |
+| keys | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| md | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| mkdir | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| mklink | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| move | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| path | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| pause | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| popd | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| prompt | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| pushd | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| rd | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| rem | D | D | D | D | D | D | D | D | D | D | D | – | – | – |
+| ren | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| rename | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| rmdir | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| set | D | D | B | D | D | D | D | D | D | D | D | – | – | – |
+| setlocal | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| shift | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| start | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| time | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| title | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| type | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| ver | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| verify | B | B | B | B | B | B | B | B | B | B | B | – | – | – |
+| vol | B | B | B | B | B | B | B | B | B | B | B | – | – | – |

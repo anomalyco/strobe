@@ -29,6 +29,9 @@ export function worktrees(dir:string,bin:string,env:NodeJS.ProcessEnv) {
     console.log(`ok ${name}: planted base ${expected}, head 101 ms; wall ${s.base_values["run.duration"].toFixed(1)} / ${s.values["run.duration"].toFixed(1)}; PathShadow ${warned}`)
   }
   sample("package-path","plan-leg",101,true);sample("variant-shim",local,37,false)
+  for (const folder of [head, base]) mkdirSync(join(folder,"sub"))
+  sample("package-path-after-cd","cd sub && plan-leg",101,true)
+  if(win) sample("package-path-after-pushd","pushd sub && plan-leg",101,true)
   const alias=join(dir,"alias"),oldPath=env.PATH
   symlinkSync(head,alias,win?"junction":"dir")
   env.PATH=join(win?alias.toUpperCase():alias,"node_modules/.bin")+delimiter+oldPath

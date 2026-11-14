@@ -72,6 +72,7 @@ fn builtin(program: &str) -> bool {
             | "date"
             | "del"
             | "dir"
+            | "dpath"
             | "echo"
             | "endlocal"
             | "erase"
@@ -80,6 +81,7 @@ fn builtin(program: &str) -> bool {
             | "ftype"
             | "goto"
             | "if"
+            | "keys"
             | "md"
             | "mkdir"
             | "mklink"
@@ -210,7 +212,7 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
 
 fn cmd_head(p: &str) -> std::result::Result<(), String> {
     if !p.starts_with('"') && !builtin(p) {
-        if p.split_once('.').is_some_and(|(stem, _)| builtin(stem)) {
+        if p.split_once(['.', ':', '/', '\\', '+', '=', ',', ';', '[', ']', '(']).is_some_and(|(stem, _)| builtin(stem)) {
             return Err(format!("quote `\"{p}\"` on a cmd.exe line so cmd does not run its builtin instead"));
         }
         if p.contains('/') {
@@ -246,7 +248,7 @@ pub(super) fn plan(text: &str, root: &Path, checkout: &Path, env: &Value, shape:
         if shape.op && path && (cwd.is_none() || find(&root.join(program), env).is_none()) {
             return Err(Error::usage(format!("give `{program}` its executable or batch extension on a cmd.exe line, or invoke its interpreter explicitly")));
         }
-        let hit = if shape.op && !path { bare(program, cwd, checkout, env)? } else { resolve(program, root, checkout, env)? };
+        let hit = if shape.op && !path { bare(program, root, cwd.is_some(), checkout, env)? } else { resolve(program, root, checkout, env)? };
         let Some(hit) = hit else {
             if shape.op && (written_ext.is_empty() || matches!(written_ext.as_str(), "exe" | "com" | "bat" | "cmd")) {
                 continue;

@@ -22,6 +22,9 @@
 | Explicit `cmd /c` with nested double quotes or apostrophes | Cmd owns the payload; implicit cmd quoting rules do not apply inside it. |
 | Explicit path in a compound line: after `cd`/`pushd`, created by an earlier command, or guarded by a file check | Shell resolves the path when that command executes. Do not require it to exist before launch. Windows still refuses file associations. |
 | Bare name on a compound line: PATH hit, guarded miss, or after a directory change | Check PATH for known hazards. Let the shell handle a miss; after a directory change do not check the old working folder for a local twin. |
+| A PATH hit inside the launching checkout after `cd` or `pushd` | Still warn on the other variant: changing working folder does not change which checkout owns the PATH entry. |
+| Unquoted builtin stem followed by punctuation on an implicit cmd line | See the [measured stem table](BUILTINS.md). Require quotes around an ambiguous executable name or path. Keep the explicit echo forms above; keep existing syntax diagnostics for assignments and semicolons. A plain resolved native executable still runs directly. |
+| Unix `bash -c"echo $HOME"` (no argument boundary) | Refuse outer expansion in the attached word; recommend a **separate**, single-quoted script argument. Do not rewrite argv or inspect a literal script's contents. |
 
 | Shim argument | Outcome with the forwarding shim (`%*`) |
 |---|---|

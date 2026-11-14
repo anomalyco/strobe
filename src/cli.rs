@@ -80,7 +80,7 @@ pub const FLAGS: &[(&str, Kind, &str)] = &[
     ("unlock-wait", Value, "bench"),
     ("require-verdict", Switch, "bench run"),
     ("require-parity", Switch, "bench"),
-    ("plan", Switch, "bench"),
+    ("plan", Switch, "bench run"),
     ("effect", Number, "bench plan"),
     ("pilot", Switch, "bench plan"),
     ("stop", Value, "bench"),
@@ -279,7 +279,16 @@ pub struct Args {
     flags: HashMap<String, String>,
 }
 
+/// Signed-rank intervals materialize the quadratic set of Walsh averages.
+pub const MAX_PAIRS: usize = 200;
+
 impl Args {
+    pub fn fixed_pairs(&self) -> Result<Option<usize>> {
+        self.get("pairs")
+            .filter(|p| *p != "auto")
+            .map(|p| p.parse().ok().filter(|n| (2..=MAX_PAIRS).contains(n)).ok_or_else(|| Error::usage(format!("--pairs {p}: use auto or an integer from 2 to {MAX_PAIRS}"))))
+            .transpose()
+    }
     pub fn parse(raw: Vec<String>) -> Result<Args> {
         let mut pos = Vec::new();
         let mut flags = HashMap::new();
@@ -341,7 +350,9 @@ impl Args {
             given(&mut flags, &name, &value)?;
         }
         let command = if pos.is_empty() { String::new() } else { pos.remove(0) };
-        Ok(Args { command, pos, flags })
+        let args = Args { command, pos, flags };
+        args.fixed_pairs()?;
+        Ok(args)
     }
 
     /// Refuses (exit 2) a flag strobe has that this command does not read: a flag given to the wrong
@@ -665,7 +676,7 @@ Use
                                   power plan, pinned to the target's CPUs with other processes kept off them
                                   (--pin as for bench); it prints its own numbers (--max-time caps the wait
                                   for the bench slot, not the command)
-  run --base \"<command>\" --head \"<command>\" [--aa] [--check] [--primary cpu.work] [--metrics metric.<name>,…]
+  run --base \"<command>\" --head \"<command>\" [--aa] [--check | --plan] [--primary cpu.work] [--metrics metric.<name>,…]
       [--pairs auto|N] [--runs 5] [--noworse 2%] [--pin …] [--reserve-cpus auto|on|off] [--power high|keep]
       [--require-verdict]
                                   a paired A/B of two commands, as a bench (verdicts, report, PR block): each
@@ -676,6 +687,7 @@ Use
                                   (--check: each command once, --head alone or --base too: cpu.work,
                                   run.duration and peak memory when measured. Exit 0 if the commands ran,
                                   1 if one failed. Nothing compared; --check --noworse is a usage error (2).)
+                                  --plan estimates kept pairs, launches and time without running either command.
                                   Timed: 0 even on worse; read series[].primary.verdict_kind in --json.
                                   Refused: 4. Undecided, including a warned same or no worse:
                                   0, or 5 with --require-verdict.
