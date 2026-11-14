@@ -27,11 +27,12 @@ fn main() {
     } else if mode == "behind" {
         // A worker *below* the real console host. Wait until it exists, not until it exits.
         let host = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/conhost.exe");
-        let _host = Command::new(host).arg("--headless").arg(std::env::current_exe().unwrap()).arg("receipt")
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let mut host = Command::new(host).arg("--headless").arg(std::env::current_exe().unwrap()).arg("receipt")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let receipt = std::path::PathBuf::from(std::env::var_os("LEFTOVER_RECEIPT").unwrap());
         let until = std::time::Instant::now() + Duration::from_secs(4);
         while !receipt.exists() {
+            assert!(host.try_wait().unwrap().is_none(), "console exited before the worker started");
             assert!(std::time::Instant::now() < until);
             std::thread::sleep(Duration::from_millis(10));
         }
