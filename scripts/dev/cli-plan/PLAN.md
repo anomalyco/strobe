@@ -12,6 +12,17 @@
 | PATH with builtin twins, extensionless Unix shims, or the other checkout's local bin | Do not shadow builtins or count extensionless stubs as Windows executables; identify the actual shim and warn on cross-checkout PATH | None |
 | Arguments to batch shims | Keep the original quoting. Refuse a percent expansion or quote escape that batch reparsing cannot preserve. | None |
 
+| Command shape | Decision |
+|---|---|
+| Windows builtin name alone (including `echo.`, `echo:text`, `echo/text`) | Implicit cmd builtin; a PATH twin does not override it. |
+| Any cmd builtin stem × `.exe` or `.com` (for example `echo.exe`, `rem.com`) | Plain line: direct, or missing. On an implicit cmd line: require quotes around the dotted bare name, at any command position. Otherwise cmd can take the builtin instead. |
+| Any cmd builtin stem × `.cmd` or `.bat` | Batch is itself a cmd line: require `"echo.cmd"` or an explicit path, even without an operator. |
+| Unix named shell with a script file or literal `-c` script, including single-quoted newlines and `‘` written as `'\''` | Start the named shell with literal argv; count shell work. |
+| Unix assignment(s), redirect before or after the shell, group, pipe, `&&`, `\|\|`, `;`, or newline around that invocation | POSIX sh owns the unchanged outer line. An outer expansion in the `-c` payload, not a redirect or a separate command's expansion, needs single quotes or a script file. |
+| Explicit `cmd /c` with nested double quotes or apostrophes | Cmd owns the payload; implicit cmd quoting rules do not apply inside it. |
+| Explicit path in a compound line: after `cd`/`pushd`, created by an earlier command, or guarded by a file check | Shell resolves the path when that command executes. Do not require it to exist before launch. Windows still refuses file associations. |
+| Bare name on a compound line: PATH hit, guarded miss, or after a directory change | Check PATH for known hazards. Let the shell handle a miss; after a directory change do not check the old working folder for a local twin. |
+
 | Shim argument | Outcome with the forwarding shim (`%*`) |
 |---|---|
 | `"a b"`, `"a&b"`, `"a\|b"`, `"a^b"` | One argument each, with the quoted contents unchanged |
@@ -46,7 +57,7 @@ not at the end of a grace period. A surviving worker invalidates the measurement
 | `shim` (`shim.cmd` via PATHEXT / executable script via PATH) | retry through cmd → interpreter | exec script's interpreter | cmd, resolved shim | direct |
 | Explicit `.bat` / `.cmd` | cmd → shim | extension irrelevant; requires +x | cmd | direct if executable |
 | `.ps1` | not a native executable; fallback may open an editor | extension irrelevant; requires +x | refuse: invoke interpreter | direct if executable |
-| `cd`, `set`, `echo` | fallback to cmd builtin when no executable | sh builtin or exec external echo | cmd builtin unless PATH executable chosen | sh builtin |
+| `cd`, `set`, `echo` | fallback to cmd builtin when no executable | sh builtin or exec external echo | unquoted cmd builtin before PATH | sh builtin |
 | `P` found only via extension | implicit .exe or cmd retries lookup | no PATHEXT | PATH + PATHEXT, append to full name | refuse if absent |
 | `P` absent | direct miss then cmd miss | sh exits 127 | fail, no retry | fail, no number |
 | Bare local executable, with/without PATH twin | implicit lookup can pick unintended file | usually PATH only | warn shadow / refuse local-only | warn shadow / refuse local-only |
@@ -56,7 +67,7 @@ not at the end of a grace period. A surviving worker invalidates the measurement
 | `P 'a b'` | **two args with literal quotes** | exec P, one argument | refuse: double quotes | direct |
 | `P HEAD^` / `P "HEAD^"` | P, literal | exec P, literal | direct (note unquoted caret) | direct |
 | `P` with escaped quote / unquoted caret on cmd line | P receives operators in argv, or cmd reparses | shell quoting | refuse: direct exe, quote caret or use script | sh or direct by allowlist |
-| `shim 100%` | batch reparses its arguments | exec script, literal | refuse: quote argument | direct |
+| `shim 100%` | batch reparses its arguments | exec script, literal | refuse: invoke exe | direct |
 | `start /b P` | cmd can return before P | absent unless installed | refuse: omit start or wait | normal lookup |
 | `A &> out`, `A &>> out`, `A \|& B`, `[[ … ]]`, `source f` | not portable cmd syntax | background, syntax error, or unintended fallback | use native spelling | refuse: POSIX redirect, `[`, `.`, or explicit bash |
 | Unquoted parentheses in Unix argument | P, literal | sh syntax error before P | direct unless group/operator | sh; show its error |
