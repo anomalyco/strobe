@@ -1316,10 +1316,12 @@ pub fn cpu_lost_with(metric: &str, runs: usize, of: usize, what: &str, reasons: 
         crate::model::ValidatorId::RunIncomplete,
         format!("{metric}: in {runs} of {of} measured runs a process of {what} ended inside the run, and the CPU it used there ended with it{how}, so the CPU of the process set is short"),
     )
-    .fix(if cfg!(target_os = "linux") {
+    .fix(if cfg!(target_os = "linux") && why.contains("no launch cgroup") {
         "let strobe launch the target (its launches' cgroups count what ended: under systemd strobe asks for a scope, so run it in a user session or as root), wrap processes the run starts but does not measure in ctx.untimed, keep the processes running until the run's end, or compare run.duration"
-    } else if cfg!(windows) {
+    } else if cfg!(windows) && why.contains("no job of strobe's") {
         "let strobe launch the target (its jobs hold each process from its start), wrap processes the run starts but does not measure in ctx.untimed, keep helpers running (warm them up, or end them in the reset), or compare run.duration"
+    } else if why.contains("listing") {
+        "a helper changed at a run edge: let startup helpers settle in setup, keep measured helpers running until reset, or compare run.duration"
     } else {
         "wrap processes the run starts but does not measure in ctx.untimed, keep the processes running until the run's end (warm up what the app starts and ends, or end it in the reset), or compare run.duration"
     })

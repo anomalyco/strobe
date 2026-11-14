@@ -623,7 +623,13 @@ fn confirm_pending(args: &Args, which: Option<&str>) -> Result<Output> {
 }
 
 pub fn background_reason(series: &Value) -> &'static str {
-    if super::bisect::unread(series) { "could not separate the target's CPU from other work" } else { "ran under heavy background work" }
+    if super::bisect::background_warn(series) {
+        if super::bisect::unread(series) { "could not separate the target's CPU from other work" } else { "ran under heavy background work" }
+    } else if series["warnings"].as_array().into_iter().flatten().any(|w| w["level"] == "warn" && w["id"] == "StateDrift") {
+        "had changing workload state (StateDrift)"
+    } else {
+        "had a changing pair difference (Drift)"
+    }
 }
 
 fn confirm_all(args: &Args, file: Option<&Path>) -> Result<(String, Vec<Value>)> {

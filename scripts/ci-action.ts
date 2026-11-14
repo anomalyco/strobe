@@ -319,8 +319,11 @@ const list = (s: string) =>
 // The worst primary verdict of a comparison: worse before anything undecided before anything decided.
 const RANK = ["worse", "refused", "unclear", "underpowered", "saturated", "stopped", "same", "no_worse", "better"]
 
-function verdicts(result: any): string[] {
-  return (result?.series ?? []).map((s: any) => s.primary?.verdict_kind ?? (s.refusal ? "refused" : "unclear"))
+export function verdicts(result: any): string[] {
+  return (result?.series ?? []).map((s: any) => {
+    const kind = s.primary?.verdict_kind ?? (s.refusal ? "refused" : "unclear")
+    return s.primary?.warned && (kind === "same" || kind === "no_worse") ? "unclear" : kind
+  })
 }
 
 function worst(kinds: string[]): string {
@@ -663,7 +666,7 @@ async function runStep() {
       done.push(d)
       const kinds = verdicts(d.result)
       if (failOn !== "never" && regressed(d.result)) failed = true
-      if (failOn === "unclear" && kinds.some((k) => !["better", "same", "no_worse"].includes(k))) failed = true
+      if (failOn === "unclear" && (d.code === 5 || kinds.some((k) => !["better", "same", "no_worse"].includes(k)))) failed = true
       // 0, a verdict-less run with --require-verdict (5) or one --max-time cut short (124) keep their verdicts;
       // every series refused (4) is a result fail-on: never reports.
       if (![0, 5, 124].includes(d.code) && !(failOn === "never" && d.code === 4)) failed = true

@@ -117,7 +117,7 @@ const TOOLS: &[Tool] = &[
             ("aa", "same build on both sides (checks the method)"),
             (
                 "check",
-                "validate the workload without a timing verdict. With a base build, check each case on base then head. A base build error stops the check before the case runs; a run error on either side or a block refusal fails the case (exit 1). A preflight refusal is listed separately; all non-gap cases refused: 4. Two bare target names check parity on the current build, not counters against a base build.",
+                "validate the workload without a timing verdict. With a base build, check each case on base then head. A base build error stops the check before the case runs; a run defect on either side fails the case (1). A primary the target, engine or display cannot measure is listed as refused. All non-gap cases refused: 4. Two bare target names check parity on the current build, not counters against a base build.",
             ),
             (
                 "batch",
@@ -138,7 +138,7 @@ const TOOLS: &[Tool] = &[
             ("equivalence", "equivalence bound in % (default 2)"),
             (
                 "noworse",
-                "non-inferiority: 2% asks whether head's primary is at most 2% worse; metric=2%,metric2=5% sets margins per metric. Timed verdicts: no worse, worse or unclear; worse is not an error. Only exact counters default to 0%; a bare other metric is a usage error (2). With check and a base build: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes). no_worse passes; worse, unstable, missing or not_compared fails (1). For a count.* named only by the flag, once a block of either side counted it, blocks in that series that neither counted nor refused it read 0. If neither side counted it, it gets no row there. If cases ran without failure but no counter compared, exit 4 even if passed is true. If both sides refused every counter, read the refused lines. For Uncounted, check the spelling against ctx.count; declare a conditional counter in its case's metrics to compare 0 with 0. Known issue in 0.34.0: an all-gap check exits 0 despite comparing nothing. Set require-parity when gating counters on a file with target gaps.",
+                "non-inferiority: 2% asks whether head's primary is at most 2% worse; metric=2%,metric2=5% sets margins per metric. Timed verdicts: no worse, worse or unclear; worse is not an error. Only exact counters default to 0%; a bare other metric is a usage error (2). With check and a base build: exact counters only (count.*, net.requests, net.bytes, tty.frames, dom.nodes). no_worse passes; worse, unstable, missing or not_compared fails (1). For a count.* named only by the flag, once a block of either side counted it, blocks in that series that neither counted nor refused it read 0. If neither side counted it, it gets no row there. No case failed but no counter compared: exit 4 with passed false, even when every case was a parity gap. If both sides refused every counter, read the refused lines. For Uncounted, check the spelling against ctx.count; declare a conditional counter in its case's metrics to compare 0 with 0.",
             ),
             (
                 "plan",

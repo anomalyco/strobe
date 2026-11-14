@@ -454,6 +454,9 @@ pub struct Comparison {
     /// What it decided, for code and result.json readers.
     #[serde(rename = "verdict_kind")]
     pub kind: VerdictKind,
+    /// A measurement warning applies to this metric, not merely to its experiment.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub warned: bool,
     pub decided: bool,
     pub needed_pairs: Option<usize>,
     /// A counter that held one value on each side in every block: compared exactly (SPEC §10.1).
@@ -570,6 +573,15 @@ pub fn kind_of(c: &serde_json::Value) -> VerdictKind {
 /// drawn again from `bound` in the unit times print in now. The words froze it in the unit, and at
 /// the digits, of the strobe that decided it (`same (±0 ms)` from a bound of 0.04 ms).
 pub fn verdict_text(c: &serde_json::Value) -> String {
+    let text = bound_text(c);
+    if c["warned"] == true && !text.ends_with(" (warned)") { format!("{text} (warned)") } else { text }
+}
+
+pub fn needs_confirmation(c: &serde_json::Value) -> bool {
+    c["warned"] == true && matches!(kind_of(c), VerdictKind::Same | VerdictKind::NoWorse)
+}
+
+fn bound_text(c: &serde_json::Value) -> String {
     let v = c["verdict"].as_str().unwrap_or("");
     // A bound of exactly 0 (both medians 0: 2% of nothing) is one too: `same (±0 µs)`.
     let bound = c["bound"].as_f64().filter(|b| b.is_finite() && *b >= 0.0);
@@ -751,6 +763,7 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
             decided: true,
             needed_pairs: None,
             exact: true,
+            warned: false,
             noworse: None,
             refusal: None,
         };
@@ -799,6 +812,7 @@ pub fn compare(name: &str, def: &MetricDef, pairs: &[(f64, f64)], bound: f64, co
         decided,
         needed_pairs,
         exact: false,
+        warned: false,
         noworse: None,
         refusal: None,
     }

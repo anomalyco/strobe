@@ -473,7 +473,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
           }
           if (i >= 0) {
             const next = lines[i + 1] ?? ""
-            const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested$/ : /Inconclusive|Unconfirmed/
+            const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : c.warned && (k === "same" || k === "no_worse") ? /Needs confirmation$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested$/ : /Inconclusive|Unconfirmed/
             if (!want.test(next)) flagIt("CRIT", `html ${where}`, `outcome "${next}" for verdict_kind ${k}`)
             // A time's absolute bound, drawn again in the unit shown (`Same (±40.0 µs)`).
             else if ((k === "same" || k === "no_worse") && vText(c) !== c.verdict && !next.includes(tTime(c.bound))) flagIt("CRIT", `html ${where}`, `outcome "${next}", where ${UNIT} prints its bound ${tTime(c.bound)}`)
@@ -658,7 +658,7 @@ function checkSummary(r: J, md: string, text: string) {
   const series = seriesOf(r)
   if (r.kind === "check") {
     const passed = series.filter((s: J) => (s.state ?? (s.passed ? "pass" : "fail")) === "pass" && s.passed !== false).length
-    if (!md.includes(`**${passed} of ${series.length} case`)) flagIt("CRIT", "summary", `tally lacks "${passed} of ${series.length}"`)
+    if (!md.includes(`${passed} of ${series.length} case`)) flagIt("CRIT", "summary", `tally lacks "${passed} of ${series.length}"`)
     for (const s of series) {
       const row = rows.find((c) => c[0] === (s.case ?? "") && (c[1] === (s.target ?? "") || !s.target))
       if (!row) {

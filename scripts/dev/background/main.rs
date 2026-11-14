@@ -4,6 +4,14 @@ mod cases;
 mod followups;
 mod surfaces;
 fn main() {
+    if let Some(dir) = std::env::args_os().nth(2).filter(|_| std::env::args().nth(1).as_deref() == Some("--fixed")) {
+        cases::fixed(std::path::Path::new(&dir));
+        return;
+    }
+    if let Some(dir) = std::env::args_os().nth(2).filter(|_| std::env::args().nth(1).as_deref() == Some("--replay")) {
+        cases::replay(std::path::Path::new(&dir));
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--history-privacy") {
         surfaces::history();
         return;

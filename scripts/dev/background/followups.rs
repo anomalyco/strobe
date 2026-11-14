@@ -72,7 +72,7 @@ pub fn run() {
     }
     println!("PR details: counted warning, refused, note, unread and zero flagged");
     for (v, reason) in [(json!({"background.unread":1}), "could not separate"), (json!({"cpu.foreign.max":600}), "heavy background")] {
-        assert!(strobe::app::track::background_reason(&json!({"blocks":[{"values":v}]})).contains(reason));
+        assert!(strobe::app::track::background_reason(&json!({"blocks":[{"values":v}],"warnings":[{"level":"warn","id":"Background"}]})).contains(reason));
     }
     // Wording contract, not separate native/terminal measurement fixtures.
     assert!(include_str!("../../../SPEC.md").contains("is `unclear`, never `rejected`"));
