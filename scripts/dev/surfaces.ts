@@ -186,12 +186,12 @@ function pctCI(est: number, lo: number, hi: number): [string, string, string] {
 }
 const relCI = (c: J): [string, string, string] => ([c.estimate, c.lo, c.hi].every(Number.isFinite) ? pctCI(c.estimate, c.lo, c.hi) : [tPct(c.estimate), tPct(c.lo), tPct(c.hi)])
 const side = (lo: number, hi: number) => lo > 0 ? 1 : hi < 0 ? -1 : 0
-function expectedShift(c: J) {
+function expectedShift(c: J, timeUnit = UNIT) {
   const s = c.shift
-  if (!s || side(s.lo,s.hi) !== side(c.lo,c.hi) || (s.estimate*c.estimate < 0 && Math.abs(c.estimate) >= c.bound)) return
+  if (!s) return
   const max = Math.max(Math.abs(s.lo),Math.abs(s.hi))
   const idx = max >= 1024**3 ? 3 : max >= 1024**2 ? 2 : max >= 1024 ? 1 : 0
-  const [factor,unit,finest] = s.unit === 'ms' ? [TU[UNIT].perMs,TU[UNIT].label,TU[UNIT].finest] as const : s.unit === 'bytes' ? [1024**-idx,['B','KB','MB','GB'][idx],3*idx] as const : [1,'MB',6] as const
+  const [factor,unit,finest] = s.unit === 'ms' ? [TU[timeUnit].perMs,TU[timeUnit].label,TU[timeUnit].finest] as const : s.unit === 'bytes' ? [1024**-idx,['B','KB','MB','GB'][idx],3*idx] as const : [1,'MB',6] as const
   const [e,l,h] = [s.estimate,s.lo,s.hi].map(v=>v*factor)
   const width=h-l, exp=Math.floor(Math.log10(width)), place=width ? exp-Number(width/10**exp < 3.545) : e ? Math.floor(Math.log10(Math.abs(e)))-2 : 0
   const num=(x:number)=>{
@@ -199,11 +199,10 @@ function expectedShift(c: J) {
     const a=Math.abs(x), k=Math.max(-finest,side(l,h) ? Math.min(place,Math.floor(Math.log10(a))) : place), d=Math.max(0,-k)
     const raw=k>0 ? String(Math.round(a/10**k)*10**k) : rfix(a,d)
     const sign=x>0?'+':'−'
-    if(Number(raw)===0) return side(l,h) && a < 0.5*10**-finest ? sign+'<'+rfix(10**-finest,finest) : '0'
+    if(Number(raw)===0) return side(l,h) ? sign+'<'+rfix(10**-finest,finest) : '0'
     return sign+group(raw)
   }
-  const est=num(e), pct=relCI(c)[0]
-  if ((est[0]==='+' && pct[0]==='−') || (est[0]==='−' && pct[0]==='+')) return
+  const est=num(e)
   const lo=num(l), hi=num(h), warn=c.warned?' (warned)':''
   return {line:`shift ${est} [${lo} … ${hi}] ${unit}${warn}`,change:`${est} ${unit}${warn}`,range:`${lo} to ${hi} ${unit}`}
 }
@@ -337,6 +336,16 @@ function checkResult(r: J) {
       }
       const ps = pairs(s, c.metric, role === "primary" && Number.isFinite(s.primary_pairs) ? s.primary_pairs : Infinity)
       const n = ps.length
+      if (flag('shift') && c.relative && !['refused','untested'].includes(k) && ['ms','bytes','MB'].includes(unitOf(c.metric))) {
+        const ds=ps.map(([a,b])=>b-a), walsh=ds.flatMap((a,i)=>ds.slice(i).map(b=>(a+b)/2)).sort((a,b)=>a-b)
+        const sums=ds.reduce((xs,_,i)=>xs.concat(xs.map(x=>x+i+1)),[0]).sort((a,b)=>a-b)
+        const cut=Math.max(0,sums[Math.floor(sums.length*.025)]-1)
+        const estimate=(walsh[(walsh.length-1)>>1]+walsh[walsh.length>>1])/2, lo=walsh[cut], hi=walsh.at(-1-cut)!
+        const ratioSign=relCI(c)[0][0], opposite=estimate*c.estimate<0
+        const signedConflict=['us','ms','s'].some(u=>{const shift=expectedShift({...c,shift:{estimate,lo,hi,unit:unitOf(c.metric)}},u)!.change[0];return shift==='+'&&ratioSign==='−'||shift==='−'&&ratioSign==='+'})
+        const admit=side(lo,hi)===side(c.lo,c.hi) && !(opposite && Math.abs(c.estimate)>=c.bound) && !signedConflict
+        if (!!c.shift!==admit) flagIt('CRIT',where,'field presence differs from the all-unit agreement rule')
+      }
       if (c.shift) {
         if (flag("shift") && (side(c.shift.lo,c.shift.hi)!==side(c.lo,c.hi) || (c.shift.estimate*c.estimate < 0 && Math.abs(c.estimate)>=c.bound))) flagIt("CRIT",where,"stored shift disagrees with the decision scale")
         if ((k === "better" || k === "worse") && ((c.shift.estimate > 0) !== (higher(s,c) === (k === "better")))) flagIt("CRIT",where,"shift points against the directional verdict")
@@ -431,6 +440,15 @@ function checkSurfaces(r: J, handle: string = r.id) {
     if (reportable && mdBody.trim() !== text.trim()) texts.push(["md", mdBody])
     const sectionsOf = (t: string) => t.split(/^(?=strobe (?:bench |run ·))/m)
     const prRows = pr.split("\n").filter((l) => l.startsWith("|")).map((l) => l.split(/(?<!\\)\|/).slice(1, -1).map(strip))
+    if (flag('shift')) {
+      // Single-series fixtures: each metric has a row. The card depicts the primary only.
+      const s=r.series[0], cs=rows(s).map(({c})=>c), count=cs.filter(c=>c.shift).length
+      const hits=(t:string, re:RegExp)=>[...t.matchAll(re)].length
+      for(const [surface,t] of [['terminal',text],['md',mdBody]]) if(hits(t,/^\s*shift [^\n]*\[/gm)!==count) flagIt('CRIT',surface,'rendered shift count differs from result.json')
+      for(const [surface,t] of [['pr',pr],['summary',summary.out]]) if(hits(t,/<br><sub>/g)!==count*2) flagIt('CRIT',surface,'paired cells differ from result.json')
+      if (!html?.text || hits(html.text,/\bshift [^\n]*?\[/g)!==count) flagIt('CRIT','html','rendered shift count differs from result.json')
+      if ((card.alt??'').includes('shift ')!==!!s.primary.shift) flagIt('CRIT','card','shift presence differs from result.json')
+    }
     const impl = r.comparison === "implementations"
     // An A/A: a better or worse verdict between identical builds is a false positive on every surface.
     const aa = r.plan?.aa === true
@@ -471,7 +489,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
               }
               if (shift!==wanted.line) flagIt("CRIT",where,`expected ${wanted.line}, got ${shift}`)
               const cleanPr=pr.replaceAll("\u00a0"," ").replaceAll("&nbsp;"," ").replaceAll("&lt;","<")
-              if (role!=="descriptive" && !cleanPr.split("\n").some(l=>l.includes(`<br><sub>${wanted.change}</sub> |`) && l.includes(`<br><sub>${wanted.range}</sub> |`))) flagIt("HIGH",`pr ${where}`,"shift not in its comparison cells")
+              if ((role!=="descriptive" || flag('shift')) && !cleanPr.split("\n").some(l=>l.includes(`<br><sub>${wanted.change}</sub> |`) && l.includes(`<br><sub>${wanted.range}</sub> |`))) flagIt("HIGH",`pr ${where}`,"shift not in its comparison cells")
               if (html?.text.includes(`${s.label} · Primary:`) && !html.text.includes(wanted.line)) flagIt("HIGH",`html ${where}`,"missing shift")
               if (flag("shift") && role==="primary" && ["better","worse"].includes(k) && !card.alt?.includes(wanted.line)) flagIt("HIGH",`card ${where}`,"missing shift")
             } else if (next.trimStart().startsWith("shift ")) flagIt("CRIT",where,"unexpected shift")
