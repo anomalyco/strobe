@@ -97,7 +97,8 @@ fn metric_fingerprint(metric: &str, runtimes: &[String], kinds: &[&str], fingerp
     let revision = match metric {
         "memory.app.private" if linux => Some(2),
         "js.heap.retained" if runtimes.iter().any(|r| r == "node") => Some(2),
-        "run.duration" | "cpu.app.total" | "cpu.wakes" | "cli.launch" if linux && kinds.contains(&"cli") => Some(2),
+        "cli.launch" if kinds.contains(&"cli") => Some(3),
+        "run.duration" | "cpu.app.total" | "cpu.wakes" if linux && kinds.contains(&"cli") => Some(2),
         m if m.starts_with("launch.") && (linux || cfg!(windows)) && kinds.iter().any(launched) => Some(2),
         _ => None,
     };

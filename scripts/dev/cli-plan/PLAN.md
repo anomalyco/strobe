@@ -1,5 +1,23 @@
 # Which process owns the command clock?
 
+**Rule.** Start an external program directly only when one literal program and its arguments account for the entire line, with a known executable and no shell operation left to perform. A named shell is itself measured shell work. Otherwise pass the original line, without substituting even a resolved path into its text, to the platform shell, or refuse before launch when the program or its arguments cannot be established without interpreting another language. Resolution supplies the direct executable and evidence about PATH for shell lines; it does not edit the user's script.
+
+| Command position or environment | What examines it | Rewrite in a shell line |
+|---|---|---|
+| First literal word, after `&&`, `||`, pipe, or in a group | Identify literal external heads; cmd builtins precede PATH; check every known head for script and shadow hazards | None |
+| After a leading redirect or cmd `if`, `for`, `call` | Refuse an implicit cmd form whose next command isn't established. Use an explicit shell script. | None |
+| Unix assignment then program, program then redirect/expansion | Check the literal command head, not the arguments; sh interprets expansions | None |
+| Explicit shell, Unix `exec` options | The named shell owns its script; shell startup counts. Unknown exec options belong to sh. | None |
+| Directory variant, including a Windows canonical root | Resolve explicit paths relative to the variant, using normal Windows path spelling | None |
+| PATH with builtin twins, extensionless Unix shims, or the other checkout's local bin | Do not shadow builtins or count extensionless stubs as Windows executables; identify the actual shim and warn on cross-checkout PATH | None |
+| Arguments to batch shims | Keep the original quoting. Refuse a percent expansion or quote escape that batch reparsing cannot preserve. | None |
+
+| Shim argument | Outcome with the forwarding shim (`%*`) |
+|---|---|
+| `"a b"`, `"a&b"`, `"a\|b"`, `"a^b"` | One argument each, with the quoted contents unchanged |
+| `%NAME%` or `"%NAME%"` | Refuse: cmd expands percent references even inside quotes |
+| `"a\"b"` | Refuse: cmd does not read a backslash as a quote escape |
+
 This table is for **strings**: `run --head` / `--base`, `cli(line)` and `ctx.exec(line)`.
 `run -- program arg…` is a different interface: the caller already split the arguments. It runs
 the user's own harness; it does not produce a `cli()` measurement. Re-parsing those arguments

@@ -36,8 +36,8 @@ pub(in super::super) fn early(line: &str) -> Result<()> {
     syntax(line).map(|_| ())
 }
 
-pub(super) fn exec(line: &str, root: &Path, env: &Value) -> Result<Planned> {
-    os::plan(line, root, env, syntax(line)?).map_err(|e| Error { message: format!("`{line}`: {}", e.message), ..e })
+pub(super) fn exec(line: &str, root: &Path, checkout: &Path, env: &Value) -> Result<Planned> {
+    os::plan(line, root, checkout, env, syntax(line)?).map_err(|e| e.prefixed(format!("`{line}`: ")))
 }
 
 fn env_var(env: &Value, name: &str) -> Option<OsString> {
@@ -54,9 +54,11 @@ fn assignment(word: &str) -> Option<&str> {
     (name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')).then_some(name)
 }
 
-fn resolve(program: &str, root: &Path, env: &Value) -> Result<Option<Evidence>> {
+fn resolve(program: &str, root: &Path, checkout: &Path, env: &Value) -> Result<Option<Evidence>> {
     if program.contains('/') || cfg!(windows) && program.contains(['\\', ':']) {
-        return os::find(&root.join(program), env)
+        let base = root.join(program);
+        return os::find(&base, env)
+            .or_else(|| (cfg!(windows) && base.is_file()).then_some(base))
             .map(|program| Some(Evidence { program, ..Default::default() }))
             .ok_or_else(|| Error::usage(format!("`{program}` not found or not executable in {}; check the path and build the program first", root.display())));
     }
@@ -74,7 +76,18 @@ fn resolve(program: &str, root: &Path, env: &Value) -> Result<Option<Evidence>> 
                     let same = std::fs::canonicalize(p).ok().and_then(|local| std::fs::File::open(&hit).ok().and_then(|f| host::disk::same_file(&f, &local)));
                     same != Some(true)
                 })
-                .map(|p| format!("bare `{program}` ran `{}` from PATH, not `{}` in the variant's folder: write `{}` to measure the variant's build", hit.display(), rel(&p), rel(&p)));
+                .map(|p| format!("bare `{program}` ran `{}` from PATH, not `{}` in the variant's folder: write `{}` to measure the variant's build", hit.display(), rel(&p), rel(&p)))
+                .or_else(|| {
+                    let checkout = PathBuf::from(host::paths::plain(checkout));
+                    let relative = hit.strip_prefix(&checkout).ok()?;
+                    (root != checkout).then(|| {
+                        format!(
+                            "bare `{program}` resolves on PATH to `{}` in the launching checkout, not this variant; both sides can run that copy: write `./{}` to measure each variant's build",
+                            hit.display(),
+                            relative.to_string_lossy().replace('\\', "/")
+                        )
+                    })
+                });
             Ok(Some(Evidence { program: hit, shadow, ..Default::default() }))
         }
         (None, Some(p)) => Err(Error::usage(format!("`{program}` is not on PATH; bare names look on PATH only: write `{}` to run the variant's build", rel(&p)))),

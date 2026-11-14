@@ -810,6 +810,8 @@ fn note_ended_launch(warnings: &mut Vec<validity::Warning>, s: &Series, ms: f64)
 pub struct Block {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     shelled: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    shell_reasons: Vec<String>,
     pub variant: String,
     pub pair: usize,
     pub values: BTreeMap<String, f64>,
@@ -1921,7 +1923,6 @@ struct Ctx<'a> {
     keep_all: bool,
     runs: usize,
     warnings: Vec<Warning>,
-    shells: BTreeMap<String, BTreeMap<String, Option<String>>>,
     config: Value,
     awake: host::Awake,
     /// Time spent waiting for the screen to unlock (ms): not part of any series' run time.
@@ -2687,7 +2688,6 @@ pub fn run(args: &Args) -> Result<Output> {
             args.num("runs")?.unwrap_or(5.0).max(1.0) as usize
         },
         warnings: Vec::new(),
-        shells: BTreeMap::new(),
         config: config.clone(),
         awake: host::Awake::start(),
         waited_ms: 0.0,
@@ -3437,6 +3437,9 @@ fn check_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Va
     };
     let (r, mut launches, sent) = check_launches(ctx, s, &variants[head], repeat, film, (split, main_counters));
     let mut r = check_halt(ctx, r)?;
+    let names = variants.iter().map(|v| side_of(ctx, v)).collect::<Vec<_>>();
+    let notes = cli::shell_notes(s, launches.iter().chain(base.iter().flat_map(|(_, bs)| bs.iter())), [*names.first().unwrap_or(&"base"), *names.last().unwrap_or(&"head")]);
+    ctx.warnings.extend(notes);
     // A counter only `--noworse` names, decided across both sides' launches.
     let mut all: Vec<&mut Block> = r.iter_mut().chain(launches.iter_mut()).collect();
     if let Some((br, bl)) = base.as_mut() {
@@ -4906,6 +4909,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     }
     let mut warnings: Vec<Warning> = Vec::new();
     // The analysers of one build's blocks: HighVariance, MultimodalDistribution, NotSteady,
+    warnings.extend(cli::shell_notes(s, blocks.iter(), ["base", "head"]));
     // Background, StateDrift (Drift is a trend of pair differences: none here).
     analyse(s, def, &blocks, &[], false, ["base", "head"], &mut warnings);
     warnings.extend(background_note(
@@ -5440,6 +5444,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         _ => ["base", "head"],
     };
     analyse(s, def, &blocks, &pairs, primary.relative, names, &mut warnings);
+    warnings.extend(cli::shell_notes(s, blocks.iter(), names));
     let (shown, screen_warnings) = shown::summarize(&blocks, ctx.implementations);
     warnings.extend(screen_warnings);
     // A number from a locked screen is not comparable with one from an unlocked screen: pairs that
@@ -10995,6 +11000,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 drop(launch_steps);
                 blocks.push(Block {
                     shelled: false,
+                    shell_reasons: Vec::new(),
                     variant: v.role.to_string(),
                     pair,
                     values,
@@ -12457,6 +12463,11 @@ fn headless_window(label: &str, name: &str, t: &Value) -> Error {
 fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variants: &[Variant], config: &Value) -> Result<Option<Refusal>> {
     let t = &describe["targets"][name];
     if t["kind"] == "cli" {
+        if !variants.iter().any(|v| v.target_of(s) == name)
+            && let Some(line) = t["run"].as_str()
+        {
+            cli::plan::early(line).map_err(|e| e.prefixed(format!("{} ({name}): ", s.label())))?;
+        }
         for v in variants.iter().filter(|v| v.target_of(s) == name) {
             let line = match &v.kind {
                 Kind::Cmd(l) => Some(l.as_str()),

@@ -16,6 +16,7 @@ pub(super) fn find(p: &Path, env: &Value) -> Option<PathBuf> {
         .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
         .to_string_lossy()
         .split(';')
+        .map(str::trim)
         .filter(|e| e.starts_with('.') && e[1..].bytes().all(|c| c.is_ascii_alphanumeric()))
         .find_map(|e| {
             let mut path = p.as_os_str().to_owned();
@@ -23,7 +24,6 @@ pub(super) fn find(p: &Path, env: &Value) -> Option<PathBuf> {
             let path = PathBuf::from(path);
             path.is_file().then_some(path)
         })
-        .or_else(|| p.is_file().then(|| p.into()))
 }
 
 #[derive(Default)]
@@ -56,6 +56,9 @@ fn explicit(program: &str) -> bool {
     matches!(Path::new(program).file_stem().unwrap_or_default().to_string_lossy().to_ascii_lowercase().as_str(), "cmd" | "pwsh" | "powershell" | "sh" | "bash" | "dash" | "ksh" | "zsh")
 }
 fn builtin(program: &str) -> bool {
+    if program.get(..5).is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "echo." | "echo:" | "echo/")) {
+        return true;
+    }
     matches!(
         program.to_ascii_lowercase().as_str(),
         "assoc"
@@ -116,7 +119,7 @@ impl Shape {
         } else if self.newline {
             Err(NEWLINE.into())
         } else if batch && self.percent {
-            Err("a batch script re-parses its arguments (`%*`): wrap the argument in double quotes, or use the executable directly for literal percent signs".into())
+            Err("a batch script re-parses its arguments (`%*`): even double quotes permit percent expansion; invoke the underlying executable directly for a literal percent sign".into())
         } else {
             Ok(())
         }
@@ -141,9 +144,10 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
             b'\n' | b'\r' if !quoted || already => return Err(NEWLINE.into()),
             b'\n' | b'\r' => s.newline = true,
             0..=8 | 11..=12 | 14..=31 => return Err("control character in command line: pass the data in a file".into()),
-            b'\'' if !quoted && !matches!(first.to_ascii_lowercase().as_str(), "pwsh" | "powershell") => {
+            b'\'' if !quoted => {
                 return Err("single quotes `'…'` do not quote arguments on Windows: use double quotes or `pwsh -NoProfile -c \"…\"`".into());
             }
+            b'%' => s.percent = true,
             _ if quoted || already => {}
             b';' => return Err("`;` outside double quotes: use `&&` between commands, or wrap `;`-separated arguments in double quotes".into()),
             b'&' if i > 0 && matches!(bytes[i - 1], b'>' | b'<') => s.op = true,
@@ -161,7 +165,6 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
             }
             b'<' | b'>' => s.op = true,
             b'^' => s.caret = true,
-            b'%' => s.percent = true,
             _ => {}
         }
         slashes = if b == b'\\' { slashes + 1 } else { 0 };
@@ -177,6 +180,9 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
         let raw = name(line, r);
         let p = raw.trim_matches('"');
         let ext = extension(Path::new(p));
+        if p.is_empty() || p.bytes().all(|b| b.is_ascii_digit()) && line[r.end..].starts_with(['<', '>']) || matches!(p.to_ascii_lowercase().as_str(), "if" | "for" | "call") {
+            return Err("the command after a leading redirection or compound cmd builtin is not a literal command head: put the line in a script and invoke its interpreter explicitly".into());
+        }
         if let Some(k) = assignment(raw) {
             return Err(format!("`{k}=…` before a command is POSIX sh syntax: set `{k}` in the target env, or write `set \"{k}=…\" && <command>`"));
         }
@@ -196,9 +202,8 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
     Ok(s)
 }
 
-pub(super) fn plan(line: &str, root: &Path, env: &Value, shape: Shape) -> Result<Planned> {
-    let line = line.trim_matches([' ', '\t']);
-    let mut text = line.to_string();
+pub(super) fn plan(text: &str, root: &Path, checkout: &Path, env: &Value, shape: Shape) -> Result<Planned> {
+    let line = text.trim_matches([' ', '\t']);
     let mut evidence = Evidence::default();
     let mut why = "shell operators";
     for r in shape.heads.iter().rev() {
@@ -206,14 +211,11 @@ pub(super) fn plan(line: &str, root: &Path, env: &Value, shape: Shape) -> Result
         if program.is_empty() {
             continue;
         }
-        let Some(hit) = resolve(program, root, env)? else {
-            if builtin(program) {
-                why = "cmd builtin";
-                continue;
-            }
-            if shape.op {
-                continue;
-            }
+        if !name(line, r).starts_with('"') && builtin(program) {
+            why = "cmd builtin";
+            continue;
+        }
+        let Some(hit) = resolve(program, root, checkout, env)? else {
             return Err(Error::msg(format!("`{program}` is not on PATH: install it or give its executable path")));
         };
         let ext = extension(&hit.program);
@@ -236,12 +238,14 @@ pub(super) fn plan(line: &str, root: &Path, env: &Value, shape: Shape) -> Result
         if batch {
             why = "batch script";
         }
-        let path = hit
-            .program
-            .to_str()
-            .filter(|p| !p.contains(['\r', '\n', '%', '"']))
-            .ok_or_else(|| Error::usage("cmd.exe cannot quote the resolved executable path losslessly: use a different PATH directory or a script"))?;
-        text.replace_range(r.clone(), &format!("\"{path}\""));
+        // Never substitute the resolved path into cmd source. In a cwd collision cmd may prefer
+        // the local executable; neither a PATH claim nor rewriting the command would be honest.
+        if !program.contains(['/', '\\', ':']) && find(&root.join(program), env).is_some() && hit.shadow.is_some() {
+            return Err(Error::usage(format!("cmd may run the local `{program}` instead of PATH's copy: give its explicit path")));
+        }
+        if batch {
+            evidence.program = hit.program;
+        }
         if hit.shadow.is_some() {
             evidence.shadow = hit.shadow;
         }
@@ -255,7 +259,6 @@ pub(super) fn plan(line: &str, root: &Path, env: &Value, shape: Shape) -> Result
         .join("cmd.exe");
     let mut cmd = Command::new(&sys);
     cmd.raw_arg(format!("/d /v:off /s /c \"{text}\""));
-    evidence.program = sys;
     evidence.shell = Some(format!("cmd.exe ({why})"));
     Ok(Planned { cmd, how: evidence })
 }

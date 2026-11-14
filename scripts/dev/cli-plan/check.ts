@@ -8,12 +8,13 @@ const dir = mkdtempSync(join(tmpdir(), "command-plan-")), file = join(dir,"redir
 process.env.PLAN_FILE = file
 const { rows } = await import("./rows.ts")
 const bin = process.env.STROBE_BIN || "strobe", env = {...process.env, PATH: dir + delimiter + process.env.PATH, PLAN_X:"one", PLAN_RECEIPTS: receipts}
-writeFileSync(join(dir, win ? "plan-shim.cmd" : "plan-shim"), (win ? "@" : "#!/bin/sh\nexec ") + "bun scripts/dev/cli-plan/work.mjs left\n", {mode:0o755})
+writeFileSync(join(dir, win ? "plan-shim.cmd" : "plan-shim"), (win ? "@" : "#!/bin/sh\nexec ") + "bun scripts/dev/cli-plan/work.mjs left " + (win ? "%*\r\n" : '"$@"\n'), {mode:0o755})
+if (win) copyFileSync(process.execPath, join(dir,"echo.exe"))
 let bad = 0
 try {
   for (const row of rows) {
     // An old start command or file association can open a window. Do not exercise those paths.
-    if (before && win && ["start", "ps1"].includes(row.key)) continue
+    if (before && win && ["start", "ps1", "leading-redirect", "if-head", "call-head", "for-head"].includes(row.key)) continue
     writeFileSync(receipts, ""); writeFileSync(file, row.key === "input" ? "left\n" : "not redirected\n")
     const r = spawnSync(bin, ["run", "--check", "--head", row.line, "--primary", "run.duration", "--metrics", "cpu.work", "--reserve-cpus", "off", "--power", "keep", "--max-time", "2m", "--json"], {encoding:"utf8", env, windowsHide:true, timeout:135000, maxBuffer:16<<20})
     if (r.error || r.status === 124) throw new Error(`${row.key} did not finish: ${r.error?.message ?? r.stderr}`)
@@ -45,13 +46,21 @@ try {
     check("only-local", ["run","--head","plan-only-local --version"], 2, /write `\.([/\\])plan-only-local/, local)
     copyFileSync(process.execPath, join(local,"plan-shadow" + exe)); copyFileSync(process.execPath, join(dir,"plan-shadow" + exe))
     check("shadow", ["run","--head","plan-shadow --version"], 0, /PathShadow/, local)
+    if (!win) {
+      check("redirect-shadow", ["run","--head","plan-shadow --version > /dev/null"], 0, /PathShadow/, local)
+      check("assignment-only-local", ["run","--head","PLAN_X=a plan-only-local --version"], 2, /write `\.\/plan-only-local/, local)
+    }
     check("asymmetric", ["run","--head","bun --version","--base","echo hi"], 0, /only base's run.duration/, local)
     if (win) {
       writeFileSync(join(local, "script.ps1"), "Write-Output ready\n")
       check("existing-script", ["run", "--head", ".\\script.ps1"], 2, /pwsh -NoProfile -File/, local)
       copyFileSync(process.execPath, join(dir,"plan-tool.3.12.com"))
       check("dotted-pathext", ["run", "--head", "plan-tool.3.12 --version"], 0, /plan-tool\.3\.12\.com/i, local)
+      const earlier=join(dir,"earlier");mkdirSync(earlier);writeFileSync(join(earlier,"plan-stub"),"#!/bin/sh\n")
+      copyFileSync(process.execPath,join(dir,"plan-stub.exe")); env.PATH=earlier+delimiter+env.PATH
+      check("extensionless-before-exe",["run","--head","plan-stub --version"],0,/plan-stub\.exe/i,local)
     }
+    const {worktrees}=await import("./worktrees.ts");worktrees(dir,bin,env)
   }
 } finally { rmSync(dir,{recursive:true,force:true}) }
 process.exitCode = bad ? 1 : 0

@@ -5304,8 +5304,12 @@ Windows starts a plain executable with the argument string as written (`^` and `
 Explicit shells count as shells too. `ShellLine` names the shell, flags an asymmetric comparison,
 and separates tracked series with shell startup. Quote literal operators. A single background `&`,
 or on Windows unquoted single quotes, semicolons, newlines, POSIX assignments and `start` without
-`/wait`, refuse with a fix. Invoke `.ps1` with `pwsh -NoProfile -File`. Avoid escaped double quotes
-or unquoted carets in implicit cmd lines and unquoted percent signs on batch shims. Known syntax
+`/wait`, refuse with a fix. Invoke `.ps1` with `pwsh -NoProfile -File`. Implicit cmd lines are
+passed unchanged. Put leading redirections and indirect commands (`if`, `for`, `call`) in an explicitly
+invoked script. Avoid escaped double quotes or unquoted carets in implicit cmd lines and percent
+signs (even quoted) on batch shims. A bare name resolving inside the launching checkout warns when
+the variant is elsewhere: use `./node_modules/.bin/tool` for each build's own shim. On Unix,
+single-quote an explicit shell's script when it contains expansions. Known syntax
 errors exit 2 before build; dynamic lines are checked at `ctx.exec`. Catching a usage refusal or
 `RunIncomplete` in the hook cannot make the block pass. `ctx.exec` returns the code and output; a nonzero exit
 fails the run (`RunIncomplete`, with the last lines), as does a command that runs past the case's

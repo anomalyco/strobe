@@ -76,6 +76,7 @@ fn metric_line(line: &str) -> Option<std::result::Result<(String, f64, Direction
 
 /// What one `ctx.exec` needs from its block.
 struct Spawn<'a> {
+    checkout: &'a Path,
     root: &'a Path,
     target: &'a Value,
     cpus: Option<u64>,
@@ -89,7 +90,7 @@ struct Spawn<'a> {
 /// `cost`, strobe's own CPU counts while the command runs: from just after its launch (its pipes
 /// handed to the readers) to its exit.
 fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)> {
-    let plan::Planned { mut cmd, how } = plan::exec(line, at.root, &at.target["env"])?;
+    let plan::Planned { mut cmd, how } = plan::exec(line, at.root, at.checkout, &at.target["env"])?;
     // The two readers start before the command and wait for its pipes, so creating their threads is
     // strobe's work before the command runs, not beside it.
     type Pipe = Box<dyn std::io::Read + Send>;
@@ -233,13 +234,18 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     let root = v.root.clone().ok_or_else(|| Error::msg(format!("{}: a cli target runs in a variant's folder", v.role)))?;
     let log = store::experiment_dir(&ctx.exp)?.join("cli.log");
     let stamp = host::paths::run().join(format!("cli-{}", store::new_id("c")));
-    let at = Spawn { root: &root, target: &target, cpus: ctx.pin, log: &log, stamp: &stamp, timeout: s.run_timeout() };
+    let root = PathBuf::from(host::paths::plain(&root));
+    let at = Spawn { root: &root, checkout: &ctx.harness.from, target: &target, cpus: ctx.pin, log: &log, stamp: &stamp, timeout: s.run_timeout() };
     let fixture = ctx.fixture_running.clone();
     let mut steps: Vec<(String, f64)> = Vec::new();
     let hooks = super::block::Hooks::default();
     let ran: RefCell<Vec<Ran>> = RefCell::new(Vec::new());
     let latched = RefCell::new(None::<Error>);
-    let checked = |r: Result<Value>| latched.take().map_or(r, Err);
+    let checked = |r: Result<Value>| match (latched.take(), r) {
+        (Some(e), Err(outer)) if e.code == outer.code && e.validator() == outer.validator() => Err(outer),
+        (Some(e), _) => Err(e),
+        (None, r) => r,
+    };
     // The CPU of every command of the run, untimed ones too (NaN once one has none): what is not the
     // target's on its CPUs over the run is other work (`cpu.foreign`).
     let own_ms: Cell<f64> = Cell::new(0.0);
@@ -256,8 +262,9 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
                 let failed = |e: &Error| {
                     gap_ms.set(f64::NAN);
                     let mut e = if e.code == 2 || e.refusal.is_some() { e.clone() } else { Error::refused("RunIncomplete", e.message.clone(), "fix the command and run the whole block again") };
-                    e.message = format!("{}: {}", label(s, v), e.message);
-                    latched.borrow_mut().get_or_insert(e);
+                    let prefix = format!("{}: ", label(s, v));
+                    e.refusal = e.refusal.map(|r| Box::new(r.prefixed(prefix.clone())));
+                    latched.borrow_mut().get_or_insert_with(|| e.prefixed(prefix));
                 };
                 let line = line_for(&a["line"], v, &target).inspect_err(failed)?;
                 // `{fixture.url}` and the like, in a line the call or the variant gave (the target's
@@ -495,9 +502,11 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     super::say_overlay(ctx, notes);
     let plans: std::collections::BTreeSet<_> = measured.iter().flat_map(|r| r.0.iter().map(|c| &c.how)).collect();
     let shelled = plans.iter().any(|p| p.shell.is_some());
-    say_plans(ctx, s, v, &plans);
+    let shell_reasons = plans.iter().filter_map(|p| p.shell.clone()).collect();
+    say_plans(ctx, s, &plans);
     Ok(Block {
         shelled,
+        shell_reasons,
         variant: v.role.to_string(),
         pair,
         values,
@@ -530,23 +539,28 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     })
 }
 
-fn say_plans(ctx: &mut Ctx, s: &Series, v: &Variant, plans: &std::collections::BTreeSet<&plan::Evidence>) {
-    let label = s.label();
-    let prefix = format!("{label}: ");
-    let sides = ctx.shells.entry(label.clone()).or_default();
-    let why = plans.iter().filter_map(|p| p.shell.as_deref()).collect::<Vec<_>>().join(", ");
-    let side = sides.entry(v.role.to_string()).or_default();
-    if !why.is_empty() {
-        *side = Some(why);
+pub(super) fn shell_notes<'a>(s: &Series, blocks: impl Iterator<Item = &'a Block>, names: [&str; 2]) -> Vec<Warning> {
+    let prefix = format!("{}: ", s.label());
+    let mut sides: BTreeMap<&str, std::collections::BTreeSet<&str>> = BTreeMap::new();
+    for b in blocks {
+        sides.entry(names[usize::from(b.variant == "head")]).or_default().extend(b.shell_reasons.iter().map(String::as_str));
     }
-    ctx.warnings.retain(|w| !(w.id == "ShellLine" && w.text.starts_with(&prefix)));
-    for (role, shell) in sides.iter().filter_map(|(r, s)| Some((r, s.as_ref()?))) {
-        ctx.warnings.push(if let Some((other, _)) = sides.iter().find(|(_, s)| s.is_none()) {
-            validity::warn("ShellLine", format!("{prefix}{role} runs through {shell} and {other} does not: only {role}'s run.duration and cpu.work include shell startup"))
-        } else {
-            validity::info("ShellLine", format!("{prefix}{role} runs through {shell}: run.duration and cpu.work include shell startup"))
-        });
-    }
+    sides
+        .iter()
+        .filter(|(_, why)| !why.is_empty())
+        .map(|(role, why)| {
+            let shell = why.iter().copied().collect::<Vec<_>>().join(", ");
+            if let Some((other, _)) = sides.iter().find(|(_, s)| s.is_empty()) {
+                validity::warn("ShellLine", format!("{prefix}{role} runs through {shell} and {other} does not: only {role}'s run.duration and cpu.work include shell startup"))
+            } else {
+                validity::info("ShellLine", format!("{prefix}{role} runs through {shell}: run.duration and cpu.work include shell startup"))
+            }
+        })
+        .collect()
+}
+
+fn say_plans(ctx: &mut Ctx, s: &Series, plans: &std::collections::BTreeSet<&plan::Evidence>) {
+    let prefix = format!("{}: ", s.label());
     for p in plans {
         let mut add = |w: Warning| {
             if !ctx.warnings.iter().any(|old| old.id == w.id && old.text == w.text) {
@@ -556,8 +570,8 @@ fn say_plans(ctx: &mut Ctx, s: &Series, v: &Variant, plans: &std::collections::B
         if let Some(text) = &p.shadow {
             add(validity::warn("PathShadow", format!("{prefix}{text}")));
         }
-        if p.shell.is_none() {
-            add(validity::info("CommandPath", format!("{prefix}{} starts `{}` directly", v.role, p.program.display())));
+        if !p.program.as_os_str().is_empty() {
+            add(validity::info("CommandPath", format!("{prefix}resolved `{}`", p.program.display())));
         }
         if let Some(text) = &p.literal {
             add(validity::info("DirectLine", format!("{prefix}{text}")));
