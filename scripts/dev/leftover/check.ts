@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { consoleRows, rows } from "./rows.ts"
+import { parents } from "./parents.ts"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const bin = Bun.which(process.env.STROBE_BIN ?? "strobe")
@@ -51,6 +52,7 @@ if (win) {
   const build = spawnSync("rustc", [join(here, "worker.rs"), "-o", worker], { windowsHide: true, timeout: 60000 })
   if (build.status !== 0) throw Error(String(build.stderr || build.error))
   copyFileSync(worker, namesake)
+  failed += parents(worker, entries)
   for (const exe of entries) for (const row of consoleRows(entries[1], worker, namesake)) {
     const receipt = join(crate, `${basename(exe)}-${row.key}`)
     const r = spawnSync(exe, ["run", "--check", "--head", row.line, "--reserve-cpus", "off", "--power", "keep", "--json"], {

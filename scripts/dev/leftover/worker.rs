@@ -6,6 +6,23 @@ use std::time::Duration;
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_default();
+    #[cfg(windows)]
+    if mode == "parent" || mode == "launch" {
+        use std::os::windows::process::CommandExt;
+        #[link(name = "kernel32")]
+        extern "system" { fn GetConsoleCP() -> u32; }
+        let attached = args.next().unwrap() == "attached";
+        if mode == "parent" {
+            let flag = if attached { 0x08000000 } else { 8 }; // CREATE_NO_WINDOW or DETACHED_PROCESS
+            let status = Command::new(std::env::current_exe().unwrap()).arg("launch").arg(if attached { "attached" } else { "none" }).args(args).creation_flags(flag).status().unwrap();
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        assert_eq!(unsafe { GetConsoleCP() } != 0, attached);
+        let exe = args.next().unwrap();
+        let mut cmd = Command::new(&exe);
+        if !attached && !exe.ends_with("strobew.exe") { cmd.creation_flags(8); }
+        std::process::exit(cmd.args(args).status().unwrap().code().unwrap_or(1));
+    }
     if mode == "sleep" {
         std::thread::sleep(Duration::from_secs(10));
     } else if mode == "wait" {

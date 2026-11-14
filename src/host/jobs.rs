@@ -423,6 +423,8 @@ pub struct Reading {
     pub running: BTreeMap<(u32, u64), u64>,
     /// System console hosts: image and job checked on the same handle at admission.
     pub console_hosts: BTreeSet<(u32, u64)>,
+    /// Command members with a known role (the measured root or a verified image).
+    pub identified: usize,
     /// Commands only: per-process readings, for jobs whose aggregate includes a console host.
     pub counters: BTreeMap<(u32, u64), CommandCounters>,
     /// The executables' file names of the ended ones, where they could be read.
@@ -501,6 +503,9 @@ fn snapshot(w: &mut HashMap<isize, Watched>, jobs: &[isize]) -> Result<Reading, 
         let mut ended = 0u32;
         for m in &mut x.members {
             settle(m);
+            if x.command && (Some(m.key.0) == x.root || m.name.is_some()) {
+                out.identified += 1;
+            }
             if m.console_host {
                 out.console_hosts.insert(m.key);
             }

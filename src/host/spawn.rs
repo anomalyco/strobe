@@ -1132,6 +1132,18 @@ impl Owned {
                             usage.cpu_refused = Some("Windows did not give every command process's CPU apart from its console".into());
                         }
                     }
+                    // An unidentified member might be the console. Neither the job's ticks nor
+                    // its peak or IO can separate it. A one-process job can only be the root.
+                    let members = if held.complete { held.ended.len() + held.running.len() } else { acct.BasicInfo.TotalProcesses as usize };
+                    if members > 1 && held.identified < members {
+                        let reason = "Windows did not identify every member of the command's job; its console could be in the count";
+                        usage.cpu_ns = None;
+                        usage.cpu_refused = Some(reason.into());
+                        usage.peak_bytes = None;
+                        usage.read_bytes = None;
+                        usage.write_bytes = None;
+                        usage.io_refused = Some(reason.into());
+                    }
                     // Ended with the job (self.end), not by pid: a start time of 0 (nd_left).
                     // Running: a held handle not signalled (`jobs`: one held from its start), else one the
                     // job lists whose handle has not signalled (an exited process whose handle another
