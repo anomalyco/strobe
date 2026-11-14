@@ -685,42 +685,7 @@ const LINUX_SCRIPT_CPU_RUN: Evidence = Evidence {
     reviewed_at: Some("9e35da42"),
     reviewed_why: Some(CHANGES_LINUX_SCRIPT_ENDED),
 };
-const MAC_CLI_WALL_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "1244967",
-    machine: "Apple silicon laptop (macOS 27.0.1)",
-    fixture: "scripts/dev/known/planted.bench.ts",
-    known: "cli-spin run.duration Δ 150.29 ms vs 150 ms planted; metric.truth_cpu_ms 150 and 300 exact",
-    aa: "cli-a against itself, 8 pairs: run.duration +0.07% [−0.15 … +0.14], same (±2%)",
-    planted: "cli-a to cli-b (150 to 300 ms): 154.55 to 304.84 ms, +97.20% [+96.98 … +97.43] for +97.06% with the 4.55 ms launch",
-    boundary: "a process left running (orphan, breakaway-left in cli.bench.ts) refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
-};
-const MAC_CLI_CPU_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "1244967",
-    machine: "Apple silicon laptop (macOS 27.0.1)",
-    fixture: "scripts/dev/known/planted.bench.ts",
-    known: "cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact",
-    aa: "cli-a against itself: cpu.work −0.01% [−0.08 … +0.06], same (±2%)",
-    planted: "cli-a to cli-b: cpu.work 152.90 to 303.04 ms, +98.23% [+98.08 … +98.40] for +98.10% with the launch; cli-io io.write and io.read +100% [+100 … +100]",
-    boundary: "a process left running refused RunIncomplete; IO of reaped children refused NotOnThisOs (cli.bench.ts)",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
-};
-const MAC_CLI_MEMORY_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "1244967",
-    machine: "Apple silicon laptop (macOS 27.0.1)",
-    fixture: "scripts/dev/known/planted.bench.ts",
-    known: "cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)",
-    aa: "cli-a against itself: memory.peak 0.0% [0.0 … 0.0], same (±2%)",
-    planted: "cli-a to cli-b (50 to 100 MiB): 51.906 to 101.906 MiB, Δ +50.000 MiB for +50 MiB",
-    boundary: "a process left running refused RunIncomplete (cli.bench.ts)",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
-};
+const MAC_CLI_PLAN: &str = "re-verify this command planner on Apple silicon: scripts/dev/known/planted.bench.ts cli-spin, cli-alloc and cli-io known answers, A/A and planted comparisons, and cli.bench.ts child and leftover boundaries (scripts/dev/cli-plan/PLAN.md)";
 const CHANGES_MAC_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees, lends a zombie no children in tree_of (unreachable when the tree is walked without zombie roots) and joins a process to its responsible one by pid and start time in responsible_pids, which drops only processes whose pid was reused: the run's edges, CPU windows and the host's processes are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged.";
 const MAC_SCRIPT_WALL_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -988,9 +953,9 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::Script, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_SCRIPT_COUNTERS), linux: Preview(LINUX_SCRIPT_COUNTERS) },
     Row { runtime: Runtime::Script, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
     Row { runtime: Runtime::Script, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
-    Row { runtime: Runtime::Cli, capability: Capability::WallAndCounts, windows: Preview(WIN_FLAGGED_AA), macos: Verified(&MAC_CLI_WALL_RUN), linux: Preview(LINUX_CLI_WALL) },
-    Row { runtime: Runtime::Cli, capability: Capability::ProcessCpu, windows: Verified(&WIN_CLI_CPU_RUN), macos: Verified(&MAC_CLI_CPU_RUN), linux: Verified(&LINUX_CLI_CPU_RUN) },
-    Row { runtime: Runtime::Cli, capability: Capability::ProcessMemory, windows: Verified(&WIN_CLI_MEMORY_RUN), macos: Verified(&MAC_CLI_MEMORY_RUN), linux: Verified(&LINUX_CLI_MEMORY_RUN) },
+    Row { runtime: Runtime::Cli, capability: Capability::WallAndCounts, windows: Preview(WIN_FLAGGED_AA), macos: Preview(MAC_CLI_PLAN), linux: Preview(LINUX_CLI_WALL) },
+    Row { runtime: Runtime::Cli, capability: Capability::ProcessCpu, windows: Verified(&WIN_CLI_CPU_RUN), macos: Preview(MAC_CLI_PLAN), linux: Verified(&LINUX_CLI_CPU_RUN) },
+    Row { runtime: Runtime::Cli, capability: Capability::ProcessMemory, windows: Verified(&WIN_CLI_MEMORY_RUN), macos: Preview(MAC_CLI_PLAN), linux: Verified(&LINUX_CLI_MEMORY_RUN) },
     Row { runtime: Runtime::Cli, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
     Row { runtime: Runtime::Tty, capability: Capability::WallAndCounts, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
     Row { runtime: Runtime::Tty, capability: Capability::ProcessCpu, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },

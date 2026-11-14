@@ -66,6 +66,27 @@ can be a desktop editor. Use a nonexistent `.ps1` for that baseline; check a rea
 candidate only. Explicit shells own the syntax **inside** their payload; the runtime leftover
 harness covers the commands text inspection cannot see.
 
+### Restore macOS verification
+
+On the Apple silicon host, with the shared slot free, build this revision and run each command separately:
+
+```sh
+cargo build --release
+export STROBE_BIN="$PWD/target/release/strobe" KNOWN_BIN="${TMPDIR:-/tmp}/cli-plan-known"
+rustc -O scripts/dev/known/known.rs -o "$KNOWN_BIN"
+bun scripts/dev/cli-plan/check.ts
+bun scripts/dev/leftover/check.ts
+f=scripts/dev/known/planted.bench.ts
+"$STROBE_BIN" bench "$f" --head . --check --runs 3 --filter cli-spin,cli-alloc,cli-io
+"$STROBE_BIN" bench "$f" --head . --aa --target cli-a --filter cli-spin,cli-alloc,cli-io --pairs 8
+"$STROBE_BIN" bench "$f" --base cli-a --head cli-b --filter cli-spin,cli-alloc,cli-io --pairs 8
+"$STROBE_BIN" bench "$f" --head . --aa --target cli-a --filter cli-spin --primary run.duration --pairs 8
+"$STROBE_BIN" bench "$f" --base cli-a --head cli-b --filter cli-spin --primary run.duration --pairs 8
+"$STROBE_BIN" bench scripts/dev/known/cli.bench.ts --head . --check --filter tree,orphan,breakaway-left
+```
+
+Record the A/A interval, launch-adjusted plant and boundaries for wall, CPU and memory before restoring the labels. A cross-target compile is not evidence for any of them.
+
 ### Baseline observation (`check.ts --before`)
 
 One headless check per row, not a speed comparison. Each leg records its own PID and parent and

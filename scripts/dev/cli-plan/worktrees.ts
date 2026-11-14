@@ -13,7 +13,7 @@ export function worktrees(dir:string,bin:string,env:NodeJS.ProcessEnv) {
   }
   const git=(...args:string[])=>go(head,"git",args)
   git("init","-q")
-  const shim=win?"plan-leg.cmd":"plan-leg", local=`./node_modules/.bin/${shim}`
+  const shim=win?"plan-leg.cmd":"plan-leg", local=win?`.\\node_modules\\.bin\\${shim}`:`./node_modules/.bin/${shim}`
   const bench=(line:string)=>`import {bench,cli} from '@hona/strobe'; export default bench({targets:{line:cli(${JSON.stringify(line)})},cases:{work:{primary:'run.duration',metrics:['metric.plant'],run:ctx=>ctx.exec()}}})\n`
   mkdirSync(join(head,"perf"));writeFileSync(join(head,"perf/work.bench.ts"),bench("plan-leg"))
   writeFileSync(join(head,"package.json"),JSON.stringify({scripts:{measure:`"${bin.replaceAll("\\","/")}" bench perf/work.bench.ts --check --base "${base.replaceAll("\\","/")}" --head . --power keep --reserve-cpus off --max-time 2m --json`}}))
@@ -24,11 +24,13 @@ export function worktrees(dir:string,bin:string,env:NodeJS.ProcessEnv) {
   const sample=(name:string,line:string,expected:number,shadow:boolean)=>{
     for(const folder of [head,base])writeFileSync(join(folder,"perf/work.bench.ts"),bench(line))
     const r=JSON.parse(go(head,process.execPath,["run","--silent","measure"])),s=r.series[0]
-    const warned=r.warnings.some((w:any)=>w.id==="PathShadow" && w.text.includes("./node_modules/.bin/plan-leg"))
+    const warned=r.warnings.some((w:any)=>w.id==="PathShadow" && w.text.replaceAll("\\","/").includes("./node_modules/.bin/plan-leg"))
     if(warned!==shadow || s.base_values["metric.plant"]!==expected || s.values["metric.plant"]!==101 || s.base_values["run.duration"]<expected-2 || s.values["run.duration"]<99)throw Error(`${name}: plant or PATH warning did not match: ${JSON.stringify(r.warnings)}`)
     console.log(`ok ${name}: planted base ${expected}, head 101 ms; wall ${s.base_values["run.duration"].toFixed(1)} / ${s.values["run.duration"].toFixed(1)}; PathShadow ${warned}`)
   }
   sample("package-path","plan-leg",101,true);sample("variant-shim",local,37,false)
+  writeFileSync(join(head,"perf/preflight.bench.ts"),`import {bench,cli} from '@hona/strobe'; export default bench({targets:{one:cli('plan-leg &',{build:'absent-build-should-not-run'}),two:cli('plan-leg')}, cases:{work:{primary:'run.duration',run:ctx=>ctx.exec()}}})`)
+  go(head,bin,["bench","perf/preflight.bench.ts","--check","--base","one","--head","two"],2); console.log("ok base target preflight before build")
   if(win){
     mkdirSync(join(head,"target/release"),{recursive:true});copyFileSync(process.execPath,join(head,"target/release/app.exe"));copyFileSync(process.execPath,join(head,"tool.exe"))
     for(const line of ["./tool --version",".\\tool.exe --version","./target/release/app.exe --version",".\\target\\release\\app.exe --version > NUL",`.\\node_modules\\.bin\\${shim}`]){

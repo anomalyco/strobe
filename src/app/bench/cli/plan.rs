@@ -82,9 +82,10 @@ fn resolve(program: &str, root: &Path, checkout: &Path, env: &Value) -> Result<O
                     let relative = hit.strip_prefix(&checkout).ok()?;
                     (root != checkout).then(|| {
                         format!(
-                            "bare `{program}` resolves on PATH to `{}` in the launching checkout, not this variant; both sides can run that copy: write `./{}` to measure each variant's build",
+                            "bare `{program}` resolves on PATH to `{}` in the launching checkout, not this variant; both sides can run that copy: write `.{}{}` to measure each variant's build",
                             hit.display(),
-                            relative.to_string_lossy().replace('\\', "/")
+                            std::path::MAIN_SEPARATOR,
+                            relative.display()
                         )
                     })
                 });

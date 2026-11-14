@@ -180,6 +180,9 @@ pub(super) fn syntax(line: &str) -> std::result::Result<Shape, String> {
         let raw = name(line, r);
         let p = raw.trim_matches('"');
         let ext = extension(Path::new(p));
+        if raw.starts_with('"') && line[r.end..].starts_with(|c: char| !matches!(c, ' ' | '\t' | ')' | '&' | '|' | '<' | '>')) {
+            return Err("put the complete program path in one pair of double quotes, then separate its arguments with a space".into());
+        }
         if p.is_empty() || p.bytes().all(|b| b.is_ascii_digit()) && line[r.end..].starts_with(['<', '>']) || matches!(p.to_ascii_lowercase().as_str(), "if" | "for" | "call") {
             return Err("the command after a leading redirection or compound cmd builtin is not a literal command head: put the line in a script and invoke its interpreter explicitly".into());
         }
@@ -235,6 +238,9 @@ pub(super) fn plan(text: &str, root: &Path, checkout: &Path, env: &Value, shape:
             return Ok(Planned { cmd, how: Evidence { shell, literal, ..hit } });
         }
         shape.cmd_rules(batch).map_err(Error::usage)?;
+        if !name(line, r).starts_with('"') && program.contains('/') {
+            return Err(Error::usage(format!("cmd does not reliably accept `/` in an unquoted program path: write `{}`", program.replace('/', "\\"))));
+        }
         if batch {
             why = "batch script";
         }
