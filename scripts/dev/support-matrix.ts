@@ -478,7 +478,7 @@ const CASES: Case[] = [
     built(`tier: Support::Preview, runtime: Runtime::Cli, capability: Capability::ProcessCpu, host: Host::WindowsArm64, preview_by: vec![Cause::Architecture]`),
     "preview (cli · process CPU on Windows arm64: runtime checks held; verified on Windows x64 only)",
   ],
-  ["status windows", `status_summary(Host::WindowsX64).line()`, "verified on Windows x64: windowless native (process CPU, process memory), cli (process CPU, process memory) · 82 more paths preview"],
+  ["status windows", `status_summary(Host::WindowsX64).line()`, "verified on Windows x64: windowless native (process CPU, process memory), script (wall time and counts), cli (process CPU, process memory) · 81 more paths preview"],
   ["status linux arm64", `status_summary(Host::LinuxArm64).line()`, "every path is preview on Linux arm64: known answers are checked on Linux x64 only"],
 ]
 
