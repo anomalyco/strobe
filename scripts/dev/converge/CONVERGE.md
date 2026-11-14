@@ -37,3 +37,28 @@ Recorded six-pair desk A/As (not a simulated re-run): 8, 8 and 7 attempts;
 56.3, 633.8 and 482.6 s. Their kept blocks crossed the floor in 10/12, 11/12
 and 12/12. The first and last ended underpowered (~48 and ~25 pairs); the middle
 was unclear. A new schedule cannot recreate an unmeasured replacement block.
+
+Each recording had ≥25% of a core in both blocks of its first attempt. The
+scheduler therefore keeps all five formerly set-aside attempts when fed the
+recorded load streams. This does not predict a different verdict for any of them.
+
+## Live A/A (six kept pairs)
+
+| Machine and load | Attempts, main → candidate | Wall time | Primary, main → candidate |
+|---|---|---|---|
+| Two-vCPU guest, one CPU pinned, steady 75% of that CPU | 6 → 6 | 9.58 → 9.45 s | Same, warned → faster (small), warned |
+| Same guest, 75% on head's first measured block only | 7 → 7 | 10.47 → 10.38 s | Same → same |
+| Working desk, headless script, target CPUs 42% busy at start | 7 → 6 | 45.77 → 38.34 s | Same, warned → same |
+
+The guest ran a 220 ms sleep; both versions flagged all 12 kept blocks in the
+steady run and none after the burst replacement. The warned A/A difference is
+not a performance claim. The desk ran a script that waits 800 ms. No load was
+planted there: 7/12 vs 2/12 kept blocks were busy. This one run cannot separate
+the effect of the scheduler from a change in the desk's activity.
+
+Run `cargo run --release --manifest-path scripts/dev/background/Cargo.toml -- --converge`.
+Optional result paths after `--converge` replay the original attempt streams.
+`bun scripts/dev/converge/plans.ts` reads `STROBE_BIN`; its scratch history
+exercises fixed, automatic and variance-limited plans without executing either
+command. The separate historical background replay is unchanged: 40 warnings,
+59 notes and 35 silent results.

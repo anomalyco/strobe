@@ -7,6 +7,9 @@ use strobe::app::bench::{
 use strobe::model::{VerdictKind, metric};
 
 pub fn run() {
+    for path in std::env::args_os().skip(2) {
+        recorded(path.as_ref());
+    }
     for name in ["cpu.work", "run.duration", "launch.ready"] {
         for fixed in [None, Some(6), Some(9), Some(12)] {
             let design = Design::new(fixed, 0.02, None, None);
@@ -88,5 +91,38 @@ pub fn run() {
                 println!("{name} {fixed:?} {regime}: {attempts} attempts / {} s; {level}", 2 * attempts);
             }
         }
+    }
+}
+
+// Ask about the actual attempts, in order, without relabelling them as new measurements or
+// inventing the primary values of set-aside attempts. Print counts, never local identifiers.
+fn recorded(path: &std::path::Path) {
+    let result: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    for s in result["series"].as_array().unwrap() {
+        let bs: Vec<Block> = serde_json::from_value(s["blocks"].clone()).unwrap();
+        let bursts: Vec<Burst> = serde_json::from_value(s["discarded_bursts"].clone()).unwrap();
+        let cores = s["target_cores"].as_u64().map(|n| n as usize);
+        let mut retries = Schedule::resume(cores, &[], &[], &[]);
+        let mut replaced = 0;
+        let mut original_aside_kept = 0;
+        for p in 0..s["pairs"].as_u64().unwrap() as usize {
+            for burst in bursts.iter().filter(|b| b.pair == p) {
+                let [a, b] = [burst.base, burst.head].map(|load| {
+                    let mut b = Block::default();
+                    b.pair = p;
+                    b.values.insert("cpu.foreign.max".into(), load);
+                    b
+                });
+                match retries.decide(&a, &b, replaced, true, true) {
+                    Decision::Replace(_) => replaced += 1,
+                    Decision::Keep(_) => original_aside_kept += 1,
+                }
+            }
+            let side = |role| bs.iter().find(|b| b.pair == p && b.variant == role).unwrap();
+            if matches!(retries.decide(side("base"), side("head"), replaced, true, true), Decision::Replace(_)) {
+                replaced += 1;
+            }
+        }
+        println!("recorded: {} attempts discarded originally; {original_aside_kept} of those would be kept; {replaced} retry decisions on this stream", bursts.len());
     }
 }

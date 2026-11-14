@@ -545,7 +545,15 @@ fn series_line(s: &Value) -> String {
     };
     let floor = super::sequential::min_clean();
     let pairs = s["pairs"].as_u64().unwrap_or(0);
-    let clean = if pairs < floor as u64 { format!("; too few for the clean-pair check (needs {floor} clean pairs; use at least --pairs {floor})") } else { String::new() };
+    let clean = if pairs < floor as u64 {
+        let interval_min = stats::min_pairs(0.95);
+        let interval = if pairs < interval_min as u64 { format!("; fewer than {interval_min} pairs cannot give a 95% interval") } else { String::new() };
+        let flag =
+            if s["underpowered"] == true && s["pairs_needed"].as_f64().is_some_and(|n| n >= floor as f64 && n < usize::MAX as f64) { String::new() } else { format!("; use at least --pairs {floor}") };
+        format!("{interval}; too few for the clean-pair check (needs {floor} clean pairs{flag})")
+    } else {
+        String::new()
+    };
     let count = if s["fixed"] == true { "" } else { "estimated " };
     format!("{}: {count}{pairs} kept pairs ({} launches before retries); {what}{clean}, {time}", s["label"].as_str().unwrap_or(""), s["launches"])
 }
