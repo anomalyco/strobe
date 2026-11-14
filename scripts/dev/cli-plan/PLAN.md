@@ -17,7 +17,7 @@
 | Windows builtin name alone (including `echo.`, `echo:text`, `echo/text`) | Implicit cmd builtin; a PATH twin does not override it. |
 | Any cmd builtin stem × `.exe` or `.com` (for example `echo.exe`, `rem.com`) | Plain line: direct, or missing. On an implicit cmd line: require quotes around the dotted bare name, at any command position. Otherwise cmd can take the builtin instead. |
 | Any cmd builtin stem × `.cmd` or `.bat` | Batch is itself a cmd line: require `"echo.cmd"` or an explicit path, even without an operator. |
-| Unix named shell with a script file or literal `-c` script, including single-quoted newlines and `‘` written as `'\''` | Start the named shell with literal argv; count shell work. |
+| Unix named shell with a script file or literal `-c` script, including single-quoted newlines and an apostrophe written as `'\''` | Start the named shell with literal argv; count shell work. |
 | Unix assignment(s), redirect before or after the shell, group, pipe, `&&`, `\|\|`, `;`, or newline around that invocation | POSIX sh owns the unchanged outer line. An outer expansion in the `-c` payload, not a redirect or a separate command's expansion, needs single quotes or a script file. |
 | Explicit `cmd /c` with nested double quotes or apostrophes | Cmd owns the payload; implicit cmd quoting rules do not apply inside it. |
 | Explicit path in a compound line: after `cd`/`pushd`, created by an earlier command, or guarded by a file check | Shell resolves the path when that command executes. Do not require it to exist before launch. Windows still refuses file associations. |

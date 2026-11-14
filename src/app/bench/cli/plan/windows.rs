@@ -243,8 +243,8 @@ pub(super) fn plan(text: &str, root: &Path, checkout: &Path, env: &Value, shape:
             // The shell may first change folder or build this file. The extension fixes its type.
             continue;
         }
-        if shape.op && path && cwd.is_none() {
-            return Err(Error::usage(format!("give `{program}` its executable or batch extension after changing folder, or invoke its interpreter explicitly")));
+        if shape.op && path && (cwd.is_none() || find(&root.join(program), env).is_none()) {
+            return Err(Error::usage(format!("give `{program}` its executable or batch extension on a cmd.exe line, or invoke its interpreter explicitly")));
         }
         let hit = if shape.op && !path { bare(program, cwd, checkout, env)? } else { resolve(program, root, checkout, env)? };
         let Some(hit) = hit else {
@@ -279,7 +279,7 @@ pub(super) fn plan(text: &str, root: &Path, checkout: &Path, env: &Value, shape:
         if !path && cwd.and_then(|r| find(&r.join(program), env)).is_some() && hit.shadow.is_some() {
             return Err(Error::usage(format!("cmd may run the local `{program}` instead of PATH's copy: give its explicit path")));
         }
-        if batch && evidence.program.as_os_str().is_empty() {
+        if batch && cwd.is_some() && evidence.program.as_os_str().is_empty() {
             evidence.program = hit.program;
         }
         if evidence.shadow.is_none() {
