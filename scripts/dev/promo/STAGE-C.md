@@ -6,6 +6,8 @@ Accept a comparison only with an unwarned primary and either zero flagged kept b
 
 ## Results
 
+No new verified cells: 24 total, 18 core. Two comparison legs qualify: terminal-grid A/B and page-engine A/A. Neither cell has a qualifying result on the other leg.
+
 Times are ms, A/A intervals are percent change. **F/C** means flagged kept blocks / fully clean pairs. The two counts have different denominators: for 12 pairs there are 24 blocks. Each load triple is the start sample in percent: target mean / target maximum / other-CPU mean. The raw archive holds the command, load, exit code, console output and each available result JSON, including unsuccessful invocations.
 
 | Cell | Known answer | A/A (%; F/C) | A/B paired shift (ms; F/C) | Refusal | Decision |
@@ -16,6 +18,8 @@ Times are ms, A/A intervals are percent change. **F/C** means flagged kept block
 | Page wall/counts | Display-off refusal attempt returned phase.b 41.2, phase.a 22.9, counts 7/5 | not run | not run | `Throttled` **not observed** | Preview: no display-off boundary; no timed legs requested |
 | Page engine | main.work 100.443 for 100; 25 layouts and 25 styles | +0.008 [−0.024, +0.047]; 5/8 of 12, clean pairs confirm | +100.070 [99.976, 100.147]; 4/8 of 12, no clean-pair confirmation | `main.script`: `NotForTarget` | Preview: known, A/A and refusal pass; needs qualifying A/B |
 | Page CPU | 2003.941 vs 2000 OS ms, ended count 0; peak foreign 25.82% | +0.039 [−0.177, +0.218]; 6/6 of 12 | +93.364 [91.715, 94.991]; relative +100.45 [98.89, 101.88]%, 7/6 of 12 | `cpu.wakes`: `NotForTarget` | Preview: both comparisons lack clean-pair confirmation |
+| Page launch | `launch.ready` 430.699 / 617.532; `plant_start` 27.599 / 14.332; spans 400.200 / 600.100, ready 2.900 / 3.100 after end | −0.021 [−0.186, +0.067]; 50/3 of 32, warned | +200.383 [199.484, 201.599]; 52/4 of 32, warned | `launch.painted`: `Headless` | Preview: later pair covers +200, but both comparisons lack load confirmation |
+| Script HTTP | 21.638 / 61.667 for 20 / 60; 15 probes each, no errors or timeouts | −0.004 [−0.106, +0.064]; 6/6 of 12 | +40.070 [40.043, 40.113]; 28/1 of 16, warned | `status-500`: `RunIncomplete` for latency after 3 invalid replies in 9 | Preview: neither comparison qualifies; interval does not contain +40 |
 
 | Cell | Known load | A/A load | A/B load | Boundary load |
 |---|---|---|---|---|
@@ -25,7 +29,11 @@ Times are ms, A/A intervals are percent change. **F/C** means flagged kept block
 | Page wall/counts | — | — | — | 1.3/6.1/89.3 |
 | Page engine | 0.6/5.0/7.2 | 0.7/3.8/6.8 | 1.7/7.5/22.8 | 1.6/12.8/21.6 |
 | Page CPU | 1.3/4.4/19.1 | 1.0/5.1/8.6 | 1.1/7.4/27.5 | 0.6/2.5/20.0 |
+| Page launch | 0.4/5.3/13.7 | 0.3/2.7/13.9 | 0.6/5.4/27.0 | 0.5/4.6/21.3 |
+| Script HTTP | 0.7/7.4/27.1 | 0.5/5.2/34.0 | 0.9/5.6/26.8 | 0.9/5.7/26.3 |
 
 Page CPU controls: work-0 0.116 [0.098, 0.132] ms (load 1.1/5.9/65.4); work-1x 90.652 [90.593, 90.712] ms (1.0/5.6/8.4). These imply an expected fixed-iteration change of about +99.85 to +99.89%, inside the A/B interval. The block flags still prevent promotion.
+
+Adding `phase_state` to the command and script wall/counts watches tripped **no verified cell**. Its function body is identical at the Mac and Linux script evidence revisions, `ebc9eeaf`, `43772400` and the reviewed head. Those two commits changed the code or comments that follow the function. The existing script review explanations now document that distinction; no review revision changed.
 
 The Mac remains offline. Its [headless run list](STAGE-B.md#when-the-mac-returns) still applies: take all four parts on the same build, use 400 → 600 ms for page launch, and do the command planner's Mac verification on the planner build. Do not transfer any Windows reading to a Mac cell.

@@ -585,21 +585,20 @@ const LINUX_WEBKIT: &str = "WPE ran headless --check; WebKitGTK under a virtual 
 // What the promotion runs left preview (2026-11-12 and -13, strobe 0.31.0 and the Mac's builds).
 const WIN_FLAGGED_AA: &str =
     "its known answer and planted A/B pass, but none of its 15 or more A/As ran without a block flagged Background (other work on the measured CPUs, win-promo-2): run the A/A on a quiet machine";
-const WIN_PAGE_WALL: &str =
-    "on 0.41.0 phases gave values and counts, not a display-off refusal; needs the display-off check when dark and qualifying wall-time pairs with the display awake";
+const WIN_PAGE_WALL: &str = "on 0.41.0 phases gave values and counts, not a display-off refusal; needs the display-off check when dark and qualifying wall-time pairs with the display awake";
 const WIN_PAGE_ENGINE: &str = "0.41.0 read 100.44 ms for 100 ms and 25 layouts/styles. Eight clean pairs confirmed the A/A, but the planted A/B had 4 flagged blocks and no clean-pair confirmation";
 const WIN_SCRIPT_CPU: &str = "on 0.41.0 the 300 ms spin read 307.63 ms; needs a known answer within 2% and qualifying CPU pairs. A/A had only a spare-capacity note; A/B had 7 clean pairs";
-const WIN_SCRIPT_HTTP: &str = "the planted interval overlaps the warm control range [+184.36 … +185.24]%, but other work flagged 9 of 24 A/A and 11 of 24 A/B blocks. Needs quiet probe pairs";
-const WIN_PAGE_CPU_FLAGGED: &str =
-    "0.41.0 cpu2s read 2003.94 ms vs 2000 OS ms. Each fixed-work comparison had only 6 clean pairs of 12; needs qualifying A/A and A/B";
+const WIN_SCRIPT_HTTP: &str = "0.41.0 had 6 clean pairs of 12 in A/A and 1 of 16 in A/B. The paired interval [40.043 … 40.113 ms] missed +40 ms; needs qualifying probe comparisons";
+const WIN_PAGE_CPU_FLAGGED: &str = "0.41.0 cpu2s read 2003.94 ms vs 2000 OS ms. Each fixed-work comparison had only 6 clean pairs of 12; needs qualifying A/A and A/B";
 const LINUX_CLI_WALL: &str = "a command's run.duration reads 15 to 18 ms more than the command took: strobe's clock starts before the launch cgroup's set-up and the child's move into it (linux-promo-6); its A/A and planted A/B pass";
-const TTY_LATENCY: &str = "0.41.0 recovered the answer and grid counts, refused overrun and recovered +60 ms with agreement on 8 clean pairs. Needs an unwarned keys A/A; only 5 of 12 pairs were clean";
+const TTY_LATENCY: &str =
+    "0.41.0 recovered the answer and grid counts, refused overrun and recovered +60 ms with agreement on 8 clean pairs. Needs an unwarned keys A/A; only 5 of 12 pairs were clean";
 const WIN_TTY_LAUNCH: &str = "0.41.0 recovered +300 ms and refused painted launch, but only 6 of 10 A/A and 4 of 10 A/B pairs were clean. Needs qualifying ready-500 A/A and planted A/B";
 const LINUX_CHROMIUM_CPU: &str =
     "cpu2s read 2006.4 ms for 2000 ms. Both 0.39.0 fixed-work comparisons refused RunIncomplete despite a launch cgroup; rerun page-work A/A and A/B with the corrected 0.41.0 process edges";
 const LINUX_NATIVE_COUNTERS: &str = "burst-1x to burst-2x read cpu.instructions +99.81% [+99.68 … +100.31] for +99.82% and its A/A same, but no refusal of the counter path is seen on this VM (root), and the one seen in --check is wrong (linux-promo-2)";
 const WIN_PAGE_LAUNCH: &str =
-    "the 200 ms plant waited longer for the ready frame during cold startup; the paired shift [195.57 … 198.93 ms] missed +200 ms. Needs the 400/600 ms marked check and quiet pairs";
+    "0.41.0 marks recovered 400.20 and 600.10 ms and the paired shift covered +200 ms, but A/A and A/B had only 3 and 4 clean pairs of 32. Needs qualifying launch comparisons";
 const MAC_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on e93fc36 launch-0 to launch-200 read Δ 201.5 ms for 200 ms";
 const MAC_HEADLESS_WALL: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 phase.b read 40.6 ms for 40 ms and the planted Δ 100.10 ms for 100 ms";
 const MAC_HEADLESS_ENGINE: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 main.work read 100.2 ms for 100 ms and the planted +99.87% for +99.68% to +99.98%";
