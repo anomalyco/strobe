@@ -26,9 +26,9 @@ exits 0 unless you pass `--require-verdict` (then 5). A refused comparison exits
 both commands run, add `--check`: a command that fails makes the check exit 1; timings from a check
 are not a verdict.
 
-Known issue: on Windows a command line starts its first program directly, so `a && b`, `a | b` or
-`a > out` measures `a` alone. Wrap such a line in `cmd /c "a && b"` on both sides, or use a script. A
-fix is designed.
+`a && b` times the whole line. Shell operators run through POSIX sh or Windows cmd.exe;
+`ShellLine` tells you when shell startup counts. Plain commands use PATH. To measure a program
+built in the variant's folder, write `./tool` or `.\tool.exe`.
 
 ## In your project
 
@@ -96,9 +96,10 @@ and defer installation until the bench ends.
 exact counters to base: a worse counter fails the job, as does a check that ran but compared none.
 A leak found with `leak` or a regression in dedicated-runner `mode: compare` also fails the job.
 In your own script, check the exit code of `bench --check --base <ref> --noworse count.items` (1 for
-failure, 4 if cases ran but compared no counter). Known issue in 0.34.0: an all-gap counter check
-exits 0 without comparing anything. Add `--require-parity` when the file has target gaps.
-For timed comparisons, read the verdict, not the exit code.
+failure, 4 if no counter compared, including when every case was a parity gap). In either case
+the check's `passed` field is false. Add `--require-parity` to require every journey.
+For timed comparisons, read `primary.verdict_kind` and `primary.warned`. Confirm a warned
+`same` or `no_worse` under steady conditions; `--require-verdict` exits 5 for it.
 Inputs: [action.yml](action.yml); design: [SPEC.md §26](SPEC.md#26-ci-the-github-action-actionyml).
 
 **Changes:** each release's notes are on [GitHub Releases](https://github.com/anomalyco/strobe/releases).

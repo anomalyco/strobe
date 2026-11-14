@@ -52,9 +52,8 @@ The design and every rule behind this file: SPEC.md.
   `--check --head "<cmd>"` (and `--base "<cmd>"`) runs each once: `cpu.work · run.duration ·
   memory.peak`. With `--check` every `--noworse` exits 2 (a command gives no exact counter): drop
   `--check` and use `--noworse cpu.work=2%`.
-- **Windows known issue** (every release so far): a `strobe run` or `cli()` line with `&&`, `||`, `|`,
-  `<` or `>` after a real program measures only the first command (the rest are its arguments). Wrap
-  it in `cmd /c "…"` on both sides, or put it in a script. A fix is designed.
+- `ShellLine`: `&&`, `||`, pipes and redirects run through the platform shell. Its startup counts.
+  Plain external commands use PATH; use `./tool` or `.\tool.exe` to measure each variant's build.
 - `--aa --head .` checks the method on this machine (same build both sides).
 - Long benches keep running in the daemon: `strobe query exp_… progress`. Ctrl-C, SIGTERM or
   `strobe bench --stop <exp>` stop after the block (exit 130, what finished is kept);
@@ -69,7 +68,8 @@ The design and every rule behind this file: SPEC.md.
   declared metric gives a value or a stated refusal.
   - `--check`: 0 when every case passes; 1 when one `FAIL`s (its `fix:` line says what to change); a
     preflight refusal is listed beside passing cases; all non-gap cases refused up front: 4.
-    A block refusal during the check fails its case (1); a refused secondary alone does not.
+    A run defect fails its case (1); a primary the target, engine or display cannot measure is
+    listed as refused. A refused secondary alone does not fail a case.
   - `--check --base <ref>`: base's line under head's; the summary ends `base and head each checked;
     nothing compared: the same command without --check times head against base` (exit 0 if both ran).
     A base build error stops the check before the case runs (1). A base run error fails the case (1):
@@ -77,11 +77,10 @@ The design and every rule behind this file: SPEC.md.
     out with `--filter` until the change merges.
   - `--check --base <ref> --noworse count.x`: each counter row ends `no worse` (passes), `worse`,
     `unstable`, `missing` or `not_compared` (each fails the case, exit 1). If cases ran and none failed
-    but no counter compared, exit **4**, even with `passed: true` in JSON. If both sides refused every
+    but no counter compared, exit **4**, with `passed: false` in JSON. If both sides refused every
     counter, read the refused lines. For `Uncounted`, check the spelling against `ctx.count`; if the run
     counts it only on some paths, add `metrics: ["count.x"]` on that case so 0 → 0 compares.
-    Known issue in 0.34.0: if every case is a parity gap, the counter check exits 0 without comparing
-    anything. Add `--require-parity` when gating on counters in a file with target gaps.
+    If every case is a parity gap, no counter compared: exit 4. `--require-parity` requires every journey.
   - `--check --base <target> --head <target>`: shared journeys get a parity matrix, not a counter
     comparison. Gaps alone exit 0 (even if no case ran), or 4 with `--require-parity`; a mismatch or
     case failure exits 1. With two bare targets, `--noworse` exits 2: it needs two builds.
@@ -382,7 +381,8 @@ noisy discovery evidence, or leave them out.
   - `SharedRunner`: a CI runner other jobs share; no timing there. `--check`, counters against base, leak
     runs and attribution work (In CI, above); timing needs a machine of its own.
 - In comparisons, single-build blocks and leak runs, a series refused while it runs (`NoPhase`, for
-  example) ends alone: `refused` in the listing. In a check its block refusal fails the case (1). Only
+  example) ends alone: `refused` in the listing. In a check a run defect fails the case (1), but a
+  primary the target, engine or display cannot provide is refused. Only
   the machine's refusals (`SessionLocked`, `Background`, `Thermal`, …) stop the bench. Every series
   refused: exit 4.
 - `!` lines warn next to a kept number; `i` lines inform. Read them before trusting a number:
@@ -581,8 +581,8 @@ export default bench({
   from outside: `cpu.work`, `run.duration`, `cli.launch`, `cpu.wakes` (not Windows), `memory.peak`,
   `io.*`, and `metric.<name>` from `strobe:metric <name>=<value> [higher]` lines it prints (declare
   one in `metrics` to test it). A nonzero exit, a timeout or a process left running fails the run.
-  Unix runs the line under `sh -c`; Windows starts its first word as the program (a `.cmd`, `.bat` or
-  a word that is no executable runs under cmd), so `a && b` there runs `a` alone: `cmd /c "a && b"`.
+  Unix uses POSIX sh; on Windows shell operators and batch shims run under cmd.exe. Quote literal
+  operators (double quotes on Windows); run a PowerShell script with `pwsh -NoProfile -File`.
 - `params: { files: { run: [100, 10_000], more: [1, 1_000] } }`: `more` only with `--params all`.
 - `bun add -d @hona/strobe` pins strobe for the project and gives editors the types; strobe runs a
   bench file with its own SDK copy either way.

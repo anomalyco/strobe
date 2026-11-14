@@ -199,7 +199,18 @@ pub struct Board {
 impl Board {
     pub fn of(r: &Value) -> Board {
         let series: Vec<&Value> = r["series"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
-        let kinds: Vec<VerdictKind> = series.iter().map(|s| if s["not_run"] == true { VerdictKind::Stopped } else { stats::kind_of(&s["primary"]) }).collect();
+        let kinds: Vec<VerdictKind> = series
+            .iter()
+            .map(|s| {
+                if s["not_run"] == true {
+                    VerdictKind::Stopped
+                } else if stats::needs_confirmation(&s["primary"]) {
+                    VerdictKind::Unclear
+                } else {
+                    stats::kind_of(&s["primary"])
+                }
+            })
+            .collect();
         let p: Vec<f64> = series.iter().map(|s| if not_compared(s) || s["not_run"] == true { f64::NAN } else { p_repeated(r, s) }).collect();
         let js: Vec<Journey> = series.iter().enumerate().map(|(i, s)| Journey { kind: kinds[i], p: if p[i].is_finite() { p[i] } else { 1.0 }, gap: not_compared(s) }).collect();
         // Non-inferiority: every compared journey's primary was tested against a margin.

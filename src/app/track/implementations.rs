@@ -343,6 +343,10 @@ pub(super) fn point(args: &Args, sides: &Sides, file: &Path, root: &Path, commit
         }
         let runtimes = super::script_runtimes(r, s, &[(sides.base_target.as_str(), Some("base")), (sides.head_target.as_str(), Some("head"))]);
         super::runtime_fingerprint(&runtimes, &mut fingerprint);
+        let shelled: Vec<_> = ["base", "head"].into_iter().filter(|side| blocks.iter().any(|b| b["variant"] == *side && b["shelled"] == true)).collect();
+        if !shelled.is_empty() {
+            fingerprint["shell_line"] = json!(shelled.join("+"));
+        }
         super::motion_fingerprint(r, s, &mut fingerprint);
         super::seed_fingerprint(r, &mut fingerprint);
         let kind_names: Vec<&str> = kinds.iter().filter_map(Value::as_str).collect();

@@ -477,6 +477,7 @@ impl Runner {
                     let refusal = msg.get("refusal").and_then(|r| serde_json::from_value::<crate::model::Refusal>(r.clone()).ok());
                     return Err(match refusal {
                         Some(r) => Error { message, ..Error::from(r) },
+                        None if msg["code"] == 2 => Error { hint, ..Error::usage(message) },
                         None => Error { hint, ..Error::msg(message) },
                     });
                 }
@@ -534,6 +535,9 @@ impl Runner {
                     Ok(v) => json!({ "id": rid, "ok": v }),
                     Err(e) => {
                         let mut reply = json!({ "id": rid, "error": e.message });
+                        if e.code == 2 {
+                            reply["code"] = json!(2);
+                        }
                         if let Some(h) = &e.hint {
                             reply["hint"] = json!(h);
                         }

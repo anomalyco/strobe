@@ -1162,7 +1162,7 @@ impl<'a> Doc<'a> {
             let id = w["id"].as_str().unwrap_or("");
             // `UserFolders` leads the block as a caution (`folder_caution`). A `HarnessOverlay` that only placed
             // a file base lacked (info) changed nothing base ran: only the warn level reaches a reviewer.
-            let context = (id == "SessionLocked" || id == "HarnessOverlay") && w["level"] != "warn";
+            let context = matches!(id, "SessionLocked" | "HarnessOverlay" | "CommandPath" | "DirectLine" | "ShellLine") && w["level"] != "warn";
             if id == "ReservedCpus" || context || id == "DisplayOff" || id == "UserFolders" {
                 continue;
             }
