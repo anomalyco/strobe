@@ -820,7 +820,7 @@ pub fn phone_timed(f: &host::adb::Facts) -> Result<()> {
             ValidatorId::WirelessTransport,
             format!("{} is reached over the network (adb over Wi-Fi): the radio's work and the link's latency would be in the numbers", f.label()),
         )
-        .fix("connect the phone with a USB cable (and `adb disconnect` its network address, or name the USB serial with --mobile=<serial>)")
+        .fix("connect the phone with a USB cable; disconnect its network address with adb, or set ANDROID_SERIAL to the USB serial from `adb devices`")
         .into());
     }
     if f.power_save == Some(true) {

@@ -253,7 +253,11 @@ pub fn launch(phone: &Phone, what: &str, timed: bool, unlock_wait: Duration) -> 
     // emulator's channels are all strobe may drive.
     let candidates: Vec<&'static str> = if facts.emulator.is_some() { installed.clone() } else { opted_in(d).into_iter().filter(|p| installed.contains(p)).collect() };
     if candidates.is_empty() {
-        let given = if facts.emulator.is_some() { String::new() } else { ", then `strobe up --mobile=<serial> --channel canary` gives it to strobe (once per phone)".into() };
+        let given = if facts.emulator.is_some() {
+            String::new()
+        } else {
+            ", then give it to strobe once with `strobe up --mobile --channel canary` (connect only that phone, or set ANDROID_SERIAL from `adb devices`)".into()
+        };
         return Err(Error::new(3, format!("{} has no Chrome channel strobe may drive", d.label()))
             .hint(format!("install Chrome Canary (or Dev, Beta) on the phone for strobe alone, open it once and finish its first run{given}; strobe never drives a phone's own Chrome")));
     }
@@ -580,7 +584,7 @@ fn channel(
     wrote_command_line: bool,
     emulator: bool,
 ) -> Result<(String, Tunnel, Vec<String>)> {
-    let clear = |packages: &[&str]| packages.iter().map(|p| format!("`adb -s <serial> shell pm clear {p}`")).collect::<Vec<_>>().join(", ");
+    let clear = |packages: &[&str]| packages.iter().map(|p| format!("`adb shell pm clear {p}`")).collect::<Vec<_>>().join(", ");
     let live: Vec<&str> = installed.iter().copied().filter(|p| running(d, p)).collect();
     if live.len() > 1 {
         crate::app::live_progress(format!("  running channels on {}: {}", d.serial.quoted_or("the phone").local(), live.join(", ")));
@@ -635,7 +639,11 @@ fn channel(
             let held = crate::app::obstruction::tab_count(&theirs, &d.serial);
             if was_running {
                 let hint = if emulator {
-                    format!("on an emulator every tab is strobe's to clear: {} clears {}'s tabs and data, then run again", clear(&[package]), name(package))
+                    format!(
+                        "on an emulator every tab is strobe's to clear: {} clears {}'s tabs and data. If several devices are attached, insert -s and the emulator's serial from `adb devices` after adb",
+                        clear(&[package]),
+                        name(package)
+                    )
                 } else {
                     format!("close {}'s tabs, or close it on the phone, then run again", name(package))
                 };
@@ -668,11 +676,11 @@ fn channel(
     if !people.is_empty() {
         let fix = if emulator {
             format!(
-                "on an emulator every tab is strobe's to clear (a tab Chrome restored, a person's from an earlier session): {} clears those tabs and the channel's data, then run again",
+                "on an emulator every tab is strobe's to clear: {} clears the restored tabs and channel data. If several devices are attached, insert -s and the emulator's serial from `adb devices` after adb",
                 clear(&held_by)
             )
         } else {
-            "strobe drives a channel no one browses: close those tabs on the phone, or give strobe a channel of its own (install Chrome Canary, open it once, then strobe up --mobile=<serial> --channel canary)".to_string()
+            "close those tabs, or install Chrome Canary, open it once and run `strobe up --mobile --channel canary` (connect only that phone, or set ANDROID_SERIAL from `adb devices`)".to_string()
         };
         return Err(Refusal::new(ValidatorId::LiveChannel, format!("every Chrome channel strobe may drive on the phone holds tabs a person opened: {}", people.join("; "))).fix(fix).into());
     }

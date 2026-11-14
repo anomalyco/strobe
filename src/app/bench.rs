@@ -2080,9 +2080,10 @@ impl ReserveTotal {
             t += &format!(", {} more started during blocks and moved within 200 ms", self.started);
         }
         if !self.failed.is_empty() {
-            t += &format!("; could not move processes of {} distinct executable(s)", self.failed.len());
             if names_live {
-                t += &format!(": {}", crate::text::Text::reserve_failed(&self.failed).local());
+                t += &format!("; {}", crate::text::Text::reserve_failed(&self.failed).local());
+            } else {
+                t += &format!("; could not move processes of {} distinct executable(s)", self.failed.len());
             }
         }
         let back = self.restored as f64 / self.moved_total.max(1) as f64;

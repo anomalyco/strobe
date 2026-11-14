@@ -9,6 +9,8 @@
 | `ios::list` (`SerialNumber`), `short_udid`, WIR listing | pairing, session, target selection, disconnect, page handle, `look`/`record`, `status` | full or shortened UDID for routing, owner inventory and local metadata | counts and USB/Wi-Fi in errors; recording summaries use model/transport, not the short ID. |
 | `args.flags.mobile`, metadata `phone`, WIR target handles | rerun commands, query, report templates and embedded HTML | machine-local device selector and recording metadata | shareable report copies omit identity fields, replace selector arguments, and scrub known IDs in derived display strings before rendering. |
 
+Only the root or block `phone` record, plan/series `mobile`, and the `mobile` flag supply report IDs. The key spelling of an address (as used in the engine identity) also counts. Display text matches whole tokens, not substrings of paths, commits or metric names. `report-control.ts` compares all six non-phone artifacts with the identical renderer built without this pass, including the HTML payload; the Rust fixture plants the USB, wireless, engine-key and WIR forms in phone reports.
+
 Read this table from left to right when changing an identity reader. A PID used to check ownership is **not** permission to print it. A refusal becomes stored prose through `Error` / `Refusal` → bench warnings, series or block `refused`, recording notes, and `progress`. Query and report can render those fields much later with no access to the original machine. Only `live_progress` checks the selected stream and bypasses `progress.log`.
 
 | Reader | Callers | Sink and boundary |

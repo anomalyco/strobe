@@ -893,7 +893,7 @@ fn legacy_obstruction(line: &str) -> String {
     {
         return "LiveChannel: the phone's browser channel is in use; close the other app or use a channel with no personal tabs".into();
     }
-    if line.contains("on an emulator every tab is strobe's to clear") && line.contains("adb -s ") && !line.contains("adb -s <serial>") {
+    if line.contains("on an emulator every tab is strobe's to clear") && line.contains("adb -s ") {
         return "on the emulator, clear the browser channel's data to remove restored tabs, then run again".into();
     }
     if line.contains("measure another build or channel, or close it (") {

@@ -106,7 +106,7 @@ pub fn resolve(target: &str) -> Result<u32> {
         [] => Err(Error::usage(format!("no process named {name}"))),
         many => {
             crate::app::live_progress(format!("  matching processes: {}", many.iter().map(|p| format!("pid:{}", p.pid)).collect::<Vec<_>>().join(", ")));
-            Err(Error::usage(format!("{} processes named {name}: choose one with pid:<n>", many.len())))
+            Err(Error::usage(format!("{} processes named {name}: use pid: followed by the target's numeric process ID", many.len())))
         }
     }
 }

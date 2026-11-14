@@ -365,7 +365,7 @@ impl Adb {
                             Some(usb) if same => *usb,
                             _ => {
                                 list();
-                                return Err(Error::usage(format!("{} devices are attached", many.len())).hint("choose a serial from adb devices with --mobile=<serial>"));
+                                return Err(Error::usage(format!("{} devices are attached", many.len())).hint("run `adb devices` and set ANDROID_SERIAL to the serial of the phone to use"));
                             }
                         }
                     }
@@ -521,7 +521,7 @@ impl Device {
     /// The error for this device gone, `why` being what showed it; kept as lost when it is a picked one.
     fn lose(&self, why: &str) -> Error {
         let e = Error::unreachable(format!("{} went away: {}", self.label(), self.serial.scrub_from(why)))
-            .hint("reconnect it, or restart the emulator, until `adb devices` lists it as `device`; `strobe bench --resume <exp>` then runs the cases a bench did not reach");
+            .hint("reconnect it, or restart the emulator, until `adb devices` lists it as `device`; then run `strobe bench --resume` followed by the experiment ID");
         match &self.lost {
             Some(l) => l.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(e).clone(),
             None => e,

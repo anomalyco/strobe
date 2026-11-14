@@ -63,7 +63,7 @@ pub fn run(args: &Args) -> Result<Output> {
     // `up --mobile[=<serial>] --channel <name>`: gives strobe one Chrome channel on a phone, and nothing else.
     if args.has("mobile") || args.has("channel") {
         let (Some(serial), Some(channel)) = (args.get("mobile"), args.get("channel")) else {
-            return Err(Error::usage("strobe up --mobile[=<serial>] --channel canary|dev|beta gives strobe that Chrome channel on the phone: both, together"));
+            return Err(Error::usage("give both --mobile and --channel, for example `strobe up --mobile --channel canary`; choose canary, dev or beta"));
         };
         let phone = crate::target::android_chrome::pick(serial)?;
         let text = crate::target::android_chrome::opt_in(&phone, channel)?;
@@ -182,7 +182,7 @@ pub(super) fn android_lines(list: &Result<Vec<host::adb::Summary>>) -> Vec<(&'st
                 // A phone (not an emulator) runs --mobile only in a channel given to strobe there.
                 let given = s.facts.as_ref().filter(|f| f.emulator.is_none()).map(|f| crate::target::android_chrome::given(&f.key()));
                 let channel = match &given {
-                    Some(g) if g.is_empty() => format!(" · no Chrome channel given to strobe (strobe up --mobile={} --channel canary)", s.listed.serial),
+                    Some(g) if g.is_empty() => " · no Chrome channel given to strobe (connect only this phone, or set ANDROID_SERIAL, then run `strobe up --mobile --channel canary`)".into(),
                     Some(g) => format!(" · strobe's: {}", crate::target::android_chrome::names(g)),
                     None => String::new(),
                 };

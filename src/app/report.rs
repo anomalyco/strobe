@@ -747,45 +747,8 @@ const TEMPLATE: &str = include_str!("../../viewer/report.html");
 
 /// The owner's raw metadata and rerun arguments keep device selectors. A report must not
 /// embed those identifiers in its payload, including copies in an older rendered message.
-fn omit_device_ids(data: &mut Value) {
-    fn collect(v: &Value, ids: &mut Vec<String>) {
-        match v {
-            Value::Array(a) => a.iter().for_each(|x| collect(x, ids)),
-            Value::Object(o) => {
-                for (k, x) in o {
-                    if matches!(k.as_str(), "serial" | "hardware_serial" | "hw_serial" | "short_udid" | "udid" | "mobile")
-                        && let Some(id) = x.as_str().filter(|s| !s.is_empty() && *s != "<device>")
-                    {
-                        ids.push(id.into());
-                    }
-                    collect(x, ids);
-                }
-            }
-            _ => {}
-        }
-    }
-    fn redact(v: &mut Value, ids: &[String]) {
-        match v {
-            Value::Array(a) => a.iter_mut().for_each(|x| redact(x, ids)),
-            Value::Object(o) => o.values_mut().for_each(|x| redact(x, ids)),
-            Value::String(s) => {
-                for id in ids {
-                    if s.contains(id) {
-                        *s = s.replace(id, "<device>");
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut ids = Vec::new();
-    collect(data, &mut ids);
-    ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
-    ids.dedup();
-    if !ids.is_empty() {
-        redact(data, &ids)
-    }
-}
+mod device_ids;
+use device_ids::omit_device_ids;
 
 pub fn html(view: &str, data: &Value) -> String {
     // The viewer does not consume the local name maps. A self-contained HTML file is a report,

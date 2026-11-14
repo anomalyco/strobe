@@ -147,8 +147,18 @@ pub fn run() {
         }
         r["series"][0]["refused"]["fixture.legitimate"] = json!(LEGIT);
         r["series"][0]["label"] = json!("target.exe");
-        r["plan"]["mobile"] = json!(SERIAL);
-        r["args"]["flags"]["mobile"] = json!("192.0.2.42:5555");
+        // No series-level selector yet (preflight refusal). Wi-Fi's engine key is not its address.
+        r["phone"] = json!({"serial":"192.0.2.42:5555","hardware_serial":null});
+        r["identity"]["engines"]["page"]["browser"] = json!("phone 192.0.2.42_5555 (mobile build)");
+        r["plan"]["mobile"] = json!("on");
+        r["args"]["flags"]["mobile"] = json!(SERIAL);
+        r["series"][0]["params"] = json!({"mobile":"1","serial":"a","text":"on"});
+        r["series"][0]["blocks"][0]["phone"] = json!({"udid":"device-id-92a","short_udid":"short-92a","handle":"wir:short-92a/app/2"});
+        r["series"][0]["pass"]["blocks"] = json!([{"phone":{"hw_serial":"alternate-physical-id"}}]);
+        r["warnings"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"Mobile","level":"info","text":"on: 192.0.2.42:5555, short-92a and alternate-physical-id; keep run.duration regression /folder/on/file 1a0b"}));
         fs::write(&file, r.to_string()).unwrap();
         let query = Args::parse(vec!["query".into(), path.into(), "summary".into()]).unwrap();
         let answer = query::run(&query).unwrap();
@@ -177,7 +187,13 @@ pub fn run() {
             allowed(&result.text);
             let body = fs::read_to_string(out).unwrap();
             allowed(&body);
-            assert!(!body.contains("192.0.2.42"));
+            for id in ["192.0.2.42:5555", "192.0.2.42_5555", "device-id-92a", "short-92a", "alternate-physical-id"] {
+                assert!(!body.contains(id), "{format} kept {id}");
+            }
+            if format == "html" {
+                assert!(body.contains("keep run.duration regression /folder/on/file 1a0b"));
+                assert!(body.contains(r#""params":{"mobile":"1","serial":"a","text":"on"}"#));
+            }
             if kind == "experiment" && matches!(format, "md" | "pr" | "summary") {
                 assert!(body.contains("12 kept launches + 4 set aside"), "retry count missing in {format}");
             }

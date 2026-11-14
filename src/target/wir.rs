@@ -337,7 +337,7 @@ fn page_hint(pages: &[InspectablePage]) -> &'static str {
         .collect::<Vec<_>>()
         .join(", ");
     crate::app::live_progress(format!("  inspectable pages: {choices}"));
-    "choose one tab by its wir:<app>/<page_id> handle from strobe targets"
+    "use the tab's complete handle from `strobe targets`"
 }
 
 fn is_blank_url(u: &str) -> bool {

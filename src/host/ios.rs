@@ -907,7 +907,7 @@ pub fn open_usb(udid_filter: Option<&str>, diagnostics: bool, deadline: Option<I
         ));
     }
     if usb.len() > 1 {
-        return Err(Error::usage(format!("{} iOS devices are plugged in over USB", usb.len())).hint("choose one from strobe status with wir:<device>/<page>"));
+        return Err(Error::usage(format!("{} iOS devices are plugged in over USB", usb.len())).hint("use the page handle for the intended phone from `strobe status`"));
     }
     let dev = usb.remove(0);
     live_phone(&dev.udid);
