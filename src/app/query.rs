@@ -1813,7 +1813,7 @@ fn frames(trace: &Path, meta: &Value, top: usize) -> Result<Output> {
         // Keep actual PipelineReporter slices, not synthetic refresh outcomes (or untimed gap markers).
         let mut reports: Vec<_> = data.frames.iter().filter(|(k, _)| k.contains(":run:") && !k.contains(":phase:")).flat_map(|(_, f)| f).filter(|f| f.id >= 0).collect();
         reports.sort_by_key(|f| std::cmp::Reverse(f.dur));
-        let evidence = if meta["headless"] == true { "no display" } else { "no display measurement" };
+        let evidence = if meta["headless"] == true { "not presented frames; no display" } else { "no display measurement" };
         let timing = if meta["timing"] == "perturbed" { "; perturbed" } else { "" };
         let mut text = format!("frames    refused ({why})\npipeline  {} compositor reports ({evidence}{timing})\n", reports.len());
         let mut rows = Vec::new();

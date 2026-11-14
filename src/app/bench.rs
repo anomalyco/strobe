@@ -8841,7 +8841,7 @@ fn dark_refusal(what: &str) -> Refusal {
         ValidatorId::Throttled,
         format!("{what}: the console display was off, and a headless Chromium page then runs its frames and timers on a throttled clock of its own, so wall time and shares of it describe that clock"),
     )
-    .fix("run with the session unlocked and the display on, or choose a display-independent primary such as main.work or cpu.work")
+    .fix("measure main.work, cpu.work or a counter the case records instead; measure wall time or CPU shares with the display on")
 }
 
 /// `Throttled` for a headless Chromium page's wall times with the display off: a block about to run
@@ -12777,10 +12777,14 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
         // whose display turns off later refuses that series then, `dark_state`).
         Some(dark_refusal(&format!("the primary {}", s.primary)))
     } else if (t["headless"] == true || args.has("headless")) && (display_metric(&s.primary) || gpu_use(&s.primary)) {
-        Some(
-            Refusal::new(ValidatorId::Headless, format!("{on}the primary {} needs a display, and the page runs headless: nothing it draws reaches one", s.primary))
-                .fix("drop --headless (and the target's headless) to measure it on screen, or choose a CPU primary: cpu.work, cpu.app.total, run.duration or phase.<name> (main.work in Chromium)"),
-        )
+        Some(Refusal::new(ValidatorId::Headless, format!("{on}the primary {} needs a display, and the page runs headless: nothing it draws reaches one", s.primary)).fix(if s.launch.is_object() {
+            "measure launch.ready instead"
+        } else {
+            match engine {
+                WebEngine::Chromium => "measure main.work, cpu.work or a counter the case records instead; measure run.duration or cpu.app.total with the display on",
+                WebEngine::Firefox | WebEngine::Webkit => "measure cpu.work instead; measure run.duration with the display on",
+            }
+        }))
     } else {
         unsupported()
     })

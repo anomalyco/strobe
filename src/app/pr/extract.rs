@@ -787,9 +787,9 @@ pub(crate) fn scrub_public(s: &str) -> String {
     let (pct, share) = (&*PCT, &*SHARE);
     static COMPOSITOR: LazyLock<Regex> = LazyLock::new(|| {
         let names = crate::host::COMPOSITORS.iter().map(|s| regex_lite::escape(s)).collect::<Vec<_>>().join("|");
-        Regex::new(&format!(r"(?i)\b(?:{names}) (\d+(?:\.\d+)?% of a core)\b")).expect("compositor share")
+        Regex::new(&format!(r"(?im)(\bdisplay (?:on|off|dimmed|\?) · session (?:locked|unlocked) · |^screen[ \t]+)(?:{names}) (\d+(?:\.\d+)?% of a core)\b")).expect("compositor share")
     });
-    let s = COMPOSITOR.replace_all(s, "compositor $1");
+    let s = COMPOSITOR.replace_all(s, "${1}compositor $2");
     let s = MOVED.replace_all(&s, "moved per block$1");
     let s = UNMOVED.replace_all(&s, "$1 could not be moved$2");
     let s = legacy_obstruction(&s);
