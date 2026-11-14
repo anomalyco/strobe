@@ -1012,8 +1012,8 @@ export const WATCH: Watch[] = [
   // ----- counts, phases and metric lines (wall_and_counts) -----
   {
     cells: ["cli · wall_and_counts", "script · wall_and_counts"],
-    spans: ["src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks", "src/app/bench.rs#phase_ms", "src/metrics.rs#phase_stretches"],
-    why: "the counts, phases and untimed stretches a run reports, kept per run and reduced (Hooks, per_run_hooks, phase_ms on the host clock, phase_stretches)",
+    spans: ["src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks", "src/app/bench.rs#phase_ms", "src/app/bench.rs#phase_state", "src/metrics.rs#phase_stretches"],
+    why: "the counts, phases and untimed stretches a run reports, kept per run and reduced (Hooks, per_run_hooks, phase_ms on the host clock, phase_stretches), and phase_state's NoPhase refusal",
   },
   // ----- a script (script) -----
   {

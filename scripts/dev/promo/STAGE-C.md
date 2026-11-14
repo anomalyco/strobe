@@ -1,0 +1,5 @@
+# Stage C: Windows headless evidence
+
+Use release v0.41.0 (`e4c1ddd8`) throughout. Keep power settings and process placement unchanged. Run one headless invocation per slot. Refusal checks need no quiet gate. For known answers and comparisons, sample over two seconds: logical CPUs 0–15 mean below 2%, maximum below 15%; CPUs 16–31 mean below 70%. Record all three readings and retain every attempt.
+
+Accept a comparison only with an unwarned primary and either zero flagged kept blocks or the instrument's own same-verdict confirmation on at least eight clean pairs. Spare capacity is not confirmation. A/A must read `same`. Judge the A/B by the paired signed-rank interval on the difference in milliseconds: +300 for terminal launch, +60 for grid, +150 for script CPU, +100 for page engine, +200 for later page launch, +40 for HTTP. Report strict containment; distinguish any timer or edge tolerance. Fixed-loop page CPU instead needs the independent zero/1× controls and a truth-covering ratio with half-width at most two percentage points. No display-awake wall measurement on this desk.
