@@ -47,6 +47,8 @@ struct Member {
     handle: Option<isize>,
     end: Option<u64>,
     name: Option<String>,
+    console_host: bool,
+    counters: Option<CommandCounters>,
 }
 
 /// A job strobe watches: its port key, its processes, how many joins the port posted, and whether a
@@ -55,6 +57,7 @@ struct Member {
 /// break away (`spawn::assign`'s, and one per process that broke away to it: `take`), and its
 /// launch's root, which `spawn::assign` puts in its own.
 struct Watched {
+    command: bool,
     id: usize,
     members: Vec<Member>,
     posted: u32,
@@ -240,23 +243,37 @@ fn settle(m: &mut Member) {
     let Some(h) = m.handle.filter(|_| m.end.is_none()) else { return };
     let mut c = 0u64;
     if exited(h) && unsafe { QueryProcessCycleTime(h as _, &mut c) } != 0 {
+        if m.counters.is_some() {
+            m.counters = Some(CommandCounters::read(h));
+        }
         m.end = Some(c);
         m.handle = None;
         unsafe { CloseHandle(h as _) };
     }
 }
 
-/// The file name of a process's executable, from a handle to it while it runs: what `EndedCpu` names
-/// an ended process by.
-fn image_name(h: isize) -> Option<String> {
+/// Read the full image on the handle that established membership, before exit makes it unavailable.
+fn image_path(h: isize) -> Option<std::path::PathBuf> {
     use windows_sys::Win32::System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW};
     let mut buf = [0u16; 1024];
     let mut n = buf.len() as u32;
     if unsafe { QueryFullProcessImageNameW(h as _, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n) } == 0 {
         return None;
     }
-    let path = String::from_utf16_lossy(&buf[..n as usize]);
-    path.rsplit(['\\', '/']).next().filter(|s| !s.is_empty()).map(str::to_string)
+    use std::os::windows::ffi::OsStringExt;
+    Some(std::ffi::OsString::from_wide(&buf[..n as usize]).into())
+}
+
+/// Incomplete job reading: require both proofs on one handle, not an image from a reused pid.
+pub fn live_console_host(job: isize, pid: u32, start: Option<u64>) -> bool {
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+        return false;
+    }
+    let h = h as isize;
+    let ok = in_job(h, job) && start.is_none_or(|s| created(h) == Some(s)) && image_path(h).as_deref().is_some_and(super::win::system_console_host);
+    unsafe { CloseHandle(h as _) };
+    ok
 }
 
 /// The process has exited: signaled, or (a handle without SYNCHRONIZE) an exit time set.
@@ -275,7 +292,10 @@ fn add(w: &mut Watched, job: isize, pid: u32, h: isize) -> Option<(u32, u64)> {
     match key {
         Some(k) if in_job(h, job) && !w.members.iter().any(|m| m.key == k) => {
             // Read now: Windows gives no image name of a process that has exited.
-            w.members.push(Member { key: k, handle: Some(h), end: None, name: image_name(h) });
+            let path = image_path(h);
+            let console_host = w.command && path.as_deref().is_some_and(super::win::system_console_host);
+            let name = path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+            w.members.push(Member { key: k, handle: Some(h), end: None, name, console_host, counters: w.command.then(CommandCounters::default) });
             Some(k)
         }
         _ => {
@@ -299,11 +319,15 @@ fn created(h: isize) -> Option<u64> {
 
 /// Watches a new job before any process joins it: its joins post to strobe's port. False where they
 /// cannot (then no reading of it is complete).
-pub fn watch(job: isize) -> bool {
+pub fn watch(job: isize, command: bool) -> bool {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
     let Some(port) = port() else { return false };
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    WATCHED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(job, Watched { id, members: Vec::new(), posted: 0, stale: false, inner: Vec::new(), root: None });
+    WATCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(job, Watched { command, id, members: Vec::new(), posted: 0, stale: false, inner: Vec::new(), root: None });
     let a = JOBOBJECT_ASSOCIATE_COMPLETION_PORT { CompletionKey: id as *mut std::ffi::c_void, CompletionPort: port as _ };
     let ok = unsafe { SetInformationJobObject(job as _, JobObjectAssociateCompletionPortInformation, &a as *const _ as *const _, std::mem::size_of_val(&a) as u32) } != 0;
     if !ok {
@@ -356,6 +380,27 @@ pub fn forget(job: isize) {
     }
 }
 
+/// Final per-process counters for a command whose job includes console infrastructure.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CommandCounters {
+    pub peak: Option<u64>,
+    pub io: Option<(u64, u64)>,
+}
+
+impl CommandCounters {
+    fn read(h: isize) -> Self {
+        use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetProcessIoCounters;
+        unsafe {
+            let mut memory: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            let peak = (K32GetProcessMemoryInfo(h as _, &mut memory, std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32) != 0).then_some(memory.PeakPagefileUsage as u64);
+            let mut io = std::mem::zeroed();
+            let io = (GetProcessIoCounters(h as _, &mut io) != 0).then_some((io.ReadTransferCount, io.WriteTransferCount));
+            Self { peak, io }
+        }
+    }
+}
+
 /// The processes of some watched jobs at one moment.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Reading {
@@ -368,6 +413,10 @@ pub struct Reading {
     pub ended: BTreeMap<(u32, u64), u64>,
     /// The processes running in them, by pid and creation time, with their CPU so far.
     pub running: BTreeMap<(u32, u64), u64>,
+    /// System console hosts: image and job checked on the same handle at admission.
+    pub console_hosts: BTreeSet<(u32, u64)>,
+    /// Commands only: per-process readings, for jobs whose aggregate includes a console host.
+    pub counters: BTreeMap<(u32, u64), CommandCounters>,
     /// The executables' file names of the ended ones, where they could be read.
     pub names: BTreeMap<(u32, u64), String>,
 }
@@ -443,11 +492,17 @@ fn snapshot(w: &mut HashMap<isize, Watched>, jobs: &[isize]) -> Result<Reading, 
         out.jobs.insert(x.id);
         let mut ended = 0u32;
         for m in &mut x.members {
+            if m.console_host {
+                out.console_hosts.insert(m.key);
+            }
             settle(m);
             match (m.end, m.handle) {
                 (Some(c), _) => {
                     ended += 1;
                     out.ended.insert(m.key, c);
+                    if let Some(c) = m.counters {
+                        out.counters.insert(m.key, c);
+                    }
                     if let Some(n) = &m.name {
                         out.names.insert(m.key, n.clone());
                     }

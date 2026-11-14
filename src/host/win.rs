@@ -133,9 +133,11 @@ pub fn process_list() -> Vec<(u32, u32, u64)> {
 }
 
 /// A console host installed by the OS, not the command's own executable with the same basename.
-pub fn system_console_host(pid: u32) -> bool {
+pub fn system_console_host(path: &std::path::Path) -> bool {
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
-    let Some(path) = exe_of(pid) else { return false };
+    if !path.file_name().is_some_and(|n| n.eq_ignore_ascii_case("conhost.exe") || n.eq_ignore_ascii_case("OpenConsole.exe")) {
+        return false;
+    }
     let mut buf = [0u16; 260];
     let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
     if n == 0 || n >= buf.len() {

@@ -118,7 +118,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
             *c.load_at.borrow_mut() = c.load.as_ref().map(LoadStart::new);
         }
         let (c0, k0, t0) = (host::thread_cycles(), host::tsc(), Instant::now());
-        let child = host::spawn_owned(&mut cmd, at.cpus, 0, None)?;
+        let child = host::spawn::spawn_command(&mut cmd, at.cpus)?;
         let (t1, k1, c1) = (Instant::now(), host::tsc(), host::thread_cycles());
         Ok((child, super::script::cpu_ms((c0, k0), (c1, k1), t1.duration_since(t0).as_secs_f64() * 1e3)))
     };
@@ -184,7 +184,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
     }
     if !usage.left.is_empty() {
         let one = usage.left.len() == 1;
-        let names: Vec<String> = usage.left.iter().take(5).map(|(p, n)| if n.is_empty() { format!("pid {p}") } else { format!("{n} (pid {p})") }).collect();
+        let names: Vec<&str> = usage.left.iter().take(5).map(|(_, n)| if n.is_empty() { "an unnamed process" } else { n.as_str() }).collect();
         let more = usage.left.len().saturating_sub(5);
         return Err(Error::refused(
             "RunIncomplete",

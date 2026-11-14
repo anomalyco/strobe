@@ -789,7 +789,8 @@ pub(crate) fn scrub_public(s: &str) -> String {
         let names = crate::host::COMPOSITORS.iter().map(|s| regex_lite::escape(s)).collect::<Vec<_>>().join("|");
         Regex::new(&format!(r"(?i)\b(?:{names}) (\d+(?:\.\d+)?% of a core)\b")).expect("compositor share")
     });
-    let s = COMPOSITOR.replace_all(s, "compositor $1");
+    let s = legacy_leftover(s);
+    let s = COMPOSITOR.replace_all(&s, "compositor $1");
     let s = MOVED.replace_all(&s, "moved per block$1");
     let s = UNMOVED.replace_all(&s, "$1 could not be moved$2");
     let s = legacy_obstruction(&s);
@@ -851,6 +852,16 @@ pub(crate) fn scrub_public(s: &str) -> String {
         }
         rest = &rest[end..];
     }
+}
+
+/// Drop obsolete PIDs only inside the old command-exit refusal's process list.
+fn legacy_leftover(s: &str) -> std::borrow::Cow<'_, str> {
+    static LIST: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(` exited while (?:a process it started was|processes it started were) still running: )(.+?)(; strobe ended (?:it|them), because the time and CPU read at its exit did not cover (?:it|them))").expect("leftover list")
+    });
+    static PID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" \(pid [0-9]+\)").expect("named child"));
+    static UNNAMED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|, )pid [0-9]+\b").expect("unnamed child"));
+    LIST.replace_all(s, |c: &regex_lite::Captures| format!("{}{}{}", &c[1], UNNAMED.replace_all(&PID.replace_all(&c[2], ""), "${1}an unnamed process"), &c[3]))
 }
 
 /// Match old producer sentences, not PID syntax by itself: leftover children and busy threads

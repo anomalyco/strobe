@@ -573,7 +573,11 @@ pub fn stop_launches() {
             }
             if stamp_of(s.pid).as_ref() != Some(&s.stamp) {
                 if super::start_time(s.pid) == Some(s.start) {
-                    leave(Some(s.pid), "a previously stamped process", "its launch stamp could not be verified at the stop");
+                    if std::time::Instant::now() < until {
+                        live = true; // The environment can disappear before the exit is visible. Do not signal.
+                    } else {
+                        leave(Some(s.pid), "a previously stamped process", "its launch stamp could not be verified at the stop");
+                    }
                 }
             } else if std::time::Instant::now() >= until {
                 leave(Some(s.pid), "a process stamped by this strobe", "it was still running after the stop's bounded wait");
@@ -608,10 +612,15 @@ static JOBS: std::sync::Mutex<Vec<(u32, Option<String>, isize)>> = std::sync::Mu
 /// gave none.
 #[cfg(windows)]
 pub fn new_job() -> Option<isize> {
+    watched_job(false)
+}
+
+#[cfg(windows)]
+fn watched_job(command: bool) -> Option<isize> {
     use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     let j = super::jobs::job_with(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)?;
     // Unwatched, its readings are incomplete: what ended in it stays unknown, as before.
-    super::jobs::watch(j);
+    super::jobs::watch(j, command);
     Some(j)
 }
 
@@ -1082,10 +1091,9 @@ impl Owned {
                     let ok = unsafe {
                         QueryInformationJobObject(j as _, JobObjectBasicAndIoAccountingInformation, &mut acct as *mut _ as *mut _, std::mem::size_of_val(&acct) as u32, std::ptr::null_mut())
                     } != 0;
-                    // Every process of the job held: their cycles (the command's own among them, and one
-                    // still running, which is ended below, as far as it got) over the same rate.
+                    // The command and its work only. The held root keeps its pid until teardown.
                     let held = super::jobs::read(&[j]);
-                    let all: u64 = held.ended.values().chain(held.running.values()).sum();
+                    let all: u64 = held.ended.iter().chain(&held.running).filter(|(k, _)| k.0 == self.pid() || !held.console_hosts.contains(k)).map(|(_, c)| c).sum();
                     if ok && held.complete && child_ns.is_some() {
                         usage.cpu_ns = hz.map(|hz| (all as f64 / hz * 1e9) as u64);
                     } else if ok {
@@ -1107,21 +1115,41 @@ impl Owned {
                     {
                         usage.peak_bytes = Some(limits.PeakProcessMemoryUsed as u64);
                     }
+                    if held.console_hosts.iter().any(|k| k.0 != self.pid()) {
+                        // Job totals include the console's peak and IO. Use only the exited work's
+                        // final readings; a missing member or counter is not a zero.
+                        let work = || held.ended.keys().filter(|k| k.0 == self.pid() || !held.console_hosts.contains(k));
+                        usage.peak_bytes = work().try_fold(0, |m, k| Some(m.max(held.counters.get(k)?.peak?))).filter(|_| held.complete);
+                        let io = work().try_fold((0, 0), |(r, w), k| held.counters.get(k)?.io.map(|(a, b)| (r + a, w + b))).filter(|_| held.complete);
+                        usage.read_bytes = io.map(|v| v.0);
+                        usage.write_bytes = io.map(|v| v.1);
+                        if io.is_none() {
+                            usage.io_refused = Some("Windows did not give every command process's IO apart from its console".into());
+                        }
+                        if !held.complete {
+                            usage.cpu_ns = None;
+                            usage.cpu_refused = Some("Windows did not give every command process's CPU apart from its console".into());
+                        }
+                    }
                     // Ended with the job (self.end), not by pid: a start time of 0 (nd_left).
                     // Running: a held handle not signalled (`jobs`: one held from its start), else one the
                     // job lists whose handle has not signalled (an exited process whose handle another
                     // holds stays listed a moment). The command itself has exited.
                     let me = self.pid();
-                    let running: Vec<u32> = if held.complete { held.running.keys().map(|k| k.0).collect() } else { job_pids(j).into_iter().filter(|&p| !super::jobs::exited_pid(p)).collect() };
+                    let running: Vec<u32> = if held.complete {
+                        held.running.keys().filter(|k| !held.console_hosts.contains(k)).map(|k| k.0).collect()
+                    } else {
+                        job_pids(j).into_iter().filter(|&p| !super::jobs::exited_pid(p) && !super::jobs::live_console_host(j, p, None)).collect()
+                    };
                     let in_job: Vec<(u32, u64, String)> = running.into_iter().filter(|&p| p != me).map(|p| (p, 0, name_of(p))).collect();
-                    let left = still_left(|| {
+                    still_left(|| {
                         let mut left = stamped(me);
-                        left.extend(in_job.iter().filter(|j| !left.iter().any(|s| s.0 == j.0)).cloned().collect::<Vec<_>>());
+                        left.retain(|(p, s, _)| !held.console_hosts.contains(&(*p, *s)) && (held.complete || !super::jobs::live_console_host(j, *p, Some(*s))));
+                        // End members with the job we created, never with a second signal to their pid.
+                        left.retain(|s| !in_job.iter().any(|j| j.0 == s.0));
+                        left.extend(in_job.iter().cloned());
                         left
-                    });
-                    // A console host is the console's (a windowless strobe's console program gets one in
-                    // its job), not the command's work: alone it is no leftover; the job's end ends it.
-                    if left.iter().all(|(pid, s, _)| *s == 0 && super::win::system_console_host(*pid)) { Vec::new() } else { left }
+                    })
                 }
                 None => {
                     // No job (strobe's own job refused a nested one): nothing counts what the command started.
@@ -1378,9 +1406,21 @@ pub fn spawn_pinned(cmd: &mut Command, cpus: Option<u64>, flags: u32) -> std::io
 /// `spawn_pinned` as an `Owned` launch, which strobe ends whole when it is done with it; `home` is the
 /// folder the launch is for (its stamp, set by the caller).
 pub fn spawn_owned(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&Path>) -> std::io::Result<Owned> {
+    launch_owned(cmd, cpus, flags, home, false)
+}
+
+pub fn spawn_command(cmd: &mut Command, cpus: Option<u64>) -> std::io::Result<Owned> {
+    #[cfg(windows)]
+    let flags = if unsafe { windows_sys::Win32::System::Console::GetConsoleCP() } == 0 { windows_sys::Win32::System::Threading::CREATE_NO_WINDOW } else { 0 };
+    #[cfg(not(windows))]
+    let flags = 0;
+    launch_owned(cmd, cpus, flags, None, true)
+}
+
+fn launch_owned(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&Path>, command: bool) -> std::io::Result<Owned> {
     // Held from before the spawn until the launch is listed: a stop in between ends it too.
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let owned = spawn_group(cmd, cpus, flags, home)?;
+    let owned = spawn_group(cmd, cpus, flags, home, command)?;
     live.push(Live { pid: owned.pid(), start: owned.start, child: true });
     Ok(owned)
 }
@@ -1402,10 +1442,10 @@ pub(crate) fn release_edge() {
     }
 }
 
-fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&Path>) -> std::io::Result<Owned> {
+fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&Path>, command: bool) -> std::io::Result<Owned> {
     #[cfg(windows)]
     {
-        let job = new_job();
+        let job = watched_job(command);
         let (child, assigned, started, spawned, first) = match windows(cmd, cpus, flags, job) {
             Ok(x) => x,
             Err(e) => {
@@ -1435,7 +1475,7 @@ fn spawn_group(cmd: &mut Command, cpus: Option<u64>, flags: u32, home: Option<&P
     #[cfg(not(windows))]
     {
         use std::os::unix::process::CommandExt;
-        let _ = flags;
+        let _ = (flags, command);
         cmd.process_group(0);
         // A target (a launch for a home) whose program is an app bundle's starts as its own
         // responsible process, as a person starts an app, so its XPC services join its process set.

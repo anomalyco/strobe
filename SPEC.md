@@ -5332,6 +5332,12 @@ stopped reading at it, so a command that printed `strobe:metric part=1`, a Latin
 
 - **Measured from outside, whole command:** what the OS counted for the command and everything it
   started (`host::spawn::Owned::run_to_exit`), summed over the run's commands:
+  - On Windows a redirected command inherits an existing console or starts without a console window.
+    A system console host in its job is console infrastructure, not a leftover or measured work.
+    The job watcher checks its full image and membership on the same process handle. When the job
+    includes such a host, the command's CPU, peak commit and IO come from its other members, not the
+    whole job. The wall clock still includes OS startup. Each real leftover is checked separately;
+    its refusal names the executable, not the expired PID.
   - `run.duration`: spawn to exit, summed over the run's commands (not the runner's round trip). On
     Windows that is the OS creating the process (`CreateProcessW`, as a person's launch pays it and as
     Unix's fork and exec are in it) plus its first instruction to its exit: strobe's own job, the
