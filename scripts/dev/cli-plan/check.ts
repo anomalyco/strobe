@@ -26,7 +26,7 @@ try {
     const legs = readFileSync(receipts,"utf8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l))
     const keys = legs.map(l=>l.key).sort().join(" "), expected = row.legs?.split(" ").sort().join(" "), shell = result?.warnings?.some((w:any)=>w.id === "ShellLine")
     const min = row.key === "pipe" ? 135 : legs.reduce((sum,l)=>sum+(l.key === "right" ? 135 : 35),0)
-    const text = r.stderr + r.stdout
+    const text = r.stderr + (result?.message ?? result?.error ?? r.stdout)
     const ok = row.how === "refuse" ? r.status === 2 && text.includes(row.reason!) && !legs.length : row.how === "missing" ? r.status === 1 && wall == null && (row.key !== "syntax" || /POSIX sh.*syntax error/i.test(series?.error || "")) :
       r.status === 0 && keys === expected && (row.how === "shell") === !!shell && typeof wall === "number" && wall + 2 >= min &&
       (legs.every(l=>l.key !== "right") || cpu >= 20 || JSON.stringify(series?.refused).includes("cpu.work")) &&
