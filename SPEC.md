@@ -9644,7 +9644,7 @@ verified line exact.
 | `script` · `process_memory` | preview | preview | preview |
 | `script` · `hardware_counters` | — | preview | preview |
 | `script` · `package_idle` | — | preview | — |
-| `script` · `http_probe` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/http-probe.bench.ts`, http.latency.p50 read 20.47 and 60.53 ms for 20 and 60 ms delays; 15 probes per side with no timeouts) |
+| `script` · `http_probe` | verified (2026-11-14, v0.41.0, Windows 11 x64 desktop, `scripts/dev/http-probe.bench.ts`, 20 and 60 ms delays read 21.638 and 61.667 ms; 15 probes per side, no errors or timeouts) | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/http-probe.bench.ts`, http.latency.p50 read 20.47 and 60.53 ms for 20 and 60 ms delays; 15 probes per side with no timeouts) |
 | `cli` · `wall_and_counts` | preview | preview | preview |
 | `cli` · `process_cpu` | verified (2026-11-14, 5a52552f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 304.75 ms for 300 ms of CPU; +150 ms plant read +150.02 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
 | `cli` · `process_memory` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
@@ -9654,7 +9654,7 @@ verified line exact.
 | `tty` · `process_memory` | preview | preview | preview |
 | `tty` · `hardware_counters` | — | preview | preview |
 | `tty` · `package_idle` | — | preview | — |
-| `tty` · `tty_grid` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/tty.bench.ts`, keys read 20.22 ms for a 20 ms answer; 10 frames, 400 cells and 620 bytes exact) |
+| `tty` · `tty_grid` | verified (2026-11-14, v0.41.0, Windows 11 x64 desktop, `scripts/dev/known/tty.bench.ts`, keys read 20.693 ms for a 20 ms answer, with 10 frames and 400 cells) | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/tty.bench.ts`, keys read 20.22 ms for a 20 ms answer; 10 frames, 400 cells and 620 bytes exact) |
 | `tty` · `launch` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/tty.bench.ts`, ready-200 and ready-500 read 201.28 and 501.22 ms; difference 299.94 ms for 300 ms planted) |
 | `tty` · `http_probe` | preview | preview | preview |
 | OS input (`OS_INPUT`) | preview | preview | preview |
