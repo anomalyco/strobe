@@ -550,9 +550,9 @@ fn series_line(s: &Value) -> String {
     let pairs = s["pairs"].as_u64().unwrap_or(0);
     let clean = if pairs < floor as u64 {
         let interval_min = stats::min_pairs(0.95);
-        let interval = if pairs < interval_min as u64 { format!("fewer than {interval_min} pairs cannot give a 95% interval") } else { "can decide when quiet".into() };
+        let interval = if pairs < interval_min as u64 { format!("fewer than {interval_min} pairs cannot give a 95% interval, and") } else { "can decide when quiet, but".into() };
         let flag = if s["underpowered"] == true { String::new() } else { format!(" (--pairs {floor})") };
-        format!("; {interval}, but cannot verify on {floor} clean pairs if other work runs{flag}")
+        format!("; {interval} cannot verify on {floor} clean pairs if other work runs{flag}")
     } else {
         String::new()
     };

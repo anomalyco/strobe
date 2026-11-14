@@ -7,6 +7,35 @@ use strobe::app::bench::{
 use strobe::model::{VerdictKind, metric};
 
 pub fn run() {
+    // The quiet wait used the remaining share; the next planned pair is not a replacement.
+    let [quiet, busy] = [0., 150.].map(|pct| {
+        let mut block = Block::default();
+        block.values.insert("cpu.foreign.max".into(), pct);
+        block
+    });
+    let mut schedule = Schedule::resume(Some(8), &[], &[], &[]);
+    assert_eq!(schedule.decide(&quiet, &busy, 0, true, true), Decision::Replace(150.));
+    schedule.cancel_replace();
+    assert_eq!(schedule.decide(&busy, &quiet, 0, true, false), Decision::Keep(Some("time budget reached")));
+
+    // One spread, two confidence levels: fewer than 40 fixed pairs but more than 40 at an auto look.
+    let design = Design::new(None, 0.02, None, None);
+    let def = metric("run.duration").unwrap();
+    let log_d: Vec<_> = (0..40)
+        .map(|i| {
+            let amplitude = if i % 10 < 4 { 0.12 } else { 0.041 / 1.4826 };
+            if i % 2 == 0 { -amplitude } else { amplitude }
+        })
+        .collect();
+    let pp: Vec<_> = log_d.iter().map(|&d: &f64| (100., 100. * d.exp())).collect();
+    let mut c = design.compare("run.duration", def, &pp);
+    assert!(!c.decided);
+    assert!(strobe::stats::pairs_needed(&log_d, 1.02_f64.ln(), design.confidence, 0.8) > pp.len());
+    let (kind, words) = strobe::app::bench::closing(&design, def, &mut c, "max pairs", &pp).unwrap();
+    assert_eq!(c.needed_pairs, Some(36));
+    assert_eq!(kind, VerdictKind::Unclear);
+    assert!(!words.contains("--pairs"));
+    println!("40 kept pairs, fixed projection 36: unclear, no rerun hint; cancelled retry: time budget reached");
     for path in std::env::args_os().skip(2) {
         recorded(path.as_ref());
     }
