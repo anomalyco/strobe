@@ -9516,7 +9516,7 @@ verified line exact.
 | `chromium_page` · `input_latency` | preview | verified (2026-11-12, e93fc36, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, interaction.p50 Δ 149.8 ms vs 150 ms planted (click-150 over click-0)) | preview |
 | `chromium_page` · `gpu` | preview | preview | preview |
 | `chromium_page` · `pixels` | preview | preview | preview |
-| `chromium_page` · `launch` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/planted.bench.ts`, page marks bracketed 200.30 and 400.20 ms for 200 and 400 ms; launch.ready followed by 9.40 and 4.20 ms) |
+| `chromium_page` · `launch` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/planted.bench.ts`, launch.ready 257.17 and 443.34 ms; plant_start 47.47 and 38.94 ms, marked spans 200.30 and 400.20 ms, ready 9.40 and 4.20 ms after plant_end) |
 | `chromium_page` · `http_probe` | preview | preview | preview |
 | `firefox_page` · `wall_and_counts` | preview | preview | preview |
 | `firefox_page` · `page_engine` | preview | preview | preview |

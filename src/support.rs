@@ -595,11 +595,11 @@ const WIN_PAGE_CPU_FLAGGED: &str =
     "with untimed OS snapshots cpu2s read 2003.98 ms vs 2016 ms. Needs quiet fixed-work pairs: 17 of 24 A/A and 3 of 24 A/B blocks flagged, with no clean-pair confirmation";
 const LINUX_CLI_WALL: &str = "a command's run.duration reads 15 to 18 ms more than the command took: strobe's clock starts before the launch cgroup's set-up and the child's move into it (linux-promo-6); its A/A and planted A/B pass";
 const TTY_LATENCY: &str = "the 20 ms answer, 10 frames, 400 cells and overrun refusal passed. Needs quiet keys A/A and spaced A/B: 10 of 16 and 3 of 16 blocks flagged";
-const WIN_TTY_LAUNCH: &str = "the 300 ms plant read 299.72 ms, but the interval [+142.56 … +143.41%] missed +143.76% from the independent check. Needs a truth-covering A/B and a quiet ready-500 A/A";
+const WIN_TTY_LAUNCH: &str = "the unflagged 12-pair shift +300.08 ms [299.55 … 300.56] covers +300 ms. Needs an unflagged ready-500 A/A";
 const LINUX_CHROMIUM_CPU: &str =
     "cpu2s read 2006.4 ms for 2000 ms. Both fixed-work comparisons refused RunIncomplete despite a launch cgroup; needs the ended-process accounting fix at the run edges and new A/A and A/B readings";
 const LINUX_NATIVE_COUNTERS: &str = "burst-1x to burst-2x read cpu.instructions +99.81% [+99.68 … +100.31] for +99.82% and its A/A same, but no refusal of the counter path is seen on this VM (root), and the one seen in --check is wrong (linux-promo-2)";
-const WIN_PAGE_LAUNCH: &str = "the marks recovered 200.2 and 400.0 ms, but the loaded paired launch.ready interval [195.57 … 198.93 ms] missed +200 ms. Needs quiet A/A and truth-covering A/B";
+const WIN_PAGE_LAUNCH: &str = "the 200 ms plant waited longer for the ready frame during cold startup; the paired shift [195.57 … 198.93 ms] missed +200 ms. Needs the 400/600 ms marked check and quiet pairs";
 const MAC_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on e93fc36 launch-0 to launch-200 read Δ 201.5 ms for 200 ms";
 const MAC_HEADLESS_WALL: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 phase.b read 40.6 ms for 40 ms and the planted Δ 100.10 ms for 100 ms";
 const MAC_HEADLESS_ENGINE: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 main.work read 100.2 ms for 100 ms and the planted +99.87% for +99.68% to +99.98%";
@@ -874,7 +874,7 @@ const LINUX_PAGE_WALL_RUN: Evidence = Evidence {
     fixture: "scripts/dev/known-web.bench.ts",
     known: "phase.b 41.69 ms for 40 ms and phase.a 23.02 ms for twice 10 ms; counts 7 and 5 exact",
     aa: "spin100, 12 pairs: run.duration +0.09% [−0.06 … +0.25], same (±2%)",
-    planted: "planted.bench.ts page-a to page-b, 32 pairs: 101.43 to 201.48 ms, +98.60% [+98.43 … +98.76] vs +98.47% from the separate 8-block page-a median 101.56 ms; no kept block flagged",
+    planted: "planted.bench.ts page-a to page-b: paired shifts +100.08 ms [99.93 … 100.24] in 12 pairs and +100.04 ms [99.94 … 100.13] in 32 pairs both cover +100 ms; no kept block flagged",
     boundary: "phase.absent requested in phases: NoPhase; no measured run entered it",
     reviewed_at: None,
     reviewed_why: None,
@@ -886,7 +886,7 @@ const LINUX_PAGE_ENGINE_RUN: Evidence = Evidence {
     fixture: "scripts/dev/known-web.bench.ts",
     known: "spin100 main.work 101.29 ms for 100 ms; layout.count and style.count both 25 for 25 forced layouts",
     aa: "spin100, 12 pairs: main.work −0.04% [−0.18 … +0.21], same (±2%)",
-    planted: "planted.bench.ts page-a to page-b, 12 pairs: 101.10 to 201.15 ms, +99.02% [+98.81 … +99.18] vs +98.94% from the separate 8-block page-a median 101.07 ms; no kept block flagged",
+    planted: "planted.bench.ts page-a to page-b, 12 pairs: main.work shift +100.05 ms [99.93 … 100.18] for +100 ms; no kept block flagged",
     boundary: "main.script refused NotForTarget on spin100 because the run calls page.eval",
     reviewed_at: None,
     reviewed_why: None,
@@ -898,7 +898,7 @@ const LINUX_TTY_GRID_RUN: Evidence = Evidence {
     fixture: "scripts/dev/known/tty.bench.ts",
     known: "keys read 20.22 ms for a 20 ms answer; 10 frames, 400 cells and 620 bytes exact",
     aa: "keys, 8 pairs: tty.latency.p50 −0.03% [−0.07 … +0.11], same (±2%)",
-    planted: "spaced, keys to keys-80, 8 pairs: 20.238 to 80.263 ms, +296.58% [+296.00 … +296.95] vs +296.72% for 60 ms over the 20.2214 ms check; no kept block flagged",
+    planted: "spaced, keys to keys-80, 8 pairs: paired shift +60.021 ms [59.993 … 60.050] for +60 ms; no kept block flagged",
     boundary: "overrun-120 refused tty.latency.p50 with AmbiguousInteraction when a later input arrived before its predecessor's answer",
     reviewed_at: None,
     reviewed_why: None,
@@ -908,7 +908,7 @@ const LINUX_PAGE_LAUNCH_RUN: Evidence = Evidence {
     version: "v0.39.0",
     machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
     fixture: "scripts/dev/known/planted.bench.ts",
-    known: "page marks bracketed 200.30 and 400.20 ms for 200 and 400 ms; launch.ready followed by 9.40 and 4.20 ms",
+    known: "launch.ready 257.17 and 443.34 ms; plant_start 47.47 and 38.94 ms, marked spans 200.30 and 400.20 ms, ready 9.40 and 4.20 ms after plant_end",
     aa: "launch-400, 40 pairs: launch.ready −0.10% [−0.87 … +0.92], same (±2%)",
     planted: "launch-200 to launch-400, 40 pairs: 252.29 to 451.17 ms, paired shift +198.95 ms [194.02 … 204.26] for +200 ms; +79.33% [+76.69 … +82.11], no kept block flagged",
     boundary: "launch.painted refused Headless before the headless launch, exit 4 with no value",
@@ -922,7 +922,7 @@ const LINUX_SCRIPT_HTTP_RUN: Evidence = Evidence {
     fixture: "scripts/dev/http-probe.bench.ts",
     known: "http.latency.p50 read 20.47 and 60.53 ms for 20 and 60 ms delays; 15 probes per side with no timeouts",
     aa: "probe-slow, 8 pairs: +0.005% [−0.047 … +0.106], same (±2%)",
-    planted: "probe-fast to probe-slow, 16 pairs: 20.451 to 60.492 ms, +195.90% [+195.55 … +196.20] covers +195.634% for 40 ms over the independent 8-block median 20.44635 ms; no kept block flagged",
+    planted: "probe-fast to probe-slow, +40 ms: the 8-block fast control [20.397 … 20.526] ms implies [+194.88 … +196.11]%; all three relative intervals overlap it: [+195.47 … +196.15]% (8 pairs), [+195.74 … +196.25]% and [+195.55 … +196.20]% (16 pairs each). Paired shifts +40.013, +40.042 and +40.045 ms; no kept block flagged",
     boundary: "status-500 refused http.latency.p50 with RunIncomplete after 3 invalid responses in 9 probes; no latency value",
     reviewed_at: None,
     reviewed_why: None,
@@ -934,7 +934,7 @@ const LINUX_TTY_LAUNCH_RUN: Evidence = Evidence {
     fixture: "scripts/dev/known/tty.bench.ts",
     known: "ready-200 and ready-500 read 201.28 and 501.22 ms; difference 299.94 ms for 300 ms planted",
     aa: "ready-500, 12 pairs: launch.ready −0.002% [−0.021 … +0.008], same (±2%)",
-    planted: "ready-200 to ready-500, 12 pairs: 201.14 to 501.19 ms, +149.12% [+148.29 … +149.23] vs +149.05% for 300 ms over the independent 201.28 ms check; one pair retried, no kept block flagged",
+    planted: "ready-200 to ready-500, 12 pairs: paired shift +299.995 ms [299.322 … 300.094] for +300 ms; one pair retried, no kept block flagged",
     boundary: "launch.painted on ready-500 refused NotForTarget: a terminal has no window of its own",
     reviewed_at: None,
     reviewed_why: None,
