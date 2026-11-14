@@ -254,6 +254,75 @@ pub fn times(ms: &[f64], signed: bool) -> Vec<String> {
     ms.iter().map(|v| time_parts(*v, None, signed)).collect()
 }
 
+/// A relative comparison's descriptive shift. Use one scale and round to the interval's precision,
+/// including tens or hundreds of whole units when a broad interval warrants them.
+pub fn paired_shift(c: &serde_json::Value) -> Option<String> {
+    let s = &c["shift"];
+    let (est, lo, hi) = (s["estimate"].as_f64()?, s["lo"].as_f64()?, s["hi"].as_f64()?);
+    if c["relative"] != true || c["refusal"].is_object() || c["verdict_kind"] == "refused" || !(lo <= est && est <= hi) {
+        return None;
+    }
+    let (factor, label, finest) = match s["unit"].as_str()? {
+        "ms" => (ctx().unit.per_ms(), time_label(), ctx().unit.finest() as i32),
+        "MB" => (1.0, "MB", 6),
+        "bytes" => {
+            let base = c["base"].as_f64()?.abs();
+            if base >= 1024f64.powi(3) {
+                (1024f64.powi(-3), "GB", 9)
+            } else if base >= 1024f64.powi(2) {
+                (1024f64.powi(-2), "MB", 6)
+            } else if base >= 1024.0 {
+                (1.0 / 1024.0, "KB", 3)
+            } else {
+                (1.0, "B", 0)
+            }
+        }
+        _ => return None,
+    };
+    let [e, l, h] = [est, lo, hi].map(|x| x * factor);
+    if ![e, l, h].iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    let w = h - l;
+    let place = if w > 0.0 {
+        let p = w.log10().floor() as i32;
+        p - i32::from(w / 10f64.powi(p) < 3.545)
+    } else if e != 0.0 {
+        e.abs().log10().floor() as i32 - 2
+    } else {
+        0
+    }
+    .max(-finest);
+    let number = |x: f64| {
+        let step = 10f64.powi(place);
+        let d = (-place).max(0) as usize;
+        let a = x.abs();
+        let body = if a >= EXACT {
+            sci(a)
+        } else if place > 0 {
+            group(&format!("{:.0}", (a / step).round() * step))
+        } else {
+            group(&format!("{a:.d$}"))
+        };
+        if x == 0.0 {
+            return "0".to_string();
+        }
+        let body = if body.chars().any(|c| matches!(c, '1'..='9')) { body } else { format!("<{}", group(&format!("{step:.d$}"))) };
+        format!("{}{body}", if x < 0.0 { minus() } else { "+" })
+    };
+    let side = |l: f64, h: f64| {
+        if h < 0.0 {
+            -1
+        } else if l > 0.0 {
+            1
+        } else {
+            0
+        }
+    };
+    let differs = est.signum() != c["estimate"].as_f64()?.signum() || side(lo, hi) != side(c["lo"].as_f64()?, c["hi"].as_f64()?);
+    Some(format!("shift {} [{} … {}] {label}{}{}", number(e), number(l), number(h), if c["warned"] == true { " (warned)" } else { "" }, if differs { " (differs on ratio scale)" } else { "" }))
+}
+
 /// A time's number alone (an axis tick under a header that names the unit): `250,000`.
 pub fn time_number(ms: f64) -> String {
     let t = time(ms);

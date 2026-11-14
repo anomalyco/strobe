@@ -1041,6 +1041,10 @@ pub(super) fn nb(s: &str) -> String {
     s.replace(' ', "\u{a0}")
 }
 
+pub(super) fn shift_row(c: &Value) -> String {
+    crate::fmt::paired_shift(c).map_or_else(String::new, |s| format!("| <sub>{}</sub> |\n", nb(&s.replace('<', "&lt;"))))
+}
+
 /// Three significant figures, no exponent: 229, 50.4, 7.05, 0.0881.
 pub(super) fn sig3(v: f64) -> String {
     if !v.is_finite() {

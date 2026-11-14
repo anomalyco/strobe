@@ -440,6 +440,7 @@ impl<'a> Doc<'a> {
                     verdict += " <sub>not after Holm</sub>";
                 }
                 t += &format!("{}| {name} | {} | {} | {chg} | {rng} | {verdict} |\n", self.series_cell(s, i), nb(&value(c, "base")), nb(&value(c, "head")));
+                t += &shift_row(c);
                 if i == 0 {
                     mains.push(c);
                     if conf_main.is_empty() {

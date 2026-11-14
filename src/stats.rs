@@ -472,6 +472,21 @@ pub struct Comparison {
 }
 
 impl Comparison {
+    /// Serialize the final comparison with the additive interval over the same pairs and look.
+    /// This is evidence for a change expressed in time or memory, never a second verdict.
+    pub fn with_shift(&self, pairs: impl Iterator<Item = (f64, f64)>, confidence: f64) -> serde_json::Value {
+        let mut row = serde_json::json!(self);
+        let Some(def) = crate::model::metric(&self.metric) else { return row };
+        if self.relative && self.kind != VerdictKind::Refused && matches!(def.unit, "ms" | "MB" | "bytes") && self.n >= 2 && [self.estimate, self.lo, self.hi].iter().all(|x| x.is_finite()) {
+            let d: Vec<_> = pairs.filter(|(a, b)| a.is_finite() && b.is_finite()).map(|(a, b)| b - a).collect();
+            let (estimate, lo, hi, _) = hodges_lehmann(&d, confidence);
+            if d.len() == self.n && [estimate, lo, hi].iter().all(|x| x.is_finite()) {
+                row["shift"] = serde_json::json!({"estimate":estimate,"lo":lo,"hi":hi,"unit":def.unit});
+            }
+        }
+        row
+    }
+
     /// Says what it decided, in words and as a kind at once (a gate, a stop, a descriptive metric).
     pub fn set_verdict(&mut self, kind: VerdictKind, verdict: impl Into<String>) {
         self.kind = kind;

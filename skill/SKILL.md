@@ -450,6 +450,7 @@ strobe update [<version>] [--from <path>] [--check] [--force]
 - `record --bench` prints the bench's warnings (`Attribution`, `ProbeOverhead`, `ObserverCost`,
   `TimerCoalescing`); `--json` marks each recording `kind: "attribution"`.
 - Every duration needs its unit (`500ms`, `10s`, `2m`, `2h`, `1d`): `--for 2000` exits 2.
+- Compare an expected additive cost with `shift` (head minus base, within pairs), not the difference of side medians. The percentage decides the verdict. A headless page can measure CPU work even with the display off; wall time on a headless Chromium page needs the display on.
 - Times print in microseconds, digits grouped: `18,309,038 µs`, `42.0 µs`, `<0.01 µs` (nonzero, under
   the finest step), `0 µs` (exactly 0). `--unit ms` or `--unit s` (or `"unit": "ms"` in strobe.json)
   prints milliseconds or seconds; never promoted as a value grows. Text only: `--json` is the same in

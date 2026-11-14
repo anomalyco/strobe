@@ -5877,6 +5877,12 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         warnings.push(validity::warn("PixelsDiffer", "base and head drew different pixels at a snapshot: see pixels"));
     }
     let window = series_window(ctx, s, &blocks);
+    let with_shift = |c: &Comparison, n: usize, confidence| {
+        let (bs, ps) = source(&c.metric);
+        c.with_shift(ps.iter().take(n).map(|&(a, b)| (val(&bs[a], &c.metric), val(&bs[b], &c.metric))), confidence)
+    };
+    let primary = with_shift(&primary, decided_n.unwrap_or(pairs.len()), design.confidence);
+    let secondaries: Vec<_> = secondaries.iter().map(|c| with_shift(c, usize::MAX, 0.95)).collect();
     let mut out = json!({
         "pixels": pixels,
         "label": s.label(), "case": s.case, "target": s.target, "target_kind": target["kind"], "params": s.params, "kind": if s.launch.is_object() { "launch" } else { "runs" },
@@ -14448,6 +14454,9 @@ pub(crate) fn render(r: &Value) -> String {
             let verdict = stats::verdict_text(&c);
             let verdict = if aa && matches!(stats::kind_of(&c), VerdictKind::Better | VerdictKind::Worse) { format!("{verdict} ← false positive (A/A)") } else { verdict };
             table.push(vec![format!("{} {name}", if primary { "★" } else { " " }), b, h, delta, ci, verdict]);
+            if let Some(shift) = crate::fmt::paired_shift(&c) {
+                table.push(vec![format!("    {shift}")]);
+            }
         }
         out += &fmt::table(&table, &[false, true, true, true, false, false], "", 2);
         if aa {
