@@ -185,6 +185,28 @@ function pctCI(est: number, lo: number, hi: number): [string, string, string] {
   return [own(est), own(lo), own(hi)]
 }
 const relCI = (c: J): [string, string, string] => ([c.estimate, c.lo, c.hi].every(Number.isFinite) ? pctCI(c.estimate, c.lo, c.hi) : [tPct(c.estimate), tPct(c.lo), tPct(c.hi)])
+const side = (lo: number, hi: number) => lo > 0 ? 1 : hi < 0 ? -1 : 0
+function expectedShift(c: J) {
+  const s = c.shift
+  if (!s || side(s.lo,s.hi) !== side(c.lo,c.hi) || (s.estimate*c.estimate < 0 && Math.abs(c.estimate) >= c.bound)) return
+  const max = Math.max(Math.abs(s.lo),Math.abs(s.hi))
+  const idx = max >= 1024**3 ? 3 : max >= 1024**2 ? 2 : max >= 1024 ? 1 : 0
+  const [factor,unit,finest] = s.unit === 'ms' ? [TU[UNIT].perMs,TU[UNIT].label,TU[UNIT].finest] as const : s.unit === 'bytes' ? [1024**-idx,['B','KB','MB','GB'][idx],3*idx] as const : [1,'MB',6] as const
+  const [e,l,h] = [s.estimate,s.lo,s.hi].map(v=>v*factor)
+  const width=h-l, exp=Math.floor(Math.log10(width)), place=width ? exp-Number(width/10**exp < 3.545) : e ? Math.floor(Math.log10(Math.abs(e)))-2 : 0
+  const num=(x:number)=>{
+    if(!x) return '0'
+    const a=Math.abs(x), k=Math.max(-finest,side(l,h) ? Math.min(place,Math.floor(Math.log10(a))) : place), d=Math.max(0,-k)
+    const raw=k>0 ? String(Math.round(a/10**k)*10**k) : rfix(a,d)
+    const sign=x>0?'+':'−'
+    if(Number(raw)===0) return side(l,h) && a < 0.5*10**-finest ? sign+'<'+rfix(10**-finest,finest) : '0'
+    return sign+group(raw)
+  }
+  const est=num(e), pct=relCI(c)[0]
+  if ((est[0]==='+' && pct[0]==='−') || (est[0]==='−' && pct[0]==='+')) return
+  const lo=num(l), hi=num(h), warn=c.warned?' (warned)':''
+  return {line:`shift ${est} [${lo} … ${hi}] ${unit}${warn}`,change:`${est} ${unit}${warn}`,range:`${lo} to ${hi} ${unit}`}
+}
 function tSigned(v: number | null, unit: string): string {
   if (v == null || !Number.isFinite(v)) return "—"
   if (unit === "ms") return tTime(v, true)
@@ -373,7 +395,7 @@ function htmlSurface(id: string, dir: string): { text: string; labels: Record<st
   return { text: domText(p.stdout.toString()), labels }
 }
 
-const strip = (s: string) => s.replace(/\*\*/g, "").replace(/<sub>.*?<\/sub>/g, "").replace(/\u00a0/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim()
+const strip = (s: string) => s.replace(/\*\*/g, "").replace(/(?:<br>)?<sub>.*?<\/sub>/g, "").replace(/\u00a0/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim()
 
 // `handle`: the experiment's id, or the path of a result.json given on the command line (a fixture).
 function checkSurfaces(r: J, handle: string = r.id) {
@@ -429,7 +451,8 @@ function checkSurfaces(r: J, handle: string = r.id) {
             if (sec) flagIt("HIGH", `${name} ${where}`, "no row")
           } else {
             const next = sec.split("\n")[sec.split("\n").indexOf(row)+1] ?? ""
-            if (c.shift) {
+            const wanted=expectedShift(c)
+            if (wanted) {
               const shift = next.trim()
               if (!shift.startsWith("shift ") || next.length > 110 || (!!c.warned !== shift.includes("(warned)"))) flagIt("CRIT",`${name} ${where}`,`shift line: ${shift}`)
               const match = /^shift (\S+) \[(\S+) … (\S+)\] (µs|ms|s|B|KB|MB|GB)\b/.exec(shift)
@@ -444,10 +467,11 @@ function checkSurfaces(r: J, handle: string = r.id) {
                   if (token.includes("<") ? Math.sign(x)!==Math.sign(display) || Math.abs(x)>=Math.abs(display) : Math.abs(x-display) > 0.500001*Math.max(step,precision)+1e-10*Math.abs(x)) flagIt("CRIT",where,`shift number ${token} does not round from ${x}`)
                 }
               }
-              const diff = Math.sign(c.shift.estimate) !== Math.sign(c.estimate) || (c.lo>0?1:c.hi<0?-1:0) !== (c.shift.lo>0?1:c.shift.hi<0?-1:0)
-              if (diff !== shift.includes("differs on ratio scale")) flagIt("HIGH", where,"unexplained scale disagreement")
-              if (!pr.replaceAll("\u00a0"," ").replaceAll("&lt;","<").includes(shift)) flagIt("HIGH",`pr ${where}`,"missing shift")
-              if (role === "primary" && html?.text.includes(`${s.label} · Primary:`) && !html.text.includes(shift)) flagIt("HIGH",`html ${where}`,"missing shift")
+              if (shift!==wanted.line) flagIt("CRIT",where,`expected ${wanted.line}, got ${shift}`)
+              const cleanPr=pr.replaceAll("\u00a0"," ").replaceAll("&nbsp;"," ").replaceAll("&lt;","<")
+              if (role!=="descriptive" && !cleanPr.split("\n").some(l=>l.includes(`<br><sub>${wanted.change}</sub> |`) && l.includes(`<br><sub>${wanted.range}</sub> |`))) flagIt("HIGH",`pr ${where}`,"shift not in its comparison cells")
+              if (html?.text.includes(`${s.label} · Primary:`) && !html.text.includes(wanted.line)) flagIt("HIGH",`html ${where}`,"missing shift")
+              if (flag("shift") && role==="primary" && ["better","worse"].includes(k) && !card.alt?.includes(wanted.line)) flagIt("HIGH",`card ${where}`,"missing shift")
             } else if (next.trimStart().startsWith("shift ")) flagIt("CRIT",where,"unexpected shift")
             // The numbers between the metric's name and its verdict, in order: base, head, Δ, CI's ends.
             const body = row.trim().replace(/^★\s*/, "").slice(c.metric.length).split(vText(c))[0]
