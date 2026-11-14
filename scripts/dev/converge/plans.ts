@@ -19,7 +19,7 @@ const plan = (n: string, ...opts:string[]) => {
   return { s: r.series[0], line }
 }
 assert.match(plan("6").line, /6 kept pairs \(12 launches before retries\).*--pairs 8/)
-assert.match(plan("4").line, /cannot give a 95% interval/)
+assert.match(plan("4").line, /cannot give a 95% interval, and cannot verify/)
 const { s, line } = plan("auto")
 assert.match(line, /8 to 40 kept pairs \(16–80 launches before retries\); spread unknown/)
 for (const invalid of ["1","201","100000"]) assert.equal(command(invalid).exitCode,2)

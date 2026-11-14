@@ -212,21 +212,19 @@ impl Driver {
 /// cannot decide it`, `max pairs`, `max time`): `underpowered` with the pairs an 80% chance needs
 /// (`PLAN_POWER`, as `plan` says them) when more would decide it, else `unclear`. Other stops (a
 /// stop, a failure, saturation) say their own words; this returns None for them.
-pub(crate) fn closing(design: &Design, def: &MetricDef, primary: &mut Comparison, stopped: &str, pp: &[(f64, f64)]) -> Option<(VerdictKind, String)> {
+pub fn closing(design: &Design, def: &MetricDef, primary: &mut Comparison, stopped: &str, pp: &[(f64, f64)]) -> Option<(VerdictKind, String)> {
     if !matches!(stopped, "more pairs cannot decide it" | "max pairs" | "max time") {
         return None;
     }
     // The 80% figure (`PLAN_POWER`) the comparison already holds, taken again from every pair (a
     // primary decided at an earlier look is not closed here).
     let d: Vec<f64> = pp.iter().map(|&(a, b)| if primary.relative { (b / a).ln() } else { b - a }).collect();
-    let need = |confidence| match primary.noworse {
-        Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, primary.relative, m), confidence, stats::PLAN_POWER),
-        None => stats::pairs_needed(&d, if primary.relative { (1.0 + design.bound).ln() } else { primary.bound }, confidence, stats::PLAN_POWER),
+    let n80 = match primary.noworse {
+        Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, primary.relative, m), 0.95, stats::PLAN_POWER),
+        None => stats::pairs_needed(&d, if primary.relative { (1.0 + design.bound).ln() } else { primary.bound }, 0.95, stats::PLAN_POWER),
     };
-    let planned = need(design.confidence);
-    let underpowered = planned != usize::MAX && planned > pp.len();
-    let n80 = need(0.95);
-    primary.needed_pairs = (n80 != usize::MAX).then_some(n80);
+    let underpowered = n80 != usize::MAX && n80 > pp.len();
+    primary.needed_pairs = underpowered.then_some(n80);
     Some(match primary.needed_pairs {
         _ if underpowered && n80 > crate::cli::MAX_PAIRS => {
             (VerdictKind::Underpowered, format!("underpowered: even {} fixed pairs are unlikely to decide; reduce block variance", crate::cli::MAX_PAIRS))

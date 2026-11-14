@@ -32,6 +32,11 @@ impl Schedule {
         s
     }
 
+    /// The quiet wait ended the budget: keep this observed pair, do not treat the next as its replacement.
+    pub fn cancel_replace(&mut self) {
+        self.replacing = false;
+    }
+
     pub fn decide(&mut self, base: &Block, head: &Block, discarded: usize, moves: bool, time_left: bool) -> Decision {
         let pct = |b: &Block| b.values.get("cpu.foreign.max").copied().unwrap_or(f64::NAN);
         let busy = |b| pct(b) >= BACKGROUND_PCT;

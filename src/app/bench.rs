@@ -38,7 +38,7 @@ pub mod plan;
 pub mod retry;
 mod script;
 pub(crate) mod sequential;
-pub use sequential::{Design, gate_and_holm};
+pub use sequential::{Design, closing, gate_and_holm};
 mod shown;
 pub mod slot;
 mod tty;
@@ -5202,6 +5202,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 // Keep the completed attempt if the quiet wait uses the rest of this series' share.
                 validity::wait_quiet(ctx.pin, retry_left().min(Duration::from_secs(5)));
                 if retry_left().is_zero() || stop_requested() {
+                    retries.cancel_replace();
                     progress(format!("  pair {} kept: no time for a replacement", pair + 1));
                     break;
                 }
