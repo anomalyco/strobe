@@ -808,6 +808,8 @@ fn note_ended_launch(warnings: &mut Vec<validity::Warning>, s: &Series, ms: f64)
 #[derive(Clone, Default, Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Block {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    shelled: bool,
     pub variant: String,
     pub pair: usize,
     pub values: BTreeMap<String, f64>,
@@ -1919,6 +1921,7 @@ struct Ctx<'a> {
     keep_all: bool,
     runs: usize,
     warnings: Vec<Warning>,
+    shells: BTreeMap<String, BTreeMap<String, Option<String>>>,
     config: Value,
     awake: host::Awake,
     /// Time spent waiting for the screen to unlock (ms): not part of any series' run time.
@@ -2684,6 +2687,7 @@ pub fn run(args: &Args) -> Result<Output> {
             args.num("runs")?.unwrap_or(5.0).max(1.0) as usize
         },
         warnings: Vec::new(),
+        shells: BTreeMap::new(),
         config: config.clone(),
         awake: host::Awake::start(),
         waited_ms: 0.0,
@@ -10990,6 +10994,7 @@ fn run_chunk(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 let steps: Vec<(String, f64)> = launch_steps[..pre].iter().chain(&c.steps).chain(&launch_steps[pre..]).cloned().collect();
                 drop(launch_steps);
                 blocks.push(Block {
+                    shelled: false,
                     variant: v.role.to_string(),
                     pair,
                     values,
@@ -12451,6 +12456,17 @@ fn headless_window(label: &str, name: &str, t: &Value) -> Error {
 /// `variants`: the sides, whose profile (`--head app:<id>`) may be their own (`sides_windowless`).
 fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variants: &[Variant], config: &Value) -> Result<Option<Refusal>> {
     let t = &describe["targets"][name];
+    if t["kind"] == "cli" {
+        for v in variants.iter().filter(|v| v.target_of(s) == name) {
+            let line = match &v.kind {
+                Kind::Cmd(l) => Some(l.as_str()),
+                _ => t["run"].as_str(),
+            };
+            if let Some(line) = line {
+                cli::plan::early(line).map_err(|e| Error::usage(format!("{}: {}", cli::label(s, v), e.message)))?;
+            }
+        }
+    }
     let windowless = |all: bool| sides_windowless(s, name, t, config, variants, all);
     let page = matches!(t["kind"].as_str(), Some("web" | "url"));
     if args.get("engine").is_some() && !page {

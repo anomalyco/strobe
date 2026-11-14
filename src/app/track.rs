@@ -458,6 +458,9 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         }
         let runtimes = script_runtimes(r, s, &[(s["target"].as_str().unwrap_or(""), None)]);
         runtime_fingerprint(&runtimes, &mut fingerprint);
+        if blocks_v.iter().any(|b| b["shelled"] == true) {
+            fingerprint["shell_line"] = json!(true);
+        }
         motion_fingerprint(r, s, &mut fingerprint);
         seed_fingerprint(r, &mut fingerprint);
         metric_fingerprint(&metric, &runtimes, &[s["target_kind"].as_str().unwrap_or("")], &mut fingerprint);

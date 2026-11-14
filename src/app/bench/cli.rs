@@ -5,6 +5,7 @@
 
 use super::*;
 use std::io::Write;
+pub(super) mod plan;
 
 /// A `metric.<name>`'s direction, as the command's lines give it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,6 +28,7 @@ impl Direction {
 /// their directions (a name printed in both directions is `None`), and its launch's CPU on strobe's
 /// thread (ms, NaN where thread cycles are not time).
 struct Ran {
+    how: plan::Evidence,
     wall: f64,
     usage: host::spawn::Usage,
     metrics: BTreeMap<String, (f64, Option<Direction>)>,
@@ -48,54 +50,8 @@ fn line_for(asked: &Value, v: &Variant, target: &Value) -> Result<String> {
     line.ok_or_else(|| Error::usage("a cli target needs a command: cli(\"<line>\"), a cmd:<line> variant, or ctx.exec(\"<line>\")"))
 }
 
-/// A line the shell can replace itself with (`exec`): one command, no variable assignment in front,
-/// nothing that joins commands (`;`, `&&`, `|`), redirects, subshells or command substitution, and no
-/// keyword or builtin that `exec` cannot run. Otherwise the shell runs the line and stays its parent.
-#[cfg(not(windows))]
-fn simple(line: &str) -> bool {
-    let first = line.split_whitespace().next().unwrap_or("");
-    const SHELL_WORDS: &[&str] =
-        &["if", "for", "while", "until", "case", "{", "!", "[", "[[", "cd", "export", "set", "unset", ".", "source", "eval", "exec", "test", "alias", "ulimit", "umask", "time"];
-    !line.contains([';', '&', '|', '<', '>', '(', ')', '`', '\n']) && !line.contains("$(") && !first.contains('=') && !SHELL_WORDS.contains(&first)
-}
-
-/// The command for `line`, run in `root`. Unix: `sh -c`, as `exec <line>` when the line is one simple
-/// command, so the command is the child, not a shell around it. Windows: the line's first word as the
-/// program, so the child is the program itself (a relative path from `root`: Windows would resolve it
-/// from strobe's own folder); `shell` (a `.cmd` or `.bat`, or a word that is no executable) runs the
-/// line under cmd.
-fn command(line: &str, shell: bool, root: &Path) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let line = line.trim();
-        let (program, rest) = match line.strip_prefix('"') {
-            Some(q) => q.split_once('"').map(|(p, r)| (p.to_string(), r.to_string())).unwrap_or((q.to_string(), String::new())),
-            None => line.split_once(char::is_whitespace).map(|(p, r)| (p.to_string(), r.to_string())).unwrap_or((line.to_string(), String::new())),
-        };
-        let script = Path::new(&program).extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
-        if shell || script {
-            return crate::target::command::shell(line);
-        }
-        let path = Path::new(&program);
-        let program = if path.is_relative() && program.contains(['/', '\\']) {
-            let joined = root.join(path);
-            let exe = joined.with_extension("exe");
-            if path.extension().is_none() && exe.is_file() { exe } else { joined }.display().to_string()
-        } else {
-            program
-        };
-        let mut c = Command::new(program);
-        if !rest.trim().is_empty() {
-            c.raw_arg(rest.trim());
-        }
-        c
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (shell, root);
-        if simple(line) { crate::target::command::shell(&format!("exec {line}")) } else { crate::target::command::shell(line) }
-    }
+pub(super) fn label(s: &Series, v: &Variant) -> String {
+    if matches!(v.kind, Kind::Cmd(_)) { format!("--{}", v.role) } else { s.label() }
 }
 
 /// `strobe:metric <name>=<value> [lower|higher]` at the start of a line (after spaces): Some(Err)
@@ -133,6 +89,7 @@ struct Spawn<'a> {
 /// `cost`, strobe's own CPU counts while the command runs: from just after its launch (its pipes
 /// handed to the readers) to its exit.
 fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)> {
+    let plan::Planned { mut cmd, how } = plan::exec(line, at.root, &at.target["env"])?;
     // The two readers start before the command and wait for its pipes, so creating their threads is
     // strobe's work before the command runs, not beside it.
     type Pipe = Box<dyn std::io::Read + Send>;
@@ -150,8 +107,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         .unzip();
     // The launch's CPU on this thread (`cli.launch`): the OS creating the process, which Windows does
     // in the launcher. NaN where thread cycles are not time.
-    let start = |shell: bool| -> std::io::Result<(host::spawn::Owned, f64)> {
-        let mut cmd = command(line, shell, at.root);
+    let mut start = || -> std::io::Result<(host::spawn::Owned, f64)> {
         for (k, val) in at.target["env"].as_object().into_iter().flatten() {
             cmd.env(k, val.as_str().unwrap_or(""));
         }
@@ -165,12 +121,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         let (t1, k1, c1) = (Instant::now(), host::tsc(), host::thread_cycles());
         Ok((child, super::script::cpu_ms((c0, k0), (c1, k1), t1.duration_since(t0).as_secs_f64() * 1e3)))
     };
-    // Windows: a word that is no executable (NotFound), or a script `raw_arg` cannot pass (InvalidInput).
-    let (mut child, launch) = match start(false) {
-        Err(e) if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput) => start(true),
-        r => r,
-    }
-    .map_err(|e| {
+    let (mut child, launch) = start().map_err(|e| {
         if let Some(c) = cost {
             c.load_at.take();
         }
@@ -223,7 +174,12 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
         ));
     }
     if usage.code != 0 {
-        return Err(Error::msg(format!("`{line}` exited with {}{}", usage.code, if tail.is_empty() { String::new() } else { format!(":\n{tail}") })));
+        let via = how.shell.as_ref().map(|s| format!(" via {s}")).unwrap_or_default();
+        return Err(Error::refused(
+            "RunIncomplete",
+            format!("`{line}`{via} exited with {}{}", usage.code, if tail.is_empty() { String::new() } else { format!(": {}", tail.replace('\n', "; ")) }),
+            "fix the command or invoke its intended shell explicitly",
+        ));
     }
     if !usage.left.is_empty() {
         let one = usage.left.len() == 1;
@@ -259,7 +215,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
     }
     let output: String = lines.join("\n");
     let output = if output.len() > 64 * 1024 { output[output.floor_char_boundary(output.len() - 64 * 1024)..].to_string() } else { output };
-    Ok((Ran { wall, usage, metrics, launch }, output))
+    Ok((Ran { how, wall, usage, metrics, launch }, output))
 }
 
 /// Child processes' CPU from Windows' clock ticks needs this many ticks (15.6 ms each) per run before
@@ -282,6 +238,8 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     let mut steps: Vec<(String, f64)> = Vec::new();
     let hooks = super::block::Hooks::default();
     let ran: RefCell<Vec<Ran>> = RefCell::new(Vec::new());
+    let latched = RefCell::new(None::<Error>);
+    let checked = |r: Result<Value>| latched.take().map_or(r, Err);
     // The CPU of every command of the run, untimed ones too (NaN once one has none): what is not the
     // target's on its CPUs over the run is other work (`cpu.foreign`).
     let own_ms: Cell<f64> = Cell::new(0.0);
@@ -295,13 +253,21 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
                 if a["line"].is_string() {
                     lines.borrow_mut().push(a["line"].clone());
                 }
-                let line = line_for(&a["line"], v, &target)?;
+                let failed = |e: &Error| {
+                    gap_ms.set(f64::NAN);
+                    if e.code == 2 || e.refusal.is_some() {
+                        let mut e = e.clone();
+                        e.message = format!("{}: {}", label(s, v), e.message);
+                        latched.borrow_mut().get_or_insert(e);
+                    }
+                };
+                let line = line_for(&a["line"], v, &target).inspect_err(failed)?;
                 // `{fixture.url}` and the like, in a line the call or the variant gave (the target's
                 // own `run` and `env` are filled with the block).
                 let line = fixture.as_ref().and_then(|f| f.fill(&json!(line)).as_str().map(str::to_string)).unwrap_or(line);
                 // Only a run's commands count; setup's and reset's prepare, as do a run's untimed ones.
                 let counted = hooks.in_run() && !hooks.untimed_now();
-                let (r, output) = exec(&line, &at, counted.then_some(&cost)).inspect_err(|_| gap_ms.set(f64::NAN))?;
+                let (r, output) = exec(&line, &at, counted.then_some(&cost)).inspect_err(failed)?;
                 let code = r.usage.code;
                 if hooks.in_run() {
                     own_ms.set(own_ms.get() + r.usage.cpu_ns.map_or(f64::NAN, |c| c as f64 / 1e6));
@@ -332,7 +298,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     let root_text = host::paths::plain(&root);
     ctx.runner.call("block", json!({ "case": s.case, "params": s.params, "target": v.target_of(s), "variant": v.role, "url": "", "root": root_text }), t, &serve)?;
     let mut lapped = Instant::now();
-    ctx.runner.call("setup", json!({}), s.hook_timeout(), &serve).map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup"))?;
+    checked(ctx.runner.call("setup", json!({}), s.hook_timeout(), &serve).map_err(|e| crate::runner::incomplete("setup", "setup", e, "", "fix the bench file's setup")))?;
     steps.push(("setup".into(), lapped.elapsed().as_secs_f64() * 1e3));
     lapped = Instant::now();
     /// One run: its commands, its counts, its phase marks, its span and the other work on the target's
@@ -355,7 +321,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         cost.end();
         let foreign = busy.zip(ctx.pin).and_then(|(b, cpus)| b.stop(cpus)).and_then(|b| b.other_ms(own_ms.get()));
         hooks.end();
-        r.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw, timed out, or a command failed"))?;
+        checked(r.map_err(|e| crate::runner::incomplete(&format!("{} run", s.case), "run", e, "", "the run threw, timed out, or a command failed")))?;
         let done = std::mem::take(&mut *ran.borrow_mut());
         cost.target_ms(cpu(&done).unwrap_or(f64::NAN));
         if let Some(l) = &cost.load
@@ -370,7 +336,7 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         }
         runs.push((done, hooks.counts(), hooks.take_marks(), metrics::Timed { t0, t1, untimed: hooks.untimed_stretches() }, foreign));
         if s.reset {
-            ctx.runner.call("reset", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset"))?;
+            checked(ctx.runner.call("reset", json!({ "case": s.case }), t, &serve).map_err(|e| crate::runner::incomplete(&format!("{} reset", s.case), "reset", e, "", "fix the case's reset")))?;
         }
         // Without CPU (cycles that are not time), steady by wall time.
         // A command's whole tree is its own (no process of it ends unseen): nothing is lost.
@@ -529,7 +495,11 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
     let ran: Vec<PathBuf> = lines.take().iter().flat_map(|l| super::line_files(Path::new(""), l)).collect();
     let notes = super::harness_overlay(v, &ran, v.target_of(s), &ctx.harness.from);
     super::say_overlay(ctx, notes);
+    let plans: std::collections::BTreeSet<_> = measured.iter().flat_map(|r| r.0.iter().map(|c| &c.how)).collect();
+    let shelled = plans.iter().any(|p| p.shell.is_some());
+    say_plans(ctx, s, v, &plans);
     Ok(Block {
+        shelled,
         variant: v.role.to_string(),
         pair,
         values,
@@ -560,4 +530,39 @@ pub(super) fn block(ctx: &mut Ctx, s: &Series, v: &Variant, pair: usize, x: &Exe
         directions,
         ..Block::default()
     })
+}
+
+fn say_plans(ctx: &mut Ctx, s: &Series, v: &Variant, plans: &std::collections::BTreeSet<&plan::Evidence>) {
+    let label = s.label();
+    let prefix = format!("{label}: ");
+    let sides = ctx.shells.entry(label.clone()).or_default();
+    let why = plans.iter().filter_map(|p| p.shell.as_deref()).collect::<Vec<_>>().join(", ");
+    let side = sides.entry(v.role.to_string()).or_default();
+    if !why.is_empty() {
+        *side = Some(why);
+    }
+    ctx.warnings.retain(|w| !(w.id == "ShellLine" && w.text.starts_with(&prefix)));
+    for (role, shell) in sides.iter().filter_map(|(r, s)| Some((r, s.as_ref()?))) {
+        ctx.warnings.push(if let Some((other, _)) = sides.iter().find(|(_, s)| s.is_none()) {
+            validity::warn("ShellLine", format!("{prefix}{role} runs through {shell} and {other} does not: only {role}'s run.duration and cpu.work include shell startup"))
+        } else {
+            validity::info("ShellLine", format!("{prefix}{role} runs through {shell}: run.duration and cpu.work include shell startup"))
+        });
+    }
+    for p in plans {
+        let mut add = |w: Warning| {
+            if !ctx.warnings.iter().any(|old| old.id == w.id && old.text == w.text) {
+                ctx.warnings.push(w);
+            }
+        };
+        if let Some(text) = &p.shadow {
+            add(validity::warn("PathShadow", format!("{prefix}{text}")));
+        }
+        if p.shell.is_none() {
+            add(validity::info("CommandPath", format!("{prefix}{} starts `{}` directly", v.role, p.program.display())));
+        }
+        if let Some(text) = &p.literal {
+            add(validity::info("DirectLine", format!("{prefix}{text}")));
+        }
+    }
 }

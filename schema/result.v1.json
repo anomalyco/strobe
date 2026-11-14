@@ -526,6 +526,7 @@
             "type": "object",
             "properties": {
               "variant": { "enum": ["base", "head"] },
+              "shelled": { "type": "boolean", "description": "A measured command line runs through a shell (SPEC 9.6). Omitted when false." },
               "pair": { "type": "integer" },
               "values": { "type": "object", "additionalProperties": { "type": ["number", "null"] }, "description": "Each metric's value, and the block's own notes: warmup.unsteady (1 swung, 2 grew), warmup.stepped.first and warmup.stepped.last (the measured runs stepped down: the first measured run's work and the last half's median, NotSteady, SPEC 9.1), untimed.n and untimed.ms." },
               "refused": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Metrics the block refused: \"<validator>: <why>\"." },
