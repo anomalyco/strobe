@@ -1,5 +1,63 @@
 # Which pair attempts pay for themselves?
 
+## Changes within a series
+
+Cross quiet, a single burst, alternating bursts, light symmetric load, sustained
+uneven load on both sides, and sustained one-sided load in both orders. Switch
+halfway to the first look. Also exercise a late isolated burst, six unanimous
+hits, an uneven patch that changes sides, and a busy replacement then a quiet
+pair. Budgets are 6, 8, 12, auto. `--sequences` on the background harness prints
+attempts/verdict/background level for each cell. `Refused` means no number.
+
+Baseline (`0990c47d` retry condition and judgement); each token is extra attempts,
+then S/B/R for same/better/refused and i/w/- for info/warn/silent. Read left
+to right at 6, 8, 12, auto; auto decided at eight in these rows. The sequence
+harness reads this independent ledger; changes to product judgement cannot
+rewrite the baseline it compares against.
+
+```text
+quiet quiet 0S- 0S- 0S- 0S-
+quiet burst 1Si 1Si 1Si 1Si
+quiet alternating 2Sw 2Sw 2Si 2Sw
+quiet light 0Sw 0Sw 0Sw 0Sw
+quiet both 2Sw 2Sw 2Sw 2Sw
+quiet one 1Sw 1Sw 1Rw 1Sw
+burst quiet 1Si 1Si 1Si 1Si
+burst burst 1Sw 1Sw 1Si 1Sw
+burst alternating 2Sw 2Sw 2Sw 2Sw
+burst light 1Sw 1Sw 1Sw 1Sw
+burst both 2Sw 2Sw 2Sw 2Sw
+burst one 2Sw 2Sw 2Sw 2Sw
+alternating quiet 2Sw 2Sw 2Si 2Sw
+alternating burst 2Sw 2Sw 2Sw 2Sw
+alternating alternating 2Sw 2Sw 2Sw 2Sw
+alternating light 2Sw 2Sw 2Sw 2Sw
+alternating both 2Sw 2Sw 2Sw 2Sw
+alternating one 2Sw 2Sw 2Sw 2Sw
+light quiet 0Sw 0Sw 0Sw 0Sw
+light burst 1Sw 1Sw 1Sw 1Sw
+light alternating 2Sw 2Sw 2Sw 2Sw
+light light 0Sw 0Sw 0Sw 0Sw
+light both 2Sw 2Sw 2Sw 2Sw
+light one 1Sw 1Sw 1Rw 1Sw
+both quiet 2Sw 2Sw 2Sw 2Sw
+both burst 2Sw 2Sw 2Sw 2Sw
+both alternating 2Sw 2Sw 2Sw 2Sw
+both light 2Sw 2Sw 2Sw 2Sw
+both both 2Sw 2Sw 2Sw 2Sw
+both one 2Sw 2Sw 2Sw 2Sw
+one quiet 1Sw 1Sw 1Rw 1Sw
+one burst 2Sw 2Sw 2Sw 2Sw
+one alternating 2Sw 2Sw 2Sw 2Sw
+one light 1Sw 1Sw 1Rw 1Sw
+one both 2Sw 2Sw 2Sw 2Sw
+one one 1Rw 1Rw 1Rw 1Rw
+late - 1Si 1Si 1Bi 1Si
+unanimous - 1Rw 1Rw 1Rw 1Rw
+irregular - 1Sw 1Rw 1Rw 1Rw
+recovery - 2Sw 2Sw 2Si 2Sw
+```
+
 One timed pair is two blocks. In the scripted rows each block takes one second;
 the clock counts blocks only, not startup, discarded warmups or a quiet wait.
 Inputs are block readings, not a load planted on the machine. Each row runs for
