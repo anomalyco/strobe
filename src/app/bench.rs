@@ -35,6 +35,7 @@ mod launch;
 mod mocks;
 mod native;
 pub mod plan;
+pub mod retry;
 mod script;
 pub(crate) mod sequential;
 pub use sequential::{Design, gate_and_holm};
@@ -5117,8 +5118,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // The target's physical cores, and the pairs discarded for a burst of other work on one side only
     // (`Burst`; a resumed series' too).
     let cores = ctx.phone.is_none().then(|| target_cores(ctx.pin)).flatten();
-    let burst_at = burst_pct(cores);
     let mut discarded: Vec<Burst> = serde_json::from_value(ctx.saved["series"][s.label()]["discarded_bursts"].clone()).unwrap_or_default();
+    let mut retries = retry::Schedule::resume(cores, &blocks, &pairs, &discarded);
     let mut aside = ctx.saved["series"][s.label()]["set_aside_launches"].as_u64().unwrap_or(2 * discarded.len() as u64);
     // Whether anything the series compares moves with load: only then is a pair worth running again.
     let load_moves = moved_by_load(s, &[]) || secondary_names(s, script, true).iter().any(|m| load_metric(m));
@@ -5177,12 +5178,10 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 // but a pattern: it stays. What the retries took out is kept (`Burst`) and the paired
                 // tests count it, so no pattern washes out of them.
                 let (bb, hb) = (&blocks[idx[0]], &blocks[idx[1]]);
-                let Some(apart) = foreign_apart(bb, hb).filter(|d| d.abs() >= burst_at) else { break };
-                let seen_before =
-                    discarded.iter().map(|x| x.apart).chain(pairs.iter().filter_map(|&(a, b)| foreign_apart(&blocks[a], &blocks[b])).filter(|d| d.abs() >= burst_at)).any(|d| d * apart > 0.0);
-                if seen_before || discarded.len() >= BURST_RETRIES || !load_moves || share.is_some_and(|t| Instant::now() >= t) {
-                    break;
-                }
+                let apart = match retries.decide(bb, hb, discarded.len(), load_moves, share.is_none_or(|t| Instant::now() < t)) {
+                    retry::Decision::Keep(_) => break,
+                    retry::Decision::Replace(apart) => apart,
+                };
                 let foreign = |b: &Block| b.values.get("cpu.foreign.max").copied().unwrap_or(f64::NAN);
                 let steal = |b: &Block| b.values.get("steal.pct").copied();
                 discarded.push(Burst { pair, base: foreign(bb), head: foreign(hb), apart, base_steal: steal(bb), head_steal: steal(hb) });

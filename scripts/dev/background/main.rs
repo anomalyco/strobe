@@ -3,7 +3,13 @@
 mod cases;
 mod followups;
 mod surfaces;
+#[path = "../converge/rows.rs"]
+mod converge;
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--converge") {
+        converge::run();
+        return;
+    }
     if let Some(dir) = std::env::args_os().nth(2).filter(|_| std::env::args().nth(1).as_deref() == Some("--fixed")) {
         cases::fixed(std::path::Path::new(&dir));
         return;
