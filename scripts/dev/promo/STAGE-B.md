@@ -1,15 +1,15 @@
 # Stage B: headless support evidence
 
-**Result: four Linux cells passed on v0.39.0 (`929d2700`). The matrix labels 24 cells verified, 20 core.** Four pre-existing command labels still need review under the new watches; the branch is not ready to land. No command labels or stamps changed. The matrix check before extending `WATCH` passed (114 rows on 6 hosts).
+**Result: 26 verified cells, 20 core, on this branch.** Round two added Linux page launch and script HTTP to the four Linux cells verified in round one. Neither new cell is core. No Windows cell passed the load rule. No command label or review stamp changed. Keep user-facing labels off until every cell in the headless starter set is verified on all three primary systems, not until a numerical quota is met.
 
 | Host | Before (total / core¹) | Short list excluding commands | After (total / core¹) |
 |---|---:|---:|---:|
 | Windows x64 desktop | 4 / 4 | 6 | 4 / 4 |
-| Linux x64 VM, two unpinned vCPUs | 6 / 6 | 4 | 10 / 9 |
+| Linux x64 VM, two unpinned vCPUs | 6 / 6 | 4 | 12 / 9 |
 | macOS arm64 laptop | 10 / 7 | 4 | 10 / 7 |
-| Total | 20 / 17 | 14 | 24 / 20 |
+| Total | 20 / 17 | 14 | 26 / 20 |
 
-¹ `Capability::core()` counts wall and counts, page engine, process CPU, process memory and terminal grid. The original 16-cell plan (including both command wall-time cells) also counted page launch toward its **headless cohort**: its projected 33 in that cohort would have been only 30 `CORE` cells. The gate of 31 core cells is not met.
+¹ `Capability::core()` counts wall and counts, page engine, process CPU, process memory and terminal grid. The short list excludes the optional terminal and probe batches. The totals include them.
 
 ## Candidate cells
 
@@ -17,7 +17,7 @@ Each host in a row needs **its own** four readings. Commands are expanded below.
 
 | Runtime · capability | Host | Batch | Known answer | A/A metric | Planted A/B | Boundary | Why repeat | Watch group |
 |---|---|---|---|---|---|---|---|---|
-| `chromium_page · launch` | Windows | L | ready difference 200 ms ±3 | `launch.ready` | 200 → 400 ms | `launch.painted`: `Headless` | attach rewrite `7c01e766` | L |
+| `chromium_page · launch` | Windows | L | start/end marks 200 and 400 ms ±0.5; ready 0–20 ms after end | `launch.ready` | paired shift covers +200 ms | `launch.painted`: `Headless` | attach rewrite `7c01e766` | L |
 | `chromium_page · launch` | Linux | L | same | same | same | same | same rewrite | L |
 | `chromium_page · launch` | macOS | L | same | same | same | same | same rewrite | L |
 | `chromium_page · wall_and_counts` | Windows | W | phases 2 × 10 and 40 ms; counts 7 and 5 exactly | `run.duration` | 100 → 200 ms | missing phase: `NoPhase` | prior A/A and A/B flagged; lean trace removed | W |
@@ -67,7 +67,7 @@ All cells depend on the common `WATCH` groups for paired statistics, warmup, blo
 - Windowless native CPU and memory were already verified on all three hosts. Linux native instruction counters still lack a proved counter-path refusal on the privileged VM; a guard on an unrelated metric is not a substitute.
 - The extra headless batches use `known/tty.bench.ts` (`--filter keys --aa --target keys`, `--filter spaced --base keys --head keys-80`, `--filter ready --aa --target ready-500`, `--filter ready --base ready-200 --head ready-500`); check `overrun-120` and `ready --primary launch.painted` separately. Watch the terminal launch, tracker, latency pairing and block reducer. For `http-probe.bench.ts` use the fixture's token/hash setup, `--filter planted --aa --target probe-slow` and `--filter planted --base probe-fast --head probe-slow`; `status-500` must refuse latency. Watch the probe and `http_state`. This proves nothing about an HTTP probe in a different runtime.
 
-## Release results
+## Round one: release results
 
 All values here are from the v0.39.0 executables, not the earlier rehearsal. Times are ms, intervals are percent change. A blank comparison means **not measured**, not `same`.
 
@@ -95,6 +95,54 @@ For page wall and engine, the independent warm control was `P --head . --blocks 
 | Terminal launch | 208.68 → 508.30, Δ299.63/300 | `NotForTarget` on painted launch | no pairs |
 | Script HTTP | 21.77 → 61.77, Δ40.00/40 | `RunIncomplete` on HTTP 500 | no pairs |
 
-Windows comparisons are reserved for the desktop's operator. No display state was changed. The macOS host was offline: no known answer, A/A, A/B or refusal was measured for its four page candidates or the optional terminal/probe batches. Do not transfer evidence between OSes.
+Round one did not run Windows comparisons. No display state was changed. The macOS host was offline: no known answer, A/A, A/B or refusal was measured for its four page candidates or the optional terminal/probe batches. Do not transfer evidence between OSes.
 
 The command watch additions expose omissions in four **existing review explanations**, not new post-review clock changes: Windows CPU and memory omit `jobs`; Linux CPU omits `Release`; Linux memory omits both `Release` and `Launch`. No review stamp was written.
+
+## Round two: release results
+
+All measurements used v0.39.0 (`929d2700`), including the checks with the revised fixtures. Preserve the round-one attempts above. For launch, subtract the two page milestones **within each launch**, then compare `launch.ready` across **matched pairs**. The unpaired 195.61 ms reading had a standard error of about 4.4 ms; it was not a clock calibration. The absolute paired intervals below use the signed-rank interval on the pairwise head-minus-base differences, not a conversion of the percentage interval.
+
+| Linux cell | Known answer (ms) | A/A, % [95% interval] | Planted A/B | Boundary | Decision |
+|---|---|---|---|---|---|
+| Page launch | marks 200.30 / 400.20; ready 9.40 / 4.20 after end | 40 pairs, −0.10 [−0.87, +0.92], same | 252.29 → 451.17 ms; paired +198.95 [194.02, 204.26] ms covers +200; +79.33 [76.69, 82.11]% | `launch.painted`: `Headless`, exit 4, no value | **Verified** |
+| Script HTTP | 20.469 / 60.527 for 20 / 60; 15 probes each, no timeout | 8 pairs, +0.005 [−0.047, +0.106], same | 16 pairs, 20.451 → 60.492 ms; +40.040 ms, +195.90 [195.55, 196.20]% covers +195.634% | `status-500`: `RunIncomplete`, no p50 after 3 invalid replies in 9 | **Verified** |
+| Page CPU | 2006.40 / 2000; zero-loop 0.486 | `RunIncomplete` | `RunIncomplete`, no estimate | `cpu.wakes`: `NotForTarget` | Preview until ended-process edge accounting is fixed and both pairs run |
+
+The warm HTTP control was `--blocks 8 --runs 2 --filter planted --target probe-fast`: 20.44634575 ms, giving `100 × 40 / 20.44634575 = 195.634%`. This is in the original 8-pair interval [195.47, 196.15], **not** the original 16-pair interval [195.74, 196.25]. The separate 16-pair confirmation above covers it. The two promotions had zero flagged kept blocks in their A/A and A/B. Round-two raw records: `launch-known`, `launch-boundary`, `launch-long-aa`, `launch-long-ab`, `http-warm`, and the final `http-confirm` in the Linux v0.39.0 batch.
+
+### Windows: readings under load, not promotions
+
+All eight A/A primaries read `same (±2%)`. The instrument did not establish clean-pair agreement for any of them. The load column gives **machine CPU % at A/A and A/B start**, then **flagged kept blocks in A/A and A/B**. A low starting load does not establish a clean run. No repeats were selected to discard a busy result.
+
+| Cell | Known answer (ms unless noted) | A/A, % [95% interval] | A/B: difference in ms; % [95% interval] vs independent truth | Boundary | Start load; flagged blocks |
+|---|---|---|---|---|---|
+| Page launch | marks 200.20 / 400.00; ready 9.70 / 3.70 later | +0.03 [−0.09, +0.35] | 220.89 → 417.99; paired +197.32 [195.57, 198.93] **misses +200 ms**; +89.18 [87.61, 90.30]% | `Headless` on painted | 23.2 / 21.9%; 31/48, 24/48 |
+| Script wall | 301.29 for 300 + call | −0.024 [−0.102, +0.052] | +149.96; +99.206 [99.125, 99.290] vs +99.127% | `NoPhase` | 19.5 / 14.2%; 5/24, 5/24 |
+| Script CPU | 301.06 for 300 | +0.090 [−0.143, +0.161] | +150.06; +97.73 [97.23, 100.13] vs +97.70% | `NotForTarget` on wakes/IO | 9.5 / 31.7%; 3/24, 14/24 |
+| Page engine | 100.43 for 100; 25 layouts and 25 styles | +0.028 [−0.026, +0.133] | +100.01; +99.44 [99.30, 99.56] vs +99.406% | `NotForTarget` on eval script time | 20.5 / 39.4%; 13/24, 17/24 |
+| Page CPU | 2003.98 vs 2016 OS (−0.60%); median ended count 0 | −0.150 [−0.771, +0.708] | +95.30; +100.68 [97.36, 102.34] vs +99.90%; half-width 2.49 pp | `NotForTarget` on wakes | 21.0 / 42.4%; 17/24, 3/24 |
+| Terminal grid | 20.660 for 20; 10 frames and 400 cells | +0.015 [−0.096, +0.124] | +59.98; +290.87 [289.83, 292.44] vs +290.42% | `AmbiguousInteraction` | 44.0 / 55.7%; 10/16, 3/16 |
+| Terminal launch | 208.675 → 508.301; +299.626 for +300 | −0.061 [−0.191, +0.045] | +299.72; +142.99 [142.56, 143.41] **misses +143.76%** | `NotForTarget` on painted | 0.5 / 0.0%; 1/24, 0/24 |
+| Script HTTP | 21.766 / 61.768 for 20 / 60; no timeout | +0.002 [−0.059, +0.119] | +40.07; +184.58 [184.06, 185.14] vs +184.554% | `RunIncomplete` on HTTP 500 | 9.7 / 16.7%; 9/24, 11/24 |
+| Page wall/counts | counts 7 / 5; no phase or wall value | not run | not run | `NoPhase`; `Throttled` with display off | skipped: needs awake display and truthful refused-primary check |
+
+The first three-run `cpu2s` check, before changing the fixture, read 2016.69 vs 2000 OS ms (start load 9.9%). With both snapshots untimed, the three-run median read 2003.98 vs 2016 OS ms (start 51.3%). Both recover the known answer within 2%. Neither substitutes for qualified fixed-work pairs.
+
+Independent controls (start load): script-a 151.32143 wall / 153.53680 CPU ms (16.8%); page-a 100.59750 main-work ms (24.2%); work-1x 92.64765 CPU ms (48.6%) and work-0 0.09204 (47.1%); probe-fast 21.673875 ms (15.9%). The marked launch check started at 21.6%, its refusal at 49.0%. For terminal known answers and non-launch boundaries see the release checks above. The script wall A/A illustrates why warnings matter: its JSON primary says `same`, but its load warning says the measured CPUs were too busy to call wall time the same.
+
+**Watch result:** the added phase, count, trace-window, windowless, terminal pairing, event and selector helpers did not trip a verified cell. The new Linux launch and probe records also have their own watches. Only the four earlier command review explanations above fail the matrix check.
+
+### When the Mac returns
+
+Use the fixture checkout with the marks and a binary with a recorded release or commit. Take and release the host slot around **each** invocation. `P` and `W` below are the paths defined above; `T=scripts/dev/known/tty.bench.ts`, `H=scripts/dev/http-probe.bench.ts`. Prefix each command with `strobe bench` and expand the file abbreviation. Use `--power keep --reserve-cpus off --why never`. Compile `scripts/dev/known/known.rs` with `rustc -O` to a scratch `KNOWN_BIN` before the terminal batch. No headed or GPU work is requested.
+
+| Mac cell | Commands (semicolon separates invocations) |
+|---|---|
+| Page wall and engine | `W --headless --head . --check --runs 3 --filter phases,spin100,layout`; `W --headless --head . --check --filter phases --primary phase.absent`; `P --headless --head . --blocks 8 --runs 3 --filter page --target page-a`. For **each** `M=run.duration` and `M=main.work`: `W --headless --head . --aa --filter spin100 --primary M --pairs 12 --runs 3`; `P --headless --filter page --base page-a --head page-b --primary M --pairs 12 --runs 3`. Check counts 7/5 and 25/25; check `main.script` refused on eval. |
+| Page CPU | `W --headless --head . --check --filter cpu2s --runs 3`; `W --headless --head . --check --filter spin100 --primary cpu.wakes`; `P --headless --head . --check --filter page-work --target work-0 --runs 3`; `P --headless --head . --blocks 8 --runs 3 --filter page-work --target work-1x`; `P --headless --head . --aa --filter page-work --target work-1x --pairs 12 --runs 3`; `P --headless --filter page-work --base work-1x --head work-2x --pairs 12 --runs 3`. |
+| Page launch | Run both L checks above. Run both L comparisons with `--pairs 40`. Read both mark widths, the ready-minus-end times and the signed-rank interval on the paired absolute changes. |
+| Terminal grid and launch | `T --head . --check --filter keys,ready,overrun-120 --runs 3`; `T --head . --check --filter ready --target ready-500 --primary launch.painted`; `T --head . --aa --filter keys --pairs 8 --runs 2`; `T --filter spaced --base keys --head keys-80 --pairs 8 --runs 2`; `T --head . --aa --filter ready --target ready-500 --pairs 12`; `T --filter ready --base ready-200 --head ready-500 --pairs 12`. |
+| Script HTTP | With the fixture's private `HTTP_PROBE_TOKEN_FILE` and `HTTP_PROBE_TOKEN_SHA256` (SHA-256 of `Bearer ` plus the trimmed token), run `H --head . --check --filter planted,status-500`; `H --head . --blocks 8 --runs 2 --filter planted --target probe-fast`; `H --head . --aa --filter planted --target probe-slow --pairs 8 --runs 2`; `H --filter planted --base probe-fast --head probe-slow --pairs 16 --runs 2`. Compare with `4000 / warm_fast_ms` percent. |
+
+The **starter gate** requires the command (wall, CPU, memory), script (wall, CPU), page (wall, engine) and windowless native (CPU, memory) paths on each primary OS. Do not use unrelated launch, HTTP or headed cells to make up the numbers. Mac script and windowless-native evidence already exists. After the command planner lands, also run **Restore macOS verification** in its `scripts/dev/cli-plan/PLAN.md` on the planner binary: planner and leftover checks; `cli-spin`, `cli-alloc`, `cli-io` check/A/A/A/B; separate `cli-spin` wall-time A/A/A/B; `tree,orphan,breakaway-left` checks. Command measurements and labels remain with that package.
