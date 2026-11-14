@@ -633,32 +633,29 @@ const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
     reviewed_at: Some("6659e57b"),
     reviewed_why: Some(CHANGES_CLI_CLOCK),
 };
-// Run again at 737544c5: a command's CPU now takes its launch cgroup's where that covers more.
 const LINUX_CLI_CPU_RUN: Evidence = Evidence {
-    date: "2026-11-13",
-    version: "737544c5",
-    machine: "Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal)",
+    date: "2026-11-14",
+    version: "f40ec86f",
+    machine: "Linux x64 virtual machine",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "cpu.work 302.4 ms vs 300 ms plus a 2.3 ms launch and tree 1205.7 ms vs 1200 ms; planted Δ 149.98 ms and 600.21 ms vs 150 and 600 ms",
-    aa: "known spin 300 against itself, 8 pairs: cpu.work −0.02% [−0.13 … +0.08], same (±2%)",
-    planted: "spin 150 to spin 300: 152.30 to 302.28 ms, +98.5% [+98.2 … +98.6] for +98.49% with the 2.3 ms launch; tree 3 × 200 to 3 × 400: 605.84 to 1206.06 ms, +99.05% [+98.92 … +99.13] for +99.04%",
+    known: "302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers",
+    aa: "spin 300, 8 pairs: −0.046% [−0.136 … +0.087], same (±2%)",
+    planted: "spin 150 to 300: 155.51 to 304.93 ms, +96.22% [+95.31 … +96.99]; tree 3 × 200 to 3 × 400: 608.61 to 1208.73 ms, +98.59% [+98.50 … +98.74]",
     boundary: "a process left running at the command's exit (orphan, breakaway-left) refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(
-        "At 8fcc3d0 exec changes the refusal hint only. Owned::run_to_exit and stamped_with reject ended or wrongly stamped candidates and keep the nonzero start on Windows; the fixtures leave no live helper except the intentionally refused orphan and breakaway-left. The successful runs take the same clocks and read the same cycles, cgroup CPU and peak. At 9e35da42 exec and block record command load outside SelfCost's observer cycles, disarm failed spawns and pass usage and inter-run command CPU after exit, spawn_group and windows invoke a no-op release hook before before_ns and started when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; command timestamps, rusage/job/cgroup CPU, peak memory and leftover refusals are unchanged. At 6659e57b windows calls pin_child on the suspended child before first_of and clocks and ends the child if SetProcessAffinityMask fails; valid launches keep the same affinity, release timestamps, accounting and leftover refusals.",
-    ),
+    reviewed_at: None,
+    reviewed_why: None,
 };
 const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
-    date: "2026-11-13",
-    version: "v0.31.0",
-    machine: "Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal)",
+    date: "2026-11-14",
+    version: "f40ec86f",
+    machine: "Linux x64 virtual machine",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB",
-    aa: "known alloc 100 300 against itself: memory.peak +0.02% [−0.01 … +0.09], same (±2%)",
-    planted: "alloc 50 to alloc 100: 51.99 to 101.99 MiB, +96.20% [+95.96 … +96.39] for +96.18%",
+    known: "202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB",
+    aa: "alloc 100, 8 pairs: +0.008% [−0.092 … +0.084], same (±2%)",
+    planted: "alloc 50 to 100: 52.07 to 102.12 MiB, +96.09% [+95.73 … +96.41]",
     boundary: "a 4 MiB peak, under strobe's own resident set the child inherits, refused NotOnThisOs; a process left running refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
+    reviewed_at: None,
+    reviewed_why: None,
 };
 const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged.";
 const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
