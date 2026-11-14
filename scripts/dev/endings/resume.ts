@@ -11,7 +11,7 @@ const exe = process.env.STROBE_BIN ?? "strobe"
 const scratch = mkdtempSync(join(tmpdir(), "compare-checkpoint-"))
 const env = { ...process.env, LOCALAPPDATA: scratch, XDG_DATA_HOME: scratch, ...(process.platform === "darwin" ? {HOME:scratch} : {}) }
 const run = (args: string[]) => Bun.spawnSync([exe, ...args], { timeout: 90000, env })
-const seedRun = run(["bench", "scripts/dev/endings/rows.bench.ts", "--base", "git:HEAD^", "--head", ".", "--filter", "ok", "--primary","run.duration", "--pairs", "2", "--runs", "1", "--why", "never", "--json"])
+const seedRun = run(["bench", "scripts/dev/endings/rows.bench.ts", "--base", "git:HEAD^", "--head", ".", "--filter", "slow", "--primary","run.duration", "--pairs", "2", "--runs", "1", "--why", "never", "--json"])
 assert.equal(seedRun.exitCode,0,seedRun.stdout.toString())
 const seed = JSON.parse(seedRun.stdout.toString())
 const home = dirname(dirname(seed.result)), label = seed.series[0].label

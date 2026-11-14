@@ -473,7 +473,7 @@ function checkSurfaces(r: J, handle: string = r.id) {
           }
           if (i >= 0) {
             const next = lines[i + 1] ?? ""
-            const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested$/ : /Inconclusive|Unconfirmed/
+            const want = refused ? /Refused/ : role === "descriptive" ? /Context$/ : c.warned && (k === "same" || k === "no_worse") ? /Needs confirmation$/ : k === "better" || k === "worse" ? new RegExp(`Confirmed ${(c.hi < 0) !== higher(s, c) ? "better" : "worse"}$|False positive$`) : k === "same" ? /Same \(/ : k === "no_worse" ? /No worse/ : k === "untested" ? /Not tested$/ : /Inconclusive|Unconfirmed/
             if (!want.test(next)) flagIt("CRIT", `html ${where}`, `outcome "${next}" for verdict_kind ${k}`)
             // A time's absolute bound, drawn again in the unit shown (`Same (±40.0 µs)`).
             else if ((k === "same" || k === "no_worse") && vText(c) !== c.verdict && !next.includes(tTime(c.bound))) flagIt("CRIT", `html ${where}`, `outcome "${next}", where ${UNIT} prints its bound ${tTime(c.bound)}`)
