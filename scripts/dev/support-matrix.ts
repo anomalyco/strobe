@@ -478,7 +478,7 @@ const CASES: Case[] = [
     built(`tier: Support::Preview, runtime: Runtime::Cli, capability: Capability::ProcessCpu, host: Host::WindowsArm64, preview_by: vec![Cause::Architecture]`),
     "preview (cli · process CPU on Windows arm64: runtime checks held; verified on Windows x64 only)",
   ],
-  ["status windows", `status_summary(Host::WindowsX64).line()`, "verified on Windows x64: windowless native (process CPU, process memory), cli (process CPU, process memory) · 82 more paths preview"],
+  ["status windows", `status_summary(Host::WindowsX64).line()`, "verified on Windows x64: windowless native (process CPU, process memory), script (wall time and counts), cli (process CPU, process memory) · 81 more paths preview"],
   ["status linux arm64", `status_summary(Host::LinuxArm64).line()`, "every path is preview on Linux arm64: known answers are checked on Linux x64 only"],
 ]
 
@@ -971,6 +971,8 @@ export const WATCH: Watch[] = [
       "src/host/spawn.rs#nt_resume",
       "src/host/spawn.rs#impl Spawned",
       "src/host/spawn.rs#Owned::spawn_span",
+      "src/host/spawn.rs#Owned::released_ns",
+      "src/host/spawn.rs#Owned::creation_ns",
       "src/host/spawn.rs#Owned::run_to_exit",
       "src/host/mod.rs#tsc",
       "src/host/mod.rs#thread_cycles",
@@ -997,6 +999,8 @@ export const WATCH: Watch[] = [
     why: "the cli cells' boundary: what a command left running is found by its group (Unix), its job (Windows) or the stamp it inherited (a process that broke away), and exec refuses the run RunIncomplete; how leftovers are then ended (end_left) refuses nothing",
   },
   { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["windows"], spans: ["src/host/win.rs#thread_cycles"], why: "Windows: the launching thread's cycles, cli.launch's CPU" },
+  { cells: ["cli · *"], os: ["windows"], spans: ["src/host/jobs.rs"], why: "the job's exit readings and the live-member check that refuses a command that left a process running" },
+  { cells: ["cli · *"], os: ["linux"], spans: ["src/host/spawn.rs#impl Release", "src/host/cgroup.rs#impl Launch"], why: "the child's pre-exec clock stamp after migration, the launch cgroup's CPU at exit and its members still running at the command's boundary" },
   { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["linux"], spans: ["src/host/linux.rs#thread_cycles"], why: "Linux: the launching thread's CPU, cli.launch's" },
   { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["macos"], spans: ["src/host/macos.rs#thread_cycles"], why: "macOS: the launching thread's CPU, cli.launch's" },
   {
@@ -1197,7 +1201,44 @@ export const WATCH: Watch[] = [
     spans: ["src/host/macos.rs#counts", "src/host/macos.rs#energy_counters"],
     why: "macOS: instructions, cycles and energy from proc_pid_rusage's v6 record",
   },
-  // ----- a headed page (chromium_page frames and input latency) -----
+  {
+    cells: ["script · http_probe"],
+    spans: ["src/probe/http_probe.rs", "src/app/bench.rs#http_state", "src/app/bench.rs#retain_probe_context", "src/app/bench.rs#main_probes", "src/app/bench.rs#probing", "src/runner.rs#Runner::call", "src/runner.rs#Runner::exchange", "src/runner.rs#Runner::ask_http", "src/runner.rs#Runner::after_setup", "src/runner.rs#Runner::http_probe", "src/runner.rs#Runner::stop_http", "src/runner.rs#Runner::take_http"],
+    why: "selecting probe blocks, stamping run windows, scheduling and timing requests, and withholding latencies for invalid responses",
+  },
+  // ----- a headless page -----
+  {
+    cells: ["chromium_page · launch"],
+    spans: ["src/app/bench/launch.rs#block", "src/app/bench/launch.rs#once", "src/app/bench/launch.rs#observer", "src/app/bench/launch.rs#arm", "src/app/bench/launch.rs#impl Attacher", "src/app/bench/launch.rs#impl Watch", "src/app/bench/launch.rs#impl Observer", "src/app/bench/launch.rs#impl Preload", "src/app/bench/launch.rs#is_page", "src/app/bench/launch.rs#const CLOCK_SLACK_MS", "src/app/bench/launch.rs#page_marks", "src/app/bench/launch.rs#milestones", "src/app/bench/launch.rs#pattern", "src/app/bench/launch.rs#refusals", "src/driver.rs#const HELPER", "src/target/a11y/mod.rs#Selector::parse", "src/target/a11y/mod.rs#Selector::page_spec", "src/target/web.rs#WebPage::start_navigation", "src/target/isolate.rs#epoch_ms", "src/app/bench.rs#target_refusal", "src/app/bench.rs#headless_of", "src/app/bench.rs#headless_target", "src/validity.rs#display_metric"],
+    why: "arming the selector before navigation, reading page marks and ready on the launch clock, and refusing painted launch without a display",
+  },
+  {
+    cells: ["chromium_page · wall_and_counts", "chromium_page · page_engine"],
+    spans: ["src/app/bench.rs#run_chunk", "src/app/bench.rs#headless_of", "src/app/bench.rs#headless_target", "src/app/bench.rs#headless_state", "src/app/bench.rs#side_windowless", "src/app/bench.rs#windowless_as", "src/app/bench.rs#windowless_target", "src/app/bench/launch.rs#app_windowless", "src/driver.rs#Driver::dispatch", "sdk/bench/src/runner.ts#@const page = {", "src/metrics.rs#read", "src/probe/trace.rs"],
+    why: "the lean page's run edges, trace selection, CDP Performance counters and the refusal of script time on page.eval; phase cases can also need traced run marks",
+  },
+  {
+    cells: ["chromium_page · wall_and_counts"],
+    spans: ["src/app/bench.rs#phase_ms", "src/app/bench.rs#phase_state", "src/app/bench.rs#const COUNT_SCRIPT", "src/driver.rs#Driver::mark", "src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks", "src/metrics.rs#phase_stretches", "src/metrics.rs#doc_mark_script", "src/metrics.rs#mark_windows", "src/metrics.rs#stretches", "src/metrics.rs#windows_sql", "src/metrics.rs#impl BlockData"],
+    why: "the phase edges and counted occurrences of a page run, reduced to its measured spans, and NoPhase for a phase the run did not enter",
+  },
+  { cells: ["chromium_page · page_engine"], spans: ["src/app/bench.rs#const WORK_PARTS"], why: "the CDP counter names and scales for layout and style work and counts" },
+  {
+    cells: ["tty · tty_grid", "tty · launch"],
+    spans: ["src/target/tty.rs#read_loop", "src/target/tty.rs#cells", "src/target/tty.rs#impl Tracker", "src/target/tty.rs#impl Grid", "src/target/tty.rs#impl Tty"],
+    why: "the PTY read stamps, grid changes, synchronized frames and bytes; the terminal publishes its committed grid and the stamp of the change that made it ready",
+  },
+  {
+    cells: ["tty · tty_grid"],
+    spans: ["src/app/bench/tty.rs#chunk", "src/app/bench/tty.rs#event_values", "src/app/bench/tty.rs#impl EventWatches", "src/driver/tty.rs#impl Driver", "src/driver/tty.rs#impl Input", "src/driver/tty.rs#impl Tty", "src/driver/tty.rs#key_bytes", "src/driver/tty.rs#owed_until", "src/driver/tty.rs#latencies", "src/driver/tty.rs#pair", "src/driver/tty.rs#pair_observing", "src/driver/tty.rs#pairings", "src/driver/tty.rs#answered", "src/driver/tty.rs#changes", "src/driver/tty.rs#ambiguous", "src/driver/tty.rs#const QUIET", "src/driver/tty.rs#const ANSWER_MAX", "src/metrics.rs#percentile"],
+    why: "the send, pairing a key to one committed update and reducing its latencies; the same path withholds ambiguous samples when input outruns replies",
+  },
+  {
+    cells: ["tty · launch"],
+    spans: ["src/app/bench/tty.rs#launch_once", "src/app/bench/launch.rs#refusals", "src/target/tty.rs#open", "src/target/tty.rs#start", "src/driver/tty.rs#find", "src/driver/tty.rs#pick", "src/driver/tty.rs#parse_sel"],
+    why: "from release to the first grid showing the selector: finding it, subtracting the two timestamps, and refusing window-only launch metrics",
+  },
+  { cells: ["tty · launch"], os: ["linux"], spans: ["src/host/spawn.rs#spawn_owned_terminal", "src/host/spawn.rs#impl Release", "src/host/spawn.rs#Owned::released_ns"], why: "the PTY child's actual release instant, stamped after cgroup and affinity setup" },
   {
     cells: ["chromium_page · frames", "chromium_page · input_latency"],
     spans: [

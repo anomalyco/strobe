@@ -585,20 +585,22 @@ const LINUX_WEBKIT: &str = "WPE ran headless --check; WebKitGTK under a virtual 
 // What the promotion runs left preview (2026-11-12 and -13, strobe 0.31.0 and the Mac's builds).
 const WIN_FLAGGED_AA: &str =
     "its known answer and planted A/B pass, but none of its 15 or more A/As ran without a block flagged Background (other work on the measured CPUs, win-promo-2): run the A/A on a quiet machine";
-const WIN_PAGE_FLAGGED: &str = "re-verify scripts/dev/known-web.bench.ts (--check and --aa --headless) and planted.bench.ts --filter page --headless on 0.33.0 or later, on a quiet machine: on 0.31.0 the known answers passed, but no A/A (12 attempts) or planted A/B (11) ran without a block flagged Background (win-promo-2), and ebc9eeaf has since stopped tracing a headless lean block";
-const WIN_PAGE_CPU_FLAGGED: &str = "re-verify scripts/dev/known-web.bench.ts (--check and --aa --headless) and planted.bench.ts --filter page-work --headless on 0.33.0 or later, on a quiet machine: on 0.31.0 cpu2s read 2051.6 ms against the OS's 2031 ms, but no A/A or planted A/B ran without a block flagged Background (win-promo-2), the plant spun on wall time, and ebc9eeaf has since stopped tracing a headless lean block, whose CPU cpu.work counted";
+const WIN_PAGE_WALL: &str =
+    "0.39.0 had no display-off phase.b value (Throttled). With the corrected check endings, verify the refusal and run the phase check and paired comparisons with the display awake";
+const WIN_PAGE_ENGINE: &str = "100.43 ms for 100 ms and 25 layouts/styles; other work flagged 13 of 24 A/A and 17 of 24 A/B blocks. Needs qualifying quiet main.work pairs";
+const WIN_SCRIPT_CPU: &str = "301.06 ms for 300 ms; other work flagged 3 of 24 A/A and 14 of 24 A/B blocks. Needs qualifying quiet cpu.work pairs";
+const WIN_SCRIPT_HTTP: &str = "the planted interval overlaps the warm control range [+184.36 … +185.24]%, but other work flagged 9 of 24 A/A and 11 of 24 A/B blocks. Needs quiet probe pairs";
+const WIN_PAGE_CPU_FLAGGED: &str =
+    "with untimed OS snapshots cpu2s read 2003.98 ms vs 2016 ms. Needs quiet fixed-work pairs: 17 of 24 A/A and 3 of 24 A/B blocks flagged, with no clean-pair confirmation";
 const LINUX_CLI_WALL: &str = "a command's run.duration reads 15 to 18 ms more than the command took: strobe's clock starts before the launch cgroup's set-up and the child's move into it (linux-promo-6); its A/A and planted A/B pass";
-const TTY_LATENCY: &str = "with keys sent faster than the program answers, tty.latency takes the next key's answer and prints a wrong latency as valid (an 80 ms answer read 24.7 ms on Windows, 50 ms read 0.17 ms on Linux: win-promo-4, linux-promo-5)";
-const WIN_TTY_LAUNCH: &str = "ready-0 to ready-300 read Δ 298.6 ms for 300 ms, but the ready-300 A/A stayed unclear after 40 pairs (−0.3% [−8 … +0.2])";
-const LINUX_TTY_LAUNCH: &str =
-    "ready-0 to ready-300 read Δ 303.4 ms for 300 ms, 0.4 ms outside ±1.5 ms per edge (the fixture's timer slack and a launch clock that starts early, linux-promo-6); its A/A and A/B pass";
-const LINUX_CHROMIUM_CPU: &str = "every part passed at 0.00% steal (cpu2s 2007.1 ms for 2000 ms, planted +98.39% [+96.90 … +99.70] for +98.30%), but the plant spins on wall time: it needs a fixed-work page (planted.bench.ts --filter page-work)";
+const TTY_LATENCY: &str = "the 20 ms answer, grid counts and overrun refusal passed. Needs quiet keys A/A and spaced A/B: the gated plant stopped at 7 pairs with 2 of 14 blocks flagged";
+const WIN_TTY_LAUNCH: &str = "the unflagged 12-pair shift +300.08 ms [299.55 … 300.56] covers +300 ms. Needs a qualifying ready-500 A/A; 0.39.0 did not judge its 11 clean pairs separately";
+const LINUX_CHROMIUM_CPU: &str =
+    "cpu2s read 2006.4 ms for 2000 ms. Both 0.39.0 fixed-work comparisons refused RunIncomplete despite a launch cgroup; rerun page-work A/A and A/B with the corrected 0.41.0 process edges";
 const LINUX_NATIVE_COUNTERS: &str = "burst-1x to burst-2x read cpu.instructions +99.81% [+99.68 … +100.31] for +99.82% and its A/A same, but no refusal of the counter path is seen on this VM (root), and the one seen in --check is wrong (linux-promo-2)";
-const WIN_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on 0.31.0 it read Δ 200.3 ms for 200 ms";
-const LINUX_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on 0.31.0 it read Δ 202.9 ms for 200 ms";
+const WIN_PAGE_LAUNCH: &str =
+    "the 200 ms plant waited longer for the ready frame during cold startup; the paired shift [195.57 … 198.93 ms] missed +200 ms. Needs the 400/600 ms marked check and quiet pairs";
 const MAC_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on e93fc36 launch-0 to launch-200 read Δ 201.5 ms for 200 ms";
-const LINUX_HEADLESS_WALL: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on 0.31.0 phase.b read 41.8 ms for 40 ms and the planted Δ 100.06 ms for 100 ms";
-const LINUX_HEADLESS_ENGINE: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on 0.31.0 main.work read 121.6 ms for 120 ms and the planted +98.80% for +98.75%";
 const MAC_HEADLESS_WALL: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 phase.b read 40.6 ms for 40 ms and the planted Δ 100.10 ms for 100 ms";
 const MAC_HEADLESS_ENGINE: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 main.work read 100.2 ms for 100 ms and the planted +99.87% for +99.68% to +99.98%";
 const MAC_HEADLESS_CPU: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page-work --headless after ebc9eeaf: a headless lean block takes no Chrome trace, whose CPU the page's cpu.work counted; on e93fc36 cpu2s read 2011 ms for 2000 ms and the planted +100.3% [+99.8 … +100.8]";
@@ -658,6 +660,22 @@ const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     boundary: "a 4 MiB peak, under strobe's own resident set the child inherits, refused NotOnThisOs; a process left running refused RunIncomplete",
     reviewed_at: Some("657edc41"),
     reviewed_why: Some(CHANGES_CLI_PLAN),
+};
+const CHANGES_WARNED_COMPARE: &str = "At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const CHANGES_LINUX_PAGE_STAGE_B: &str = "At 439d2152 and bc8f1c70 run_chunk initializes Block::shelled to false and Block::shell_reasons to empty on page blocks; at 3fadfdc7 run_chunk refreshes Linux EndedMarks via starting before t0, outside the run's wall edges, trace marks, counts and CDP Performance counters, and leaves warmup selection unchanged on runs without a pre-t0 helper exit race; at eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const CHANGES_LINUX_PAGE_LAUNCH: &str = "At 439d2152, bc8f1c70 and 7d696e6e target_refusal validates cli command lines only; at 6626fc7b and 0be69524 target_refusal adds cross-engine frame, dark-display check and unsupported-metric guards that leave url launch.ready measurement and headless launch.painted Headless refusal unchanged; at eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const CHANGES_LINUX_SCRIPT_HTTP: &str = "At 439d2152 Runner::exchange preserves usage exit code 2 on error replies without changing HTTP probe scheduling, timestamps, untimed windows or RunIncomplete refusals; at eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const WIN_SCRIPT_WALL_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Windows 11 x64 desktop",
+    fixture: "scripts/dev/known/planted.bench.ts",
+    known: "script.bench.ts spin read run.duration 301.29 ms for a 300 ms spin plus the host call",
+    aa: "script-a, 8 pairs: −0.029% [−0.124 … +0.081], same (±2%); no kept block flagged",
+    planted: "script-a to script-b, 8 pairs: paired shift +149.933 ms [149.733 … 150.442] covers +150 ms; no kept block flagged",
+    boundary: "no-phase in refused-series.bench.ts refused NoPhase without a value",
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_WARNED_COMPARE),
 };
 const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged. At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
 const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
@@ -829,11 +847,84 @@ const LINUX_NATIVE_MEMORY_RUN: Evidence = Evidence {
     reviewed_why: Some(CHANGES_LINUX_NATIVE_ENDED),
 };
 
+const LINUX_PAGE_WALL_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
+    fixture: "scripts/dev/known-web.bench.ts",
+    known: "phase.b 41.69 ms for 40 ms and phase.a 23.02 ms for twice 10 ms; counts 7 and 5 exact",
+    aa: "spin100, 12 pairs: run.duration +0.09% [−0.06 … +0.25], same (±2%)",
+    planted: "planted.bench.ts page-a to page-b: paired shifts +100.08 ms [99.93 … 100.24] in 12 pairs and +100.04 ms [99.94 … 100.13] in 32 pairs both cover +100 ms; no kept block flagged",
+    boundary: "phase.absent requested in phases: NoPhase; no measured run entered it",
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_PAGE_STAGE_B),
+};
+const LINUX_PAGE_ENGINE_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
+    fixture: "scripts/dev/known-web.bench.ts",
+    known: "spin100 main.work 101.29 ms for 100 ms; layout.count and style.count both 25 for 25 forced layouts",
+    aa: "spin100, 12 pairs: main.work −0.04% [−0.18 … +0.21], same (±2%)",
+    planted: "planted.bench.ts page-a to page-b, 12 pairs: main.work shift +100.05 ms [99.93 … 100.18] for +100 ms; no kept block flagged",
+    boundary: "main.script refused NotForTarget on spin100 because the run calls page.eval",
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_PAGE_STAGE_B),
+};
+const LINUX_TTY_GRID_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
+    fixture: "scripts/dev/known/tty.bench.ts",
+    known: "keys read 20.22 ms for a 20 ms answer; 10 frames, 400 cells and 620 bytes exact",
+    aa: "keys, 8 pairs: tty.latency.p50 −0.03% [−0.07 … +0.11], same (±2%)",
+    planted: "spaced, keys to keys-80, 8 pairs: paired shift +60.021 ms [59.993 … 60.050] for +60 ms; no kept block flagged",
+    boundary: "overrun-120 refused tty.latency.p50 with AmbiguousInteraction when a later input arrived before its predecessor's answer",
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_WARNED_COMPARE),
+};
+const LINUX_PAGE_LAUNCH_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
+    fixture: "scripts/dev/known/planted.bench.ts",
+    known: "launch.ready 257.17 and 443.34 ms; plant_start 47.47 and 38.94 ms, marked spans 200.30 and 400.20 ms, ready 9.40 and 4.20 ms after plant_end",
+    aa: "launch-400, 40 pairs: launch.ready −0.10% [−0.87 … +0.92], same (±2%)",
+    planted: "launch-200 to launch-400, 40 pairs: 252.29 to 451.17 ms, paired shift +198.95 ms [194.02 … 204.26] for +200 ms; +79.33% [+76.69 … +82.11], no kept block flagged",
+    boundary: "launch.painted refused Headless before the headless launch, exit 4 with no value",
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_PAGE_LAUNCH),
+};
+const LINUX_SCRIPT_HTTP_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
+    fixture: "scripts/dev/http-probe.bench.ts",
+    known: "http.latency.p50 read 20.47 and 60.53 ms for 20 and 60 ms delays; 15 probes per side with no timeouts",
+    aa: "probe-slow, 8 pairs: +0.005% [−0.047 … +0.106], same (±2%)",
+    planted: "probe-fast to probe-slow, +40 ms: the 8-block fast control [20.397 … 20.526] ms implies [+194.88 … +196.11]%; all three relative intervals overlap it: [+195.47 … +196.15]% (8 pairs), [+195.74 … +196.25]% and [+195.55 … +196.20]% (16 pairs each). Paired shifts +40.013, +40.042 and +40.045 ms; no kept block flagged",
+    boundary: "status-500 refused http.latency.p50 with RunIncomplete after 3 invalid responses in 9 probes; no latency value",
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_LINUX_SCRIPT_HTTP),
+};
+const LINUX_TTY_LAUNCH_RUN: Evidence = Evidence {
+    date: "2026-11-14",
+    version: "v0.39.0",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
+    fixture: "scripts/dev/known/tty.bench.ts",
+    known: "ready-200 and ready-500 read 201.28 and 501.22 ms; difference 299.94 ms for 300 ms planted",
+    aa: "ready-500, 12 pairs: launch.ready −0.002% [−0.021 … +0.008], same (±2%)",
+    planted: "ready-200 to ready-500, 12 pairs: paired shift +299.995 ms [299.322 … 300.094] for +300 ms; one pair retried, no kept block flagged",
+    boundary: "launch.painted on ready-500 refused NotForTarget: a terminal has no window of its own",
+    reviewed_at: Some("cf3c6775"),
+    reviewed_why: Some(CHANGES_WARNED_COMPARE),
+};
+
 /// Every path strobe can run, with its support on each OS's primary architecture. A runtime and
 /// capability with no row is not measured for that kind of target (strobe refuses `NotForTarget`).
 pub const SUPPORT_MATRIX: &[Row] = &[
-    Row { runtime: Runtime::ChromiumPage, capability: Capability::WallAndCounts, windows: Preview(WIN_PAGE_FLAGGED), macos: Preview(MAC_HEADLESS_WALL), linux: Preview(LINUX_HEADLESS_WALL) },
-    Row { runtime: Runtime::ChromiumPage, capability: Capability::PageEngine, windows: Preview(WIN_PAGE_FLAGGED), macos: Preview(MAC_HEADLESS_ENGINE), linux: Preview(LINUX_HEADLESS_ENGINE) },
+    Row { runtime: Runtime::ChromiumPage, capability: Capability::WallAndCounts, windows: Preview(WIN_PAGE_WALL), macos: Preview(MAC_HEADLESS_WALL), linux: Verified(&LINUX_PAGE_WALL_RUN) },
+    Row { runtime: Runtime::ChromiumPage, capability: Capability::PageEngine, windows: Preview(WIN_PAGE_ENGINE), macos: Preview(MAC_HEADLESS_ENGINE), linux: Verified(&LINUX_PAGE_ENGINE_RUN) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::ProcessCpu, windows: Preview(WIN_PAGE_CPU_FLAGGED), macos: Preview(MAC_HEADLESS_CPU), linux: Preview(LINUX_CHROMIUM_CPU) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::ProcessMemory, windows: Preview(PAGE_MEMORY), macos: Preview(MAC_UNRUN), linux: Preview(PAGE_MEMORY) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_UNRUN), linux: Preview(COUNTERS_UNRUN) },
@@ -843,7 +934,7 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::ChromiumPage, capability: Capability::InputLatency, windows: Preview(WIN_INPUT), macos: Verified(&MAC_INPUT_RUN), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::Gpu, windows: Preview(GPU_TRUTH), macos: Preview(GPU_TRUTH), linux: Preview(NO_DISPLAY) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::Pixels, windows: Preview(PIXELS), macos: Preview(MAC_UNRUN), linux: Preview(NO_DISPLAY) },
-    Row { runtime: Runtime::ChromiumPage, capability: Capability::Launch, windows: Preview(WIN_PAGE_LAUNCH), macos: Preview(MAC_PAGE_LAUNCH), linux: Preview(LINUX_PAGE_LAUNCH) },
+    Row { runtime: Runtime::ChromiumPage, capability: Capability::Launch, windows: Preview(WIN_PAGE_LAUNCH), macos: Preview(MAC_PAGE_LAUNCH), linux: Verified(&LINUX_PAGE_LAUNCH_RUN) },
     Row { runtime: Runtime::ChromiumPage, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
     Row { runtime: Runtime::FirefoxPage, capability: Capability::WallAndCounts, windows: Preview(FIREFOX), macos: Preview(MAC_FIREFOX), linux: Preview(FIREFOX) },
     Row { runtime: Runtime::FirefoxPage, capability: Capability::PageEngine, windows: Preview(FIREFOX), macos: Preview(MAC_FIREFOX), linux: Preview(FIREFOX) },
@@ -945,13 +1036,13 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::NativeWindowless, capability: Capability::Gpu, windows: Preview(GPU_TRUTH), macos: Preview(GPU_TRUTH), linux: Preview(GPU_TRUTH) },
     Row { runtime: Runtime::NativeWindowless, capability: Capability::Launch, windows: Preview(LAUNCH), macos: Preview(LAUNCH), linux: Preview(LAUNCH) },
     Row { runtime: Runtime::NativeWindowless, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
-    Row { runtime: Runtime::Script, capability: Capability::WallAndCounts, windows: Preview(WIN_FLAGGED_AA), macos: Verified(&MAC_SCRIPT_WALL_RUN), linux: Verified(&LINUX_SCRIPT_WALL_RUN) },
+    Row { runtime: Runtime::Script, capability: Capability::WallAndCounts, windows: Verified(&WIN_SCRIPT_WALL_RUN), macos: Verified(&MAC_SCRIPT_WALL_RUN), linux: Verified(&LINUX_SCRIPT_WALL_RUN) },
     Row { runtime: Runtime::Script, capability: Capability::PageEngine, windows: Preview(SCRIPT_ENGINE), macos: Preview(SCRIPT_ENGINE), linux: Preview(SCRIPT_ENGINE) },
-    Row { runtime: Runtime::Script, capability: Capability::ProcessCpu, windows: Preview(WIN_FLAGGED_AA), macos: Verified(&MAC_SCRIPT_CPU_RUN), linux: Verified(&LINUX_SCRIPT_CPU_RUN) },
+    Row { runtime: Runtime::Script, capability: Capability::ProcessCpu, windows: Preview(WIN_SCRIPT_CPU), macos: Verified(&MAC_SCRIPT_CPU_RUN), linux: Verified(&LINUX_SCRIPT_CPU_RUN) },
     Row { runtime: Runtime::Script, capability: Capability::ProcessMemory, windows: Preview(SCRIPT_MEMORY), macos: Preview(MAC_SCRIPT_MEMORY), linux: Preview(SCRIPT_MEMORY) },
     Row { runtime: Runtime::Script, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_SCRIPT_COUNTERS), linux: Preview(LINUX_SCRIPT_COUNTERS) },
     Row { runtime: Runtime::Script, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
-    Row { runtime: Runtime::Script, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
+    Row { runtime: Runtime::Script, capability: Capability::HttpProbe, windows: Preview(WIN_SCRIPT_HTTP), macos: Preview(MAC_UNRUN), linux: Verified(&LINUX_SCRIPT_HTTP_RUN) },
     Row { runtime: Runtime::Cli, capability: Capability::WallAndCounts, windows: Preview(WIN_FLAGGED_AA), macos: Preview(MAC_CLI_PLAN), linux: Preview(LINUX_CLI_WALL) },
     Row { runtime: Runtime::Cli, capability: Capability::ProcessCpu, windows: Verified(&WIN_CLI_CPU_RUN), macos: Preview(MAC_CLI_PLAN), linux: Verified(&LINUX_CLI_CPU_RUN) },
     Row { runtime: Runtime::Cli, capability: Capability::ProcessMemory, windows: Verified(&WIN_CLI_MEMORY_RUN), macos: Preview(MAC_CLI_PLAN), linux: Verified(&LINUX_CLI_MEMORY_RUN) },
@@ -961,8 +1052,8 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::Tty, capability: Capability::ProcessMemory, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
     Row { runtime: Runtime::Tty, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_UNRUN), linux: Preview(COUNTERS_UNRUN) },
     Row { runtime: Runtime::Tty, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
-    Row { runtime: Runtime::Tty, capability: Capability::TtyGrid, windows: Preview(TTY_LATENCY), macos: Preview(MAC_UNRUN), linux: Preview(TTY_LATENCY) },
-    Row { runtime: Runtime::Tty, capability: Capability::Launch, windows: Preview(WIN_TTY_LAUNCH), macos: Preview(MAC_UNRUN), linux: Preview(LINUX_TTY_LAUNCH) },
+    Row { runtime: Runtime::Tty, capability: Capability::TtyGrid, windows: Preview(TTY_LATENCY), macos: Preview(MAC_UNRUN), linux: Verified(&LINUX_TTY_GRID_RUN) },
+    Row { runtime: Runtime::Tty, capability: Capability::Launch, windows: Preview(WIN_TTY_LAUNCH), macos: Preview(MAC_UNRUN), linux: Verified(&LINUX_TTY_LAUNCH_RUN) },
     Row { runtime: Runtime::Tty, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
 ];
 

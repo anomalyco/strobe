@@ -9499,6 +9499,12 @@ ran it, the machine, the fixture, and what was planted against what strobe read;
 checked that way on that OS; `—`: strobe refuses it there. Off the primary architecture (Windows
 arm64, macOS x64, Linux arm64) every cell is preview.
 
+For an additive plant, use the paired 95% signed-rank interval on `head − base` in the metric's own
+unit. Alternatively propagate the independent control's interval: for a positive increment Δ and
+baseline interval [L, H] above zero, the expected relative change spans [Δ/H, Δ/L]. Compare the
+intervals for overlap, not a sampled control value as if it were exact. State the method and any
+fixture tolerance before collecting comparisons. Report all attempts.
+
 A verified cell holds only for the code that produced its numbers. `support-matrix.ts --check` (CI
 runs it, with the whole history) compares the code that computes each verified cell (its `WATCH` spans,
 items with their attributes and modifiers) at the evidence's build, or at the commit a person reviewed
@@ -9513,8 +9519,8 @@ verified line exact.
 
 | Runtime · capability | Windows x64 | macOS arm64 | Linux x64 |
 |---|---|---|---|
-| `chromium_page` · `wall_and_counts` | preview | preview | preview |
-| `chromium_page` · `page_engine` | preview | preview | preview |
+| `chromium_page` · `wall_and_counts` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known-web.bench.ts`, phase.b 41.69 ms for 40 ms and phase.a 23.02 ms for twice 10 ms; counts 7 and 5 exact) |
+| `chromium_page` · `page_engine` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known-web.bench.ts`, spin100 main.work 101.29 ms for 100 ms; layout.count and style.count both 25 for 25 forced layouts) |
 | `chromium_page` · `process_cpu` | preview | preview | preview |
 | `chromium_page` · `process_memory` | preview | preview | preview |
 | `chromium_page` · `hardware_counters` | — | preview | preview |
@@ -9524,7 +9530,7 @@ verified line exact.
 | `chromium_page` · `input_latency` | preview | verified (2026-11-12, e93fc36, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, interaction.p50 Δ 149.8 ms vs 150 ms planted (click-150 over click-0)) | preview |
 | `chromium_page` · `gpu` | preview | preview | preview |
 | `chromium_page` · `pixels` | preview | preview | preview |
-| `chromium_page` · `launch` | preview | preview | preview |
+| `chromium_page` · `launch` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/planted.bench.ts`, launch.ready 257.17 and 443.34 ms; plant_start 47.47 and 38.94 ms, marked spans 200.30 and 400.20 ms, ready 9.40 and 4.20 ms after plant_end) |
 | `chromium_page` · `http_probe` | preview | preview | preview |
 | `firefox_page` · `wall_and_counts` | preview | preview | preview |
 | `firefox_page` · `page_engine` | preview | preview | preview |
@@ -9608,13 +9614,13 @@ verified line exact.
 | `native_windowless` · `gpu` | preview | preview | preview |
 | `native_windowless` · `launch` | preview | preview | preview |
 | `native_windowless` · `http_probe` | preview | preview | preview |
-| `script` · `wall_and_counts` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.10 ms vs 150 ms planted; spin 300.79 ms vs 300 ms + 0.7 ms call (its check on e93fc36)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.07 ms vs 150 ms planted; spin 301.7 ms vs 300 ms + 1.4 ms call) |
+| `script` · `wall_and_counts` | verified (2026-11-14, v0.39.0, Windows 11 x64 desktop, `scripts/dev/known/planted.bench.ts`, script.bench.ts spin read run.duration 301.29 ms for a 300 ms spin plus the host call) | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.10 ms vs 150 ms planted; spin 300.79 ms vs 300 ms + 0.7 ms call (its check on e93fc36)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, run.duration Δ 150.07 ms vs 150 ms planted; spin 301.7 ms vs 300 ms + 1.4 ms call) |
 | `script` · `page_engine` | preview | preview | preview |
 | `script` · `process_cpu` | preview | verified (2026-11-12, 964e825, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cpu.work 300.32 ms vs 300 ms (its check on e93fc36); planted 2x read +100.18% [+99.94 … +100.46]) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/planted.bench.ts`, cpu.work 300.65 ms vs 300 ms; planted 2x read +99.69% [+99.45 … +99.80] vs +99.65% at 0.00% steal) |
 | `script` · `process_memory` | preview | preview | preview |
 | `script` · `hardware_counters` | — | preview | preview |
 | `script` · `package_idle` | — | preview | — |
-| `script` · `http_probe` | preview | preview | preview |
+| `script` · `http_probe` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/http-probe.bench.ts`, http.latency.p50 read 20.47 and 60.53 ms for 20 and 60 ms delays; 15 probes per side with no timeouts) |
 | `cli` · `wall_and_counts` | preview | preview | preview |
 | `cli` · `process_cpu` | verified (2026-11-14, 5a52552f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 304.75 ms for 300 ms of CPU; +150 ms plant read +150.02 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
 | `cli` · `process_memory` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
@@ -9624,8 +9630,8 @@ verified line exact.
 | `tty` · `process_memory` | preview | preview | preview |
 | `tty` · `hardware_counters` | — | preview | preview |
 | `tty` · `package_idle` | — | preview | — |
-| `tty` · `tty_grid` | preview | preview | preview |
-| `tty` · `launch` | preview | preview | preview |
+| `tty` · `tty_grid` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/tty.bench.ts`, keys read 20.22 ms for a 20 ms answer; 10 frames, 400 cells and 620 bytes exact) |
+| `tty` · `launch` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/tty.bench.ts`, ready-200 and ready-500 read 201.28 and 501.22 ms; difference 299.94 ms for 300 ms planted) |
 | `tty` · `http_probe` | preview | preview | preview |
 | OS input (`OS_INPUT`) | preview | preview | preview |
 | a page measured from outside (`OUTSIDE_PAGE`) | preview | preview | preview |

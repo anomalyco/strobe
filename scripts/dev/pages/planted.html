@@ -37,11 +37,13 @@ function work(n) { let x = 1; for (let i = 0; i < n; i++) x = (Math.imul(x, 1664
 if (q.has("work")) for (let i = 0; i < 20; i++) work(1e6)
 window.known = { spin, work }
 setTimeout(() => {
+  if (q.has("delay")) performance.mark("plant_start")
   spin(num("delay"))
   const main = document.createElement("main")
   main.id = "ready"
   main.textContent = "ready"
   document.body.append(main)
+  if (q.has("delay")) performance.mark("plant_end")
 }, 0)
 if (q.has("vsyncs")) {
   const box = document.getElementById("box")
