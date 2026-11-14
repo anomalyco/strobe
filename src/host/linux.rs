@@ -291,7 +291,15 @@ pub fn all_processes() -> Vec<ProcInfo> {
                     v.get(1).copied().unwrap_or(0).saturating_sub(v.get(2).copied().unwrap_or(0)) * page()
                 })
                 .unwrap_or(0);
-            ProcInfo { pid: s.pid, parent: s.ppid, name: name(&s), cpu_ns: s.cpu_ns, cycles: process_cpu_ns(s.pid).unwrap_or(0), private_bytes: private, threads: s.threads }
+            ProcInfo {
+                pid: s.pid,
+                parent: s.ppid,
+                name: crate::text::Identity::process(name(&s)),
+                cpu_ns: s.cpu_ns,
+                cycles: process_cpu_ns(s.pid).unwrap_or(0),
+                private_bytes: private,
+                threads: s.threads,
+            }
         })
         .collect()
 }

@@ -626,7 +626,7 @@ pub fn run(args: &Args) -> Result<Output> {
     let browser = match &mobile {
         Some(serial) => {
             let phone = crate::target::android_chrome::pick(serial)?;
-            progress(format!("look: {} {} ({})", phone.facts.manufacturer, phone.facts.model, phone.device.serial));
+            progress(format!("look: {} {} ({})", phone.facts.manufacturer, phone.facts.model, phone.device.label()));
             crate::target::android_chrome::launch(&phone, "look", false, Duration::ZERO)?
         }
         None => chromium::launch(&window, !args.has("headed"), None, &[])?,
@@ -917,7 +917,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     let started = Instant::now();
     let mut session = wir::Session::attach(target, false, timeout, super::stop_requested)?;
     let handle = session.page.handle.clone();
-    progress(format!("look {handle}"));
+    progress("looking at the selected page on the USB phone");
 
     let mut problems: Vec<String> = Vec::new();
     let mut raw_console: Vec<wir::ConsoleEntry> = Vec::new();
@@ -968,7 +968,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
             }
             _ => {
                 return Err(Error::usage(format!("--element {:?}: no visible element matches it", sel.source))
-                    .hint(format!("strobe look {handle} lists the headings and text; a selector is CSS, then role=, text=, index=")));
+                    .hint("strobe look with the same target lists the headings and text; a selector is CSS, then role=, text=, index="));
             }
         }
     } else if args.has("full") {

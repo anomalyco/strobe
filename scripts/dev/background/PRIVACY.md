@@ -1,5 +1,14 @@
 # Other processes in measurement diagnostics
 
+## The measured phone
+
+| Identity reader | Consumers | Private use | Diagnostic boundary |
+| --- | --- | --- | --- |
+| `Adb::devices` (`devices-l`), `ANDROID_SERIAL`, `--mobile`, `Adb::pick` | selection, `Device::transport`, forward/reverse, shell/sync and disconnect | exact USB serial or wireless address on the adb wire; inventory and restore journals | count and transport when selection fails; a run-local device number when several are attached. Never echo the wire request or a server's `device '<serial>' not found`. |
+| `Device::hardware_serial`, `facts::read` (`ro.serialno`, `ro.boot.serialno`) | USB/Wi-Fi dedup, phone slot, dedicated channel, calibration key; `phone_timed`, thermal/cool/wake, browser GPU errors | exact key in owner-only state; measured model/transport distinguish phones without that key | store cause, reading, device label and fix; never print the speed-reference key in a refusal. |
+| `ios::list` (`SerialNumber`), `short_udid`, WIR listing | pairing, session, target selection, disconnect, page handle, `look`/`record`, `status` | full or shortened UDID for routing, owner inventory and local metadata | counts and USB/Wi-Fi in errors; recording summaries use model/transport, not the short ID. |
+| `args.flags.mobile`, metadata `phone`, WIR target handles | rerun commands, query, report templates and embedded HTML | machine-local device selector and recording metadata | shareable report copies omit identity fields, replace selector arguments, and scrub known IDs in derived display strings before rendering. |
+
 Read this table from left to right when changing an identity reader. A PID used to check ownership is **not** permission to print it. A refusal becomes stored prose through `Error` / `Refusal` → bench warnings, series or block `refused`, recording notes, and `progress`. Query and report can render those fields much later with no access to the original machine. Only `live_progress` checks the selected stream and bypasses `progress.log`.
 
 | Reader | Callers | Sink and boundary |

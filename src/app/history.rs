@@ -29,6 +29,16 @@ pub fn query(args: &Args) -> Result<Output> {
 
 /// The series a handle names: one id or prefix, a bench file (every series of it), or all of them.
 fn select(which: Option<&str>) -> Result<Vec<Series>> {
+    let mut series = select_raw(which)?;
+    for s in &mut series {
+        for p in &mut s.points {
+            super::pr::safe_diagnostics(p);
+        }
+    }
+    Ok(series)
+}
+
+fn select_raw(which: Option<&str>) -> Result<Vec<Series>> {
     let Some(w) = which else { return Ok(history::list()) };
     if w.starts_with("ser_") {
         return Ok(history::load(&history::resolve(w)?).into_iter().collect());

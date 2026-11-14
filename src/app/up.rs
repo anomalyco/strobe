@@ -180,7 +180,7 @@ pub(super) fn android_lines(list: &Result<Vec<host::adb::Summary>>) -> Vec<(&'st
             .iter()
             .map(|s| {
                 // A phone (not an emulator) runs --mobile only in a channel given to strobe there.
-                let given = s.facts.as_ref().filter(|f| f.emulator.is_none()).map(|f| crate::target::android_chrome::given(&host::adb::key_of(&f.serial, f.hardware_serial.as_deref())));
+                let given = s.facts.as_ref().filter(|f| f.emulator.is_none()).map(|f| crate::target::android_chrome::given(&f.key()));
                 let channel = match &given {
                     Some(g) if g.is_empty() => format!(" · no Chrome channel given to strobe (strobe up --mobile={} --channel canary)", s.listed.serial),
                     Some(g) => format!(" · strobe's: {}", crate::target::android_chrome::names(g)),

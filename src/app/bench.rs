@@ -805,7 +805,7 @@ fn note_ended_launch(warnings: &mut Vec<validity::Warning>, s: &Series, ms: f64)
     ));
 }
 
-#[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
+#[derive(Clone, Default, Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Block {
     pub variant: String,
@@ -822,7 +822,7 @@ pub struct Block {
     /// Wall time of each step of the block (ms), in order: where a bench's time goes.
     steps: Vec<(String, f64)>,
     /// The busiest processes outside strobe's own tree during the block: name and % of one core.
-    background: Vec<(String, f64)>,
+    background: Vec<(crate::text::Identity, f64)>,
     /// A leak run's growth verdicts and suspects (memory blocks only).
     #[serde(skip_serializing_if = "Option::is_none")]
     leak: Option<Value>,
@@ -1816,16 +1816,17 @@ fn split_core(pin: Option<u64>) -> bool {
 /// The busiest processes during a series' blocks with other work, for the progress (never a
 /// published note): each name once, at its most.
 fn busiest_during(blocks: &[Block]) -> String {
-    let mut most: BTreeMap<&str, f64> = BTreeMap::new();
+    let mut most: BTreeMap<crate::text::Identity, f64> = BTreeMap::new();
     for b in blocks.iter().filter(|b| b.values.get("cpu.foreign.max").is_some_and(|f| *f >= BACKGROUND_PCT)) {
         for (n, p) in &b.background {
-            let e = most.entry(n.as_str()).or_insert(0.0);
+            let e = most.entry(n.clone()).or_insert(0.0);
             *e = e.max(*p);
         }
     }
-    let mut v: Vec<(&str, f64)> = most.into_iter().collect();
+    let mut v: Vec<_> = most.into_iter().collect();
     v.sort_by(|a, b| b.1.total_cmp(&a.1));
-    v.iter().take(3).map(|(n, p)| format!("{n} {p:.0}%")).collect::<Vec<_>>().join(", ")
+    v.truncate(3);
+    crate::text::Text::process_shares(&v).into_local()
 }
 
 /// What other work on the target's CPUs or a CPU quota moves by itself: times and CPU shares
@@ -2025,15 +2026,15 @@ struct Ctx<'a> {
 }
 
 /// Every block's reservation, merged for the experiment's context.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub struct ReserveTotal {
     cpus: u64,
     blocks: u32,
     /// Per name, the most of that executable one block moved.
-    moved: BTreeMap<String, u32>,
+    moved: BTreeMap<crate::text::Identity, u32>,
     moved_per_block: f64,
     started: u32,
-    failed: BTreeMap<String, String>,
+    failed: BTreeMap<crate::text::Identity, String>,
     restored: u32,
     /// Processes moved in all blocks together (each block counts its own).
     moved_total: u32,
@@ -2068,32 +2069,20 @@ impl ReserveTotal {
     /// Only the terminal version contains executable names.
     fn text(&self, names_live: bool) -> String {
         let cpus = cpu_list(self.cpus);
-        let mut top: Vec<(&String, &u32)> = self.moved.iter().collect();
-        top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        let names = top.iter().take(4).map(|(n, c)| if **c > 1 { format!("{n} ×{c}") } else { n.to_string() }).collect::<Vec<_>>().join(", ");
         let mut t = format!(
             "other processes of this user kept off CPUs {cpus} during {} timed block{}: {:.0} moved per block{}",
             self.blocks,
             if self.blocks == 1 { "" } else { "s" },
             self.moved_per_block,
-            if names_live && !names.is_empty() { format!(" ({names}{})", if top.len() > 4 { ", …" } else { "" }) } else { String::new() }
+            if names_live && !self.moved.is_empty() { crate::text::Text::reserve_moved(&self.moved).into_local() } else { String::new() }
         );
         if self.started > 0 {
             t += &format!(", {} more started during blocks and moved within 200 ms", self.started);
         }
         if !self.failed.is_empty() {
-            let mut by: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-            for (n, why) in &self.failed {
-                by.entry(why.as_str()).or_default().push(n.as_str());
-            }
-            let failed = by
-                .iter()
-                .map(|(why, names)| format!("{} ({why})", names.iter().take(4).copied().collect::<Vec<_>>().join(", ") + if names.len() > 4 { ", …" } else { "" }))
-                .collect::<Vec<_>>()
-                .join("; ");
             t += &format!("; could not move processes of {} distinct executable(s)", self.failed.len());
             if names_live {
-                t += &format!(": {failed}");
+                t += &format!(": {}", crate::text::Text::reserve_failed(&self.failed).local());
             }
         }
         let back = self.restored as f64 / self.moved_total.max(1) as f64;
@@ -2751,7 +2740,7 @@ pub fn run(args: &Args) -> Result<Output> {
         if !matches!(mode, Mode::Check | Mode::Pixels | Mode::Leak) {
             validity::phone_timed(&phone.facts)?;
         }
-        progress(format!("phone {} {} · Android {} · {}", phone.facts.manufacturer, phone.facts.model, phone.facts.android, phone.device.serial));
+        progress(format!("phone {} {} · Android {} · {}", phone.facts.manufacturer, phone.facts.model, phone.facts.android, phone.device.label()));
         ctx.phone = Some(phone);
     }
     ctx.runner.batch(batch.is_some());
@@ -6897,12 +6886,12 @@ fn growth(ys: &[f64], n: usize, bound: f64, show: &dyn Fn(f64) -> String) -> Val
 }
 
 /// What `Foreign::stop` read over a speed check.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 struct OtherWork {
     /// Other work on the target's CPUs (% of one core; None when unreadable).
     foreign: Option<f64>,
     /// The busiest processes on the machine but the browser's, as % of one core.
-    busiest: Vec<(String, f64)>,
+    busiest: Vec<(crate::text::Identity, f64)>,
     /// The hypervisor's steal on those CPUs (% of their time; Linux guests, `validity::Steal`).
     steal: Option<f64>,
     /// How far `foreign` can be off from the idle counters' resolution alone (% of one core; Linux).
@@ -6971,13 +6960,13 @@ impl Foreign {
                 let ours: std::collections::BTreeSet<u32> = host::tree_pids(me).into_iter().collect();
                 let skip: std::collections::BTreeSet<u32> = std::iter::once(me).chain(theirs.iter().map(|p| p.pid)).collect();
                 let before: BTreeMap<u32, u64> = self.procs.1.iter().map(|p| (p.pid, p.cycles)).collect();
-                let mut out: Vec<(String, f64)> = now
+                let mut out: Vec<_> = now
                     .1
                     .iter()
                     .filter(|p| p.pid != 0 && !skip.contains(&p.pid))
                     .map(|p| {
                         let whose = if ours.contains(&p.pid) { ", the bench's" } else { "" };
-                        (format!("{} ({}{whose})", p.name, p.pid), 100.0 * p.cycles.saturating_sub(before.get(&p.pid).copied().unwrap_or(0)) as f64 / span)
+                        (p.name.with_pid(p.pid, whose), 100.0 * p.cycles.saturating_sub(before.get(&p.pid).copied().unwrap_or(0)) as f64 / span)
                     })
                     .filter(|(_, pct)| *pct >= 5.0)
                     .collect();
@@ -7051,11 +7040,11 @@ fn native_speed(ctx: &mut Ctx, s: &Series, v: &Variant) -> Result<Option<f64>> {
 
 /// The three busiest processes outside strobe's own tree (the target, runner and servers) between two
 /// process snapshots, as % of one core, from 5% up.
-fn busiest_others(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>)) -> Vec<(String, f64)> {
+fn busiest_others(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>)) -> Vec<(crate::text::Identity, f64)> {
     let ours: std::collections::BTreeSet<u32> = host::tree_pids(std::process::id()).into_iter().collect();
     let before: BTreeMap<u32, u64> = a.1.iter().map(|p| (p.pid, p.cpu_ns)).collect();
     let span = b.0.saturating_sub(a.0).max(1) as f64;
-    let mut out: Vec<(String, f64)> =
+    let mut out: Vec<_> =
         b.1.iter()
             .filter(|p| p.pid != 0 && !ours.contains(&p.pid))
             .filter_map(|p| Some((p.name.clone(), 100.0 * p.cpu_ns.saturating_sub(*before.get(&p.pid)?) as f64 / span)))
@@ -7095,11 +7084,11 @@ fn vm_text(vm: &str, series: &[Value], unpinned: bool) -> String {
 /// The three busiest processes outside strobe's own tree between two snapshots, from 5% of one core up
 /// (one that started meanwhile counted from zero; one that also ended meanwhile is not seen): names for
 /// the progress (`run_load`).
-fn other_processes(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>)) -> Vec<(String, f64)> {
+fn other_processes(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>)) -> Vec<(crate::text::Identity, f64)> {
     let ours: std::collections::BTreeSet<u32> = host::tree_pids(std::process::id()).into_iter().collect();
     let before: BTreeMap<u32, u64> = a.1.iter().map(|p| (p.pid, p.cpu_ns)).collect();
     let span = b.0.saturating_sub(a.0).max(1) as f64;
-    let mut busiest: Vec<(String, f64)> =
+    let mut busiest: Vec<_> =
         b.1.iter()
             .filter(|p| p.pid != 0 && !ours.contains(&p.pid))
             .map(|p| (p.name.clone(), 100.0 * p.cpu_ns.saturating_sub(before.get(&p.pid).copied().unwrap_or(0)) as f64 / span))
@@ -7270,7 +7259,7 @@ pub fn measured_launch<T>(measured: bool, start: impl FnOnce() -> Option<T>) -> 
 }
 
 /// Use the measured runs only. An unread target is not a quiet CPU and not a foreign process.
-pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)>>, pinned: bool) -> Block {
+pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(crate::text::Identity, f64)>>, pinned: bool) -> Block {
     if loads.is_empty() {
         return b;
     }
@@ -7327,10 +7316,10 @@ pub fn run_load(mut b: Block, loads: &[RunLoad], named: Option<Vec<(String, f64)
 /// Whether a process the block names ran elsewhere: the reservation moved processes of that name
 /// (Linux: by its first 15 bytes, as the kernel keeps it) and could move every one of them (one it
 /// could not, an elevated one, stayed on the target's CPUs).
-fn moved_away(report: &host::reserve::Report, named: &str) -> bool {
-    let name = named.split(" (").next().unwrap_or(named);
-    let moved = report.moved.contains_key(name) || (cfg!(target_os = "linux") && report.moved.keys().any(|k| k.len() == 15 && name.starts_with(k.as_str())));
-    moved && !report.failed.contains_key(name)
+fn moved_away(report: &host::reserve::Report, named: &crate::text::Identity) -> bool {
+    let name = named.bare_process();
+    let moved = report.moved.contains_key(&name) || (cfg!(target_os = "linux") && report.moved.keys().any(|k| k.matches_comm(&name)));
+    moved && !report.failed.contains_key(&name)
 }
 
 /// What the screen was doing over a block or recording, for its meta and `query summary`: the
@@ -7340,7 +7329,7 @@ fn moved_away(report: &host::reserve::Report, named: &str) -> bool {
 pub(crate) fn screen_state(a: &(u64, Vec<host::ProcInfo>), b: &(u64, Vec<host::ProcInfo>)) -> Value {
     let before: BTreeMap<u32, u64> = a.1.iter().map(|p| (p.pid, p.cpu_ns)).collect();
     let span = b.0.saturating_sub(a.0).max(1) as f64;
-    let compositor = b.1.iter().filter(|p| host::COMPOSITORS.iter().any(|c| p.name.eq_ignore_ascii_case(c))).fold(None, |acc: Option<(String, f64)>, p| {
+    let compositor = b.1.iter().filter(|p| host::COMPOSITORS.iter().any(|c| p.name.matches_ascii(c))).fold(None, |acc: Option<(crate::text::Identity, f64)>, p| {
         let pct = 100.0 * p.cpu_ns.saturating_sub(before.get(&p.pid).copied().unwrap_or(p.cpu_ns)) as f64 / span;
         Some(match acc {
             Some((n, x)) => (n, x + pct),

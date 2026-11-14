@@ -341,11 +341,11 @@ pub fn memory_map(pid: u32) -> Option<MemoryMap> {
 }
 
 /// One process from a system snapshot.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
 pub struct ProcInfo {
     pub pid: u32,
     pub parent: u32,
-    pub name: String,
+    pub name: crate::text::Identity,
     /// Kernel + user time, in ns; the OS updates it per clock tick (15.6 ms on Windows).
     pub cpu_ns: u64,
     /// CPU cycles charged at context switches (`tsc` units), exact where `cpu_ns` is coarse.

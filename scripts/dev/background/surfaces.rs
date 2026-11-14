@@ -28,16 +28,20 @@ fn allowed(s: &str) {
 fn producers() -> Vec<String> {
     let private = |s: &str, k| Private::new(s.to_owned(), k);
     obstruction::window(&private(TITLE, PrivKind::WindowTitle), PID);
+    let phone = Private::device_id(SERIAL);
+    let label = strobe::text::Text::device_label(&phone, false, Some(2));
+    assert_eq!(label, "the phone (device 2)");
     vec![
+        validity::thermal_refusal(&label, "its battery is at 42 °C", "before the block").message(),
         obstruction::ancestor(&private(PATH, PrivKind::HostAncestor)),
         obstruction::unattributed(PID),
         obstruction::timer(16., &private(PATH, PrivKind::HostAncestor)),
         obstruction::running_browser("browser", &[PID]),
         obstruction::unverified_browser("browser", PID, "wrong image"),
         obstruction::foreign_launch(PID, "already open"),
-        obstruction::stay_awake(&format!("{PID}:712"), SERIAL),
-        obstruction::socket_holder(&private(NAME, PrivKind::ForeignProc), SERIAL),
-        obstruction::tab_count(&[private(URL, PrivKind::UrlSecret)], SERIAL),
+        obstruction::stay_awake(&format!("{PID}:712"), &Private::device_id(SERIAL)),
+        obstruction::socket_holder(&private(NAME, PrivKind::ForeignProc), &Private::device_id(SERIAL)),
+        obstruction::tab_count(&[private(URL, PrivKind::UrlSecret)], &Private::device_id(SERIAL)),
         obstruction::helper_pipe(&private(PATH, PrivKind::ForeignProc), PID, &private(SID, PrivKind::UserAccount)).into(),
     ]
 }
@@ -72,14 +76,16 @@ fn streams() {
 pub fn run() {
     let mut reserve = ReserveTotal::default();
     let mut sample = host::reserve::Report::default();
-    sample.moved.insert(NAME.into(), 12);
-    sample.failed.insert(NAME.into(), "OS declined".into());
+    sample.moved.insert(Private::process(NAME), 12);
+    sample.failed.insert(Private::process(NAME), "OS declined".into());
     reserve.add(&sample);
-    let detail = validity::speed_context(&[(format!("{NAME} ({PID})"), 75.)], Some(2.), true, |s| assert!(s.starts_with("  ") && s.contains(NAME) && s.contains(&PID.to_string())));
+    let detail = validity::speed_context(&[(Private::process(NAME).with_pid(PID, ""), 75.)], Some(2.), true, |s| assert!(s.starts_with("  ") && s.contains(NAME) && s.contains(&PID.to_string())));
     allowed(&detail);
     assert!(detail.contains("75%"));
     let home = std::env::temp_dir().join(format!("strobe-private-bench-{}", host::now_ns()));
     fs::create_dir(&home).unwrap();
+    let hist = std::process::Command::new(std::env::current_exe().unwrap()).env("LOCALAPPDATA", &home).env("XDG_DATA_HOME", &home).arg("--history-privacy").output().unwrap();
+    assert!(hist.status.success(), "history fixture: {}", String::from_utf8_lossy(&hist.stderr));
     let file = home.join("result.json");
     let path = file.to_str().unwrap();
     streams();
@@ -141,6 +147,8 @@ pub fn run() {
         }
         r["series"][0]["refused"]["fixture.legitimate"] = json!(LEGIT);
         r["series"][0]["label"] = json!("target.exe");
+        r["plan"]["mobile"] = json!(SERIAL);
+        r["args"]["flags"]["mobile"] = json!("192.0.2.42:5555");
         fs::write(&file, r.to_string()).unwrap();
         let query = Args::parse(vec!["query".into(), path.into(), "summary".into()]).unwrap();
         let answer = query::run(&query).unwrap();
@@ -169,6 +177,7 @@ pub fn run() {
             allowed(&result.text);
             let body = fs::read_to_string(out).unwrap();
             allowed(&body);
+            assert!(!body.contains("192.0.2.42"));
             if kind == "experiment" && matches!(format, "md" | "pr" | "summary") {
                 assert!(body.contains("12 kept launches + 4 set aside"), "retry count missing in {format}");
             }
@@ -177,8 +186,15 @@ pub fn run() {
         assert_eq!(stored, r);
     }
     let meta = home.join("meta.json");
-    let data = json!({"id":"rec_private_rows","kind":"native","background":[[NAME,75]],"insights":{"hits":[{"evidence":{"busiest":[[NAME,75]]}}]},"note":legacy[6],"unattributed":legacy[7]});
+    let own_path = "Privacy_Accessibility: turn on /fixture/strobe";
+    let data = json!({"id":"rec_private_rows","kind":"native","phone":{"short_udid":SERIAL,"udid":format!("full-{SERIAL}")},"background":[[NAME,75]],"insights":{"hits":[{"evidence":{"busiest":[[NAME,75]]}}]},"note":legacy[6],"unattributed":legacy[7],"frames_refused":legacy[8],"presents_refused":legacy[8],"os_frames":{"refused":legacy[8]},"care_note":legacy[8],"hint":own_path});
     fs::write(&meta, data.to_string()).unwrap();
+    let summary = query::run(&Args::parse(["query", meta.to_str().unwrap(), "summary"].map(str::to_string).to_vec()).unwrap()).unwrap();
+    allowed(&summary.text);
+    assert_eq!(summary.json["hint"], own_path);
+    for key in ["frames_refused", "presents_refused", "care_note", "os_frames"] {
+        allowed(&summary.json[key].to_string());
+    }
     for format in ["md", "html"] {
         let out = home.join("recording.txt");
         let args = Args::parse(["report", "recording", meta.to_str().unwrap(), "--format", format, "--out", out.to_str().unwrap()].map(str::to_string).to_vec()).unwrap();
@@ -188,4 +204,18 @@ pub fn run() {
     assert_eq!(serde_json::from_slice::<Value>(&fs::read(meta).unwrap()).unwrap(), data);
     fs::remove_dir_all(home).unwrap();
     println!("privacy fixture: terminal vs pipe, progress.log, result prose, legacy refusals, query summary/insights, six experiment formats, recording MD/HTML; owner-only lists unchanged");
+}
+
+pub fn history() {
+    let id = "ser_privacyfixture";
+    let legacy = format!("another window covers the point (1, 2): {TITLE:?} of process {PID}");
+    strobe::history::append(id, &json!({"t":"series","id":id,"label":"fixture","metric":"run.duration","unit":"ms"})).unwrap();
+    strobe::history::append(id, &json!({"t":"point","why":legacy,"notes":[legacy],"valid":false})).unwrap();
+    let args = |words: &[&str]| Args::parse(words.iter().map(|w| w.to_string()).collect()).unwrap();
+    let view = app::history::run(&args(&["history", id])).unwrap();
+    allowed(&view.text);
+    allowed(&view.json.to_string());
+    let out = strobe::history::dir().join("report.html");
+    app::history::report(&args(&["report", "history", id, "--out", out.to_str().unwrap()])).unwrap();
+    allowed(&fs::read_to_string(out).unwrap());
 }

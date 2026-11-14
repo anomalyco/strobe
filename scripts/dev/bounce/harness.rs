@@ -1257,7 +1257,7 @@ fn left_log() {
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let whole = |l: &str| {
         l.split_once(' ').is_some_and(|(s, rest)| {
-            s.parse::<u64>().is_ok() && rest.starts_with("pid ") && (rest.ends_with(": made three times in one invocation") || rest.ends_with(": one of many threads writing at once"))
+            s.parse::<u64>().is_ok() && matches!(rest, "a test note: made three times in one invocation" | "a test note: one of many threads writing at once")
         })
     };
     println!("8 threads x 200 notes: {} lines, {} not whole", text.lines().count(), text.lines().filter(|l| !whole(l)).count());

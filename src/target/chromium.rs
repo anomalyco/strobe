@@ -619,7 +619,7 @@ impl Browser {
         let what = format!(
             "{} on {} closed its DevTools connection when strobe asked for its GPU (SystemInfo.getInfo), as a Chrome whose GPU it cannot query does on every launch ({})",
             p.package,
-            p.facts.serial,
+            p.facts.label(),
             e.message.lines().next().unwrap_or("")
         );
         let fix = if p.facts.emulator.is_some() {

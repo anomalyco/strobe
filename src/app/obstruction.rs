@@ -1,6 +1,6 @@
 //! Details about a blocker are for the person at the terminal. Only the role or count goes back
 //! to the caller, even when progress is disabled or redirected to a log.
-use crate::text::{PrivKind, Private, Text};
+use crate::text::{Private, Text};
 
 fn diagnostic(text: Text) -> String {
     if text.is_marked() {
@@ -43,19 +43,19 @@ pub fn window(title: &Private<String>, pid: u32) {
     super::live_progress(crate::msg!("  covering window or element: {} (pid {})", title.quoted_or("another window"), pid).local());
 }
 
-pub fn tab_count(tabs: &[Private<String>], serial: &str) -> String {
+pub fn tab_count(tabs: &[Private<String>], serial: &Private<String>) -> String {
     if let Some(first) = tabs.first() {
-        super::live_progress(crate::msg!("  open tab on {}: {}", serial, first.quoted_or("a tab")).local());
+        super::live_progress(crate::msg!("  open tab on {}: {}", Text::device(serial, false), first.quoted_or("a tab")).local());
     }
     format!("{} tab{} a person opened", tabs.len(), if tabs.len() == 1 { "" } else { "s" })
 }
 
-pub fn socket_holder(holder: &Private<String>, serial: &str) -> String {
-    diagnostic(crate::msg!("{} holds Chrome's DevTools socket on {}", holder.redacted("another app"), Text::marked(serial, PrivKind::DeviceId, "the phone")))
+pub fn socket_holder(holder: &Private<String>, serial: &Private<String>) -> String {
+    diagnostic(crate::msg!("{} holds Chrome's DevTools socket on {}", holder.redacted("another app"), Text::device(serial, false)))
 }
 
-pub fn stay_awake(owner: &str, serial: &str) -> String {
-    super::live_progress(format!("  phone {serial} kept awake by strobe {owner}"));
+pub fn stay_awake(owner: &str, serial: &Private<String>) -> String {
+    super::live_progress(crate::msg!("  phone {} kept awake by strobe {}", Text::device(serial, false), owner).local());
     "another strobe keeps the phone awake".into()
 }
 

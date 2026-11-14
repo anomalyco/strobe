@@ -61,7 +61,31 @@ pub(crate) fn safe_diagnostics(v: &mut Value) {
                                 walk(reason);
                             }
                         }
-                    } else if matches!(k.as_str(), "text" | "summary" | "detail" | "error" | "why" | "message" | "verdict" | "fix" | "hint" | "unattributed" | "note") && x.is_string() {
+                    } else if k == "notes"
+                        && let Some(notes) = x.as_array_mut()
+                    {
+                        for note in notes {
+                            if note.is_string() { clean(note) } else { walk(note) }
+                        }
+                    } else if matches!(
+                        k.as_str(),
+                        "text"
+                            | "summary"
+                            | "detail"
+                            | "error"
+                            | "why"
+                            | "message"
+                            | "verdict"
+                            | "fix"
+                            | "hint"
+                            | "unattributed"
+                            | "note"
+                            | "refused"
+                            | "frames_refused"
+                            | "presents_refused"
+                            | "care_note"
+                    ) && x.is_string()
+                    {
                         clean(x);
                     } else if !matches!(k.as_str(), "background" | "moved" | "failed" | "values") {
                         walk(x);

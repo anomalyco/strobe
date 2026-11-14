@@ -8,16 +8,18 @@ use crate::model::{Error, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Facts {
-    pub serial: String,
+    #[serde(skip)]
+    ordinal: Option<usize>,
+    pub serial: crate::text::Identity,
     pub transport: Transport,
     pub manufacturer: String,
     pub model: String,
     /// `<manufacturer> <model>` of the SoC (Android 12+), else the board platform.
     pub soc: Option<String>,
     /// The hardware serial (`ro.serialno`): the same phone over USB and over Wi-Fi.
-    pub hardware_serial: Option<String>,
+    pub hardware_serial: Option<crate::text::Identity>,
     pub android: String,
     pub sdk: u32,
     pub fingerprint: String,
@@ -42,6 +44,18 @@ pub struct Facts {
     pub secure_lock: Option<bool>,
     /// `stay_on_while_plugged_in`: 1 AC, 2 USB, 4 wireless, 8 dock (`svc power stayon`).
     pub stay_on: Option<u32>,
+}
+
+impl Facts {
+    pub fn label(&self) -> String {
+        crate::text::Text::device_label(&self.serial, self.emulator.is_some(), self.ordinal)
+    }
+    pub fn key(&self) -> String {
+        super::key_of(self.serial.expose_local(), self.hardware_serial.as_ref().map(|s| s.expose_local().as_str()))
+    }
+    pub fn speed_key(&self) -> &str {
+        self.hardware_serial.as_ref().unwrap_or(&self.serial).expose_local()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -113,28 +127,29 @@ pub(super) fn read(d: &Device) -> Result<Facts> {
     // Valid or nothing: a device whose properties did not come back is not reported as a clean one.
     let sdk: u32 = p("ro.build.version.sdk").and_then(|s| s.parse().ok()).unwrap_or(0);
     if props.is_empty() || sdk == 0 || p("ro.build.fingerprint").is_none() {
-        return Err(Error::msg(format!("{}: could not read its system properties (getprop gave {} of them)", d.serial, props.len())).hint("check `adb shell getprop` on it"));
+        return Err(Error::msg(format!("{}: could not read its system properties (getprop gave {} of them)", d.label(), props.len())).hint("check `adb shell getprop` on it"));
     }
 
-    let emulator = emulator_evidence(&d.serial, &props);
+    let emulator = emulator_evidence(d.wire_id(), &props);
     let soc = match (p("ro.soc.manufacturer"), p("ro.soc.model")) {
         (Some(m), Some(n)) => Some(format!("{m} {n}")),
         (None, Some(n)) => Some(n.to_string()),
         _ => p("ro.board.platform").or(p("ro.hardware")).map(str::to_string),
     };
-    let transport = d.adb.devices().ok().and_then(|all| all.into_iter().find(|l| l.serial == d.serial)).map(|l| l.transport).unwrap_or_else(|| classify(&d.serial, false));
+    let transport = d.adb.devices().ok().and_then(|all| all.into_iter().find(|l| d.serial.matches(&l.serial))).map(|l| l.transport).unwrap_or_else(|| classify(d.wire_id(), false));
     let flag = |s: &str| match s.trim() {
         "1" | "true" => Some(true),
         "0" | "false" => Some(false),
         _ => None,
     };
     Ok(Facts {
+        ordinal: d.ordinal,
         serial: d.serial.clone(),
         transport,
         manufacturer: ps("ro.product.manufacturer"),
         model: ps("ro.product.model"),
         soc,
-        hardware_serial: p("ro.serialno").or(p("ro.boot.serialno")).map(str::to_string),
+        hardware_serial: p("ro.serialno").or(p("ro.boot.serialno")).map(crate::text::Identity::device_id),
         android: ps("ro.build.version.release"),
         sdk,
         fingerprint: ps("ro.build.fingerprint"),
@@ -183,7 +198,7 @@ fn emulator_evidence(serial: &str, props: &BTreeMap<String, String>) -> Option<S
         return Some(format!("ro.build.characteristics={}", p("ro.build.characteristics")));
     }
     if serial.starts_with("emulator-") {
-        return Some(format!("serial {serial}"));
+        return Some("emulator transport".into());
     }
     None
 }

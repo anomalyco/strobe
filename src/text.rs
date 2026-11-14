@@ -111,13 +111,19 @@ impl<T> Private<T> {
     /// The value itself, for what never becomes text: an OS call, a wire protocol, a comparison with
     /// another of this machine's names. Every use is listed in `scripts/privacy-check.ts`. The canary
     /// never touches it.
-    #[expect(dead_code, reason = "no reader needs to expose its private value")]
     pub(crate) fn expose_local(&self) -> &T {
         &self.0
     }
 }
 
 impl<T: AsRef<str>> Private<T> {
+    pub fn matches_ascii(&self, other: &str) -> bool {
+        self.0.as_ref().eq_ignore_ascii_case(other)
+    }
+
+    pub fn with_pid(&self, pid: u32, suffix: &str) -> Private<String> {
+        Private(format!("{} ({pid}{suffix})", self.0.as_ref()), self.1)
+    }
     /// Compare an OS identifier without handing out the private string.
     pub fn matches(&self, other: &str) -> bool {
         self.0.as_ref() == other
@@ -138,6 +144,25 @@ impl<T: AsRef<str>> Private<T> {
     pub fn tail_chars(&self, n: usize) -> Private<String> {
         let s = self.0.as_ref();
         Private(s.chars().skip(s.chars().count().saturating_sub(n)).collect(), self.1)
+    }
+}
+
+pub type Identity = Private<String>;
+impl Identity {
+    pub fn scrub_from(&self, s: &str) -> String {
+        if self.0.is_empty() { s.to_string() } else { s.replace(&self.0, "<device>") }
+    }
+    pub fn bare_process(&self) -> Self {
+        Self::process(self.0.split(" (").next().unwrap_or(&self.0))
+    }
+    pub fn matches_comm(&self, name: &Self) -> bool {
+        self.0.len() == 15 && name.0.starts_with(&self.0)
+    }
+    pub fn process(name: impl Into<String>) -> Self {
+        Self::new(name.into(), PrivKind::ForeignProc)
+    }
+    pub fn device_id(id: impl Into<String>) -> Self {
+        Self::new(id.into(), PrivKind::DeviceId)
     }
 }
 
@@ -417,6 +442,11 @@ impl Text {
     /// already says `the phone` and adds the id in parentheses, `Text::phone_id`.
     pub fn device(id: &Private<String>, emulator: bool) -> Text {
         id.redacted(if emulator { "the emulator" } else { "the phone" })
+    }
+
+    pub fn device_label(id: &Private<String>, emulator: bool, ordinal: Option<usize>) -> String {
+        let kind = Self::device(id, emulator).public().into_owned();
+        ordinal.map_or_else(|| kind.clone(), |n| format!("{kind} (device {n})"))
     }
 
     /// A phone's id in parentheses after the words `the phone` (`the phone{} is locked`): local ` (4D5E6F70)`,

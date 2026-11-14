@@ -340,7 +340,7 @@ fn native_drive() -> (bool, String) {
             grant.push(format!("accessibility to {app}: {}", host::macos::accessibility_pane()));
         }
         if !rec {
-            grant.push(format!("Screen Recording to {}: {}", host::macos::screen_recording_grantee(), host::macos::screen_recording_pane()));
+            grant.push(format!("Screen Recording to {}: {}", host::macos::recording_grantee(&app), host::macos::screen_recording_pane()));
         }
         let split = app != own && ax && !rec;
         let text = format!(

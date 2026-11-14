@@ -869,9 +869,7 @@ fn legacy_obstruction(line: &str) -> String {
     }
     // A new message may give strobe's own binary for a split grant. Only older messages
     // have the foreign grantee instead of its role. Keep the pane, URL and action on new reads.
-    if !line.contains("the app or daemon strobe runs under")
-        && (line.contains(" (the app strobe runs under)") || line.contains("macOS passes Device Control on from ") || (line.contains("Privacy_Accessibility") && line.contains("turn on ")))
-    {
+    if !line.contains("the app or daemon strobe runs under") && (line.contains(" (the app strobe runs under)") || line.contains("macOS passes Device Control on from ")) {
         return "check the app or daemon strobe runs under in System Settings › Privacy & Security; Screen Recording may need strobe's own binary".into();
     }
     if line.contains(" is running (pid ") && ["a WebDriver session", "that is your app", "isolated home of another strobe"].iter().any(|s| line.contains(s))

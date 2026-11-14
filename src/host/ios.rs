@@ -54,19 +54,18 @@ pub enum Connection {
 
 /// One entry of usbmuxd's device list. A phone on the cable that also syncs over Wi-Fi is two
 /// entries with one `udid`, each with its own `id`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Device {
     /// usbmuxd's handle for this attachment (changes on every replug).
     pub id: u64,
-    pub udid: String,
+    pub udid: crate::text::Identity,
     pub connection: Connection,
 }
 
 /// The id to show for a phone: the UDID's last 8 characters. A current UDID is
 /// `<8 hex chip id>-<16 hex ECID>`, so its first characters are the same for every phone of a model.
-pub fn short_udid(udid: &str) -> String {
-    let chars: Vec<char> = udid.chars().collect();
-    chars[chars.len().saturating_sub(8)..].iter().collect()
+pub fn short_udid(udid: &crate::text::Identity) -> crate::text::Identity {
+    udid.tail_chars(8)
 }
 
 // sockets and deadlines
@@ -298,7 +297,7 @@ pub fn list(deadline: Option<Instant>) -> Result<Vec<Device>> {
             Some("Network") => Connection::Network,
             _ => continue,
         };
-        out.push(Device { id, udid: udid.to_string(), connection });
+        out.push(Device { id, udid: crate::text::Identity::device_id(udid), connection });
     }
     Ok(out)
 }
@@ -325,9 +324,9 @@ pub struct PairRecord {
 }
 
 /// The pair record for `udid`. Err when this computer was never trusted by the device.
-pub fn pair_record(udid: &str, deadline: Option<Instant>) -> Result<PairRecord> {
+pub fn pair_record(udid: &crate::text::Identity, deadline: Option<Instant>) -> Result<PairRecord> {
     let mut f = Dictionary::new();
-    f.insert("PairRecordID".into(), udid.into());
+    f.insert("PairRecordID".into(), udid.expose_local().as_str().into());
     let (_, _, reply) = mux_request("ReadPairRecord", f, deadline)?;
     let Some(data) = reply.get("PairRecordData").and_then(Value::as_data) else {
         mux_result(&reply, "the pair record")?;
@@ -346,9 +345,13 @@ pub fn pair_record(udid: &str, deadline: Option<Instant>) -> Result<PairRecord> 
     })
 }
 
-fn not_paired(udid: &str, e: Error) -> Error {
-    Error::msg(format!("this computer is not trusted by the device ({})", e.message))
-        .hint(format!("unlock the phone ({}), plug it in and tap Trust, then enter its passcode; strobe never pairs by itself", short_udid(udid)))
+fn not_paired(udid: &crate::text::Identity, e: Error) -> Error {
+    live_phone(udid);
+    Error::msg(format!("this computer is not trusted by the device ({})", e.message)).hint("unlock the phone, plug it in and tap Trust, then enter its passcode; strobe never pairs by itself")
+}
+
+fn live_phone(udid: &crate::text::Identity) {
+    crate::app::live_progress(crate::msg!("  selected phone{}", crate::text::Text::phone_id(&short_udid(udid))).local());
 }
 
 // plist framing
@@ -834,10 +837,10 @@ pub fn battery(l: &mut Lockdown, diagnostics: bool) -> Battery {
 }
 
 /// One USB-attached, unlocked, trusted iOS device ready for service connections.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Connected {
     pub device: Device,
-    pub udid: String,
+    pub udid: crate::text::Identity,
     pub product_type: Option<String>,
     pub ios: Option<String>,
     pub battery: Battery,
@@ -846,8 +849,8 @@ pub struct Connected {
 }
 
 /// Whether `query` names `udid` (exact full UDID or its trailing `short_udid`, case-insensitive).
-pub fn matches_udid(udid: &str, query: &str) -> bool {
-    !query.is_empty() && (udid.eq_ignore_ascii_case(query) || short_udid(udid).eq_ignore_ascii_case(query))
+pub fn matches_udid(udid: &crate::text::Identity, query: &str) -> bool {
+    !query.is_empty() && (udid.matches_ascii(query) || short_udid(udid).matches_ascii(query))
 }
 
 /// Opens a fresh authenticated lockdownd session on `device`, mapping lock-screen errors to `DeviceAsleep`.
@@ -855,7 +858,12 @@ pub fn session_for(device: &Device, deadline: Option<Instant>) -> Result<Lockdow
     let mut l = Lockdown::connect(device, deadline)?;
     let pair = pair_record(&device.udid, deadline).map_err(|e| if e.code == 124 { e } else { not_paired(&device.udid, e) })?;
     l.start_session(&pair).map_err(|e| {
-        if e.message.contains("PasswordProtected") { Error::refused("DeviceAsleep", format!("the phone ({}) is locked", short_udid(&device.udid)), "unlock the phone and run again") } else { e }
+        if e.message.contains("PasswordProtected") {
+            live_phone(&device.udid);
+            Error::refused("DeviceAsleep", "the selected USB phone is locked", "unlock the phone and run again")
+        } else {
+            e
+        }
     })?;
     Ok(l)
 }
@@ -874,37 +882,35 @@ pub fn open_usb(udid_filter: Option<&str>, diagnostics: bool, deadline: Option<I
         return Err(Error::unreachable("no iOS device connected").hint("plug the iPhone into this computer with a USB cable, unlock it and tap Trust"));
     }
     let want = udid_filter.filter(|q| !q.is_empty());
-    let mut udids: Vec<String> = Vec::new();
+    let mut udids = Vec::new();
     for d in &devices {
         if want.is_none_or(|q| matches_udid(&d.udid, q)) && !udids.contains(&d.udid) {
             udids.push(d.udid.clone());
         }
     }
     if udids.is_empty() {
-        let seen: Vec<String> = devices.iter().filter(|d| d.connection == Connection::Usb).map(|d| short_udid(&d.udid)).collect();
-        let hint = if seen.is_empty() { "plug the phone in with a USB cable and run strobe status".to_string() } else { format!("connected USB phones: {}", seen.join(", ")) };
-        return Err(Error::usage(format!("no connected iOS device matches {:?}", want.unwrap_or(""))).hint(hint));
+        return Err(Error::usage("no connected iOS device matches the selected ID").hint("connect it over USB and check strobe status for the attached phones"));
     }
     let mut usb: Vec<Device> = Vec::new();
-    let mut wifi_only: Vec<String> = Vec::new();
+    let mut wifi_only = 0;
     for u in &udids {
         match devices.iter().find(|d| &d.udid == u && d.connection == Connection::Usb) {
             Some(d) => usb.push(d.clone()),
-            None => wifi_only.push(short_udid(u)),
+            None => wifi_only += 1,
         }
     }
     if usb.is_empty() {
         return Err(Error::refused(
             "WirelessTransport",
-            format!("iOS device {} is connected over Wi-Fi only", wifi_only.join(", ")),
+            format!("no selected iOS phone is on USB ({wifi_only} on Wi-Fi only)"),
             "plug the phone into this computer with a USB cable: strobe never reads or measures over Wi-Fi",
         ));
     }
     if usb.len() > 1 {
-        let choices: Vec<String> = usb.iter().map(|d| format!("wir:{}/…", short_udid(&d.udid))).collect();
-        return Err(Error::usage(format!("{} iOS devices are plugged in over USB", usb.len())).hint(format!("name the phone in the target: {}", choices.join(" or "))));
+        return Err(Error::usage(format!("{} iOS devices are plugged in over USB", usb.len())).hint("choose one from strobe status with wir:<device>/<page>"));
     }
     let dev = usb.remove(0);
+    live_phone(&dev.udid);
     let mut l = session_for(&dev, deadline)?;
     let values = l.get_value(None, None)?.and_then(Value::into_dictionary).unwrap_or_default();
     let locked = match values.get("PasswordProtected").and_then(Value::as_boolean) {
@@ -912,7 +918,7 @@ pub fn open_usb(udid_filter: Option<&str>, diagnostics: bool, deadline: Option<I
         None => l.get_value(None, Some("PasswordProtected"))?.and_then(|v| v.as_boolean()),
     };
     if locked == Some(true) {
-        return Err(Error::refused("DeviceAsleep", format!("the phone ({}) is locked, so Safari and Web Inspector will not expose tabs", short_udid(&dev.udid)), "unlock the phone and run again"));
+        return Err(Error::refused("DeviceAsleep", "the selected USB phone is locked, so Safari and Web Inspector will not expose tabs", "unlock the phone and run again"));
     }
     let text = |k: &str| values.get(k).and_then(Value::as_string).map(str::to_string);
     let wall = number(values.get("TimeIntervalSince1970")).filter(|&t| t.is_finite() && t > 0.0).or_else(|| wall_clock_s(&mut l));
@@ -922,10 +928,10 @@ pub fn open_usb(udid_filter: Option<&str>, diagnostics: bool, deadline: Option<I
 }
 
 /// One phone as `strobe status` shows it. Never its name: a personal phone's name is the owner's.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Summary {
     /// The full UDID, to select the phone as a target; text shows `short_udid`.
-    pub udid: String,
+    pub udid: crate::text::Identity,
     /// The usbmuxd attachments this phone has: `usb`, `wifi` or both.
     pub connections: Vec<Connection>,
     pub product_type: Option<String>,
@@ -1012,7 +1018,7 @@ pub fn describe(s: &Summary) -> String {
         Some(false) => parts.push("unlocked".into()),
         None => {}
     }
-    parts.push(short_udid(&s.udid));
+    parts.push(short_udid(&s.udid).expose_local().clone());
     let mut t = parts.join(" · ");
     if let Some(p) = &s.problem {
         t += &format!(": {p}");

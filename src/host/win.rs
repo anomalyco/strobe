@@ -56,7 +56,7 @@ pub fn process_trees(roots: &super::PickRoots) -> Vec<ProcTimes> {
         .map(|i| {
             let p = &all[i].info;
             let (cpu_ns, cycles, private_bytes, working_set) = proc_times(p.pid);
-            ProcTimes { pid: p.pid, parent: p.parent, start: all[i].create as u64, name: p.name.clone(), cpu_ns, cycles, private_bytes, working_set }
+            ProcTimes { pid: p.pid, parent: p.parent, start: all[i].create as u64, name: p.name.expose_local().clone(), cpu_ns, cycles, private_bytes, working_set }
         })
         .collect()
 }
@@ -1666,7 +1666,7 @@ pub fn tree_threads(roots: &super::PickRoots) -> (Vec<(u32, u64)>, Vec<super::Th
     let mut by_pid: HashMap<u32, Vec<super::ThreadInfo>> = HashMap::new();
     each_process(|p, threads| {
         let pid = p.pid as u32;
-        all.push(SysProc { info: super::ProcInfo { pid, parent: p.parent as u32, ..Default::default() }, create: p.create });
+        all.push(SysProc { info: super::ProcInfo { pid, parent: p.parent as u32, name: crate::text::Identity::process(""), cpu_ns: 0, cycles: 0, private_bytes: 0, threads: 0 }, create: p.create });
         let list: Vec<super::ThreadInfo> = threads
             .iter()
             .map(|t| super::ThreadInfo {
@@ -1899,7 +1899,7 @@ fn system_processes(names: bool) -> Vec<SysProc> {
             info: super::ProcInfo {
                 pid: p.pid as u32,
                 parent: p.parent as u32,
-                name,
+                name: crate::text::Identity::process(name),
                 cpu_ns: (p.user as u64 + p.kernel as u64) * 100,
                 cycles: p.cycles,
                 private_bytes: p.pagefile as u64,

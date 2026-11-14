@@ -23,7 +23,7 @@ const ALL_POWER: u32 = 1 | 2 | 4;
 /// A phone in a file name: its hardware serial (the same over USB and Wi-Fi), else the adb serial,
 /// with anything but letters, digits, `.`, `_`, `-` as `_`.
 pub(super) fn phone_key(d: &Device, hw: Option<&str>) -> String {
-    key_of(&d.serial, hw)
+    key_of(d.wire_id(), hw)
 }
 
 /// `phone_key` from a serial and the hardware serial, as `Facts` has them.
@@ -42,7 +42,7 @@ fn read_setting(d: &Device) -> Result<Option<u32>> {
         "null" => Ok(None),
         t => match t.parse::<u32>() {
             Ok(v) if v <= 15 => Ok(Some(v)),
-            _ => Err(Error::msg(format!("{}: {SETTING} reads {t:?}, not a setting strobe knows", d.serial))),
+            _ => Err(Error::msg(format!("{}: {SETTING} reads {t:?}, not a setting strobe knows", d.label()))),
         },
     }
 }
@@ -122,11 +122,11 @@ impl StayAwake {
         let original = adopted.unwrap_or(now);
         let write = |applied: Option<u32>| {
             let body = json!({ "owner": spawn::owner_stamp(), "serial": d.serial, "hw_serial": hw, "original": setting_json(original), "applied": setting_json(applied) });
-            paths::write_owner_only(&path, body.to_string().as_bytes()).map_err(|e| Error::msg(format!("could not journal {}'s stay-awake setting: {e}", d.serial)))
+            paths::write_owner_only(&path, body.to_string().as_bytes()).map_err(|e| Error::msg(format!("could not journal {}'s stay-awake setting: {e}", d.label())))
         };
         // Journal first: a strobe killed between the two still has it put back.
         write(None)?;
-        let applied = d.sh("svc power stayon true").and_then(|_| read_setting(d)).and_then(|a| a.ok_or_else(|| Error::msg(format!("{}: `svc power stayon true` left {SETTING} unset", d.serial))));
+        let applied = d.sh("svc power stayon true").and_then(|_| read_setting(d)).and_then(|a| a.ok_or_else(|| Error::msg(format!("{}: `svc power stayon true` left {SETTING} unset", d.label()))));
         let applied = match applied {
             Ok(a) => a,
             Err(e) => {
@@ -217,7 +217,7 @@ impl CommandLine {
         let hw = d.hardware_serial();
         let path = cmdline_journal(&phone_key(d, hw.as_deref()));
         let body = json!({ "owner": spawn::owner_stamp(), "serial": d.serial, "hw_serial": hw, "content": content });
-        paths::write_owner_only(&path, body.to_string().as_bytes()).map_err(|e| Error::msg(format!("could not journal {}'s Chrome command line: {e}", d.serial)))?;
+        paths::write_owner_only(&path, body.to_string().as_bytes()).map_err(|e| Error::msg(format!("could not journal {}'s Chrome command line: {e}", d.label())))?;
         if let Err(e) = d.sh(&format!("echo {} > {CHROME_COMMAND_LINE}", quote(content))) {
             let _ = std::fs::remove_file(&path);
             return Err(e);
@@ -282,7 +282,7 @@ fn device_lock(d: &Device, holder: &Value) -> Result<std::result::Result<Conn, V
     let text = String::from_utf8_lossy(&out);
     match text.strip_prefix("busy\n") {
         Some(info) => Ok(Err(serde_json::from_str(info.trim()).unwrap_or_else(|_| json!({ "serial": d.serial })))),
-        None => Err(Error::msg(format!("{}: the phone's lock did not answer ({:?})", d.serial, text.trim())).hint("strobe needs toybox's flock on the phone (Android 7 and later)")),
+        None => Err(Error::msg(format!("{}: the phone's lock did not answer ({:?})", d.label(), text.trim())).hint("strobe needs toybox's flock on the phone (Android 7 and later)")),
     }
 }
 
@@ -351,7 +351,7 @@ impl PhoneSlot {
             }
             if Instant::now() >= until {
                 if let Some(what) = last["what"].as_str() {
-                    crate::app::live_progress(format!("  phone {} slot held by: {what}", d.serial));
+                    crate::app::live_progress(format!("  phone {} slot held by: {what}", d.serial.quoted_or("the phone").local()));
                 }
                 return Err(Error::refused("ConcurrentBench", "the phone is in use by another strobe", "wait for it to finish; one strobe runs on a phone at a time"));
             }

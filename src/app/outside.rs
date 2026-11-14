@@ -98,11 +98,8 @@ pub fn resolve(target: &str) -> Result<u32> {
     }
     let name = target.strip_prefix("proc:").unwrap_or(target).to_ascii_lowercase();
     let all = host::all_processes();
-    let is = |n: &str| {
-        let n = n.to_ascii_lowercase();
-        n == name || n.strip_suffix(".exe") == Some(name.as_str())
-    };
-    let matching: Vec<&host::ProcInfo> = all.iter().filter(|p| is(&p.name)).collect();
+    let exe = format!("{name}.exe");
+    let matching: Vec<&host::ProcInfo> = all.iter().filter(|p| p.name.matches_ascii(&name) || p.name.matches_ascii(&exe)).collect();
     let roots: Vec<&&host::ProcInfo> = matching.iter().filter(|p| !matching.iter().any(|q| q.pid == p.parent)).collect();
     match roots.as_slice() {
         [one] => Ok(one.pid),
@@ -116,7 +113,7 @@ pub fn resolve(target: &str) -> Result<u32> {
 
 pub fn record(args: &Args, target: &str) -> Result<Output> {
     let root = resolve(target)?;
-    let name = host::all_processes().into_iter().find(|p| p.pid == root).map(|p| p.name).unwrap_or_default();
+    let name = host::all_processes().into_iter().find(|p| p.pid == root).map(|p| p.name.expose_local().clone()).unwrap_or_default();
     let deep = match args.get("probes").unwrap_or("timing") {
         "timing" => false,
         "deep" | "attribution" | "stacks-unprivileged" | "waits" => true,

@@ -290,7 +290,7 @@ fn recorded(args: &Args, target: String) -> Result<Output> {
     let target = if mobile.is_some() { crate::target::android_chrome::served(&target)? } else { target };
     let browser = if let Some(serial) = &mobile {
         let phone = crate::target::android_chrome::pick(serial)?;
-        progress(format!("recording on {} {} ({})", phone.facts.manufacturer, phone.facts.model, phone.device.serial));
+        progress(format!("recording on {} {} ({})", phone.facts.manufacturer, phone.facts.model, phone.device.label()));
         let timed = set == Set::Timing && !args.has("video");
         // A timed recording waits (up to 3 minutes) for a hot phone to cool; the launch reads it again.
         if timed {
@@ -1759,9 +1759,6 @@ pub(crate) fn phone_line(p: &Value) -> Option<String> {
         if let Some(t) = p["battery"]["temperature_c"].as_f64() {
             parts.push(format!("{t:.1} °C"));
         }
-        if let Some(id) = p["short_udid"].as_str() {
-            parts.push(id.to_string());
-        }
         return Some(parts.join(" · "));
     }
     let mut parts = vec![format!("{} {}", p["manufacturer"].as_str().unwrap_or(""), p["model"].as_str().unwrap_or("")).trim().to_string(), format!("Android {}", p["android"].as_str().unwrap_or("?"))];
@@ -2167,7 +2164,7 @@ fn ios_wir(args: &Args, target: &str) -> Result<Output> {
     let token = id.trim_start_matches("rec_").to_string();
 
     let log_stream = LogStream::start(&usb_dev, allowlist.clone(), t0_ns, wall0_s);
-    progress(format!("recording {id} on {handle} ({}) for {}", session.phone.product_type.as_deref().unwrap_or("iPhone"), fmt::ms_duration(for_ms)));
+    progress(format!("recording {id} on the selected page ({} over USB) for {}", session.phone.product_type.as_deref().unwrap_or("iPhone"), fmt::ms_duration(for_ms)));
 
     if set == Set::Memory {
         let mem_res = wki::record_memory(&mut session, &dir, for_ms, |m| progress(m));

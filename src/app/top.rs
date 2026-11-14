@@ -211,7 +211,7 @@ impl Top {
                 ProcRow {
                     pid: p.pid,
                     parent: p.parent,
-                    name: p.name.clone(),
+                    name: p.name.expose_local().clone(),
                     cpu_pct: cpu,
                     private_mb: p.private_bytes as f64 / MB,
                     gpu_3d_pct: gpu_3d,

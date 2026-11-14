@@ -45,6 +45,9 @@ When a design change is agreed, update this file in the same change.
    `insights..busiest` lists for local diagnosis and cross-block deduplication (`--format md` and `--format html`
    omit foreign process names too, while only `--format pr|summary|card|badge` and the GitHub Action's artifact
    scrubber also redact local paths).
+   A measured phone's transport address, serial and device ID are also private. Stored diagnostics identify
+   the selected phone by role, model, transport or its position in the attached list, not a hardware ID.
+   The exact selector stays in local inventory, routing, calibration and owner-only metadata, not reports.
 10. **Never break user space.** strobe writes only its own files and marked managed entries, all
     removed by `strobe leave`. It never changes a target's settings, profile or data. Launched
     targets get isolated homes; attached targets are left as they were on detach.

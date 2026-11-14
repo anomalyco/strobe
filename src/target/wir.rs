@@ -20,12 +20,12 @@ pub const SAFARI_BUNDLE: &str = "com.apple.mobilesafari";
 pub const MAX_IN_FLIGHT: usize = 8;
 
 /// One inspectable page reported by `com.apple.webinspector`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct InspectablePage {
     /// Canonical strobe handle (`wir:<short_udid>/<app>/<page_id>`).
     pub handle: String,
-    pub udid: String,
-    pub short_udid: String,
+    pub udid: crate::text::Identity,
+    pub short_udid: crate::text::Identity,
     /// WIR routing identifier (`PID:123` or bundle id) used in `_rpc_forward*` messages.
     pub app_id: String,
     pub bundle_id: String,
@@ -137,7 +137,7 @@ fn is_web_page_type(ty: &str) -> bool {
     matches!(ty, "WIRTypeWebPage" | "WIRTypePage" | "WIRTypeWeb")
 }
 
-fn parse_listing(udid: &str, conn_id: &str, app: &AppEntry, listing: &Dictionary) -> Vec<InspectablePage> {
+fn parse_listing(udid: &crate::text::Identity, conn_id: &str, app: &AppEntry, listing: &Dictionary) -> Vec<InspectablePage> {
     let short = ios::short_udid(udid);
     let seg = app_handle_segment(&app.bundle_id);
     let mut out = Vec::new();
@@ -154,8 +154,8 @@ fn parse_listing(udid: &str, conn_id: &str, app: &AppEntry, listing: &Dictionary
         let local_dbg = d.get("WIRHasLocalDebuggerKey").and_then(Plist::as_boolean).unwrap_or(false);
         let other_conn = d.get("WIRConnectionIdentifierKey").and_then(Plist::as_string).filter(|c| !c.is_empty() && *c != conn_id).is_some();
         out.push(InspectablePage {
-            handle: format!("wir:{short}/{seg}/{page_id}"),
-            udid: udid.to_string(),
+            handle: format!("wir:{}/{seg}/{page_id}", short.expose_local()),
+            udid: udid.clone(),
             short_udid: short.clone(),
             app_id: app.app_id.clone(),
             bundle_id: app.bundle_id.clone(),
@@ -186,7 +186,7 @@ fn start_wir(l: &mut Lockdown) -> Result<Service> {
 }
 
 /// Discovers connected inspectable apps and their open web pages on an open `webinspector` service.
-fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration, safari_fast: bool) -> Result<(Vec<AppEntry>, Vec<InspectablePage>)> {
+fn discover_pages(svc: &mut Service, udid: &crate::text::Identity, conn_id: &str, budget: Duration, safari_fast: bool) -> Result<(Vec<AppEntry>, Vec<InspectablePage>)> {
     let overall = Instant::now() + budget;
     svc.set_deadline(Some(overall));
     let mut id_arg = Dictionary::new();
@@ -302,14 +302,14 @@ fn discover_pages(svc: &mut Service, udid: &str, conn_id: &str, budget: Duration
 }
 
 /// Lists inspectable pages on a USB-connected, unlocked phone for `strobe status` within a shared `deadline`.
-pub fn list_pages_for_udid_until(udid: &str, deadline: Instant) -> Result<Vec<InspectablePage>> {
+pub fn list_pages_for_udid_until(udid: &crate::text::Identity, deadline: Instant) -> Result<Vec<InspectablePage>> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
         return Ok(Vec::new());
     }
     let dl = Some(deadline);
     let devices = ios::list(dl)?;
-    let Some(dev) = devices.into_iter().find(|d| d.udid == udid && d.connection == ios::Connection::Usb) else {
+    let Some(dev) = devices.into_iter().find(|d| &d.udid == udid && d.connection == ios::Connection::Usb) else {
         return Ok(Vec::new());
     };
     let mut l = ios::session_for(&dev, dl)?;
@@ -420,7 +420,7 @@ fn choose_page(pages: &[InspectablePage], apps: &[AppEntry], page_sel: &str) -> 
 }
 
 /// Splits `wir:[selector]` into `(optional_udid_filter, page_selector)` by checking connected devices.
-fn split_selector<'a>(raw: &'a str, known_udids: &[String]) -> (Option<&'a str>, &'a str) {
+fn split_selector<'a>(raw: &'a str, known_udids: &[crate::text::Identity]) -> (Option<&'a str>, &'a str) {
     let s = raw.strip_prefix("wir:").unwrap_or(raw).trim_matches('/');
     if s.is_empty() {
         return (None, "");
@@ -491,7 +491,7 @@ impl Session {
     fn attach_once(target: &str, diagnostics: bool, overall: Instant, stop: fn() -> bool) -> Result<Self> {
         let usb_deadline = Some(overall.min(Instant::now() + Duration::from_millis(4500)));
         let devices = ios::list(usb_deadline)?;
-        let known_udids: Vec<String> = devices.iter().map(|d| d.udid.clone()).collect();
+        let known_udids: Vec<_> = devices.iter().map(|d| d.udid.clone()).collect();
         let (udid_hint, page_sel) = split_selector(target, &known_udids);
         let (mut lockdown, phone) = ios::open_usb(udid_hint, diagnostics, usb_deadline)?;
         let mut svc = start_wir(&mut lockdown)?;
@@ -527,7 +527,7 @@ impl Session {
             svc.close();
             return Err(Error::refused(
                 "DebuggerAttached",
-                format!("{} already has a debugger attached", page.handle),
+                "the selected page already has a debugger attached",
                 "close Safari's Web Inspector (or any other debugger attached to this tab) and run again",
             ));
         }
@@ -572,7 +572,7 @@ impl Session {
                     return Err(Error::new(130, "stopped (Ctrl-C, SIGTERM or strobe bench --stop)"));
                 }
                 if Instant::now() >= wait_until {
-                    return Err(Error::timeout(format!("{} accepted the socket setup, but sent no Target.targetCreated in 2.5 s", session.page.handle))
+                    return Err(Error::timeout("the selected page accepted the socket setup, but sent no Target.targetCreated in 2.5 s")
                         .hint("keep Safari open and unlocked on the phone, and close any other Web Inspector window"));
                 }
                 session.pump_once(wait_until)?;
@@ -987,11 +987,12 @@ impl Drop for Session {
     }
 }
 
-fn disconnect_error(short_udid: &str, why: &str, stopped: bool) -> Error {
+fn disconnect_error(short_udid: &crate::text::Identity, why: &str, stopped: bool) -> Error {
     if stopped {
         return Error::new(130, "stopped (Ctrl-C, SIGTERM or strobe bench --stop)");
     }
-    Error::refused("RunIncomplete", format!("lost connection to the phone ({short_udid}): {why}"), "keep the phone unlocked on the USB cable with the tab open in Safari, then run again")
+    crate::app::live_progress(crate::msg!("  lost connection to the phone{}: {}", crate::text::Text::phone_id(short_udid), why).local());
+    Error::refused("RunIncomplete", "lost connection to the selected USB phone", "keep the phone unlocked on the USB cable with the tab open in Safari, then run again")
 }
 
 /// Folds `Console.messageAdded`, `Console.messageRepeatCountUpdated`, and `Runtime.exceptionThrown`

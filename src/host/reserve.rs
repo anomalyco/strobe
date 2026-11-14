@@ -23,16 +23,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// What one block's reservation did.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Report {
     /// The CPUs kept for the target (a mask of processor group 0).
     pub cpus: u64,
     /// Processes moved off them, by executable name: how many of each.
-    pub moved: BTreeMap<String, u32>,
+    pub moved: BTreeMap<crate::text::Identity, u32>,
     /// How many of those started while the block ran (moved by the sweep, up to 200 ms late).
     pub started: u32,
     /// This user's processes that could not be moved, by name, with why.
-    pub failed: BTreeMap<String, String>,
+    pub failed: BTreeMap<crate::text::Identity, String>,
     /// Moved back after the block. Others exited, or something else changed their CPU set since
     /// (theirs is kept).
     pub restored: u32,
@@ -318,13 +318,13 @@ mod imp {
                         match apply(m) {
                             Ok(m) => {
                                 moved.push(m);
-                                *report.moved.entry(name).or_default() += 1;
+                                *report.moved.entry(crate::text::Identity::process(name)).or_default() += 1;
                                 if !first {
                                     report.started += 1;
                                 }
                             }
                             Err(why) if !why.is_empty() => {
-                                report.failed.insert(name, why);
+                                report.failed.insert(crate::text::Identity::process(name), why);
                             }
                             Err(_) => {}
                         }
@@ -631,7 +631,7 @@ mod imp {
                 match consider(*pid, *create, cpus, &allowed, &me) {
                     Verdict::Skip => {}
                     Verdict::Failed(why) => {
-                        report.failed.insert(name.clone(), why);
+                        report.failed.insert(crate::text::Identity::process(name.clone()), why);
                     }
                     Verdict::Move(m) => batch.push((m, name.clone())),
                 }
@@ -641,13 +641,13 @@ mod imp {
                 write_journal(&moved, &batch);
                 for (m, name) in batch {
                     if set_sets(m.handle, &m.set) {
-                        *report.moved.entry(name).or_default() += 1;
+                        *report.moved.entry(crate::text::Identity::process(name)).or_default() += 1;
                         if !first {
                             report.started += 1;
                         }
                         moved.push(m);
                     } else {
-                        report.failed.insert(name, "the OS refused its CPU set".into());
+                        report.failed.insert(crate::text::Identity::process(name), "the OS refused its CPU set".into());
                         unsafe { CloseHandle(m.handle) };
                     }
                 }

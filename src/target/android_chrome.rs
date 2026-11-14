@@ -105,7 +105,7 @@ pub fn opt_in(phone: &Phone, channel: &str) -> Result<String> {
         return Err(Error::usage(format!("--channel: canary, dev or beta, not {channel}: strobe never drives Chrome itself on a phone (it is a person's browser)")));
     };
     if !installed(d)?.contains(package) {
-        return Err(Error::new(3, format!("{} is not installed on {}", name(package), d.serial))
+        return Err(Error::new(3, format!("{} is not installed on {}", name(package), d.label()))
             .hint(format!("install {} from the Play Store, open it once and finish its first run, then run this again", name(package))));
     }
     let mut all: Value = std::fs::read(opt_ins()).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
@@ -119,7 +119,7 @@ pub fn opt_in(phone: &Phone, channel: &str) -> Result<String> {
     Ok(format!(
         "{} on {} ({} {}) is strobe's: --mobile runs force-stop it, open and close their own tab and clear the origins they load",
         name(package),
-        d.serial,
+        d.label(),
         phone.facts.manufacturer,
         phone.facts.model
     ))
@@ -236,7 +236,7 @@ pub fn launch(phone: &Phone, what: &str, timed: bool, unlock_wait: Duration) -> 
         if timed {
             crate::validity::phone_timed(f)?;
             if let Some(why) = crate::validity::phone_hot(f) {
-                return Err(crate::validity::thermal_refusal(&d.serial, &why, "before the block").into());
+                return Err(crate::validity::thermal_refusal(&d.label(), &why, "before the block").into());
             }
         }
         Ok(())
@@ -253,8 +253,8 @@ pub fn launch(phone: &Phone, what: &str, timed: bool, unlock_wait: Duration) -> 
     // emulator's channels are all strobe may drive.
     let candidates: Vec<&'static str> = if facts.emulator.is_some() { installed.clone() } else { opted_in(d).into_iter().filter(|p| installed.contains(p)).collect() };
     if candidates.is_empty() {
-        let given = if facts.emulator.is_some() { String::new() } else { format!(", then `strobe up --mobile={} --channel canary` gives it to strobe (once per phone)", d.serial) };
-        return Err(Error::new(3, format!("{} has no Chrome channel strobe may drive", d.serial))
+        let given = if facts.emulator.is_some() { String::new() } else { ", then `strobe up --mobile=<serial> --channel canary` gives it to strobe (once per phone)".into() };
+        return Err(Error::new(3, format!("{} has no Chrome channel strobe may drive", d.label()))
             .hint(format!("install Chrome Canary (or Dev, Beta) on the phone for strobe alone, open it once and finish its first run{given}; strobe never drives a phone's own Chrome")));
     }
     let (written, kept) = if facts.debuggable {
@@ -287,11 +287,11 @@ pub fn launch(phone: &Phone, what: &str, timed: bool, unlock_wait: Duration) -> 
     }
     let tab = cdp.send("Target.createTarget", json!({ "url": "about:blank" }), None)?["targetId"].as_str().unwrap_or("").to_string();
     if tab.is_empty() {
-        return Err(Error::msg(format!("{} ({package}) opened no tab for strobe", d.serial)));
+        return Err(Error::msg(format!("{} ({package}) opened no tab for strobe", d.label())));
     }
     let _ = cdp.send("Target.activateTarget", json!({ "targetId": tab }), None);
     let body = json!({ "owner": crate::host::spawn::owner_stamp(), "serial": d.serial, "package": package, "tab": tab, "url": "about:blank" });
-    paths::write_owner_only(&journal, body.to_string().as_bytes()).map_err(|e| Error::msg(format!("could not journal strobe's tab on {}: {e}", d.serial)))?;
+    paths::write_owner_only(&journal, body.to_string().as_bytes()).map_err(|e| Error::msg(format!("could not journal strobe's tab on {}: {e}", d.label())))?;
     // The screen in CSS pixels at its density: the page's own size is read once it loads.
     let window = facts.display.as_ref().filter(|s| s.density > 0).map_or_else(Window::default, |s| {
         let scale = s.density as f64 / 160.0;
@@ -357,7 +357,7 @@ impl Launch {
     pub fn still_cool(&self) -> Result<()> {
         let f = self.device.facts()?;
         match crate::validity::phone_hot(&f) {
-            Some(why) => Err(crate::validity::thermal_refusal(&self.device.serial, &why, "after the block's runs").into()),
+            Some(why) => Err(crate::validity::thermal_refusal(&self.device.label(), &why, "after the block's runs").into()),
             None => Ok(()),
         }
     }
@@ -371,7 +371,7 @@ impl Launch {
 
     /// The phone's hardware serial (else its serial), for its own speed reference.
     pub fn key(&self) -> String {
-        self.facts.hardware_serial.clone().unwrap_or_else(|| self.device.serial.clone())
+        self.facts.speed_key().to_string()
     }
 
     /// What a recording and a block keep of the phone: what it is, how it is connected, the channel, its
@@ -583,7 +583,7 @@ fn channel(
     let clear = |packages: &[&str]| packages.iter().map(|p| format!("`adb -s <serial> shell pm clear {p}`")).collect::<Vec<_>>().join(", ");
     let live: Vec<&str> = installed.iter().copied().filter(|p| running(d, p)).collect();
     if live.len() > 1 {
-        crate::app::live_progress(format!("  running channels on {}: {}", d.serial, live.join(", ")));
+        crate::app::live_progress(format!("  running channels on {}: {}", d.serial.quoted_or("the phone").local(), live.join(", ")));
         return Err(
             Error::new(3, format!("{} channels run on the phone at once, and DevTools reaches only one of them", live.len())).hint("close all but one of them on the phone (Recents, swipe them away)")
         );
@@ -662,7 +662,7 @@ fn channel(
                 let held = crate::app::obstruction::socket_holder(&holder, &d.serial);
                 Err(Error::new(3, format!("{held} after strobe restarted {}", name(package))).hint("close the other app on the phone"))
             }
-            Socket::Closed => Err(Error::new(3, format!("{} on {} did not open its DevTools socket after a restart", name(package), d.serial)).hint("open it on the phone once, then run again")),
+            Socket::Closed => Err(Error::new(3, format!("{} on {} did not open its DevTools socket after a restart", name(package), d.label())).hint("open it on the phone once, then run again")),
         };
     }
     if !people.is_empty() {
@@ -677,7 +677,7 @@ fn channel(
         return Err(Refusal::new(ValidatorId::LiveChannel, format!("every Chrome channel strobe may drive on the phone holds tabs a person opened: {}", people.join("; "))).fix(fix).into());
     }
     let kept = if kept_command_line { format!(" (a {} is kept as it was)", adb::CHROME_COMMAND_LINE) } else { String::new() };
-    Err(Error::new(3, format!("{} on {} never opened its DevTools socket: still on its first-run screens{kept}", first_run.join(", "), d.serial))
+    Err(Error::new(3, format!("{} on {} never opened its DevTools socket: still on its first-run screens{kept}", first_run.join(", "), d.label()))
         .hint("open that Chrome on the phone once and finish its first run, with USB debugging on"))
 }
 
@@ -695,7 +695,7 @@ pub fn cool(d: &Device) -> Result<bool> {
             return Err(crate::app::stop_error());
         }
         if !said {
-            crate::app::progress(format!("  {} is hot ({why}): waiting up to 3 minutes for it to cool", d.serial));
+            crate::app::progress(format!("  {} is hot ({why}): waiting up to 3 minutes for it to cool", d.label()));
             said = true;
         }
         std::thread::sleep(Duration::from_secs(15));
@@ -715,7 +715,7 @@ fn wake(d: &Device, facts: Facts, wait: Duration) -> Result<Facts> {
         let _ = d.sh("wm dismiss-keyguard");
     }
     if secure {
-        crate::app::progress(format!("  {} is locked with a PIN: waiting{} for a person to unlock it", d.serial, if wait.is_zero() { String::new() } else { format!(" up to {} s", wait.as_secs()) }));
+        crate::app::progress(format!("  {} is locked with a PIN: waiting{} for a person to unlock it", d.label(), if wait.is_zero() { String::new() } else { format!(" up to {} s", wait.as_secs()) }));
     }
     let until = Instant::now() + wait.max(Duration::from_secs(3));
     loop {
@@ -734,7 +734,7 @@ fn wake(d: &Device, facts: Facts, wait: Duration) -> Result<Facts> {
             } else {
                 "wake the phone and dismiss its lock screen (or set its screen lock to None for a phone kept for strobe)"
             };
-            return Err(Refusal::new(ValidatorId::DeviceAsleep, format!("{} is asleep: {what}", d.serial)).fix(fix).into());
+            return Err(Refusal::new(ValidatorId::DeviceAsleep, format!("{} is asleep: {what}", d.label())).fix(fix).into());
         }
     }
 }

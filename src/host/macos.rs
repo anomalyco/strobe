@@ -717,7 +717,15 @@ pub fn all_processes() -> Vec<ProcInfo> {
         .into_iter()
         .map(|b| {
             let (cpu, footprint, _, _, _) = rusage(b.pid).unwrap_or_default();
-            ProcInfo { pid: b.pid, parent: b.ppid, name: b.name, cpu_ns: cpu, cycles: cpu, private_bytes: footprint, threads: task_info(b.pid).map(|t| t.pti_threadnum as u32).unwrap_or(0) }
+            ProcInfo {
+                pid: b.pid,
+                parent: b.ppid,
+                name: crate::text::Identity::process(b.name),
+                cpu_ns: cpu,
+                cycles: cpu,
+                private_bytes: footprint,
+                threads: task_info(b.pid).map(|t| t.pti_threadnum as u32).unwrap_or(0),
+            }
         })
         .collect()
 }
@@ -1444,11 +1452,14 @@ pub fn screen_recording_pane() -> &'static str {
 /// under a daemon or agent (macOS has been seen to pass Accessibility on to such a child but to
 /// check Screen Recording against the child's own binary).
 pub fn screen_recording_grantee() -> String {
-    let app = responsible_app();
+    recording_grantee(&responsible_app())
+}
+
+pub fn recording_grantee(app: &str) -> String {
     let own = own_exe();
     match app != own && accessibility_trusted() && !screen_capture_allowed() {
         true => format!("strobe itself at {own} (macOS passes Device Control on from {app} to what it starts, but checks Screen Recording against strobe's own binary)"),
-        false if own.is_empty() || app == own => app,
+        false if own.is_empty() || app == own => app.to_string(),
         false => format!("{app}, or strobe itself at {own} if granting that app does not help"),
     }
 }

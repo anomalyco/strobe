@@ -116,10 +116,11 @@ pub struct Stat {
 }
 
 /// One connected device: requests open a connection each (the server multiplexes them).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Device {
     adb: Adb,
-    pub serial: String,
+    pub serial: crate::text::Identity,
+    ordinal: Option<usize>,
     /// A device a run picked (`Adb::pick`, shared by its clones): the error it was lost with, once the
     /// server no longer had it (unplugged, an emulator that died) or its shell stopped answering. Its
     /// requests then fail at once with that error, so the run stops at the first (`lost`) instead of
@@ -143,6 +144,7 @@ pub struct Tunnel {
 struct Conn {
     s: TcpStream,
     ctx: String,
+    device: Option<crate::text::Identity>,
 }
 
 fn server_port() -> u16 {
@@ -179,7 +181,7 @@ impl Conn {
             Ok(s)
         };
         let s = open().map_err(|e| Error::unreachable(format!("no adb server answers on 127.0.0.1:{port}: {e}")).hint("start it with `adb start-server`"))?;
-        Ok(Conn { s, ctx: ctx.to_string() })
+        Ok(Conn { s, ctx: ctx.to_string(), device: None })
     }
 
     fn error(&self, e: std::io::Error) -> Error {
@@ -220,6 +222,7 @@ impl Conn {
             b"OKAY" => Ok(()),
             b"FAIL" => {
                 let why = self.read_string()?;
+                let why = self.device.as_ref().map_or_else(|| why.clone(), |id| id.scrub_from(&why));
                 Err(Error::msg(format!("{}: {why}", self.ctx)))
             }
             other => Err(Error::msg(format!("{}: unexpected reply {:?}", self.ctx, String::from_utf8_lossy(other)))),
@@ -341,13 +344,12 @@ impl Adb {
         let env = std::env::var("ANDROID_SERIAL").ok().filter(|s| !s.is_empty());
         let want = serial.map(str::to_string).or(env);
         let all = self.devices()?;
-        let named = |l: &Listed| format!("{} ({})", l.serial, state_text(&l.state));
-        let list = || all.iter().map(named).collect::<Vec<_>>().join(", ");
+        let list = || crate::app::live_progress(format!("  attached phones: {}", all.iter().map(|l| format!("{} ({})", l.serial, state_text(&l.state))).collect::<Vec<_>>().join(", ")));
         let one = match &want {
-            Some(s) => all
-                .iter()
-                .find(|l| &l.serial == s)
-                .ok_or_else(|| Error::unreachable(format!("no device {s} is attached{}", if all.is_empty() { String::new() } else { format!(" (attached: {})", list()) })))?,
+            Some(s) => all.iter().find(|l| &l.serial == s).ok_or_else(|| {
+                list();
+                Error::unreachable(format!("the selected device is not attached ({} attached); check adb devices", all.len()))
+            })?,
             None => {
                 let ready: Vec<&Listed> = all.iter().filter(|l| l.state == State::Device).collect();
                 match ready.as_slice() {
@@ -362,9 +364,8 @@ impl Adb {
                         match many.iter().find(|l| l.transport == Transport::Usb) {
                             Some(usb) if same => *usb,
                             _ => {
-                                return Err(
-                                    Error::usage(format!("{} devices are attached: {}", many.len(), many.iter().map(|l| named(l)).collect::<Vec<_>>().join(", "))).hint("name one by its serial")
-                                );
+                                list();
+                                return Err(Error::usage(format!("{} devices are attached", many.len())).hint("choose a serial from adb devices with --mobile=<serial>"));
                             }
                         }
                     }
@@ -372,17 +373,20 @@ impl Adb {
             }
         };
         let why = state_text(&one.state);
+        let mut device = self.device(&one.serial);
+        device.ordinal = (all.len() > 1).then(|| all.iter().position(|l| l.serial == one.serial).unwrap_or(0) + 1);
+        crate::app::live_progress(crate::msg!("  {}: {}", device.label(), device.serial.quoted_or("the phone")).local());
         match one.state {
-            State::Device => Ok(Device { lost: Some(Arc::default()), ..self.device(&one.serial) }),
-            State::Unauthorized => Err(Error::new(3, format!("{} is unauthorized", one.serial)).hint("unlock the phone and accept the \"Allow USB debugging?\" prompt")),
-            State::NoPermissions => Err(Error::new(3, format!("{} is {why}", one.serial)).hint("the OS refused the USB device: add a udev rule for it, then reconnect")),
-            _ => Err(Error::unreachable(format!("{} is {why}", one.serial)).hint("reconnect it, or wait until it finishes booting")),
+            State::Device => Ok(Device { lost: Some(Arc::default()), ..device }),
+            State::Unauthorized => Err(Error::new(3, format!("{} is unauthorized", device.label())).hint("unlock the phone and accept the \"Allow USB debugging?\" prompt")),
+            State::NoPermissions => Err(Error::new(3, format!("{} is {why}", device.label())).hint("the OS refused the USB device: add a udev rule for it, then reconnect")),
+            _ => Err(Error::unreachable(format!("{} is {why}", device.label())).hint("reconnect it, or wait until it finishes booting")),
         }
     }
 
     /// A device by serial, without checking it is attached.
     pub fn device(&self, serial: &str) -> Device {
-        Device { adb: *self, serial: serial.to_string(), lost: None }
+        Device { adb: *self, serial: crate::text::Identity::device_id(serial), ordinal: None, lost: None }
     }
 }
 
@@ -472,13 +476,32 @@ fn parse_list(text: &str, serial: Option<&str>) -> Vec<(String, String)> {
 }
 
 impl Device {
+    fn wire_id(&self) -> &str {
+        self.serial.expose_local()
+    }
+
+    pub fn label(&self) -> String {
+        crate::text::Text::device_label(&self.serial, false, self.ordinal)
+    }
+
+    fn device_conn(&self, timeout: Option<Duration>, operation: &str) -> Result<Conn> {
+        let mut c = Conn::open(self.adb.port, timeout, &format!("{}: {operation}", self.label()))?;
+        c.device = Some(self.serial.clone());
+        Ok(c)
+    }
+
+    fn query(&self, service: &str) -> Result<String> {
+        let mut c = self.device_conn(Some(DEFAULT_TIMEOUT), service)?;
+        c.request(&format!("host-serial:{}:{service}", self.wire_id()))?;
+        c.read_string()
+    }
     /// A connection switched to this device, ready for one service.
     fn transport(&self, timeout: Option<Duration>, what: &str) -> Result<Conn> {
         if let Some(e) = self.lost() {
             return Err(e);
         }
-        let mut c = Conn::open(self.adb.port, timeout, &format!("{}: {what}", self.serial))?;
-        c.send(&format!("host:transport:{}", self.serial))?;
+        let mut c = self.device_conn(timeout, what)?;
+        c.send(&format!("host:transport:{}", self.wire_id()))?;
         match &c.read_n(4)?[..] {
             b"OKAY" => Ok(c),
             // The server no longer has it: `device 'emulator-5554' not found`, `device offline`.
@@ -497,7 +520,7 @@ impl Device {
 
     /// The error for this device gone, `why` being what showed it; kept as lost when it is a picked one.
     fn lose(&self, why: &str) -> Error {
-        let e = Error::unreachable(format!("{} went away: {why}", self.serial))
+        let e = Error::unreachable(format!("{} went away: {}", self.label(), self.serial.scrub_from(why)))
             .hint("reconnect it, or restart the emulator, until `adb devices` lists it as `device`; `strobe bench --resume <exp>` then runs the cases a bench did not reach");
         match &self.lost {
             Some(l) => l.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(e).clone(),
@@ -520,7 +543,7 @@ impl Device {
 
     /// What this device's adbd supports (`shell_v2`, `cmd`, `stat_v2`, …).
     pub fn features(&self) -> Result<Vec<String>> {
-        Ok(self.adb.query(&format!("host-serial:{}:features", self.serial))?.split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect())
+        Ok(self.query("features")?.split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect())
     }
 
     /// The phone's own serial (`ro.serialno`, else `ro.boot.serialno`): the same over USB and Wi-Fi.
@@ -533,7 +556,7 @@ impl Device {
     fn open_shell(&self, cmd: &str, timeout: Duration) -> Result<Conn> {
         let mut c = self.transport(Some(timeout), &format!("`{}`", short(cmd)))?;
         c.send(&format!("shell,v2,raw:{cmd}"))?;
-        c.status().map_err(|e| Error::msg(format!("{}: the shell did not start: {}", self.serial, e.message)).hint("strobe needs adbd's shell protocol v2 (Android 7 and later)"))?;
+        c.status().map_err(|e| Error::msg(format!("{}: the shell did not start: {}", self.label(), e.message)).hint("strobe needs adbd's shell protocol v2 (Android 7 and later)"))?;
         Ok(c)
     }
 
@@ -574,7 +597,7 @@ impl Device {
         if !o.ok() {
             let err = o.stderr_text();
             let why = err.trim().lines().last().unwrap_or("");
-            return Err(Error::msg(format!("{}: `{}` exited {}{}", self.serial, short(cmd), o.code, if why.is_empty() { String::new() } else { format!(": {why}") })));
+            return Err(Error::msg(format!("{}: `{}` exited {}{}", self.label(), short(cmd), o.code, if why.is_empty() { String::new() } else { format!(": {why}") })));
         }
         Ok(o.stdout_text())
     }
@@ -590,11 +613,11 @@ impl Device {
         if let Some(e) = self.lost() {
             return Err(e);
         }
-        let mut c = self.adb.conn(&format!("{}: forward {local} to {remote}", self.serial))?;
+        let mut c = self.device_conn(Some(DEFAULT_TIMEOUT), &format!("forward {local} to {remote}"))?;
         // On the host: one OKAY for the connection, one for the forward, then the port of `tcp:0`. A first
         // FAIL is the server's when it no longer has the device (`device '…' not found`, `device offline`),
         // or the listener's (`cannot bind listener: …`).
-        c.send(&format!("host-serial:{}:forward:{local};{remote}", self.serial))?;
+        c.send(&format!("host-serial:{}:forward:{local};{remote}", self.wire_id()))?;
         match &c.read_n(4)?[..] {
             b"OKAY" => {}
             b"FAIL" => {
@@ -621,7 +644,7 @@ impl Device {
 
     /// This device's forwards (host to device): (local, remote).
     pub fn forwards(&self) -> Result<Vec<(String, String)>> {
-        Ok(parse_list(&self.adb.query(&format!("host-serial:{}:list-forward", self.serial))?, Some(&self.serial)))
+        Ok(parse_list(&self.query("list-forward")?, Some(self.wire_id())))
     }
 
     /// This device's reverses (device to host): (remote, local).
@@ -640,8 +663,8 @@ impl Device {
             c.request(&format!("reverse:killforward:{listen}"))?;
             c
         } else {
-            let mut c = self.adb.conn(&format!("{}: remove forward {listen}", self.serial))?;
-            c.request(&format!("host-serial:{}:killforward:{listen}", self.serial))?;
+            let mut c = self.device_conn(Some(DEFAULT_TIMEOUT), &format!("remove forward {listen}"))?;
+            c.request(&format!("host-serial:{}:killforward:{listen}", self.wire_id()))?;
             c
         };
         c.status()
@@ -675,9 +698,9 @@ impl Device {
         let _ = sync_request(&mut c, b"QUIT", b"");
         match (reply, sent) {
             (Ok((id, _)), Ok(())) if &id == b"OKAY" => Ok(()),
-            (Ok((id, msg)), _) if &id == b"FAIL" => Err(Error::msg(format!("{}: push to {remote}: {msg}", self.serial))),
+            (Ok((id, msg)), _) if &id == b"FAIL" => Err(Error::msg(format!("{}: push to {remote}: {msg}", self.label()))),
             (_, Err(e)) | (Err(e), Ok(())) => Err(e),
-            (Ok((id, _)), Ok(())) => Err(Error::msg(format!("{}: push to {remote}: unexpected {:?}", self.serial, String::from_utf8_lossy(&id)))),
+            (Ok((id, _)), Ok(())) => Err(Error::msg(format!("{}: push to {remote}: unexpected {:?}", self.label(), String::from_utf8_lossy(&id)))),
         }
     }
 
@@ -695,10 +718,10 @@ impl Device {
                     out.write_all(&buf[..len])?;
                     size += len as u64;
                 }
-                b"DATA" => return Err(Error::msg(format!("{}: pull {remote}: a {len}-byte chunk (adbd sends at most 64 KiB)", self.serial))),
+                b"DATA" => return Err(Error::msg(format!("{}: pull {remote}: a {len}-byte chunk (adbd sends at most 64 KiB)", self.label()))),
                 b"DONE" => break,
-                b"FAIL" => return Err(Error::msg(format!("{}: pull {remote}: {}", self.serial, String::from_utf8_lossy(&c.read_n(len.min(SYNC_CHUNK))?)))),
-                other => return Err(Error::msg(format!("{}: pull {remote}: unexpected {:?}", self.serial, String::from_utf8_lossy(other)))),
+                b"FAIL" => return Err(Error::msg(format!("{}: pull {remote}: {}", self.label(), String::from_utf8_lossy(&c.read_n(len.min(SYNC_CHUNK))?)))),
+                other => return Err(Error::msg(format!("{}: pull {remote}: unexpected {:?}", self.label(), String::from_utf8_lossy(other)))),
             }
         }
         let _ = sync_request(&mut c, b"QUIT", b"");
@@ -718,12 +741,12 @@ impl Device {
         if v2 {
             // STA2: id, error, dev, ino, mode, nlink, uid, gid, size, atime, mtime, ctime.
             if &b[..4] != b"STA2" {
-                return Err(Error::msg(format!("{}: stat {remote}: unexpected reply", self.serial)));
+                return Err(Error::msg(format!("{}: stat {remote}: unexpected reply", self.label())));
             }
             return Ok((u32_at(4) == 0).then(|| Stat { mode: u32_at(24), size: u64_at(40), mtime: u64_at(56) as i64 }));
         }
         if &b[..4] != b"STAT" {
-            return Err(Error::msg(format!("{}: stat {remote}: unexpected reply", self.serial)));
+            return Err(Error::msg(format!("{}: stat {remote}: unexpected reply", self.label())));
         }
         Ok((u32_at(4) != 0).then(|| Stat { mode: u32_at(4), size: u32_at(8) as u64, mtime: u32_at(12) as i64 }))
     }
@@ -743,7 +766,7 @@ impl Device {
 /// computer's loopback (a reverse) are theirs here, as a fixture's check reads them.
 pub fn server_pids() -> Vec<u32> {
     let port = server_port();
-    let adb: Vec<u32> = crate::host::all_processes().into_iter().filter(|p| matches!(p.name.to_ascii_lowercase().as_str(), "adb" | "adb.exe")).map(|p| p.pid).collect();
+    let adb: Vec<u32> = crate::host::all_processes().into_iter().filter(|p| p.name.matches_ascii("adb") || p.name.matches_ascii("adb.exe")).map(|p| p.pid).collect();
     let listening = crate::host::tcp::sockets(&adb).unwrap_or_default();
     adb.into_iter().filter(|pid| listening.iter().any(|s| s.pid == *pid && s.listening && s.local.1 == port)).collect()
 }
@@ -779,7 +802,7 @@ fn sync_head(c: &mut Conn) -> Result<([u8; 4], usize)> {
 
 /// One device as `strobe status` and `strobe up` list it: as the server lists it, with its facts when it
 /// takes requests (else why not).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Summary {
     #[serde(flatten)]
     pub listed: Listed,
@@ -906,7 +929,7 @@ impl Drop for Tunnel {
     fn drop(&mut self) {
         let _ = self.device.remove(self.reverse, &self.listen);
         let mut list = TUNNELS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = list.iter().position(|t| t["serial"] == self.device.serial.as_str() && t["reverse"] == self.reverse && t["listen"] == self.listen.as_str()) {
+        if let Some(i) = list.iter().position(|t| t["serial"] == self.device.wire_id() && t["reverse"] == self.reverse && t["listen"] == self.listen.as_str()) {
             list.remove(i);
         }
         write_tunnels(&list);

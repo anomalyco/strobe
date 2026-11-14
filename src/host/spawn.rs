@@ -420,7 +420,7 @@ pub fn shared_process() {
 
 /// The log every note goes to the moment it is made (`leave`), so none is lost to a panic, an abort, a
 /// second Ctrl-C or an MCP run that outlived its call: `<state>/log/left-alone.log`, a line each:
-/// seconds since 1970, then the note as a run prints it (a pid and fixed words, nothing else).
+/// seconds since 1970, then what was left and why. Unverified PIDs are live only.
 pub fn left_alone_log() -> std::path::PathBuf {
     super::paths::state_dir().join("log").join("left-alone.log")
 }

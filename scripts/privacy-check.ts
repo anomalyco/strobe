@@ -27,7 +27,15 @@ const root = join(import.meta.dir, "..")
 
 // Where `expose_local()` may hand out a private value, and why: what never becomes text (an OS call, a wire
 // protocol, a comparison with another of the machine's names).
-const exposeAllowed: Record<string, string> = {}
+const exposeAllowed: Record<string, string> = {
+  "src/host/adb.rs": "adb transport and journal identity",
+  "src/host/adb/facts.rs": "owner-only opt-in and speed-reference key",
+  "src/host/ios.rs": "pair-record lookup and explicit device inventory",
+  "src/target/wir.rs": "canonical device selection handle for local inventory and metadata",
+  "src/app/top.rs": "explicit owner-requested process inventory",
+  "src/app/outside.rs": "name of the selected recording target after PID filtering",
+  "src/host/win.rs": "target member selected by the process tree",
+}
 
 // Files that compose or publish text: none may ever expose a private value, whatever the list above says.
 const neverExpose = [/^src\/validity\.rs$/, /^src\/model\.rs$/, /^src\/stats\.rs$/, /^src\/text(\.rs|\/)/, /^src\/driver(\.rs|\/)/, /^src\/target\/a11y\//, /^src\/app\/pr(\.rs|\/)/, /^src\/app\/card(\.rs|\/)/, /^src\/app\/report\.rs$/]

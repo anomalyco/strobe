@@ -363,12 +363,10 @@ pub fn named_work(who: &[(String, f64)], steal: Option<f64>) -> String {
 }
 
 /// The caller can show the private diagnostic live; only the public words become result text.
-pub fn speed_context(who: &[(String, f64)], steal: Option<f64>, machine: bool, live: impl FnOnce(&str)) -> String {
-    use crate::text::{PrivKind, Private, Text};
-    let names = who.iter().map(|(n, p)| (Private::new(n.clone(), PrivKind::ForeignProc), *p)).collect::<Vec<_>>();
+pub fn speed_context(who: &[(crate::text::Identity, f64)], steal: Option<f64>, machine: bool, live: impl FnOnce(&str)) -> String {
     let lead = if machine { "busiest processes on the machine (% of a core): " } else { "busiest processes (% of a core): " };
-    let text = Text::busiest_processes(lead, machine, &names, steal);
-    if !names.is_empty() {
+    let text = crate::text::Text::busiest_processes(lead, machine, who, steal);
+    if !who.is_empty() {
         live(&format!("  {}", text.local()));
     }
     text.public().into_owned()
@@ -527,7 +525,7 @@ const FOREIGN_PCT: f64 = 25.0;
 struct Try {
     ms: f64,
     foreign_pct: f64,
-    others: Vec<(String, f64)>,
+    others: Vec<(crate::text::Identity, f64)>,
     /// Hypervisor steal on the target's CPUs meanwhile (% of their time; Linux guests).
     steal: Option<f64>,
 }
@@ -560,13 +558,13 @@ fn timed_check(cpus: Option<u64>) -> Try {
         _ => 0.0,
     };
     let before: std::collections::HashMap<u32, u64> = p0.iter().map(|p| (p.pid, p.cpu_ns)).collect();
-    let mut others: Vec<(String, f64)> = p1
+    let mut others: Vec<_> = p1
         .iter()
         .filter(|p| p.pid != me && p.pid != 0)
         .filter_map(|p| {
             let d = p.cpu_ns.saturating_sub(*before.get(&p.pid)?) as f64 / 1e6;
             let pct = 100.0 * d / wall_ms.max(1.0);
-            (pct >= 5.0).then(|| (format!("{} ({})", p.name, p.pid), pct))
+            (pct >= 5.0).then(|| (p.name.with_pid(p.pid, ""), pct))
         })
         .collect();
     others.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -721,10 +719,7 @@ fn reference_throttled(key: &str, what: &str, ms: f64, keep: bool) -> Result<Opt
     {
         let vs = crate::fmt::times(&[ms, r], false).join(" vs ");
         return Err(Refusal::new(ValidatorId::Throttled, format!("the page's speed check ran {ratio:.2}× slower than {what} ({vs})"))
-            .fix(format!(
-                "remove CPU throttling, plug in power, leave power saving, let the device cool down; a reference set by an unusually fast check goes with its entry {key:?} in {}",
-                path.display()
-            ))
+            .fix(format!("remove CPU throttling, plug in power, leave power saving, let the device cool down; its saved speed reference is in {}", path.display()))
             .into());
     }
     if !keep {
@@ -816,23 +811,23 @@ pub fn thermal_refusal(serial: &str, why: &str, when: &str) -> Refusal {
 /// a bench waits for it to pass. An untimed run (`--check`, `look`, attribution, a leak run) takes none of these.
 pub fn phone_timed(f: &host::adb::Facts) -> Result<()> {
     if let Some(why) = &f.emulator {
-        return Err(Refusal::new(ValidatorId::Emulator, format!("{} is an emulator ({why}): it runs on this computer's CPU and GPU, not a phone's, so its timing describes no phone", f.serial))
+        return Err(Refusal::new(ValidatorId::Emulator, format!("{} is an emulator ({why}): it runs on this computer's CPU and GPU, not a phone's, so its timing describes no phone", f.label()))
             .fix("time the page on a phone on a cable; an emulator runs `bench --check`, leak runs (`--probes memory`), `look` and attribution recordings")
             .into());
     }
     if f.transport == host::adb::Transport::Wireless {
         return Err(Refusal::new(
             ValidatorId::WirelessTransport,
-            format!("{} is reached over the network (adb over Wi-Fi): the radio's work and the link's latency would be in the numbers", f.serial),
+            format!("{} is reached over the network (adb over Wi-Fi): the radio's work and the link's latency would be in the numbers", f.label()),
         )
         .fix("connect the phone with a USB cable (and `adb disconnect` its network address, or name the USB serial with --mobile=<serial>)")
         .into());
     }
     if f.power_save == Some(true) {
-        return Err(Refusal::new(ValidatorId::PowerSave, format!("{} has Battery Saver on: it slows the CPU and GPU and defers work", f.serial)).fix("turn Battery Saver off on the phone").into());
+        return Err(Refusal::new(ValidatorId::PowerSave, format!("{} has Battery Saver on: it slows the CPU and GPU and defers work", f.label())).fix("turn Battery Saver off on the phone").into());
     }
     if let Some(b) = f.battery.as_ref().filter(|b| b.level < LOW_BATTERY_PCT) {
-        return Err(Refusal::new(ValidatorId::LowBattery, format!("{}'s battery is at {}%: phones slow down under {LOW_BATTERY_PCT}% to make it last", f.serial, b.level))
+        return Err(Refusal::new(ValidatorId::LowBattery, format!("{}'s battery is at {}%: phones slow down under {LOW_BATTERY_PCT}% to make it last", f.label(), b.level))
             .fix("charge the phone past 20% (keep it on the charger while strobe runs)")
             .into());
     }

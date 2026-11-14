@@ -734,7 +734,7 @@ Global    --json  -q  -h  -V  --progress stderr|stdout|off (stdout for shells th
 Handles   plain ids: ASCII letters, digits, _ and -; a unique prefix works. Experiment --id: 1–96 characters.
           Recording --id: rec_ plus 1–64 such characters. query and report also take a path (above).
 Clean-up  strobe ends what it launched; a process it cannot prove it launched it leaves alone, and the
-          command ends with a line per such process (its pid and why; --json: left_alone; the state
+          command ends with a line per such process (what was left and why; --json: left_alone; the state
           folder's log/left-alone.log; strobe status says when there were any in the last day)
 Schema    result.json and --json: schema/result.v1.json (node_modules/@hona/strobe/schema/); strobe.json:
           schema/strobe.v1.json

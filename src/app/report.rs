@@ -115,6 +115,7 @@ pub fn run(args: &Args) -> Result<Output> {
     // A card or badge needs only the result: no views, no insights. Published: every string of it
     // through `pr::public` first.
     if let Some(format @ ("card" | "badge")) = args.get("format") {
+        omit_device_ids(&mut data);
         super::pr::public_value(&mut data);
         return super::card::report(args, &scratch, &data, format);
     }
@@ -171,6 +172,7 @@ pub fn run(args: &Args) -> Result<Output> {
         }
     }
     let format = args.get("format").unwrap_or("html");
+    omit_device_ids(&mut data);
     // A PR block and a step summary are published: every string they read through `pr::public` first,
     // the views and insights just attached too.
     if matches!(format, "pr" | "summary") {
@@ -743,10 +745,53 @@ fn side_attribution(rec: &Rec, plan_runs: Option<u64>, engine: &str) -> Option<V
 
 const TEMPLATE: &str = include_str!("../../viewer/report.html");
 
+/// The owner's raw metadata and rerun arguments keep device selectors. A report must not
+/// embed those identifiers in its payload, including copies in an older rendered message.
+fn omit_device_ids(data: &mut Value) {
+    fn collect(v: &Value, ids: &mut Vec<String>) {
+        match v {
+            Value::Array(a) => a.iter().for_each(|x| collect(x, ids)),
+            Value::Object(o) => {
+                for (k, x) in o {
+                    if matches!(k.as_str(), "serial" | "hardware_serial" | "hw_serial" | "short_udid" | "udid" | "mobile")
+                        && let Some(id) = x.as_str().filter(|s| !s.is_empty() && *s != "<device>")
+                    {
+                        ids.push(id.into());
+                    }
+                    collect(x, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn redact(v: &mut Value, ids: &[String]) {
+        match v {
+            Value::Array(a) => a.iter_mut().for_each(|x| redact(x, ids)),
+            Value::Object(o) => o.values_mut().for_each(|x| redact(x, ids)),
+            Value::String(s) => {
+                for id in ids {
+                    if s.contains(id) {
+                        *s = s.replace(id, "<device>");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut ids = Vec::new();
+    collect(data, &mut ids);
+    ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
+    ids.dedup();
+    if !ids.is_empty() {
+        redact(data, &ids)
+    }
+}
+
 pub fn html(view: &str, data: &Value) -> String {
     // The viewer does not consume the local name maps. A self-contained HTML file is a report,
     // not a copy of result.json. The latter keeps the structured fields for local consumers.
     let mut data = data.clone();
+    omit_device_ids(&mut data);
     super::pr::safe_diagnostics(&mut data);
     if let Some(r) = data.pointer_mut("/plan/reserve").and_then(Value::as_object_mut) {
         r.remove("moved");
