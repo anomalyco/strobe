@@ -32,7 +32,7 @@ Take head minus base **within each kept pair**. Use the same look, pass, pairs a
 | Surface | Today | Placement |
 |---|---|---|
 | Terminal / Markdown | Side medians, change, range, verdict | Indented continuation immediately under the metric; no new column. New line ≤110 columns (`surfaces.ts` previously had no column assertion). |
-| PR block / summary | Metrics table | Second line in Change and Likely range. No extra row. Descriptive rows keep their compact table. |
+| PR block / summary | Metrics table | Second line in Change and Likely range, including moved descriptive rows under Also measured. No extra row. Unchanged descriptive rows stay in the footer. |
 | Single-tile card | Headline, medians, pair tally | Shift and range where the full line fits; tile description retains them. No extra text on a crowded tile. |
 | Badge | Headline alone | No shift; cannot fit a second quantity and range |
 | HTML | Forest row with percentage and range | A subordinate line under the metric |
@@ -47,4 +47,6 @@ Take head minus base **within each kept pair**. Use the same look, pass, pairs a
 | Four [1,3], four [120,100]; seven [1,3], three [500,400] | Opposite substantive direction or different interval sides: no field, text or label |
 | Four [100,100.2], four [110,109.79] | Clean same: a small center rounds to unsigned zero, not an opposing direction |
 | Shift 10,000 times smaller/larger than its baseline | Fixed chosen time unit; bytes scaled by the shift, not the baseline |
-| Descriptive time and memory (`run`) | Terminal, Markdown, HTML and JSON carry the same shift as a tested row; no extra PR detail |
+| Descriptive time and memory (`run`) | Terminal, Markdown, HTML, JSON and moved PR rows carry the same shift as a tested row |
+| A ratio and shift that print opposite signs in even one unit | Omit the shift at computation, including from JSON; changing units cannot restore it |
+| One-sided interval from +0.5 to +1 byte | `shift +1 [+<1 … +1] B`; an endpoint below the display resolution is not zero |

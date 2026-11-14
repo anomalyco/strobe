@@ -495,7 +495,18 @@ impl Comparison {
         if self.relative && self.kind != VerdictKind::Refused && matches!(def.unit, "ms" | "MB" | "bytes") && self.n >= 2 && [self.estimate, self.lo, self.hi].iter().all(|x| x.is_finite()) {
             let d: Vec<_> = pairs.filter(|(a, b)| a.is_finite() && b.is_finite()).map(|(a, b)| b - a).collect();
             let (estimate, lo, hi, _) = hodges_lehmann(&d, confidence);
-            if d.len() == self.n && [estimate, lo, hi].iter().all(|x| x.is_finite()) && shift_agrees((estimate, lo, hi), (self.estimate, self.lo, self.hi), self.bound) {
+            let shift = (estimate, lo, hi);
+            if d.len() == self.n && [estimate, lo, hi].iter().all(|x| x.is_finite()) && shift_agrees(shift, (self.estimate, self.lo, self.hi), self.bound) {
+                use crate::fmt::{
+                    FmtCtx,
+                    TimeUnit::{Ms, S, Us},
+                };
+                let opposite =
+                    estimate != 0.0 && self.estimate != 0.0 && (estimate > 0.0) != (self.estimate > 0.0) && crate::fmt::pct_ci(self.estimate, self.lo, self.hi).0.starts_with(['+', '−', '-']);
+                let units: &[_] = if def.unit == "ms" { &[Us, Ms, S] } else { &[Us] };
+                if !units.iter().all(|&unit| crate::fmt::shift_in(shift, def.unit, FmtCtx { unit, ascii: false }, "").is_some_and(|s| !opposite || s.estimate == "0")) {
+                    return row;
+                }
                 row["shift"] = serde_json::json!({"estimate":estimate,"lo":lo,"hi":hi,"unit":def.unit});
             }
         }

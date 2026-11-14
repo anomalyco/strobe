@@ -589,7 +589,7 @@ impl<'a> Doc<'a> {
                 if o != Out::Refused && uneven(c).is_some() {
                     odd.push((s, c));
                 }
-                let (chg, rng) = change_cells(c, o);
+                let (chg, rng) = with_shift_cells(c, change_cells(c, o));
                 let rng = if o == Out::Refused {
                     let (id, why) = refusal(c);
                     format!("skipped <sub>{}</sub>", plain_refusal(&id, &why))

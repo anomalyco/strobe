@@ -954,7 +954,7 @@ fn card_svg(card: &Card, theme: Theme) -> String {
                 strip(&mut svg, PAD, top + 330.0, width * 0.62, t, 8.0, false);
                 let note = if t.tally.is_empty() { String::new() } else { format!("each dot is one pair · {}", t.tally) };
                 svg.text(W - PAD, top + 364.0, (20.0, false), Ink::Muted, "end", &note);
-                svg.text(PAD, bottom - 30.0, (20.0, false), Ink::Muted, "start", &t.shift);
+                svg.text(PAD, bottom - 30.0, (20.0, false), Ink::Muted, "start", &clip(&t.shift, width, 20.0, false));
             }
         }
     }

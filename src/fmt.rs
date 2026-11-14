@@ -275,12 +275,13 @@ pub(crate) fn shift_text(c: &serde_json::Value) -> Option<ShiftText> {
     if c["relative"] != true || c["refusal"].is_object() || c["verdict_kind"] == "refused" || !(lo <= est && est <= hi) {
         return None;
     }
-    let ratio = (c["estimate"].as_f64()?, c["lo"].as_f64()?, c["hi"].as_f64()?);
-    if !crate::stats::shift_agrees((est, lo, hi), ratio, c["bound"].as_f64()?) {
-        return None;
-    }
-    let (factor, label, finest) = match s["unit"].as_str()? {
-        "ms" => (ctx().unit.per_ms(), time_label(), ctx().unit.finest() as i32),
+    shift_in((est, lo, hi), s["unit"].as_str()?, ctx(), if c["warned"] == true { " (warned)" } else { "" })
+}
+
+/// Format the same numbers during admission and display; changing units cannot decide whether a shift exists.
+pub(crate) fn shift_in((est, lo, hi): (f64, f64, f64), unit: &str, fmt: FmtCtx, warning: &'static str) -> Option<ShiftText> {
+    let (factor, label, finest) = match unit {
+        "ms" => (fmt.unit.per_ms(), fmt.unit.label(fmt.ascii), fmt.unit.finest() as i32),
         "MB" => (1.0, "MB", 6),
         "bytes" => {
             let magnitude = lo.abs().max(hi.abs());
@@ -328,21 +329,23 @@ pub(crate) fn shift_text(c: &serde_json::Value) -> Option<ShiftText> {
         };
         let body = if body.chars().any(|c| matches!(c, '1'..='9')) {
             body
-        } else if one_sided && a < 0.5 * 10f64.powi(-finest) {
+        } else if one_sided {
             format!("<{step:.d$}")
         } else {
             return "0".into();
         };
-        format!("{}{body}", if x < 0.0 { minus() } else { "+" })
+        format!(
+            "{}{body}",
+            if x >= 0.0 {
+                "+"
+            } else if fmt.ascii {
+                "-"
+            } else {
+                "−"
+            }
+        )
     };
-    let estimate = number(e);
-    if est != 0.0 && ratio.0 != 0.0 && (est > 0.0) != (ratio.0 > 0.0) && estimate != "0" {
-        let pct = pct_ci(ratio.0, ratio.1, ratio.2).0;
-        if pct.starts_with(['+', '−', '-']) {
-            return None;
-        }
-    }
-    Some(ShiftText { estimate, lo: number(l), hi: number(h), unit: label, warning: if c["warned"] == true { " (warned)" } else { "" } })
+    Some(ShiftText { estimate: number(e), lo: number(l), hi: number(h), unit: label, warning })
 }
 
 /// A time's number alone (an axis tick under a header that names the unit): `250,000`.
