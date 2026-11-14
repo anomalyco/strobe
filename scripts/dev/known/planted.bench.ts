@@ -170,7 +170,8 @@ export default bench({
     launch: {
       targets: ["launch-0", "launch-200", "launch-400"],
       primary: "launch.ready",
-      launch: { until: "#ready" },
+      metrics: ["launch.plant_start", "launch.plant_end"],
+      launch: { until: "#ready", milestones: { plant_start: { in: "page", match: /^plant_start$/ }, plant_end: { in: "page", match: /^plant_end$/ } } },
     },
     frames: {
       targets: ["frame-light", "frame-heavy"],

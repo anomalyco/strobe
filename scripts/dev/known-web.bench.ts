@@ -146,10 +146,11 @@ export default bench({
     cpu2s: {
       primary: "cpu.work",
       metrics: ["count.os_cpu_ms", "count.os_cpu_ended", "cpu.renderer", "cpu.app.total", "run.duration"],
-      async run({ page, count }) {
-        const before = osCpu()
+      async run({ page, count, untimed }) {
+        // Exclude the two OS queries, not the page's spin, from strobe's measured tree CPU.
+        const before = process.platform === "win32" ? await untimed(osCpu) : null
         await page.eval(() => (window as any).known.spin(2000))
-        const after = osCpu()
+        const after = process.platform === "win32" ? await untimed(osCpu) : null
         if (before == null || after == null) return
         let used = 0
         for (const [p, ms] of after) used += ms - (before.get(p) ?? 0)

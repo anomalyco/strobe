@@ -1203,12 +1203,12 @@ export const WATCH: Watch[] = [
   // ----- a headed page (chromium_page frames and input latency) -----
   {
     cells: ["chromium_page · wall_and_counts", "chromium_page · page_engine"],
-    spans: ["src/app/bench.rs#run_chunk", "src/app/bench.rs#headless_of", "src/app/bench.rs#headless_target", "src/app/bench.rs#headless_state", "src/app/bench.rs#side_windowless", "src/driver.rs#Driver::dispatch", "sdk/bench/src/runner.ts#@const page = {", "src/metrics.rs#read", "src/probe/trace.rs"],
+    spans: ["src/app/bench.rs#run_chunk", "src/app/bench.rs#headless_of", "src/app/bench.rs#headless_target", "src/app/bench.rs#headless_state", "src/app/bench.rs#side_windowless", "src/app/bench.rs#windowless_as", "src/app/bench.rs#windowless_target", "src/app/bench/launch.rs#app_windowless", "src/driver.rs#Driver::dispatch", "sdk/bench/src/runner.ts#@const page = {", "src/metrics.rs#read", "src/probe/trace.rs"],
     why: "the lean page's run edges, trace selection, CDP Performance counters and the refusal of script time on page.eval; phase cases can also need traced run marks",
   },
   {
     cells: ["chromium_page · wall_and_counts"],
-    spans: ["src/app/bench.rs#phase_ms", "src/app/bench.rs#phase_state", "src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks", "src/metrics.rs#phase_stretches", "src/metrics.rs#doc_mark_script", "src/metrics.rs#mark_windows"],
+    spans: ["src/app/bench.rs#phase_ms", "src/app/bench.rs#phase_state", "src/app/bench.rs#const COUNT_SCRIPT", "src/driver.rs#Driver::mark", "src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks", "src/metrics.rs#phase_stretches", "src/metrics.rs#doc_mark_script", "src/metrics.rs#mark_windows", "src/metrics.rs#stretches", "src/metrics.rs#windows_sql", "src/metrics.rs#impl BlockData"],
     why: "the phase edges and counted occurrences of a page run, reduced to its measured spans, and NoPhase for a phase the run did not enter",
   },
   { cells: ["chromium_page · page_engine"], spans: ["src/app/bench.rs#const WORK_PARTS"], why: "the CDP counter names and scales for layout and style work and counts" },
@@ -1219,12 +1219,12 @@ export const WATCH: Watch[] = [
   },
   {
     cells: ["tty · tty_grid"],
-    spans: ["src/app/bench/tty.rs#chunk", "src/driver/tty.rs#impl Driver", "src/driver/tty.rs#impl Input", "src/driver/tty.rs#owed_until", "src/driver/tty.rs#latencies", "src/driver/tty.rs#pair", "src/driver/tty.rs#pair_observing", "src/driver/tty.rs#ambiguous", "src/driver/tty.rs#const QUIET", "src/driver/tty.rs#const ANSWER_MAX", "src/metrics.rs#percentile"],
+    spans: ["src/app/bench/tty.rs#chunk", "src/app/bench/tty.rs#event_values", "src/app/bench/tty.rs#impl EventWatches", "src/driver/tty.rs#impl Driver", "src/driver/tty.rs#impl Input", "src/driver/tty.rs#impl Tty", "src/driver/tty.rs#key_bytes", "src/driver/tty.rs#owed_until", "src/driver/tty.rs#latencies", "src/driver/tty.rs#pair", "src/driver/tty.rs#pair_observing", "src/driver/tty.rs#pairings", "src/driver/tty.rs#answered", "src/driver/tty.rs#changes", "src/driver/tty.rs#ambiguous", "src/driver/tty.rs#const QUIET", "src/driver/tty.rs#const ANSWER_MAX", "src/metrics.rs#percentile"],
     why: "the send, pairing a key to one committed update and reducing its latencies; the same path withholds ambiguous samples when input outruns replies",
   },
   {
     cells: ["tty · launch"],
-    spans: ["src/app/bench/tty.rs#launch_once", "src/app/bench/launch.rs#refusals", "src/target/tty.rs#open", "src/target/tty.rs#start", "src/driver/tty.rs#find"],
+    spans: ["src/app/bench/tty.rs#launch_once", "src/app/bench/launch.rs#refusals", "src/target/tty.rs#open", "src/target/tty.rs#start", "src/driver/tty.rs#find", "src/driver/tty.rs#pick", "src/driver/tty.rs#parse_sel"],
     why: "from release to the first grid showing the selector: finding it, subtracting the two timestamps, and refusing window-only launch metrics",
   },
   { cells: ["tty · launch"], os: ["linux"], spans: ["src/host/spawn.rs#spawn_owned_terminal", "src/host/spawn.rs#impl Release", "src/host/spawn.rs#Owned::released_ns"], why: "the PTY child's actual release instant, stamped after cgroup and affinity setup" },
