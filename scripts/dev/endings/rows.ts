@@ -70,8 +70,9 @@ for (const [name, flags, code, states, summary] of rows) {
 }
 if (!baseline) {
   const id=`exp_end_${crypto.randomUUID()}`
-  const p=Bun.spawnSync([exe,"run","--check","--head","bun -v & bun -v","--id",id,"--json"],{timeout:30000})
+  const p=Bun.spawnSync([exe,"bench","scripts/dev/endings/line.bench.ts","--check","--head",".","--id",id,"--json"],{timeout:30000})
   assert.equal(p.exitCode,2,p.stdout.toString())
+  assert.match(JSON.parse(p.stdout.toString()).error,/&/)
   assert.doesNotMatch(p.stderr.toString(), / · exp_/)
   assert.ok(!existsSync(join(experiments,id)))
   const parity=Bun.spawnSync([exe,"bench","scripts/dev/endings/parity.bench.ts","--base","left","--head","right","--headless","--check","--json"],{timeout:90000})
