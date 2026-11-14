@@ -52,9 +52,8 @@ The design and every rule behind this file: SPEC.md.
   `--check --head "<cmd>"` (and `--base "<cmd>"`) runs each once: `cpu.work · run.duration ·
   memory.peak`. With `--check` every `--noworse` exits 2 (a command gives no exact counter): drop
   `--check` and use `--noworse cpu.work=2%`.
-- **Windows known issue** (every release so far): a `strobe run` or `cli()` line with `&&`, `||`, `|`,
-  `<` or `>` after a real program measures only the first command (the rest are its arguments). Wrap
-  it in `cmd /c "…"` on both sides, or put it in a script. A fix is designed.
+- `ShellLine`: `&&`, `||`, pipes and redirects run through the platform shell. Its startup counts.
+  Plain external commands use PATH; use `./tool` or `.\tool.exe` to measure each variant's build.
 - `--aa --head .` checks the method on this machine (same build both sides).
 - Long benches keep running in the daemon: `strobe query exp_… progress`. Ctrl-C, SIGTERM or
   `strobe bench --stop <exp>` stop after the block (exit 130, what finished is kept);
@@ -581,8 +580,8 @@ export default bench({
   from outside: `cpu.work`, `run.duration`, `cli.launch`, `cpu.wakes` (not Windows), `memory.peak`,
   `io.*`, and `metric.<name>` from `strobe:metric <name>=<value> [higher]` lines it prints (declare
   one in `metrics` to test it). A nonzero exit, a timeout or a process left running fails the run.
-  Unix runs the line under `sh -c`; Windows starts its first word as the program (a `.cmd`, `.bat` or
-  a word that is no executable runs under cmd), so `a && b` there runs `a` alone: `cmd /c "a && b"`.
+  Unix uses POSIX sh; on Windows shell operators and batch shims run under cmd.exe. Quote literal
+  operators (double quotes on Windows); run a PowerShell script with `pwsh -NoProfile -File`.
 - `params: { files: { run: [100, 10_000], more: [1, 1_000] } }`: `more` only with `--params all`.
 - `bun add -d @hona/strobe` pins strobe for the project and gives editors the types; strobe runs a
   bench file with its own SDK copy either way.

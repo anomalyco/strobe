@@ -947,7 +947,7 @@ createInterface({ input: socket }).on("line", (line) => {
     // strobe's fix for a failed call (a missing permission, a selector to try) rides along as `hint`,
     // and the validator that refused it as `refusal`, which a hook that lets the error through hands back.
     if ("error" in message)
-      waiting.reject(Object.assign(new Error(message.error), message.hint ? { hint: message.hint } : {}, message.refusal ? { refusal: message.refusal } : {}))
+      waiting.reject(Object.assign(new Error(message.error), message.hint ? { hint: message.hint } : {}, message.refusal ? { refusal: message.refusal } : {}, message.code === 2 ? { code: 2 } : {}))
     else waiting.resolve(message.ok)
     return
   }
@@ -968,6 +968,7 @@ createInterface({ input: socket }).on("line", (line) => {
         stack: String(error?.stack ?? ""),
         ...(typeof error?.hint === "string" ? { hint: error.hint } : {}),
         ...(error?.refusal ? { refusal: error.refusal } : {}),
+        ...(error?.code === 2 ? { code: 2 } : {}),
       }),
   )
 })

@@ -97,7 +97,8 @@ fn metric_fingerprint(metric: &str, runtimes: &[String], kinds: &[&str], fingerp
     let revision = match metric {
         "memory.app.private" if linux => Some(2),
         "js.heap.retained" if runtimes.iter().any(|r| r == "node") => Some(2),
-        "run.duration" | "cpu.app.total" | "cpu.wakes" | "cli.launch" if linux && kinds.contains(&"cli") => Some(2),
+        "cli.launch" if kinds.contains(&"cli") => Some(3),
+        "run.duration" | "cpu.app.total" | "cpu.wakes" if linux && kinds.contains(&"cli") => Some(2),
         m if m.starts_with("launch.") && (linux || cfg!(windows)) && kinds.iter().any(launched) => Some(2),
         _ => None,
     };
@@ -458,6 +459,9 @@ fn point(args: &Args, file: &Path, root: &Path, commit: &str, blocks: usize, sta
         }
         let runtimes = script_runtimes(r, s, &[(s["target"].as_str().unwrap_or(""), None)]);
         runtime_fingerprint(&runtimes, &mut fingerprint);
+        if blocks_v.iter().any(|b| b["shelled"] == true) {
+            fingerprint["shell_line"] = json!(true);
+        }
         motion_fingerprint(r, s, &mut fingerprint);
         seed_fingerprint(r, &mut fingerprint);
         metric_fingerprint(&metric, &runtimes, &[s["target_kind"].as_str().unwrap_or("")], &mut fingerprint);

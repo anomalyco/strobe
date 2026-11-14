@@ -678,10 +678,10 @@ Use
                                   1 if one failed. Nothing compared; --check --noworse is a usage error (2).)
                                   Timed: 0 even on worse; read series[].primary.verdict_kind in --json.
                                   Refused: 4. Undecided: 0, or 5 with --require-verdict.
-                                  (Windows, a known issue: a line is started directly, its first word the
-                                  program, so after a real program &&, ||, |, < and > go to it as arguments
-                                  and only its first command runs and is measured: wrap the line in cmd /c \"…\"
-                                  on both sides, or use a script)
+                                  Plain commands use PATH. For the variant's build use ./tool or .\tool.exe.
+                                  Shell operators run the whole line through POSIX sh or Windows cmd.exe;
+                                  ShellLine means shell startup is included. Quote a literal &. On Windows
+                                  use double quotes, && between commands, and an interpreter for scripts.
 
 Setup
   init [<dir>] [--target web|lib|server|native|electron|tty|cli] [--force]

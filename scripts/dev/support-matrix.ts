@@ -955,8 +955,9 @@ export const WATCH: Watch[] = [
     cells: ["cli · *"],
     spans: [
       "src/app/bench/cli.rs#line_for",
-      "src/app/bench/cli.rs#simple",
-      "src/app/bench/cli.rs#command",
+      "src/app/bench/cli/plan.rs",
+      "src/app/bench/cli/plan/unix.rs",
+      "src/app/bench/cli/plan/windows.rs",
       "src/app/bench/cli.rs#exec",
       "src/app/bench/cli.rs#block",
       "src/app/bench/cli.rs#metric_line",
@@ -975,7 +976,7 @@ export const WATCH: Watch[] = [
       "src/host/mod.rs#thread_cycles",
       "src/host/mod.rs#cycles_refused",
     ],
-    why: "a command's run: the line as spawned (line_for, simple, command: whether a shell stays its parent), its two edges and launch CPU (exec; Windows' CreateProcessW, its job (new_job, assign: what breaks away stays in its count) and resume in windows, nt_resume and Spawned::around, spawn_span; cpu_ms on the cycle clock), its output lines (each_line), its job or group and what the OS counted at its exit (spawn_group, run_to_exit: job cycles and PeakProcessMemoryUsed on Windows, wait4's rusage on Unix), and the block's values from them (block, metric_line, sum_of); strobe's own cost (SelfCost) and the stamps' writing are not the command's numbers",
+    why: "a command's run: the line as spawned (line_for and the command planner choose the executable or shell), its two edges and launch CPU (exec; Windows' CreateProcessW, its job (new_job, assign: what breaks away stays in its count) and resume in windows, nt_resume and Spawned::around, spawn_span; cpu_ms on the cycle clock), its output lines (each_line), its job or group and what the OS counted at its exit (spawn_group, run_to_exit: job cycles and PeakProcessMemoryUsed on Windows, wait4's rusage on Unix), and the block's values from them (block, metric_line, sum_of); strobe's own cost (SelfCost) and the stamps' writing are not the command's numbers",
   },
   {
     cells: ["cli · *"],

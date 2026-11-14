@@ -317,7 +317,8 @@ export interface Context<P, K = any> extends Seeded {
   /**
    * `cli()` targets: runs a command to its exit in the variant's folder, timed and counted from outside (its CPU,
    * context switches, peak memory and IO, with everything it starts), and resolves with its exit code and output.
-   * Default: the target's command (with a `cmd:` variant, the variant's). A nonzero exit fails the run. Lines it
+   * Default: the target's command (with a `cmd:` variant, the variant's). Shell operators run the whole line
+   * through POSIX sh or Windows cmd.exe. A usage or incomplete-run refusal still fails when caught. Lines it
    * prints as `strobe:metric <name>=<value>` add to `metric.<name>` for the run.
    */
   exec(line?: string): Promise<{ code: number; output: string }>
@@ -813,11 +814,10 @@ export interface ScriptOptions {
 export interface CliOptions {
   /**
    * The command line each `ctx.exec()` runs in the variant's folder, to its exit, at most the case's `timeout`.
-   * Unix: `sh -c "exec <run>"` for one simple command, else `sh -c "<run>"` (assignments, pipes, `;`, `&&`,
-   * redirects, builtins); Windows: the first word is the program (a `.cmd` or `.bat`, or a word that is no
-   * executable, runs under cmd). Known issue on Windows: `&&`, `||`, `|`, `<` and `>` after a real program reach it
-   * as arguments, so only its first command runs and is measured; write `cmd /c "a && b"`, or one `ctx.exec` per
-   * command. Omit it when the variants are commands (`--base "cmd:<line>"`, what `strobe run --base … --head …`
+   * A plain external command uses PATH (on Windows, PATHEXT too). Use `./tool` or `.\tool.exe` for a local build.
+   * POSIX sh handles Unix shell syntax; cmd.exe handles Windows operators, builtins and batch shims. ShellLine
+   * includes shell startup. Quote literal operators; use double quotes on Windows and wait for every child.
+   * Omit it when the variants are commands (`--base "cmd:<line>"`, what `strobe run --base … --head …`
    * does). `{fixture.url}` and the like are filled in.
    */
   run?: string
@@ -1003,7 +1003,7 @@ export function script<P = any>(entry: string, opts: Omit<ScriptOptions, "entry"
  * `io.write`, and `metric.<name>` from its `strobe:metric <name>=<value> [lower|higher]` lines (default lower is
  * better; every command of a run must print each name it prints, in one direction). Cases: `run: (ctx) => ctx.exec()`.
  * A metric the case declares that this command does not give is refused with why (and what it gives instead); one it
- * does not declare is left out. On Windows a line with `&&` or `|` measures its first command only: see
+ * does not declare is left out. The clock covers the whole line, including any shell it needs: see
  * {@link CliOptions.run}.
  */
 export function cli<P = any>(run?: string, opts: Omit<CliOptions, "run"> & Side = {}): Target<P> {

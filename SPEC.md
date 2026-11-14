@@ -1648,15 +1648,9 @@ strobe run --check --head "<command>" [--base "<command>"]
   times two against each other (add --check to run each once first), or strobe run [--pin auto]
   [--reserve-cpus on|off] [--power high|keep] -- <command> [args…] runs your own harness under a
   bench's conditions` (exit 2).
-- **Known issue (every release so far, Windows only).** A command line is started directly, its first
-  word the program and the rest its arguments, so shell operators after a real program (`a && b`,
-  `a || b`, `a | b`, `a > out`, `a < in`) are passed to that program as arguments, and only the first
-  command runs and is measured. Wrap such a line in `cmd /c "…"` (on both sides of a comparison, so
-  both carry cmd's own start-up) or put it in a script. Checked with 0.34.0 on adais: `--check --head
-  "bun a.js && bun b.js"` printed `metric.a 1.00 · metric.b refused` (`a command printed no
-  strobe:metric b=<value> line`), and `--head 'cmd /c "bun a.js && bun b.js"'` read both. A line whose
-  program is a `.cmd` or `.bat`, or whose first word is no executable, runs under `cmd /d /s /c`
-  whole. Unix runs every line under `sh -c` (§9.6 "CLI targets"). A fix is designed.
+- `--base` and `--head` take command-line strings (§9.6, CLI targets). `a && b` runs both commands
+  if `a` succeeds. A shell's startup counts and the result names it. By contrast, `run -- program
+  arg…` takes already separated arguments: an argument containing `&&` stays an argument.
 
 - `strobe run -- <command>` runs an ad-hoc harness under a bench block's conditions: it takes the
   device's bench slot (so it never overlaps a timed block), switches to the fastest power plan, pins
@@ -5305,17 +5299,28 @@ with the plain fix.
 folder is the variant's root (`ctx.root`): the top folder of the checkout a folder variant names (not
 the subfolder given, as for `build.cwd`), a git ref's worktree, or for a `cmd:` variant the folder
 strobe was started in. Relative paths in the line resolve from there. The line is the call's own, else a `cmd:<line>` variant's, else the target's `run`;
-`{fixture.*}` is filled into all three and into `env` (§9.10). Unix runs one simple command as `sh -c
-"exec <line>"` (the command is the child, not a shell around it), and any other line as `sh -c
-"<line>"`: one with a variable assignment in front, `;`, `&`, `|`, a redirect, a subshell, a command
-substitution, a newline, or a shell keyword or builtin first. Windows starts the line's first word as
-the program (a `.cmd` or `.bat`, a word that is no executable, or arguments the program's command
-line cannot carry run under `cmd`). Known issue, in every release so far: on Windows a line with `&&`,
-`||`, `|`, `<` or `>` after a real program passes the operator and the rest to that program as
-arguments, so only its first command runs and is measured (§5.13); wrap such a line in `cmd /c "…"`
-or put it in a script. A fix is designed. `ctx.exec` resolves with the exit code and output; a nonzero exit
+`{fixture.*}` is filled into all three and into `env` (§9.10). A plain command uses PATH (and
+PATHEXT on Windows). Use `./tool` or `.\tool.exe` to run the variant's build. A local-only bare name
+is refused; a PATH copy shadowing the build warns `PathShadow`. Resolution happens after building.
+On Unix, POSIX sh replaces itself with a plain external command. Builtins, expansions, pipes,
+redirections and compound lines use POSIX sh, not bash: no brace expansion; use `bash -c` for bash.
+Windows starts a plain executable with the argument string as written (`^` and `%NAME%` are literal).
+`&&`, `||`, pipes, redirection, grouping, cmd builtins and batch shims use `cmd /d /v:off /s /c`.
+Naming a shell (`sh -c`, `bash`, `cmd /c`, `pwsh -c`) gives it the inner script without PATH or file-association checks inside; shell startup and the leftover-process check still count.
+`ShellLine` names the shell, flags an asymmetric comparison,
+and separates tracked series with shell startup. Quote literal operators. A single background `&`,
+or on Windows unquoted single quotes, semicolons, newlines, POSIX assignments and `start` without
+`/wait`, refuse with a fix. Invoke `.ps1` with `pwsh -NoProfile -File`. Implicit cmd lines are
+passed unchanged. Put leading redirections and indirect commands (`if`, `for`, `call`) in an explicitly
+invoked script. Avoid escaped double quotes or unquoted carets in implicit cmd lines and percent
+signs (even quoted) on batch shims. Quote dotted builtin names on implicit cmd lines (`"echo.cmd"`), so cmd does not take the builtin instead.
+The shell looks up paths when each command runs: an earlier command may build the file or change folder. A bare name resolving inside the launching checkout warns when
+the variant is elsewhere: use `./node_modules/.bin/tool` for each build's own shim. On Unix,
+single-quote an explicit shell's script when it contains expansions. Known syntax
+errors exit 2 before build; dynamic lines are checked at `ctx.exec`. Catching a usage refusal or
+`RunIncomplete` in the hook cannot make the block pass. `ctx.exec` returns the code and output; a nonzero exit
 fails the run (`RunIncomplete`, with the last lines), as does a command that runs past the case's
-`timeout` (strobe ends it and what it started), a command that left processes running 100 ms after
+`timeout` (strobe ends it and what it started), a command that left processes running when
 it exited (strobe ends them; what they did is not counted whole), and a run that ran no command.
 Left-running includes what left the command's group or ran outside its job (a `setsid` daemon):
 every command carries a stamp of its block (`STROBE_HOME`, `STROBE_OWNER`, §13.2) that strobe finds
@@ -6058,6 +6063,10 @@ emits:
 | `ObserverCost` | warn | every bench, per side: strobe's reads of a side's page or accessibility tree inside its runs took over 2% of their wall time, or a native app's tree was read over 8 times a run (`driver.reads`, `driver.read_ms`), or pixels over 8 times (`driver.pixel_reads`); a page's attribution profile's driver rows, `(strobe driver)` and `(native, via strobe driver)`, held over 2% of its active main-thread time (every sample but `(idle)`, when that is at least 2 ms a run); a `script()` target's relay of `ctx.call` over 10% of a core when its runs made 2 or more timed `ctx.call`s each (`overhead.script_calls`), or, pinned with fewer, the bench file's own `run()` using 85% of a core or more on strobe's CPUs (a client whose `fetch()` may pace the server; §19). An implementation comparison also warns when one side's reads came at least 4 more times a run and over 4 times as often as the other's (§9.10) |
 | `ProbeOverhead` | warn | a Chromium-family series timed with `--trace full`: its timed blocks traced every task of every thread, which costs the page main-thread time (§8.1: `main.work` +0.8% on a click, +35% on an idle page, `cpu.work` +3.5%); compare it only with full-trace runs. `query a..b` of a lean and a full-trace recording says the same |
 | `TickSampledCpu` | warn | a `cli()` run's `cpu.work` holds child processes' CPU from Windows' clock ticks (where strobe did not hold them): their share of `cpu.work` (§9.6) |
+| `ShellLine` | info, warn | the measured command includes shell startup; warns when only one side does (§9.6) |
+| `CommandPath` | info | the resolved executable or batch shim of a command (§9.6) |
+| `DirectLine` | info | a Windows direct command passes a caret or a defined `%NAME%` literally (§9.6) |
+| `PathShadow` | warn | a bare program name ran PATH's copy instead of the build in the variant's folder (§9.6) |
 | **What a run counted** | | |
 | `EndedCpu` | info | once per series: processes ended inside measured runs (or before a launch was ready), and `cpu.work` holds the CPU they used, from Linux's launch cgroups or the handles Windows strobe held from each process's start: how many runs, the median ms, and on Windows the executables that used the most (§9.6) |
 | `HeadlessFrame` | warn | a headless run's last step left at least 1.0 ms and 5% of `main.work` of style and layout (or layouts the run read 0 of) to the frame after the run, and the series declares a metric read before that frame (`run.duration`, `cpu.*`, the trace's metrics over the run): names those metrics and the time; pass `{ until: [selector, "frame"] }` (§7.3) |
@@ -9606,9 +9615,9 @@ verified line exact.
 | `script` · `hardware_counters` | — | preview | preview |
 | `script` · `package_idle` | — | preview | — |
 | `script` · `http_probe` | preview | preview | preview |
-| `cli` · `wall_and_counts` | preview | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin run.duration Δ 150.29 ms vs 150 ms planted; metric.truth_cpu_ms 150 and 300 exact) | preview |
-| `cli` · `process_cpu` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact) | verified (2026-11-13, 737544c5, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, cpu.work 302.4 ms vs 300 ms plus a 2.3 ms launch and tree 1205.7 ms vs 1200 ms; planted Δ 149.98 ms and 600.21 ms vs 150 and 600 ms) |
-| `cli` · `process_memory` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB) |
+| `cli` · `wall_and_counts` | preview | preview | preview |
+| `cli` · `process_cpu` | verified (2026-11-14, 5a52552f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 304.75 ms for 300 ms of CPU; +150 ms plant read +150.02 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
+| `cli` · `process_memory` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
 | `cli` · `http_probe` | preview | preview | preview |
 | `tty` · `wall_and_counts` | preview | preview | preview |
 | `tty` · `process_cpu` | preview | preview | preview |

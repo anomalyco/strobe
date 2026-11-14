@@ -607,58 +607,55 @@ const MAC_HEADLESS_CPU: &str = "re-verify scripts/dev/known-web.bench.ts and pla
 // `reviewed_at`: the commit at which every later change to the code that computes it was read and found
 // unable to move its numbers (`scripts/dev/support-matrix.ts --check` holds the code to it).
 // The cli cells' review at 737544c5 (`cleanup/spawn-clock`): the changes 384805d4 reviewed, then its own.
-const CHANGES_CLI_CLOCK: &str = "e3d0ffc1 made run_to_exit end what a command left by pid and start time only after every reading, keep the child as Proc::Child in spawn_group and carry each process's start time through still_left, group_members, stamped_with, stamped, stamped_in, stamp_of and stamp_in (a stamp kept only while its process keeps the start time it was listed with), and ebc9eeaf made block refuse only a declared metric; then 41ca8772, 11ac5f29 and 737544c5 made exec time a run from Owned::released_ns less creation_ns to Usage::exited_ns on host::now_ns, which windows reads beside the Instant it already read before the suspended child resumes (the impl Spawned and Owned::spawn_span hold the same CreateProcessW span) and spawn_group reads right before the spawn on macOS, as before, while on Linux spawn_group adds a close-on-exec stamp after the cgroup move and CPU mask that already made it fork (peak_floor read as before), and made run_to_exit read what is left once at the exit (still_left without its 100 ms grace; Windows from the job's held handles, a console host alone not counted; Linux also the launch cgroup's live members) and take the launch cgroup's CPU on Linux: a run that leaves nothing has the same edges, counts and readings on Windows and macOS (adais spin 300 run.duration 322.2 to 320.9 ms and cpu.work 306.96 to 306.25 ms; air 304 to 304.5 ms, cpu.work 303 ms on both), Linux memory.peak reads the same (alloc 202 MB, alloc-small refused NotOnThisOs), and a process left running is still refused RunIncomplete, now at once. At 8fcc3d0 exec changes the refusal hint only. Owned::run_to_exit and stamped_with reject ended or wrongly stamped candidates and keep the nonzero start on Windows; the fixtures leave no live helper except the intentionally refused orphan and breakaway-left. The successful runs take the same clocks and read the same cycles, cgroup CPU and peak. At 9e35da42 exec and block record command load outside SelfCost's observer cycles, disarm failed spawns and pass usage and inter-run command CPU after exit, spawn_group and windows invoke a no-op release hook before before_ns and started when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; command timestamps, rusage/job/cgroup CPU, peak memory and leftover refusals are unchanged. At 6659e57b windows calls pin_child on the suspended child before first_of and clocks and ends the child if SetProcessAffinityMask fails; valid launches keep the same affinity, release timestamps, accounting and leftover refusals.";
 
+const CHANGES_CLI_PLAN: &str = "At 7d696e6e and 5a52552f plan, unix and windows canonicalize checkout paths before stripping, match echo. only as an exact builtin on Windows, allow outer shell wrappers around explicit Unix shells, and defer compound path checks to runtime; quoted absolute executable launches in known/cli.bench.ts take the identical direct branch with unchanged clocks, accounting and leftover refusals.";
 const WIN_CLI_CPU_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "v0.31.0",
+    date: "2026-11-14",
+    version: "5a52552f",
     machine: "Windows 11 x64 desktop",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms",
-    aa: "known.exe spin 300 against itself, 8 pairs: cpu.work −0.00% [−0.11 … +0.33], same (±2%)",
-    planted: "spin 150 to spin 300: cpu.work 155.55 to 305.54 ms, +96.41% [+96.07 … +96.77] for +96.43% with the 5.55 ms launch",
+    known: "304.75 ms for 300 ms of CPU; +150 ms plant read +150.02 ms",
+    aa: "spin 300, 8 pairs: +0.032% [−0.048 … +0.219], same (±2%); 0 of 16 blocks flagged Background",
+    planted: "spin 150 to 300: 153.79 to 303.81 ms, +97.52% [+97.28 … +97.77], covering +97.52% after 3.81 ms launch CPU in the A/A; 0 of 16 blocks flagged Background",
     boundary: "a process left running (orphan, breakaway-left) refused RunIncomplete; cpu.wakes refused NotOnThisOs",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
+    reviewed_at: None,
+    reviewed_why: None,
 };
 const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "v0.31.0",
+    date: "2026-11-14",
+    version: "f40ec86f",
     machine: "Windows 11 x64 desktop",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB",
-    aa: "known.exe alloc 100 300 against itself: memory.peak 0.00% [−0.03 … +0.03], same (±2%)",
-    planted: "alloc 50 to alloc 100: 50.99 to 101.10 MiB, +98.26% [+98.23 … +98.30] for +98.25% (its blocks flagged Background, which a peak is not loaded by)",
+    known: "201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB",
+    aa: "alloc 100, 8 pairs: −0.006% [−0.032 … +0.013], same (±2%)",
+    planted: "alloc 50 to 100: 50.89 to 101.00 MiB, +98.46% [+98.38 … +98.50] (blocks flagged Background, which does not move memory.peak)",
     boundary: "a process left running refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
+    reviewed_at: Some("db07a2e0"),
+    reviewed_why: Some(CHANGES_CLI_PLAN),
 };
-// Run again at 737544c5: a command's CPU now takes its launch cgroup's where that covers more.
 const LINUX_CLI_CPU_RUN: Evidence = Evidence {
-    date: "2026-11-13",
-    version: "737544c5",
-    machine: "Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal)",
+    date: "2026-11-14",
+    version: "f40ec86f",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "cpu.work 302.4 ms vs 300 ms plus a 2.3 ms launch and tree 1205.7 ms vs 1200 ms; planted Δ 149.98 ms and 600.21 ms vs 150 and 600 ms",
-    aa: "known spin 300 against itself, 8 pairs: cpu.work −0.02% [−0.13 … +0.08], same (±2%)",
-    planted: "spin 150 to spin 300: 152.30 to 302.28 ms, +98.5% [+98.2 … +98.6] for +98.49% with the 2.3 ms launch; tree 3 × 200 to 3 × 400: 605.84 to 1206.06 ms, +99.05% [+98.92 … +99.13] for +99.04%",
+    known: "302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers",
+    aa: "spin 300, 8 pairs: −0.046% [−0.136 … +0.087], same (±2%)",
+    planted: "spin 150 to 300: 155.51 to 304.93 ms, +96.22% [+95.31 … +96.99]; tree 3 × 200 to 3 × 400: 608.61 to 1208.73 ms, +98.59% [+98.50 … +98.74]",
     boundary: "a process left running at the command's exit (orphan, breakaway-left) refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(
-        "At 8fcc3d0 exec changes the refusal hint only. Owned::run_to_exit and stamped_with reject ended or wrongly stamped candidates and keep the nonzero start on Windows; the fixtures leave no live helper except the intentionally refused orphan and breakaway-left. The successful runs take the same clocks and read the same cycles, cgroup CPU and peak. At 9e35da42 exec and block record command load outside SelfCost's observer cycles, disarm failed spawns and pass usage and inter-run command CPU after exit, spawn_group and windows invoke a no-op release hook before before_ns and started when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; command timestamps, rusage/job/cgroup CPU, peak memory and leftover refusals are unchanged. At 6659e57b windows calls pin_child on the suspended child before first_of and clocks and ends the child if SetProcessAffinityMask fails; valid launches keep the same affinity, release timestamps, accounting and leftover refusals.",
-    ),
+    reviewed_at: Some("db07a2e0"),
+    reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
-    date: "2026-11-13",
-    version: "v0.31.0",
-    machine: "Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal)",
+    date: "2026-11-14",
+    version: "f40ec86f",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
     fixture: "scripts/dev/known/cli.bench.ts",
-    known: "memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB",
-    aa: "known alloc 100 300 against itself: memory.peak +0.02% [−0.01 … +0.09], same (±2%)",
-    planted: "alloc 50 to alloc 100: 51.99 to 101.99 MiB, +96.20% [+95.96 … +96.39] for +96.18%",
+    known: "202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB",
+    aa: "alloc 100, 8 pairs: +0.008% [−0.092 … +0.084], same (±2%)",
+    planted: "alloc 50 to 100: 52.07 to 102.12 MiB, +96.09% [+95.73 … +96.41]",
     boundary: "a 4 MiB peak, under strobe's own resident set the child inherits, refused NotOnThisOs; a process left running refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
+    reviewed_at: Some("db07a2e0"),
+    reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged.";
 const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
@@ -685,42 +682,7 @@ const LINUX_SCRIPT_CPU_RUN: Evidence = Evidence {
     reviewed_at: Some("9e35da42"),
     reviewed_why: Some(CHANGES_LINUX_SCRIPT_ENDED),
 };
-const MAC_CLI_WALL_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "1244967",
-    machine: "Apple silicon laptop (macOS 27.0.1)",
-    fixture: "scripts/dev/known/planted.bench.ts",
-    known: "cli-spin run.duration Δ 150.29 ms vs 150 ms planted; metric.truth_cpu_ms 150 and 300 exact",
-    aa: "cli-a against itself, 8 pairs: run.duration +0.07% [−0.15 … +0.14], same (±2%)",
-    planted: "cli-a to cli-b (150 to 300 ms): 154.55 to 304.84 ms, +97.20% [+96.98 … +97.43] for +97.06% with the 4.55 ms launch",
-    boundary: "a process left running (orphan, breakaway-left in cli.bench.ts) refused RunIncomplete",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
-};
-const MAC_CLI_CPU_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "1244967",
-    machine: "Apple silicon laptop (macOS 27.0.1)",
-    fixture: "scripts/dev/known/planted.bench.ts",
-    known: "cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact",
-    aa: "cli-a against itself: cpu.work −0.01% [−0.08 … +0.06], same (±2%)",
-    planted: "cli-a to cli-b: cpu.work 152.90 to 303.04 ms, +98.23% [+98.08 … +98.40] for +98.10% with the launch; cli-io io.write and io.read +100% [+100 … +100]",
-    boundary: "a process left running refused RunIncomplete; IO of reaped children refused NotOnThisOs (cli.bench.ts)",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
-};
-const MAC_CLI_MEMORY_RUN: Evidence = Evidence {
-    date: "2026-11-12",
-    version: "1244967",
-    machine: "Apple silicon laptop (macOS 27.0.1)",
-    fixture: "scripts/dev/known/planted.bench.ts",
-    known: "cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)",
-    aa: "cli-a against itself: memory.peak 0.0% [0.0 … 0.0], same (±2%)",
-    planted: "cli-a to cli-b (50 to 100 MiB): 51.906 to 101.906 MiB, Δ +50.000 MiB for +50 MiB",
-    boundary: "a process left running refused RunIncomplete (cli.bench.ts)",
-    reviewed_at: Some("6659e57b"),
-    reviewed_why: Some(CHANGES_CLI_CLOCK),
-};
+const MAC_CLI_PLAN: &str = "re-verify this command planner on Apple silicon: scripts/dev/known/planted.bench.ts cli-spin, cli-alloc and cli-io known answers, A/A and planted comparisons, and cli.bench.ts child and leftover boundaries (scripts/dev/cli-plan/PLAN.md)";
 const CHANGES_MAC_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees, lends a zombie no children in tree_of (unreachable when the tree is walked without zombie roots) and joins a process to its responsible one by pid and start time in responsible_pids, which drops only processes whose pid was reused: the run's edges, CPU windows and the host's processes are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged.";
 const MAC_SCRIPT_WALL_RUN: Evidence = Evidence {
     date: "2026-11-12",
@@ -746,7 +708,7 @@ const MAC_SCRIPT_CPU_RUN: Evidence = Evidence {
     reviewed_at: Some("9e35da42"),
     reviewed_why: Some(CHANGES_MAC_SCRIPT_ENDED),
 };
-const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks. At 8fcc3d0 run_chunk carries a CPU refusal reason beside its run; it changes neither frame nor input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged.";
+const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks. At 8fcc3d0 run_chunk carries a CPU refusal reason beside its run; it changes neither frame nor input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged. At 439d2152 and bc8f1c70 run_chunk initializes Block::shelled to false and Block::shell_reasons to empty on page blocks; trace marks, frame windows, input timestamps and refusals are unchanged.";
 const MAC_FRAMES_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "1244967",
@@ -756,7 +718,7 @@ const MAC_FRAMES_RUN: Evidence = Evidence {
     aa: "frame-light against itself: frames.interval.p95 0.000% [−0.002 … 0.000], frames.dropped.pct same (±0 pp)",
     planted: "frame-light to frame-heavy (a frame spun 0.1 to 1.5 vsyncs): interval.p95 +99.994% [+99.987 … +100.000] for +99.994%; dropped +33.5 pp [+33.1 … +33.8]",
     boundary: "a block too short for its p95 refused TailTooShort; frames of a headless page refused Headless",
-    reviewed_at: Some("6659e57b"),
+    reviewed_at: Some("db07a2e0"),
     reviewed_why: Some(CHANGES_PAGE),
 };
 const MAC_INPUT_RUN: Evidence = Evidence {
@@ -768,10 +730,10 @@ const MAC_INPUT_RUN: Evidence = Evidence {
     aa: "click-150 against itself, 8 pairs: interaction.p50 +0.10% [−0.48 … +0.51], same (±2%)",
     planted: "click-0 to click-150 (the answer's frame spun 150 ms): 33.01 to 182.77 ms, Δ [145.4 … 158.6] ms for 150 ms",
     boundary: "interaction.* of a headless page refused Headless",
-    reviewed_at: Some("6659e57b"),
+    reviewed_at: Some("db07a2e0"),
     reviewed_why: Some(CHANGES_MAC_INPUT),
 };
-const CHANGES_MAC_INPUT: &str = "Driver::dispatch refuses type with paste and marks burst press (c41ff0f8); a burst press without a selector skips focus and settle (fb490d96). The click fixture uses neither type nor press: its CDP events and timestamps did not change. run_chunk's trace choice, marks and windowless checks, headless_state, side_windowless, windowless_as, windowless_target and launch::app_windowless leave this headed url() with the same trace, marks and windows (ebc9eeaf, 8c60bc69, 08d14fc4, 28ca96aa, e0142531); read still accepts its plain recording id (ad15195c). run_chunk now carries a CPU refusal reason beside its run (8fcc3d0), not a change to input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged.";
+const CHANGES_MAC_INPUT: &str = "Driver::dispatch refuses type with paste and marks burst press (c41ff0f8); a burst press without a selector skips focus and settle (fb490d96). The click fixture uses neither type nor press: its CDP events and timestamps did not change. run_chunk's trace choice, marks and windowless checks, headless_state, side_windowless, windowless_as, windowless_target and launch::app_windowless leave this headed url() with the same trace, marks and windows (ebc9eeaf, 8c60bc69, 08d14fc4, 28ca96aa, e0142531); read still accepts its plain recording id (ad15195c). run_chunk now carries a CPU refusal reason beside its run (8fcc3d0), not a change to input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged. At 439d2152 and bc8f1c70 run_chunk initializes Block::shelled to false and Block::shell_reasons to empty on page blocks; trace marks, frame windows, input timestamps and refusals are unchanged.";
 const MAC_NATIVE_CPU_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "964e825",
@@ -988,9 +950,9 @@ pub const SUPPORT_MATRIX: &[Row] = &[
     Row { runtime: Runtime::Script, capability: Capability::HardwareCounters, windows: Refused(WIN_COUNTERS), macos: Preview(MAC_SCRIPT_COUNTERS), linux: Preview(LINUX_SCRIPT_COUNTERS) },
     Row { runtime: Runtime::Script, capability: Capability::PackageIdle, windows: Refused(NO_IDLE), macos: Preview(MAC_IDLE), linux: Refused(NO_IDLE) },
     Row { runtime: Runtime::Script, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
-    Row { runtime: Runtime::Cli, capability: Capability::WallAndCounts, windows: Preview(WIN_FLAGGED_AA), macos: Verified(&MAC_CLI_WALL_RUN), linux: Preview(LINUX_CLI_WALL) },
-    Row { runtime: Runtime::Cli, capability: Capability::ProcessCpu, windows: Verified(&WIN_CLI_CPU_RUN), macos: Verified(&MAC_CLI_CPU_RUN), linux: Verified(&LINUX_CLI_CPU_RUN) },
-    Row { runtime: Runtime::Cli, capability: Capability::ProcessMemory, windows: Verified(&WIN_CLI_MEMORY_RUN), macos: Verified(&MAC_CLI_MEMORY_RUN), linux: Verified(&LINUX_CLI_MEMORY_RUN) },
+    Row { runtime: Runtime::Cli, capability: Capability::WallAndCounts, windows: Preview(WIN_FLAGGED_AA), macos: Preview(MAC_CLI_PLAN), linux: Preview(LINUX_CLI_WALL) },
+    Row { runtime: Runtime::Cli, capability: Capability::ProcessCpu, windows: Verified(&WIN_CLI_CPU_RUN), macos: Preview(MAC_CLI_PLAN), linux: Verified(&LINUX_CLI_CPU_RUN) },
+    Row { runtime: Runtime::Cli, capability: Capability::ProcessMemory, windows: Verified(&WIN_CLI_MEMORY_RUN), macos: Preview(MAC_CLI_PLAN), linux: Verified(&LINUX_CLI_MEMORY_RUN) },
     Row { runtime: Runtime::Cli, capability: Capability::HttpProbe, windows: Preview(HTTP), macos: Preview(MAC_UNRUN), linux: Preview(HTTP) },
     Row { runtime: Runtime::Tty, capability: Capability::WallAndCounts, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
     Row { runtime: Runtime::Tty, capability: Capability::ProcessCpu, windows: Preview(TTY), macos: Preview(MAC_UNRUN), linux: Preview(TTY) },
