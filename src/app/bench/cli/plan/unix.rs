@@ -133,32 +133,45 @@ fn explicit(program: &str) -> bool {
 
 // Diagnose expansion in the script argument itself, not in an outer redirect or another command.
 fn expanded_script(mut args: &str) -> bool {
-    while let Some((option, rest)) = word(args.trim_start_matches([' ', '\t'])) {
+    loop {
+        args = args.trim_start_matches([' ', '\t']);
+        if let Some(flags) = args.strip_prefix('-')
+            && let Some((prefix, script)) = flags.split_once('c')
+            && prefix.bytes().all(|b| b.is_ascii_alphabetic())
+            && script.starts_with(['"', '\'', '$', '`'])
+        {
+            return expanded_word(script);
+        }
+        let Some((option, rest)) = word(args) else { break };
         if !option.starts_with('-') || option == "--" {
             break;
         }
         if option == "-Command" || !option.starts_with("--") && option.ends_with('c') {
-            let mut quote = '\0';
-            let mut chars = rest.trim_start_matches([' ', '\t']).chars();
-            while let Some(c) = chars.next() {
-                match c {
-                    '$' | '`' if quote != '\'' => return true,
-                    '\\' if quote != '\'' => {
-                        chars.next();
-                    }
-                    '\'' | '"' if quote == '\0' => quote = c,
-                    c if c == quote => quote = '\0',
-                    ' ' | '\t' | '\n' | '>' | '<' | ';' | '&' | '|' | ')' if quote == '\0' => break,
-                    _ => {}
-                }
-            }
-            break;
+            return expanded_word(rest.trim_start_matches([' ', '\t']));
         }
         args = rest;
         if matches!(option.as_str(), "-o" | "+o" | "-O" | "+O")
             && let Some((_, after)) = word(args.trim_start_matches([' ', '\t']))
         {
             args = after;
+        }
+    }
+    false
+}
+
+fn expanded_word(script: &str) -> bool {
+    let mut quote = '\0';
+    let mut chars = script.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' | '`' if quote != '\'' => return true,
+            '\\' if quote != '\'' => {
+                chars.next();
+            }
+            '\'' | '"' if quote == '\0' => quote = c,
+            c if c == quote => quote = '\0',
+            ' ' | '\t' | '\n' | '>' | '<' | ';' | '&' | '|' | ')' if quote == '\0' => break,
+            _ => {}
         }
     }
     false
@@ -184,7 +197,7 @@ pub(super) fn plan(line: &str, root: &Path, checkout: &Path, env: &Value, shape:
         Ok(Planned { cmd, how })
     } else {
         let mut how = Evidence { shell: Some("POSIX sh (shell syntax or builtin)".into()), ..Default::default() };
-        let mut cwd = Some(root);
+        let mut check_local = true;
         for at in shape.starts {
             let mut tail = &line[at..];
             while let Some((p, rest)) = word(tail.trim_start_matches([' ', '\t'])) {
@@ -193,15 +206,15 @@ pub(super) fn plan(line: &str, root: &Path, checkout: &Path, env: &Value, shape:
                     continue;
                 }
                 if explicit(&p) && expanded_script(rest) {
-                    return Err(Error::usage(format!("`{p}` has outer shell syntax: single-quote the script so only `{p}` expands it, or put it in a script file")));
+                    return Err(Error::usage(format!("`{p}` has outer shell syntax: single-quote the script as a separate argument so only `{p}` expands it, or put it in a script file")));
                 }
                 if p == "cd" {
-                    cwd = None;
+                    check_local = false;
                 }
                 if !p.is_empty()
                     && !p.contains('/')
                     && !builtin(&p)
-                    && let Some(hit) = bare(&p, cwd, checkout, env)?
+                    && let Some(hit) = bare(&p, root, check_local, checkout, env)?
                     && hit.shadow.is_some()
                 {
                     how.shadow = hit.shadow;
