@@ -164,6 +164,9 @@ fn unit_of(m: &str) -> &'static str {
 
 /// One comparison as the report reads it (the same reading as `--format pr`).
 fn outcome(c: &Value, aa: bool) -> Out {
+    if stats::needs_confirmation(c) {
+        return Out::Unclear;
+    }
     if verdict(c).is_empty() {
         return Out::Unclear;
     }
@@ -636,6 +639,7 @@ fn badge_of(s: &Value, aa: bool) -> (String, String, String, Tone) {
     let noun = short(metric(c)).0;
     let o = primary_out(s, aa);
     let (value, tone) = match o {
+        _ if stats::needs_confirmation(c) => ("needs confirmation".into(), Tone::Plain),
         _ if s["kind"] == "leak" => (
             if o == Out::Worse {
                 "leaks"

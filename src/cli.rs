@@ -516,7 +516,8 @@ Use
         a shared CI runner (GitHub-hosted) refuses timing (SharedRunner): --check (with --base and --noworse
                                   on exact counters), leak runs and record --probes attribution run there
         exit: timed comparisons   0 even on worse (read primary.verdict_kind); 4 if all primaries refused.
-                                  --require-verdict: 5 undecided, 4 for a refused primary or parity gap.
+                                  --require-verdict: 5 undecided (including warned same or no worse),
+                                  4 for a refused primary or parity gap.
               checks              0 pass; 1 case failure, including a broken run or a --noworse row that
                                   was worse, unstable, missing or not_compared. All non-gap cases refused: 4.
                                   --noworse with nothing compared: 4, even if every case is a gap.

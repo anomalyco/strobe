@@ -69,7 +69,8 @@ The design and every rule behind this file: SPEC.md.
   declared metric gives a value or a stated refusal.
   - `--check`: 0 when every case passes; 1 when one `FAIL`s (its `fix:` line says what to change); a
     preflight refusal is listed beside passing cases; all non-gap cases refused up front: 4.
-    A block refusal during the check fails its case (1); a refused secondary alone does not.
+    A run defect fails its case (1); a primary the target, engine or display cannot measure is
+    listed as refused. A refused secondary alone does not fail a case.
   - `--check --base <ref>`: base's line under head's; the summary ends `base and head each checked;
     nothing compared: the same command without --check times head against base` (exit 0 if both ran).
     A base build error stops the check before the case runs (1). A base run error fails the case (1):

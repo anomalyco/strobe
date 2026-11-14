@@ -98,7 +98,8 @@ A leak found with `leak` or a regression in dedicated-runner `mode: compare` als
 In your own script, check the exit code of `bench --check --base <ref> --noworse count.items` (1 for
 failure, 4 if no counter compared, including when every case was a parity gap). In either case
 the check's `passed` field is false. Add `--require-parity` to require every journey.
-For timed comparisons, read the verdict, not the exit code.
+For timed comparisons, read `primary.verdict_kind` and `primary.warned`. Confirm a warned
+`same` or `no_worse` under steady conditions; `--require-verdict` exits 5 for it.
 Inputs: [action.yml](action.yml); design: [SPEC.md §26](SPEC.md#26-ci-the-github-action-actionyml).
 
 **Changes:** each release's notes are on [GitHub Releases](https://github.com/anomalyco/strobe/releases).

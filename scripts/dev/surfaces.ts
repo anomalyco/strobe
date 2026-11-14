@@ -658,7 +658,7 @@ function checkSummary(r: J, md: string, text: string) {
   const series = seriesOf(r)
   if (r.kind === "check") {
     const passed = series.filter((s: J) => (s.state ?? (s.passed ? "pass" : "fail")) === "pass" && s.passed !== false).length
-    if (!md.includes(`**${passed} of ${series.length} case`)) flagIt("CRIT", "summary", `tally lacks "${passed} of ${series.length}"`)
+    if (!md.includes(`${passed} of ${series.length} case`)) flagIt("CRIT", "summary", `tally lacks "${passed} of ${series.length}"`)
     for (const s of series) {
       const row = rows.find((c) => c[0] === (s.case ?? "") && (c[1] === (s.target ?? "") || !s.target))
       if (!row) {

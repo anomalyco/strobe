@@ -351,6 +351,7 @@
         "words": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2, "description": "Its words for the better and worse directions (faster, slower; more, less for a metric.<name> better higher)." },
         "verdict": { "type": "string", "description": "In words: faster (small), same (±2%), refused (TailTooShort): …" },
         "verdict_kind": { "$ref": "#/definitions/verdictKind" },
+        "warned": { "const": true, "description": "A series measurement warning applies to this metric. Confirm a warned same or no_worse before relying on it." },
         "decided": { "type": "boolean" },
         "needed_pairs": { "type": ["integer", "null"] },
         "exact": { "const": true, "description": "A stable counter, compared exactly." },

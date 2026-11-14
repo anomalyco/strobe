@@ -53,6 +53,43 @@ refusal or device loss can end the command before it has a result (4 or 255).
 | Stopped / unlock wait | stopped, finished work | stopped.code | absent | 130 / 124 | finished results |
 | Flag error | reason | — | absent | 2 | — |
 
-**Loaded comparison (unchanged):** a consumer reading only
+**Loaded comparison in 0.39.0:** a consumer reading only
 `series[].primary.verdict_kind` sees `same`. It does not see the separate
 `Background` warning that load could hide a difference.
+
+| Comparison | Baseline | Required ending |
+|---|---|---|
+| Warning impugns `same` or `no_worse` | Verdict alone looks clean; strict verdict exits 0 | Mark the metric `warned: true`, qualify the words; strict verdict exits 5, default 0 |
+| Warning on a directional result | Direction survives contention | Preserve direction, carry warning with the metric |
+| `--pairs 12`, one flagged block | 11 clean pairs ignored because 12 requested | Judge on clean pairs when at least eight remain |
+
+## Evidence
+
+`bun scripts/dev/endings/rows.ts` drives a headless script with `STROBE_BIN`.
+`dark.ts` takes a separate binary built after applying `dark-block.patch` in a
+disposable checkout. Its only substitution is the final display reading of a
+block. No command changes the actual display or lock state.
+
+| Linux known answer (CPU ms) | 0.39.0 | Candidate |
+|---|---:|---:|
+| Command, 300 ms | 302.322 | 303.093 |
+| Command tree, 1,200 ms | 1,205.342 | 1,205.398 |
+| Script spin, 300 ms wall | 302.894 | 306.310 |
+| Script child, 300 ms CPU | 303.740 | 304.214 |
+| Windowless 4 ms tick at 50 Hz | 201.143 | 201.280 |
+| Fixed-work page, two blocks, five runs each | RunIncomplete in 1/5 | 131.693; 131.505 |
+
+One run per control; these are not performance verdicts. VM load average at start:
+0.01 (baseline), 1.08 (candidate, after compilation). The command's own counters
+still read 300 and 1,200. The native and script controls retain their planted work.
+
+The background dev crate's `--replay <logs>` split stayed **40 warnings / 59 notes /
+35 silent**: its historical replay already used eight pairs. `--fixed <results>`
+instead replays the unrounded single-pass, fixed-design comparisons with the old
+and new minimum. Among 16 comparisons: **9 warnings / 7 notes → 8 / 8**. Only
+script CPU A/A changed level: its 9/12 clean pairs agreed on all five judged
+metrics, with at most 0.01 percentage points of shift. Three notes gained direct
+clean-pair evidence: terminal launch A/A (11/12; two metrics; 0.04 pp), page
+fixed work A/B (9/12; five metrics; 0.12 pp), and script wall A/B (9/12; three
+metrics; 0.13 pp). Other levels did not change. No pair, estimate or interval was
+replaced by the clean subset.

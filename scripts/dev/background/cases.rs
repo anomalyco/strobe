@@ -175,7 +175,7 @@ pub fn run(logs: Option<&Path>) {
     let phone = LoadImpact { expects_load: false, ..impact(&p, 8) };
     expect("phone/macOS host reading inapplicable", background_note(&blocks(16, |_| 500.), &phone), "nothing");
     let warning = background_note(&blocks(16, |_| 600.), &a).unwrap();
-    assert!(strobe::app::bisect::contaminated(&serde_json::json!({"decided":true,"verdict":"same","warnings":[warning]})));
+    assert!(strobe::stats::needs_confirmation(&serde_json::json!({"decided":true,"verdict_kind":"same","warned":true})));
     println!("bisect: warned same is not evidence for moving a bound");
     use strobe::app::bisect::{blocked, inconclusive_confirmation, retry_allowed};
     for (kind, d, unread, want) in [
@@ -188,12 +188,12 @@ pub fn run(logs: Option<&Path>) {
         ("refused", 1, false, true),
         ("worse", 1, true, true),
     ] {
-        let mut step = serde_json::json!({"series_background":true,"unread":unread,"decided":!matches!(kind,"unclear"|"underpowered"|"refused"),"verdict_kind":kind,"lo":d,"hi":d});
+        let mut step = serde_json::json!({"warned":true,"unread":unread,"decided":!matches!(kind,"unclear"|"underpowered"|"refused"),"verdict_kind":kind,"lo":d,"hi":d});
         assert_eq!(blocked(&step, Some(1)), want);
         assert_eq!(blocked(&step, None), want && kind != "better");
         let vals = if unread { serde_json::json!({"background.unread":1}) } else { serde_json::json!({"cpu.foreign.max":600}) };
         assert_eq!(inconclusive_confirmation(&serde_json::json!({"primary":step,"warnings":[warning],"blocks":[{"values":vals}]}), 1), want);
-        step["series_background"] = false.into();
+        step["warned"] = false.into();
         assert!(!blocked(&step, Some(1)));
     }
     assert!(retry_allowed(true, false, 1));
@@ -286,7 +286,7 @@ pub fn run(logs: Option<&Path>) {
 // Historical logs have rounded primary pair values, block maxima above the flag floor, and the
 // published verdicts. They lack run-level CPU and per-pair secondaries. Replay the primary under the
 // same one-core target assumption as the original desk analysis. Never invent replacement pairs.
-fn replay(dir: &Path) {
+pub fn replay(dir: &Path) {
     use regex_lite::Regex;
     let pair = Regex::new(r"^\s*pair\s+(\d+)\s+\S+\s+([\d,.]+)\s*([^\s]+)\s+\S+\s+([\d,.]+)\s*([^\s]+)\s+[+−-]?\d").unwrap();
     let flag = Regex::new(r"pair (\d+) ([^:]+): up to (\d+)% of a core").unwrap();
@@ -357,4 +357,73 @@ fn replay(dir: &Path) {
         println!("{} {level}: {}", path.file_name().unwrap().to_string_lossy(), note.as_ref().map_or("", |w| w.text.as_str()));
     }
     println!("replay: {counts:?}");
+}
+
+// Replay fixed-design, single-pass comparisons from the unrounded block values.
+// Use the published comparisons (including Holm's gate) and change only the clean-pair floor.
+pub fn fixed(dir: &Path) {
+    use serde_json::Value;
+    let mut split = [BTreeMap::<String, usize>::new(), BTreeMap::new()];
+    let mut files = std::fs::read_dir(dir).unwrap().map(|f| f.unwrap().path()).collect::<Vec<_>>();
+    files.sort();
+    for file in files.iter().filter(|p| p.extension().is_some_and(|x| x == "json")) {
+        let Ok(r) = serde_json::from_slice::<Value>(&std::fs::read(file).unwrap()) else { continue };
+        let Some(n) = r["args"]["flags"]["pairs"].as_str().and_then(|x| x.parse::<usize>().ok()) else { continue };
+        for s in r["series"].as_array().into_iter().flatten().filter(|s| s["pass"].is_null() && s["primary"]["p"].is_number() && s["pairs"] == n) {
+            let bs: Vec<Block> = serde_json::from_value(s["blocks"].clone()).unwrap();
+            let mut pairs = Vec::new();
+            for i in 0..n {
+                let side = |v| bs.iter().position(|b| b.pair == i && b.variant == v).unwrap();
+                pairs.push((side("base"), side("head")));
+            }
+            let clean: Vec<_> = pairs
+                .iter()
+                .copied()
+                .filter(|&(a, b)| {
+                    [a, b].iter().all(|&i| {
+                        !bs[i].values.contains_key("background.unread") && !bs[i].values.contains_key("background.subtick") && bs[i].values.get("cpu.foreign.max").is_some_and(|x| *x < BACKGROUND_PCT)
+                    })
+                })
+                .collect();
+            let compared = |v: &Value, pairs: &[(usize, usize)]| {
+                let name = v["metric"].as_str().unwrap();
+                let def = model::metric(name).unwrap();
+                let pp: Vec<_> = pairs.iter().filter_map(|&(a, b)| Some((*bs[a].values.get(name)?, *bs[b].values.get(name)?))).collect();
+                Design::new(Some(n), 0.02, v["noworse"].as_f64(), None).compare(name, def, &pp)
+            };
+            let published = |v: &Value| {
+                let mut c = compared(v, &pairs);
+                c.kind = stats::kind_of(v);
+                c.decided = v["decided"] == true;
+                c.estimate = v["estimate"].as_f64().unwrap_or(f64::NAN);
+                c.lo = v["lo"].as_f64().unwrap_or(f64::NAN);
+                c.hi = v["hi"].as_f64().unwrap_or(f64::NAN);
+                c.bound = v["bound"].as_f64().unwrap_or(0.);
+                c
+            };
+            let rows: Vec<_> = std::iter::once(&s["primary"]).chain(s["secondaries"].as_array().into_iter().flatten()).map(|v| (v, published(v))).collect();
+            let bursts: Vec<Burst> = serde_json::from_value(s["discarded_bursts"].clone()).unwrap_or_default();
+            let sets = load_sets(&bs, &pairs, &bursts, None);
+            let names = ["base", "head"];
+            let refusal = sets[0].refusal(names);
+            let mut outcomes = Vec::new();
+            for (i, min) in [n.max(stats::min_pairs(0.95)), Design::new(None, 0.02, None, None).min_pairs().max(stats::min_pairs(0.95))].into_iter().enumerate() {
+                let mut at = impact(&rows[0].1, s["target_cores"].as_u64().unwrap_or(0) as usize);
+                at.counted_cpus = s["target_cpus"].as_u64().unwrap_or(0) as u32;
+                at.min_clean = min;
+                at.lopsided = refusal.as_ref();
+                at.discarded = &bursts;
+                at.moves = rows.iter().any(|(_, c)| load_metric(&c.metric));
+                at.judged = rows.iter().filter(|(_, c)| judged_secondary(c)).map(|(v, c)| (c, (clean.len() >= min).then(|| (clean.len(), compared(v, &clean))))).collect();
+                let note = background_note(&bs, &at);
+                let level = note.as_ref().map_or("nothing", |w| w.level.as_str()).to_string();
+                *split[i].entry(level.clone()).or_default() += 1;
+                outcomes.push((level, note.map_or(String::new(), |w| w.text)));
+            }
+            if outcomes[0] != outcomes[1] {
+                println!("{} {}/{} clean: {} -> {}: {}", file.file_stem().unwrap().to_string_lossy(), clean.len(), n, outcomes[0].0, outcomes[1].0, outcomes[1].1);
+            }
+        }
+    }
+    println!("fixed replay: {:?} -> {:?}", split[0], split[1]);
 }

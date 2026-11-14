@@ -1746,7 +1746,7 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
             if matches!(c.kind, VerdictKind::Same | VerdictKind::NoWorse) {
                 if steady || peak >= ceiling {
                     let how = if steady { "in at least half the blocks".to_string() } else { format!("up to {peak:.0}% of a core") };
-                    return Err(format!("it ran {how} (contention on both sides can mask a real difference near the bound): too busy to call {} {}", c.metric, c.verdict));
+                    return Err(format!("it ran {how}; contention on both sides can mask a difference near the bound; rerun when quieter to confirm {} {}", c.metric, c.verdict));
                 }
             } else if half > c.bound && !((c.lo > c.bound || c.hi < -c.bound) && (half <= 2.5 * c.bound || peak < ceiling)) {
                 return Err(format!(
@@ -2675,6 +2675,27 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let projects = target_projects(&describe, &series, &variants)?;
     check_engines(&mut series, &describe, args, &variants, &config, &projects)?;
+    let pixels_only = args.has("pixels-only");
+    if pixels_only && variants.len() < 2 {
+        return Err(Error::usage("--pixels-only compares base with head: add --base <variant>"));
+    }
+    let why = args.get("why").unwrap_or("auto");
+    if !matches!(why, "auto" | "always" | "never") {
+        return Err(Error::usage(format!("--why: auto, always or never, not {why}")));
+    }
+    if why == "always"
+        && matches!(mode, Mode::Check | Mode::Blocks(_))
+        && let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && describe["targets"][&s.target]["kind"] == "cli")
+    {
+        return Err(Error::usage(format!(
+            "{}: a cli() case has no attribution recording: its commands end inside each run (profile a long-running command with strobe record pid:<n> --probes deep)",
+            s.case
+        )));
+    }
+    let max_time = args.get("max-time").map(duration_ms).transpose()?.map(Duration::from_millis);
+    if let Some(n) = args.get("pairs").filter(|n| *n != "auto") {
+        n.parse::<usize>().map_err(|_| Error::usage("--pairs: auto or a number"))?;
+    }
     let exp = args.get("id").map(str::to_string).unwrap_or_else(|| store::new_id("exp"));
     let dir = store::experiment_dir(&exp)?;
     runner.log = dir.join("runner.log");
@@ -2687,7 +2708,6 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     // `--max-time` from here: every wait counts, the slot's before the first block too (`fit_answer`).
     let started = Instant::now();
-    let max_time = args.get("max-time").map(duration_ms).transpose()?.map(Duration::from_millis);
     let mut ctx = Ctx {
         busy_before: busy,
         args,
@@ -3003,10 +3023,6 @@ pub fn run(args: &Args) -> Result<Output> {
     }
     let mut series_out = Vec::new();
     let mut all_decided = true;
-    let pixels_only = args.has("pixels-only");
-    if pixels_only && variants.len() < 2 {
-        return Err(Error::usage("--pixels-only compares base with head: add --base <variant>"));
-    }
     // A stop (Ctrl-C, SIGTERM, `--stop`) or a failure ends the experiment with what it finished: the
     // series done, the pairs of the one running, and the series it never reached.
     let mut halted: Option<Error> = None;
@@ -3016,21 +3032,6 @@ pub fn run(args: &Args) -> Result<Output> {
     let mut not_run: Vec<String> = Vec::new();
     // Series `--max-time` left no time to start.
     let mut out_of_time: Vec<String> = Vec::new();
-    // `--why`, said before any series runs: a `cli()` case has no attribution recording (SPEC §9.6),
-    // and a check or `--blocks N` profiles only with `always`.
-    let why = args.get("why").unwrap_or("auto");
-    if !matches!(why, "auto" | "always" | "never") {
-        return Err(Error::usage(format!("--why: auto, always or never, not {why}")));
-    }
-    if why == "always"
-        && matches!(mode, Mode::Check | Mode::Blocks(_))
-        && let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && ctx.describe["targets"][&s.target]["kind"] == "cli")
-    {
-        return Err(Error::usage(format!(
-            "{}: a cli() case has no attribution recording: its commands end inside each run (profile a long-running command with strobe record pid:<n> --probes deep)",
-            s.case
-        )));
-    }
     // `http.*` (SPEC §8.9), said before any series runs: the probe starts at the end of a setup, which a
     // launch case has none of; and Linux's counter blocks and the probe blocks are one pass too many.
     if let Some(s) = series.iter().find(|s| s.gap.is_none() && s.refused.is_none() && probing(s) != Probing::Aside && s.launch.is_object()) {
@@ -3297,6 +3298,7 @@ pub fn run(args: &Args) -> Result<Output> {
     // (a one-sided `Background`, a lock state that changed): exit 4 when that is all of them.
     let compared = series_out.iter().filter(|s| s["kind"] != "gap").count();
     let primaries_refused = series_out.iter().filter(|s| s["kind"] != "gap" && s["primary"]["verdict_kind"] == "refused").count();
+    all_decided &= !series_out.iter().any(|s| stats::needs_confirmation(&s["primary"]));
     let result_json = json!({
         "id": exp, "kind": "experiment", "file": file, "created": super::record::now_iso(),
         // A refresh only where some series drew to a display (a headless page has none).
@@ -4553,9 +4555,10 @@ fn check_text_at(r: &Value, source: Option<&Path>) -> String {
     let reset = if series.iter().any(|s| s["reset"] == true) { "; a case with a reset runs once more after it, unmeasured" } else { "" };
     // Cases whose base could not run them: failed, as nothing of head was checked against base.
     let base_failed = series.iter().filter(|s| !matches!(s["kind"].as_str(), Some("gap" | "refused")) && s["base"].is_object() && s["base"]["passed"] != true).count();
-    let tally = if lead.is_empty() { format!("{} of {ran} cases passed", ran - failed) } else { format!("{lead} (exit {code}); {ran} cases ran") };
+    let tally = if lead.is_empty() { format!("{} of {ran} cases passed", ran - failed) } else { format!("{lead} (exit {code}); {ran} case{} ran", if ran == 1 { "" } else { "s" }) };
+    let detail = if ran == 0 { String::new() } else { format!(" ({cold}{later}{reset}; {compared})") };
     text += &format!(
-        "\n{tally}{}{}{}{} ({cold}{later}{reset}; {compared})\n",
+        "\n{tally}{}{}{}{}{detail}\n",
         if base_failed > 0 { format!(", {base_failed} failed on base") } else { String::new() },
         if refused > 0 { format!(", {refused} where the targets' journeys differ") } else { String::new() },
         if gaps > 0 { format!(", {gaps} parity gap{}", if gaps == 1 { "" } else { "s" }) } else { String::new() },
@@ -5563,7 +5566,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     let tested = sequential::gate_and_holm(&mut secondaries, primary_decided);
     // What the other work did to the rest (SPEC §10.2): judged on what load moves, each
     // metric on the blocks it was measured in (a pass's for what the paired loop's kind does not give).
-    let min_clean = min_pairs.max(stats::min_pairs(0.95));
+    let min_clean = LOOKS[0].max(stats::min_pairs(0.95));
     let without = |name: &str, upto: usize| -> Option<(usize, Vec<(f64, f64)>)> {
         let (bs, ps) = source(name);
         let quiet = |i: usize| !unread_load(&bs[i]) && !bs[i].values.contains_key("background.subtick") && bs[i].values.get("cpu.foreign.max").is_some_and(|f| *f < BACKGROUND_PCT);
@@ -5586,6 +5589,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         };
         judged.push((c, without(&c.metric, usize::MAX).and_then(|(n, pp)| Some((n, again(&pp)?)))));
     }
+    let mut warned_sets = Vec::new();
     for (i, set) in sets.iter().enumerate() {
         let from_here = |m: &str| usize::from(apart(m)) == i && load_metric(m);
         let impact = LoadImpact {
@@ -5603,6 +5607,9 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
             names,
         };
         if let Some(mut note) = background_note(set.blocks, &impact) {
+            if note.id == "Background" && note.level == "warn" {
+                warned_sets.push(i);
+            }
             if sets.len() > 1 {
                 let kind = if probe == Probing::Separate && main_http != (i == 1) {
                     "HTTP probe"
@@ -5618,6 +5625,16 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 super::live_progress(format!("  other work on the measured CPUs in some blocks (busiest elsewhere: {who})"));
             }
             warnings.push(note);
+        }
+    }
+    // Drift is the primary's trend; state drift describes the workload in the paired blocks.
+    let drift = warnings.iter().any(|w| w.id == "Drift" && w.level == "warn");
+    let state_drift = warnings.iter().any(|w| w.id == "StateDrift" && w.level == "warn");
+    for c in std::iter::once(&mut primary).chain(secondaries.iter_mut()).chain(descriptive.iter_mut()) {
+        c.warned =
+            c.kind != VerdictKind::Refused && (drift && c.metric == s.primary || state_drift && !apart(&c.metric) || load_metric(&c.metric) && warned_sets.contains(&usize::from(apart(&c.metric))));
+        if c.warned {
+            c.verdict.push_str(" (warned)");
         }
     }
     // Smallest n whose exact signed-rank test can clear Holm's first step across the tested set.
@@ -8477,10 +8494,10 @@ fn unread_refusal(ctx: &Ctx, s: &Series, v: &Variant, target: &Value, m: &str) -
         return not_for("other work on the CPUs the target is pinned to, and it is pinned to none", "run on a machine with cores to keep apart, with --pin auto");
     }
     let os = support::Host::this().os();
-    if let Some(rt) = support::Runtime::of_target(target, side_windowless(target, &ctx.config, v), ctx.phone.is_some()) {
-        if let Some(r) = unsupported_metric(s, target, rt, m, os) {
-            return r;
-        }
+    if let Some(rt) = support::Runtime::of_target(target, side_windowless(target, &ctx.config, v), ctx.phone.is_some())
+        && let Some(r) = unsupported_metric(s, target, rt, m, os)
+    {
+        return r;
     }
     if matches!(base, "input.rate" | "input.gap.p95") || base.starts_with("interaction.") || base.starts_with("scroll.latency") {
         return Refusal::new(ValidatorId::NoInput, format!("{m}: no measured run sent the input it times")).fix("drive the page in the run (page.click, page.type, page.drag, page.scroll)");

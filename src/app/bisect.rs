@@ -63,7 +63,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
         if retry_allowed(blocked(&s, sign), false, retries) && !remaining().is_zero() && !super::stop_requested() {
             let k = s["step"].as_u64().unwrap_or_default() as usize;
             retries += 1;
-            progress(format!("step {k}: Background made the step inconclusive; waiting up to 60 s for quieter CPUs and retrying ({retries} of 2)"));
+            progress(format!("step {k}: a measurement warning made the step inconclusive; waiting up to 60 s for quieter CPUs and retrying ({retries} of 2)"));
             crate::validity::wait_quiet(None, remaining().min(Duration::from_secs(60)));
             if super::stop_requested() {
                 return Err(super::stop_error());
@@ -158,7 +158,7 @@ pub(crate) fn run_from(args: &Args, range: &str, first: Option<&Output>, target:
         (Some(_), false) => Outcome::Unclear,
     };
     let verdict = match (&culprit, undecided.is_empty()) {
-        _ if let Some(s) = dirty => format!("unclear: Background at step {}; the step could not settle {}..{} under load; rerun when quieter", s["step"], short(&good), short(&bad)),
+        _ if let Some(s) = dirty => format!("unclear: a measurement warning at step {}; the step could not settle {}..{}; rerun under steady conditions", s["step"], short(&good), short(&bad)),
         _ if steps[0]["decided"] != true => "unclear: the endpoints did not give a verdict".into(),
         // Not against its parent, but steps without a verdict: where the move is stays open.
         _ if not_alone.is_some() && !undecided.is_empty() => format!(
@@ -273,7 +273,7 @@ fn step_json(out: &Output, root: &Path, k: usize, base: &str, head: &str) -> Res
         progress(format!("  step {k}: ! {}  {}", w["id"].as_str().unwrap_or(""), w["text"].as_str().unwrap_or("")));
     }
     let s = json!({
-        "series_background":contaminated(&series[0]), "unread":unread(&series[0]),
+        "warned":p["warned"] == true, "unread":unread(&series[0]),
         "warnings":warnings,
         "step": k, "good": base, "commit": head, "short": short(head), "subject": subject(root, head),
         "experiment": out.json["id"], "series": series[0]["label"], "metric": p["metric"], "relative": p["relative"],
@@ -298,10 +298,6 @@ fn moved(s: &Value) -> Option<i8> {
     }
 }
 
-pub fn contaminated(s: &Value) -> bool {
-    s["warnings"].as_array().into_iter().flatten().any(|w| w["id"] == "Background" && w["level"] == "warn")
-}
-
 pub(super) fn unread(series: &Value) -> bool {
     [&series["blocks"], &series["pass"]["blocks"]]
         .into_iter()
@@ -310,7 +306,7 @@ pub(super) fn unread(series: &Value) -> bool {
 }
 
 pub fn blocked(s: &Value, sign: Option<i8>) -> bool {
-    s["series_background"] == true && (s["unread"] == true || !matches!(s["verdict_kind"].as_str(), Some("better" | "worse")) || moved(s).is_none_or(|d| sign.is_some_and(|wanted| wanted != d)))
+    s["warned"] == true && (s["unread"] == true || !matches!(s["verdict_kind"].as_str(), Some("better" | "worse")) || moved(s).is_none_or(|d| sign.is_some_and(|wanted| wanted != d)))
 }
 
 pub fn retry_allowed(blocked: bool, retried: bool, used: usize) -> bool {
@@ -320,9 +316,8 @@ pub fn retry_allowed(blocked: bool, retried: bool, used: usize) -> bool {
 pub fn inconclusive_confirmation(series: &Value, sign: i8) -> bool {
     let mut step = series["primary"].clone();
     if !step.is_object() {
-        return contaminated(series);
+        return true;
     }
-    step["series_background"] = json!(contaminated(series));
     step["unread"] = json!(unread(series));
     blocked(&step, Some(sign))
 }

@@ -1,0 +1,14 @@
+diff --git a/src/app/bench.rs b/src/app/bench.rs
+--- a/src/app/bench.rs
++++ b/src/app/bench.rs
+@@ -7699,7 +7699,9 @@
+                 break;
+             }
+             if steady && lit {
+-                let shown = display.map(|d| d.0);
++                let shown = if dark_primary(ctx).is_some() {
++                    Some(0)
++                } else { display.map(|d| d.0) };
+                 return stamped(r, cases, |s, mut b| {
+                     b.display = shown;
+                     let b = dark_state(ctx, s, x, shown, session_state(s, b, start));

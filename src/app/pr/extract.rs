@@ -83,6 +83,9 @@ pub(super) fn small(c: &Value) -> bool {
 }
 
 pub(super) fn outcome(c: &Value, aa: bool) -> Out {
+    if crate::stats::needs_confirmation(c) {
+        return Out::Unclear;
+    }
     if verdict(c).is_empty() {
         return Out::Gated;
     }

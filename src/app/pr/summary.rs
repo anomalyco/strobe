@@ -155,8 +155,8 @@ fn check(r: &Value, series: &[&Value]) -> String {
     let mut out = heading(r, "check");
     let total = series.len();
     let ending = crate::app::bench::CheckEnd::of(r);
-    let mut parts =
-        if ending.lead.is_empty() { vec![format!("**{passed} of {total} case{} passed**", if total == 1 { "" } else { "s" })] } else { vec![format!("**{}** (exit {})", ending.lead, ending.code)] };
+    let tally = format!("{passed} of {total} case{} passed", if total == 1 { "" } else { "s" });
+    let mut parts = if ending.lead.is_empty() { vec![format!("**{tally}**")] } else { vec![format!("**{}** (exit {})", ending.lead, ending.code), tally] };
     for (n, what) in [(failed, "failed"), (refused, "refused"), (other, "did not run")] {
         if n > 0 {
             parts.push(format!("{n} {what}"));

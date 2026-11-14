@@ -532,6 +532,12 @@ workload runs, not whether it is faster. For `--check --noworse`, **check the pr
 `result.json`'s `passed` is true only when a case ran and the check completed successfully.
 An up-front refusal of the whole file can exit 4 without writing `result.json` at all.
 
+A metric affected by a series-level `Background`, `Drift` or `StateDrift` warning
+carries `warned: true`. An informational note does not set it. Under `--require-verdict`,
+a warned `same` or `no_worse` primary needs confirmation (5); the normal exit is still 0.
+A directional verdict keeps its direction. The background check needs at least eight clean
+pairs to compare their verdict with the full set, independent of `--pairs`.
+
 | Run | Ending | What it prints | Exit |
 |---|---|---|---|
 | `--check` (one build) | every case passes | `pass <case>  <values>`; `N of N cases passed (…; nothing compared)` | 0 |

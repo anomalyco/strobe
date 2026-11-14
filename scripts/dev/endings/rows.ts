@@ -1,6 +1,7 @@
 // Run manually from the repo root with the binary to check. --baseline prints the old endings.
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 
 const exe = process.env.STROBE_BIN ?? "strobe"
 const file = "scripts/dev/endings/rows.bench.ts"
@@ -11,6 +12,11 @@ const rows: [string, string[], number, string[], string][] = [
   ["pass", [], 0, ["pass"], "1 of 1 cases passed"],
   ["base", base, 0, ["pass"], "base and head each checked"],
   ["counter", counter, 0, ["pass"], "only the --noworse counters compared"],
+  ["secondary", [], 0, ["pass"], "1 of 1 cases passed"],
+  ["worse", counter, 1, ["fail"], "0 of 1 cases passed"],
+  ["basefail", base, 1, ["fail"], "1 failed on base"],
+  ["somegap", [], 0, ["pass", "gap"], "1 parity gap"],
+  ["failure-wins", [...base,"--noworse","count.absent","--require-parity"], 1, ["fail","gap"], "1 parity gap"],
   ["empty", [...base, "--noworse", "count.absent"], 4, ["pass"], "nothing compared"],
   ["defect", [], 1, ["fail"], "0 of 1 cases passed"],
   ["phase", [], 1, ["fail"], "0 of 1 cases passed"],
@@ -21,16 +27,20 @@ const rows: [string, string[], number, string[], string][] = [
   ["gaps-counter", counter, 4, ["gap"], "nothing compared"],
   ["gaps-parity", ["--require-parity"], 4, ["gap"], "nothing checked"],
   ["flags", ["--noworse", "main.work"], 2, [], ""],
+  ["nomatch", [], 2, [], ""],
 ]
+let experiments = ""
 for (const [name, flags, code, states, summary] of rows) {
-  const filter = ({ mixed: "ok,frames", strict: "ok,frames", "gaps-parity": "gap", "gaps-counter": "gap" } as Record<string,string>)[name] ?? (["defect","phase","frames","gap"].includes(name) ? name : "ok")
+  const filter = ({ mixed: "ok,frames", strict: "ok,frames", somegap:"ok,gap", "failure-wins":"defect,gap", "gaps-parity": "gap", "gaps-counter": "gap" } as Record<string,string>)[name] ?? (["nomatch","secondary","worse","basefail","defect","phase","frames","gap"].includes(name) ? name : "ok")
   const run = (args: string[]) => Bun.spawnSync([exe, ...args], { timeout: 100000, stdout: "pipe", stderr: "pipe" })
-  const p = run(["bench", file, "--head", ".", "--filter", filter, "--check", ...flags, "--json"])
+  const id = `exp_end_${crypto.randomUUID()}`
+  const p = run(["bench", file, "--id", id, "--head", ".", "--filter", filter, "--check", ...flags, "--json"])
   const r = JSON.parse(p.stdout.toString().trim() || "{}")
   console.log(name, p.exitCode, r.passed, r.series?.map((s: any) => [s.state, s.passed, s.decided]), r.text?.split("\n").find((l: string) => /cases passed|nothing checked|nothing compared/.test(l)) ?? r.error ?? p.stderr.toString().slice(-300))
   if (baseline) continue
   assert.equal(p.exitCode, code, name)
-  if (!states.length) { assert.doesNotMatch(p.stderr.toString(), / · exp_/); continue }
+  if (!states.length) { assert.doesNotMatch(p.stderr.toString(), / · exp_/); assert.ok(experiments && !existsSync(join(experiments,id))); continue }
+  experiments = dirname(dirname(r.result))
   const saved = JSON.parse(readFileSync(r.result, "utf8"))
   assert.deepEqual(saved.series, r.series)
   assert.equal(saved.passed, code === 0 && states.includes("pass"))
