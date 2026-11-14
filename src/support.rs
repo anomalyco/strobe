@@ -608,6 +608,7 @@ const MAC_HEADLESS_CPU: &str = "re-verify scripts/dev/known-web.bench.ts and pla
 // unable to move its numbers (`scripts/dev/support-matrix.ts --check` holds the code to it).
 // The cli cells' review at 737544c5 (`cleanup/spawn-clock`): the changes 384805d4 reviewed, then its own.
 
+const CHANGES_CLI_PLAN: &str = "At 7d696e6e and 5a52552f plan, unix and windows canonicalize checkout paths before stripping, match echo. only as an exact builtin on Windows, allow outer shell wrappers around explicit Unix shells, and defer compound path checks to runtime; quoted absolute executable launches in known/cli.bench.ts take the identical direct branch with unchanged clocks, accounting and leftover refusals.";
 const WIN_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-14",
     version: "5a52552f",
@@ -629,8 +630,8 @@ const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
     aa: "alloc 100, 8 pairs: −0.006% [−0.032 … +0.013], same (±2%)",
     planted: "alloc 50 to 100: 50.89 to 101.00 MiB, +98.46% [+98.38 … +98.50] (blocks flagged Background, which does not move memory.peak)",
     boundary: "a process left running refused RunIncomplete",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("db07a2e0"),
+    reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const LINUX_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -641,8 +642,8 @@ const LINUX_CLI_CPU_RUN: Evidence = Evidence {
     aa: "spin 300, 8 pairs: −0.046% [−0.136 … +0.087], same (±2%)",
     planted: "spin 150 to 300: 155.51 to 304.93 ms, +96.22% [+95.31 … +96.99]; tree 3 × 200 to 3 × 400: 608.61 to 1208.73 ms, +98.59% [+98.50 … +98.74]",
     boundary: "a process left running at the command's exit (orphan, breakaway-left) refused RunIncomplete",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("db07a2e0"),
+    reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -653,8 +654,8 @@ const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     aa: "alloc 100, 8 pairs: +0.008% [−0.092 … +0.084], same (±2%)",
     planted: "alloc 50 to 100: 52.07 to 102.12 MiB, +96.09% [+95.73 … +96.41]",
     boundary: "a 4 MiB peak, under strobe's own resident set the child inherits, refused NotOnThisOs; a process left running refused RunIncomplete",
-    reviewed_at: None,
-    reviewed_why: None,
+    reviewed_at: Some("db07a2e0"),
+    reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged.";
 const LINUX_SCRIPT_WALL_RUN: Evidence = Evidence {
@@ -707,7 +708,7 @@ const MAC_SCRIPT_CPU_RUN: Evidence = Evidence {
     reviewed_at: Some("9e35da42"),
     reviewed_why: Some(CHANGES_MAC_SCRIPT_ENDED),
 };
-const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks. At 8fcc3d0 run_chunk carries a CPU refusal reason beside its run; it changes neither frame nor input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged.";
+const CHANGES_PAGE: &str = "run_chunk traces a lean block with nothing on screen only for a trace metric (ebc9eeaf), puts no goto mark in a Chromium page, whose new documents mark themselves (8c60bc69), and checks that a declared-windowless app shows no window (08d14fc4), and headless_state refuses a windowless app's drawn metrics NotForTarget (28ca96aa, 8c60bc69), and a side is windowless by side_windowless, windowless_as, windowless_target and launch::app_windowless (e0142531, 28ca96aa, 8c60bc69), which read a url() target with no window key and no app profile as not windowless, as before: a headed url() page whose runs load nothing takes the same trace, marks, windows and refusals; and ad15195c made read put a token into its SQL only when it is a plain id, which a bench block's always is (its recording id without rec_, hex digits), so read queries the same marks. At 8fcc3d0 run_chunk carries a CPU refusal reason beside its run; it changes neither frame nor input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged. At 439d2152 and bc8f1c70 run_chunk initializes Block::shelled to false and Block::shell_reasons to empty on page blocks; trace marks, frame windows, input timestamps and refusals are unchanged.";
 const MAC_FRAMES_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "1244967",
@@ -717,7 +718,7 @@ const MAC_FRAMES_RUN: Evidence = Evidence {
     aa: "frame-light against itself: frames.interval.p95 0.000% [−0.002 … 0.000], frames.dropped.pct same (±0 pp)",
     planted: "frame-light to frame-heavy (a frame spun 0.1 to 1.5 vsyncs): interval.p95 +99.994% [+99.987 … +100.000] for +99.994%; dropped +33.5 pp [+33.1 … +33.8]",
     boundary: "a block too short for its p95 refused TailTooShort; frames of a headless page refused Headless",
-    reviewed_at: Some("6659e57b"),
+    reviewed_at: Some("db07a2e0"),
     reviewed_why: Some(CHANGES_PAGE),
 };
 const MAC_INPUT_RUN: Evidence = Evidence {
@@ -729,10 +730,10 @@ const MAC_INPUT_RUN: Evidence = Evidence {
     aa: "click-150 against itself, 8 pairs: interaction.p50 +0.10% [−0.48 … +0.51], same (±2%)",
     planted: "click-0 to click-150 (the answer's frame spun 150 ms): 33.01 to 182.77 ms, Δ [145.4 … 158.6] ms for 150 ms",
     boundary: "interaction.* of a headless page refused Headless",
-    reviewed_at: Some("6659e57b"),
+    reviewed_at: Some("db07a2e0"),
     reviewed_why: Some(CHANGES_MAC_INPUT),
 };
-const CHANGES_MAC_INPUT: &str = "Driver::dispatch refuses type with paste and marks burst press (c41ff0f8); a burst press without a selector skips focus and settle (fb490d96). The click fixture uses neither type nor press: its CDP events and timestamps did not change. run_chunk's trace choice, marks and windowless checks, headless_state, side_windowless, windowless_as, windowless_target and launch::app_windowless leave this headed url() with the same trace, marks and windows (ebc9eeaf, 8c60bc69, 08d14fc4, 28ca96aa, e0142531); read still accepts its plain recording id (ad15195c). run_chunk now carries a CPU refusal reason beside its run (8fcc3d0), not a change to input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged.";
+const CHANGES_MAC_INPUT: &str = "Driver::dispatch refuses type with paste and marks burst press (c41ff0f8); a burst press without a selector skips focus and settle (fb490d96). The click fixture uses neither type nor press: its CDP events and timestamps did not change. run_chunk's trace choice, marks and windowless checks, headless_state, side_windowless, windowless_as, windowless_target and launch::app_windowless leave this headed url() with the same trace, marks and windows (ebc9eeaf, 8c60bc69, 08d14fc4, 28ca96aa, e0142531); read still accepts its plain recording id (ad15195c). run_chunk now carries a CPU refusal reason beside its run (8fcc3d0), not a change to input sampling or reduction. At 9e35da42 run_chunk passes the finished run's timed CPU and tree edges to SelfCost, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; trace marks, frame windows, input timestamps and refusals are unchanged. At 6659e57b run_chunk formats a first slow speed check's text through speed_context so process names stay in live terminal progress only; trace marks, frame windows, input timestamps and refusals are unchanged. At 439d2152 and bc8f1c70 run_chunk initializes Block::shelled to false and Block::shell_reasons to empty on page blocks; trace marks, frame windows, input timestamps and refusals are unchanged.";
 const MAC_NATIVE_CPU_RUN: Evidence = Evidence {
     date: "2026-11-12",
     version: "964e825",
