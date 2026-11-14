@@ -62,9 +62,14 @@ fn resolve(program: &str, root: &Path, checkout: &Path, env: &Value) -> Result<O
             .map(|program| Some(Evidence { program, ..Default::default() }))
             .ok_or_else(|| Error::usage(format!("`{program}` not found or not executable in {}; check the path and build the program first", root.display())));
     }
+    bare(program, Some(root), checkout, env)
+}
+
+// After a directory change in a shell line the starting folder cannot tell us about local files.
+fn bare(program: &str, root: Option<&Path>, checkout: &Path, env: &Value) -> Result<Option<Evidence>> {
     let path = env_var(env, "PATH").unwrap_or_default();
     let hit = std::env::split_paths(&path).filter(|p| p.is_absolute()).find_map(|p| os::find(&p.join(program), env));
-    let local = os::find(&root.join(program), env);
+    let local = root.and_then(|r| os::find(&r.join(program), env));
     let rel = |p: &Path| format!(".{}{}", std::path::MAIN_SEPARATOR, p.file_name().unwrap_or_default().to_string_lossy());
     match (hit, local) {
         (Some(hit), local) => {
@@ -78,9 +83,11 @@ fn resolve(program: &str, root: &Path, checkout: &Path, env: &Value) -> Result<O
                 })
                 .map(|p| format!("bare `{program}` ran `{}` from PATH, not `{}` in the variant's folder: write `{}` to measure the variant's build", hit.display(), rel(&p), rel(&p)))
                 .or_else(|| {
-                    let checkout = PathBuf::from(host::paths::plain(checkout));
-                    let relative = hit.strip_prefix(&checkout).ok()?;
-                    (root != checkout).then(|| {
+                    // Resolve directory aliases but not the shim: its target can live outside the checkout.
+                    let checkout = checkout.canonicalize().ok()?;
+                    let path = hit.parent()?.canonicalize().ok()?.join(hit.file_name()?);
+                    let relative = path.strip_prefix(&checkout).ok()?;
+                    (root?.canonicalize().ok()? != checkout).then(|| {
                         format!(
                             "bare `{program}` resolves on PATH to `{}` in the launching checkout, not this variant; both sides can run that copy: write `.{}{}` to measure each variant's build",
                             hit.display(),

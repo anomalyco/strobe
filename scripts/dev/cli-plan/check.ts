@@ -1,6 +1,6 @@
 // From the repo root: STROBE_BIN=<binary> bun scripts/dev/cli-plan/check.ts [--before].
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, copyFileSync, mkdirSync } from "node:fs"
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, copyFileSync, mkdirSync, linkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, delimiter } from "node:path"
 const before = process.argv.includes("--before"), win = process.platform === "win32"
@@ -9,7 +9,10 @@ process.env.PLAN_FILE = file
 const { rows } = await import("./rows.ts")
 const bin = process.env.STROBE_BIN || "strobe", env = {...process.env, PATH: dir + delimiter + process.env.PATH, PLAN_X:"one", PLAN_RECEIPTS: receipts}
 writeFileSync(join(dir, win ? "plan-shim.cmd" : "plan-shim"), (win ? "@" : "#!/bin/sh\nexec ") + "bun scripts/dev/cli-plan/work.mjs left " + (win ? "%*\r\n" : '"$@"\n'), {mode:0o755})
-if (win) copyFileSync(process.execPath, join(dir,"echo.exe"))
+if (win) {
+  copyFileSync(process.execPath, join(dir,"echo.exe")); linkSync(join(dir,"echo.exe"), join(dir,"rem.com"))
+  for (const name of ["echo.cmd", "ver.bat"]) copyFileSync(join(dir,"plan-shim.cmd"), join(dir,name))
+}
 let bad = 0
 try {
   for (const row of rows) {
@@ -43,7 +46,12 @@ try {
       check(name, ["bench", "scripts/dev/cli-plan/hooks.bench.ts", "--head", ".", "--filter", name], code, pattern)
     const local = join(dir,"local"), exe = win ? ".exe" : ""
     mkdirSync(local); copyFileSync(process.execPath, join(local,"plan-only-local" + exe))
-    check("only-local", ["run","--head","plan-only-local --version"], 2, /write `\.([/\\])plan-only-local/, local)
+    const sub = join(local,"sub"), app = "app" + exe, rel = win ? `.\\${app}` : `./${app}`
+    mkdirSync(sub); linkSync(join(local,"plan-only-local" + exe),join(sub,app))
+    check("cd-relative", ["run","--head",`(cd sub && ${rel} --version)`], 0, /ShellLine/, local)
+    check("generated-program", ["run","--head",(win ? `copy sub\\${app} ${app} >nul` : `cp sub/${app} ${app}`) + ` && ${rel} --version`], 0, /ShellLine/, local)
+    check("cd-old-local", ["run","--head",`cd sub && plan-only-local --version || echo fallback`], 0, /ShellLine/, local)
+     check("only-local", ["run","--head","plan-only-local --version"], 2, /write `\.([/\\])plan-only-local/, local)
     copyFileSync(process.execPath, join(local,"plan-shadow" + exe)); copyFileSync(process.execPath, join(dir,"plan-shadow" + exe))
     check("shadow", ["run","--head","plan-shadow --version"], 0, /PathShadow/, local)
     if (!win) {

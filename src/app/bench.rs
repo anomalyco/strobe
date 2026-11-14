@@ -12474,7 +12474,7 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
                 _ => t["run"].as_str(),
             };
             if let Some(line) = line {
-                cli::plan::early(line).map_err(|e| Error::usage(format!("{}: {}", cli::label(s, v), e.message)))?;
+                cli::plan::early(line).map_err(|e| e.prefixed(format!("{}: ", cli::label(s, v))))?;
             }
         }
     }

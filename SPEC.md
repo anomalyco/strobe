@@ -5301,13 +5301,15 @@ On Unix, POSIX sh replaces itself with a plain external command. Builtins, expan
 redirections and compound lines use POSIX sh, not bash: no brace expansion; use `bash -c` for bash.
 Windows starts a plain executable with the argument string as written (`^` and `%NAME%` are literal).
 `&&`, `||`, pipes, redirection, grouping, cmd builtins and batch shims use `cmd /d /v:off /s /c`.
-Explicit shells count as shells too. `ShellLine` names the shell, flags an asymmetric comparison,
+Naming a shell (`sh -c`, `bash`, `cmd /c`, `pwsh -c`) gives it the inner script without PATH or file-association checks inside; shell startup and the leftover-process check still count.
+`ShellLine` names the shell, flags an asymmetric comparison,
 and separates tracked series with shell startup. Quote literal operators. A single background `&`,
 or on Windows unquoted single quotes, semicolons, newlines, POSIX assignments and `start` without
 `/wait`, refuse with a fix. Invoke `.ps1` with `pwsh -NoProfile -File`. Implicit cmd lines are
 passed unchanged. Put leading redirections and indirect commands (`if`, `for`, `call`) in an explicitly
 invoked script. Avoid escaped double quotes or unquoted carets in implicit cmd lines and percent
-signs (even quoted) on batch shims. A bare name resolving inside the launching checkout warns when
+signs (even quoted) on batch shims. Quote dotted builtin names on implicit cmd lines (`"echo.cmd"`), so cmd does not take the builtin instead.
+The shell looks up paths when each command runs: an earlier command may build the file or change folder. A bare name resolving inside the launching checkout warns when
 the variant is elsewhere: use `./node_modules/.bin/tool` for each build's own shim. On Unix,
 single-quote an explicit shell's script when it contains expansions. Known syntax
 errors exit 2 before build; dynamic lines are checked at `ctx.exec`. Catching a usage refusal or
@@ -6057,7 +6059,7 @@ emits:
 | `ProbeOverhead` | warn | a Chromium-family series timed with `--trace full`: its timed blocks traced every task of every thread, which costs the page main-thread time (§8.1: `main.work` +0.8% on a click, +35% on an idle page, `cpu.work` +3.5%); compare it only with full-trace runs. `query a..b` of a lean and a full-trace recording says the same |
 | `TickSampledCpu` | warn | a `cli()` run's `cpu.work` holds child processes' CPU from Windows' clock ticks (where strobe did not hold them): their share of `cpu.work` (§9.6) |
 | `ShellLine` | info, warn | the measured command includes shell startup; warns when only one side does (§9.6) |
-| `CommandPath` | info | the resolved executable of a direct command (§9.6) |
+| `CommandPath` | info | the resolved executable or batch shim of a command (§9.6) |
 | `DirectLine` | info | a Windows direct command passes a caret or a defined `%NAME%` literally (§9.6) |
 | `PathShadow` | warn | a bare program name ran PATH's copy instead of the build in the variant's folder (§9.6) |
 | **What a run counted** | | |
@@ -9609,8 +9611,8 @@ verified line exact.
 | `script` · `package_idle` | — | preview | — |
 | `script` · `http_probe` | preview | preview | preview |
 | `cli` · `wall_and_counts` | preview | preview | preview |
-| `cli` · `process_cpu` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 305.77 ms for 300 ms of CPU; +150 ms plant read +149.87 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine, `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
-| `cli` · `process_memory` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine, `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
+| `cli` · `process_cpu` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 305.77 ms for 300 ms of CPU; +150 ms plant read +149.87 ms) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers) |
+| `cli` · `process_memory` | verified (2026-11-14, f40ec86f, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, 201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB) | preview | verified (2026-11-14, f40ec86f, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/cli.bench.ts`, 202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB) |
 | `cli` · `http_probe` | preview | preview | preview |
 | `tty` · `wall_and_counts` | preview | preview | preview |
 | `tty` · `process_cpu` | preview | preview | preview |

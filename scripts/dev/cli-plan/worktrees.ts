@@ -1,7 +1,7 @@
 // Two real worktrees. The package script supplies PATH; neither variant overrides it in its target.
 import { spawnSync } from "node:child_process"
-import { mkdirSync, writeFileSync, copyFileSync } from "node:fs"
-import { join } from "node:path"
+import { mkdirSync, writeFileSync, copyFileSync, symlinkSync } from "node:fs"
+import { join, delimiter } from "node:path"
 
 export function worktrees(dir:string,bin:string,env:NodeJS.ProcessEnv) {
   const head=join(dir,"head"),base=join(dir,"base"),win=process.platform==="win32"
@@ -21,14 +21,18 @@ export function worktrees(dir:string,bin:string,env:NodeJS.ProcessEnv) {
   for(const [folder,ms] of [[head,101],[base,37]] as const){
     const path=join(folder,"node_modules/.bin");mkdirSync(path,{recursive:true});writeFileSync(join(path,shim),(win?"@":"#!/bin/sh\nexec ")+`bun -e "Bun.sleepSync(${ms});console.log('strobe:metric plant=${ms}')"\n`,{mode:0o755})
   }
-  const sample=(name:string,line:string,expected:number,shadow:boolean)=>{
+  const sample=(name:string,line:string,expected:number,shadow:boolean,viaPackage=true)=>{
     for(const folder of [head,base])writeFileSync(join(folder,"perf/work.bench.ts"),bench(line))
-    const r=JSON.parse(go(head,process.execPath,["run","--silent","measure"])),s=r.series[0]
+    const r=JSON.parse(viaPackage ? go(head,process.execPath,["run","--silent","measure"]) : go(head,bin,["bench","perf/work.bench.ts","--check","--base",base,"--head",".","--power","keep","--reserve-cpus","off","--json"])),s=r.series[0]
     const warned=r.warnings.some((w:any)=>w.id==="PathShadow" && w.text.replaceAll("\\","/").includes("./node_modules/.bin/plan-leg"))
     if(warned!==shadow || s.base_values["metric.plant"]!==expected || s.values["metric.plant"]!==101 || s.base_values["run.duration"]<expected-2 || s.values["run.duration"]<99)throw Error(`${name}: plant or PATH warning did not match: ${JSON.stringify(r.warnings)}`)
     console.log(`ok ${name}: planted base ${expected}, head 101 ms; wall ${s.base_values["run.duration"].toFixed(1)} / ${s.values["run.duration"].toFixed(1)}; PathShadow ${warned}`)
   }
   sample("package-path","plan-leg",101,true);sample("variant-shim",local,37,false)
+  const alias=join(dir,"alias"),oldPath=env.PATH
+  symlinkSync(head,alias,win?"junction":"dir")
+  env.PATH=join(win?alias.toUpperCase():alias,"node_modules/.bin")+delimiter+oldPath
+  sample("aliased-checkout-path","plan-leg",101,true,false);env.PATH=oldPath
   writeFileSync(join(head,"perf/preflight.bench.ts"),`import {bench,cli} from '@hona/strobe'; export default bench({targets:{one:cli('plan-leg &',{build:'absent-build-should-not-run'}),two:cli('plan-leg')}, cases:{work:{primary:'run.duration',run:ctx=>ctx.exec()}}})`)
   go(head,bin,["bench","perf/preflight.bench.ts","--check","--base","one","--head","two"],2); console.log("ok base target preflight before build")
   if(win){

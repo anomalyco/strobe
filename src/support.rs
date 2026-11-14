@@ -627,7 +627,7 @@ const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
     fixture: "scripts/dev/known/cli.bench.ts",
     known: "201.22 MiB peak for 200 MiB allocated; +50 MiB plant read +50.11 MiB",
     aa: "alloc 100, 8 pairs: −0.006% [−0.032 … +0.013], same (±2%)",
-    planted: "alloc 50 to 100: 50.89 to 101.00 MiB, +98.46% [+98.38 … +98.50]; machine at 23% CPU before the comparison",
+    planted: "alloc 50 to 100: 50.89 to 101.00 MiB, +98.46% [+98.38 … +98.50] (blocks flagged Background, which does not move memory.peak)",
     boundary: "a process left running refused RunIncomplete",
     reviewed_at: None,
     reviewed_why: None,
@@ -635,7 +635,7 @@ const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
 const LINUX_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-14",
     version: "f40ec86f",
-    machine: "Linux x64 virtual machine",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
     fixture: "scripts/dev/known/cli.bench.ts",
     known: "302.12 ms for 300 ms of CPU; 1205.26 ms for three 400 ms workers",
     aa: "spin 300, 8 pairs: −0.046% [−0.136 … +0.087], same (±2%)",
@@ -647,7 +647,7 @@ const LINUX_CLI_CPU_RUN: Evidence = Evidence {
 const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-14",
     version: "f40ec86f",
-    machine: "Linux x64 virtual machine",
+    machine: "Linux x64 virtual machine (2 vCPUs unpinned)",
     fixture: "scripts/dev/known/cli.bench.ts",
     known: "202.10 MiB peak for 200 MiB allocated; +50 MiB plant read +50.05 MiB",
     aa: "alloc 100, 8 pairs: +0.008% [−0.092 … +0.084], same (±2%)",
