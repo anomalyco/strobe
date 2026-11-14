@@ -93,3 +93,29 @@ clean-pair evidence: terminal launch A/A (11/12; two metrics; 0.04 pp), page
 fixed work A/B (9/12; five metrics; 0.12 pp), and script wall A/B (9/12; three
 metrics; 0.13 pp). Other levels did not change. No pair, estimate or interval was
 replaced by the clean subset.
+
+`stop.ts` asks the real CLI to stop its own experiment and asserts exit 130 and
+the saved and rendered ending. `resume.ts` starts a real headless timed pair,
+then exercises the finalizer through completed checkpoints: warned `same` /
+`no_worse` (5 strict, 0 otherwise), warned directional (0), clean same (0),
+unclear (0 or 5) and all refused (4). This checks policy and rendering, not the
+ability to induce symmetric load on demand.
+
+### Verified cells requiring review (no stamps)
+
+At the baseline, `support-matrix --check` identifies five changed spans:
+`src/stats.rs#compare` initializes `warned` to false; `src/app/bench.rs#run_chunk`
+refreshes the Linux launch membership; `src/host/mod.rs#process_cycles_at`,
+`#ended_marks`, and `#impl EndedMarks` change Linux edge accounting. The
+statistics change no arithmetic, clock, interval, or counter value. The clean-pair
+threshold changes the warning, not the pairs used for the estimate.
+
+| Tripped cells | Hosts | Can a fixture number change because of this patch? |
+|---|---|---|
+| Page: frames, input latency | macOS | No: Linux edge code is not compiled here. |
+| Windowless native: process CPU | Windows, macOS, Linux | Only on Linux if process membership changes at the edge; stable members use the same counters. |
+| Windowless native: process memory | Windows, macOS, Linux | No memory reading changes. An accompanying Linux CPU reading has the edge qualification above. |
+| Windowless native: hardware counters | macOS | No. |
+| Script: wall and counts, process CPU | macOS, Linux | No change to wall or counts. Linux CPU can change for a zombie, reused PID or a helper joining or exiting at the edge. |
+| Command: wall and counts | macOS | No. |
+| Command: process CPU, process memory | Windows, macOS, Linux | No: these cells trip the comparison constructor only. |

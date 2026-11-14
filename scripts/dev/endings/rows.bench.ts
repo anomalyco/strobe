@@ -5,6 +5,7 @@ export default bench({
   cases: {
     ok: { primary: "count.items", run: ({ count }) => count("items", 3) },
     secondary: { primary: "count.items", metrics: ["frames.dropped.pct"], run: ({ count }) => count("items", 3) },
+    slow: { primary: "count.items", run: async ({ count }) => { await Bun.sleep(800); count("items", 1) } },
     worse: { primary: "count.items", run: ({ variant, count }) => count("items", variant === "base" ? 1 : 4) },
     basefail: { primary: "count.items", run: ({ variant, count }) => { if (variant === "base") throw new Error("base failed its run"); count("items", 1) } },
     defect: { primary: "cpu.work", run: () => { throw new Error("fixture incomplete") } },
