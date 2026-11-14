@@ -65,6 +65,40 @@ refusal or device loss can end the command before it has a result (4 or 255).
 
 ## Evidence
 
+### Downstream ending matrix (review baseline `5aeb2aa`)
+
+These columns extend both tables above. Rows with identical downstream decisions
+are grouped; a check never produces a timed verdict for bisect or confirmation.
+The action column is `outputs.verdict / step exit` for one experiment; `fail-on:
+never` reports rather than penalizes completed failures/refusals.
+
+| Ending | HTML | Card / badge | PR text / step summary | Action output / exit | Bisect step | Track confirmation |
+|---|---|---|---|---|---|---|
+| Head, base, secondary refused, exact counters no worse | check passed, values | no timed claim | check table, counts | pass / 0 | — | — |
+| Case defect, base failure, worse/unstable/missing counter, journey mismatch | failure + reason | no timed claim | fail, reason once | fail / 1 | — | — |
+| Mixed passes with capability refusal, including dark display | pass and refusal cards | no timed claim | separate counts | pass / 0; strict unmet: fail / 1 | — | — |
+| All refused, required coverage, no counter compared | **previously green; must show nonpass banner** | no timed claim | coverage reason first | fail / 1 | — | — |
+| Some gaps, all gaps, all-gap counter check | **previously timed card; must show gap** | no timed claim | gap separate from not run | mixed pass / 0; inventory fail / 0; counter fail / 1 | — | — |
+| Stopped/timeout with result | stop reason + completed cases | no completed claim | stop and number not run | fail / 1 (check) | no bound | not confirmed |
+| Build, usage, connectivity or host error before result | no report | none | command error only | error / 1 | no bound | not confirmed |
+| Clean same/no worse | equivalent, A/A passed only for same | same | equivalent/no worse | same or no_worse / 0 | may advance | not a regression |
+| Warned same/no worse, load or drift | **previously confirmed; needs confirmation** | needs confirmation | needs confirmation, warned | **previously same / 0; unclear / 1 with fail-on unclear** | never advance; quiet retry only for load | inconclusive, actual reason |
+| Directional shift, including small or beyond a margin, warned or clean | direction, warning if applicable | direction | direction and margin; **suffix previously damaged markup** | better / 0 or worse / 1 under regression policy | keep decisive, consistent direction; unread load blocks | confirm matching direction only |
+| Undecided/underpowered | inconclusive | unclear | inconclusive | kind / 1 if strict | no decided move | not confirmed |
+| One-sided load refusal | refusal | not measured | skipped | refused / 1 if strict | quiet wait and retry | inconclusive |
+| Other refused primary / parity gap | refused or gap | not measured | not compared | refusal per policy | no direction | not confirmed |
+| Max-time during comparison | partial counts and verdicts | finished result | finished result | from kept verdicts | use only valid step | use only valid comparison |
+
+Other readers: `query summary`, `--format md` and MCP forward the CLI result;
+`exp_insights` reads gap/refusal before check status; plan indexes usable blocks,
+not check success. `family` and the implementation scoreboard consume the guarded
+primary. Journey matching and counter comparisons produce the per-case status;
+neither makes an independent experiment-exit decision. `stats` supplies the
+machine kind and human words to extraction, card, bisect and track. Dev readers
+(background, surfaces, next-commands, viewer-units, HTTP probe, endings) inspect
+or generate evidence, not shipped verdicts. The action's regression boolean is
+distinct from its verdict: an unclear comparison alone is not a regression.
+
 `bun scripts/dev/endings/rows.ts` drives a headless script with `STROBE_BIN`.
 `dark.ts` takes a separate binary built after applying `dark-block.patch` in a
 disposable checkout. Its only substitution is the final display reading of a
