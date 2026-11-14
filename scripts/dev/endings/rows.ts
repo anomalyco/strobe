@@ -19,6 +19,7 @@ const rows: [string, string[], number, string[], string][] = [
   ["somegap", [], 0, ["pass", "gap"], "1 parity gap"],
   ["bare-gap", [...base,"--noworse","0%"], 0, ["pass","gap"], "1 parity gap"],
   ["bad-gap", [...base,"--noworse","main.work=2%"], 2, [], ""],
+  ["garbage-gap", [...base,"--noworse","banana"], 2, [], ""],
   ["nofixture", [], 4, ["refused"], "nothing checked"],
   ["failure-wins", [...base,"--noworse","count.absent","--require-parity"], 1, ["fail","gap"], "1 parity gap"],
   ["empty", [...base, "--noworse", "count.absent"], 4, ["pass"], "nothing compared"],
@@ -38,12 +39,13 @@ for (const [name, flags, code, states, summary] of rows) {
   const filter = ({ mixed: "ok,frames", strict: "ok,frames", somegap:"ok,gap", "failure-wins":"defect,gap", "gaps-parity": "gap", "gaps-counter": "gap" } as Record<string,string>)[name] ?? (["nomatch","secondary","worse","basefail","defect","phase","frames","gap"].includes(name) ? name : "ok")
   const run = (args: string[]) => Bun.spawnSync([exe, ...args], { timeout: 100000, stdout: "pipe", stderr: "pipe" })
   const id = `exp_end_${crypto.randomUUID()}`
-  const selected = ({"bare-gap":"ok,gap","bad-gap":"gap",nofixture:"nofixture"} as Record<string,string>)[name] ?? filter
+  const selected = ({"bare-gap":"ok,gap","bad-gap":"gap","garbage-gap":"gap",nofixture:"nofixture"} as Record<string,string>)[name] ?? filter
   const p = run(["bench", file, "--id", id, "--head", ".", "--filter", selected, "--check", ...flags, "--json"])
   const r = JSON.parse(p.stdout.toString().trim() || "{}")
   console.log(name, p.exitCode, r.passed, r.series?.map((s: any) => [s.state, s.passed, s.decided]), r.text?.split("\n").find((l: string) => /cases passed|nothing checked|nothing compared/.test(l)) ?? r.error ?? p.stderr.toString().slice(-300))
   if (baseline) continue
   assert.equal(p.exitCode, code, name)
+  if (name === "garbage-gap") assert.match(r.error, /--noworse:.*banana/)
   if (!states.length) { assert.doesNotMatch(p.stderr.toString(), / · exp_/); assert.ok(experiments && !existsSync(join(experiments,id))); continue }
   experiments = dirname(dirname(r.result))
   const saved = JSON.parse(readFileSync(r.result, "utf8"))

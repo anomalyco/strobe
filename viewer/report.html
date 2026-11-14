@@ -2766,6 +2766,9 @@ function buildHeroProse(r, s, c, cl, aa) {
       `: its worse end is inside the ${fmtMargin(c, u)} allowed, so no worse.`
     );
   }
+  if (cl.warned) {
+    return h("p", { class: "hero-prose" }, `The measured interval (${fmtRange(c, u)}) met the bound, but a measurement warning qualifies this result. Rerun under steady conditions to confirm it.`);
+  }
   if (cl.kind === "inconclusive") {
     const estMins = finite(c.needed_pairs) && finite(s.elapsed_ms) && s.pairs > 0 && c.needed_pairs < 5000
       ? ` (~${fmtDuration((s.elapsed_ms / s.pairs) * c.needed_pairs)})`
@@ -3927,6 +3930,7 @@ function sideArg(v) {
 function renderNextStepsSection(r, s, aa) {
   const c = s.primary || {};
   const m = c.metric || "";
+  const decided = s.decided && !classify(c, m, aa).warned;
   const u = unitOf(m);
   const file = cleanPath(r.file || "<bench-file>");
   const baseVar = (r.variants || []).find((v) => v.role === "base");
@@ -3972,7 +3976,7 @@ function renderNextStepsSection(r, s, aa) {
         ? `Run ~${need} pairs${timeHint} to resolve a ${fmtBound(c, u)} difference:`
         : `Resolving ${fmtBound(c, u)} would take ~${need} pairs${timeHint}. Only re-run if hunting sub-2% shifts:`;
     items.push({ why: h("span", {}, advice), cmd: benchCmd(`--pairs ${need}`) });
-  } else if (!aa && s.decided && finite(s.holm_pairs) && s.pairs < s.holm_pairs && (s.secondaries || []).some((sec) => !sec.decided && (sec.lo > 0 || sec.hi < 0))) {
+  } else if (!aa && decided && finite(s.holm_pairs) && s.pairs < s.holm_pairs && (s.secondaries || []).some((sec) => !sec.decided && (sec.lo > 0 || sec.hi < 0))) {
     items.push({
       why: h("span", {}, `Primary is decided; run ${s.holm_pairs} pairs if you also want to statistically confirm secondary metrics:`),
       cmd: benchCmd(`--pairs ${s.holm_pairs}`),
@@ -3980,7 +3984,7 @@ function renderNextStepsSection(r, s, aa) {
   }
 
   items.push({
-    why: h("span", {}, s.decided && !aa ? "Result is statistically decided — generate Markdown summary for your pull request:" : "Export a concise Markdown summary:"),
+    why: h("span", {}, decided && !aa ? "Result is statistically decided — generate Markdown summary for your pull request:" : "Export a concise Markdown summary:"),
     cmd: `strobe report experiment ${r.id} --format md`,
   });
 
@@ -7790,6 +7794,7 @@ function renderBisect(r) {
   const matchHash = (a, b) => !!(a && b && (a === b || a.startsWith(b) || b.startsWith(a)));
 
   const stepOutcome = (st) => {
+    if (st.blocked) return { tag: "Blocked", detail: "A measurement warning prevented a decision", cls: "undecided", tone: "warn" };
     if (!st.decided) {
       const mNeed = /~(\d+)\s+pairs/.exec(st.verdict || "");
       return { tag: "No verdict", detail: mNeed ? `No verdict (~${mNeed[1]} pairs needed)` : "No verdict", cls: "undecided", tone: "warn" };

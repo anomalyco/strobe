@@ -19,5 +19,10 @@ for (const [filter, code] of [["phases", 4], ["spin100,phases", 0]] as const) {
   const pr = run(["report", "experiment", r.id, "--format", "summary"])
   assert.equal(pr.exitCode, 0)
   assert.match(pr.stdout.toString(), /\| phases \|[^\n]+\| refused \|/)
+  if (filter.includes("spin100")) {
+    const spin=r.series.find((s:any)=>s.case==="spin100")
+    assert.equal(spin.state,"pass"); assert.ok(spin.values["cpu.work"]>0)
+    assert.match(spin.refused["run.duration"],/Throttled/); assert.equal(spin.values["run.duration"],undefined)
+  }
   console.log(filter, dark.state, dark.refusal.validator, r.passed, p.exitCode)
 }

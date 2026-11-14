@@ -2675,7 +2675,12 @@ pub fn run(args: &Args) -> Result<Output> {
         }
         // With only gaps validate named metrics, but never bind a bare margin to a journey that cannot run.
         if let Some(named) = args.get("noworse") {
-            let names = named.split(',').filter(|p| p.contains('=') || model::metric(p.trim()).is_some()).collect::<Vec<_>>().join(",");
+            let names = named
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty() && (p.contains('=') || model::metric(p).is_some() || p.trim_end_matches('%').trim().parse::<f64>().is_err()))
+                .collect::<Vec<_>>()
+                .join(",");
             if !names.is_empty() {
                 check_counter_margins(&names, "")?;
             }

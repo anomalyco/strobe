@@ -56,6 +56,8 @@ for (const [kind,load,strict,margin,code] of [
     if(kind==="same" || kind==="no_worse"){
       const html=rendered(exe,id,env)
       assert.match(html,/Needs confirmation/); assert.doesNotMatch(html,/Confirmed · Equivalent|A\/A Control · Passed|Confirmed · No worse/)
+      assert.match(html,/Rerun under steady conditions/)
+      assert.doesNotMatch(html,/Run-to-run variance across|Primary is decided;|Result is statistically decided/)
       for(const format of ["card","badge"]){
         const out=join(dir,`${format}.svg`), img=run(["report","experiment",id,"--format",format,"--json","--out",out])
         assert.equal(img.exitCode,0); assert.match(img.stdout.toString(),/needs confirmation/i)
@@ -64,3 +66,13 @@ for (const [kind,load,strict,margin,code] of [
   }
   console.log(`${kind} from ${pairs.length} pairs, warned=${!!c.warned}, strict=${strict}: ${code}`)
 }
+
+// A saved bisect that stopped on a warned same cannot move its good bound.
+const dir=mkdtempSync(join(scratch,"bisect-")), file=join(dir,"result.json")
+const good="11111111", bad="22222222", metric="run.duration"
+writeFileSync(file, JSON.stringify({kind:"bisect",id:"exp_blocked",range:`${good}..${bad}`,good,bad,metric,
+  outcome:"unclear",verdict:"unclear: a measurement warning",remaining:{good,bad},commits:[{commit:bad,short:bad}],
+  steps:[{step:0,good,commit:bad,short:bad,metric,pairs:12,relative:true,estimate:0,lo:-0.01,hi:0.01,bound:0.02,
+    decided:true,warned:true,blocked:true,verdict_kind:"same",verdict:"same (±2%) (warned)"}]}))
+const rail=rendered(exe,file,env)
+assert.match(rail,/22222222 · Blocked/); assert.doesNotMatch(rail,/Not moved/)
