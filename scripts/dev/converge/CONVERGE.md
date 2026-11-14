@@ -58,6 +58,20 @@ irregular - 1Sw 1Rw 1Rw 1Rw
 recovery - 2Sw 2Sw 2Si 2Sw
 ```
 
+Outcome on the revised branch: **158/160 agree on the verdict and level; no
+warning becomes a note**. Two less-cautious cells: `irregular` at fixed 8 and
+auto. Main ran a ninth attempt (seven +150%, two −30%, p=.0156), so refused;
+the branch measured eight (six +150%, two −30%, p=.03125), so cannot claim the
+specified p≤.02 refusal. Both carry a warning: fixed 8 says worse; auto says
+same, warned. A hypothetical ninth reading is not evidence. At fixed 6 the
+unanimous exception is reachable, and at 12 both policies refuse this sequence.
+
+The late-burst auto row now matches main: nine attempts, same, note (formerly
+eight, faster, note). The unanimous six-pair row refuses with seven attempts on
+both versions: the opening two-sided pair stays; the first later isolated hit
+is replaced. Six pairs with *both* sides busy and the same large difference in
+every pair exercise the six-difference refusal directly.
+
 One timed pair is two blocks. In the scripted rows each block takes one second;
 the clock counts blocks only, not startup, discarded warmups or a quiet wait.
 Inputs are block readings, not a load planted on the machine. Each row runs for
@@ -72,15 +86,14 @@ so a load refusal cannot hide behind a change in the workload.
 | Both sides busy, 50/200 then 200/50, alternating | 2 → 0 | +4 → 0 s | Same, warned |
 | Only head stays busy (0/150) | 1 → 1 | +2 s | One-sided load refuses, counting set-aside attempts |
 
-Two consecutive timed blocks at or above 25% of a core are evidence that load
-lasted across a block boundary. Stop retrying for load for the rest of the series.
-A repeated large difference toward the same side already stays on main; keep
-that protection too. Equal steady load has no large difference and never needed
-a retry. Neither policy changes a block reading or decides the verdict.
+Keep the pair when both of its blocks are busy. After a busy replacement, keep
+subsequent bursts until a clean pair runs. Neither condition persists after the
+evidence for it is gone. A repeated isolated hit on the same side stays, as on
+main. Equal steady load has no large difference and never needed a retry.
 
 | Pair plan (cross every row above) | Kept pairs / launches here | Main before first pair, unknown spread | Target before first pair |
 |---|---:|---|---|
-| Default | 8 / 16 (first look) | At least 8 pairs | Estimated kept pairs and launches; spread unknown |
+| Default | 8 / 16 (first look) | At least 8 pairs | 8 to 40 kept pairs; 16–80 launches before retries |
 | Under eight: 6 | 6 / 12 | At least 6 pairs | Fixed count; cannot check agreement on 8 clean pairs; `--pairs 8` |
 | Eight to eleven: 9 | 9 / 18 | At least 9 pairs | Fixed count and launches; no clean-floor warning |
 | Twelve or more: 12 | 12 / 24 | At least 12 pairs | Fixed count and launches; no clean-floor warning |
@@ -96,11 +109,13 @@ Recorded six-pair desk A/As (not a simulated re-run): 8, 8 and 7 attempts;
 and 12/12. The first and last ended underpowered (~48 and ~25 pairs); the middle
 was unclear. A new schedule cannot recreate an unmeasured replacement block.
 
-Each recording had ≥25% of a core in both blocks of its first attempt. The
+Each formerly set-aside attempt had ≥25% of a core in both blocks. The
 scheduler therefore keeps all five formerly set-aside attempts when fed the
-recorded load streams. This does not predict a different verdict for any of them.
+recorded load streams. One later, formerly kept, isolated hit in the first stream
+does qualify for a retry. Its replacement was never measured. This does not
+predict a different verdict for any of them.
 
-## Live A/A (six kept pairs)
+## Live A/A at `c47cc48` (six kept pairs)
 
 | Machine and load | Attempts, main → candidate | Wall time | Primary, main → candidate |
 |---|---|---|---|
@@ -118,5 +133,6 @@ Run `cargo run --release --manifest-path scripts/dev/background/Cargo.toml -- --
 Optional result paths after `--converge` replay the original attempt streams.
 `bun scripts/dev/converge/plans.ts` reads `STROBE_BIN`; its scratch history
 exercises fixed, automatic and variance-limited plans without executing either
-command. The separate historical background replay is unchanged: 40 warnings,
-59 notes and 35 silent results.
+command. The separate historical background replay changes from 40 warnings,
+59 notes and 35 silent results to 47/52/35. In seven old directional results a
+kept pair crosses the burst ceiling: CPU headroom no longer clears those hits.

@@ -3567,7 +3567,9 @@ flowchart LR
   verdict names among them, is for an 80% chance from the same robust spread, as `plan`'s are, so the
   two never differ by the factor (z + z₀.₈)²/z² ≈ 1.8 they once did, and a series whose 80% figure
   exceeds its pairs is `underpowered`, not `unclear`. Its `--pairs N` hint is the total number of kept
-  pairs for another run, not N additional attempts. `--pairs N` is one look at N at 95%. Secondaries and
+  pairs for another run, not N additional attempts. Compute the suggested fixed count at 95%, not
+  at a sequential look's confidence. If more than 200 are needed, reduce block variance rather than
+  printing an unusable command. `--pairs N` accepts 2 through 200 and is one look at N at 95%. Secondaries and
   descriptive rows use 95% intervals at the final pair. When the primary is decided at a look with
   fewer pairs than the tested secondaries need to clear Holm (2·2⁻ⁿ ≤ 0.05/tests: 9 pairs from 7
   tests), the series runs on to that many pairs for them and keeps the primary's verdict from its
@@ -3596,7 +3598,8 @@ flowchart LR
   - *Budget*: the plan and startup line count kept pairs and two timed launches per pair, before
     retries. Below eight pairs they say the clean-pair check cannot run, not that a quiet run cannot
     decide. The requested count stands. With a prior or pilot spread, an underpowered plan gives the
-    estimated `--pairs N` for an 80% chance at the expected effect, not a guarantee.
+    estimated fixed `--pairs N` for an 80% chance at the expected effect, not a guarantee. Auto plans
+    show the range (8 to 40 kept pairs, 16–80 timed launches before retries).
   - *Spread*: the primary's per-pair differences in earlier experiments of the same series (bench
     file name, series label, primary) on this device, each centred on its own median and pooled
     (1.4826·MAD, `stats::spread`), all in the newest experiment's scale (log ratios or differences,
@@ -6220,9 +6223,10 @@ Missing accounting is not a zero.
 
 When a pair's blocks differ by at least one core of foreign work (a quarter of the target's physical
 cores if smaller, never below a quarter core), strobe can set the pair aside and run it again. It
-retries at most twice per series and never twice toward the same side. After two consecutive timed
-blocks reach 25% of a core, the load is sustained: keep this pair and finish without further load
-retries. Count the blocks in execution order, including set-aside attempts. Set-aside differences
+retries at most twice per series and never twice toward the same side. Keep the pair when both
+blocks of this pair reach 25% of a core, or when a replacement still had a busy block and no clean
+pair has run since. A busy block on each side of a pair boundary does not suffice. A retry waits
+no longer than the remaining series or experiment budget. Set-aside differences
 still count toward the test for one-sided load. Display-state retries are separate.
 
 Kept and flagged is right for work spread over both sides: it widens the interval. Work that ran with
@@ -6239,7 +6243,11 @@ refused `Background` ("other work ran on the target's CPUs during head's blocks 
 side's: a quarter core or more apart in 8 of 8 pairs (signed-rank p 0.008)"), decided before the
 primary's gate and Holm, so a refused secondary takes no share of Holm's level; the series warning
 explains the refusal, and a verdict the last look had printed is withdrawn on a
-progress line (`lopsided_background`). Before the test, a pair's difference is moved toward 0 (never
+progress line (`lopsided_background`). At exactly six readable differences, the smallest possible
+two-sided p is 1/32. Unanimous differences all at or above the size floor toward one side refuse
+there too (also for hypervisor steal). Spare CPU capacity cannot clear a kept pair at or above
+the one-sided burst threshold; agreement on enough clean pairs is separate evidence.
+Before the test, a pair's difference is moved toward 0 (never
 past it, never away) by the change in the compositor's CPU between its blocks: a side that presents
 more makes the compositor work on the target's CPUs too, which is its own doing. The level and the
 half-the-pairs floor keep symmetric work from refusing: simulated with each block's other work

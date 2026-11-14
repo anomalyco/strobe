@@ -22,9 +22,7 @@ const POWER: f64 = stats::PLAN_POWER;
 const UNKNOWN_BLOCK: &str = "unknown: no earlier run or --check of this case here (a --check, a --pilot or this run's first pairs measure one)";
 
 pub fn run(args: &Args) -> Result<Output> {
-    if let Some(p) = args.get("pairs").filter(|p| *p != "auto") {
-        p.parse::<usize>().map_err(|_| Error::usage("--pairs: auto or a number"))?;
-    }
+    args.fixed_pairs()?;
     let file = args.pos.first().ok_or_else(|| Error::usage("plan needs a bench file: strobe plan perf/x.bench.ts [--base <variant>] [--head <variant>]"))?;
     let file = std::fs::canonicalize(file).map_err(|_| Error::usage(format!("no such bench file: {file}")))?;
     // Checked as the bench would, though a plan runs no hook.
@@ -67,7 +65,7 @@ pub fn run(args: &Args) -> Result<Output> {
     // Sides with and without anything on screen (two targets, or two builds or profiles of one): refused
     // as the bench refuses them, whatever the sides name.
     super::offscreen_sides(&describe, &series, &variants, &config, &projects, args.has("headless"))?;
-    let mut plan = estimate(&series, &describe, &file, args, &config, &project, &variants, None);
+    let mut plan = estimate(&series, &describe, &file, args, &config, &project, &variants, None)?;
     let text = text(&file, &variants, &plan, &notes);
     plan["text"] = json!(text);
     Ok(Output::new(text, plan))
@@ -273,10 +271,10 @@ fn check_block(file_name: &str, s: &Series, runs: f64, setup: &Value, cmds: &Cmd
 /// The plan of `series` (see the module comment). `me` is the bench that asks (its own registration is
 /// not queue).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &Args, config: &Value, project: &Path, variants: &[Variant], me: Option<&str>) -> Value {
+pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &Args, config: &Value, project: &Path, variants: &[Variant], me: Option<&str>) -> Result<Value> {
     let file_name = file.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
     let mut history = History { index: store::index(), results: HashMap::new() };
-    let fixed = args.get("pairs").filter(|p| *p != "auto").and_then(|p| p.parse::<usize>().ok()).map(|n| n.max(2));
+    let fixed = args.fixed_pairs()?;
     let confidence = if fixed.is_some() { 0.95 } else { 1.0 - POCOCK_ALPHA };
     let runs = args.num("runs").ok().flatten().unwrap_or(5.0);
     let bound = args
@@ -378,7 +376,7 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         // In the differences' scale: log ratios, or the unit for counts.
         let theta = if relative { (1.0 + effect).max(1e-9).ln() } else { effect * base_value };
         // The verdict expected, in words and whether it is a difference to explain (attribution blocks).
-        let (expect, need, differs) = match (sigma, def) {
+        let project_pairs = |confidence| match (sigma, def) {
             (Some(sig), Some(def)) => match margin {
                 Some(m) => {
                     let m_abs = if relative { m } else { stats::in_unit(def, m, base_value, f64::NAN) };
@@ -404,6 +402,8 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
             _ => (String::new(), f64::NAN, false),
         };
         let max_pairs = fixed.unwrap_or(*LOOKS.last().unwrap_or(&40));
+        let (expect, need, differs) = project_pairs(confidence);
+        let fixed_need = project_pairs(0.95).1.ceil();
         let look = if need.is_finite() {
             match fixed {
                 Some(n) => (need <= n as f64).then_some(n),
@@ -442,7 +442,7 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
         out.push(json!({
             "label": s.label(), "case": s.case, "target": s.target, "primary": s.primary, "relative": relative,
             "mode": if margin.is_some() { "noworse" } else { "two-sided" }, "margin": margin, "bound": bound,
-            "fixed": fixed.is_some(), "launches": pairs.checked_mul(2),
+            "fixed": fixed.is_some(), "launches": pairs.checked_mul(2), "fixed_pairs_needed": fixed_need.is_finite().then_some(fixed_need),
             "sigma": sigma, "spread_source": spread_source, "from": pool.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             "block_ms": block_ms, "block_source": block_source, "warmup_blocks": warmup_blocks, "warmup_ms": warmup_ms,
             "effect": effect, "effect_source": effect_source, "expect": expect, "pairs_needed": need.is_finite().then_some(need.ceil()),
@@ -456,11 +456,11 @@ pub(super) fn estimate(series: &[Series], describe: &Value, file: &Path, args: &
     let queue_ms: f64 = others.iter().filter_map(|b| b["eta_ms"].as_f64()).sum();
     // A total with a series of unknown block time is unknown (null), never the known part as a whole.
     let blocks_ms = (unknown == 0).then_some(total);
-    json!({
+    Ok(json!({
         "series": out, "builds": builds, "build_ms": build_ms,
         "slot": { "others": others.iter().map(|b| json!({ "exp": b["exp"], "state": b["state"], "eta_ms": b["eta_ms"] })).collect::<Vec<_>>(), "wait_ms_max": queue_ms },
         "blocks_ms": blocks_ms, "total_ms": blocks_ms.map(|b| b + build_ms), "blocks_unknown": unknown,
-    })
+    }))
 }
 
 /// Whether each variant builds before its blocks, and about how long: unchanged builds are reused, and a
@@ -539,7 +539,10 @@ fn series_line(s: &Value) -> String {
         (Some(_), None) => {
             let pct = |x| fmt::bound(x, true, x, "");
             let at = s["margin"].as_f64().map_or_else(|| format!("±{}", pct(s["bound"].as_f64().unwrap_or(0.02))), |m| format!("a {} margin", pct(m)));
-            let need = s["pairs_needed"].as_f64().filter(|n| *n < usize::MAX as f64).map_or_else(|| "no finite pair estimate".into(), |n| format!("try --pairs {n:.0} for an 80% chance"));
+            let need = s["fixed_pairs_needed"]
+                .as_f64()
+                .filter(|n| *n <= crate::cli::MAX_PAIRS as f64)
+                .map_or_else(|| format!("even {} fixed pairs are unlikely to decide; reduce block variance", crate::cli::MAX_PAIRS), |n| format!("try --pairs {n:.0} for an 80% chance"));
             format!("likely underpowered at {at} for the expected effect; {need}")
         }
     };
@@ -547,15 +550,19 @@ fn series_line(s: &Value) -> String {
     let pairs = s["pairs"].as_u64().unwrap_or(0);
     let clean = if pairs < floor as u64 {
         let interval_min = stats::min_pairs(0.95);
-        let interval = if pairs < interval_min as u64 { format!("; fewer than {interval_min} pairs cannot give a 95% interval") } else { String::new() };
-        let flag =
-            if s["underpowered"] == true && s["pairs_needed"].as_f64().is_some_and(|n| n >= floor as f64 && n < usize::MAX as f64) { String::new() } else { format!("; use at least --pairs {floor}") };
-        format!("{interval}; too few for the clean-pair check (needs {floor} clean pairs{flag})")
+        let interval = if pairs < interval_min as u64 { format!("fewer than {interval_min} pairs cannot give a 95% interval") } else { "can decide when quiet".into() };
+        let flag = if s["underpowered"] == true { String::new() } else { format!(" (--pairs {floor})") };
+        format!("; {interval}, but cannot verify on {floor} clean pairs if other work runs{flag}")
     } else {
         String::new()
     };
-    let count = if s["fixed"] == true { "" } else { "estimated " };
-    format!("{}: {count}{pairs} kept pairs ({} launches before retries); {what}{clean}, {time}", s["label"].as_str().unwrap_or(""), s["launches"])
+    let budget = if s["fixed"] == true {
+        format!("{pairs} kept pairs ({} launches before retries)", s["launches"])
+    } else {
+        let (lo, hi) = (LOOKS[0], LOOKS[LOOKS.len() - 1]);
+        format!("{lo} to {hi} kept pairs ({}–{} launches before retries)", 2 * lo, 2 * hi)
+    };
+    format!("{}: {budget}; {what}{clean}, {time}", s["label"].as_str().unwrap_or(""))
 }
 
 fn total_line(plan: &Value) -> String {
@@ -597,7 +604,8 @@ fn text(file: &Path, variants: &[Variant], plan: &Value, notes: &[String]) -> St
         Some(t) => format!("{} {} ({t} at {})", v.role, v.name, v.label),
         None => format!("{} {}", v.role, v.label),
     };
-    let mut t = format!("strobe plan {name} · {}\n", variants.iter().map(side).collect::<Vec<_>>().join(" · "));
+    let heading = if variants.iter().all(|v| matches!(v.kind, Kind::Cmd(_))) { "strobe run --plan".into() } else { format!("strobe plan {name}") };
+    let mut t = format!("{heading} · {}\n", variants.iter().map(side).collect::<Vec<_>>().join(" · "));
     for n in notes {
         t += &format!("{}\n", n.trim_end());
     }

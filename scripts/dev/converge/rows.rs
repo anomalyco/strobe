@@ -40,7 +40,7 @@ pub fn run() {
                     let decision = schedule.decide(&a, &b, discarded.len(), true, true);
                     assert_eq!(decision, resumed);
                     if regime == "both busy" {
-                        assert!(matches!(decision, Decision::Keep(Some("other work continued across consecutive blocks"))));
+                        assert!(matches!(decision, Decision::Keep(Some("other work ran on both sides of this pair"))));
                     }
                     match decision {
                         Decision::Replace(apart) => discarded.push(Burst { pair, apart, base: load[0], head: load[1], base_steal: None, head_steal: None }),
@@ -65,6 +65,7 @@ pub fn run() {
                 let refusal = load_sets(&blocks, &pairs, &discarded, None)[0].refusal(names);
                 assert_eq!(refusal.is_some(), regime == "head busy");
                 let impact = LoadImpact {
+                    pairs: &pairs,
                     counted_cpus: 8,
                     busy_before: 0.,
                     expects_load: true,

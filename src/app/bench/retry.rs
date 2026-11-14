@@ -10,20 +10,20 @@ pub enum Decision {
 pub struct Schedule {
     threshold: f64,
     seen: [bool; 2],
-    last_busy: bool,
-    sustained: bool,
+    replacing: bool,
+    busy_replacement: bool,
 }
 
 impl Schedule {
     pub fn resume(cores: Option<usize>, blocks: &[Block], pairs: &[(usize, usize)], discarded: &[Burst]) -> Self {
-        let mut s = Self { threshold: burst_pct(cores), seen: [false; 2], last_busy: false, sustained: false };
+        let mut s = Self { threshold: burst_pct(cores), seen: [false; 2], replacing: false, busy_replacement: false };
         // A checkpoint may end between a discarded attempt and its replacement. Recover the
         // chronological block order, including every such attempt, without any new stored state.
         let mut bursts = discarded.iter().peekable();
         for pair in 0..=pairs.len() {
             while let Some(b) = bursts.next_if(|b| b.pair == pair) {
-                s.observe(pair, b.base, b.head);
                 s.seen[usize::from(b.apart > 0.)] = true;
+                s.replacing = true;
             }
             if let Some(&(a, b)) = pairs.get(pair) {
                 s.decide(&blocks[a], &blocks[b], 0, false, false);
@@ -32,22 +32,23 @@ impl Schedule {
         s
     }
 
-    fn observe(&mut self, pair: usize, base: f64, head: f64) {
-        for pct in if pair.is_multiple_of(2) { [base, head] } else { [head, base] } {
-            let busy = pct >= BACKGROUND_PCT;
-            self.sustained |= self.last_busy && busy;
-            self.last_busy = busy;
-        }
-    }
-
     pub fn decide(&mut self, base: &Block, head: &Block, discarded: usize, moves: bool, time_left: bool) -> Decision {
         let pct = |b: &Block| b.values.get("cpu.foreign.max").copied().unwrap_or(f64::NAN);
-        self.observe(base.pair, pct(base), pct(head));
+        let busy = |b| pct(b) >= BACKGROUND_PCT;
+        let quiet = |b: &Block| pct(b) < BACKGROUND_PCT && !super::unread_load(b) && !b.values.contains_key("background.subtick");
+        if quiet(base) && quiet(head) {
+            self.busy_replacement = false;
+        }
+        if std::mem::take(&mut self.replacing) && (busy(base) || busy(head)) {
+            self.busy_replacement = true;
+        }
         let Some(apart) = foreign_apart(base, head).filter(|d| d.abs() >= self.threshold) else { return Decision::Keep(None) };
-        let seen = std::mem::replace(&mut self.seen[usize::from(apart > 0.)], true);
-        let reason = if self.sustained {
-            "other work continued across consecutive blocks"
-        } else if seen {
+        // Track isolated hits on each side, not a busy patch that has its own reset rule.
+        let reason = if busy(base) && busy(head) {
+            "other work ran on both sides of this pair"
+        } else if self.busy_replacement {
+            "a replacement was busy and no clean pair followed"
+        } else if std::mem::replace(&mut self.seen[usize::from(apart > 0.)], true) {
             "repeated load on the same side"
         } else if discarded >= BURST_RETRIES {
             "retry limit reached"
@@ -56,6 +57,7 @@ impl Schedule {
         } else if !time_left {
             "time budget reached"
         } else {
+            self.replacing = true;
             return Decision::Replace(apart);
         };
         Decision::Keep(Some(reason))

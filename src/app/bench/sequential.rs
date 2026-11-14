@@ -219,13 +219,19 @@ pub(crate) fn closing(design: &Design, def: &MetricDef, primary: &mut Comparison
     // The 80% figure (`PLAN_POWER`) the comparison already holds, taken again from every pair (a
     // primary decided at an earlier look is not closed here).
     let d: Vec<f64> = pp.iter().map(|&(a, b)| if primary.relative { (b / a).ln() } else { b - a }).collect();
-    let n80 = match primary.noworse {
-        Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, primary.relative, m), design.confidence, stats::PLAN_POWER),
-        None => stats::pairs_needed(&d, if primary.relative { (1.0 + design.bound).ln() } else { primary.bound }, design.confidence, stats::PLAN_POWER),
+    let need = |confidence| match primary.noworse {
+        Some(m) => stats::pairs_needed_noworse(&d, stats::margin_shift(def, primary.relative, m), confidence, stats::PLAN_POWER),
+        None => stats::pairs_needed(&d, if primary.relative { (1.0 + design.bound).ln() } else { primary.bound }, confidence, stats::PLAN_POWER),
     };
+    let planned = need(design.confidence);
+    let underpowered = planned != usize::MAX && planned > pp.len();
+    let n80 = need(0.95);
     primary.needed_pairs = (n80 != usize::MAX).then_some(n80);
     Some(match primary.needed_pairs {
-        Some(n80) if n80 > pp.len() => (VerdictKind::Underpowered, format!("underpowered: ~{n80} kept pairs needed for an 80% chance; rerun with --pairs {n80}")),
+        _ if underpowered && n80 > crate::cli::MAX_PAIRS => {
+            (VerdictKind::Underpowered, format!("underpowered: even {} fixed pairs are unlikely to decide; reduce block variance", crate::cli::MAX_PAIRS))
+        }
+        Some(n80) if underpowered => (VerdictKind::Underpowered, format!("underpowered: ~{n80} kept pairs needed for an 80% chance; rerun with --pairs {n80}")),
         _ if stopped == "max pairs" && !design.fixed => (
             VerdictKind::Unclear,
             format!("unclear after {} pairs, the last planned look: the difference sits on the {}", pp.len(), if design.margin.is_some() { "margin" } else { "equivalence bound" }),

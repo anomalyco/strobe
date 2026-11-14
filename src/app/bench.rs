@@ -1471,11 +1471,15 @@ const LOPSIDED_P: f64 = 0.02;
 fn lopsided_background(blocks: &[Block], pairs: &[(usize, usize)], names: [&str; 2], discarded: &[Burst]) -> Option<Refusal> {
     let d: Vec<f64> = pairs.iter().filter_map(|&(a, b)| foreign_apart(&blocks[a], &blocks[b])).chain(discarded.iter().map(|x| x.apart)).collect();
     let (head, n, p) = lopsided(&d, BACKGROUND_PCT)?;
+    let unanimous = if d.len() == stats::min_pairs(0.95) { ", unanimous" } else { "" };
     let side = if head { names[1] } else { names[0] };
     Some(
         Refusal::new(
             ValidatorId::Background,
-            format!("other work ran on the target's CPUs during {side}'s blocks more than the other side's: a quarter core or more apart in {n} of {} pairs (signed-rank p {p:.3})", d.len()),
+            format!(
+                "other work ran on the target's CPUs during {side}'s blocks more than the other side's: a quarter core or more apart in {n} of {} pairs (signed-rank p {p:.3}{unanimous})",
+                d.len()
+            ),
         )
         .fix("let that work finish or keep it off the bench's CPUs, then run the bench again"),
     )
@@ -1491,7 +1495,8 @@ fn lopsided(d: &[f64], apart: f64) -> Option<(bool, usize, f64)> {
     let p = stats::wilcoxon_p(d);
     let head = metrics::median(d) > 0.0;
     let n = d.iter().filter(|x| if head { **x >= apart } else { **x <= -apart }).count();
-    (p <= LOPSIDED_P && n >= d.len().div_ceil(2)).then_some((head, n, p))
+    let unanimous_min = d.len() == stats::min_pairs(0.95) && n == d.len() && p <= 1.0 / 32.0;
+    (unanimous_min || (p <= LOPSIDED_P && n >= d.len().div_ceil(2))).then_some((head, n, p))
 }
 
 /// Hypervisor steal (% of the target's CPUs' time, `steal.pct`) a pair's blocks must differ by to
@@ -1578,6 +1583,7 @@ fn moved_by_load(s: &Series, tested: &[Comparison]) -> bool {
 
 /// What a series' comparisons say about its blocks with other work, for `background_note`.
 pub struct LoadImpact<'a> {
+    pub pairs: &'a [(usize, usize)],
     pub counted_cpus: u32,
     pub busy_before: f64,
     pub expects_load: bool,
@@ -1727,6 +1733,9 @@ pub fn background_note(blocks: &[Block], at: &LoadImpact) -> Option<Warning> {
     let steady = flagged.len() * 2 >= measured.len();
     let ceiling = burst_pct(at.cores);
     let light = || -> std::result::Result<(usize, f64), String> {
+        if at.pairs.iter().any(|&(a, b)| foreign_apart(&blocks[a], &blocks[b]).is_some_and(|d| d.abs() >= ceiling)) {
+            return Err("a kept pair had one-sided load; spare CPU capacity does not rule out a biased difference".into());
+        }
         if blocks.iter().any(|b| b.values.contains_key("background.subtick")) {
             return Err("some block spans were too short to establish CPU headroom".into());
         }
@@ -2710,9 +2719,7 @@ pub fn run(args: &Args) -> Result<Output> {
         )));
     }
     let max_time = args.get("max-time").map(duration_ms).transpose()?.map(Duration::from_millis);
-    if let Some(n) = args.get("pairs").filter(|n| *n != "auto") {
-        n.parse::<usize>().map_err(|_| Error::usage("--pairs: auto or a number"))?;
-    }
+    args.fixed_pairs()?;
     let exp = args.get("id").map(str::to_string).unwrap_or_else(|| store::new_id("exp"));
     let implementations = variants.iter().filter_map(|v| v.target.as_deref()).collect::<std::collections::BTreeSet<_>>().len() == 2;
     let headless = args.has("headless");
@@ -3027,7 +3034,7 @@ pub fn run(args: &Args) -> Result<Output> {
         ctx.warnings.push(validity::warn("Rerun", RERUN));
     }
     // The plan (SPEC §9.1): pairs and minutes per series from earlier runs here, and the ETA it keeps.
-    let estimate = if compares && !args.has("pixels-only") { plan::estimate(&series, &ctx.describe, &file, args, &config, &project, &variants, Some(&exp)) } else { Value::Null };
+    let estimate = if compares && !args.has("pixels-only") { plan::estimate(&series, &ctx.describe, &file, args, &config, &project, &variants, Some(&exp))? } else { Value::Null };
     // A series no block of which ran here has no planned time (`null`): the time after it is unknown.
     let planned: Vec<Option<f64>> = estimate["series"].as_array().into_iter().flatten().map(|s| s["ms"].as_f64()).collect();
     for (i, s) in series.iter().enumerate() {
@@ -4986,6 +4993,7 @@ fn blocks_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &V
     warnings.extend(background_note(
         &blocks,
         &LoadImpact {
+            pairs: &[],
             counted_cpus: ctx.pin.unwrap_or_else(|| host::topology().all()).count_ones(),
             busy_before: ctx.busy_before,
             expects_load: ctx.phone.is_none() && !cfg!(target_os = "macos"),
@@ -5048,16 +5056,12 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         ctx.args.num("equivalence")?.map(|b| b / 100.0).unwrap_or_else(|| config["metrics"]["equivalence"].as_str().and_then(|e| e.trim_end_matches('%').parse::<f64>().ok()).unwrap_or(2.0) / 100.0);
     // Verdicts only at planned looks, each at a Pocock level, so looking more than once keeps the
     // overall false-positive rate at 5% (SPEC §9.1). `--pairs N` is one look at N at 95%.
-    let fixed = match ctx.args.get("pairs") {
-        Some("auto") | None => None,
-        Some(n) => {
-            let n = n.parse::<usize>().map_err(|_| Error::usage("--pairs: auto or a number"))?.max(2);
-            if n < stats::min_pairs(0.95) && !ctx.warnings.iter().any(|w| w.id == "FewPairs") {
-                ctx.warnings.push(validity::info("FewPairs", format!("--pairs {n}: below {} pairs no interval reaches 95%, so nothing gets a verdict (a smoke run)", stats::min_pairs(0.95))));
-            }
-            Some(n)
-        }
-    };
+    let fixed = ctx.args.fixed_pairs()?;
+    if let Some(n) = fixed.filter(|&n| n < stats::min_pairs(0.95))
+        && !ctx.warnings.iter().any(|w| w.id == "FewPairs")
+    {
+        ctx.warnings.push(validity::info("FewPairs", format!("--pairs {n}: below {} pairs no interval reaches 95%, so nothing gets a verdict (a smoke run)", stats::min_pairs(0.95))));
+    }
     // Non-inferiority (SPEC §9.3): the same interval at the same looks, judged against the margin. An
     // implementation comparison's journeys are one family (SPEC §9.3): a primary decided better or
     // worse runs on to the pairs at which its repeated p can clear Holm across them.
@@ -5071,6 +5075,8 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     // This series' deadline under `--max-time`: an equal share of the time left among the series still
     // to run (this one included); a series that ends early leaves its time to the ones after it.
     let share = max_time.map(|t| series_started + t.saturating_sub(started.elapsed()) / remaining.max(1) as u32);
+    let retry_deadline = share.into_iter().chain(ctx.deadline).min();
+    let retry_left = || retry_deadline.map_or(Duration::MAX, |t| t.saturating_duration_since(Instant::now()));
     let waited_before = ctx.waited_ms;
     // A resumed experiment (`--resume`) starts from the pairs it had finished.
     let saved = &ctx.saved["series"][s.label()];
@@ -5178,7 +5184,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 // but a pattern: it stays. What the retries took out is kept (`Burst`) and the paired
                 // tests count it, so no pattern washes out of them.
                 let (bb, hb) = (&blocks[idx[0]], &blocks[idx[1]]);
-                let apart = match retries.decide(bb, hb, discarded.len(), load_moves, share.is_none_or(|t| Instant::now() < t)) {
+                let apart = match retries.decide(bb, hb, discarded.len(), load_moves, !retry_left().is_zero()) {
                     retry::Decision::Keep(reason) => {
                         if let Some(why) = reason {
                             progress(format!("  pair {} kept: {why}", pair + 1));
@@ -5189,11 +5195,17 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                 };
                 let foreign = |b: &Block| b.values.get("cpu.foreign.max").copied().unwrap_or(f64::NAN);
                 let steal = |b: &Block| b.values.get("steal.pct").copied();
-                discarded.push(Burst { pair, base: foreign(bb), head: foreign(hb), apart, base_steal: steal(bb), head_steal: steal(hb) });
                 let who = busiest_during(&blocks[start..]);
                 if !who.is_empty() {
                     super::live_progress(format!("  busiest elsewhere: {who}"));
                 }
+                // Keep the completed attempt if the quiet wait uses the rest of this series' share.
+                validity::wait_quiet(ctx.pin, retry_left().min(Duration::from_secs(5)));
+                if retry_left().is_zero() || stop_requested() {
+                    progress(format!("  pair {} kept: no time for a replacement", pair + 1));
+                    break;
+                }
+                discarded.push(Burst { pair, base: foreign(bb), head: foreign(hb), apart, base_steal: steal(bb), head_steal: steal(hb) });
                 discard(&mut blocks);
                 aside += 2;
                 checkpoint(ctx, &s.label(), json!({ "blocks": blocks, "pairs": pairs, "decided_n": driver.decided_n, "discarded_bursts": discarded,"set_aside_launches":aside }));
@@ -5204,12 +5216,15 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
                     apart.abs(),
                     discarded.len()
                 ));
-                validity::wait_quiet(ctx.pin, Duration::from_secs(5));
                 continue;
             }
             discard(&mut blocks);
             aside += 2;
             redone += 1;
+            if retry_left().is_zero() {
+                driver.stopped = "max time".into();
+                break 'pairs;
+            }
             if redone >= 5 {
                 return Err(Error::refused(
                     "SessionLocked",
@@ -5641,6 +5656,7 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
     for (i, set) in sets.iter().enumerate() {
         let from_here = |m: &str| usize::from(apart(m)) == i && load_metric(m);
         let impact = LoadImpact {
+            pairs: set.pairs,
             counted_cpus: ctx.pin.unwrap_or_else(|| host::topology().all()).count_ones(),
             busy_before: ctx.busy_before,
             expects_load: ctx.phone.is_none() && !cfg!(target_os = "macos"),

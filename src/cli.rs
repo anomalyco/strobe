@@ -279,7 +279,16 @@ pub struct Args {
     flags: HashMap<String, String>,
 }
 
+/// Signed-rank intervals materialize the quadratic set of Walsh averages.
+pub const MAX_PAIRS: usize = 200;
+
 impl Args {
+    pub fn fixed_pairs(&self) -> Result<Option<usize>> {
+        self.get("pairs")
+            .filter(|p| *p != "auto")
+            .map(|p| p.parse().ok().filter(|n| (2..=MAX_PAIRS).contains(n)).ok_or_else(|| Error::usage(format!("--pairs {p}: use auto or an integer from 2 to {MAX_PAIRS}"))))
+            .transpose()
+    }
     pub fn parse(raw: Vec<String>) -> Result<Args> {
         let mut pos = Vec::new();
         let mut flags = HashMap::new();
@@ -341,7 +350,9 @@ impl Args {
             given(&mut flags, &name, &value)?;
         }
         let command = if pos.is_empty() { String::new() } else { pos.remove(0) };
-        Ok(Args { command, pos, flags })
+        let args = Args { command, pos, flags };
+        args.fixed_pairs()?;
+        Ok(args)
     }
 
     /// Refuses (exit 2) a flag strobe has that this command does not read: a flag given to the wrong
