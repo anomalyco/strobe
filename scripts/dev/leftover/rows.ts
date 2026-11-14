@@ -30,3 +30,16 @@ export const rows = (crate?: string): Row[] =>
         { key: "pipeline", line: `cmd /c "bun ${child} | findstr ok"`, expect: "pass", proves: "a pipeline: cmd waits for every stage" },
       ]
   ).concat(crate ? [{ key: "build", line: `cargo check --offline --manifest-path ${JSON.stringify(join(crate, "Cargo.toml"))}`, expect: "pass", proves: "an ordinary build: cargo and the rustc it starts" }] : [])
+
+export function consoleRows(gui: string, worker: string, namesake: string): Row[] {
+  return [
+    { key: "console", line: "bun -e 0", expect: "pass", proves: "a console command" },
+    { key: "gui", line: `"${gui}" --version`, expect: "pass", proves: "a GUI-subsystem command with no window" },
+    { key: "cmd", line: "cmd /d /c exit 0", expect: "pass", proves: "an explicit shell" },
+    { key: "shim", line: `"${join(here, "bin", "waited.cmd")}"`, expect: "pass", proves: "a waited batch shim" },
+    { key: "wait", line: `"${worker}" wait`, expect: "pass", proves: "a waited console grandchild" },
+    { key: "leave", line: `"${worker}" leave "${worker}"`, expect: "refused", proves: "an unawaited worker beside the host" },
+    { key: "separate", line: `"${worker}" leave "${worker}" separate`, expect: "refused", proves: "a worker with its own invisible console" },
+    { key: "namesake", line: `"${worker}" leave "${namesake}"`, expect: "refused", proves: "a non-system executable with the host's basename" },
+  ]
+}
