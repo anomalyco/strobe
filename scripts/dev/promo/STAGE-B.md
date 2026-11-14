@@ -17,7 +17,7 @@ Each host in a row needs **its own** four readings. Commands are expanded below.
 
 | Runtime · capability | Host | Batch | Known answer | A/A metric | Planted A/B | Boundary | Why repeat | Watch group |
 |---|---|---|---|---|---|---|---|---|
-| `chromium_page · launch` | Windows | L | start/end marks 200 and 400 ms ±0.5; ready 0–20 ms after end | `launch.ready` | paired shift covers +200 ms | `launch.painted`: `Headless` | attach rewrite `7c01e766` | L |
+| `chromium_page · launch` | Windows | L | marked spans within 0.5 ms of each plant; ready 0–20 ms after end | `launch.ready` | paired shift covers +200 ms | `launch.painted`: `Headless` | attach rewrite `7c01e766` | L |
 | `chromium_page · launch` | Linux | L | same | same | same | same | same rewrite | L |
 | `chromium_page · launch` | macOS | L | same | same | same | same | same rewrite | L |
 | `chromium_page · wall_and_counts` | Windows | W | phases 2 × 10 and 40 ms; counts 7 and 5 exactly | `run.duration` | 100 → 200 ms | missing phase: `NoPhase` | prior A/A and A/B flagged; lean trace removed | W |

@@ -599,7 +599,8 @@ const WIN_TTY_LAUNCH: &str = "the unflagged 12-pair shift +300.08 ms [299.55 …
 const LINUX_CHROMIUM_CPU: &str =
     "cpu2s read 2006.4 ms for 2000 ms. Both fixed-work comparisons refused RunIncomplete despite a launch cgroup; needs the ended-process accounting fix at the run edges and new A/A and A/B readings";
 const LINUX_NATIVE_COUNTERS: &str = "burst-1x to burst-2x read cpu.instructions +99.81% [+99.68 … +100.31] for +99.82% and its A/A same, but no refusal of the counter path is seen on this VM (root), and the one seen in --check is wrong (linux-promo-2)";
-const WIN_PAGE_LAUNCH: &str = "the 200 ms plant waited longer for the ready frame during cold startup; the paired shift [195.57 … 198.93 ms] missed +200 ms. Needs the 400/600 ms marked check and quiet pairs";
+const WIN_PAGE_LAUNCH: &str =
+    "the 200 ms plant waited longer for the ready frame during cold startup; the paired shift [195.57 … 198.93 ms] missed +200 ms. Needs the 400/600 ms marked check and quiet pairs";
 const MAC_PAGE_LAUNCH: &str = "re-verify scripts/dev/known/planted.bench.ts --filter launch --headless (launch-200 to launch-400) after 7c01e766: it rewrote how a page launch is watched (Watch::start into Attacher); on e93fc36 launch-0 to launch-200 read Δ 201.5 ms for 200 ms";
 const MAC_HEADLESS_WALL: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 phase.b read 40.6 ms for 40 ms and the planted Δ 100.10 ms for 100 ms";
 const MAC_HEADLESS_ENGINE: &str = "re-verify scripts/dev/known-web.bench.ts and planted.bench.ts --filter page --headless after ebc9eeaf: a headless lean block takes no Chrome trace and puts no run marks in the page; on e93fc36 main.work read 100.2 ms for 100 ms and the planted +99.87% for +99.68% to +99.98%";

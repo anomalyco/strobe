@@ -16,8 +16,8 @@
 //   strobe bench scripts/dev/known/planted.bench.ts --base script-a --head script-b --filter spin
 //   strobe bench scripts/dev/known/planted.bench.ts --base page-a --head page-b --filter page --headless
 //   strobe bench scripts/dev/known/planted.bench.ts --base work-1x --head work-2x --filter page-work --headless
-//   strobe bench scripts/dev/known/planted.bench.ts --head . --aa --filter launch --target launch-400 --headless
-//   strobe bench scripts/dev/known/planted.bench.ts --base launch-200 --head launch-400 --filter launch --headless
+//   strobe bench scripts/dev/known/planted.bench.ts --head . --aa --filter launch --target launch-600 --headless
+//   strobe bench scripts/dev/known/planted.bench.ts --base launch-400 --head launch-600 --filter launch --headless
 //   strobe bench scripts/dev/known/planted.bench.ts --base pulse-100 --head pulse-200 --filter pulse
 //   strobe bench scripts/dev/known/planted.bench.ts --base hold-50 --head hold-100 --filter memory
 // Headed (a display, the window in front):
@@ -53,7 +53,7 @@
 //             frame. The first frame came at about 11 ms on a Mac but 85-140 ms on a Windows desktop (headless),
 //             where launch-0 over launch-200 read +120 ms: only plants past the first frame add up, so launch-200
 //             to launch-400 is +200 ms (a 200 ms timer instead read +205.5 ms on a Mac: a browser's timer fires
-//             late by its slack). Run the A/A on launch-400 (about 420 ms, so ±2% is ±8 ms): launch-200's was
+//             late by its slack). Use the longer side for A/A: launch-200's was
 //             unclear after 40 pairs on Windows and underpowered at 12 on Linux, launch-0's (about 12 ms on a Mac)
 //             cannot decide ±2%. Use 400 → 600 to keep both ready-frame waits past cold browser startup.
 //   frames    the page times the display's vsync V, then every animation frame spins 0.1 V (frame-light) or 1.5 V
