@@ -6,7 +6,10 @@ use std::time::Duration;
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_default();
-    if mode == "sleep" {
+    if mode == "receipt" {
+        std::fs::write(std::env::var_os("LEFTOVER_RECEIPT").unwrap(), std::process::id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(10));
+    } else if mode == "sleep" {
         std::thread::sleep(Duration::from_secs(10));
     } else if mode == "wait" {
         assert!(Command::new(std::env::current_exe().unwrap()).status().unwrap().success());
@@ -21,5 +24,16 @@ fn main() {
         let child = cmd.spawn().unwrap();
         let mut receipt = std::fs::OpenOptions::new().create(true).append(true).open(std::env::var_os("LEFTOVER_RECEIPT").unwrap()).unwrap();
         writeln!(receipt, "{}", child.id()).unwrap();
+    } else if mode == "behind" {
+        // A worker *below* the real console host. Wait until it exists, not until it exits.
+        let host = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/conhost.exe");
+        let _host = Command::new(host).arg("--headless").arg(std::env::current_exe().unwrap()).arg("receipt")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let receipt = std::path::PathBuf::from(std::env::var_os("LEFTOVER_RECEIPT").unwrap());
+        let until = std::time::Instant::now() + Duration::from_secs(4);
+        while !receipt.exists() {
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

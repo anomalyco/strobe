@@ -156,6 +156,7 @@ pub fn run() {
         format!("waiting for the bench of an older strobe (pid {PID}) to finish"),
         format!("it ends when pid {PID} releases the slot or exits"),
         format!("Throttled: busiest processes (% of a core): {NAME} ({PID}) 75%"),
+        format!("RunIncomplete: `fixture` exited while processes it started were still running: child.exe (pid {PID}), pid {PID}; strobe ended them, because the time and CPU read at its exit did not cover them"),
     ];
     for kind in ["check", "experiment"] {
         let mut r = json!({"id":"exp_private_rows","kind":kind,"plan":{"reserve":reserve,"runs_per_block":1},"variants":[{"role":"base","label":"base"},{"role":"head","label":"head"}],"warnings":[reserve.note(),validity::warn("Background",detail.clone())],"series":[{"label":"fixture","kind":"runs","passed":true,"primary":{"metric":"run.duration","verdict":"unclear","verdict_kind":"unclear"},"pairs":6,"launches":12,"discarded_bursts":[{},{}],"warnings":[validity::warn("Throttled",detail.clone())],"blocks":[{"pair":0,"variant":"base","values":{"cpu.foreign.max":75},"background":[[NAME,75]]},{"pair":0,"variant":"head","values":{"cpu.foreign.max":0}}]}]});

@@ -1021,6 +1021,7 @@ fn still_left(read: impl Fn() -> Vec<(u32, u64, String)>) -> Vec<(u32, u64, Stri
 /// the command's (its group membership or its stamp, in the same read), never by a group of its own
 /// (`host::kill_opened`), and lists it in `Usage::left`. A start time of 0 marks a process of the
 /// launch's Windows job, which the job's end ends (`TerminateJobObject`), never by its pid.
+#[cfg(unix)]
 fn end_left(left: Vec<(u32, u64, String)>) -> Vec<(u32, String)> {
     for &(p, s, _) in left.iter().filter(|l| l.1 != 0) {
         super::kill_opened(p, s);
@@ -1155,14 +1156,45 @@ impl Owned {
                     // No job (strobe's own job refused a nested one): nothing counts what the command started.
                     usage.cpu_refused = Some("Windows: the job strobe runs in refused a job for the command, so what it started is in no count".into());
                     usage.io_refused = usage.cpu_refused.clone();
-                    still_left(|| stamped(self.pid()))
+                    let root = self.pid(); // The child handle still holds this pid.
+                    let mut left = still_left(|| stamped(root));
+                    let list = super::process_list();
+                    let stamped_parents = left.iter().map(|(p, s, _)| (*p, *s)).collect::<Vec<_>>();
+                    left.retain(|(p, start, _)| {
+                        if !super::exe_of(*p).as_deref().is_some_and(super::win::system_console_host) || super::start_time(*p) != Some(*start) {
+                            return true;
+                        }
+                        let attached = list
+                            .iter()
+                            .any(|&(pid, parent, s)| pid == *p && s == *start && (parent == root || stamped_parents.iter().any(|&(pp, ps)| pp == parent && ps <= s && list.contains(&(pp, root, ps)))));
+                        if !attached {
+                            leave(Some(*p), "a stamped system console host", "without a launch job its attachment to the command could not be proved");
+                        }
+                        false // Never end an OS console host individually, including one we could not attribute.
+                    });
+                    left
                 }
             };
-            usage.left = end_left(left);
-            // What it left was read and ended above, and an exited process is in no snapshot, so
-            // ending its tree again (a snapshot of every process, 5 ms on adais) finds nothing.
+            // The command exited. End only identified leftovers and the job, never a new tree scan.
             self.unlist();
+            let mut unverified = false;
+            for (p, start, name) in left {
+                if start != 0 && super::start_time(p) == Some(start) {
+                    // Outside our job: re-read the stamp now, not just at the earlier sweep. The
+                    // termination handle checks creation time once more before signalling.
+                    if !stamp_of(p).is_some_and(|s| s.start != 0 && Some((s.pid, s.start)) == parse_owner(owner_stamp()) && stamp.is_some_and(|h| s.home == home_key(h))) {
+                        leave(Some(p), "a previously stamped process", "its launch stamp could not be verified at command exit");
+                        unverified = true;
+                        continue;
+                    }
+                    super::kill_opened(p, start);
+                }
+                usage.left.push((p, name));
+            }
             self.end();
+            if unverified {
+                return Err(std::io::Error::other("a command process could not be verified at exit; strobe left it alone"));
+            }
             Ok(usage)
         }
         #[cfg(unix)]

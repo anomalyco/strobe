@@ -41,5 +41,6 @@ export function consoleRows(gui: string, worker: string, namesake: string): Row[
     { key: "leave", line: `"${worker}" leave "${worker}"`, expect: "refused", proves: "an unawaited worker beside the host" },
     { key: "separate", line: `"${worker}" leave "${worker}" separate`, expect: "refused", proves: "a worker with its own invisible console" },
     { key: "namesake", line: `"${worker}" leave "${namesake}"`, expect: "refused", proves: "a non-system executable with the host's basename" },
+    { key: "behind", line: `"${worker}" behind`, expect: "refused", proves: "a worker below the real console host" },
   ]
 }
