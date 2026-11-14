@@ -9499,8 +9499,8 @@ verified line exact.
 
 | Runtime · capability | Windows x64 | macOS arm64 | Linux x64 |
 |---|---|---|---|
-| `chromium_page` · `wall_and_counts` | preview | preview | preview |
-| `chromium_page` · `page_engine` | preview | preview | preview |
+| `chromium_page` · `wall_and_counts` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known-web.bench.ts`, phase.b 41.69 ms for 40 ms and phase.a 23.02 ms for twice 10 ms; counts 7 and 5 exact) |
+| `chromium_page` · `page_engine` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known-web.bench.ts`, spin100 main.work 101.29 ms for 100 ms; layout.count and style.count both 25 for 25 forced layouts) |
 | `chromium_page` · `process_cpu` | preview | preview | preview |
 | `chromium_page` · `process_memory` | preview | preview | preview |
 | `chromium_page` · `hardware_counters` | — | preview | preview |
@@ -9610,8 +9610,8 @@ verified line exact.
 | `tty` · `process_memory` | preview | preview | preview |
 | `tty` · `hardware_counters` | — | preview | preview |
 | `tty` · `package_idle` | — | preview | — |
-| `tty` · `tty_grid` | preview | preview | preview |
-| `tty` · `launch` | preview | preview | preview |
+| `tty` · `tty_grid` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/tty.bench.ts`, keys read 20.22 ms for a 20 ms answer; 10 frames, 400 cells and 620 bytes exact) |
+| `tty` · `launch` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/tty.bench.ts`, ready-200 and ready-500 read 201.28 and 501.22 ms; difference 299.94 ms for 300 ms planted) |
 | `tty` · `http_probe` | preview | preview | preview |
 | OS input (`OS_INPUT`) | preview | preview | preview |
 | a page measured from outside (`OUTSIDE_PAGE`) | preview | preview | preview |

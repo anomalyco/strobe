@@ -970,6 +970,8 @@ export const WATCH: Watch[] = [
       "src/host/spawn.rs#nt_resume",
       "src/host/spawn.rs#impl Spawned",
       "src/host/spawn.rs#Owned::spawn_span",
+      "src/host/spawn.rs#Owned::released_ns",
+      "src/host/spawn.rs#Owned::creation_ns",
       "src/host/spawn.rs#Owned::run_to_exit",
       "src/host/mod.rs#tsc",
       "src/host/mod.rs#thread_cycles",
@@ -996,6 +998,8 @@ export const WATCH: Watch[] = [
     why: "the cli cells' boundary: what a command left running is found by its group (Unix), its job (Windows) or the stamp it inherited (a process that broke away), and exec refuses the run RunIncomplete; how leftovers are then ended (end_left) refuses nothing",
   },
   { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["windows"], spans: ["src/host/win.rs#thread_cycles"], why: "Windows: the launching thread's cycles, cli.launch's CPU" },
+  { cells: ["cli · *"], os: ["windows"], spans: ["src/host/jobs.rs"], why: "the job's exit readings and the live-member check that refuses a command that left a process running" },
+  { cells: ["cli · *"], os: ["linux"], spans: ["src/host/spawn.rs#impl Release", "src/host/cgroup.rs#impl Launch"], why: "the child's pre-exec clock stamp after migration, the launch cgroup's CPU at exit and its members still running at the command's boundary" },
   { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["linux"], spans: ["src/host/linux.rs#thread_cycles"], why: "Linux: the launching thread's CPU, cli.launch's" },
   { cells: ["cli · process_cpu", "cli · wall_and_counts"], os: ["macos"], spans: ["src/host/macos.rs#thread_cycles"], why: "macOS: the launching thread's CPU, cli.launch's" },
   {
@@ -1197,6 +1201,33 @@ export const WATCH: Watch[] = [
     why: "macOS: instructions, cycles and energy from proc_pid_rusage's v6 record",
   },
   // ----- a headed page (chromium_page frames and input latency) -----
+  {
+    cells: ["chromium_page · wall_and_counts", "chromium_page · page_engine"],
+    spans: ["src/app/bench.rs#run_chunk", "src/app/bench.rs#headless_of", "src/app/bench.rs#headless_target", "src/app/bench.rs#headless_state", "src/app/bench.rs#side_windowless", "src/driver.rs#Driver::dispatch", "sdk/bench/src/runner.ts#@const page = {", "src/metrics.rs#read", "src/probe/trace.rs"],
+    why: "the lean page's run edges, trace selection, CDP Performance counters and the refusal of script time on page.eval; phase cases can also need traced run marks",
+  },
+  {
+    cells: ["chromium_page · wall_and_counts"],
+    spans: ["src/app/bench.rs#phase_ms", "src/app/bench.rs#phase_state", "src/app/bench/block.rs#impl Hooks", "src/app/bench/block.rs#per_run_hooks", "src/metrics.rs#phase_stretches", "src/metrics.rs#doc_mark_script", "src/metrics.rs#mark_windows"],
+    why: "the phase edges and counted occurrences of a page run, reduced to its measured spans, and NoPhase for a phase the run did not enter",
+  },
+  { cells: ["chromium_page · page_engine"], spans: ["src/app/bench.rs#const WORK_PARTS"], why: "the CDP counter names and scales for layout and style work and counts" },
+  {
+    cells: ["tty · tty_grid", "tty · launch"],
+    spans: ["src/target/tty.rs#read_loop", "src/target/tty.rs#cells", "src/target/tty.rs#impl Tracker", "src/target/tty.rs#impl Grid", "src/target/tty.rs#impl Tty"],
+    why: "the PTY read stamps, grid changes, synchronized frames and bytes; the terminal publishes its committed grid and the stamp of the change that made it ready",
+  },
+  {
+    cells: ["tty · tty_grid"],
+    spans: ["src/app/bench/tty.rs#chunk", "src/driver/tty.rs#impl Driver", "src/driver/tty.rs#impl Input", "src/driver/tty.rs#owed_until", "src/driver/tty.rs#latencies", "src/driver/tty.rs#pair", "src/driver/tty.rs#pair_observing", "src/driver/tty.rs#ambiguous", "src/driver/tty.rs#const QUIET", "src/driver/tty.rs#const ANSWER_MAX", "src/metrics.rs#percentile"],
+    why: "the send, pairing a key to one committed update and reducing its latencies; the same path withholds ambiguous samples when input outruns replies",
+  },
+  {
+    cells: ["tty · launch"],
+    spans: ["src/app/bench/tty.rs#launch_once", "src/app/bench/launch.rs#refusals", "src/target/tty.rs#open", "src/target/tty.rs#start", "src/driver/tty.rs#find"],
+    why: "from release to the first grid showing the selector: finding it, subtracting the two timestamps, and refusing window-only launch metrics",
+  },
+  { cells: ["tty · launch"], os: ["linux"], spans: ["src/host/spawn.rs#spawn_owned_terminal", "src/host/spawn.rs#impl Release", "src/host/spawn.rs#Owned::released_ns"], why: "the PTY child's actual release instant, stamped after cgroup and affinity setup" },
   {
     cells: ["chromium_page · frames", "chromium_page · input_latency"],
     spans: [
