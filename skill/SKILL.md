@@ -77,11 +77,10 @@ The design and every rule behind this file: SPEC.md.
     out with `--filter` until the change merges.
   - `--check --base <ref> --noworse count.x`: each counter row ends `no worse` (passes), `worse`,
     `unstable`, `missing` or `not_compared` (each fails the case, exit 1). If cases ran and none failed
-    but no counter compared, exit **4**, even with `passed: true` in JSON. If both sides refused every
+    but no counter compared, exit **4**, with `passed: false` in JSON. If both sides refused every
     counter, read the refused lines. For `Uncounted`, check the spelling against `ctx.count`; if the run
     counts it only on some paths, add `metrics: ["count.x"]` on that case so 0 → 0 compares.
-    Known issue in 0.34.0: if every case is a parity gap, the counter check exits 0 without comparing
-    anything. Add `--require-parity` when gating on counters in a file with target gaps.
+    If every case is a parity gap, no counter compared: exit 4. `--require-parity` requires every journey.
   - `--check --base <target> --head <target>`: shared journeys get a parity matrix, not a counter
     comparison. Gaps alone exit 0 (even if no case ran), or 4 with `--require-parity`; a mismatch or
     case failure exits 1. With two bare targets, `--noworse` exits 2: it needs two builds.

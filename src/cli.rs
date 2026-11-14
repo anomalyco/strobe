@@ -517,12 +517,11 @@ Use
                                   on exact counters), leak runs and record --probes attribution run there
         exit: timed comparisons   0 even on worse (read primary.verdict_kind); 4 if all primaries refused.
                                   --require-verdict: 5 undecided, 4 for a refused primary or parity gap.
-              checks              0 pass; 1 case failure, including a block refusal or a --noworse row that
+              checks              0 pass; 1 case failure, including a broken run or a --noworse row that
                                   was worse, unstable, missing or not_compared. All non-gap cases refused: 4.
-                                  If cases ran but no counter compared, exit 4 unless a case failed (1).
-                                  Read the exit code, not passed alone. Gaps alone: 0, or 4 with
-                                  --require-parity. Known issue in 0.34.0: this includes all-gap --noworse
-                                  checks. Add --require-parity to guard counters in files with target gaps.
+                                  --noworse with nothing compared: 4, even if every case is a gap.
+                                  --require-parity: 4 on any gap. --require-verdict: 4 on any gap or
+                                  refused case. A failed case takes precedence (1).
               other modes         --blocks: 0 on completion, 4 if all refused. Leak run: 0 even for a leak;
                                   --require-verdict: 5 if undecided, 4 if any primary refused. Pixels-only:
                                   0 if all snapshots match, 1 for a difference or a one-sided snapshot.

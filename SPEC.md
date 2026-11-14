@@ -529,14 +529,14 @@ Not built: `node:<port>` and `bun:<port>` (an inspector endpoint, §13.5: a Node
 **How a bench ends.** For a timed comparison (including `strobe run --base … --head …`), read
 `series[].primary.verdict_kind` for the outcome; slower is not an error. A check asks whether the
 workload runs, not whether it is faster. For `--check --noworse`, **check the process exit code**:
-`result.json`'s `passed` means no case failed and the check did not stop. It can be true on exit 4.
+`result.json`'s `passed` is true only when a case ran and the check completed successfully.
 An up-front refusal of the whole file can exit 4 without writing `result.json` at all.
 
 | Run | Ending | What it prints | Exit |
 |---|---|---|---|
 | `--check` (one build) | every case passes | `pass <case>  <values>`; `N of N cases passed (…; nothing compared)` | 0 |
 | | a case fails: a run threw or timed out, its primary or `until` gave nothing, a refused primary in its block | `FAIL <case>  <why>`, `fix: …`; `M of N cases passed` | 1 |
-| | a known preflight refusal (e.g. headless frame primary, windowless launch waiting for a window, unsupported engine or display too small) | `refused <case>  <validator>: <why>` beside other cases; the first refusal if all were ruled out up front | 0 beside passing cases; 4 if every non-gap case was refused |
+| | a primary refused for the target, engine or display, before or during its run | `refused <case>  <validator>: <why>`; the rest of the file runs | 0 beside passing cases; 4 if every non-gap case was refused, or any with `--require-verdict` |
 | `--check --runs N` or `--check --repeat R` | N runs in one launch, or R fresh launches; still no timing verdict | median and `[lowest … highest run]`, or median and each launch's value | as `--check`; use `--repeat` to repeat a launch case. With `--why always`, `--runs` applies to attribution instead |
 | `--check --base <build>` | both sides run every case | head's line, `base  <values> · rec <id>` under it; `…; base and head each checked; nothing compared: the same command without --check times head against base` | 0 |
 | | base cannot build | build error; the check stops before the case runs on either side | 1 |
@@ -560,9 +560,9 @@ An up-front refusal of the whole file can exit 4 without writing `result.json` a
 | `bench --resume <exp>` | resume the saved command with its original flags and completed work | `finished before the resume: kept` for reused series; then that mode's result | same exit rules as the saved mode; no saved state or still running: 2 |
 
 On a check, case failures (1) take precedence over missing counter comparisons or parity gaps (4).
-**Known issue in 0.34.0:** if every entry is a parity gap, `--check --noworse` exits 0
-(`0 of 0 cases passed, N parity gaps`) despite comparing nothing. Add `--require-parity` to make
-gaps exit 4 when gating on counters. A fix is designed.
+If every entry is a parity gap, `--check --noworse` compared nothing: exit 4.
+Without a counter gate a parity inventory can complete with gaps. Either `--require-parity`
+or `--require-verdict` makes any gap exit 4.
 When `Uncounted` says a check compared nothing (exit 4), check each name against the runs' `ctx.count("…")` calls
 first: the `Uncounted` note offers a name the bench file counts one typo away. When a run case counts
 the counter only on some paths, declare it in that case's metrics (`metrics: ["count.fallbacks"]`): a
@@ -1065,8 +1065,7 @@ count.items 3 → 5 · worse (>0.5) (exact)` (`!` when it fails). The summary en
   case's`; `…; every --noworse counter was refused on both sides (the refused lines say why), so
   nothing was compared (exit 4)`; and, when a declared counter's row failed, `…; no --noworse counter
   was compared, and a case that declares one failed for it (its line says why)` (exit 1).
-  Known issue in 0.34.0: when every entry is a parity gap, no case runs and this counter check exits
-  0 instead of 4 (§5.2). Pass `--require-parity` when gating `--noworse` on a file with target gaps.
+  When every entry is a parity gap, no counter compared: exit 4 (§5.2).
 `--noworse` adds its margins to every series
 (in every mode). A `count.<name>` only the flag names (not the case's primary, `metrics` or own
 `noworse`: `Series::flagged`) is decided per series, across both sides and every block or launch
@@ -1099,7 +1098,7 @@ comparison lists it as a secondary. Checked with 0.34.0 on adais (a `cli()` file
 keeps `base` (base's side, as head's fields), `base_values` and `counters` (`metric`, `margin` as a
 fraction, `state` `no_worse`, `worse`, `unstable`, `missing` or `not_compared`, `passed`, `stable`,
 `base` and `head` medians, `base_runs`, `head_runs`, `why`, `text`; an empty list on a case that ran
-with the flag and compared none; `passed` stays true then). This is the comparison a shared CI runner allows
+with the flag and compared none; the whole check cannot pass if all lists are empty). This is the comparison a shared CI runner allows
 (§10.1 `SharedRunner`, §26).
 **Many cases per launch** (`--check --batch N`): run cases that one launch can hold share it, its
 `prepare` and its `setup`, up to N at a time, so a file of many small cases (a fuzzer's) checks in a
