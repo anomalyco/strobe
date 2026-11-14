@@ -608,7 +608,7 @@ const MAC_HEADLESS_CPU: &str = "re-verify scripts/dev/known-web.bench.ts and pla
 // unable to move its numbers (`scripts/dev/support-matrix.ts --check` holds the code to it).
 // The cli cells' review at 737544c5 (`cleanup/spawn-clock`): the changes 384805d4 reviewed, then its own.
 
-const CHANGES_CLI_PLAN: &str = "At 7d696e6e and 5a52552f plan, unix and windows canonicalize checkout paths before stripping, match echo. only as an exact builtin on Windows, allow outer shell wrappers around explicit Unix shells, and defer compound path checks to runtime; quoted absolute executable launches in known/cli.bench.ts take the identical direct branch with unchanged clocks, accounting and leftover refusals. At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
+const CHANGES_CLI_PLAN: &str = "At 7d696e6e and 5a52552f plan, unix and windows canonicalize checkout paths before stripping, match echo. only as an exact builtin on Windows, allow outer shell wrappers around explicit Unix shells, and defer compound path checks to runtime; quoted absolute executable launches in known/cli.bench.ts take the identical direct branch with unchanged clocks, accounting and leftover refusals. At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold. At 5c77457d plan, unix and windows keep launching-checkout PATH warnings after directory changes, guard all measured cmd builtin stems and keys/dpath on Windows, and refuse attached -c outer expansions on Unix, and at 657edc41 run the Unix outer-expansion refusal in the early preflight; quoted absolute executable launches in known/cli.bench.ts take the identical direct branch.";
 const WIN_CLI_CPU_RUN: Evidence = Evidence {
     date: "2026-11-14",
     version: "5a52552f",
@@ -618,8 +618,10 @@ const WIN_CLI_CPU_RUN: Evidence = Evidence {
     aa: "spin 300, 8 pairs: +0.032% [−0.048 … +0.219], same (±2%); 0 of 16 blocks flagged Background",
     planted: "spin 150 to 300: 153.79 to 303.81 ms, +97.52% [+97.28 … +97.77], covering +97.52% after 3.81 ms launch CPU in the A/A; 0 of 16 blocks flagged Background",
     boundary: "a process left running (orphan, breakaway-left) refused RunIncomplete; cpu.wakes refused NotOnThisOs",
-    reviewed_at: Some("416db0e7"),
-    reviewed_why: Some("At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold."),
+    reviewed_at: Some("657edc41"),
+    reviewed_why: Some(
+        "At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold. At 5c77457d plan, unix and windows keep launching-checkout PATH warnings after directory changes, guard all measured cmd builtin stems and keys/dpath on Windows, and refuse attached -c outer expansions on Unix, and at 657edc41 run the Unix outer-expansion refusal in the early preflight; quoted absolute executable launches in known/cli.bench.ts take the identical direct branch.",
+    ),
 };
 const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
     date: "2026-11-14",
@@ -630,7 +632,7 @@ const WIN_CLI_MEMORY_RUN: Evidence = Evidence {
     aa: "alloc 100, 8 pairs: −0.006% [−0.032 … +0.013], same (±2%)",
     planted: "alloc 50 to 100: 50.89 to 101.00 MiB, +98.46% [+98.38 … +98.50] (blocks flagged Background, which does not move memory.peak)",
     boundary: "a process left running refused RunIncomplete",
-    reviewed_at: Some("416db0e7"),
+    reviewed_at: Some("657edc41"),
     reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const LINUX_CLI_CPU_RUN: Evidence = Evidence {
@@ -642,7 +644,7 @@ const LINUX_CLI_CPU_RUN: Evidence = Evidence {
     aa: "spin 300, 8 pairs: −0.046% [−0.136 … +0.087], same (±2%)",
     planted: "spin 150 to 300: 155.51 to 304.93 ms, +96.22% [+95.31 … +96.99]; tree 3 × 200 to 3 × 400: 608.61 to 1208.73 ms, +98.59% [+98.50 … +98.74]",
     boundary: "a process left running at the command's exit (orphan, breakaway-left) refused RunIncomplete",
-    reviewed_at: Some("416db0e7"),
+    reviewed_at: Some("657edc41"),
     reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
@@ -654,7 +656,7 @@ const LINUX_CLI_MEMORY_RUN: Evidence = Evidence {
     aa: "alloc 100, 8 pairs: +0.008% [−0.092 … +0.084], same (±2%)",
     planted: "alloc 50 to 100: 52.07 to 102.12 MiB, +96.09% [+95.73 … +96.41]",
     boundary: "a 4 MiB peak, under strobe's own resident set the child inherits, refused NotOnThisOs; a process left running refused RunIncomplete",
-    reviewed_at: Some("416db0e7"),
+    reviewed_at: Some("657edc41"),
     reviewed_why: Some(CHANGES_CLI_PLAN),
 };
 const CHANGES_LINUX_SCRIPT: &str = "chunk refuses js.heap.retained on a host with no collector (28ca96aa) and a Bun host's macOS footprint (4af04e29), outside every run's edges; Host::spawn keeps the runtime the host says it is (4afa154e); and e3d0ffc1 keeps each process's start time in process_trees and the child as Proc::Child in spawn_group: the run's edges, its CPU windows and the processes counted are the same. At 8fcc3d0 chunk attaches a CPU refusal reason to a measured run only, without moving either wall edge. At 9e35da42 SelfCost samples per-run CPU load outside strobe's own cycle reads and tracks inter-run tree gaps on Linux, chunk passes the run's timed CPU and tree edges to it, spawn_group invokes a no-op release hook before before_ns when no launch load is armed, Busy exposes pct less idle-tick error, and lopsided_background counts set-aside one-sided bursts; t0..t1 wall spans, host-tree CPU, SelfCost's overhead share and boundary refusals are unchanged. At eaaa90a1 compare initializes Comparison::warned to false without changing any estimate, interval or verdict threshold.";
