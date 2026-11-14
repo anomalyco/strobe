@@ -382,7 +382,7 @@ impl<'a> Doc<'a> {
             return "Identical builds differed".into();
         }
         if outs.iter().any(|(o, _)| matches!(o, Out::Unclear | Out::Gated)) {
-            let need = outs.iter().filter_map(|(_, s)| s["primary"]["needed_pairs"].as_u64().filter(|n| *n <= 1000)).max();
+            let need = outs.iter().filter_map(|(_, s)| s["primary"]["needed_pairs"].as_u64().filter(|n| *n <= 1000 && *n > s["pairs"].as_u64().unwrap_or(0))).max();
             return need.map(|n| format!("Not decided yet: needs ~{n} pairs")).unwrap_or_else(|| "Not decided yet".into());
         }
         // A refused series (one refused before it ran, an engine without its primary) says nothing about the
@@ -1337,7 +1337,7 @@ impl<'a> Doc<'a> {
             }
         }
         for s in &self.series {
-            let need = s["primary"]["needed_pairs"].as_u64().filter(|n| *n <= crate::cli::MAX_PAIRS as u64);
+            let need = s["primary"]["needed_pairs"].as_u64().filter(|n| *n <= crate::cli::MAX_PAIRS as u64 && *n > s["pairs"].as_u64().unwrap_or(0));
             if let (Out::Unclear, Some(n)) = (self.primary_out(s), need) {
                 line += &format!("\n# to settle {} (~{n} pairs), add: --filter {} --pairs {n}", self.title(s), quote(s["case"].as_str().unwrap_or("")));
             }

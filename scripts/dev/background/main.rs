@@ -8,6 +8,10 @@ mod converge;
 #[path = "../converge/sequences.rs"]
 mod sequences;
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--closing-result") {
+        println!("{}", converge::closing_result());
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--sequences") {
         sequences::table();
         return;

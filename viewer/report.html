@@ -2661,6 +2661,10 @@ function shortSeriesOutcome(c, m, u, cl, aa) {
 }
 
 /* ---------- Layer 1: Verdict Hero ---------- */
+function morePairs(c, s) {
+  return finite(c.needed_pairs) && c.needed_pairs > (s.pairs ?? c.n ?? 0) ? c.needed_pairs : null;
+}
+
 function humanHeadline(c, m, u, cl, s, aa) {
   if (cl.warned) return { pill: "Needs confirmation", headline: `${labelOf(m)}: a measurement warning qualifies the verdict` };
   // The change at its interval's digits without its sign, as the card's large number: a decided
@@ -2695,8 +2699,8 @@ function humanHeadline(c, m, u, cl, s, aa) {
     return { pill: `Confirmed · Equivalent (${fmtBound(c, u)})`, headline: `No meaningful change in ${noun}` };
   }
   if (cl.kind === "inconclusive") {
-    const need = finite(c.needed_pairs) ? `Needs ~${c.needed_pairs} pairs` : "Noise exceeds threshold";
-    return { pill: `Inconclusive · ${need}`, headline: `Inconclusive after ${s.pairs || "?"} launch pairs` };
+    const need = morePairs(c, s);
+    return { pill: need ? `Inconclusive · Needs ~${need} pairs` : "Inconclusive", headline: `Inconclusive after ${s.pairs || "?"} launch pairs` };
   }
   // "Confirmed" only for a decided shift (tone win or loss): anything else has no verdict to state.
   if (cl.tone !== "win" && cl.tone !== "loss") {
@@ -2770,14 +2774,15 @@ function buildHeroProse(r, s, c, cl, aa) {
     return h("p", { class: "hero-prose" }, `The measured interval (${fmtRange(c, u)}) met the bound, but a measurement warning qualifies this result. Rerun under steady conditions to confirm it.`);
   }
   if (cl.kind === "inconclusive") {
-    const estMins = finite(c.needed_pairs) && finite(s.elapsed_ms) && s.pairs > 0 && c.needed_pairs < 5000
-      ? ` (~${fmtDuration((s.elapsed_ms / s.pairs) * c.needed_pairs)})`
+    const need = morePairs(c, s);
+    const estMins = need && need < 5000 && finite(s.elapsed_ms) && s.pairs > 0
+      ? ` (~${fmtDuration((s.elapsed_ms / s.pairs) * need)})`
       : "";
     return h("p", { class: "hero-prose" },
       SIDES ? `${labelOf(m)}: ${SIDES.head} ` : `${labelOf(m)} measured `, h("strong", {}, fmtVal(c.head, u)), SIDES ? ` vs ${SIDES.base} ` : " vs ", h("strong", {}, fmtVal(c.base, u)),
       ` (${fmtDelta(c.estimate, c, u)}), with true change between `, h("strong", {}, fmtRange(c, u)), ". ",
-      finite(c.needed_pairs) && c.needed_pairs < 5000
-        ? `Run-to-run variance across ${nPairs} pairs is wider than ${fmtBound(c, u)}; resolving a ${fmtBound(c, u)} shift requires ~${c.needed_pairs} pairs${estMins}.`
+      need && need < 5000
+        ? `Run-to-run variance across ${nPairs} pairs is wider than ${fmtBound(c, u)}; resolving a ${fmtBound(c, u)} shift requires ~${need} pairs${estMins}.`
         : `Run-to-run variance across ${nPairs} pairs is too wide to resolve ${fmtBound(c, u)} without stabilizing the case first.`
     );
   }
@@ -3966,8 +3971,8 @@ function renderNextStepsSection(r, s, aa) {
     });
   }
 
-  const need = c.needed_pairs;
-  if (!s.decided && finite(need) && need > (s.pairs || 0) && need < 1000) {
+  const need = morePairs(c, s);
+  if (!s.decided && need && need < 1000) {
     const estMs = finite(s.elapsed_ms) && s.pairs > 0 ? (s.elapsed_ms / s.pairs) * need : NaN;
     const timeHint = finite(estMs) ? ` (~${fmtDuration(estMs)})` : "";
     const advice = aa
