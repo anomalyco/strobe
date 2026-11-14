@@ -9510,7 +9510,7 @@ verified line exact.
 | `chromium_page` · `input_latency` | preview | verified (2026-11-12, e93fc36, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, interaction.p50 Δ 149.8 ms vs 150 ms planted (click-150 over click-0)) | preview |
 | `chromium_page` · `gpu` | preview | preview | preview |
 | `chromium_page` · `pixels` | preview | preview | preview |
-| `chromium_page` · `launch` | preview | preview | preview |
+| `chromium_page` · `launch` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/known/planted.bench.ts`, page marks bracketed 200.30 and 400.20 ms for 200 and 400 ms; launch.ready followed by 9.40 and 4.20 ms) |
 | `chromium_page` · `http_probe` | preview | preview | preview |
 | `firefox_page` · `wall_and_counts` | preview | preview | preview |
 | `firefox_page` · `page_engine` | preview | preview | preview |
@@ -9600,7 +9600,7 @@ verified line exact.
 | `script` · `process_memory` | preview | preview | preview |
 | `script` · `hardware_counters` | — | preview | preview |
 | `script` · `package_idle` | — | preview | — |
-| `script` · `http_probe` | preview | preview | preview |
+| `script` · `http_probe` | preview | preview | verified (2026-11-14, v0.39.0, Linux x64 virtual machine (2 vCPUs unpinned), `scripts/dev/http-probe.bench.ts`, http.latency.p50 read 20.47 and 60.53 ms for 20 and 60 ms delays; 15 probes per side with no timeouts) |
 | `cli` · `wall_and_counts` | preview | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin run.duration Δ 150.29 ms vs 150 ms planted; metric.truth_cpu_ms 150 and 300 exact) | preview |
 | `cli` · `process_cpu` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, cpu.work 306.2 ms vs 300 ms plus a 6.2 ms launch; planted Δ 149.99 ms vs 150 ms) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-spin cpu.work 303.2 ms vs 300 ms and planted Δ 150.13 ms vs 150 ms; cli-io 2x exact) | verified (2026-11-13, 737544c5, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, cpu.work 302.4 ms vs 300 ms plus a 2.3 ms launch and tree 1205.7 ms vs 1200 ms; planted Δ 149.98 ms and 600.21 ms vs 150 and 600 ms) |
 | `cli` · `process_memory` | verified (2026-11-12, v0.31.0, Windows 11 x64 desktop, `scripts/dev/known/cli.bench.ts`, memory.peak 201 MB vs 200 MiB + 1.3 MiB base; planted +50 MiB (+100 KiB of page tables) read +50.11 MiB) | verified (2026-11-12, 1244967, Apple silicon laptop (macOS 27.0.1), `scripts/dev/known/planted.bench.ts`, cli-alloc memory.peak 51.9 MB and 102 MB vs 50 and 100 MiB + 1.9 MiB; planted Δ +50.00 MiB vs +50 MiB (+96.33%)) | verified (2026-11-13, v0.31.0, Linux x64 virtual machine (2 vCPUs unpinned; 0.00% steal), `scripts/dev/known/cli.bench.ts`, memory.peak 202 MB vs 200 MiB + 2 MiB base; planted +50 MiB read +50.00 MiB) |

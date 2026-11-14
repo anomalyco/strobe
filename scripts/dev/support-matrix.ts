@@ -1200,7 +1200,17 @@ export const WATCH: Watch[] = [
     spans: ["src/host/macos.rs#counts", "src/host/macos.rs#energy_counters"],
     why: "macOS: instructions, cycles and energy from proc_pid_rusage's v6 record",
   },
-  // ----- a headed page (chromium_page frames and input latency) -----
+  {
+    cells: ["script · http_probe"],
+    spans: ["src/probe/http_probe.rs", "src/app/bench.rs#http_state", "src/app/bench.rs#main_probes", "src/app/bench.rs#probing", "src/runner.rs#Runner::call", "src/runner.rs#Runner::ask_http", "src/runner.rs#Runner::after_setup", "src/runner.rs#Runner::http_probe", "src/runner.rs#Runner::stop_http", "src/runner.rs#Runner::take_http"],
+    why: "selecting probe blocks, stamping run windows, scheduling and timing requests, and withholding latencies for invalid responses",
+  },
+  // ----- a headless page -----
+  {
+    cells: ["chromium_page · launch"],
+    spans: ["src/app/bench/launch.rs#once", "src/app/bench/launch.rs#observer", "src/app/bench/launch.rs#arm", "src/app/bench/launch.rs#impl Attacher", "src/app/bench/launch.rs#impl Watch", "src/app/bench/launch.rs#impl Observer", "src/app/bench/launch.rs#impl Preload", "src/app/bench/launch.rs#is_page", "src/app/bench/launch.rs#const CLOCK_SLACK_MS", "src/app/bench/launch.rs#page_marks", "src/app/bench/launch.rs#milestones", "src/app/bench/launch.rs#refusals", "src/driver.rs#const HELPER", "src/target/web.rs#WebPage::start_navigation", "src/target/isolate.rs#epoch_ms", "src/app/bench.rs#target_refusal", "src/app/bench.rs#headless_of", "src/app/bench.rs#headless_target", "src/validity.rs#display_metric"],
+    why: "arming the selector before navigation, reading page marks and ready on the launch clock, and refusing painted launch without a display",
+  },
   {
     cells: ["chromium_page · wall_and_counts", "chromium_page · page_engine"],
     spans: ["src/app/bench.rs#run_chunk", "src/app/bench.rs#headless_of", "src/app/bench.rs#headless_target", "src/app/bench.rs#headless_state", "src/app/bench.rs#side_windowless", "src/app/bench.rs#windowless_as", "src/app/bench.rs#windowless_target", "src/app/bench/launch.rs#app_windowless", "src/driver.rs#Driver::dispatch", "sdk/bench/src/runner.ts#@const page = {", "src/metrics.rs#read", "src/probe/trace.rs"],
