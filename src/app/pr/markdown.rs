@@ -1337,7 +1337,7 @@ impl<'a> Doc<'a> {
             }
         }
         for s in &self.series {
-            let need = s["primary"]["needed_pairs"].as_u64().filter(|n| *n <= 400);
+            let need = s["primary"]["needed_pairs"].as_u64().filter(|n| *n <= crate::cli::MAX_PAIRS as u64);
             if let (Out::Unclear, Some(n)) = (self.primary_out(s), need) {
                 line += &format!("\n# to settle {} (~{n} pairs), add: --filter {} --pairs {n}", self.title(s), quote(s["case"].as_str().unwrap_or("")));
             }

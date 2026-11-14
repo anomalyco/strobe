@@ -29,6 +29,9 @@ The design and every rule behind this file: SPEC.md.
 
 ### Did my change make it faster?
 
+- Allow at least eight pairs for the clean-pair check. `strobe run --plan` previews a command comparison.
+- On a busy desk use `cpu.work` or, for headless pages, `main.work`. Read any `Background` warning.
+
 1. Write or find a bench file (below; `strobe init` writes a first one). Check it first:
    `strobe bench <file> --head . --check` (each case once, pass or fail with a screenshot).
 2. `strobe plan <file> --base origin/dev --head .` says pairs and minutes per series (`time unknown`,
