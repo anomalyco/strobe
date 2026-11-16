@@ -1,5 +1,7 @@
 # strobe
 
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
+
 The referee for a performance claim in a pull request. "This makes it faster" becomes a verdict: strobe
 runs the old and the new side in alternating pairs on CPUs of their own, and says which side won and by
 how much, with a confidence interval, or that it cannot tell yet. A number it cannot defend, it refuses.
