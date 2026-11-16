@@ -5898,6 +5898,13 @@ fn run_series(ctx: &mut Ctx, s: &Series, variants: &mut [Variant], config: &Valu
         warnings.push(validity::warn("PixelsDiffer", "base and head drew different pixels at a snapshot: see pixels"));
     }
     let window = series_window(ctx, s, &blocks);
+    let with_shift = |c: &Comparison, n: usize, confidence| {
+        let (bs, ps) = source(&c.metric);
+        c.with_shift(ps.iter().take(n).map(|&(a, b)| (val(&bs[a], &c.metric), val(&bs[b], &c.metric))), confidence)
+    };
+    let primary = with_shift(&primary, decided_n.unwrap_or(pairs.len()), design.confidence);
+    let secondaries: Vec<_> = secondaries.iter().map(|c| with_shift(c, usize::MAX, 0.95)).collect();
+    let descriptive: Vec<_> = descriptive.iter().map(|c| with_shift(c, usize::MAX, 0.95)).collect();
     let mut out = json!({
         "pixels": pixels,
         "label": s.label(), "case": s.case, "target": s.target, "target_kind": target["kind"], "params": s.params, "kind": if s.launch.is_object() { "launch" } else { "runs" },
@@ -7740,7 +7747,7 @@ fn on_screen(ctx: &mut Ctx, cases: &[Series], v: &Variant, pair: usize, x: &Exec
                 }
                 // Still off: this series is refused (the bench's loop lists it and runs the rest).
                 if let Some(p) = dark_primary(ctx).filter(|_| cases.len() == 1 && display.is_some_and(|d| d.0 == 0)) {
-                    return Err(dark_refusal(&format!("the primary {p}")).into());
+                    return Err(dark_refusal(&format!("the primary {p}"), s.launch.is_object()).into());
                 }
             }
             let r = slotted(ctx, cases, v, pair, x);
@@ -8851,12 +8858,16 @@ fn dark_metric(m: &str) -> bool {
         || m.starts_with("span.")
 }
 
-fn dark_refusal(what: &str) -> Refusal {
+fn dark_refusal(what: &str, launch: bool) -> Refusal {
     Refusal::new(
         ValidatorId::Throttled,
         format!("{what}: the console display was off, and a headless Chromium page then runs its frames and timers on a throttled clock of its own, so wall time and shares of it describe that clock"),
     )
-    .fix("run with the session unlocked and the display on, or choose a display-independent primary such as main.work or cpu.work")
+    .fix(if launch {
+        "measure cpu.work over the launch instead"
+    } else {
+        "measure main.work, cpu.work or a counter the case records instead; measure wall time or CPU shares with the display on"
+    })
 }
 
 /// `Throttled` for a headless Chromium page's wall times with the display off: a block about to run
@@ -8869,7 +8880,7 @@ fn dark_state(ctx: &Ctx, s: &Series, x: &Exec, display: Option<u8>, mut b: Block
     b.values.retain(|k, _| !dark_metric(k));
     b.phases.clear();
     for m in declared_metrics(s).into_iter().filter(|m| dark_metric(m)) {
-        b.refused.insert(m.clone(), dark_refusal(m));
+        b.refused.insert(m.clone(), dark_refusal(m, s.launch.is_object()));
     }
     b
 }
@@ -12637,7 +12648,7 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
         let on = if s.sides.is_some() { format!("{}: ", t["name"].as_str().unwrap_or(name)) } else { String::new() };
         if s.launch.is_object() {
             let window_until = native::window_until(s, &s.launch["until"])?.is_some();
-            if let Err(e) = launch::windowless_refusal(s, window_until) {
+            if let Err(e) = launch::windowless_refusal(s, window_until, is_native(t)) {
                 let Some(r) = e.refusal else { return Err(e) };
                 // launch.rs names the case; every listing prints the series' label beside this.
                 let summary = r.summary.strip_prefix(&format!("{}: ", s.case)).unwrap_or(&r.summary).to_string();
@@ -12678,7 +12689,7 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
                     ValidatorId::Headless,
                     format!("{on}the primary {} needs a display, and the app runs on the headless Wayland compositor strobe starts: nothing it draws reaches one", s.primary),
                 )
-                .fix("run it on an X11 session (display: \"x11\") to measure it on screen, or choose a CPU primary: cpu.work, cpu.app.total, run.duration or phase.<name>"),
+                .fix("measure cpu.work instead; to measure presentation, run it on a visible X11 display (display: \"x11\")"),
             ));
         }
         #[cfg(target_os = "linux")]
@@ -12790,12 +12801,16 @@ fn target_refusal(s: &Series, name: &str, describe: &Value, args: &Args, variant
     {
         // The display is off now: the series is listed refused and the rest of the file runs (a block
         // whose display turns off later refuses that series then, `dark_state`).
-        Some(dark_refusal(&format!("the primary {}", s.primary)))
+        Some(dark_refusal(&format!("the primary {}", s.primary), s.launch.is_object()))
     } else if (t["headless"] == true || args.has("headless")) && (display_metric(&s.primary) || gpu_use(&s.primary)) {
-        Some(
-            Refusal::new(ValidatorId::Headless, format!("{on}the primary {} needs a display, and the page runs headless: nothing it draws reaches one", s.primary))
-                .fix("drop --headless (and the target's headless) to measure it on screen, or choose a CPU primary: cpu.work, cpu.app.total, run.duration or phase.<name> (main.work in Chromium)"),
-        )
+        Some(Refusal::new(ValidatorId::Headless, format!("{on}the primary {} needs a display, and the page runs headless: nothing it draws reaches one", s.primary)).fix(if s.launch.is_object() {
+            "measure launch.ready instead"
+        } else {
+            match engine {
+                WebEngine::Chromium => "measure main.work, cpu.work or a counter the case records instead; measure run.duration or cpu.app.total with the display on",
+                WebEngine::Firefox | WebEngine::Webkit => "measure cpu.work instead; measure run.duration with the display on",
+            }
+        }))
     } else {
         unsupported()
     })
@@ -14469,6 +14484,9 @@ pub(crate) fn render(r: &Value) -> String {
             let verdict = stats::verdict_text(&c);
             let verdict = if aa && matches!(stats::kind_of(&c), VerdictKind::Better | VerdictKind::Worse) { format!("{verdict} ← false positive (A/A)") } else { verdict };
             table.push(vec![format!("{} {name}", if primary { "★" } else { " " }), b, h, delta, ci, verdict]);
+            if let Some(shift) = crate::fmt::paired_shift(&c) {
+                table.push(vec![format!("    {shift}")]);
+            }
         }
         out += &fmt::table(&table, &[false, true, true, true, false, false], "", 2);
         if aa {

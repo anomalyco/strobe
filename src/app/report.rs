@@ -771,6 +771,23 @@ pub fn html(view: &str, data: &Value) -> String {
     omit_screen_name(&mut data);
     for s in data.get_mut("series").and_then(Value::as_array_mut).into_iter().flatten() {
         omit_screen_name(s);
+        for c in ["primary", "secondaries", "descriptive"] {
+            let add_labels = |row: &mut Value| {
+                if row["shift"].is_object() {
+                    for unit in [crate::fmt::TimeUnit::Us, crate::fmt::TimeUnit::Ms, crate::fmt::TimeUnit::S] {
+                        let _ctx = crate::fmt::scope(crate::fmt::FmtCtx { unit, ascii: false });
+                        if let Some(text) = crate::fmt::paired_shift(row) {
+                            row["shift_text"][unit.as_str()] = json!(text);
+                        }
+                    }
+                }
+            };
+            if let Some(rows) = s[c].as_array_mut() {
+                rows.iter_mut().for_each(add_labels);
+            } else if let Some(row) = s.get_mut(c) {
+                add_labels(row);
+            }
+        }
         for key in ["/blocks", "/pass/blocks"] {
             for b in s.pointer_mut(key).and_then(Value::as_array_mut).into_iter().flatten() {
                 omit_screen_name(b);

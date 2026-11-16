@@ -75,7 +75,7 @@ fn answer(q: &Value) -> Result<Value> {
                 Some(m) => stats::compare_noworse(name, def, &pairs, m, conf),
                 None => stats::compare(name, def, &pairs, bound, conf),
             };
-            serde_json::to_value(&c)?
+            c.with_shift(pairs.into_iter(), conf)
         }
         "simulate" => simulate::run(q)?,
         "pct" => json!({ "text": fmt::pct(q["r"].as_f64().unwrap_or(f64::NAN)) }),

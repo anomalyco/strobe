@@ -254,6 +254,100 @@ pub fn times(ms: &[f64], signed: bool) -> Vec<String> {
     ms.iter().map(|v| time_parts(*v, None, signed)).collect()
 }
 
+/// A relative comparison's descriptive shift. Use one scale and round to the interval's precision,
+/// including tens or hundreds of whole units when a broad interval warrants them.
+pub(crate) struct ShiftText {
+    pub estimate: String,
+    pub lo: String,
+    pub hi: String,
+    pub unit: &'static str,
+    pub warning: &'static str,
+}
+
+pub fn paired_shift(c: &serde_json::Value) -> Option<String> {
+    let ShiftText { estimate, lo, hi, unit, warning } = shift_text(c)?;
+    Some(format!("shift {estimate} [{lo} … {hi}] {unit}{warning}"))
+}
+
+pub(crate) fn shift_text(c: &serde_json::Value) -> Option<ShiftText> {
+    let s = &c["shift"];
+    let (est, lo, hi) = (s["estimate"].as_f64()?, s["lo"].as_f64()?, s["hi"].as_f64()?);
+    if c["relative"] != true || c["refusal"].is_object() || c["verdict_kind"] == "refused" || !(lo <= est && est <= hi) {
+        return None;
+    }
+    shift_in((est, lo, hi), s["unit"].as_str()?, ctx(), if c["warned"] == true { " (warned)" } else { "" })
+}
+
+/// Format the same numbers during admission and display; changing units cannot decide whether a shift exists.
+pub(crate) fn shift_in((est, lo, hi): (f64, f64, f64), unit: &str, fmt: FmtCtx, warning: &'static str) -> Option<ShiftText> {
+    let (factor, label, finest) = match unit {
+        "ms" => (fmt.unit.per_ms(), fmt.unit.label(fmt.ascii), fmt.unit.finest() as i32),
+        "MB" => (1.0, "MB", 6),
+        "bytes" => {
+            let magnitude = lo.abs().max(hi.abs());
+            if magnitude >= 1024f64.powi(3) {
+                (1024f64.powi(-3), "GB", 9)
+            } else if magnitude >= 1024f64.powi(2) {
+                (1024f64.powi(-2), "MB", 6)
+            } else if magnitude >= 1024.0 {
+                (1.0 / 1024.0, "KB", 3)
+            } else {
+                (1.0, "B", 0)
+            }
+        }
+        _ => return None,
+    };
+    let [e, l, h] = [est, lo, hi].map(|x| x * factor);
+    if ![e, l, h].iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    let w = h - l;
+    let place = if w > 0.0 {
+        let p = w.log10().floor() as i32;
+        p - i32::from(w / 10f64.powi(p) < 3.545)
+    } else if e != 0.0 {
+        e.abs().log10().floor() as i32 - 2
+    } else {
+        0
+    }
+    .max(-finest);
+    let number = |x: f64| {
+        if x == 0.0 {
+            return "0".to_string();
+        }
+        let a = x.abs();
+        let one_sided = lo > 0.0 || hi < 0.0;
+        let place = if one_sided { place.min(a.log10().floor() as i32).max(-finest) } else { place };
+        let step = 10f64.powi(place);
+        let d = (-place).max(0) as usize;
+        let body = if a >= EXACT {
+            sci(a)
+        } else if place > 0 {
+            group(&format!("{:.0}", (a / step).round() * step))
+        } else {
+            group(&format!("{a:.d$}"))
+        };
+        let body = if body.chars().any(|c| matches!(c, '1'..='9')) {
+            body
+        } else if one_sided {
+            format!("<{step:.d$}")
+        } else {
+            return "0".into();
+        };
+        format!(
+            "{}{body}",
+            if x >= 0.0 {
+                "+"
+            } else if fmt.ascii {
+                "-"
+            } else {
+                "−"
+            }
+        )
+    };
+    Some(ShiftText { estimate: number(e), lo: number(l), hi: number(h), unit: label, warning })
+}
+
 /// A time's number alone (an axis tick under a header that names the unit): `250,000`.
 pub fn time_number(ms: f64) -> String {
     let t = time(ms);

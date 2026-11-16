@@ -3659,6 +3659,15 @@ flowchart LR
 
 ### 9.3 Statistics
 
+- **Reading a comparison:** Side values are medians. For a time or memory compared by ratio, `shift`
+  gives the Hodges–Lehmann estimate and interval of **head minus base within each pair**, in the row's
+  unit. It uses the same finite pairs, stopping look and confidence level as the percentage. It is not
+  the difference of the medians, or the result of discarding noisy pairs. A negative time shift means
+  less time. Compare an additive prediction (say, 150 ms) with this interval. The verdict still tests
+  log ratios: omit the shift when the intervals disagree on the side of zero or the two estimates
+  point opposite ways at or beyond the ratio bound. Do not print opposing signed estimates. A warned shift
+  carries the row's warning. A refused comparison gives no shift. Counts and comparisons already in
+  their own unit do not repeat the difference. JSON keeps `shift.{estimate,lo,hi,unit}` unrounded.
 - **Test and interval**: Wilcoxon signed-rank on `d` (zeros dropped; tied |d| share their mid-rank
   and the null distribution is that of those ranks, exact up to n = 400 from the doubled ranks'
   distribution built as probabilities, the normal approximation above with the tie-corrected

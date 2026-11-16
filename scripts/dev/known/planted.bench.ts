@@ -34,6 +34,8 @@
 //   cli-spin  known.rs spins 150 ms (cli-a) or 300 ms (cli-b) of CPU: cpu.work and run.duration +150 ms (b0: the
 //             process's own launch and exit, about 3 ms of CPU and 5 ms of wall on a Mac; metric.truth_cpu_ms
 //             prints the spin)
+//   cli-wall  150 or 300 ms on a monotonic wall clock. Unlike a process-CPU plant this does not add time
+//             spent waiting to be scheduled to the requested delay. Compare +150 ms with the run.duration shift.
 //   cli-alloc 50 MiB (cli-a) or 100 MiB (cli-b) written and held 300 ms: memory.peak +50 MiB (b0: the program's
 //             own peak, about 1.9 MiB on a Mac)
 //   cli-io    20 MiB written and 12 MiB read (cli-a), 40 and 24 (cli-b): io.write and io.read 2x, byte for byte
@@ -147,6 +149,7 @@ export default bench({
   },
   cases: {
     "cli-spin": { ...command("spin 150", "spin 300"), primary: "cpu.work", metrics: ["run.duration", "metric.truth_cpu_ms"] },
+    "cli-wall": { ...command("wall 150", "wall 300"), primary: "run.duration", metrics: ["cpu.work"] },
     "cli-alloc": { ...command("alloc 50 300", "alloc 100 300"), primary: "memory.peak", metrics: ["metric.truth_mib"] },
     "cli-io": { ...command("io 20 12", "io 40 24"), primary: "io.write", metrics: ["io.read", "metric.truth_write_bytes", "metric.truth_read_bytes"] },
     spin: {

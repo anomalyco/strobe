@@ -12,5 +12,7 @@ for (const name of [...Object.keys(result.plan.reserve.moved),...Object.keys(res
 }
 for (const row of [copy,copy.series[0],copy.series[0].blocks[0],copy.series[0].pass.blocks[0]]) assert.deepEqual(row.screen.compositor,{cpu_pct:3.1})
 assert(copy.text.endsWith('compositor 3.1% of a core'))
+assert.equal(scrubResult({text:'      screen  sway 1.2% of a core'}).text,'      screen  compositor 1.2% of a core')
 assert.equal(result.screen.compositor.name,'gnome-shell')
+assert.equal(scrubResult({subject:'sway 12.3% of a core'}).subject,'sway 12.3% of a core')
 console.log('upload copy: screen roles, shares and counts retained; owner names absent at all four levels')

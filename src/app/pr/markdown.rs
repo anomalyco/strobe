@@ -535,7 +535,7 @@ impl<'a> Doc<'a> {
                     odd.push((s, c));
                 }
                 let name = if i == 0 { format!("{} <sub>main</sub>", cell(&noun(m))) } else { cell(&noun(m)) };
-                let (chg, rng) = change_cells(c, o);
+                let (chg, rng) = with_shift_cells(c, change_cells(c, o));
                 t += &format!("{}| {name} | {} | {} | {chg} | {rng} | {} |\n", self.series_cell(s, i), nb(&value(c, "base")), nb(&value(c, "head")), verdict_text(c, o, s, self.aa));
                 if i == 0 {
                     mains.push(c);
@@ -589,7 +589,7 @@ impl<'a> Doc<'a> {
                 if o != Out::Refused && uneven(c).is_some() {
                     odd.push((s, c));
                 }
-                let (chg, rng) = change_cells(c, o);
+                let (chg, rng) = with_shift_cells(c, change_cells(c, o));
                 let rng = if o == Out::Refused {
                     let (id, why) = refusal(c);
                     format!("skipped <sub>{}</sub>", plain_refusal(&id, &why))

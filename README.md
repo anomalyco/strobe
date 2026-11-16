@@ -21,6 +21,7 @@ that it works (add `--base "<command>"` to run both once).
 </picture>
 
 Read the verdict to see which command won, or read `series[].primary.verdict_kind` in `--json`.
+To check an expected delay, read the shift under the metric. For example, `shift +150,000 [+149,700 … +150,400] µs` means head took about 150 ms longer per pair. The brackets give the paired interval, not the spread of individual launches.
 `strobe run` exits 0 even when head is slower or `worse`. An `unclear` or `underpowered` result also
 exits 0 unless you pass `--require-verdict` (then 5). A refused comparison exits 4. To check that
 both commands run, add `--check`: a command that fails makes the check exit 1; timings from a check

@@ -595,7 +595,7 @@ let followed = 0
         if (lean.traced !== false || !why.includes("Headless:") || why.includes("--trace full") || !why.includes(hint) || has && why.includes("--why always")) fail(`headless frames: ${why}`)
         if (has) {
           const text = go(["query",s.attribution,"frames"],0), j = JSON.parse(go(["query",s.attribution,"frames","--json"],0))
-          if (!text.includes(`${j.compositor_reports} compositor reports (no display; perturbed)`) || /\bpresented\b|vsyncs dropped|display .*Hz/.test(text) || j.headless!==true || !j.frames_refused || j.timing!=="perturbed" || "presented" in j || "dropped_pct" in j || "values" in j) fail(`headless pipeline: ${text} ${JSON.stringify(j)}`)
+          if (!text.includes(`${j.compositor_reports} compositor reports (not presented frames; no display; perturbed)`) || /\d+ presented\b|vsyncs dropped|display .*Hz/.test(text) || j.headless!==true || !j.frames_refused || j.timing!=="perturbed" || "presented" in j || "dropped_pct" in j || "values" in j) fail(`headless pipeline: ${text} ${JSON.stringify(j)}`)
           if (JSON.parse(go(["query",s.attribution,"inputs","--json"],4)).validator!=="Headless") fail("headless inputs claimed screen latency")
           if (!go(["query",id,"frames"],4).includes(hint)) fail("experiment missed its kept profile")
           followed++

@@ -5415,7 +5415,8 @@ function forestRow(item, dom, focus, aa) {
     track,
     // A long interval wraps between its ends, never inside a number.
     h("span", { class: "mono", style: "color:var(--ink-3);font-size:11px" }, fmtRange(c, u, "\u0000").split("\u0000").flatMap((end, i) => [i ? " … " : null, h("span", { style: "white-space:nowrap" }, end)])),
-    h("span", { style: `font-size:12px;color:${cl.tone === "win" ? "var(--win-ink)" : cl.tone === "loss" ? "var(--loss-ink)" : "var(--ink-3)"}` }, outcomeStr)
+    h("span", { style: `font-size:12px;color:${cl.tone === "win" ? "var(--win-ink)" : cl.tone === "loss" ? "var(--loss-ink)" : "var(--ink-3)"}` }, outcomeStr),
+    c.shift_text?.[TIME_UNIT] ? h("div", { class: "mono dim", style: "grid-column:1/-1;font-size:11px;padding-left:14px" }, c.shift_text[TIME_UNIT]) : null
   );
 }
 

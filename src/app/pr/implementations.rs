@@ -436,6 +436,7 @@ impl<'a> Doc<'a> {
                     (if marked(c, o) { format!("**{d}**") } else { d }, range_x(c))
                 };
                 let mut verdict = verdict_text(c, o, s, false);
+                let (chg, rng) = with_shift_cells(c, (chg, rng));
                 if i == 0 && board.alone(si) {
                     verdict += " <sub>not after Holm</sub>";
                 }

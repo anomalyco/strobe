@@ -189,7 +189,9 @@ pub fn run() {
         no_names(&prose.to_string(), &names);
         no_names(&log, &names);
         r["text"] = json!(format!("screen  display on · session unlocked · {COMPOSITOR} 0.0% of a core"));
-        r["warnings"].as_array_mut().unwrap().push(json!({"text":format!("legacy screen: {} 12.3% of a core", COMPOSITOR.to_uppercase()),"id":"Display","level":"info"}));
+        r["warnings"].as_array_mut().unwrap().push(json!({"text":format!("display off · session locked · {} 12.3% of a core", COMPOSITOR.to_uppercase()),"id":"Display","level":"info"}));
+        r["variants"][0]["subject"] = json!("sway 12.3% of a core");
+        r["warnings"].as_array_mut().unwrap().push(json!({"text":format!("      screen  {COMPOSITOR} 1.2% of a core"),"id":"Display","level":"info"}));
         // Older persisted prose must also render safely. The structured fields stay on disk.
         r["warnings"]
             .as_array_mut()
@@ -254,6 +256,8 @@ pub fn run() {
                 assert!(!body.contains(id), "{format} kept {id}");
             }
             if format == "html" {
+                assert!(body.contains("sway 12.3% of a core"));
+                assert!(body.contains("      screen  compositor 1.2% of a core"));
                 assert!(body.contains("compositor 0.0% of a core") && body.contains("compositor 12.3% of a core"));
                 assert!(body.contains("keep run.duration regression /folder/on/file 1a0b"));
                 assert!(body.contains(r#""params":{"mobile":"1","serial":"a","text":"on"}"#));
@@ -271,6 +275,7 @@ pub fn run() {
     fs::write(&meta, data.to_string()).unwrap();
     let summary = query::run(&Args::parse(["query", meta.to_str().unwrap(), "summary"].map(str::to_string).to_vec()).unwrap()).unwrap();
     allowed(&summary.text);
+    no_names(&summary.text, &[NAME.to_owned(), COMPOSITOR.to_owned()]);
     assert_eq!(summary.json["hint"], own_path);
     for key in ["frames_refused", "presents_refused", "care_note", "os_frames"] {
         allowed(&summary.json[key].to_string());

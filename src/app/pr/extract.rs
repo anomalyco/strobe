@@ -787,10 +787,10 @@ pub(crate) fn scrub_public(s: &str) -> String {
     let (pct, share) = (&*PCT, &*SHARE);
     static COMPOSITOR: LazyLock<Regex> = LazyLock::new(|| {
         let names = crate::host::COMPOSITORS.iter().map(|s| regex_lite::escape(s)).collect::<Vec<_>>().join("|");
-        Regex::new(&format!(r"(?i)\b(?:{names}) (\d+(?:\.\d+)?% of a core)\b")).expect("compositor share")
+        Regex::new(&format!(r"(?im)(\bdisplay (?:on|off|dimmed|\?) · session (?:locked|unlocked) · |^[ \t]*screen[ \t]+)(?:{names}) (\d+(?:\.\d+)?% of a core)\b")).expect("compositor share")
     });
     let s = legacy_leftover(s);
-    let s = COMPOSITOR.replace_all(&s, "compositor $1");
+    let s = COMPOSITOR.replace_all(&s, "${1}compositor $2");
     let s = MOVED.replace_all(&s, "moved per block$1");
     let s = UNMOVED.replace_all(&s, "$1 could not be moved$2");
     let s = legacy_obstruction(&s);
@@ -1050,6 +1050,15 @@ pub(super) fn plain_note(text: &str, (base, head): (&str, &str)) -> String {
 /// Spaces that may not break: a number stays with its unit.
 pub(super) fn nb(s: &str) -> String {
     s.replace(' ', "\u{a0}")
+}
+
+pub(super) fn with_shift_cells(c: &Value, (mut change, mut range): (String, String)) -> (String, String) {
+    if let Some(s) = crate::fmt::shift_text(c) {
+        let sub = |t: String| format!("<br><sub>{}</sub>", nb(&t.replace('<', "&lt;")));
+        change += &sub(format!("{} {}{}", s.estimate, s.unit, s.warning));
+        range += &sub(format!("{} to {} {}", s.lo, s.hi, s.unit));
+    }
+    (change, range)
 }
 
 /// Three significant figures, no exponent: 229, 50.4, 7.05, 0.0881.

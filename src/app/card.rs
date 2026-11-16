@@ -336,6 +336,7 @@ struct Tile {
     band: (f64, f64),
     lower: bool,
     tally: String,
+    shift: String,
     series: String,
 }
 
@@ -395,7 +396,21 @@ fn tile(s: &Value, c: &Value, series: String) -> Tile {
     let band = if band.is_finite() { band } else { 0.02 };
     // `same` means a change inside ±bound of base: in log ratios, ln(1 − b) to ln(1 + b).
     let band = if relative { ((1.0 - band).max(1e-9).ln(), (1.0 + band).ln()) } else { (-band, band) };
-    Tile { amount, words: format!("{word} {noun}"), delta, noun, before: disp(f(&c["base"]), unit), after: disp(f(&c["head"]), unit), tone, dots, band, lower, tally, series }
+    Tile {
+        amount,
+        words: format!("{word} {noun}"),
+        delta,
+        noun,
+        before: disp(f(&c["base"]), unit),
+        after: disp(f(&c["head"]), unit),
+        tone,
+        dots,
+        band,
+        lower,
+        tally,
+        series,
+        shift: crate::fmt::paired_shift(c).unwrap_or_default(),
+    }
 }
 
 /// Each pair's two blocks (base, head), in pair order, of the blocks that measured a metric
@@ -497,6 +512,7 @@ fn build(r: &Value) -> Card {
                 band: (0.0, 0.0),
                 lower: true,
                 tally: format!("more in {k} of {n} pairs · not tested"),
+                shift: String::new(),
                 series: name(s),
             },
         ));
@@ -563,6 +579,12 @@ fn build(r: &Value) -> Card {
             .collect();
         (Body::Tiles(tiles), parts.join("; "))
     };
+    let single = match &body {
+        Body::Tiles(t) if t.len() == 1 => Some(&t[0]),
+        Body::Calm { tile, .. } => tile.as_deref(),
+        _ => None,
+    };
+    let alt = if let Some(t) = single.filter(|t| !t.shift.is_empty()) { format!("{alt}; {}", t.shift) } else { alt };
     let alt = if more.is_empty() { format!("{alt}.") } else { format!("{alt}; {more}.") };
     Card { id, subject, body, footer, more, alt, badges, lead, sides: super::pr::side_words(r) }
 }
@@ -875,10 +897,11 @@ fn card_svg(card: &Card, theme: Theme) -> String {
             svg.text(PAD - 5.0, top + 196.0, (big, true), tone_ink(t.tone), "start", &t.amount);
             let ws = fit(&t.words, width, 52.0, false);
             svg.text(PAD, top + 292.0, (ws, false), Ink::Fg, "start", &t.words);
-            before_after(&mut svg, (PAD, top + 346.0, 26.0), t, width, &card.sides);
-            strip(&mut svg, PAD, top + 378.0, width * 0.62, t, 8.0, t.tone != Tone::Plain);
+            before_after(&mut svg, (PAD, top + 330.0, 26.0), t, width, &card.sides);
+            strip(&mut svg, PAD, top + 362.0, width * 0.62, t, 8.0, t.tone != Tone::Plain);
             let note = if t.tally.is_empty() { String::new() } else { format!("each dot is one pair · {}", t.tally) };
-            svg.text(W - PAD, top + 408.0, (20.0, false), Ink::Muted, "end", &note);
+            svg.text(W - PAD, top + 392.0, (20.0, false), Ink::Muted, "end", &note);
+            svg.text(PAD, bottom - 30.0, (20.0, false), Ink::Muted, "start", &clip(&t.shift, width, 20.0, false));
         }
         Body::Tiles(tiles) => {
             let n = tiles.len() as f32;
@@ -931,6 +954,7 @@ fn card_svg(card: &Card, theme: Theme) -> String {
                 strip(&mut svg, PAD, top + 330.0, width * 0.62, t, 8.0, false);
                 let note = if t.tally.is_empty() { String::new() } else { format!("each dot is one pair · {}", t.tally) };
                 svg.text(W - PAD, top + 364.0, (20.0, false), Ink::Muted, "end", &note);
+                svg.text(PAD, bottom - 30.0, (20.0, false), Ink::Muted, "start", &clip(&t.shift, width, 20.0, false));
             }
         }
     }
