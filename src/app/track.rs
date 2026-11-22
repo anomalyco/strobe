@@ -310,7 +310,8 @@ fn gpu_fingerprint() -> String {
 fn driver_versions() -> Vec<String> {
     #[cfg(windows)]
     {
-        let out = Command::new("reg").args(["query", r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}", "/s", "/v", "DriverVersion"]).output();
+        let out =
+            host::no_window(&mut Command::new("reg")).args(["query", r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}", "/s", "/v", "DriverVersion"]).output();
         let text = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
         text.lines().filter(|l| l.trim_start().starts_with("DriverVersion")).filter_map(|l| l.split_whitespace().last().map(str::to_string)).collect()
     }
@@ -865,7 +866,7 @@ fn alert(args: &Args, s: &history::Series, c: &Value) -> Result<Value> {
     }
     if let Some(url) = hook {
         let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-        let out = Command::new("curl")
+        let out = host::no_window(&mut Command::new("curl"))
             .args(["-sS", "-m", "20", "-o", null, "-w", "%{http_code}", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary"])
             .arg(format!("@{}", path.display()))
             .arg(url)
@@ -884,6 +885,7 @@ fn shell(cmd: &str, file: &Path, stdin: &str) -> Option<i32> {
         use std::os::windows::process::CommandExt;
         let mut c = Command::new("cmd");
         c.raw_arg(format!("/d /s /c \"{cmd}\""));
+        host::no_window(&mut c);
         c
     };
     #[cfg(not(windows))]

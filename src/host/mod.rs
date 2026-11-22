@@ -2200,9 +2200,25 @@ fn runnable(p: &Path) -> bool {
     }
 }
 
+/// Windows `CREATE_NO_WINDOW` creation flag (0 elsewhere): keeps console children from opening a
+/// visible terminal window and stealing focus when started from the windowless `strobew.exe`.
+pub const NO_WINDOW: u32 = if cfg!(windows) { 0x0800_0000 } else { 0 };
+
+/// Applies [`NO_WINDOW`] on Windows so a console child does not flash a terminal window. Callers
+/// of [`spawn_owned`] or [`spawn_pinned`] must pass [`NO_WINDOW`] in `flags`, because Windows'
+/// `CommandExt::creation_flags` replaces any flags set earlier.
+pub fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(NO_WINDOW);
+    }
+    cmd
+}
+
 /// Runs a command and returns stdout when it succeeds.
 pub fn output(cmd: &mut Command) -> Option<String> {
-    cmd.output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    no_window(cmd).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 pub fn home() -> PathBuf {

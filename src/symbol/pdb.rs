@@ -150,7 +150,7 @@ pub fn find(module: &Path, cv: &CodeView, servers: &[String]) -> Option<PathBuf>
     let tmp = dir.join(format!("{name}.part{}", std::process::id()));
     for server in std::iter::once(MICROSOFT.to_string()).chain(servers.iter().cloned()) {
         let url = format!("{}/{name}/{}/{name}", server.trim_end_matches('/'), cv.id());
-        let ok = std::process::Command::new("curl")
+        let ok = crate::host::no_window(&mut std::process::Command::new("curl"))
             .args(["-sfL", "--max-time", "300", "-o"])
             .arg(&tmp)
             .arg(&url)

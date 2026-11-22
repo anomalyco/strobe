@@ -127,7 +127,7 @@ impl Host {
         let out = o.open(log)?;
         let err = out.try_clone()?;
         cmd.stdin(Stdio::null()).stdout(out).stderr(err);
-        let mut child = host::spawn_owned(&mut cmd, cpus, 0, None).map_err(|e| Error::msg(format!("start the script host: {e}")))?;
+        let mut child = host::spawn_owned(&mut cmd, cpus, host::NO_WINDOW, None).map_err(|e| Error::msg(format!("start the script host: {e}")))?;
         let failed = |log: &Path| Error::msg(format!("the script host did not load {}:\n{}", entry.display(), log_tail(log, 12).join("\n")));
         // The host connects once its runtime is up; a module that fails to import ends it first.
         listener.set_nonblocking(true)?;

@@ -118,7 +118,7 @@ fn exec(line: &str, at: &Spawn, cost: Option<&SelfCost>) -> Result<(Ran, String)
             *c.load_at.borrow_mut() = c.load.as_ref().map(LoadStart::new);
         }
         let (c0, k0, t0) = (host::thread_cycles(), host::tsc(), Instant::now());
-        let child = host::spawn_owned(&mut cmd, at.cpus, 0, None)?;
+        let child = host::spawn_owned(&mut cmd, at.cpus, host::NO_WINDOW, None)?;
         let (t1, k1, c1) = (Instant::now(), host::tsc(), host::thread_cycles());
         Ok((child, super::script::cpu_ms((c0, k0), (c1, k1), t1.duration_since(t0).as_secs_f64() * 1e3)))
     };

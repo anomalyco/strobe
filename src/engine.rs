@@ -81,7 +81,7 @@ pub fn download(name: &str, sha: &str) -> Result<PathBuf> {
     // Into a name of its own, checked, then renamed: another strobe downloading the same asset at
     // the same time never reads half of this one.
     let part = dir.join(format!("{name}.{}-{}.part", std::process::id(), host::paths::csprng_hex(4)?));
-    let status = Command::new(curl).args(["-fsSL", "--retry", "2", "-o"]).arg(&part).arg(&url).status()?;
+    let status = host::no_window(&mut Command::new(curl)).args(["-fsSL", "--retry", "2", "-o"]).arg(&part).arg(&url).status()?;
     if !status.success() {
         let _ = std::fs::remove_file(&part);
         return Err(Error::unreachable(format!("download {url} failed")));

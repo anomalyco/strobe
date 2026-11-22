@@ -251,7 +251,7 @@ pub(super) fn replace_binaries(from: &Path, dir: &Path) -> Result<bool> {
         }
         let build = super::mcp::file_build(&from.join(exe("strobe")));
         for (dst, _, _) in swaps.iter().filter(|s| s.2) {
-            let ran = Command::new(dst).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+            let ran = host::no_window(&mut Command::new(dst)).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output();
             let why = match &ran {
                 Err(e) => Some(format!("it did not start: {e}")),
                 Ok(o) if !o.status.success() => Some(format!("strobe --version exited {}", o.status.code().unwrap_or(-1))),
@@ -442,7 +442,7 @@ fn mcp_up(s: &mut Steps) {
     let config = global_config();
     let existing = std::fs::read_to_string(&config).unwrap_or_default();
     if !jsonc::has_entry(&existing) {
-        let ok = Command::new(&oc)
+        let ok = host::no_window(&mut Command::new(&oc))
             .args(["mcp", "add", "strobe", "--global", "--url", &url, "--header", &format!("Authorization=Bearer {{file:{token_file}}}")])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -463,7 +463,7 @@ fn mcp_up(s: &mut Steps) {
     // Live in every loaded location, no reload.
     let token = mcp::token().unwrap_or_default();
     let entry = json!({ "config": { "type": "remote", "url": url, "oauth": false, "headers": { "Authorization": format!("Bearer {token}") } } }).to_string();
-    let locations: Vec<String> = Command::new(&oc)
+    let locations: Vec<String> = host::no_window(&mut Command::new(&oc))
         .args(["api", "debug.location.list"])
         .output()
         .ok()
@@ -480,7 +480,7 @@ fn mcp_up(s: &mut Steps) {
                     .map(|dir| {
                         let (oc, entry) = (&oc, &entry);
                         scope.spawn(move || {
-                            Command::new(oc)
+                            host::no_window(&mut Command::new(oc))
                                 .args(["api", "experimental.mcp.add", "--param", "server=strobe", "--param", &format!("directory={dir}"), "--data", entry])
                                 .stdin(Stdio::null())
                                 .stdout(Stdio::null())
@@ -698,7 +698,7 @@ pub fn leave(args: &Args) -> Result<Output> {
         std::fs::write(&config, cut)?;
     }
     if let Some(oc) = opencode() {
-        let locations: Vec<String> = Command::new(&oc)
+        let locations: Vec<String> = host::no_window(&mut Command::new(&oc))
             .args(["api", "debug.location.list"])
             .output()
             .ok()
@@ -706,7 +706,11 @@ pub fn leave(args: &Args) -> Result<Output> {
             .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|l| l["directory"].as_str().map(str::to_string)).collect()))
             .unwrap_or_default();
         for dir in locations {
-            let _ = Command::new(&oc).args(["api", "experimental.mcp.remove", "--param", "server=strobe", "--param", &format!("directory={dir}")]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            let _ = host::no_window(&mut Command::new(&oc))
+                .args(["api", "experimental.mcp.remove", "--param", "server=strobe", "--param", &format!("directory={dir}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
     }
     s.line("✓", "mcp", "removed");
