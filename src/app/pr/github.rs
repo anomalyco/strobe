@@ -45,6 +45,7 @@ fn gh_pr(repo: Option<&str>, extra: &[&str]) -> std::process::Command {
     if let Some(r) = repo {
         c.args(["-R", r]);
     }
+    crate::host::no_window(&mut c);
     c
 }
 

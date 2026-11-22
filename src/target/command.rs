@@ -51,6 +51,7 @@ pub fn shell(line: &str) -> Command {
         use std::os::windows::process::CommandExt;
         let mut c = Command::new("cmd");
         c.raw_arg(format!("/d /s /c \"{line}\""));
+        host::no_window(&mut c);
         c
     }
     #[cfg(not(windows))]
@@ -85,7 +86,7 @@ pub fn launch(spec: &Spec, home: &Path, fresh: bool, window: &Window, cpus: Opti
     cmd.current_dir(&spec.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let (epoch, at_ns) = (epoch_ms(), host::now_ns());
     // Its own group, so the dev server, the app and everything they spawn end together.
-    let mut child = match host::spawn_owned(&mut cmd, cpus, 0, Some(home)) {
+    let mut child = match host::spawn_owned(&mut cmd, cpus, host::NO_WINDOW, Some(home)) {
         Ok(c) => c,
         Err(e) => {
             super::isolate::release_home(home);

@@ -2106,7 +2106,7 @@ fn save_protocols(home: &Path, schemes: &[String]) {
     #[cfg(windows)]
     for scheme in schemes {
         let key = format!(r"HKCU\Software\Classes\{scheme}");
-        let saved = Command::new("reg")
+        let saved = host::no_window(&mut Command::new("reg"))
             .args(["export", &key])
             .arg(home.join(format!(".strobe-protocol-{scheme}.reg")))
             .arg("/y")
@@ -2198,14 +2198,14 @@ pub fn restore_protocols(home: &Path) {
         let url = if reg {
             text.lines().any(|l| l.trim().to_ascii_lowercase().starts_with("\"url protocol\"="))
         } else {
-            Command::new("reg").args(["query", &key, "/v", "URL Protocol"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+            host::no_window(&mut Command::new("reg")).args(["query", &key, "/v", "URL Protocol"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
         };
         if !plain || !url || (reg && !text.lines().all(own)) {
             continue;
         }
-        let _ = Command::new("reg").args(["delete", &key, "/f"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = host::no_window(&mut Command::new("reg")).args(["delete", &key, "/f"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
         if reg {
-            let _ = Command::new("reg").arg("import").arg(e.path()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            let _ = host::no_window(&mut Command::new("reg")).arg("import").arg(e.path()).stdout(Stdio::null()).stderr(Stdio::null()).status();
         }
     }
     let _ = home;

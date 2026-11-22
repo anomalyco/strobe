@@ -195,7 +195,7 @@ mod imp {
     }
 
     fn set_scheme(guid: &str) -> bool {
-        Command::new("powercfg").args(["/setactive", guid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+        super::super::no_window(&mut Command::new("powercfg")).args(["/setactive", guid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
     }
 
     fn text(g: &GUID) -> String {

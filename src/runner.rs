@@ -202,7 +202,7 @@ impl Runner {
             .stdout(out)
             .stderr(err);
         // An early return from here drops the child, which ends the runner and what it started.
-        let mut child = host::spawn_owned(&mut cmd, cpus, 0, None).map_err(|e| Error::msg(format!("spawn bun: {e}")))?;
+        let mut child = host::spawn_owned(&mut cmd, cpus, host::NO_WINDOW, None).map_err(|e| Error::msg(format!("spawn bun: {e}")))?;
         listener.set_nonblocking(true)?;
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
         let conn = loop {

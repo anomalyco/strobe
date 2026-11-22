@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 fn git(root: &Path) -> Command {
     let mut c = Command::new("git");
     c.arg("-C").arg(root).stdin(Stdio::null());
+    super::no_window(&mut c);
     c
 }
 

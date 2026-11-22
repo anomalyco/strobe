@@ -842,7 +842,7 @@ fn markdown(data: &Value, path: Option<&std::path::Path>, recording: bool) -> St
 /// Opens a file or a URL (without `&`: cmd's `start` would split it) with the desktop's handler.
 pub(super) fn open(p: &str) {
     let _ = if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/c", "start", "", p]).spawn()
+        crate::host::no_window(&mut std::process::Command::new("cmd")).args(["/c", "start", "", p]).spawn()
     } else if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(p).spawn()
     } else {

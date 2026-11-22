@@ -180,7 +180,7 @@ fn https(url: &str, local: bool) -> Option<Got> {
         IpAddr::V6(v) => format!("[{v}]"),
         v => v.to_string(),
     };
-    let out = std::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" })
+    let out = crate::host::no_window(&mut std::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" }))
         .args(["-sS", "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0", "--connect-timeout", "5", "--max-time", "30", "--max-filesize"])
         .arg(CAP.to_string())
         .arg("--resolve")

@@ -13796,7 +13796,7 @@ fn prepare_variant(v: &mut Variant, target: &Value, config: &Value, h: &Harness,
     progress(format!("  serve {} on :{port}", v.role));
     let mut serve_cmd = shell(&cmd);
     serve_cmd.current_dir(&cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let child = host::spawn_owned(&mut serve_cmd, None, 0, None).map_err(|e| Error::msg(format!("serve {}: {e}", v.role)))?;
+    let child = host::spawn_owned(&mut serve_cmd, None, host::NO_WINDOW, None).map_err(|e| Error::msg(format!("serve {}: {e}", v.role)))?;
     v.server = Some(child);
     let ready = serve["ready"].as_str().unwrap_or("http://127.0.0.1:{port}/").replace("{port}", &port.to_string());
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -13858,7 +13858,7 @@ fn build_variant(role: &str, root: &Path, build: &Value, copy: Option<(&Path, &P
     // a fresh worktree has none.
     if (cwd.join("bun.lock").exists() || cwd.join("bun.lockb").exists()) && !cwd.join("node_modules").exists() {
         progress(format!("  bun install ({role}, {})", build["cwd"].as_str().unwrap_or(".")));
-        Command::new(crate::runner::find_bun().unwrap_or_else(|| "bun".into())).args(["install", "--frozen-lockfile"]).current_dir(&cwd).stdout(Stdio::null()).status()?;
+        host::no_window(&mut Command::new(crate::runner::find_bun().unwrap_or_else(|| "bun".into()))).args(["install", "--frozen-lockfile"]).current_dir(&cwd).stdout(Stdio::null()).status()?;
     }
     progress(format!("  build {role}: {cmd}"));
     let mut c = shell(&cmd);
@@ -13991,7 +13991,7 @@ fn worktree(r: &str, project: &Path) -> Result<(PathBuf, host::cache::Lease)> {
         if dir.join("bun.lock").exists() || dir.join("bun.lockb").exists() {
             let _unpinned = Unpinned::start();
             progress("  bun install (worktree)");
-            Command::new(crate::runner::find_bun().unwrap_or_else(|| "bun".into())).arg("install").current_dir(&dir).stdout(Stdio::null()).status()?;
+            host::no_window(&mut Command::new(crate::runner::find_bun().unwrap_or_else(|| "bun".into()))).arg("install").current_dir(&dir).stdout(Stdio::null()).status()?;
         }
     }
     Ok((dir, lease))

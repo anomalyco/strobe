@@ -47,9 +47,21 @@ pub fn run(args: &Args) -> Result<Output> {
         };
         let installed = super::up::install_dir().join(exe("strobe"));
         let new = source.join(exe("strobe"));
-        let reported = Command::new(&new).arg("--version").stdin(Stdio::null()).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let reported = crate::host::no_window(&mut Command::new(&new))
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
         let Some(reported) = reported else { return Err(Error::msg(format!("{} does not run (strobe --version failed)", new.display()))) };
-        let current = Command::new(&installed).arg("--version").stdin(Stdio::null()).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        let current = crate::host::no_window(&mut Command::new(&installed))
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
         // One build id is one build (its sources, target and profile); copies without one compare bytes.
         let same = match (super::mcp::file_build(&installed), super::mcp::file_build(&new)) {
             (Some(a), Some(b)) => a == b,
@@ -199,7 +211,7 @@ fn from_npm(version: Option<&str>, stage: &Path) -> Result<(PathBuf, String)> {
 /// daemon held the caller's pipe open forever, so the caller never saw `update` finish. Relayed, it
 /// holds only this process's pipe, which is abandoned at exit.
 fn run_relayed(c: &mut Command) -> std::io::Result<std::process::ExitStatus> {
-    let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = crate::host::no_window(c).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     // Both to stderr: `update` prints its own result line.
     let relay = |from: Box<dyn Read + Send>, tx: std::sync::mpsc::Sender<()>| {
@@ -231,7 +243,7 @@ fn run_relayed(c: &mut Command) -> std::io::Result<std::process::ExitStatus> {
 
 fn curl(url: &str, to: Option<&Path>) -> Result<Vec<u8>> {
     let mut c = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
-    c.args(["-fsSL", "--retry", "2"]).stdin(Stdio::null());
+    crate::host::no_window(&mut c).args(["-fsSL", "--retry", "2"]).stdin(Stdio::null());
     if let Some(p) = to {
         c.arg("-o").arg(p);
     }

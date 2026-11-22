@@ -93,7 +93,7 @@ impl Spec {
                 c.stdout(Stdio::null()).stderr(Stdio::null());
             }
         }
-        let mut owned = host::spawn_owned(&mut c, cpus, 0, Some(&home)).map_err(|e| Error::msg(format!("fixture: {cmd} in {}: {e}", host::paths::plain(&self.dir))))?;
+        let mut owned = host::spawn_owned(&mut c, cpus, host::NO_WINDOW, Some(&home)).map_err(|e| Error::msg(format!("fixture: {cmd} in {}: {e}", host::paths::plain(&self.dir))))?;
         let pid = owned.pid();
         let ready = self.ready.as_deref().map(|r| fill(r, port, &home, params));
         let deadline = Instant::now() + self.timeout;
